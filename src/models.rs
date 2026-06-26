@@ -98,7 +98,13 @@ pub struct Candidate {
     pub acceptance_criteria: Vec<String>,
     pub verification: Vec<String>,
     pub hydration_used: bool,
+    pub hydration_source: String,
     pub hydration_match_method: String,
+    pub hydrated_fields: Vec<String>,
+    pub debug_gate_keys: Vec<String>,
+    pub debug_scout_keys: Vec<String>,
+    pub debug_hydrated_keys: Vec<String>,
+    pub debug_hydrated_finding_excerpt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_finding_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
