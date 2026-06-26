@@ -1,0 +1,22 @@
+{
+  "tool": "scout-finding-gate",
+  "mode": "draft-only",
+  "source_scout_artifact": "__SCOUT_ARTIFACT__",
+  "findings": [
+    {
+      "id": "001",
+      "title": "README is missing obvious setup/run/test sections",
+      "type": "docs",
+      "gate_status": "warn",
+      "hard_rejects": [],
+      "warnings": [
+        "no command",
+        "README-only finding"
+      ],
+      "source_finding_path": "/tmp/gah/scout/draft-issues/001-readme.md",
+      "source_draft_issue_path": "/tmp/gah/scout/draft-issues/001-readme.md",
+      "approved_draft_issue_path": null,
+      "rejected_finding_path": null
+    }
+  ]
+}

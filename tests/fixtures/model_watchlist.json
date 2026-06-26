@@ -1,0 +1,21 @@
+{
+  "active_default_candidate": "deepseek/deepseek-v4-flash",
+  "models": [
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "status": "active_default_candidate",
+      "input_per_1m": 0.09,
+      "output_per_1m": 0.18,
+      "max_input_per_1m": 0.20,
+      "max_output_per_1m": 0.40
+    },
+    {
+      "id": "qwen/qwen3-235b-a22b-2507",
+      "status": "watch_unavailable_in_hermes",
+      "input_per_1m": 0.09,
+      "output_per_1m": 0.10,
+      "max_input_per_1m": 0.20,
+      "max_output_per_1m": 0.40
+    }
+  ]
+}

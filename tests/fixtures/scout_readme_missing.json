@@ -1,0 +1,33 @@
+{
+  "tool": "scout-repo",
+  "mode": "draft-only",
+  "repo_url": "https://github.com/Kh1ng/llm-chat",
+  "local_path": "/tmp/gah-fixtures/llm-chat",
+  "findings": [
+    {
+      "id": "001",
+      "type": "docs",
+      "title": "README is missing obvious setup/run/test sections",
+      "risk_guess": "low",
+      "confidence": "medium",
+      "evidence": [
+        "README headings do not include setup/install/usage/run/test sections"
+      ],
+      "affected_files": [
+        "README.md"
+      ],
+      "commands": [],
+      "suggested_acceptance_criteria": [
+        "README includes setup instructions",
+        "README includes run/usage instructions",
+        "README includes test instructions"
+      ],
+      "suggested_verification": [
+        "inspect README headings"
+      ],
+      "likely_agent_safe": true,
+      "finding_path": "/tmp/gah/scout/draft-issues/001-readme.md",
+      "draft_issue_path": "/tmp/gah/scout/draft-issues/001-readme.md"
+    }
+  ]
+}
