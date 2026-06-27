@@ -54,7 +54,7 @@ pub fn run_openhands(
 
 pub fn backend_available(name: &str) -> bool {
     let cmd = match name {
-        "openhands" | "cloud-coder" => "openhands",
+        "openhands",
         "codex" => "codex",
         "claude" => "claude",
         _ => return true, // internal backends (ponytail, auto) are always "available"
