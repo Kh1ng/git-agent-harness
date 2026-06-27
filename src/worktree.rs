@@ -68,12 +68,16 @@ pub fn has_changes(worktree: &Path) -> Result<bool> {
 
 pub fn diff_patch(worktree: &Path, target_branch: &str) -> Result<String> {
     let origin_ref = format!("origin/{}", target_branch);
-    git(&["diff", &origin_ref, "HEAD"], worktree)
+    Ok(
+        String::from_utf8_lossy(&git_raw(&["diff", &origin_ref, "HEAD"], worktree)?.stdout)
+            .to_string(),
+    )
 }
 
 pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>> {
     let origin_ref = format!("origin/{}", target_branch);
-    let tracked = git(&["diff", "--name-only", &origin_ref, "HEAD"], worktree)?;
+    let out = git_raw(&["diff", "--name-only", &origin_ref, "HEAD"], worktree)?;
+    let tracked = String::from_utf8_lossy(&out.stdout).to_string();
     let mut files: Vec<String> = tracked
         .lines()
         .filter(|l| !l.is_empty())
@@ -81,7 +85,12 @@ pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>
         .collect();
     let status = git_raw(&["status", "--porcelain"], worktree)?;
     for line in String::from_utf8_lossy(&status.stdout).lines() {
-        if line.starts_with("??") {
+        if line.is_empty() {
+            continue;
+        }
+        let first = line.as_bytes().get(0).copied().unwrap_or(b' ');
+        let second = line.as_bytes().get(1).copied().unwrap_or(b' ');
+        if first != b' ' || second != b' ' {
             files.push(line[3..].trim().to_string());
         }
     }

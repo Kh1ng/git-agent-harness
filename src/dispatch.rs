@@ -591,7 +591,7 @@ fn count_test_files(profile: &Profile, root: &Path) -> usize {
     } else {
         profile.test_file_patterns.clone()
     };
-    count_files_matching(root, &|name: &str| {
+    count_files_matching(root, root, &|name: &str| {
         patterns.iter().any(|pat| {
             let re = format!(
                 "^{}$",
@@ -604,7 +604,7 @@ fn count_test_files(profile: &Profile, root: &Path) -> usize {
     })
 }
 
-fn count_files_matching(dir: &Path, pred: &dyn Fn(&str) -> bool) -> usize {
+fn count_files_matching(root: &Path, dir: &Path, pred: &dyn Fn(&str) -> bool) -> usize {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
     };
@@ -617,10 +617,11 @@ fn count_files_matching(dir: &Path, pred: &dyn Fn(&str) -> bool) -> usize {
                 name,
                 "target" | ".git" | "node_modules" | "__pycache__" | ".venv"
             ) {
-                count += count_files_matching(&path, pred);
+                count += count_files_matching(root, &path, pred);
             }
-        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if pred(name) {
+        } else if path.is_file() {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            if pred(&rel.to_string_lossy()) {
                 count += 1;
             }
         }
