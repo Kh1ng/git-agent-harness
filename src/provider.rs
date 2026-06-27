@@ -21,40 +21,44 @@ pub fn create_draft_mr(
 }
 
 fn gitlab_mr(profile: &Profile, branch: &str, title: &str, body: &str) -> Result<MrResult> {
-    let out = Command::new("glab")
-        .args([
-            "mr",
-            "create",
-            "--source-branch",
-            branch,
-            "--target-branch",
-            &profile.default_target_branch,
-            "--title",
-            &format!("Draft: {}", title),
-            "--description",
-            body,
-            "--draft",
-            "--yes",
-        ])
-        .current_dir(&profile.local_path)
-        .output()
-        .context("glab mr create; is glab installed and authenticated?")?;
+    let api_base = profile
+        .provider_api_base
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let pat = profile.pat();
+    let url = format!("{}/projects/{}/merge_requests", api_base, project_id);
+    let payload = serde_json::json!({
+        "source_branch": branch,
+        "target_branch": profile.default_target_branch,
+        "title": format!("Draft: {}", title),
+        "description": body,
+    });
 
-    if !out.status.success() {
-        anyhow::bail!(
-            "glab mr create failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let url = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find(|l| l.starts_with("http"))
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            &format!("PRIVATE-TOKEN: {}", pat),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &payload.to_string(),
+            &url,
+        ])
+        .output()
+        .context("curl gitlab create mr")?;
+
+    let resp: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("parsing gitlab MR response")?;
     Ok(MrResult {
-        url,
-        id: String::new(),
+        url: resp["web_url"].as_str().unwrap_or("").to_string(),
+        id: resp["iid"].to_string(),
     })
 }
 
