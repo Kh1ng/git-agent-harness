@@ -153,12 +153,14 @@ fn main() -> Result<()> {
                 if let Some(id) = &p.provider_project_id {
                     println!("provider_project_id:   {}", id);
                 }
-                if let Some(oh) = &p.openhands_profile {
-                    println!("openhands_profile:     {}", oh);
-                    let profiles = runner::list_oh_profiles();
-                    if !profiles.contains(oh) {
-                        println!("  WARNING: profile file not found at ~/.openhands/profiles/{}.json", oh);
-                    }
+                if !p.openhands_args.is_empty() {
+                    println!("openhands_args:        {:?}", p.openhands_args);
+                }
+                if !p.codex_args.is_empty() {
+                    println!("codex_args:            {:?}", p.codex_args);
+                }
+                if !p.claude_args.is_empty() {
+                    println!("claude_args:           {:?}", p.claude_args);
                 }
             }
         },

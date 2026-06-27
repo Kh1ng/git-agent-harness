@@ -43,24 +43,15 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         "improve" | "fix" => improve(cfg, profile, args, &session_dir),
         "pm" => pm(profile, &session_dir),
         "review" => review(profile, args, &session_dir),
-        "experiment" => {
-            println!("experiment mode: not yet implemented");
-            Ok(())
-        }
+        "experiment" => anyhow::bail!("experiment mode not yet implemented"),
         other => anyhow::bail!("unknown mode: {}", other),
     }
 }
 
-fn resolve_llm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<runner::LlmConfig> {
-    // --oh-profile CLI flag > profile.openhands_profile config > defaults
-    let oh_name = args
-        .oh_profile
-        .as_deref()
-        .or(profile.openhands_profile.as_deref());
-
-    if let Some(name) = oh_name {
+fn resolve_llm(cfg: &GahConfig, args: &DispatchArgs) -> Result<runner::LlmConfig> {
+    if let Some(name) = args.oh_profile.as_deref() {
         let mut llm = runner::load_oh_profile(name)?;
-        // env vars still override the profile file
+        // env vars always win over the profile file
         if let Ok(v) = std::env::var("LLM_BASE_URL") { llm.base_url = v; }
         if let Ok(v) = std::env::var("LLM_API_KEY")  { llm.api_key  = v; }
         if let Ok(v) = std::env::var("LLM_MODEL")    { llm.model    = v; }
@@ -77,16 +68,33 @@ fn resolve_llm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Resul
 
 fn run_backend(
     backend: &str,
+    profile: &Profile,
     wt: &Path,
     task: &str,
     session_dir: &Path,
     llm: &runner::LlmConfig,
 ) -> Result<runner::RunResult> {
     match backend {
-        "codex" => runner::run_codex(wt, task, session_dir),
-        "claude" => runner::run_claude(wt, task, session_dir),
-        _ => runner::run_openhands(wt, task, session_dir, llm),
+        "codex" => runner::run_codex(wt, task, session_dir, &profile.codex_args),
+        "claude" => runner::run_claude(wt, task, session_dir, &profile.claude_args),
+        _ => runner::run_openhands(wt, task, session_dir, llm, &profile.openhands_args),
     }
+}
+
+/// Check all required external binaries exist before starting a long operation.
+fn preflight(backend: &str) -> Result<()> {
+    let required: &[&str] = &["git"];
+    let backend_bin = match backend {
+        "codex" => "codex",
+        "claude" => "claude",
+        _ => "openhands",
+    };
+    for bin in required.iter().chain(std::iter::once(&backend_bin)) {
+        if !runner::backend_available(bin) && Command::new("which").arg(bin).output().map(|o| !o.status.success()).unwrap_or(true) {
+            anyhow::bail!("required binary '{}' not found on PATH", bin);
+        }
+    }
+    Ok(())
 }
 
 fn improve(
@@ -95,14 +103,9 @@ fn improve(
     args: &DispatchArgs,
     session_dir: &Path,
 ) -> Result<()> {
-    if !runner::backend_available(&args.backend) {
-        anyhow::bail!(
-            "backend '{}' not available; check it is installed and on PATH",
-            args.backend
-        );
-    }
+    preflight(&args.backend)?;
 
-    let llm = resolve_llm(cfg, profile, args)?;
+    let llm = resolve_llm(cfg, args)?;
 
     let ts = timestamp();
     let branch = format!("gah/{}-{}", profile.repo_id, &ts);
@@ -125,7 +128,7 @@ fn improve(
     let task = build_task(profile, &args.mode, &args.target);
     println!("\nRunning {} backend...", args.backend);
 
-    let result = run_backend(&args.backend, &wt, &task, session_dir, &llm);
+    let result = run_backend(&args.backend, profile, &wt, &task, session_dir, &llm);
     let result = match result {
         Ok(r) => r,
         Err(e) => {
@@ -308,11 +311,7 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
     );
     match args.mode.as_str() {
         "improve" | "fix" => {
-            let oh_name = args
-                .oh_profile
-                .as_deref()
-                .or(profile.openhands_profile.as_deref());
-            if let Some(name) = oh_name {
+            if let Some(name) = args.oh_profile.as_deref() {
                 println!("OH profile:   {} (~/.openhands/profiles/{}.json)", name, name);
             } else {
                 let cloud = args.backend == "cloud-coder";

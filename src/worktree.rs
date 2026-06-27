@@ -7,6 +7,10 @@ pub fn git(args: &[&str], cwd: &Path) -> Result<String> {
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
+        // Prevent user git config (color, pager, aliases) from corrupting output
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .with_context(|| format!("git {}", args.join(" ")))?;
     if !out.status.success() {

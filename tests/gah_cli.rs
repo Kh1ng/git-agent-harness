@@ -273,3 +273,156 @@ allow_project_write = false
         .failure()
         .stdout(predicate::str::contains("blocked"));
 }
+
+// ── dispatch / profile regression tests ──────────────────────────────────────
+
+fn write_dispatch_config(tmp: &TempDir) -> std::path::PathBuf {
+    let cfg = tmp.path().join("gah-config.toml");
+    fs::write(
+        &cfg,
+        r#"
+[defaults]
+artifact_root = "/tmp/gah-test-artifacts"
+worktree_base = "/tmp/gah-test-worktrees"
+llm_base_url  = "http://localhost:4000"
+llm_model_local = "local/test"
+llm_model_cloud = "cloud/test"
+
+[profiles.test-repo]
+display_name          = "Test Repo"
+repo_id               = "test-repo"
+provider              = "github"
+repo                  = "owner/test-repo"
+local_path            = "/tmp/nonexistent-repo"
+artifact_root         = "/tmp/gah-test-artifacts/test-repo"
+default_target_branch = "main"
+claude_args           = ["--allowedTools", "Edit,Write,Bash"]
+"#,
+    )
+    .unwrap();
+    cfg
+}
+
+#[test]
+fn profile_list_shows_configured_profiles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args(["profile", "list", "--config", cfg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("test-repo"))
+        .stdout(predicate::str::contains("Test Repo"))
+        .stdout(predicate::str::contains("github"));
+}
+
+#[test]
+fn profile_show_displays_all_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args(["profile", "show", "test-repo", "--config", cfg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("default_target_branch: main"))
+        .stdout(predicate::str::contains("provider:              github"))
+        .stdout(predicate::str::contains("claude_args"));
+}
+
+#[test]
+fn profile_show_unknown_profile_fails_with_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args(["profile", "show", "no-such-profile", "--config", cfg.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("test-repo"));
+}
+
+#[test]
+fn dispatch_dry_run_improve_prints_plan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args([
+            "dispatch",
+            "--profile", "test-repo",
+            "--mode", "improve",
+            "--dry-run",
+            "--config-path", cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DRY RUN"))
+        .stdout(predicate::str::contains("origin/main"))
+        .stdout(predicate::str::contains("gah/test-repo-"));
+}
+
+#[test]
+fn dispatch_dry_run_shows_backend_in_plan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args([
+            "dispatch",
+            "--profile", "test-repo",
+            "--mode", "improve",
+            "--backend", "claude",
+            "--dry-run",
+            "--config-path", cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude"));
+}
+
+#[test]
+fn dispatch_dry_run_shows_oh_profile_when_given() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args([
+            "dispatch",
+            "--profile", "test-repo",
+            "--mode", "improve",
+            "--oh-profile", "some-profile",
+            "--dry-run",
+            "--config-path", cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("some-profile"));
+}
+
+#[test]
+fn dispatch_dry_run_pm_mode_prints_pm_steps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args([
+            "dispatch",
+            "--profile", "test-repo",
+            "--mode", "pm",
+            "--dry-run",
+            "--config-path", cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pm-report.md"));
+}
+
+#[test]
+fn dispatch_unknown_mode_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args([
+            "dispatch",
+            "--profile", "test-repo",
+            "--mode", "bogus-mode",
+            "--config-path", cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+}

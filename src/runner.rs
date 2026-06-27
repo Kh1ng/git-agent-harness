@@ -49,14 +49,14 @@ pub fn list_oh_profiles() -> Vec<String> {
     names
 }
 
-/// Run OpenHands in headless mode. LLM config is injected via environment variables
-/// using --override-with-envs; the named profile in ~/.openhands/profiles/ is not
-/// loaded by the CLI itself — we read it and pass the values explicitly.
+/// Run OpenHands in headless mode. LLM config is injected via --override-with-envs.
+/// extra_args come from profile.openhands_args in config (e.g. plugin/skill flags).
 pub fn run_openhands(
     worktree: &Path,
     task: &str,
     session_dir: &Path,
     llm: &LlmConfig,
+    extra_args: &[String],
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
@@ -75,6 +75,7 @@ pub fn run_openhands(
             "--always-approve",
             "--override-with-envs",
         ])
+        .args(extra_args)
         .env("OPENHANDS_SUPPRESS_BANNER", "1")
         .env("LLM_BASE_URL", &llm.base_url)
         .env("LLM_API_KEY", &llm.api_key)
@@ -93,7 +94,13 @@ pub fn run_openhands(
 }
 
 /// Run Codex non-interactively via `codex exec`.
-pub fn run_codex(worktree: &Path, task: &str, session_dir: &Path) -> Result<RunResult> {
+/// extra_args come from profile.codex_args (e.g. `-c model=gpt-4o`).
+pub fn run_codex(
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    extra_args: &[String],
+) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
 
@@ -103,6 +110,7 @@ pub fn run_codex(worktree: &Path, task: &str, session_dir: &Path) -> Result<RunR
     let start = Instant::now();
     let status = Command::new("codex")
         .args(["exec", task])
+        .args(extra_args)
         .current_dir(worktree)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_err))
@@ -117,7 +125,13 @@ pub fn run_codex(worktree: &Path, task: &str, session_dir: &Path) -> Result<RunR
 }
 
 /// Run Claude CLI non-interactively via `claude -p`.
-pub fn run_claude(worktree: &Path, task: &str, session_dir: &Path) -> Result<RunResult> {
+/// extra_args come from profile.claude_args (e.g. `--allowedTools Edit,Write,Bash`).
+pub fn run_claude(
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    extra_args: &[String],
+) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
 
@@ -127,6 +141,7 @@ pub fn run_claude(worktree: &Path, task: &str, session_dir: &Path) -> Result<Run
     let start = Instant::now();
     let status = Command::new("claude")
         .args(["-p", task])
+        .args(extra_args)
         .current_dir(worktree)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_err))

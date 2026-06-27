@@ -32,13 +32,12 @@ gah dispatch --profile my-repo --mode improve
 Location (in order of precedence):
 
 1. `$GAH_CONFIG` env var
-2. `/root/agent-lab/config/gah-config.toml`
-3. `~/.config/gah/config.toml`
+2. `~/.config/gah/config.toml`
 
 ```toml
 [defaults]
-artifact_root   = "/root/agent-lab/artifacts"
-worktree_base   = "/root/agent-lab/worktrees"
+artifact_root   = "/path/to/artifacts"
+worktree_base   = "/path/to/worktrees"
 llm_base_url    = "http://your-litellm-proxy:4000"
 llm_model_local = "litellm_proxy/local-model"
 llm_model_cloud = "litellm_proxy/cloud-model"
@@ -49,9 +48,13 @@ repo_id               = "my-repo"             # used in branch names and artifac
 provider              = "github"              # "github" or "gitlab"
 repo                  = "owner/repo-name"
 local_path            = "/path/to/local/clone"
-artifact_root         = "/root/agent-lab/artifacts/my-repo"
+artifact_root         = "/path/to/artifacts/my-repo"
 default_target_branch = "main"
-openhands_profile     = "local-qwen3-coder"  # optional; name from ~/.openhands/profiles/
+
+# Optional extra CLI args passed to each backend:
+openhands_args = []                                      # e.g. plugin/skill flags
+codex_args     = ["-c", "model=gpt-4o"]                 # codex exec overrides
+claude_args    = ["--allowedTools", "Edit,Write,Bash"]   # limit claude's tools
 
 # GitLab-only fields:
 # provider_api_base   = "https://gitlab.example.com/api/v4"
@@ -164,7 +167,7 @@ gah policy-check --config <path> --action <action>
 
 ## OpenHands profiles
 
-OpenHands profiles live at `~/.openhands/profiles/<name>.json` and define LLM connection settings:
+Pass `--oh-profile <name>` at runtime to specify which LLM profile OpenHands uses. The profile file lives at `~/.openhands/profiles/<name>.json`:
 
 ```json
 {
@@ -175,7 +178,7 @@ OpenHands profiles live at `~/.openhands/profiles/<name>.json` and define LLM co
 }
 ```
 
-Use `gah profile show <name>` to confirm the profile file exists. List available profiles:
+`LLM_*` env vars always override the profile file. List available profiles:
 
 ```bash
 ls ~/.openhands/profiles/
