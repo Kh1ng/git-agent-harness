@@ -16,6 +16,7 @@ pub struct DispatchArgs {
     pub dry_run: bool,
     pub config_path: Option<String>,
     pub oh_profile: Option<String>,
+    pub model: Option<String>,
     pub retries: u32,
     pub allow_draft_fail: bool,
 }
@@ -53,6 +54,9 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
 fn resolve_llm(cfg: &GahConfig, args: &DispatchArgs) -> Result<runner::LlmConfig> {
     if let Some(name) = args.oh_profile.as_deref() {
         let mut llm = runner::load_oh_profile(name)?;
+        if let Some(m) = &args.model {
+            llm.model = m.clone();
+        }
         if let Ok(v) = std::env::var("LLM_BASE_URL") {
             llm.base_url = v;
         }
@@ -62,6 +66,16 @@ fn resolve_llm(cfg: &GahConfig, args: &DispatchArgs) -> Result<runner::LlmConfig
         if let Ok(v) = std::env::var("LLM_MODEL") {
             llm.model = v;
         }
+        return Ok(llm);
+    }
+    // No profile: apply --model override on top of backend defaults
+    if let Some(m) = &args.model {
+        let cloud = args.backend == "cloud-coder";
+        let llm = runner::LlmConfig {
+            base_url: cfg.defaults.llm_base_url(),
+            api_key: cfg.defaults.llm_api_key(),
+            model: m.clone(),
+        };
         return Ok(llm);
     }
     let cloud = args.backend == "cloud-coder";
@@ -444,9 +458,14 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
                     "OH profile:   {} (~/.openhands/profiles/{}.json)",
                     name, name
                 );
+                if let Some(m) = &args.model {
+                    println!("Model override: {}", m);
+                }
             } else {
                 let cloud = args.backend == "cloud-coder";
-                println!("LLM model:    {}", cfg.defaults.llm_model(cloud));
+                let default_model = cfg.defaults.llm_model(cloud);
+                let model_name = args.model.as_deref().unwrap_or(&default_model);
+                println!("LLM model:    {}", model_name);
                 println!("LLM base:     {}", cfg.defaults.llm_base_url());
             }
             println!("Backend:      {}", args.backend);

@@ -594,3 +594,87 @@ fn dispatch_dry_run_allow_draft_fail_shown() {
         .success()
         .stdout(predicate::str::contains("Allow draft fail: true"));
 }
+
+#[test]
+fn dispatch_dry_run_oh_profile_shows_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "test-repo",
+            "--mode",
+            "improve",
+            "--oh-profile",
+            "my-profile",
+            "--model",
+            "custom/model-name",
+            "--dry-run",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("OH profile:   my-profile"))
+        .stdout(predicate::str::contains(
+            "Model override: custom/model-name",
+        ));
+}
+
+#[test]
+fn dispatch_dry_run_model_override_shows_custom_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "test-repo",
+            "--mode",
+            "improve",
+            "--model",
+            "custom/test-model",
+            "--dry-run",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("custom/test-model"));
+}
+
+#[test]
+fn dispatch_dry_run_oh_profile_does_not_pass_profile_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    // The dry-run output must not contain "--profile" as an OpenHands argument.
+    // It only shows the GAH --oh-profile flag which is a different thing.
+    let output = bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "test-repo",
+            "--mode",
+            "improve",
+            "--oh-profile",
+            "some-profile",
+            "--dry-run",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&output.get_output().stdout);
+    // GAH --oh-profile IS shown in dry-run output
+    assert!(stdout.contains("some-profile"), "oh-profile should appear");
+    // But there should be no mention of --profile being passed to openhands
+    // The dry-run shows: openhands --headless --json -t ... (no --profile)
+    let openhands_line = stdout.lines().find(|l| l.contains("openhands --headless"));
+    if let Some(line) = openhands_line {
+        assert!(
+            !line.contains("--profile"),
+            "OpenHands arg line must not contain --profile"
+        );
+    }
+}
