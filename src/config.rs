@@ -70,6 +70,8 @@ pub struct Profile {
     /// Example: ["cargo test --quiet", "cargo clippy -- -D warnings"]
     #[serde(default)]
     pub validation_commands: Vec<String>,
+    #[serde(default)]
+    pub test_file_patterns: Vec<String>,
 }
 
 impl Profile {

@@ -321,7 +321,13 @@ fn profile_show_displays_all_fields() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = write_dispatch_config(&tmp);
     bin()
-        .args(["profile", "show", "test-repo", "--config", cfg.to_str().unwrap()])
+        .args([
+            "profile",
+            "show",
+            "test-repo",
+            "--config",
+            cfg.to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("default_target_branch: main"))
@@ -334,7 +340,13 @@ fn profile_show_unknown_profile_fails_with_hint() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = write_dispatch_config(&tmp);
     bin()
-        .args(["profile", "show", "no-such-profile", "--config", cfg.to_str().unwrap()])
+        .args([
+            "profile",
+            "show",
+            "no-such-profile",
+            "--config",
+            cfg.to_str().unwrap(),
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("test-repo"));
@@ -347,10 +359,13 @@ fn dispatch_dry_run_improve_prints_plan() {
     bin()
         .args([
             "dispatch",
-            "--profile", "test-repo",
-            "--mode", "improve",
+            "--profile",
+            "test-repo",
+            "--mode",
+            "improve",
             "--dry-run",
-            "--config-path", cfg.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -366,11 +381,15 @@ fn dispatch_dry_run_shows_backend_in_plan() {
     bin()
         .args([
             "dispatch",
-            "--profile", "test-repo",
-            "--mode", "improve",
-            "--backend", "claude",
+            "--profile",
+            "test-repo",
+            "--mode",
+            "improve",
+            "--backend",
+            "claude",
             "--dry-run",
-            "--config-path", cfg.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -384,11 +403,15 @@ fn dispatch_dry_run_shows_oh_profile_when_given() {
     bin()
         .args([
             "dispatch",
-            "--profile", "test-repo",
-            "--mode", "improve",
-            "--oh-profile", "some-profile",
+            "--profile",
+            "test-repo",
+            "--mode",
+            "improve",
+            "--oh-profile",
+            "some-profile",
             "--dry-run",
-            "--config-path", cfg.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -402,10 +425,13 @@ fn dispatch_dry_run_pm_mode_prints_pm_steps() {
     bin()
         .args([
             "dispatch",
-            "--profile", "test-repo",
-            "--mode", "pm",
+            "--profile",
+            "test-repo",
+            "--mode",
+            "pm",
             "--dry-run",
-            "--config-path", cfg.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -419,9 +445,12 @@ fn dispatch_unknown_mode_fails() {
     bin()
         .args([
             "dispatch",
-            "--profile", "test-repo",
-            "--mode", "bogus-mode",
-            "--config-path", cfg.to_str().unwrap(),
+            "--profile",
+            "test-repo",
+            "--mode",
+            "bogus-mode",
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .failure();
@@ -459,7 +488,13 @@ fn profile_show_displays_validation_commands() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = write_dispatch_config_with_validation(&tmp);
     bin()
-        .args(["profile", "show", "validated-repo", "--config", cfg.to_str().unwrap()])
+        .args([
+            "profile",
+            "show",
+            "validated-repo",
+            "--config",
+            cfg.to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("validation_commands"))
@@ -474,10 +509,13 @@ fn dispatch_dry_run_shows_validation_commands() {
     bin()
         .args([
             "dispatch",
-            "--profile", "validated-repo",
-            "--mode", "improve",
+            "--profile",
+            "validated-repo",
+            "--mode",
+            "improve",
             "--dry-run",
-            "--config-path", cfg.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -492,11 +530,15 @@ fn dispatch_dry_run_shows_retries_in_plan() {
     bin()
         .args([
             "dispatch",
-            "--profile", "validated-repo",
-            "--mode", "improve",
-            "--retries", "3",
+            "--profile",
+            "validated-repo",
+            "--mode",
+            "improve",
+            "--retries",
+            "3",
             "--dry-run",
-            "--config-path", cfg.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -517,11 +559,15 @@ fn dispatch_dry_run_candidate_json_target_labeled() {
     bin()
         .args([
             "dispatch",
-            "--profile", "test-repo",
-            "--mode", "improve",
-            "--target", fake_candidates.to_str().unwrap(),
+            "--profile",
+            "test-repo",
+            "--mode",
+            "improve",
+            "--target",
+            fake_candidates.to_str().unwrap(),
             "--dry-run",
-            "--config-path", cfg.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -535,11 +581,14 @@ fn dispatch_dry_run_allow_draft_fail_shown() {
     bin()
         .args([
             "dispatch",
-            "--profile", "test-repo",
-            "--mode", "improve",
+            "--profile",
+            "test-repo",
+            "--mode",
+            "improve",
             "--allow-draft-fail",
             "--dry-run",
-            "--config-path", cfg.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .success()
