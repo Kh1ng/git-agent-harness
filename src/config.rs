@@ -66,6 +66,10 @@ pub struct Profile {
     /// Extra CLI args appended to `claude -p` (e.g. `--allowedTools Edit,Write,Bash`)
     #[serde(default)]
     pub claude_args: Vec<String>,
+    /// Commands run in the worktree after each agent attempt; all must pass before commit/push.
+    /// Example: ["cargo test --quiet", "cargo clippy -- -D warnings"]
+    #[serde(default)]
+    pub validation_commands: Vec<String>,
 }
 
 impl Profile {

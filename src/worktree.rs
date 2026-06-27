@@ -103,6 +103,15 @@ pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>
 }
 
 pub fn commit_and_push(worktree: &Path, branch: &str, push_url: &str, repo_id: &str) -> Result<()> {
+    commit_and_push_msg(
+        worktree,
+        branch,
+        push_url,
+        &format!("gah: improve mode changes for {}", repo_id),
+    )
+}
+
+pub fn commit_and_push_msg(worktree: &Path, branch: &str, push_url: &str, msg: &str) -> Result<()> {
     git(&["add", "-A"], worktree)?;
 
     let staged = Command::new("git")
@@ -113,15 +122,7 @@ pub fn commit_and_push(worktree: &Path, branch: &str, push_url: &str, repo_id: &
         anyhow::bail!("nothing to commit after git add -A");
     }
 
-    git(
-        &[
-            "commit",
-            "-q",
-            "-m",
-            &format!("gah: improve mode changes for {}", repo_id),
-        ],
-        worktree,
-    )?;
+    git(&["commit", "-q", "-m", msg], worktree)?;
 
     let out = Command::new("git")
         .args(["push", "-q", push_url, branch])

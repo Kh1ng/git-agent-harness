@@ -73,20 +73,20 @@ pub struct ScoutFinding {
     pub draft_issue_path: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CandidateArtifact {
     pub counts: CandidateCounts,
     pub candidates: Vec<Candidate>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CandidateCounts {
     pub seen: usize,
     pub converted: usize,
     pub skipped_warning: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Candidate {
     pub candidate_id: String,
     pub source_gate_status: String,

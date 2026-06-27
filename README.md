@@ -56,6 +56,11 @@ openhands_args = []                                      # e.g. plugin/skill fla
 codex_args     = ["-c", "model=gpt-4o"]                 # codex exec overrides
 claude_args    = ["--allowedTools", "Edit,Write,Bash"]   # limit claude's tools
 
+# Commands run in the worktree after each agent attempt.
+# All must pass (exit 0) before commit/push is allowed.
+# On failure, output is fed back to the agent and the attempt retried.
+validation_commands = ["cargo test --quiet", "cargo clippy -- -D warnings"]
+
 # GitLab-only fields:
 # provider_api_base   = "https://gitlab.example.com/api/v4"
 # provider_project_id = "42"
@@ -90,7 +95,9 @@ gah dispatch --profile <name> --mode <mode> [options]
 | `--mode` | required | `improve`, `fix`, `pm`, `review`, `experiment` |
 | `--backend` | `auto` | `openhands`, `cloud-coder`, `codex`, `claude`, `auto` |
 | `--oh-profile` | config default | OpenHands profile name (`~/.openhands/profiles/<name>.json`) |
-| `--target` | | Task hint or branch name (mode-dependent) |
+| `--target` | | Task hint, path to `candidates.json`, or branch name (mode-dependent) |
+| `--retries` | `2` | How many times to retry after validation fails |
+| `--allow-draft-fail` | | Push and open draft MR even if validation still fails after all retries |
 | `--dry-run` | | Print plan without making any changes |
 | `--config` | | Override config file path |
 
@@ -108,8 +115,7 @@ gah dispatch --profile <name> --mode <mode> [options]
 
 1. `LLM_*` env vars always win
 2. `--oh-profile <name>` → reads `~/.openhands/profiles/<name>.json`
-3. `profile.openhands_profile` in config.toml
-4. `defaults.llm_model_local` / `defaults.llm_model_cloud` + `defaults.llm_base_url`
+3. `defaults.llm_model_local` / `defaults.llm_model_cloud` + `defaults.llm_base_url`
 
 **Modes:**
 
