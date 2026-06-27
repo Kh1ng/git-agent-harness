@@ -57,9 +57,6 @@ pub struct Profile {
     pub provider_api_base: Option<String>,
     #[serde(default)]
     pub provider_project_id: Option<String>,
-    /// Default OpenHands profile name (maps to ~/.openhands/profiles/<name>.json)
-    #[serde(default)]
-    pub openhands_profile: Option<String>,
 }
 
 impl Profile {

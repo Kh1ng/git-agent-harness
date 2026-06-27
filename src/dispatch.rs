@@ -14,8 +14,6 @@ pub struct DispatchArgs {
     pub budget: u32,
     pub dry_run: bool,
     pub config_path: Option<String>,
-    /// OpenHands profile name (~/.openhands/profiles/<name>.json); overrides profile default
-    pub oh_profile: Option<String>,
 }
 
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
@@ -42,50 +40,12 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     match args.mode.as_str() {
         "improve" | "fix" => improve(cfg, profile, args, &session_dir),
         "pm" => pm(profile, &session_dir),
-        "review" => review(profile, args, &session_dir),
+        "review" => review(cfg, profile, args, &session_dir),
         "experiment" => {
             println!("experiment mode: not yet implemented");
             Ok(())
         }
         other => anyhow::bail!("unknown mode: {}", other),
-    }
-}
-
-fn resolve_llm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<runner::LlmConfig> {
-    // --oh-profile CLI flag > profile.openhands_profile config > defaults
-    let oh_name = args
-        .oh_profile
-        .as_deref()
-        .or(profile.openhands_profile.as_deref());
-
-    if let Some(name) = oh_name {
-        let mut llm = runner::load_oh_profile(name)?;
-        // env vars still override the profile file
-        if let Ok(v) = std::env::var("LLM_BASE_URL") { llm.base_url = v; }
-        if let Ok(v) = std::env::var("LLM_API_KEY")  { llm.api_key  = v; }
-        if let Ok(v) = std::env::var("LLM_MODEL")    { llm.model    = v; }
-        return Ok(llm);
-    }
-
-    let cloud = args.backend == "cloud-coder";
-    Ok(runner::LlmConfig {
-        base_url: cfg.defaults.llm_base_url(),
-        api_key:  cfg.defaults.llm_api_key(),
-        model:    cfg.defaults.llm_model(cloud),
-    })
-}
-
-fn run_backend(
-    backend: &str,
-    wt: &Path,
-    task: &str,
-    session_dir: &Path,
-    llm: &runner::LlmConfig,
-) -> Result<runner::RunResult> {
-    match backend {
-        "codex" => runner::run_codex(wt, task, session_dir),
-        "claude" => runner::run_claude(wt, task, session_dir),
-        _ => runner::run_openhands(wt, task, session_dir, llm),
     }
 }
 
@@ -95,14 +55,17 @@ fn improve(
     args: &DispatchArgs,
     session_dir: &Path,
 ) -> Result<()> {
+    let cloud = args.backend == "cloud-coder";
+    let llm_base = cfg.defaults.llm_base_url();
+    let llm_key = cfg.defaults.llm_api_key();
+    let llm_model = cfg.defaults.llm_model(cloud);
+
     if !runner::backend_available(&args.backend) {
         anyhow::bail!(
             "backend '{}' not available; check it is installed and on PATH",
             args.backend
         );
     }
-
-    let llm = resolve_llm(cfg, profile, args)?;
 
     let ts = timestamp();
     let branch = format!("gah/{}-{}", profile.repo_id, &ts);
@@ -123,9 +86,18 @@ fn improve(
     println!("Branch:   {}", branch);
 
     let task = build_task(profile, &args.mode, &args.target);
-    println!("\nRunning {} backend...", args.backend);
+    println!("\nRunning backend...");
 
-    let result = run_backend(&args.backend, &wt, &task, session_dir, &llm);
+    let result = runner::run_openhands(
+        &wt,
+        &task,
+        session_dir,
+        cloud,
+        &llm_base,
+        &llm_key,
+        &llm_model,
+    );
+
     let result = match result {
         Ok(r) => r,
         Err(e) => {
@@ -211,7 +183,12 @@ fn pm(profile: &Profile, session_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn review(profile: &Profile, args: &DispatchArgs, session_dir: &Path) -> Result<()> {
+fn review(
+    cfg: &GahConfig,
+    profile: &Profile,
+    args: &DispatchArgs,
+    session_dir: &Path,
+) -> Result<()> {
     let repo = Path::new(&profile.local_path);
 
     let branch = if args.target.is_empty() {
@@ -225,9 +202,9 @@ fn review(profile: &Profile, args: &DispatchArgs, session_dir: &Path) -> Result<
     let _ = git_output(&["fetch", "-q", "origin", "--prune"], repo);
 
     let diff = git_output(&["diff", &origin_ref, "HEAD"], repo).unwrap_or_default();
-    let files =
-        git_output(&["diff", "--name-only", &origin_ref, "HEAD"], repo).unwrap_or_default();
+    let files = git_output(&["diff", "--name-only", &origin_ref, "HEAD"], repo).unwrap_or_default();
 
+    // Write review bundle
     let bundle = session_dir.join("review-bundle");
     fs::create_dir_all(&bundle)?;
     fs::write(bundle.join("diff.patch"), &diff)?;
@@ -239,6 +216,7 @@ fn review(profile: &Profile, args: &DispatchArgs, session_dir: &Path) -> Result<
             branch, profile.default_target_branch, profile.repo
         ),
     )?;
+    fs::write(bundle.join("check-summary.json"), r#"{"status":"not_run"}"#)?;
 
     if diff.is_empty() {
         println!("No diff vs {}. Nothing to review.", origin_ref);
@@ -251,40 +229,36 @@ fn review(profile: &Profile, args: &DispatchArgs, session_dir: &Path) -> Result<
         files.lines().count()
     );
 
-    let prompt = format!(
-        "Review this diff for correctness, test coverage, and safety. \
-         Repo: {}. Branch: {}. Target: {}.\n\nDiff:\n```\n{}\n```\nChanged files:\n{}",
-        profile.repo,
-        branch,
-        profile.default_target_branch,
-        &diff[..diff.len().min(60_000)],
-        files,
-    );
-
-    // Use the requested backend, fall back to claude if available
-    let effective_backend = if args.backend == "auto" || args.backend.is_empty() {
-        if which("claude").is_some() { "claude" } else { "openhands" }
+    // Try claude CLI
+    let claude = which("claude");
+    if let Some(claude_bin) = claude {
+        let prompt = format!(
+            "Review this diff for correctness, test coverage, and safety. \
+             Repo: {}. Branch: {}. Target: {}.\n\nDiff:\n```\n{}\n```\nChanged files:\n{}",
+            profile.repo,
+            branch,
+            profile.default_target_branch,
+            &diff[..diff.len().min(60_000)],
+            files,
+        );
+        let out = Command::new(&claude_bin).args(["-p", &prompt]).output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let review_text = String::from_utf8_lossy(&o.stdout).to_string();
+                let report_path = session_dir.join("review-report.md");
+                fs::write(&report_path, &review_text)?;
+                println!("{}", review_text);
+                println!("Written: {}", report_path.display());
+            }
+            _ => {
+                println!(
+                    "claude review backend unavailable. Bundle at: {}",
+                    bundle.display()
+                );
+            }
+        }
     } else {
-        &args.backend
-    };
-
-    let result = match effective_backend {
-        "claude" => Command::new("claude").args(["-p", &prompt]).output().ok(),
-        _ => None,
-    };
-
-    match result {
-        Some(o) if o.status.success() => {
-            let review_text = String::from_utf8_lossy(&o.stdout).to_string();
-            let report_path = session_dir.join("review-report.md");
-            fs::write(&report_path, &review_text)?;
-            println!("{}", review_text);
-            println!("Written: {}", report_path.display());
-        }
-        _ => {
-            println!("Review bundle written to: {}", bundle.display());
-            println!("Run `claude -p \"$(cat {}/diff.patch)\"` to review manually.", bundle.display());
-        }
+        println!("claude not found. Bundle written to: {}", bundle.display());
     }
 
     Ok(())
@@ -308,19 +282,11 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
     );
     match args.mode.as_str() {
         "improve" | "fix" => {
-            let oh_name = args
-                .oh_profile
-                .as_deref()
-                .or(profile.openhands_profile.as_deref());
-            if let Some(name) = oh_name {
-                println!("OH profile:   {} (~/.openhands/profiles/{}.json)", name, name);
-            } else {
-                let cloud = args.backend == "cloud-coder";
-                println!("LLM model:    {}", cfg.defaults.llm_model(cloud));
-                println!("LLM base:     {}", cfg.defaults.llm_base_url());
-            }
-            println!("Backend:      {}", args.backend);
-            println!("\nSteps: fetch → worktree → {} → diff → commit → push → draft MR", args.backend);
+            let cloud = args.backend == "cloud-coder";
+            let model = cfg.defaults.llm_model(cloud);
+            println!("LLM model:    {}", model);
+            println!("LLM base:     {}", cfg.defaults.llm_base_url());
+            println!("\nSteps: fetch → worktree → openhands → diff → commit → push → draft MR");
         }
         "pm" => println!("Steps: git log → test count → CI check → write pm-report.md"),
         "review" => println!("Steps: git diff → bundle → claude review"),

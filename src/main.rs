@@ -49,7 +49,6 @@ enum Commands {
         profile: String,
         #[arg(long)]
         mode: String,
-        /// Backend: openhands, cloud-coder, codex, claude, auto
         #[arg(long, default_value = "auto")]
         backend: String,
         #[arg(long, default_value = "")]
@@ -61,9 +60,6 @@ enum Commands {
         /// Path to gah-config.toml (default: auto-discovered)
         #[arg(long, name = "config")]
         config_path: Option<String>,
-        /// OpenHands profile name from ~/.openhands/profiles/<name>.json
-        #[arg(long)]
-        oh_profile: Option<String>,
     },
     /// Manage profiles
     Profile {
@@ -108,7 +104,6 @@ fn main() -> Result<()> {
             budget,
             dry_run,
             config_path,
-            oh_profile,
         } => {
             let cfg = config::load(config_path.as_deref())?;
             dispatch::run(
@@ -121,7 +116,6 @@ fn main() -> Result<()> {
                     budget,
                     dry_run,
                     config_path,
-                    oh_profile,
                 },
             )?;
         }
@@ -152,13 +146,6 @@ fn main() -> Result<()> {
                 }
                 if let Some(id) = &p.provider_project_id {
                     println!("provider_project_id:   {}", id);
-                }
-                if let Some(oh) = &p.openhands_profile {
-                    println!("openhands_profile:     {}", oh);
-                    let profiles = runner::list_oh_profiles();
-                    if !profiles.contains(oh) {
-                        println!("  WARNING: profile file not found at ~/.openhands/profiles/{}.json", oh);
-                    }
                 }
             }
         },
