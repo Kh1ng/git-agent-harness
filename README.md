@@ -32,13 +32,12 @@ gah dispatch --profile my-repo --mode improve
 Location (in order of precedence):
 
 1. `$GAH_CONFIG` env var
-2. `/root/agent-lab/config/gah-config.toml`
-3. `~/.config/gah/config.toml`
+2. `~/.config/gah/config.toml`
 
 ```toml
 [defaults]
-artifact_root   = "/root/agent-lab/artifacts"
-worktree_base   = "/root/agent-lab/worktrees"
+artifact_root   = "/path/to/artifacts"
+worktree_base   = "/path/to/worktrees"
 llm_base_url    = "http://your-litellm-proxy:4000"
 llm_model_local = "litellm_proxy/local-model"
 llm_model_cloud = "litellm_proxy/cloud-model"
@@ -49,9 +48,18 @@ repo_id               = "my-repo"             # used in branch names and artifac
 provider              = "github"              # "github" or "gitlab"
 repo                  = "owner/repo-name"
 local_path            = "/path/to/local/clone"
-artifact_root         = "/root/agent-lab/artifacts/my-repo"
+artifact_root         = "/path/to/artifacts/my-repo"
 default_target_branch = "main"
-openhands_profile     = "local-qwen3-coder"  # optional; name from ~/.openhands/profiles/
+
+# Optional extra CLI args passed to each backend:
+openhands_args = []                                      # e.g. plugin/skill flags
+codex_args     = ["-c", "model=gpt-4o"]                 # codex exec overrides
+claude_args    = ["--allowedTools", "Edit,Write,Bash"]   # limit claude's tools
+
+# Commands run in the worktree after each agent attempt.
+# All must pass (exit 0) before commit/push is allowed.
+# On failure, output is fed back to the agent and the attempt retried.
+validation_commands = ["cargo test --quiet", "cargo clippy -- -D warnings"]
 
 # GitLab-only fields:
 # provider_api_base   = "https://gitlab.example.com/api/v4"
@@ -87,7 +95,9 @@ gah dispatch --profile <name> --mode <mode> [options]
 | `--mode` | required | `improve`, `fix`, `pm`, `review`, `experiment` |
 | `--backend` | `auto` | `openhands`, `cloud-coder`, `codex`, `claude`, `auto` |
 | `--oh-profile` | config default | OpenHands profile name (`~/.openhands/profiles/<name>.json`) |
-| `--target` | | Task hint or branch name (mode-dependent) |
+| `--target` | | Task hint, path to `candidates.json`, or branch name (mode-dependent) |
+| `--retries` | `2` | How many times to retry after validation fails |
+| `--allow-draft-fail` | | Push and open draft MR even if validation still fails after all retries |
 | `--dry-run` | | Print plan without making any changes |
 | `--config` | | Override config file path |
 
@@ -105,8 +115,7 @@ gah dispatch --profile <name> --mode <mode> [options]
 
 1. `LLM_*` env vars always win
 2. `--oh-profile <name>` → reads `~/.openhands/profiles/<name>.json`
-3. `profile.openhands_profile` in config.toml
-4. `defaults.llm_model_local` / `defaults.llm_model_cloud` + `defaults.llm_base_url`
+3. `defaults.llm_model_local` / `defaults.llm_model_cloud` + `defaults.llm_base_url`
 
 **Modes:**
 
@@ -164,7 +173,7 @@ gah policy-check --config <path> --action <action>
 
 ## OpenHands profiles
 
-OpenHands profiles live at `~/.openhands/profiles/<name>.json` and define LLM connection settings:
+Pass `--oh-profile <name>` at runtime to specify which LLM profile OpenHands uses. The profile file lives at `~/.openhands/profiles/<name>.json`:
 
 ```json
 {
@@ -175,7 +184,7 @@ OpenHands profiles live at `~/.openhands/profiles/<name>.json` and define LLM co
 }
 ```
 
-Use `gah profile show <name>` to confirm the profile file exists. List available profiles:
+`LLM_*` env vars always override the profile file. List available profiles:
 
 ```bash
 ls ~/.openhands/profiles/

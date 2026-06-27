@@ -35,8 +35,8 @@ pub fn run(gate_artifact: &str, include_warnings: bool, out_root: &str) -> Resul
             continue;
         }
         converted += 1;
-        let hydrated = hydrate_finding(finding, scout.as_ref());
-        let candidate = build_candidate(finding, &hydrated);
+        let (hydrated, is_hydrated) = hydrate_finding(finding, scout.as_ref());
+        let candidate = build_candidate(finding, &hydrated, is_hydrated);
         fs::write(
             run_dir
                 .join("candidates")
@@ -82,9 +82,9 @@ fn unique_dir(root: &Path) -> Result<PathBuf> {
     anyhow::bail!("unable to allocate unique run directory")
 }
 
-fn hydrate_finding(gate: &GateFinding, scout: Option<&ScoutArtifact>) -> GateFinding {
+fn hydrate_finding(gate: &GateFinding, scout: Option<&ScoutArtifact>) -> (GateFinding, bool) {
     let Some(scout) = scout else {
-        return gate.clone();
+        return (gate.clone(), false);
     };
     let matched = match gate.id.as_ref() {
         Some(id) => scout
@@ -101,31 +101,31 @@ fn hydrate_finding(gate: &GateFinding, scout: Option<&ScoutArtifact>) -> GateFin
                 .find(|f| f.title.as_deref() == Some(title.as_str()))
         })
     });
-    let Some(scout) = matched else {
-        return gate.clone();
+    let Some(scout_finding) = matched else {
+        return (gate.clone(), false);
     };
 
     let mut hydrated = gate.clone();
-    merge_missing(&mut hydrated.affected_files, scout.affected_files.clone());
-    merge_missing(&mut hydrated.evidence, scout.evidence.clone());
-    merge_missing(&mut hydrated.commands, scout.commands.clone());
+    merge_missing(&mut hydrated.affected_files, scout_finding.affected_files.clone());
+    merge_missing(&mut hydrated.evidence, scout_finding.evidence.clone());
+    merge_missing(&mut hydrated.commands, scout_finding.commands.clone());
     merge_missing(
         &mut hydrated.suggested_acceptance_criteria,
-        scout.suggested_acceptance_criteria.clone(),
+        scout_finding.suggested_acceptance_criteria.clone(),
     );
     merge_missing(
         &mut hydrated.suggested_verification,
-        scout.suggested_verification.clone(),
+        scout_finding.suggested_verification.clone(),
     );
-    merge_missing(&mut hydrated.risk_guess, scout.risk_guess.clone());
-    merge_missing(&mut hydrated.confidence, scout.confidence.clone());
-    merge_missing(&mut hydrated.likely_agent_safe, scout.likely_agent_safe);
-    merge_missing(&mut hydrated.finding_path, scout.finding_path.clone());
+    merge_missing(&mut hydrated.risk_guess, scout_finding.risk_guess.clone());
+    merge_missing(&mut hydrated.confidence, scout_finding.confidence.clone());
+    merge_missing(&mut hydrated.likely_agent_safe, scout_finding.likely_agent_safe);
+    merge_missing(&mut hydrated.finding_path, scout_finding.finding_path.clone());
     merge_missing(
         &mut hydrated.draft_issue_path,
-        scout.draft_issue_path.clone(),
+        scout_finding.draft_issue_path.clone(),
     );
-    hydrated
+    (hydrated, true)
 }
 
 fn merge_missing<T>(target: &mut Option<T>, fallback: Option<T>) {
@@ -134,7 +134,7 @@ fn merge_missing<T>(target: &mut Option<T>, fallback: Option<T>) {
     }
 }
 
-fn build_candidate(gate: &GateFinding, hydrated: &GateFinding) -> Candidate {
+fn build_candidate(gate: &GateFinding, hydrated: &GateFinding, is_hydrated: bool) -> Candidate {
     let source = hydrated;
     let mut suggested_labels = Vec::new();
     if let Some(kind) = source.finding_type.as_ref() {
@@ -167,20 +167,12 @@ fn build_candidate(gate: &GateFinding, hydrated: &GateFinding) -> Candidate {
             .clone()
             .unwrap_or_default(),
         verification: source.suggested_verification.clone().unwrap_or_default(),
-        hydration_used: !std::ptr::eq(source, gate),
-        hydration_source: if !std::ptr::eq(source, gate) {
-            "scout.json".into()
-        } else {
-            "gate.json".into()
-        },
-        hydration_match_method: if !std::ptr::eq(source, gate) {
-            "id".into()
-        } else {
-            "none".into()
-        },
-        hydrated_fields: hydrated_fields(gate, source, !std::ptr::eq(source, gate)),
+        hydration_used: is_hydrated,
+        hydration_source: if is_hydrated { "scout.json".into() } else { "gate.json".into() },
+        hydration_match_method: if is_hydrated { "id".into() } else { "none".into() },
+        hydrated_fields: hydrated_fields(gate, source, is_hydrated),
         debug_gate_keys: gate_keys(gate),
-        debug_scout_keys: scout_keys(source, !std::ptr::eq(source, gate)),
+        debug_scout_keys: scout_keys(source, is_hydrated),
         debug_hydrated_keys: hydrated_keys(source),
         debug_hydrated_finding_excerpt: hydrated_excerpt(source),
         source_finding_path: gate

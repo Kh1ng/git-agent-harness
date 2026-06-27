@@ -49,6 +49,7 @@ enum Commands {
         profile: String,
         #[arg(long)]
         mode: String,
+        /// Backend: openhands, cloud-coder, codex, claude, auto
         #[arg(long, default_value = "auto")]
         backend: String,
         #[arg(long, default_value = "")]
@@ -60,6 +61,15 @@ enum Commands {
         /// Path to gah-config.toml (default: auto-discovered)
         #[arg(long, name = "config")]
         config_path: Option<String>,
+        /// OpenHands profile name from ~/.openhands/profiles/<name>.json
+        #[arg(long)]
+        oh_profile: Option<String>,
+        /// How many times to retry after validation fails (0 = one attempt, no retries)
+        #[arg(long, default_value_t = 2)]
+        retries: u32,
+        /// Push and open draft MR even if validation commands still fail after all retries
+        #[arg(long, default_value_t = false)]
+        allow_draft_fail: bool,
     },
     /// Manage profiles
     Profile {
@@ -104,6 +114,9 @@ fn main() -> Result<()> {
             budget,
             dry_run,
             config_path,
+            oh_profile,
+            retries,
+            allow_draft_fail,
         } => {
             let cfg = config::load(config_path.as_deref())?;
             dispatch::run(
@@ -116,6 +129,9 @@ fn main() -> Result<()> {
                     budget,
                     dry_run,
                     config_path,
+                    oh_profile,
+                    retries,
+                    allow_draft_fail,
                 },
             )?;
         }
@@ -146,6 +162,21 @@ fn main() -> Result<()> {
                 }
                 if let Some(id) = &p.provider_project_id {
                     println!("provider_project_id:   {}", id);
+                }
+                if !p.openhands_args.is_empty() {
+                    println!("openhands_args:        {:?}", p.openhands_args);
+                }
+                if !p.codex_args.is_empty() {
+                    println!("codex_args:            {:?}", p.codex_args);
+                }
+                if !p.claude_args.is_empty() {
+                    println!("claude_args:           {:?}", p.claude_args);
+                }
+                if !p.validation_commands.is_empty() {
+                    println!("validation_commands:");
+                    for cmd in &p.validation_commands {
+                        println!("  - {}", cmd);
+                    }
                 }
             }
         },

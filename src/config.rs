@@ -57,6 +57,19 @@ pub struct Profile {
     pub provider_api_base: Option<String>,
     #[serde(default)]
     pub provider_project_id: Option<String>,
+    /// Extra CLI args appended to the openhands invocation (e.g. plugins, skill flags)
+    #[serde(default)]
+    pub openhands_args: Vec<String>,
+    /// Extra CLI args appended to `codex exec` (e.g. `-c model=gpt-4o`)
+    #[serde(default)]
+    pub codex_args: Vec<String>,
+    /// Extra CLI args appended to `claude -p` (e.g. `--allowedTools Edit,Write,Bash`)
+    #[serde(default)]
+    pub claude_args: Vec<String>,
+    /// Commands run in the worktree after each agent attempt; all must pass before commit/push.
+    /// Example: ["cargo test --quiet", "cargo clippy -- -D warnings"]
+    #[serde(default)]
+    pub validation_commands: Vec<String>,
 }
 
 impl Profile {
@@ -98,12 +111,8 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
         .or_else(|| std::env::var("GAH_CONFIG").ok().map(PathBuf::from))
         .or_else(|| {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-            [
-                PathBuf::from("/root/agent-lab/config/gah-config.toml"),
-                PathBuf::from(format!("{}/.config/gah/config.toml", home)),
-            ]
-            .into_iter()
-            .find(|p| p.exists())
+            let p = PathBuf::from(format!("{}/.config/gah/config.toml", home));
+            p.exists().then_some(p)
         })
         .ok_or_else(|| {
             anyhow::anyhow!("no config found; set GAH_CONFIG or create ~/.config/gah/config.toml")

@@ -7,6 +7,10 @@ pub fn git(args: &[&str], cwd: &Path) -> Result<String> {
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
+        // Prevent user git config (color, pager, aliases) from corrupting output
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .with_context(|| format!("git {}", args.join(" ")))?;
     if !out.status.success() {
@@ -99,6 +103,15 @@ pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>
 }
 
 pub fn commit_and_push(worktree: &Path, branch: &str, push_url: &str, repo_id: &str) -> Result<()> {
+    commit_and_push_msg(
+        worktree,
+        branch,
+        push_url,
+        &format!("gah: improve mode changes for {}", repo_id),
+    )
+}
+
+pub fn commit_and_push_msg(worktree: &Path, branch: &str, push_url: &str, msg: &str) -> Result<()> {
     git(&["add", "-A"], worktree)?;
 
     let staged = Command::new("git")
@@ -109,15 +122,7 @@ pub fn commit_and_push(worktree: &Path, branch: &str, push_url: &str, repo_id: &
         anyhow::bail!("nothing to commit after git add -A");
     }
 
-    git(
-        &[
-            "commit",
-            "-q",
-            "-m",
-            &format!("gah: improve mode changes for {}", repo_id),
-        ],
-        worktree,
-    )?;
+    git(&["commit", "-q", "-m", msg], worktree)?;
 
     let out = Command::new("git")
         .args(["push", "-q", push_url, branch])
