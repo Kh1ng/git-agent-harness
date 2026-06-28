@@ -96,8 +96,9 @@ fn run_backend(
     task: &str,
     session_dir: &Path,
     llm: &runner::LlmConfig,
+    env_path: Option<&str>,
 ) -> Result<runner::RunResult> {
-    let env_vars = profile.env_file.as_deref()
+    let env_vars = env_path
         .map(runner::load_env_file)
         .unwrap_or_default();
     match backend {
@@ -203,6 +204,19 @@ fn improve(
     preflight(&args.backend)?;
     let llm = resolve_llm(cfg, args)?;
 
+    // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
+    let resolved_env = if args.prod {
+        profile.env_file_prod.as_deref().unwrap_or("")
+    } else {
+        profile.env_file.as_deref().unwrap_or("")
+    };
+    if !resolved_env.is_empty() {
+        println!("Env file: {}", resolved_env);
+        if args.prod {
+            println!("  \u{26a0}\u{fe0f}  PRODUCTION env - agent has live API access");
+        }
+    }
+
     let ts = timestamp();
     let branch = format!("gah/{}-{}", profile.repo_id, &ts);
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
@@ -248,7 +262,8 @@ fn improve(
         let attempt_session = session_dir.join(format!("attempt-{}", attempt + 1));
         fs::create_dir_all(&attempt_session)?;
 
-        let result = run_backend(&args.backend, profile, &wt, &task, &attempt_session, &llm);
+        let env_path = if !resolved_env.is_empty() { Some(resolved_env) } else { None };
+        let result = run_backend(&args.backend, profile, &wt, &task, &attempt_session, &llm, env_path);
         let result = match result {
             Ok(r) => r,
             Err(e) => {
@@ -383,6 +398,19 @@ fn experiment(
     preflight(&args.backend)?;
     let llm = resolve_llm(cfg, args)?;
 
+    // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
+    let resolved_env = if args.prod {
+        profile.env_file_prod.as_deref().unwrap_or("")
+    } else {
+        profile.env_file.as_deref().unwrap_or("")
+    };
+    if !resolved_env.is_empty() {
+        println!("Env file: {}", resolved_env);
+        if args.prod {
+            println!("  \u{26a0}\u{fe0f}  PRODUCTION env - agent has live API access");
+        }
+    }
+
     let ts = timestamp();
     let branch = format!("gah/exp-{}-{}", profile.repo_id, &ts);
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
@@ -397,7 +425,8 @@ fn experiment(
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
 
-    let result = match run_backend(&args.backend, profile, &wt, &task, &attempt_dir, &llm) {
+    let env_path = if !resolved_env.is_empty() { Some(resolved_env) } else { None };
+    let result = match run_backend(&args.backend, profile, &wt, &task, &attempt_dir, &llm, env_path) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Backend error (continuing for judge evaluation): {:#}", e);
@@ -575,6 +604,19 @@ fn pm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs, session_dir: &Pat
     preflight(&args.backend)?;
     let llm = resolve_llm(cfg, args)?;
 
+    // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
+    let resolved_env = if args.prod {
+        profile.env_file_prod.as_deref().unwrap_or("")
+    } else {
+        profile.env_file.as_deref().unwrap_or("")
+    };
+    if !resolved_env.is_empty() {
+        println!("Env file: {}", resolved_env);
+        if args.prod {
+            println!("  \u{26a0}\u{fe0f}  PRODUCTION env - agent has live API access");
+        }
+    }
+
     let task = format!(
         "Repository: {} ({})\nLocal path: {}\nTarget branch: {}\n\n\
          You are a project manager. Decompose the ticket below into 3-6 atomic sub-tasks, \
@@ -599,7 +641,7 @@ fn pm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs, session_dir: &Pat
     fs::write(attempt_dir.join("task.md"), &task)?;
 
     // Run in the live repo (PM only creates docs — no code changes, low risk)
-    let result = run_backend(&args.backend, profile, repo, &task, &attempt_dir, &llm)?;
+    let result = run_backend(&args.backend, profile, repo, &task, &attempt_dir, &llm, None)?;
     println!("PM backend finished: exit={} duration={:.0}s log={}", result.exit_code, result.duration_secs, result.log_path);
 
     // List resulting ticket files so the manager can dispatch them
