@@ -192,7 +192,7 @@ fn improve(
     } else {
         args.target.clone()
     };
-    let mut task = build_task(profile, &args.mode, &target);
+    let mut task = build_task(profile, &wt, &args.mode, &target);
     let max_attempts = args.retries + 1;
     let mut validation_failed = false;
     for attempt in 0..max_attempts {
@@ -349,15 +349,21 @@ fn experiment(
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
-    let task = build_task(profile, "experiment", &args.target);
+    let task = build_task(profile, &wt, "experiment", &args.target);
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
 
     let result = match run_backend(&args.backend, profile, &wt, &task, &attempt_dir, &llm) {
         Ok(r) => r,
         Err(e) => {
-            worktree::cleanup(&wt, repo);
-            return Err(e);
+            eprintln!("Backend error (continuing for judge evaluation): {:#}", e);
+            let log_path = attempt_dir.join("backend-output.log");
+            let _ = std::fs::write(&log_path, format!("Backend error: {:#}", e));
+            runner::RunResult {
+                exit_code: -1,
+                duration_secs: 0.0,
+                log_path: log_path.to_string_lossy().into_owned(),
+            }
         }
     };
     println!(
@@ -728,7 +734,7 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
 /// Build the task prompt for the agent.
 /// If `target` is a path to a candidates.json file, build a structured packet from the first candidate.
 /// Otherwise build a mode-appropriate prompt with target as the task body.
-fn build_task(profile: &Profile, mode: &str, target: &str) -> String {
+fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String {
     // Try to load as candidate artifact
     if !target.is_empty() {
         let p = Path::new(target);
@@ -736,7 +742,7 @@ fn build_task(profile: &Profile, mode: &str, target: &str) -> String {
             if let Ok(text) = fs::read_to_string(p) {
                 if let Ok(artifact) = serde_json::from_str::<CandidateArtifact>(&text) {
                     if let Some(candidate) = artifact.candidates.first() {
-                        return format_candidate_task(profile, mode, candidate);
+                        return format_candidate_task(profile, wt, mode, candidate);
                     }
                 }
             }
@@ -765,8 +771,8 @@ fn build_task(profile: &Profile, mode: &str, target: &str) -> String {
     };
 
     let mut task = format!(
-        "Repository: {} ({})\nLocal path: {}\nTarget branch: {}\n\n{}\n",
-        profile.display_name, profile.repo, profile.local_path, profile.default_target_branch, instruction,
+        "Repository: {} ({})\nWorking directory: {}\nTarget branch: {}\n\n{}\n",
+        profile.display_name, profile.repo, wt.display(), profile.default_target_branch, instruction,
     );
     if !target.is_empty() {
         task.push_str(&format!("\n## Focus\n\n{}\n", target));
@@ -774,7 +780,7 @@ fn build_task(profile: &Profile, mode: &str, target: &str) -> String {
     task
 }
 
-fn format_candidate_task(profile: &Profile, mode: &str, c: &crate::models::Candidate) -> String {
+fn format_candidate_task(profile: &Profile, wt: &Path, mode: &str, c: &crate::models::Candidate) -> String {
     let mut out = format!(
         "# Task: {}\n\n\
          Repository: {} ({})\n\
