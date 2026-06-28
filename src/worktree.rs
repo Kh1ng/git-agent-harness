@@ -57,12 +57,14 @@ pub fn create(
     Ok(worktree_path)
 }
 
-pub fn has_changes(worktree: &Path) -> Result<bool> {
+pub fn has_changes(worktree: &Path, target_branch: &str) -> Result<bool> {
     let status = git_raw(&["status", "--porcelain"], worktree)?;
     if !status.stdout.is_empty() {
         return Ok(true);
     }
-    let diff = git_raw(&["diff", "HEAD", "@{upstream}"], worktree)?;
+    // ponytail: compare against origin/<target> — @{upstream} fails silently on new untracked branches
+    let origin_ref = format!("origin/{}", target_branch);
+    let diff = git_raw(&["diff", "HEAD", &origin_ref], worktree)?;
     Ok(!diff.stdout.is_empty())
 }
 

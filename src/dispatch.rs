@@ -94,10 +94,13 @@ fn run_backend(
     session_dir: &Path,
     llm: &runner::LlmConfig,
 ) -> Result<runner::RunResult> {
+    let env_vars = profile.env_file.as_deref()
+        .map(runner::load_env_file)
+        .unwrap_or_default();
     match backend {
-        "codex" => runner::run_codex(wt, task, session_dir, &profile.codex_args),
-        "claude" => runner::run_claude(wt, task, session_dir, &profile.claude_args),
-        _ => runner::run_openhands(wt, task, session_dir, llm, &profile.openhands_args),
+        "codex" => runner::run_codex(wt, task, session_dir, &profile.codex_args, &env_vars),
+        "claude" => runner::run_claude(wt, task, session_dir, &profile.claude_args, &env_vars),
+        _ => runner::run_openhands(wt, task, session_dir, llm, &profile.openhands_args, &env_vars),
     }
 }
 
@@ -175,7 +178,21 @@ fn improve(
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
-    let mut task = build_task(profile, &args.mode, &args.target);
+    let target = if args.target.is_empty() {
+        // Auto-discover latest candidates.json when no explicit target given
+        let default = PathBuf::from(&profile.artifact_root)
+            .join("candidates")
+            .join("latest.json");
+        if default.exists() {
+            println!("Auto-target: {}", default.display());
+            default.to_string_lossy().into_owned()
+        } else {
+            args.target.clone()
+        }
+    } else {
+        args.target.clone()
+    };
+    let mut task = build_task(profile, &args.mode, &target);
     let max_attempts = args.retries + 1;
     let mut validation_failed = false;
     for attempt in 0..max_attempts {
@@ -277,7 +294,7 @@ fn improve(
     // each attempt is self-contained.
     // ────────────────────────────────────────────────────────────────────────
 
-    let has_changes = worktree::has_changes(&wt)?;
+    let has_changes = worktree::has_changes(&wt, &profile.default_target_branch)?;
     if !has_changes {
         println!("No changes produced — nothing to push.");
         worktree::cleanup(&wt, repo);
