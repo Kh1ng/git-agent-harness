@@ -66,9 +66,18 @@ pub struct Profile {
     /// Extra CLI args appended to `claude -p` (e.g. `--allowedTools Edit,Write,Bash`)
     #[serde(default)]
     pub claude_args: Vec<String>,
-    /// Optional path to a KEY=VALUE env file sourced before running any backend.
+    /// Path to a policy TOML file (see gah policy-check). When set, dispatch
+    /// enforces permissions before provisioning any worktree.
+    #[serde(default)]
+    pub policy_path: Option<String>,
+    /// Optional path to a KEY=VALUE env file sourced before running any backend
+    /// in dev mode (default). Contains dev/api keys, never prod credentials.
     #[serde(default)]
     pub env_file: Option<String>,
+    /// Path to a production KEY=VALUE env file. Only loaded when --prod is passed
+    /// to dispatch. Keeps prod credentials isolated from dev runs.
+    #[serde(default)]
+    pub env_file_prod: Option<String>,
     /// Commands run in the worktree after each agent attempt; all must pass before commit/push.
     /// Example: ["cargo test --quiet", "cargo clippy -- -D warnings"]
     #[serde(default)]
@@ -90,22 +99,30 @@ impl Profile {
         }
     }
 
+    /// Build push URL without embedding PAT. Authentication is handled
+    /// via GIT_ASKPASS by the caller, so the token never appears in process
+    /// arguments, process lists, or shell history.
     pub fn push_url(&self) -> String {
         match self.provider.as_str() {
             "gitlab" => {
                 let base = self.provider_api_base.as_deref().unwrap_or("");
                 let host = base.trim_end_matches("/api/v4").trim_end_matches('/');
-                let pat = self.pat();
-                if let Some(rest) = host.strip_prefix("https://") {
-                    format!("https://oauth2:{}@{}/{}.git", pat, rest, self.repo)
-                } else if let Some(rest) = host.strip_prefix("http://") {
-                    format!("http://oauth2:{}@{}/{}.git", pat, rest, self.repo)
-                } else {
-                    format!("{}/{}.git", host, self.repo)
-                }
+                format!("{}/{}.git", host, self.repo)
             }
             "github" => format!("https://github.com/{}.git", self.repo),
             _ => self.repo.clone(),
+        }
+    }
+
+    /// Return the bare hostname from the provider API base for URL construction.
+    pub fn push_host(&self) -> String {
+        match self.provider.as_str() {
+            "gitlab" => {
+                let base = self.provider_api_base.as_deref().unwrap_or("");
+                base.trim_end_matches("/api/v4").trim_end_matches('/').to_string()
+            }
+            "github" => "https://github.com".to_string(),
+            _ => String::new(),
         }
     }
 }

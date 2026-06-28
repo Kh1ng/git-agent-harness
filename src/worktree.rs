@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::io::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -99,16 +100,32 @@ pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>
     Ok(files)
 }
 
-pub fn commit_and_push(worktree: &Path, branch: &str, push_url: &str, repo_id: &str) -> Result<()> {
+pub fn commit_and_push(worktree: &Path, branch: &str, push_url: &str, repo_id: &str, pat: &str) -> Result<()> {
     commit_and_push_msg(
         worktree,
         branch,
         push_url,
         &format!("gah: improve mode changes for {}", repo_id),
+        pat,
     )
 }
 
-pub fn commit_and_push_msg(worktree: &Path, branch: &str, push_url: &str, msg: &str) -> Result<()> {
+/// Write a temporary GIT_ASKPASS script that outputs the given password.
+/// Returns the path to the script. The caller MUST clean up the file.
+fn write_askpass(pat: &str) -> Result<std::path::PathBuf> {
+    let path = std::env::temp_dir().join(format!("gah-askpass-{}", std::process::id()));
+    let mut f = std::fs::File::create(&path)?;
+    f.write_all(b"#!/bin/sh\n")?;
+    f.write_all(b"echo \"")?;
+    f.write_all(pat.as_bytes())?;
+    f.write_all(b"\"\n")?;
+    // Make executable
+    use std::os::unix::fs::PermissionsExt;
+    f.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    Ok(path)
+}
+
+pub fn commit_and_push_msg(worktree: &Path, branch: &str, push_url: &str, msg: &str, pat: &str) -> Result<()> {
     git(&["add", "-A"], worktree)?;
 
     let staged = git_raw(&["diff", "--cached", "--name-only"], worktree)?;
@@ -118,7 +135,15 @@ pub fn commit_and_push_msg(worktree: &Path, branch: &str, push_url: &str, msg: &
 
     git(&["commit", "-q", "-m", msg], worktree)?;
 
-    let out = git_raw(&["push", "-q", push_url, branch], worktree).context("git push")?;
+    let askpass = write_askpass(pat)?;
+    let out = Command::new("git")
+        .args(["push", "-q", push_url, branch])
+        .env("GIT_ASKPASS", &askpass)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(worktree)
+        .output()
+        .context("git push")?;
+    let _ = std::fs::remove_file(&askpass);
     if !out.status.success() {
         anyhow::bail!(
             "push failed: {}",

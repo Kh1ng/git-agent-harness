@@ -19,6 +19,9 @@ pub struct DispatchArgs {
     pub model: Option<String>,
     pub retries: u32,
     pub allow_draft_fail: bool,
+    /// Require explicit --prod flag to load production env_file_prod.
+    /// Without this flag, only env_file (dev) is loaded.
+    pub prod: bool,
 }
 
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
@@ -151,12 +154,52 @@ fn preflight(backend: &str) -> Result<()> {
     Ok(())
 }
 
+/// Check profile policy before provisioning any worktree.
+/// If a policy_path is set, the requested action must be allowed or dispatch
+/// hard-fails before any mutations occur.
+fn enforce_policy(profile: &Profile, action: &str) -> Result<()> {
+    let Some(policy_path) = &profile.policy_path else {
+        return Ok(()); // no policy file = trust the user
+    };
+    let text = std::fs::read_to_string(policy_path)
+        .with_context(|| format!("reading policy file: {}", policy_path))?;
+    let cfg: crate::models::PolicyConfig = toml::from_str(&text)
+        .with_context(|| format!("parsing policy file: {}", policy_path))?;
+    let repo = cfg.repo;
+    let allowed = match repo.trust_mode.as_str() {
+        "read_only" => false,
+        "draft_pr_allowed" => match action {
+            "open-draft-pr" => {
+                repo.allow_provider_mutation && repo.allow_push && repo.allow_draft_pr
+            }
+            "edit-issue" => repo.allow_issue_write,
+            "git-push" => repo.allow_push,
+            "git-push-prod" => repo.allow_project_write,
+            _ => false,
+        },
+        _ => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "POLICY BLOCKED: trust_mode={:?} does not allow action={:?}.              Set allow_push/allow_draft_pr/allow_project_write in {} or              pass --override-policy if you know what you're doing.",
+            repo.trust_mode, action, policy_path
+        )
+    }
+}
+
 fn improve(
     cfg: &GahConfig,
     profile: &Profile,
     args: &DispatchArgs,
     session_dir: &Path,
 ) -> Result<()> {
+    // Enforce policy before any mutations
+    let push_action = if args.prod { "git-push-prod" } else { "git-push" };
+    enforce_policy(profile, "open-draft-pr")?;
+    enforce_policy(profile, push_action)?;
+
     preflight(&args.backend)?;
     let llm = resolve_llm(cfg, args)?;
 
@@ -312,7 +355,8 @@ fn improve(
 
     println!("Changes detected. Committing and pushing...");
     let push_url = profile.push_url();
-    worktree::commit_and_push_msg(&wt, &branch, &push_url, &commit_msg)?;
+    let push_pat = profile.pat();
+    worktree::commit_and_push_msg(&wt, &branch, &push_url, &commit_msg, &push_pat)?;
 
     let mr_title = if validation_failed {
         format!("[GAH][DRAFT-FAIL] {}: {}", args.mode, profile.repo_id)
@@ -405,7 +449,8 @@ fn experiment(
     println!("Changes detected. Committing and pushing...");
     let commit_msg = format!("gah: experiment for {}", profile.repo_id);
     let push_url = profile.push_url();
-    worktree::commit_and_push_msg(&wt, &branch, &push_url, &commit_msg)?;
+    let push_pat = profile.pat();
+    worktree::commit_and_push_msg(&wt, &branch, &push_url, &commit_msg, &push_pat)?;
 
     let mr_body = format!(
         "## GAH Experiment\n\nBranch: `{}`\nTarget: `{}`\n\
@@ -691,6 +736,7 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
             println!("Backend:      {}", args.backend);
             println!("Retries:      {}", args.retries);
             println!("Allow draft fail: {}", args.allow_draft_fail);
+            println!("Prod env:         {}", args.prod);
             if !profile.validation_commands.is_empty() {
                 println!("Validation:");
                 for cmd in &profile.validation_commands {
@@ -780,7 +826,7 @@ fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String 
     task
 }
 
-fn format_candidate_task(profile: &Profile, wt: &Path, mode: &str, c: &crate::models::Candidate) -> String {
+fn format_candidate_task(profile: &Profile, _wt: &Path, mode: &str, c: &crate::models::Candidate) -> String {
     let mut out = format!(
         "# Task: {}\n\n\
          Repository: {} ({})\n\

@@ -74,6 +74,10 @@ enum Commands {
         /// Push and open draft MR even if validation commands still fail after all retries
         #[arg(long, default_value_t = false)]
         allow_draft_fail: bool,
+        /// Load production env file (env_file_prod) instead of dev env_file.
+        /// Without this flag, only the dev env_file is loaded.
+        #[arg(long, default_value_t = false)]
+        prod: bool,
     },
     /// Manage profiles
     Profile {
@@ -122,6 +126,7 @@ fn main() -> Result<()> {
             oh_profile,
             retries,
             allow_draft_fail,
+            prod,
         } => {
             let cfg = config::load(config_path.as_deref())?;
             dispatch::run(
@@ -138,6 +143,7 @@ fn main() -> Result<()> {
                     oh_profile,
                     retries,
                     allow_draft_fail,
+                    prod,
                 },
             )?;
         }
