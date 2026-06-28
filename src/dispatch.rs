@@ -426,8 +426,10 @@ fn experiment(
 fn collect_artifacts(wt: &Path, out: &Path) -> usize {
     const ARTIFACT_EXTS: &[&str] = &["ipynb", "html", "png", "jpg", "jpeg", "csv", "parquet"];
 
+    // Intentionally omit --exclude-standard: ML repos gitignore *.csv, *.png,
+    // *.parquet etc. to avoid committing large datasets. We want those files.
     let Ok(output) = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
+        .args(["ls-files", "--others"])
         .current_dir(wt)
         .output()
     else {
@@ -454,16 +456,25 @@ fn collect_artifacts(wt: &Path, out: &Path) -> usize {
 }
 
 /// Ask an LLM judge whether the agent answered the task.
-/// Falls back to artifact presence when `claude` is unavailable.
+/// Always calls Claude regardless of artifact count — a blank file is not success.
+/// Falls back to artifact presence only when `claude` is unavailable.
 fn judge_experiment(task: &str, log: &str, artifact_count: usize) -> bool {
-    if artifact_count > 0 {
-        return true;
-    }
+    let artifact_note = if artifact_count > 0 {
+        format!("{} output file(s) were produced.", artifact_count)
+    } else {
+        "No output files were produced.".to_string()
+    };
     let prompt = format!(
-        "Task: {}\n\nAgent output (last 3000 chars):\n{}\n\n\
-         Did the agent meaningfully answer the task? Reply with only YES or NO.",
+        "You are evaluating whether an AI agent meaningfully answered a research task.\n\n\
+         Task:\n{}\n\n\
+         Agent output (last 3000 chars):\n{}\n\n\
+         {}\n\n\
+         Did the agent produce a substantive, non-trivial answer to the task? \
+         An empty file, a stub, or a generic error message does not count. \
+         Reply with only YES or NO.",
         &task[..task.len().min(500)],
-        &log[log.len().saturating_sub(3000)..]
+        &log[log.len().saturating_sub(3000)..],
+        artifact_note,
     );
     Command::new("claude")
         .args(["-p", &prompt])
@@ -475,7 +486,8 @@ fn judge_experiment(task: &str, log: &str, artifact_count: usize) -> bool {
                 .to_uppercase()
                 .contains("YES")
         })
-        .unwrap_or(false)
+        // claude unavailable: fall back to artifact presence as a weak signal
+        .unwrap_or(artifact_count > 0)
 }
 
 fn pm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs, session_dir: &Path) -> Result<()> {
