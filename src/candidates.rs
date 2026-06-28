@@ -106,7 +106,10 @@ fn hydrate_finding(gate: &GateFinding, scout: Option<&ScoutArtifact>) -> (GateFi
     };
 
     let mut hydrated = gate.clone();
-    merge_missing(&mut hydrated.affected_files, scout_finding.affected_files.clone());
+    merge_missing(
+        &mut hydrated.affected_files,
+        scout_finding.affected_files.clone(),
+    );
     merge_missing(&mut hydrated.evidence, scout_finding.evidence.clone());
     merge_missing(&mut hydrated.commands, scout_finding.commands.clone());
     merge_missing(
@@ -119,8 +122,14 @@ fn hydrate_finding(gate: &GateFinding, scout: Option<&ScoutArtifact>) -> (GateFi
     );
     merge_missing(&mut hydrated.risk_guess, scout_finding.risk_guess.clone());
     merge_missing(&mut hydrated.confidence, scout_finding.confidence.clone());
-    merge_missing(&mut hydrated.likely_agent_safe, scout_finding.likely_agent_safe);
-    merge_missing(&mut hydrated.finding_path, scout_finding.finding_path.clone());
+    merge_missing(
+        &mut hydrated.likely_agent_safe,
+        scout_finding.likely_agent_safe,
+    );
+    merge_missing(
+        &mut hydrated.finding_path,
+        scout_finding.finding_path.clone(),
+    );
     merge_missing(
         &mut hydrated.draft_issue_path,
         scout_finding.draft_issue_path.clone(),
@@ -168,8 +177,16 @@ fn build_candidate(gate: &GateFinding, hydrated: &GateFinding, is_hydrated: bool
             .unwrap_or_default(),
         verification: source.suggested_verification.clone().unwrap_or_default(),
         hydration_used: is_hydrated,
-        hydration_source: if is_hydrated { "scout.json".into() } else { "gate.json".into() },
-        hydration_match_method: if is_hydrated { "id".into() } else { "none".into() },
+        hydration_source: if is_hydrated {
+            "scout.json".into()
+        } else {
+            "gate.json".into()
+        },
+        hydration_match_method: if is_hydrated {
+            "id".into()
+        } else {
+            "none".into()
+        },
         hydrated_fields: hydrated_fields(gate, source, is_hydrated),
         debug_gate_keys: gate_keys(gate),
         debug_scout_keys: scout_keys(source, is_hydrated),

@@ -64,6 +64,10 @@ enum Commands {
         /// OpenHands profile name from ~/.openhands/profiles/<name>.json
         #[arg(long)]
         oh_profile: Option<String>,
+        /// Override the model name (e.g. "litellm_proxy/cloud-coder").
+        /// Takes precedence over profile model and backend defaults.
+        #[arg(long)]
+        model: Option<String>,
         /// How many times to retry after validation fails (0 = one attempt, no retries)
         #[arg(long, default_value_t = 2)]
         retries: u32,
@@ -114,6 +118,7 @@ fn main() -> Result<()> {
             budget,
             dry_run,
             config_path,
+            model,
             oh_profile,
             retries,
             allow_draft_fail,
@@ -129,6 +134,7 @@ fn main() -> Result<()> {
                     budget,
                     dry_run,
                     config_path,
+                    model,
                     oh_profile,
                     retries,
                     allow_draft_fail,

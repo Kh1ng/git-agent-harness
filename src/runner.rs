@@ -20,8 +20,13 @@ pub struct LlmConfig {
 pub fn load_oh_profile(name: &str) -> Result<LlmConfig> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     let path = PathBuf::from(format!("{}/.openhands/profiles/{}.json", home, name));
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("openhands profile '{}' not found at {}", name, path.display()))?;
+    let text = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "openhands profile '{}' not found at {}",
+            name,
+            path.display()
+        )
+    })?;
     let v: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("parsing openhands profile {}", path.display()))?;
     Ok(LlmConfig {

@@ -1,7 +1,7 @@
 use crate::config::{self, GahConfig, Profile};
 use crate::models::CandidateArtifact;
 use crate::{provider, runner, worktree};
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,6 +16,7 @@ pub struct DispatchArgs {
     pub dry_run: bool,
     pub config_path: Option<String>,
     pub oh_profile: Option<String>,
+    pub model: Option<String>,
     pub retries: u32,
     pub allow_draft_fail: bool,
 }
@@ -53,16 +54,35 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
 fn resolve_llm(cfg: &GahConfig, args: &DispatchArgs) -> Result<runner::LlmConfig> {
     if let Some(name) = args.oh_profile.as_deref() {
         let mut llm = runner::load_oh_profile(name)?;
-        if let Ok(v) = std::env::var("LLM_BASE_URL") { llm.base_url = v; }
-        if let Ok(v) = std::env::var("LLM_API_KEY")  { llm.api_key  = v; }
-        if let Ok(v) = std::env::var("LLM_MODEL")    { llm.model    = v; }
+        if let Some(m) = &args.model {
+            llm.model = m.clone();
+        }
+        if let Ok(v) = std::env::var("LLM_BASE_URL") {
+            llm.base_url = v;
+        }
+        if let Ok(v) = std::env::var("LLM_API_KEY") {
+            llm.api_key = v;
+        }
+        if let Ok(v) = std::env::var("LLM_MODEL") {
+            llm.model = v;
+        }
+        return Ok(llm);
+    }
+    // No profile: apply --model override on top of backend defaults
+    if let Some(m) = &args.model {
+        let cloud = args.backend == "cloud-coder";
+        let llm = runner::LlmConfig {
+            base_url: cfg.defaults.llm_base_url(),
+            api_key: cfg.defaults.llm_api_key(),
+            model: m.clone(),
+        };
         return Ok(llm);
     }
     let cloud = args.backend == "cloud-coder";
     Ok(runner::LlmConfig {
         base_url: cfg.defaults.llm_base_url(),
-        api_key:  cfg.defaults.llm_api_key(),
-        model:    cfg.defaults.llm_model(cloud),
+        api_key: cfg.defaults.llm_api_key(),
+        model: cfg.defaults.llm_model(cloud),
     })
 }
 
@@ -82,9 +102,11 @@ fn run_backend(
 }
 
 /// Run validation_commands in the worktree. Returns Err(combined output) on first failure.
-fn validate(profile: &Profile, wt: &Path) -> Result<(), String> {
+fn validate(profile: &Profile, wt: &Path) -> Result<()> {
     for cmd_str in &profile.validation_commands {
-        let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+        let parts = shlex::split(cmd_str).ok_or_else(|| {
+            anyhow::anyhow!("invalid command string (unterminated quote?): {}", cmd_str)
+        })?;
         let Some((bin, rest)) = parts.split_first() else {
             continue;
         };
@@ -93,14 +115,15 @@ fn validate(profile: &Profile, wt: &Path) -> Result<(), String> {
             .args(rest)
             .current_dir(wt)
             .output()
-            .map_err(|e| format!("failed to run '{}': {}", cmd_str, e))?;
+            .with_context(|| format!("failed to run '{}'", cmd_str))?;
         if !out.status.success() {
-            return Err(format!(
-                "$ {}\n{}{}",
+            bail!(
+                "$ {}
+{}{}",
                 cmd_str,
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr),
-            ));
+            );
         }
     }
     Ok(())
@@ -139,8 +162,16 @@ fn improve(
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
     let repo = Path::new(&profile.local_path);
 
-    println!("Creating worktree from {}...", profile.default_target_branch);
-    let wt = worktree::create(repo, &profile.default_target_branch, &branch, &worktree_base)?;
+    println!(
+        "Creating worktree from {}...",
+        profile.default_target_branch
+    );
+    let wt = worktree::create(
+        repo,
+        &profile.default_target_branch,
+        &branch,
+        &worktree_base,
+    )?;
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
@@ -148,7 +179,12 @@ fn improve(
     let max_attempts = args.retries + 1;
     let mut validation_failed = false;
     for attempt in 0..max_attempts {
-        println!("\nAttempt {}/{}: running {} backend...", attempt + 1, max_attempts, args.backend);
+        println!(
+            "\nAttempt {}/{}: running {} backend...",
+            attempt + 1,
+            max_attempts,
+            args.backend
+        );
         let attempt_session = session_dir.join(format!("attempt-{}", attempt + 1));
         fs::create_dir_all(&attempt_session)?;
 
@@ -168,22 +204,30 @@ fn improve(
 
         if result.exit_code != 0 {
             worktree::cleanup(&wt, repo);
-            anyhow::bail!("backend exited {} on attempt {}", result.exit_code, attempt + 1);
+            anyhow::bail!(
+                "backend exited {} on attempt {}",
+                result.exit_code,
+                attempt + 1
+            );
         }
 
         if profile.validation_commands.is_empty() {
             break;
         }
 
-        println!("Running validation ({} commands)...", profile.validation_commands.len());
+        println!(
+            "Running validation ({} commands)...",
+            profile.validation_commands.len()
+        );
         match validate(profile, &wt) {
             Ok(()) => {
                 println!("Validation passed.");
                 validation_failed = false;
                 break;
             }
-            Err(failure_output) => {
+            Err(e) => {
                 validation_failed = true;
+                let failure_output = format!("{:#}", e);
                 let failure_path = attempt_session.join("validation-failure.txt");
                 fs::write(&failure_path, &failure_output)?;
                 println!("Validation failed ({})", failure_path.display());
@@ -197,7 +241,9 @@ fn improve(
                         &failure_output[..failure_output.len().min(8_000)],
                     );
                 } else if args.allow_draft_fail {
-                    println!("Validation still failing; --allow-draft-fail set — pushing as draft.");
+                    println!(
+                        "Validation still failing; --allow-draft-fail set — pushing as draft."
+                    );
                 } else {
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
@@ -210,6 +256,27 @@ fn improve(
         }
     }
 
+    // ── Architecture note ──────────────────────────────────────────────────
+    // The retry loop above cold-restarts the backend on each attempt. It does
+    // NOT maintain a persistent agent session across retries. Each attempt
+    // launches a fresh backend process with accumulated failure context in the
+    // task prompt. This is intentional — the current design prioritizes
+    // simplicity and observability over session persistence. A future version
+    // could keep the backend running (e.g., via a socket or API) and push
+    // validation feedback into the existing conversation, but that would
+    // require each backend to expose a continuation API. For now, the retry
+    // loop is stateless: fail → append context → re-launch.
+    //
+    // The validation_commands list runs sequentially in the worktree directory.
+    // All commands must exit 0 for the attempt to count as passing. The full
+    // stdout+stderr of any failing command is fed back into the next attempt's
+    // prompt, truncated to 8 000 chars to stay within context windows.
+    // Because the backend is re-launched from scratch each attempt, the agent
+    // must re-read the repo state — it cannot carry working memory between
+    // attempts. This is acceptable for bounded code-generation tasks where
+    // each attempt is self-contained.
+    // ────────────────────────────────────────────────────────────────────────
+
     let has_changes = worktree::has_changes(&wt)?;
     if !has_changes {
         println!("No changes produced — nothing to push.");
@@ -218,7 +285,10 @@ fn improve(
     }
 
     let commit_msg = if validation_failed {
-        format!("gah: {} changes for {} [validation-failing draft]", args.mode, profile.repo_id)
+        format!(
+            "gah: {} changes for {} [validation-failing draft]",
+            args.mode, profile.repo_id
+        )
     } else {
         format!("gah: {} changes for {}", args.mode, profile.repo_id)
     };
@@ -246,7 +316,7 @@ fn improve(
 fn pm(profile: &Profile, session_dir: &Path) -> Result<()> {
     let repo = Path::new(&profile.local_path);
     let log = git_output(&["log", "--oneline", "-20"], repo).unwrap_or_default();
-    let test_count = count_test_files(repo);
+    let test_count = count_test_files(profile, repo);
     let has_ci = repo.join(".github/workflows").exists()
         || repo.join(".gitlab-ci.yml").exists()
         || repo.join(".ci").exists();
@@ -305,24 +375,38 @@ fn review(profile: &Profile, args: &DispatchArgs, session_dir: &Path) -> Result<
     fs::write(bundle.join("changed-files.txt"), &files)?;
     fs::write(
         bundle.join("mr-description.md"),
-        format!("Branch: {}\nTarget: {}\nRepo: {}", branch, profile.default_target_branch, profile.repo),
+        format!(
+            "Branch: {}\nTarget: {}\nRepo: {}",
+            branch, profile.default_target_branch, profile.repo
+        ),
     )?;
 
     if diff.is_empty() {
         println!("No diff vs {}. Nothing to review.", origin_ref);
         return Ok(());
     }
-    println!("Diff: {} bytes, files: {}", diff.len(), files.lines().count());
+    println!(
+        "Diff: {} bytes, files: {}",
+        diff.len(),
+        files.lines().count()
+    );
 
     let prompt = format!(
         "Review this diff for correctness, test coverage, and safety. \
          Repo: {}. Branch: {}. Target: {}.\n\nDiff:\n```\n{}\n```\nChanged files:\n{}",
-        profile.repo, branch, profile.default_target_branch,
-        &diff[..diff.len().min(60_000)], files,
+        profile.repo,
+        branch,
+        profile.default_target_branch,
+        &diff[..diff.len().min(60_000)],
+        files,
     );
 
     let effective_backend = if args.backend == "auto" || args.backend.is_empty() {
-        if which("claude").is_some() { "claude" } else { "openhands" }
+        if which("claude").is_some() {
+            "claude"
+        } else {
+            "openhands"
+        }
     } else {
         &args.backend
     };
@@ -342,7 +426,10 @@ fn review(profile: &Profile, args: &DispatchArgs, session_dir: &Path) -> Result<
         }
         _ => {
             println!("Review bundle written to: {}", bundle.display());
-            println!("Run `claude -p \"$(cat {}/diff.patch)\"` to review manually.", bundle.display());
+            println!(
+                "Run `claude -p \"$(cat {}/diff.patch)\"` to review manually.",
+                bundle.display()
+            );
         }
     }
     Ok(())
@@ -353,18 +440,32 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
     println!("## What would happen\n");
     let ts = timestamp();
     let branch = format!("gah/{}-{}", profile.repo_id, &ts);
-    let session_dir = PathBuf::from(&profile.artifact_root).join("sessions").join(&ts);
+    let session_dir = PathBuf::from(&profile.artifact_root)
+        .join("sessions")
+        .join(&ts);
     println!("Session dir:  {}", session_dir.display());
     println!("New branch:   {}", branch);
     println!("From:         origin/{}", profile.default_target_branch);
-    println!("Worktree:     {}/{}", cfg.defaults.worktree_base, branch.replace('/', "-"));
+    println!(
+        "Worktree:     {}/{}",
+        cfg.defaults.worktree_base,
+        branch.replace('/', "-")
+    );
     match args.mode.as_str() {
         "improve" | "fix" => {
             if let Some(name) = args.oh_profile.as_deref() {
-                println!("OH profile:   {} (~/.openhands/profiles/{}.json)", name, name);
+                println!(
+                    "OH profile:   {} (~/.openhands/profiles/{}.json)",
+                    name, name
+                );
+                if let Some(m) = &args.model {
+                    println!("Model override: {}", m);
+                }
             } else {
                 let cloud = args.backend == "cloud-coder";
-                println!("LLM model:    {}", cfg.defaults.llm_model(cloud));
+                let default_model = cfg.defaults.llm_model(cloud);
+                let model_name = args.model.as_deref().unwrap_or(&default_model);
+                println!("LLM model:    {}", model_name);
                 println!("LLM base:     {}", cfg.defaults.llm_base_url());
             }
             println!("Backend:      {}", args.backend);
@@ -377,14 +478,20 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
                 }
             }
             if !args.target.is_empty() {
-                let task_type = if Path::new(&args.target).extension().map_or(false, |e| e == "json") {
+                let task_type = if Path::new(&args.target)
+                    .extension()
+                    .map_or(false, |e| e == "json")
+                {
                     "candidate JSON"
                 } else {
                     "task string"
                 };
                 println!("Task source:  {} ({})", args.target, task_type);
             }
-            println!("\nSteps: fetch → worktree → {} → [validate → retry]* → commit → push → draft MR", args.backend);
+            println!(
+                "\nSteps: fetch → worktree → {} → [validate → retry]* → commit → push → draft MR",
+                args.backend
+            );
         }
         "pm" => println!("Steps: git log → test count → CI check → write pm-report.md"),
         "review" => println!("Steps: git diff → bundle → claude review"),
@@ -434,8 +541,11 @@ fn format_candidate_task(profile: &Profile, c: &crate::models::Candidate) -> Str
          Repository: {} ({})\n\
          Local path: {}\n\
          Target branch: {}\n\n",
-        c.candidate_id, profile.display_name, profile.repo,
-        profile.local_path, profile.default_target_branch,
+        c.candidate_id,
+        profile.display_name,
+        profile.repo,
+        profile.local_path,
+        profile.default_target_branch,
     );
 
     if !c.evidence.is_empty() {
@@ -481,18 +591,39 @@ fn git_output(args: &[&str], cwd: &Path) -> Result<String> {
     worktree::git(args, cwd)
 }
 
-fn count_test_files(root: &Path) -> usize {
-    count_files_matching(root, &|name: &str| {
-        name.starts_with("test_")
-            || name.ends_with("_test.py")
-            || name.ends_with(".test.ts")
-            || name.ends_with(".test.js")
-            || name.ends_with(".spec.ts")
-            || name.ends_with("_test.rs")
+fn count_test_files(profile: &Profile, root: &Path) -> usize {
+    let patterns = if profile.test_file_patterns.is_empty() {
+        vec![
+            "test_*.py".to_string(),
+            "*_test.py".to_string(),
+            "*.test.ts".to_string(),
+            "*.test.js".to_string(),
+            "*.spec.ts".to_string(),
+            "*.spec.js".to_string(),
+            "*_test.rs".to_string(),
+            "tests/*.rs".to_string(),
+            "*_test.go".to_string(),
+            "*Test.java".to_string(),
+            "*_spec.rb".to_string(),
+            "*Tests.cs".to_string(),
+        ]
+    } else {
+        profile.test_file_patterns.clone()
+    };
+    count_files_matching(root, root, &|name: &str| {
+        patterns.iter().any(|pat| {
+            let re = format!(
+                "^{}$",
+                pat.replace(".", r"\.").replace("*", ".*").replace("?", ".")
+            );
+            regex::Regex::new(&re)
+                .map(|r| r.is_match(name))
+                .unwrap_or(false)
+        })
     })
 }
 
-fn count_files_matching(dir: &Path, pred: &dyn Fn(&str) -> bool) -> usize {
+fn count_files_matching(root: &Path, dir: &Path, pred: &dyn Fn(&str) -> bool) -> usize {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
     };
@@ -501,11 +632,15 @@ fn count_files_matching(dir: &Path, pred: &dyn Fn(&str) -> bool) -> usize {
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !matches!(name, "target" | ".git" | "node_modules" | "__pycache__" | ".venv") {
-                count += count_files_matching(&path, pred);
+            if !matches!(
+                name,
+                "target" | ".git" | "node_modules" | "__pycache__" | ".venv"
+            ) {
+                count += count_files_matching(root, &path, pred);
             }
-        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if pred(name) {
+        } else if path.is_file() {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            if pred(&rel.to_string_lossy()) {
                 count += 1;
             }
         }
