@@ -66,6 +66,9 @@ pub struct Profile {
     /// Extra CLI args appended to `claude -p` (e.g. `--allowedTools Edit,Write,Bash`)
     #[serde(default)]
     pub claude_args: Vec<String>,
+    /// Optional path to a KEY=VALUE env file sourced before running any backend.
+    #[serde(default)]
+    pub env_file: Option<String>,
     /// Commands run in the worktree after each agent attempt; all must pass before commit/push.
     /// Example: ["cargo test --quiet", "cargo clippy -- -D warnings"]
     #[serde(default)]

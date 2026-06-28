@@ -4,6 +4,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+/// Parse a KEY=VALUE env file, skipping blank lines and comments.
+pub fn load_env_file(path: &str) -> Vec<(String, String)> {
+    let Ok(text) = fs::read_to_string(path) else { return vec![] };
+    text.lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .filter_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            Some((k.trim().to_string(), v.trim().trim_matches('"').trim_matches('\'').to_string()))
+        })
+        .collect()
+}
+
 pub struct RunResult {
     pub exit_code: i32,
     pub duration_secs: f64,
@@ -62,6 +74,7 @@ pub fn run_openhands(
     session_dir: &Path,
     llm: &LlmConfig,
     extra_args: &[String],
+    env_vars: &[(String, String)],
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
@@ -70,8 +83,8 @@ pub fn run_openhands(
     let log_err = log_file.try_clone()?;
 
     let start = Instant::now();
-    let status = Command::new("openhands")
-        .args([
+    let mut cmd = Command::new("openhands");
+    cmd.args([
             "--headless",
             "--json",
             "-t",
@@ -87,9 +100,11 @@ pub fn run_openhands(
         .env("LLM_MODEL", &llm.model)
         .current_dir(worktree)
         .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err))
-        .status()
-        .context("launching openhands; is it installed and on PATH?")?;
+        .stderr(Stdio::from(log_err));
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let status = cmd.status().context("launching openhands; is it installed and on PATH?")?;
 
     Ok(RunResult {
         exit_code: status.code().unwrap_or(-1),
@@ -105,6 +120,7 @@ pub fn run_codex(
     task: &str,
     session_dir: &Path,
     extra_args: &[String],
+    env_vars: &[(String, String)],
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
@@ -113,14 +129,14 @@ pub fn run_codex(
     let log_err = log_file.try_clone()?;
 
     let start = Instant::now();
-    let status = Command::new("codex")
-        .args(["exec", task])
+    let mut cmd = Command::new("codex");
+    cmd.args(["exec", task])
         .args(extra_args)
         .current_dir(worktree)
         .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err))
-        .status()
-        .context("launching codex; is it installed and on PATH?")?;
+        .stderr(Stdio::from(log_err));
+    for (k, v) in env_vars { cmd.env(k, v); }
+    let status = cmd.status().context("launching codex; is it installed and on PATH?")?;
 
     Ok(RunResult {
         exit_code: status.code().unwrap_or(-1),
@@ -136,6 +152,7 @@ pub fn run_claude(
     task: &str,
     session_dir: &Path,
     extra_args: &[String],
+    env_vars: &[(String, String)],
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
@@ -144,14 +161,14 @@ pub fn run_claude(
     let log_err = log_file.try_clone()?;
 
     let start = Instant::now();
-    let status = Command::new("claude")
-        .args(["-p", task])
+    let mut cmd = Command::new("claude");
+    cmd.args(["-p", task])
         .args(extra_args)
         .current_dir(worktree)
         .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err))
-        .status()
-        .context("launching claude; is it installed and on PATH?")?;
+        .stderr(Stdio::from(log_err));
+    for (k, v) in env_vars { cmd.env(k, v); }
+    let status = cmd.status().context("launching claude; is it installed and on PATH?")?;
 
     Ok(RunResult {
         exit_code: status.code().unwrap_or(-1),
