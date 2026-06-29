@@ -51,9 +51,13 @@ local_path            = "/path/to/local/clone"
 artifact_root         = "/path/to/artifacts/my-repo"
 default_target_branch = "main"
 
+# OpenHands profile to use (reads ~/.openhands/profiles/<name>.json for LLM config).
+# Without this, GAH falls through to llm_model_local which may be unavailable.
+oh_profile = "cloud-coder"
+
 # Optional extra CLI args passed to each backend:
 openhands_args = []                                      # e.g. plugin/skill flags
-codex_args     = ["-c", "model=gpt-4o"]                 # codex exec overrides
+codex_args     = ["-m", "gpt-5.4-mini", "--dangerously-bypass-approvals-and-sandbox"]  # model + non-interactive
 claude_args    = ["--allowedTools", "Edit,Write,Bash"]   # limit claude's tools
 
 # KEY=VALUE env file injected into the backend's environment.
@@ -122,8 +126,13 @@ gah dispatch --profile <name> --mode <mode> [options]
 **OpenHands LLM resolution order** (most to least specific):
 
 1. `LLM_*` env vars always win
-2. `--oh-profile <name>` → reads `~/.openhands/profiles/<name>.json`
-3. `defaults.llm_model_local` / `defaults.llm_model_cloud` + `defaults.llm_base_url`
+2. `--oh-profile <name>` CLI flag → reads `~/.openhands/profiles/<name>.json`
+3. `oh_profile = "<name>"` in the profile TOML block → same file resolution (no flag needed)
+4. `defaults.llm_model_local` / `defaults.llm_model_cloud` + `defaults.llm_base_url`
+
+> **Tip:** Without `oh_profile` set in config or `--oh-profile` on the CLI, GAH falls through to
+> `llm_model_local` which may be a model not currently deployed. Always set `oh_profile` in your
+> profile block when using OpenHands, or pass `--oh-profile` on each dispatch.
 
 **Modes:**
 
@@ -221,3 +230,50 @@ Pass `--oh-profile <name>` at runtime to specify which LLM profile OpenHands use
 ```bash
 ls ~/.openhands/profiles/
 ```
+
+## Troubleshooting
+
+**OpenHands exits in ~6 seconds with `LLMBadRequestError: Invalid model name`**
+
+GAH fell through to `llm_model_local` (e.g. `local-qwen3-coder`) which isn't deployed. Fix: set
+`oh_profile = "cloud-coder"` in your profile block, or pass `--oh-profile cloud-coder` on each
+dispatch command. Without this, OpenHands starts, loads its tools, and immediately errors out.
+
+**`git fetch --prune: Permission denied` on worktree creation**
+
+Happens when a previous agent run as `root` left reflog files under `.git/logs/refs/remotes/origin/gah/`
+owned by root. Fix:
+```bash
+sudo chown -R $USER:$USER /path/to/repo/.git/logs/refs/remotes/origin/gah/
+sudo chown -R $USER:$USER /path/to/repo/.git/worktrees/
+sudo chown -R $USER:$USER /path/to/artifacts/
+```
+
+**`git worktree add: Permission denied` on `.git/worktrees/`**
+
+Same root-ownership issue as above — usually from GAH being run as root via sudo or a root cron.
+Run the same `chown` fix above.
+
+**Codex exits immediately in non-interactive mode**
+
+Codex requires `--dangerously-bypass-approvals-and-sandbox` to run headlessly without prompting for
+every tool use. Add it to `codex_args` in your profile:
+```toml
+codex_args = ["-m", "gpt-5.4-mini", "--dangerously-bypass-approvals-and-sandbox"]
+```
+
+**`validation_commands` exits 5 (pytest: no tests collected)**
+
+Your `-k` filter matched nothing. Use `python3 -m pytest -x -q` (no filter) so all tests run.
+A narrow `-k` filter that doesn't match any test returns exit 5, which GAH treats as a validation
+failure and wastes all retries.
+
+**`from __future__ import annotations` SyntaxError in agent-generated test files**
+
+Agent-generated Python test files sometimes place `from __future__ import annotations` after other
+imports, causing `SyntaxError: from __future__ imports must occur at the beginning of the file`.
+This blocks pytest collection and burns all retries. Check generated test files before review:
+```bash
+grep -n "from __future__" tests/test_*.py | grep -v "^tests.*:1:"
+```
+Any match not on line 1 needs the import moved to line 1.
