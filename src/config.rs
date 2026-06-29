@@ -57,6 +57,9 @@ pub struct Profile {
     pub provider_api_base: Option<String>,
     #[serde(default)]
     pub provider_project_id: Option<String>,
+    /// OpenHands profile name (~/.openhands/profiles/<name>.json). Overrides default LLM config.
+    #[serde(default)]
+    pub oh_profile: Option<String>,
     /// Extra CLI args appended to the openhands invocation (e.g. plugins, skill flags)
     #[serde(default)]
     pub openhands_args: Vec<String>,

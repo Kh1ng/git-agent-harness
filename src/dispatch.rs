@@ -54,8 +54,10 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     }
 }
 
-fn resolve_llm(cfg: &GahConfig, args: &DispatchArgs) -> Result<runner::LlmConfig> {
-    if let Some(name) = args.oh_profile.as_deref() {
+fn resolve_llm(cfg: &GahConfig, args: &DispatchArgs, profile_oh: Option<&str>) -> Result<runner::LlmConfig> {
+    // CLI flag wins, then profile config, then default
+    let effective_oh_profile = args.oh_profile.as_deref().or(profile_oh);
+    if let Some(name) = effective_oh_profile {
         let mut llm = runner::load_oh_profile(name)?;
         if let Some(m) = &args.model {
             llm.model = m.clone();
@@ -209,7 +211,7 @@ fn improve(
     enforce_policy(profile, push_action)?;
 
     preflight(&args.backend)?;
-    let llm = resolve_llm(cfg, args)?;
+    let llm = resolve_llm(cfg, args, profile.oh_profile.as_deref())?;
 
     // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
     let resolved_env = if args.prod {
@@ -406,7 +408,7 @@ fn experiment(
     session_dir: &Path,
 ) -> Result<()> {
     preflight(&args.backend)?;
-    let llm = resolve_llm(cfg, args)?;
+    let llm = resolve_llm(cfg, args, profile.oh_profile.as_deref())?;
 
     // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
     let resolved_env = if args.prod {
@@ -612,7 +614,7 @@ fn pm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs, session_dir: &Pat
 
     // With a target: dispatch an LLM to decompose it into atomic sub-tickets.
     preflight(&args.backend)?;
-    let llm = resolve_llm(cfg, args)?;
+    let llm = resolve_llm(cfg, args, profile.oh_profile.as_deref())?;
 
     // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
     let resolved_env = if args.prod {
