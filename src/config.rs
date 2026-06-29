@@ -84,6 +84,15 @@ pub struct Profile {
     pub validation_commands: Vec<String>,
     #[serde(default)]
     pub test_file_patterns: Vec<String>,
+    /// Model override for `improve`/`fix` mode (heavy lifting)
+    #[serde(default)]
+    pub model_improve: Option<String>,
+    /// Model override for `pm` mode (ticket decomposition, cheap/fast)
+    #[serde(default)]
+    pub model_pm: Option<String>,
+    /// Model override for `review` mode
+    #[serde(default)]
+    pub model_review: Option<String>,
 }
 
 impl Profile {

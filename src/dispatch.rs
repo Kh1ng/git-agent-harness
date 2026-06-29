@@ -71,21 +71,28 @@ fn resolve_llm(cfg: &GahConfig, args: &DispatchArgs) -> Result<runner::LlmConfig
         }
         return Ok(llm);
     }
-    // No profile: apply --model override on top of backend defaults
+    // --model flag always wins
     if let Some(m) = &args.model {
-        let cloud = args.backend == "cloud-coder";
-        let llm = runner::LlmConfig {
+        return Ok(runner::LlmConfig {
             base_url: cfg.defaults.llm_base_url(),
             api_key: cfg.defaults.llm_api_key(),
             model: m.clone(),
-        };
-        return Ok(llm);
+        });
     }
+    // Check profile-level mode-specific override, then global default
+    let profile_model = config::get_profile(cfg, &args.profile).ok().and_then(|p| {
+        match args.mode.as_str() {
+            "improve" | "fix" => p.model_improve.clone(),
+            "pm" => p.model_pm.clone(),
+            "review" => p.model_review.clone(),
+            _ => None,
+        }
+    });
     let cloud = args.backend == "cloud-coder";
     Ok(runner::LlmConfig {
         base_url: cfg.defaults.llm_base_url(),
         api_key: cfg.defaults.llm_api_key(),
-        model: cfg.defaults.llm_model(cloud),
+        model: profile_model.unwrap_or_else(|| cfg.defaults.llm_model(cloud)),
     })
 }
 
@@ -308,6 +315,9 @@ fn improve(
                 println!("Validation failed ({})", failure_path.display());
 
                 if attempt + 1 < max_attempts {
+                    // Wipe bad code so next attempt starts clean
+                    let _ = worktree::git(&["reset", "--hard", "HEAD"], &wt);
+                    let _ = worktree::git(&["clean", "-fd"], &wt);
                     println!("Retrying with failure context...");
                     task = format!(
                         "{}\n\n## Retry {}: validation failed\n\nFix the following before completing the task:\n\n```\n{}\n```",
