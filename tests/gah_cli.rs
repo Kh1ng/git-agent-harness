@@ -1124,3 +1124,73 @@ fn review_writes_structured_verdict_and_posts_comment() {
     assert!(verdict.contains("\"verdict\": \"APPROVE_STRONG\""));
     assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
 }
+
+#[test]
+fn dispatch_dry_run_ticket_metadata_feeds_routing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let ticket = tmp.path().join("ticket.md");
+    fs::write(
+        &ticket,
+        "Difficulty: medium\nRisk: low\nRecommended backend: codex\nRecommended model: test-model\n",
+    )
+    .unwrap();
+    let cfg = write_real_repo_config_with_extra(&tmp, &repo, "github", "", "");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "codex");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "improve",
+            "--target",
+            ticket.to_str().unwrap(),
+            "--dry-run",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Effective:    codex"));
+}
+
+#[test]
+fn sync_classifies_open_gah_prs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] fix\",\"headRefName\":\"gah/test-1\",\"url\":\"https://example/pr/1\",\"labels\":[{\"name\":\"gah-ready-for-human\"}],\"mergedAt\":null,\"updatedAt\":\"2099-01-01T00:00:00Z\",\"statusCheckRollup\":[]}]'; exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("READY_FOR_HUMAN"))
+        .stdout(predicate::str::contains(
+            "recommended: human review and merge decision",
+        ));
+}

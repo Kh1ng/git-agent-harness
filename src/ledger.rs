@@ -326,6 +326,58 @@ pub mod summary {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct BackendUsageSummary {
+    pub runs_this_week: u64,
+    pub runs_this_session: u64,
+    pub estimated_cost_this_week: f64,
+    pub actual_cost_this_week: f64,
+    pub strong_runs_this_week: u64,
+    pub strong_runs_this_session: u64,
+}
+
+pub fn usage_summary_for_backend(
+    cfg: &GahConfig,
+    backend: &str,
+    model: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<BackendUsageSummary> {
+    let entries = read_entries(cfg)?;
+    let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(7))
+        .format(&Rfc3339)
+        .unwrap_or_default();
+    let mut out = BackendUsageSummary::default();
+    for entry in entries {
+        let same_backend = entry.effective_backend == backend;
+        let same_model = model
+            .map(|m| entry.effective_model.as_deref() == Some(m))
+            .unwrap_or(true);
+        let this_week = entry.timestamp >= cutoff;
+        let this_session = session_id
+            .map(|s| entry.session_id.as_deref() == Some(s))
+            .unwrap_or(false);
+        if same_backend && same_model && this_week {
+            out.runs_this_week += 1;
+            out.estimated_cost_this_week += entry.usage.estimated_cost_usd.unwrap_or(0.0);
+            out.actual_cost_this_week += entry.usage.actual_cost_usd.unwrap_or(0.0);
+        }
+        if same_backend && same_model && this_session {
+            out.runs_this_session += 1;
+        }
+        if entry.confidence_impact.as_deref() != Some("low")
+            && matches!(entry.mode.as_str(), "review" | "improve" | "fix")
+        {
+            if this_week {
+                out.strong_runs_this_week += 1;
+            }
+            if this_session {
+                out.strong_runs_this_session += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{append, LedgerEntry};

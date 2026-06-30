@@ -11,6 +11,7 @@ mod provider;
 mod prune;
 mod routing;
 mod runner;
+mod sync;
 mod usage;
 mod worktree;
 
@@ -100,6 +101,13 @@ enum Commands {
     Ledger {
         #[command(subcommand)]
         command: LedgerCommands,
+    },
+    /// Classify open GAH-created merge requests / pull requests
+    Sync {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
     },
     /// Dispatch a job to a backend (improve, pm, review, fix, experiment)
     Dispatch {
@@ -239,6 +247,14 @@ fn main() -> Result<()> {
                 config_path,
             } => ledger::summary::run(&since, profile.as_deref(), config_path.as_deref())?,
         },
+
+        Commands::Sync {
+            profile,
+            config_path,
+        } => {
+            let cfg = config::load(config_path.as_deref())?;
+            sync::run(&cfg, &profile)?;
+        }
 
         Commands::Dispatch {
             profile,

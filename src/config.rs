@@ -142,6 +142,18 @@ pub struct RoutingPolicy {
     pub allow_review_fallback: bool,
     #[serde(default)]
     pub allow_implementation_fallback: bool,
+    #[serde(default)]
+    pub max_runs_per_backend_per_week: Option<u64>,
+    #[serde(default)]
+    pub max_runs_per_backend_per_session: Option<u64>,
+    #[serde(default)]
+    pub max_total_strong_model_runs_per_week: Option<u64>,
+    #[serde(default)]
+    pub max_total_strong_model_runs_per_session: Option<u64>,
+    #[serde(default)]
+    pub max_known_estimated_cost_per_week: Option<f64>,
+    #[serde(default)]
+    pub max_known_actual_cost_per_week: Option<f64>,
 }
 
 impl Profile {

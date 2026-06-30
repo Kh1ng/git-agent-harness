@@ -1,5 +1,5 @@
 use crate::config::{self, GahConfig, Profile};
-use crate::ledger::LedgerEntry;
+use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
 use crate::models::{PmPlan, PmPlanTicket};
 use crate::routing::{self, RouteDecision, RouteRequest};
@@ -281,6 +281,32 @@ fn improve(
     enforce_policy(profile, "open-draft-pr")?;
     enforce_policy(profile, push_action)?;
 
+    let target = if args.target.is_empty() {
+        let default = PathBuf::from(&profile.artifact_root)
+            .join("candidates")
+            .join("latest.json");
+        if default.exists() {
+            println!("Auto-target: {}", default.display());
+            default.to_string_lossy().into_owned()
+        } else {
+            args.target.clone()
+        }
+    } else {
+        args.target.clone()
+    };
+    let ticket_meta = parse_ticket_metadata(Path::new(&target)).ok().flatten();
+    let usage_summary = ledger::usage_summary_for_backend(
+        cfg,
+        args.backend.as_str(),
+        args.model.as_deref(),
+        Some(
+            session_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(""),
+        ),
+    )
+    .ok();
     let route = routing::decide(
         &cfg.defaults,
         profile,
@@ -288,8 +314,14 @@ fn improve(
             mode: &args.mode,
             requested_backend: &args.backend,
             requested_model: args.model.as_deref(),
-            recommended_backend: None,
-            recommended_model: None,
+            recommended_backend: ticket_meta
+                .as_ref()
+                .and_then(|m| m.recommended_backend.as_deref()),
+            recommended_model: ticket_meta
+                .as_ref()
+                .and_then(|m| m.recommended_model.as_deref()),
+            session_id: session_dir.file_name().and_then(|s| s.to_str()),
+            usage_summary,
         },
     )?;
     apply_route_to_ledger(ledger, &route);
@@ -333,20 +365,6 @@ fn improve(
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
-    let target = if args.target.is_empty() {
-        // Auto-discover latest candidates.json when no explicit target given
-        let default = PathBuf::from(&profile.artifact_root)
-            .join("candidates")
-            .join("latest.json");
-        if default.exists() {
-            println!("Auto-target: {}", default.display());
-            default.to_string_lossy().into_owned()
-        } else {
-            args.target.clone()
-        }
-    } else {
-        args.target.clone()
-    };
     let mut task = build_task(profile, &wt, &args.mode, &target);
     let max_attempts = args.retries + 1;
     let mut validation_failed = false;
@@ -536,6 +554,8 @@ fn experiment(
             requested_model: args.model.as_deref(),
             recommended_backend: None,
             recommended_model: None,
+            session_id: session_dir.file_name().and_then(|s| s.to_str()),
+            usage_summary: None,
         },
     )?;
     apply_route_to_ledger(ledger, &route);
@@ -817,6 +837,8 @@ fn pm(
             requested_model: args.model.as_deref(),
             recommended_backend: None,
             recommended_model: None,
+            session_id: session_dir.file_name().and_then(|s| s.to_str()),
+            usage_summary: None,
         },
     )?;
     apply_route_to_ledger(ledger, &plan_route);
@@ -1045,6 +1067,8 @@ fn review(
             requested_model: args.model.as_deref(),
             recommended_backend: None,
             recommended_model: None,
+            session_id: session_dir.file_name().and_then(|s| s.to_str()),
+            usage_summary: None,
         },
     )?;
     apply_route_to_ledger(ledger, &route);
@@ -1365,7 +1389,7 @@ fn format_candidate_task(
 mod tests {
     use super::{
         apply_pm_plan, build_pm_plan_task, collect_pm_preflight, collect_ticket_summaries,
-        first_markdown_heading, parse_pm_plan,
+        first_markdown_heading, parse_pm_plan, parse_ticket_metadata,
     };
     use crate::config::{Profile, RoutingPolicy};
     use crate::models::PmPlan;
@@ -1515,6 +1539,26 @@ mod tests {
         assert_eq!(written.len(), 1);
         assert!(written[0].display().to_string().contains("fix-auth"));
     }
+
+    #[test]
+    fn parses_ticket_metadata_for_routing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket = tmp.path().join("ticket.md");
+        fs::write(
+            &ticket,
+            "Difficulty: hard\nRisk: high\nRecommended backend: codex\nRecommended model: gpt-x\n\n## Affected Files\n- src/auth.rs\n\n## Verification Commands\n- `pytest tests/test_auth.py -x`\n",
+        )
+        .unwrap();
+        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
+        assert_eq!(meta.recommended_backend.as_deref(), Some("codex"));
+        assert_eq!(meta.recommended_model.as_deref(), Some("gpt-x"));
+        assert_eq!(meta.difficulty.as_deref(), Some("hard"));
+        assert_eq!(meta.risk.as_deref(), Some("high"));
+        assert_eq!(
+            meta.verification_commands,
+            vec!["pytest tests/test_auth.py -x"]
+        );
+    }
 }
 
 fn git_output(args: &[&str], cwd: &Path) -> Result<String> {
@@ -1553,6 +1597,8 @@ fn dry_run_route(
             requested_model: args.model.as_deref(),
             recommended_backend: None,
             recommended_model: None,
+            session_id: None,
+            usage_summary: None,
         },
     )
     .ok()
@@ -1767,6 +1813,52 @@ fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecision) {
     ledger.fallback_used = route.fallback_used;
     ledger.confidence_impact = route.confidence_impact.clone();
     ledger.human_required = route.human_required;
+}
+
+#[derive(Debug, Clone, Default)]
+struct TicketMetadata {
+    difficulty: Option<String>,
+    risk: Option<String>,
+    recommended_backend: Option<String>,
+    recommended_model: Option<String>,
+    verification_commands: Vec<String>,
+    affected_files: Vec<String>,
+}
+
+fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
+    if path.extension().and_then(|e| e.to_str()) != Some("md") || !path.exists() {
+        return Ok(None);
+    }
+    let body = fs::read_to_string(path)?;
+    let mut meta = TicketMetadata::default();
+    for line in body.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("Difficulty:") {
+            meta.difficulty = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Risk:") {
+            meta.risk = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Recommended backend:") {
+            let value = value.trim();
+            if !value.is_empty() && value != "unspecified" {
+                meta.recommended_backend = Some(value.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("Recommended model:") {
+            let value = value.trim();
+            if !value.is_empty() && value != "unspecified" {
+                meta.recommended_model = Some(value.to_string());
+            }
+        } else if line.starts_with("- `") && line.ends_with('`') {
+            meta.verification_commands.push(
+                line.trim_start_matches("- `")
+                    .trim_end_matches('`')
+                    .to_string(),
+            );
+        } else if let Some(value) = line.strip_prefix("- ") {
+            if value.contains('/') || value.contains('.') {
+                meta.affected_files.push(value.to_string());
+            }
+        }
+    }
+    Ok(Some(meta))
 }
 
 fn parse_review_verdict(

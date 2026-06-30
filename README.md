@@ -217,6 +217,8 @@ Missing `docs/MANAGER_MEMORY.md` is a hard failure for PM decomposition.
 
 With a target, PM mode now asks the manager for structured JSON, validates it, dedupes it against existing tickets/open MRs/recent merged MRs, assigns ticket IDs, and then writes the ticket markdown files itself.
 
+When `improve` or `fix` targets a ticket markdown file, GAH also reads ticket metadata such as difficulty, risk, recommended backend/model, affected files, and verification commands before routing the worker.
+
 ## Review Gate
 
 Review mode now produces:
@@ -261,6 +263,22 @@ gah ledger summary --profile my-repo --since 24h
 
 Summary includes backend/mode counts, requested vs effective backend, fallback counts, validation and push rates, MR counts, average duration, and usage/cost totals when known.
 
+## Sync
+
+Use `gah sync --profile my-repo` to classify open GAH-created MRs/PRs without dispatching anything new.
+
+Current classifications include:
+
+- `CI_FAILED`
+- `NEEDS_REVIEW`
+- `NEEDS_FIX`
+- `READY_FOR_HUMAN`
+- `MERGED`
+- `STALE`
+- `UNKNOWN`
+
+This pass only prints state and recommended next action. It does not auto-merge or auto-dispatch fix runs.
+
 ## Prune
 
 Remove old GAH-owned sessions and worktrees:
@@ -282,6 +300,7 @@ Prune only touches:
 - `gah dispatch`
 - `gah ledger summary`
 - `gah prune`
+- `gah sync`
 - `gah profile list`
 - `gah profile show <name>`
 - `gah candidates`

@@ -1,4 +1,5 @@
 use crate::config::{Defaults, Profile, RoutingPolicy};
+use crate::ledger::BackendUsageSummary;
 use crate::runner;
 use anyhow::Result;
 
@@ -9,6 +10,8 @@ pub struct RouteRequest<'a> {
     pub requested_model: Option<&'a str>,
     pub recommended_backend: Option<&'a str>,
     pub recommended_model: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub usage_summary: Option<BackendUsageSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +42,8 @@ pub fn decide(
     let default_mode = policy_backend_model(&defaults.routing, req.mode);
     let review_fallback_allowed =
         profile.routing.allow_review_fallback || defaults.routing.allow_review_fallback;
+    let allow_impl_fallback = profile.routing.allow_implementation_fallback
+        || defaults.routing.allow_implementation_fallback;
 
     let mut backend = profile_mode
         .0
@@ -63,6 +68,41 @@ pub fn decide(
     let mut fallback_used = false;
     let mut confidence_impact = None;
     let mut human_required = false;
+    if let Some(summary) = &req.usage_summary {
+        if let Some(cap_reason) = over_cap_reason(
+            &profile.routing,
+            &defaults.routing,
+            &backend,
+            req.session_id,
+            summary,
+        ) {
+            if req.mode == "review" && review_fallback_allowed {
+                let fallback = review_fallback_backend(defaults, profile)
+                    .or_else(any_available_backend)
+                    .unwrap_or_else(|| backend.clone());
+                if fallback != backend {
+                    reason = format!("{}; {}", reason, cap_reason);
+                    fallback_used = true;
+                    confidence_impact = Some("low".into());
+                    human_required = true;
+                    backend = fallback;
+                }
+            } else if req.mode != "review" && allow_impl_fallback {
+                let fallback = any_available_backend().unwrap_or_else(|| backend.clone());
+                if fallback != backend {
+                    fallback_used = true;
+                    confidence_impact = Some("medium".into());
+                    backend = fallback;
+                    reason = format!(
+                        "{}; {}; implementation fallback due to routing caps",
+                        reason, cap_reason
+                    );
+                }
+            } else {
+                anyhow::bail!("{}", cap_reason);
+            }
+        }
+    }
 
     if !runner::backend_available(&backend) {
         if req.mode == "review" && review_fallback_allowed {
@@ -247,6 +287,84 @@ fn any_available_backend() -> Option<String> {
         .map(str::to_string)
 }
 
+fn over_cap_reason(
+    profile: &RoutingPolicy,
+    defaults: &RoutingPolicy,
+    backend: &str,
+    session_id: Option<&str>,
+    summary: &BackendUsageSummary,
+) -> Option<String> {
+    let max_runs_week = profile
+        .max_runs_per_backend_per_week
+        .or(defaults.max_runs_per_backend_per_week);
+    if let Some(max) = max_runs_week {
+        if summary.runs_this_week >= max {
+            return Some(format!(
+                "backend '{}' exceeded weekly run cap ({}/{})",
+                backend, summary.runs_this_week, max
+            ));
+        }
+    }
+    if session_id.is_some() {
+        let max_runs_session = profile
+            .max_runs_per_backend_per_session
+            .or(defaults.max_runs_per_backend_per_session);
+        if let Some(max) = max_runs_session {
+            if summary.runs_this_session >= max {
+                return Some(format!(
+                    "backend '{}' exceeded session run cap ({}/{})",
+                    backend, summary.runs_this_session, max
+                ));
+            }
+        }
+        let max_strong_session = profile
+            .max_total_strong_model_runs_per_session
+            .or(defaults.max_total_strong_model_runs_per_session);
+        if let Some(max) = max_strong_session {
+            if summary.strong_runs_this_session >= max {
+                return Some(format!(
+                    "strong-model session cap reached ({}/{})",
+                    summary.strong_runs_this_session, max
+                ));
+            }
+        }
+    }
+    let max_strong_week = profile
+        .max_total_strong_model_runs_per_week
+        .or(defaults.max_total_strong_model_runs_per_week);
+    if let Some(max) = max_strong_week {
+        if summary.strong_runs_this_week >= max {
+            return Some(format!(
+                "strong-model weekly cap reached ({}/{})",
+                summary.strong_runs_this_week, max
+            ));
+        }
+    }
+    let max_estimated = profile
+        .max_known_estimated_cost_per_week
+        .or(defaults.max_known_estimated_cost_per_week);
+    if let Some(max) = max_estimated {
+        if summary.estimated_cost_this_week >= max {
+            return Some(format!(
+                "estimated weekly cost cap reached (${:.4}/${:.4})",
+                summary.estimated_cost_this_week, max
+            ));
+        }
+    }
+    let max_actual = profile
+        .max_known_actual_cost_per_week
+        .or(defaults.max_known_actual_cost_per_week);
+    if let Some(max) = max_actual {
+        if summary.actual_cost_this_week >= max {
+            return Some(format!(
+                "actual weekly cost cap reached (${:.4}/${:.4})",
+                summary.actual_cost_this_week, max
+            ));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{decide, RouteRequest};
@@ -309,6 +427,8 @@ mod tests {
                 requested_model: None,
                 recommended_backend: Some("openhands"),
                 recommended_model: None,
+                session_id: None,
+                usage_summary: None,
             },
         )
         .unwrap();
