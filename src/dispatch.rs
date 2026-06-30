@@ -3,7 +3,7 @@ use crate::ledger::LedgerEntry;
 use crate::models::CandidateArtifact;
 use crate::models::{PmPlan, PmPlanTicket};
 use crate::routing::{self, RouteDecision, RouteRequest};
-use crate::{provider, runner, worktree};
+use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1085,6 +1085,10 @@ fn review(
 
     let prompt = format!(
         "Review this diff for correctness, test coverage, and safety. \
+         Return two sections:\n\
+         1. Markdown review notes.\n\
+         2. A JSON object with fields: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes.\n\
+         Verdict must be one of APPROVE_STRONG, APPROVE_WEAK, NEEDS_FIX, REJECT, HUMAN_REVIEW.\n\
          Repo: {}. Branch: {}. Target: {}.\n\nDiff:\n```\n{}\n```\nChanged files:\n{}",
         profile.repo,
         branch,
@@ -1102,14 +1106,27 @@ fn review(
     match result {
         Some(o) if o.status.success() => {
             let review_text = String::from_utf8_lossy(&o.stdout).to_string();
+            let review_usage = usage::parse_generic_usage(&review_text, "review_output_log");
+            let verdict = parse_review_verdict(&review_text, &route, &review_usage)?;
             let report_path = session_dir.join("review-report.md");
+            let verdict_path = session_dir.join("review-verdict.json");
             fs::write(&report_path, &review_text)?;
+            fs::write(&verdict_path, serde_json::to_string_pretty(&verdict)?)?;
             println!("{}", review_text);
             println!("Written: {}", report_path.display());
+            println!("Written: {}", verdict_path.display());
             ledger.backend_exit_code = o.status.code();
-            if route.fallback_used {
-                println!("Review confidence reduced; human review required.");
-                ledger.validation_result = Some("human-review".into());
+            ledger.validation_result = Some(verdict.verdict.clone());
+            ledger.human_required = verdict.human_required;
+            ledger.confidence_impact = Some(verdict.confidence.clone());
+            ledger.usage = review_usage.clone();
+            let mr_body = render_review_comment(&verdict, session_dir);
+            let labels = review_labels(&verdict);
+            if let Err(err) = provider::post_review_comment(profile, &branch, &mr_body, &labels) {
+                eprintln!("warning: failed to post MR review comment: {:#}", err);
+            }
+            if verdict.human_required {
+                println!("Review requires human attention.");
             }
         }
         _ => {
@@ -1750,6 +1767,71 @@ fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecision) {
     ledger.fallback_used = route.fallback_used;
     ledger.confidence_impact = route.confidence_impact.clone();
     ledger.human_required = route.human_required;
+}
+
+fn parse_review_verdict(
+    review_text: &str,
+    route: &RouteDecision,
+    parsed_usage: &crate::ledger::LedgerUsage,
+) -> Result<crate::models::ReviewVerdict> {
+    let json = extract_first_json_object(review_text)
+        .ok_or_else(|| anyhow::anyhow!("reviewer did not return verdict JSON"))?;
+    let mut verdict = serde_json::from_str::<crate::models::ReviewVerdict>(&json)?;
+    if route.fallback_used && verdict.verdict == "APPROVE_STRONG" {
+        verdict.verdict = "APPROVE_WEAK".into();
+    }
+    if route.fallback_used {
+        verdict.human_required = true;
+        if verdict.confidence == "high" {
+            verdict.confidence = "medium".into();
+        }
+    }
+    if matches!(verdict.verdict.as_str(), "APPROVE_WEAK" | "HUMAN_REVIEW") {
+        verdict.human_required = true;
+    }
+    verdict.reviewer_backend = Some(route.effective_backend.clone());
+    verdict.reviewer_model = route.effective_model.clone();
+    verdict.requested_backend = Some(route.requested_backend.clone());
+    verdict.effective_backend = Some(route.effective_backend.clone());
+    verdict.requested_model = route.requested_model.clone();
+    verdict.effective_model = route.effective_model.clone();
+    verdict.fallback_used = Some(route.fallback_used);
+    verdict.usage_source = parsed_usage.usage_source.clone();
+    verdict.input_tokens = parsed_usage.input_tokens;
+    verdict.output_tokens = parsed_usage.output_tokens;
+    verdict.total_tokens = parsed_usage.total_tokens;
+    verdict.estimated_cost_usd = parsed_usage.estimated_cost_usd;
+    verdict.actual_cost_usd = parsed_usage.actual_cost_usd;
+    Ok(verdict)
+}
+
+fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &Path) -> String {
+    let mut out = format!(
+        "GAH review verdict: `{}`\n\nConfidence: `{}`\nHuman required: `{}`\nReviewer: `{}` / `{}`\nArtifacts: `{}`\n",
+        verdict.verdict,
+        verdict.confidence,
+        verdict.human_required,
+        verdict.effective_backend.as_deref().unwrap_or("unknown"),
+        verdict.effective_model.as_deref().unwrap_or("unknown"),
+        session_dir.display(),
+    );
+    if !verdict.blocking_findings.is_empty() {
+        out.push_str("\nBlocking findings:\n");
+        for item in &verdict.blocking_findings {
+            out.push_str(&format!("- {}\n", item));
+        }
+    }
+    out
+}
+
+fn review_labels(verdict: &crate::models::ReviewVerdict) -> Vec<&'static str> {
+    match verdict.verdict.as_str() {
+        "APPROVE_STRONG" => vec!["gah-ready-for-human"],
+        "APPROVE_WEAK" => vec!["gah-review-weak", "gah-human-review"],
+        "NEEDS_FIX" | "REJECT" => vec!["gah-needs-fix"],
+        "HUMAN_REVIEW" => vec!["gah-human-review"],
+        _ => vec![],
+    }
 }
 
 fn count_test_files(profile: &Profile, root: &Path) -> usize {

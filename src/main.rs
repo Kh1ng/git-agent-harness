@@ -11,6 +11,7 @@ mod provider;
 mod prune;
 mod routing;
 mod runner;
+mod usage;
 mod worktree;
 
 use anyhow::Result;

@@ -217,6 +217,30 @@ Missing `docs/MANAGER_MEMORY.md` is a hard failure for PM decomposition.
 
 With a target, PM mode now asks the manager for structured JSON, validates it, dedupes it against existing tickets/open MRs/recent merged MRs, assigns ticket IDs, and then writes the ticket markdown files itself.
 
+## Review Gate
+
+Review mode now produces:
+
+- `review-report.md`
+- `review-verdict.json`
+
+Verdicts are:
+
+- `APPROVE_STRONG`
+- `APPROVE_WEAK`
+- `NEEDS_FIX`
+- `REJECT`
+- `HUMAN_REVIEW`
+
+Weak or fallback review always requires human review. No auto-merge is performed.
+
+When the provider can be reached, GAH also posts a concise MR/PR comment and best-effort labels such as:
+
+- `gah-ready-for-human`
+- `gah-needs-fix`
+- `gah-human-review`
+- `gah-review-weak`
+
 ## Ledger
 
 Inspect recent runs:
@@ -234,6 +258,8 @@ Summarize the ledger:
 gah ledger summary --since 7d
 gah ledger summary --profile my-repo --since 24h
 ```
+
+Summary includes backend/mode counts, requested vs effective backend, fallback counts, validation and push rates, MR counts, average duration, and usage/cost totals when known.
 
 ## Prune
 

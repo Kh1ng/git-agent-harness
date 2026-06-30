@@ -167,3 +167,42 @@ pub struct PmPlanTicket {
     pub verification_commands: Vec<String>,
     pub uncovered_reason: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReviewVerdict {
+    pub verdict: String,
+    pub confidence: String,
+    pub human_required: bool,
+    #[serde(default)]
+    pub blocking_findings: Vec<String>,
+    #[serde(default)]
+    pub non_blocking_findings: Vec<String>,
+    #[serde(default)]
+    pub risk_notes: Vec<String>,
+    #[serde(default)]
+    pub reviewer_backend: Option<String>,
+    #[serde(default)]
+    pub reviewer_model: Option<String>,
+    #[serde(default)]
+    pub requested_backend: Option<String>,
+    #[serde(default)]
+    pub effective_backend: Option<String>,
+    #[serde(default)]
+    pub requested_model: Option<String>,
+    #[serde(default)]
+    pub effective_model: Option<String>,
+    #[serde(default)]
+    pub fallback_used: Option<bool>,
+    #[serde(default)]
+    pub usage_source: Option<String>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub actual_cost_usd: Option<f64>,
+}

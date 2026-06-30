@@ -94,6 +94,40 @@ fn init_git_repo(path: &std::path::Path) {
         .unwrap();
 }
 
+fn add_origin_and_feature_commit(repo: &std::path::Path) {
+    let bare = repo.parent().unwrap().join("origin.git");
+    ProcessCommand::new("git")
+        .args(["init", "--bare", bare.to_str().unwrap()])
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["remote", "add", "origin", bare.to_str().unwrap()])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["checkout", "-b", "feature/review"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    fs::write(repo.join("src.txt"), "changed\n").unwrap();
+    ProcessCommand::new("git")
+        .args(["add", "src.txt"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["commit", "-m", "feature change"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+}
+
 fn write_real_repo_config(
     tmp: &TempDir,
     repo: &std::path::Path,
@@ -1038,4 +1072,55 @@ llm_model_cloud = ""
         .stdout(predicate::str::contains("Entries: 1"))
         .stdout(predicate::str::contains("By mode:"))
         .stdout(predicate::str::contains("pm"));
+}
+
+#[test]
+fn review_writes_structured_verdict_and_posts_comment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}\nEOF\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success();
+
+    let sessions = tmp.path().join("artifacts/real/sessions");
+    let session = latest_child_dir(&sessions);
+    let report = fs::read_to_string(session.join("review-report.md")).unwrap();
+    let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
+    assert!(report.contains("Review notes"));
+    assert!(verdict.contains("\"verdict\": \"APPROVE_STRONG\""));
+    assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
 }

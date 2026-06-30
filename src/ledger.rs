@@ -9,11 +9,19 @@ use time::OffsetDateTime;
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
+    pub usage_source: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    pub requests_count: Option<u64>,
     pub estimated_cost_usd: Option<f64>,
-    pub usage_source: Option<String>,
+    pub actual_cost_usd: Option<f64>,
+    pub quota_window: Option<String>,
+    pub quota_used_percent: Option<f64>,
+    pub quota_remaining_percent: Option<f64>,
+    pub quota_reset_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -181,17 +189,66 @@ pub mod summary {
 
         let mut by_mode: HashMap<String, usize> = HashMap::new();
         let mut by_backend: HashMap<String, usize> = HashMap::new();
+        let mut by_requested_backend: HashMap<String, usize> = HashMap::new();
         let mut success = 0usize;
         let mut failed = 0usize;
+        let mut fallback = 0usize;
+        let mut validation_pass = 0usize;
+        let mut push_success = 0usize;
+        let mut mr_count = 0usize;
+        let mut duration_total = 0.0f64;
+        let mut duration_count = 0usize;
+        let mut input_tokens = 0u64;
+        let mut output_tokens = 0u64;
+        let mut total_tokens = 0u64;
+        let mut requests_count = 0u64;
+        let mut estimated_cost = 0.0f64;
+        let mut actual_cost = 0.0f64;
+        let mut estimated_cost_seen = false;
+        let mut actual_cost_seen = false;
         for entry in &entries {
             *by_mode.entry(entry.mode.clone()).or_default() += 1;
             *by_backend
                 .entry(entry.effective_backend.clone())
                 .or_default() += 1;
+            *by_requested_backend
+                .entry(entry.requested_backend.clone())
+                .or_default() += 1;
             if entry.error_summary.is_some() {
                 failed += 1;
             } else {
                 success += 1;
+            }
+            if entry.fallback_used {
+                fallback += 1;
+            }
+            if matches!(
+                entry.validation_result.as_deref(),
+                Some("passed") | Some("APPROVE_STRONG") | Some("APPROVE_WEAK")
+            ) {
+                validation_pass += 1;
+            }
+            if entry.push_succeeded {
+                push_success += 1;
+            }
+            if entry.mr_created {
+                mr_count += 1;
+            }
+            if let Some(duration) = entry.duration_seconds {
+                duration_total += duration;
+                duration_count += 1;
+            }
+            input_tokens += entry.usage.input_tokens.unwrap_or(0);
+            output_tokens += entry.usage.output_tokens.unwrap_or(0);
+            total_tokens += entry.usage.total_tokens.unwrap_or(0);
+            requests_count += entry.usage.requests_count.unwrap_or(0);
+            if let Some(cost) = entry.usage.estimated_cost_usd {
+                estimated_cost += cost;
+                estimated_cost_seen = true;
+            }
+            if let Some(cost) = entry.usage.actual_cost_usd {
+                actual_cost += cost;
+                actual_cost_seen = true;
             }
         }
 
@@ -199,8 +256,34 @@ pub mod summary {
         println!("Failed:  {}", failed);
         println!("By mode:");
         print_counts(&by_mode);
+        println!("Requested backend:");
+        print_counts(&by_requested_backend);
         println!("By backend:");
         print_counts(&by_backend);
+        println!("Fallbacks: {}", fallback);
+        println!(
+            "Validation pass rate: {}/{}",
+            validation_pass,
+            entries.len()
+        );
+        println!("Push success rate: {}/{}", push_success, entries.len());
+        println!("MR count: {}", mr_count);
+        if duration_count > 0 {
+            println!(
+                "Average duration: {:.1}s",
+                duration_total / duration_count as f64
+            );
+        }
+        println!(
+            "Usage totals: input={} output={} total={} requests={}",
+            input_tokens, output_tokens, total_tokens, requests_count
+        );
+        if estimated_cost_seen {
+            println!("Estimated cost total: ${:.4}", estimated_cost);
+        }
+        if actual_cost_seen {
+            println!("Actual cost total: ${:.4}", actual_cost);
+        }
         if let Some(last) = entries.last() {
             println!(
                 "Last run: {} {} {} {}",
