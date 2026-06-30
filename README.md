@@ -9,7 +9,7 @@
 - One backend CLI:
   - `codex`
   - `claude`
-  - `openhands` for `openhands` or `cloud-coder`
+  - `openhands`
 - Provider tooling:
   - GitHub: `gh`
   - GitLab: `glab` for PM MR preflight, plus token env vars for push/MR creation
@@ -306,3 +306,7 @@ Prune only touches:
 - `gah candidates`
 - `gah price-guard`
 - `gah policy-check`
+
+## TODO / Backlog
+
+- **Smart MR titles from ticket**: Parse `Suggested MR Title:` field from the ticket file and use it as the MR title instead of the generic `[GAH] improve: <repo>`. Fall back to generic if field not present.
