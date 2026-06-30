@@ -1,8 +1,15 @@
 use anyhow::{Context, Result};
-use std::io::Write;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DiffStats {
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
 
 pub fn git(args: &[&str], cwd: &Path) -> Result<String> {
     let out = git_raw(args, cwd)?;
@@ -100,14 +107,36 @@ pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>
     Ok(files)
 }
 
-pub fn commit_and_push(worktree: &Path, branch: &str, push_url: &str, repo_id: &str, pat: &str) -> Result<()> {
-    commit_and_push_msg(
+pub fn diff_stats(worktree: &Path, target_branch: &str) -> Result<DiffStats> {
+    let origin_ref = format!("origin/{}", target_branch);
+    let out = git_raw(&["diff", "--numstat", &origin_ref, "HEAD"], worktree)?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut stats = DiffStats::default();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(adds) = parts.next() else { continue };
+        let Some(dels) = parts.next() else { continue };
+        stats.files_changed += 1;
+        stats.insertions += adds.parse::<u32>().unwrap_or(0);
+        stats.deletions += dels.parse::<u32>().unwrap_or(0);
+    }
+    Ok(stats)
+}
+
+pub fn commit_and_push(
+    worktree: &Path,
+    branch: &str,
+    push_url: &str,
+    repo_id: &str,
+    pat: &str,
+) -> Result<()> {
+    stage_all(worktree)?;
+    ensure_staged(worktree)?;
+    commit_msg(
         worktree,
-        branch,
-        push_url,
         &format!("gah: improve mode changes for {}", repo_id),
-        pat,
-    )
+    )?;
+    push_branch(worktree, branch, push_url, pat)
 }
 
 /// Write a temporary GIT_ASKPASS script that outputs the given password.
@@ -125,16 +154,25 @@ fn write_askpass(pat: &str) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-pub fn commit_and_push_msg(worktree: &Path, branch: &str, push_url: &str, msg: &str, pat: &str) -> Result<()> {
+pub fn stage_all(worktree: &Path) -> Result<()> {
     git(&["add", "-A"], worktree)?;
+    Ok(())
+}
 
+pub fn ensure_staged(worktree: &Path) -> Result<()> {
     let staged = git_raw(&["diff", "--cached", "--name-only"], worktree)?;
     if staged.stdout.is_empty() {
         anyhow::bail!("nothing to commit after git add -A");
     }
+    Ok(())
+}
 
+pub fn commit_msg(worktree: &Path, msg: &str) -> Result<()> {
     git(&["commit", "-q", "-m", msg], worktree)?;
+    Ok(())
+}
 
+pub fn push_branch(worktree: &Path, branch: &str, push_url: &str, pat: &str) -> Result<()> {
     let askpass = write_askpass(pat)?;
     let out = Command::new("git")
         .args(["push", "-q", push_url, branch])
@@ -151,6 +189,19 @@ pub fn commit_and_push_msg(worktree: &Path, branch: &str, push_url: &str, msg: &
         );
     }
     Ok(())
+}
+
+pub fn commit_and_push_msg(
+    worktree: &Path,
+    branch: &str,
+    push_url: &str,
+    msg: &str,
+    pat: &str,
+) -> Result<()> {
+    stage_all(worktree)?;
+    ensure_staged(worktree)?;
+    commit_msg(worktree, msg)?;
+    push_branch(worktree, branch, push_url, pat)
 }
 
 pub fn cleanup(worktree: &Path, repo: &Path) {

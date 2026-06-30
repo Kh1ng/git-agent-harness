@@ -1,0 +1,16 @@
+[defaults]
+artifact_root = "/home/you/.local/share/gah/artifacts"
+worktree_base = "/home/you/.local/share/gah/worktrees"
+llm_base_url = "http://localhost:4000"
+llm_model_local = "your/local-model"
+llm_model_cloud = "your/cloud-model"
+
+[profiles.my-repo]
+display_name = "My Repo"
+repo_id = "my-repo"
+provider = "github"
+repo = "owner/repo"
+local_path = "/path/to/local/clone"
+artifact_root = "/home/you/.local/share/gah/artifacts/my-repo"
+default_target_branch = "main"
+validation_commands = []

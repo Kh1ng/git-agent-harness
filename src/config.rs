@@ -42,6 +42,16 @@ impl Defaults {
             self.llm_model_local.clone()
         }
     }
+
+    pub fn ledger_path(&self) -> PathBuf {
+        if let Ok(path) = std::env::var("GAH_LEDGER_PATH") {
+            return PathBuf::from(path);
+        }
+        if !self.artifact_root.trim().is_empty() {
+            return PathBuf::from(self.artifact_root.trim()).join("ledger.jsonl");
+        }
+        default_config_dir().join("ledger.jsonl")
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -111,6 +121,22 @@ impl Profile {
         }
     }
 
+    pub fn pat_env_names(&self) -> &'static [&'static str] {
+        match self.provider.as_str() {
+            "gitlab" => &["GITLAB_PAT2", "GITLAB_PAT"],
+            "github" => &["GITHUB_TOKEN", "GH_TOKEN"],
+            _ => &[],
+        }
+    }
+
+    pub fn provider_cli(&self) -> Option<&'static str> {
+        match self.provider.as_str() {
+            "gitlab" => Some("glab"),
+            "github" => Some("gh"),
+            _ => None,
+        }
+    }
+
     /// Build push URL without embedding PAT. Authentication is handled
     /// via GIT_ASKPASS by the caller, so the token never appears in process
     /// arguments, process lists, or shell history.
@@ -160,18 +186,30 @@ fn normalize_repo_path(repo: &str) -> String {
     }
 }
 
-pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
-    let path = config_path
+pub fn default_config_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    PathBuf::from(home).join(".config/gah")
+}
+
+pub fn default_config_path() -> PathBuf {
+    default_config_dir().join("config.toml")
+}
+
+pub fn resolve_config_path(config_path: Option<&str>) -> PathBuf {
+    config_path
         .map(PathBuf::from)
         .or_else(|| std::env::var("GAH_CONFIG").ok().map(PathBuf::from))
-        .or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-            let p = PathBuf::from(format!("{}/.config/gah/config.toml", home));
-            p.exists().then_some(p)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!("no config found; set GAH_CONFIG or create ~/.config/gah/config.toml")
-        })?;
+        .unwrap_or_else(default_config_path)
+}
+
+pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
+    let path = resolve_config_path(config_path);
+    if !path.exists() {
+        anyhow::bail!(
+            "no config found; set GAH_CONFIG or create {}",
+            default_config_path().display()
+        );
+    }
 
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;

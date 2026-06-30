@@ -1,10 +1,14 @@
 mod candidates;
 mod config;
 mod dispatch;
+mod doctor;
+mod init;
+mod ledger;
 mod models;
 mod policy;
 mod price_guard;
 mod provider;
+mod prune;
 mod runner;
 mod worktree;
 
@@ -42,6 +46,53 @@ enum Commands {
         config: String,
         #[arg(long)]
         action: String,
+    },
+    /// Validate config and profile setup
+    Doctor {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
+    /// Create or print a starter GAH config/profile
+    Init {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        local_path: String,
+        #[arg(long, default_value = "main")]
+        default_target_branch: String,
+        #[arg(long)]
+        provider_api_base: Option<String>,
+        #[arg(long)]
+        provider_project_id: Option<String>,
+        #[arg(long)]
+        artifact_root: Option<String>,
+        #[arg(long)]
+        worktree_base: Option<String>,
+        #[arg(long)]
+        oh_profile: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        print: bool,
+    },
+    /// Delete old GAH-owned sessions and worktrees
+    Prune {
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = 30)]
+        older_than: u64,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
     },
     /// Dispatch a job to a backend (improve, pm, review, fix, experiment)
     Dispatch {
@@ -113,6 +164,53 @@ fn main() -> Result<()> {
         Commands::PriceGuard { watchlist, model } => price_guard::run(&watchlist, &model)?,
 
         Commands::PolicyCheck { config, action } => policy::run(&config, &action)?,
+
+        Commands::Doctor {
+            profile,
+            config_path,
+        } => doctor::run(profile.as_deref(), config_path.as_deref())?,
+
+        Commands::Init {
+            profile,
+            display_name,
+            provider,
+            repo,
+            local_path,
+            default_target_branch,
+            provider_api_base,
+            provider_project_id,
+            artifact_root,
+            worktree_base,
+            oh_profile,
+            config_path,
+            print,
+        } => init::run(init::InitArgs {
+            profile,
+            display_name,
+            provider,
+            repo,
+            local_path,
+            default_target_branch,
+            provider_api_base,
+            provider_project_id,
+            artifact_root,
+            worktree_base,
+            oh_profile,
+            config_path,
+            print,
+        })?,
+
+        Commands::Prune {
+            dry_run,
+            older_than,
+            profile,
+            config_path,
+        } => prune::run(
+            profile.as_deref(),
+            config_path.as_deref(),
+            older_than,
+            dry_run,
+        )?,
 
         Commands::Dispatch {
             profile,

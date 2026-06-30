@@ -1,279 +1,232 @@
 # git-agent-harness
 
-`gah` is a CLI control plane for running AI coding agents against git repositories. It creates isolated git worktrees, runs a backend agent, validates output, commits any changes, and opens a draft MR/PR — all from a single command.
+`gah` is a CLI that runs coding agents against real repositories with guardrails around git worktrees, validation, pushing, draft MR/PR creation, PM ticket decomposition, session logging, and cleanup.
+
+## Requirements
+
+- `git`
+- Rust toolchain (`cargo build --release`)
+- One backend CLI:
+  - `codex`
+  - `claude`
+  - `openhands` for `openhands` or `cloud-coder`
+- Provider tooling:
+  - GitHub: `gh`
+  - GitLab: `glab` for PM MR preflight, plus token env vars for push/MR creation
 
 ## Install
 
 ```bash
 cargo build --release
-# then put target/release/gah on PATH, or symlink it
-```
-
-## Quick start
-
-```bash
-# 1. Copy and edit the config
 mkdir -p ~/.config/gah
 cp config/gah-config.example.toml ~/.config/gah/config.toml
-# edit it: add your repos under [profiles.<name>]
-
-# 2. Set secrets in your environment (or .env)
-export GITLAB_PAT=...
-export LLM_API_KEY=***
-
-# 3. Run
-gah profile list
-gah dispatch --profile my-repo --mode improve --dry-run
-gah dispatch --profile my-repo --mode improve
 ```
 
-## Config file
+Provider-specific examples:
 
-Location (in order of precedence):
+- `config/gah-config.github.example.toml`
+- `config/gah-config.gitlab.example.toml`
+- `config/gah-config.gitlab-self-hosted.example.toml`
 
-1. `$GAH_CONFIG` env var
-2. `~/.config/gah/config.toml`
+## What GAH Creates
+
+- Per-run session directories under each profile `artifact_root/sessions/`
+- Worktrees under `defaults.worktree_base`
+- A JSONL session ledger at:
+  - `$GAH_LEDGER_PATH`, if set
+  - otherwise `defaults.artifact_root/ledger.jsonl`, if configured
+  - otherwise `~/.config/gah/ledger.jsonl`
+
+## Config Basics
+
+GAH loads config from:
+
+1. `--config`
+2. `GAH_CONFIG`
+3. `~/.config/gah/config.toml`
+
+Minimal shape:
 
 ```toml
 [defaults]
-artifact_root   = "/path/to/artifacts"
-worktree_base   = "/path/to/worktrees"
-llm_base_url    = "http://your-litellm-proxy:4000"
-llm_model_local = "litellm_proxy/local-model"
-llm_model_cloud = "litellm_proxy/cloud-model"
+artifact_root = "/home/you/.local/share/gah/artifacts"
+worktree_base = "/home/you/.local/share/gah/worktrees"
+llm_base_url = "http://localhost:4000"
+llm_model_local = "your/local-model"
+llm_model_cloud = "your/cloud-model"
 
 [profiles.my-repo]
-display_name          = "My Repo"
-repo_id               = "my-repo"             # used in branch names and artifact paths
-provider              = "github"              # "github" or "gitlab"
-repo                  = "owner/repo-name"
-local_path            = "/path/to/local/clone"
-artifact_root         = "/path/to/artifacts/my-repo"
+display_name = "My Repo"
+repo_id = "my-repo"
+provider = "github"
+repo = "owner/repo"
+local_path = "/path/to/local/clone"
+artifact_root = "/home/you/.local/share/gah/artifacts/my-repo"
 default_target_branch = "main"
-
-# OpenHands profile to use (reads ~/.openhands/profiles/<name>.json for LLM config).
-# Without this, GAH falls through to llm_model_local which may be unavailable.
-oh_profile = "cloud-coder"
-
-# Optional extra CLI args passed to each backend:
-openhands_args = []                                      # e.g. plugin/skill flags
-codex_args     = ["-m", "gpt-5.4-mini", "--dangerously-bypass-approvals-and-sandbox"]  # model + non-interactive
-claude_args    = ["--allowedTools", "Edit,Write,Bash"]   # limit claude's tools
-
-# KEY=VALUE env file injected into the backend's environment.
-# Use this for API keys, DB URLs, and other secrets (never commit this file).
-env_file = "/path/to/secrets.env"
-
-# File name patterns used to count test files for PM reports.
-# Default (when omitted): test_*.py, *_test.py, *.test.ts, *.spec.ts, etc.
-test_file_patterns = ["test_*.py", "*_spec.rb", "*.test.ts"]
-
-# Commands run in the worktree after each agent attempt.
-# All must pass (exit 0) before commit/push is allowed.
-# On failure, output is fed back to the agent and the attempt retried.
-validation_commands = ["cargo test --quiet", "cargo clippy -- -D warnings"]
-
-# GitLab-only fields:
-# provider_api_base   = "https://gitlab.example.com/api/v4"
-# provider_project_id = "42"
+validation_commands = []
 ```
 
-## Environment variables
+GitLab adds:
 
-Secrets always come from env vars, never the config file:
-
-| Variable | Purpose |
-|---|---|
-| `GITLAB_PAT` / `GITLAB_PAT2` | GitLab personal access token (api + write_repository scopes) |
-| `GITHUB_TOKEN` / `GH_TOKEN` | GitHub token (optional if `gh auth login` is done) |
-| `LLM_API_KEY` | LLM proxy API key |
-| `LLM_BASE_URL` | Override LLM base URL (takes precedence over config) |
-| `LLM_MODEL` | Override model entirely (takes precedence over config and OH profile) |
-| `GAH_CONFIG` | Override config file path |
-
-## Subcommands
-
-### `gah dispatch`
-
-Run an agent job against a profile.
-
-```bash
-gah dispatch --profile <name> --mode <mode> [options]
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--profile` | required | Profile name from config |
-| `--mode` | required | `improve`, `fix`, `pm`, `review`, `experiment` |
-| `--backend` | `auto` | `openhands`, `cloud-coder`, `codex`, `claude`, `auto` |
-| `--oh-profile` | config default | OpenHands profile name (`~/.openhands/profiles/<name>.json`) |
-| `--target` | | Task hint, path to `candidates.json`, or ticket description (mode-dependent) |
-| `--retries` | `2` | How many times to retry after validation fails |
-| `--allow-draft-fail` | | Push and open draft MR even if validation still fails after all retries |
-| `--dry-run` | | Print plan without making any changes |
-| `--config` | | Override config file path |
-
-**Backends:**
-
-| Backend | Binary | Notes |
-|---|---|---|
-| `openhands` | `openhands` | Headless agent; uses local LLM from config/OH profile |
-| `cloud-coder` | `openhands` | Same binary; uses `defaults.llm_model_cloud` |
-| `codex` | `codex` | OpenAI Codex CLI (`codex exec <task>`) |
-| `claude` | `claude` | Claude CLI (`claude -p <task>`) |
-| `auto` | first available | Tries `openhands`, then errors |
-
-**OpenHands LLM resolution order** (most to least specific):
-
-1. `LLM_*` env vars always win
-2. `--oh-profile <name>` CLI flag → reads `~/.openhands/profiles/<name>.json`
-3. `oh_profile = "<name>"` in the profile TOML block → same file resolution (no flag needed)
-4. `defaults.llm_model_local` / `defaults.llm_model_cloud` + `defaults.llm_base_url`
-
-> **Tip:** Without `oh_profile` set in config or `--oh-profile` on the CLI, GAH falls through to
-> `llm_model_local` which may be a model not currently deployed. Always set `oh_profile` in your
-> profile block when using OpenHands, or pass `--oh-profile` on each dispatch.
-
-**Modes:**
-
-| Mode | What it does |
-|---|---|
-| `improve` / `fix` | Create worktree → run agent → validate (retry on failure) → commit+push → open draft MR |
-| `pm` | Without `--target`: static repo report (git log, test count, CI status, README). With `--target <ticket>`: dispatches a PM agent to decompose the ticket into atomic sub-tasks saved to `docs/tickets/TICKET-NNN-<slug>.md` |
-| `review` | Diff vs target branch → bundle patch → run `claude -p` review → write review-report.md |
-| `experiment` | Provisions a worktree for research/exploratory tasks. Runs the agent, then collects untracked artifacts (*.ipynb, *.csv, *.png, *.html — bypasses `.gitignore`), runs an LLM judge to evaluate task completion, and commits output + opens draft MR with judge verdict. Ideal for web scraping, ML experiments, data exports, and prototyping. |
-
-### `gah profile`
-
-```bash
-gah profile list              # list all profiles
-gah profile show <name>       # show profile details; warns if openhands_profile file is missing
-```
-
-### `gah candidates`
-
-Convert CI/gate artifact findings into prioritized backlog candidates.
-
-```bash
-gah candidates --gate-artifact <path> --out-root <dir> [--include-warnings]
-```
-
-### `gah price-guard`
-
-Check whether a model is on the price watchlist.
-
-```bash
-gah price-guard --watchlist <path> --model <name>
-```
-
-### `gah policy-check`
-
-Evaluate a repo policy config against a requested action.
-
-```bash
-gah policy-check --config <path> --action <action>
-```
-
-## Provider CLI requirements
-
-- **GitHub**: `gh` CLI, authenticated via `gh auth login`. No token env var needed if authed.
-- **GitLab**: `glab` CLI, authenticated for your instance via `glab auth login --hostname gitlab.example.com`. The `local_path` must be a clone whose remote points at that instance.
-
-*Note:* `gah` also supports direct API access via PAT env vars (`GITLAB_PAT2`, `GH_TOKEN`) for push/create-MR operations without the provider CLI.
-
-## Adding a new project
-
-1. Clone the repo locally.
-2. Add a `[profiles.<name>]` block to your config.toml (set `provider`, `repo`, `local_path`, `default_target_branch`).
-3. For GitLab: run `glab auth login --hostname <your-instance>`.
-4. (Optional) Point the profile's `env_file` at your secrets file so backends have API access.
-5. Validate: `gah profile show <name>`.
-6. Preview: `gah dispatch --profile <name> --mode pm --dry-run`.
-7. Run: `gah dispatch --profile <name> --mode improve`.
-
-## Retry & Validation Loop
-
-When `validation_commands` is set, the harness runs them in the worktree after each agent attempt. If any command exits non-zero:
-
-1. The full stdout+stderr is saved to `validation-failure.txt`
-2. The failure output is appended to the agent's task prompt (up to 8,000 chars)
-3. A fresh agent process is cold-started with the accumulated context
-4. Up to `--retries + 1` attempts are made
-
-If all retries are exhausted, the harness bails with a clear error. Pass `--allow-draft-fail` to push the draft MR anyway (useful for partial progress).
-
-## Experiment Artifact Collection
-
-In `experiment` mode, untracked files with the following extensions are copied to the session artifacts directory:
-
-`.ipynb` `.html` `.png` `.jpg` `.jpeg` `.csv` `.parquet`
-
-Collection intentionally **ignores** `.gitignore` — research repos commonly gitignore large data files. The files remain untracked in git and are not committed to the repo; they are preserved in the session artifacts for review.
-
-After collection, an LLM judge (Claude if available, otherwise artifact-count heuristic) evaluates whether the agent produced a meaningful answer. The judge verdict is included in the draft MR description.
-
-## OpenHands profiles
-
-Pass `--oh-profile <name>` at runtime to specify which LLM profile OpenHands uses. The profile file lives at `~/.openhands/profiles/<name>.json`:
-
-```json
-{
-  "model": "litellm_proxy/local-qwen3-coder",
-  "api_key": "",
-  "base_url": "http://192.168.5.248:4000",
-  "num_retries": 5
-}
-```
-
-`LLM_*` env vars always override the profile file. List available profiles:
-
-```bash
-ls ~/.openhands/profiles/
-```
-
-## Troubleshooting
-
-**OpenHands exits in ~6 seconds with `LLMBadRequestError: Invalid model name`**
-
-GAH fell through to `llm_model_local` (e.g. `local-qwen3-coder`) which isn't deployed. Fix: set
-`oh_profile = "cloud-coder"` in your profile block, or pass `--oh-profile cloud-coder` on each
-dispatch command. Without this, OpenHands starts, loads its tools, and immediately errors out.
-
-**`git fetch --prune: Permission denied` on worktree creation**
-
-Happens when a previous agent run as `root` left reflog files under `.git/logs/refs/remotes/origin/gah/`
-owned by root. Fix:
-```bash
-sudo chown -R $USER:$USER /path/to/repo/.git/logs/refs/remotes/origin/gah/
-sudo chown -R $USER:$USER /path/to/repo/.git/worktrees/
-sudo chown -R $USER:$USER /path/to/artifacts/
-```
-
-**`git worktree add: Permission denied` on `.git/worktrees/`**
-
-Same root-ownership issue as above — usually from GAH being run as root via sudo or a root cron.
-Run the same `chown` fix above.
-
-**Codex exits immediately in non-interactive mode**
-
-Codex requires `--dangerously-bypass-approvals-and-sandbox` to run headlessly without prompting for
-every tool use. Add it to `codex_args` in your profile:
 ```toml
-codex_args = ["-m", "gpt-5.4-mini", "--dangerously-bypass-approvals-and-sandbox"]
+provider_api_base = "https://gitlab.example.com/api/v4"
+provider_project_id = "12345"
 ```
 
-**`validation_commands` exits 5 (pytest: no tests collected)**
+Secrets do not go in config.
 
-Your `-k` filter matched nothing. Use `python3 -m pytest -x -q` (no filter) so all tests run.
-A narrow `-k` filter that doesn't match any test returns exit 5, which GAH treats as a validation
-failure and wastes all retries.
+## Auth
 
-**`from __future__ import annotations` SyntaxError in agent-generated test files**
+- GitHub: set `GITHUB_TOKEN` or `GH_TOKEN`
+- GitLab: set `GITLAB_PAT` or `GITLAB_PAT2`
+- LLM proxy: set `LLM_API_KEY` if needed
 
-Agent-generated Python test files sometimes place `from __future__ import annotations` after other
-imports, causing `SyntaxError: from __future__ imports must occur at the beginning of the file`.
-This blocks pytest collection and burns all retries. Check generated test files before review:
+GAH keeps push auth in askpass; it does not embed tokens into remotes or push URLs.
+
+## Setup
+
+### GitHub
+
 ```bash
-grep -n "from __future__" tests/test_*.py | grep -v "^tests.*:1:"
+gh auth login
+export GITHUB_TOKEN=...
+gah doctor --profile my-repo
 ```
-Any match not on line 1 needs the import moved to line 1.
+
+### GitLab.com
+
+```bash
+glab auth login --hostname gitlab.com
+export GITLAB_PAT=...
+gah doctor --profile my-repo
+```
+
+### Self-Hosted GitLab
+
+```bash
+glab auth login --hostname gitlab.example.com
+export GITLAB_PAT=...
+```
+
+Set:
+
+```toml
+provider_api_base = "https://gitlab.example.com/api/v4"
+```
+
+GAH derives pushes from that base, including self-hosted domains.
+
+## Onboarding
+
+`gah init` writes a starter config or appends a profile block.
+
+```bash
+gah init \
+  --profile my-repo \
+  --display-name "My Repo" \
+  --provider gitlab \
+  --repo group/project \
+  --local-path /path/to/repo \
+  --default-target-branch main \
+  --provider-api-base https://gitlab.example.com/api/v4
+```
+
+Preview without writing:
+
+```bash
+gah init ... --print
+```
+
+## Doctor
+
+Check config and profile readiness:
+
+```bash
+gah doctor --profile my-repo
+gah doctor
+```
+
+Doctor checks:
+
+- config loads
+- repo path exists and is a git repo
+- provider CLI exists
+- expected provider token env vars are present
+- push URL can be derived
+- artifact/worktree paths are writable
+- `docs/MANAGER_MEMORY.md` exists
+
+## First Dispatch
+
+Start with a dry run:
+
+```bash
+gah dispatch --profile my-repo --mode improve --dry-run
+```
+
+Then run for real:
+
+```bash
+gah dispatch --profile my-repo --mode improve --backend codex --target "Fix flaky tests"
+```
+
+PM report without a manager backend:
+
+```bash
+gah dispatch --profile my-repo --mode pm
+```
+
+PM ticket decomposition:
+
+```bash
+gah dispatch --profile my-repo --mode pm --backend claude --target "Break this work into atomic tickets"
+```
+
+## PM Mode
+
+PM mode with a target now injects preflight context before the manager runs:
+
+- `docs/MANAGER_MEMORY.md`
+- open GitLab MRs
+- recently merged GitLab MRs
+- existing `docs/tickets/*.md`
+- current branch, dirty state, recent commits
+
+Missing `docs/MANAGER_MEMORY.md` is a hard failure for PM decomposition.
+
+## Ledger
+
+Inspect recent runs:
+
+```bash
+tail -n 20 ~/.config/gah/ledger.jsonl
+jq . ~/.config/gah/ledger.jsonl | less
+```
+
+Fields include mode, backend, branch, session dir, validation status, commit/push/MR status, diff stats, error summary, and nullable usage/cost placeholders.
+
+## Prune
+
+Remove old GAH-owned sessions and worktrees:
+
+```bash
+gah prune --dry-run --older-than 14
+gah prune --profile my-repo --older-than 30
+```
+
+Prune only touches:
+
+- `artifact_root/sessions/*`
+- worktrees under `defaults.worktree_base` with GAH-owned naming prefixes
+
+## Command Summary
+
+- `gah init`
+- `gah doctor`
+- `gah dispatch`
+- `gah prune`
+- `gah profile list`
+- `gah profile show <name>`
+- `gah candidates`
+- `gah price-guard`
+- `gah policy-check`

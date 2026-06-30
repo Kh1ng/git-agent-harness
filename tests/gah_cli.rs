@@ -2,6 +2,8 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::process::Command as ProcessCommand;
 use tempfile::TempDir;
 
 fn bin() -> Command {
@@ -38,6 +40,91 @@ fn latest_child_dir(root: &std::path::Path) -> std::path::PathBuf {
         .collect();
     dirs.sort();
     dirs.pop().unwrap()
+}
+
+fn make_fake_bin(dir: &std::path::Path, name: &str) {
+    let path = dir.join(name);
+    fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+}
+
+fn prepend_path(dir: &std::path::Path) -> String {
+    let old = std::env::var("PATH").unwrap_or_default();
+    format!("{}:{}", dir.display(), old)
+}
+
+fn init_git_repo(path: &std::path::Path) {
+    fs::create_dir_all(path.join("docs")).unwrap();
+    ProcessCommand::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    fs::write(path.join("README.md"), "hello\n").unwrap();
+    fs::write(path.join("docs/MANAGER_MEMORY.md"), "# Memory\n").unwrap();
+    ProcessCommand::new("git")
+        .args(["add", "."])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+}
+
+fn write_real_repo_config(
+    tmp: &TempDir,
+    repo: &std::path::Path,
+    provider: &str,
+) -> std::path::PathBuf {
+    let cfg = tmp.path().join("gah-config-real.toml");
+    let extra = match provider {
+        "gitlab" => "provider_api_base = \"https://gitlab.example.com/api/v4\"\nprovider_project_id = \"42\"\n",
+        _ => "",
+    };
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[defaults]
+artifact_root = "{root}/artifacts"
+worktree_base = "{root}/worktrees"
+llm_base_url  = "http://localhost:4000"
+llm_model_local = "local/test"
+llm_model_cloud = "cloud/test"
+
+[profiles.real]
+display_name          = "Real Repo"
+repo_id               = "real"
+provider              = "{provider}"
+repo                  = "owner/real"
+local_path            = "{repo}"
+artifact_root         = "{root}/artifacts/real"
+default_target_branch = "main"
+{extra}
+"#,
+            root = tmp.path().display(),
+            provider = provider,
+            repo = repo.display(),
+            extra = extra,
+        ),
+    )
+    .unwrap();
+    cfg
 }
 
 #[test]
@@ -677,4 +764,165 @@ fn dispatch_dry_run_oh_profile_does_not_pass_profile_flag() {
             "OpenHands arg line must not contain --profile"
         );
     }
+}
+
+#[test]
+fn init_prints_profile_snippet() {
+    bin()
+        .args([
+            "init",
+            "--profile",
+            "sample",
+            "--display-name",
+            "Sample Repo",
+            "--provider",
+            "github",
+            "--repo",
+            "owner/sample",
+            "--local-path",
+            "/tmp/sample",
+            "--print",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[profiles.sample]"))
+        .stdout(predicate::str::contains("provider = \"github\""));
+}
+
+#[test]
+fn doctor_passes_for_valid_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "gh");
+
+    bin()
+        .args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"))
+        .stdout(predicate::str::contains("manager memory"));
+}
+
+#[test]
+fn doctor_fails_when_manager_memory_is_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    fs::remove_file(repo.join("docs/MANAGER_MEMORY.md")).unwrap();
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "gh");
+
+    bin()
+        .args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[FAIL]"))
+        .stdout(predicate::str::contains("manager memory"));
+}
+
+#[test]
+fn dispatch_pm_writes_ledger_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let ledger = tmp.path().join("artifacts/ledger.jsonl");
+    let text = fs::read_to_string(ledger).unwrap();
+    assert!(text.contains("\"profile\":\"real\""));
+    assert!(text.contains("\"mode\":\"pm\""));
+}
+
+#[test]
+fn prune_dry_run_reports_old_sessions_and_worktrees() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let session = tmp.path().join("artifacts/real/sessions/20240101");
+    fs::create_dir_all(&session).unwrap();
+
+    let worktree_root = tmp.path().join("worktrees");
+    fs::create_dir_all(&worktree_root).unwrap();
+    let worktree = worktree_root.join("gah-real-old");
+    ProcessCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "gah/real-old",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+
+    ProcessCommand::new("touch")
+        .args([
+            "-t",
+            "202401010000",
+            session.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    bin()
+        .args([
+            "prune",
+            "--profile",
+            "real",
+            "--older-than",
+            "1",
+            "--dry-run",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("would remove session"))
+        .stdout(predicate::str::contains("would remove worktree"));
 }
