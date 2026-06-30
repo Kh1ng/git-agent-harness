@@ -114,28 +114,49 @@ impl Profile {
     /// Build push URL without embedding PAT. Authentication is handled
     /// via GIT_ASKPASS by the caller, so the token never appears in process
     /// arguments, process lists, or shell history.
-    pub fn push_url(&self) -> String {
+    pub fn push_url(&self) -> Result<String> {
         match self.provider.as_str() {
             "gitlab" => {
-                let base = self.provider_api_base.as_deref().unwrap_or("");
-                let host = base.trim_end_matches("/api/v4").trim_end_matches('/');
-                format!("{}/{}.git", host, self.repo)
+                let base = self.gitlab_push_base()?;
+                Ok(format!("{}/{}", base, normalize_repo_path(&self.repo)))
             }
-            "github" => format!("https://github.com/{}.git", self.repo),
-            _ => self.repo.clone(),
+            "github" => Ok(format!(
+                "https://github.com/{}",
+                normalize_repo_path(&self.repo)
+            )),
+            _ => Ok(self.repo.clone()),
         }
     }
 
-    /// Return the bare hostname from the provider API base for URL construction.
-    pub fn push_host(&self) -> String {
-        match self.provider.as_str() {
-            "gitlab" => {
-                let base = self.provider_api_base.as_deref().unwrap_or("");
-                base.trim_end_matches("/api/v4").trim_end_matches('/').to_string()
-            }
-            "github" => "https://github.com".to_string(),
-            _ => String::new(),
+    fn gitlab_push_base(&self) -> Result<String> {
+        let base = self
+            .provider_api_base
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?
+            .trim();
+        if base.is_empty() {
+            anyhow::bail!("profile missing provider_api_base for gitlab");
         }
+
+        let trimmed = base.trim_end_matches('/');
+        let without_api = trimmed.strip_suffix("/api/v4").unwrap_or(trimmed);
+        let (scheme, rest) = without_api
+            .split_once("://")
+            .unwrap_or(("https", without_api));
+        let host = rest.split('/').next().unwrap_or("").trim_matches('/');
+        if host.is_empty() {
+            anyhow::bail!("invalid provider_api_base for gitlab: {}", base);
+        }
+        Ok(format!("{}://oauth2@{}", scheme, host))
+    }
+}
+
+fn normalize_repo_path(repo: &str) -> String {
+    let repo = repo.trim_matches('/');
+    if repo.ends_with(".git") {
+        repo.to_string()
+    } else {
+        format!("{}.git", repo)
     }
 }
 
@@ -167,4 +188,59 @@ pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile>
             names.join(", ")
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Profile;
+
+    fn gitlab_profile(api_base: Option<&str>) -> Profile {
+        Profile {
+            display_name: "Test".into(),
+            repo_id: "test".into(),
+            provider: "gitlab".into(),
+            repo: "group/repo".into(),
+            local_path: "/tmp/repo".into(),
+            artifact_root: "/tmp/artifacts".into(),
+            default_target_branch: "main".into(),
+            provider_api_base: api_base.map(str::to_string),
+            provider_project_id: Some("42".into()),
+            oh_profile: None,
+            openhands_args: vec![],
+            codex_args: vec![],
+            claude_args: vec![],
+            policy_path: None,
+            env_file: None,
+            env_file_prod: None,
+            validation_commands: vec![],
+            test_file_patterns: vec![],
+            model_improve: None,
+            model_pm: None,
+            model_review: None,
+        }
+    }
+
+    #[test]
+    fn gitlab_push_url_uses_self_hosted_domain() {
+        let profile = gitlab_profile(Some("https://gitlab.coltonspurgin.tech/api/v4"));
+        assert_eq!(
+            profile.push_url().unwrap(),
+            "https://oauth2@gitlab.coltonspurgin.tech/group/repo.git"
+        );
+    }
+
+    #[test]
+    fn gitlab_push_url_handles_trailing_slash_and_missing_api_suffix() {
+        let profile = gitlab_profile(Some("https://gitlab.example.com/"));
+        assert_eq!(
+            profile.push_url().unwrap(),
+            "https://oauth2@gitlab.example.com/group/repo.git"
+        );
+    }
+
+    #[test]
+    fn gitlab_push_url_rejects_missing_host() {
+        let profile = gitlab_profile(Some("https:///api/v4"));
+        assert!(profile.push_url().is_err());
+    }
 }

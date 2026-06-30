@@ -54,7 +54,11 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     }
 }
 
-fn resolve_llm(cfg: &GahConfig, args: &DispatchArgs, profile_oh: Option<&str>) -> Result<runner::LlmConfig> {
+fn resolve_llm(
+    cfg: &GahConfig,
+    args: &DispatchArgs,
+    profile_oh: Option<&str>,
+) -> Result<runner::LlmConfig> {
     // CLI flag wins, then profile config, then default
     let effective_oh_profile = args.oh_profile.as_deref().or(profile_oh);
     if let Some(name) = effective_oh_profile {
@@ -82,14 +86,15 @@ fn resolve_llm(cfg: &GahConfig, args: &DispatchArgs, profile_oh: Option<&str>) -
         });
     }
     // Check profile-level mode-specific override, then global default
-    let profile_model = config::get_profile(cfg, &args.profile).ok().and_then(|p| {
-        match args.mode.as_str() {
-            "improve" | "fix" => p.model_improve.clone(),
-            "pm" => p.model_pm.clone(),
-            "review" => p.model_review.clone(),
-            _ => None,
-        }
-    });
+    let profile_model =
+        config::get_profile(cfg, &args.profile)
+            .ok()
+            .and_then(|p| match args.mode.as_str() {
+                "improve" | "fix" => p.model_improve.clone(),
+                "pm" => p.model_pm.clone(),
+                "review" => p.model_review.clone(),
+                _ => None,
+            });
     let cloud = args.backend == "cloud-coder";
     Ok(runner::LlmConfig {
         base_url: cfg.defaults.llm_base_url(),
@@ -107,13 +112,18 @@ fn run_backend(
     llm: &runner::LlmConfig,
     env_path: Option<&str>,
 ) -> Result<runner::RunResult> {
-    let env_vars = env_path
-        .map(runner::load_env_file)
-        .unwrap_or_default();
+    let env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
     match backend {
         "codex" => runner::run_codex(wt, task, session_dir, &profile.codex_args, &env_vars),
         "claude" => runner::run_claude(wt, task, session_dir, &profile.claude_args, &env_vars),
-        _ => runner::run_openhands(wt, task, session_dir, llm, &profile.openhands_args, &env_vars),
+        _ => runner::run_openhands(
+            wt,
+            task,
+            session_dir,
+            llm,
+            &profile.openhands_args,
+            &env_vars,
+        ),
     }
 }
 
@@ -152,16 +162,39 @@ fn preflight(backend: &str) -> Result<()> {
         _ => "openhands",
     };
     for bin in &["git", backend_bin] {
-        let found = Command::new("which")
-            .arg(bin)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !found {
-            anyhow::bail!("required binary '{}' not found on PATH", bin);
-        }
+        ensure_bin(bin)?;
     }
     Ok(())
+}
+
+fn ensure_bin(bin: &str) -> Result<()> {
+    let found = Command::new("which")
+        .arg(bin)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if found {
+        Ok(())
+    } else {
+        anyhow::bail!("required binary '{}' not found on PATH", bin);
+    }
+}
+
+fn command_output(bin: &str, args: &[&str], cwd: &Path) -> Result<String> {
+    let out = Command::new(bin)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("{} {}", bin, args.join(" ")))?;
+    if !out.status.success() {
+        bail!(
+            "{} {}: {}",
+            bin,
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Check profile policy before provisioning any worktree.
@@ -173,8 +206,8 @@ fn enforce_policy(profile: &Profile, action: &str) -> Result<()> {
     };
     let text = std::fs::read_to_string(policy_path)
         .with_context(|| format!("reading policy file: {}", policy_path))?;
-    let cfg: crate::models::PolicyConfig = toml::from_str(&text)
-        .with_context(|| format!("parsing policy file: {}", policy_path))?;
+    let cfg: crate::models::PolicyConfig =
+        toml::from_str(&text).with_context(|| format!("parsing policy file: {}", policy_path))?;
     let repo = cfg.repo;
     let allowed = match repo.trust_mode.as_str() {
         "read_only" => false,
@@ -206,7 +239,11 @@ fn improve(
     session_dir: &Path,
 ) -> Result<()> {
     // Enforce policy before any mutations
-    let push_action = if args.prod { "git-push-prod" } else { "git-push" };
+    let push_action = if args.prod {
+        "git-push-prod"
+    } else {
+        "git-push"
+    };
     enforce_policy(profile, "open-draft-pr")?;
     enforce_policy(profile, push_action)?;
 
@@ -271,8 +308,20 @@ fn improve(
         let attempt_session = session_dir.join(format!("attempt-{}", attempt + 1));
         fs::create_dir_all(&attempt_session)?;
 
-        let env_path = if !resolved_env.is_empty() { Some(resolved_env) } else { None };
-        let result = run_backend(&args.backend, profile, &wt, &task, &attempt_session, &llm, env_path);
+        let env_path = if !resolved_env.is_empty() {
+            Some(resolved_env)
+        } else {
+            None
+        };
+        let result = run_backend(
+            &args.backend,
+            profile,
+            &wt,
+            &task,
+            &attempt_session,
+            &llm,
+            env_path,
+        );
         let result = match result {
             Ok(r) => r,
             Err(e) => {
@@ -381,7 +430,7 @@ fn improve(
     };
 
     println!("Changes detected. Committing and pushing...");
-    let push_url = profile.push_url();
+    let push_url = profile.push_url()?;
     let push_pat = profile.pat();
     worktree::commit_and_push_msg(&wt, &branch, &push_url, &commit_msg, &push_pat)?;
 
@@ -428,8 +477,16 @@ fn experiment(
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
     let repo = Path::new(&profile.local_path);
 
-    println!("Creating worktree from {}...", profile.default_target_branch);
-    let wt = worktree::create(repo, &profile.default_target_branch, &branch, &worktree_base)?;
+    println!(
+        "Creating worktree from {}...",
+        profile.default_target_branch
+    );
+    let wt = worktree::create(
+        repo,
+        &profile.default_target_branch,
+        &branch,
+        &worktree_base,
+    )?;
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
@@ -437,8 +494,20 @@ fn experiment(
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
 
-    let env_path = if !resolved_env.is_empty() { Some(resolved_env) } else { None };
-    let result = match run_backend(&args.backend, profile, &wt, &task, &attempt_dir, &llm, env_path) {
+    let env_path = if !resolved_env.is_empty() {
+        Some(resolved_env)
+    } else {
+        None
+    };
+    let result = match run_backend(
+        &args.backend,
+        profile,
+        &wt,
+        &task,
+        &attempt_dir,
+        &llm,
+        env_path,
+    ) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Backend error (continuing for judge evaluation): {:#}", e);
@@ -465,7 +534,14 @@ fn experiment(
     // Judge whether the task was answered
     let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
     let answered = judge_experiment(&args.target, &log_text, artifact_count);
-    println!("Judge: {}", if answered { "ANSWERED" } else { "PARTIAL/UNANSWERED" });
+    println!(
+        "Judge: {}",
+        if answered {
+            "ANSWERED"
+        } else {
+            "PARTIAL/UNANSWERED"
+        }
+    );
 
     if !answered && artifact_count == 0 {
         println!(
@@ -489,7 +565,7 @@ fn experiment(
 
     println!("Changes detected. Committing and pushing...");
     let commit_msg = format!("gah: experiment for {}", profile.repo_id);
-    let push_url = profile.push_url();
+    let push_url = profile.push_url()?;
     let push_pat = profile.pat();
     worktree::commit_and_push_msg(&wt, &branch, &push_url, &commit_msg, &push_pat)?;
 
@@ -602,8 +678,13 @@ fn pm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs, session_dir: &Pat
         let report = format!(
             "# PM Report: {}\n\nRepo: {}\nBranch: {}\nTest files: {}\nCI configured: {}\n\n\
              ## Recent commits\n```\n{}\n```\n\n## README\n{}\n",
-            profile.display_name, profile.repo, profile.default_target_branch,
-            test_count, has_ci, log, readme_text,
+            profile.display_name,
+            profile.repo,
+            profile.default_target_branch,
+            test_count,
+            has_ci,
+            log,
+            readme_text,
         );
         let out_path = session_dir.join("pm-report.md");
         fs::write(&out_path, &report)?;
@@ -629,32 +710,26 @@ fn pm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs, session_dir: &Pat
         }
     }
 
-    let task = format!(
-        "Repository: {} ({})\nLocal path: {}\nTarget branch: {}\n\n\
-         You are a project manager. Decompose the ticket below into 3-6 atomic sub-tasks, \
-         each small enough for a single agent to complete in one session (30-60 min).\n\n\
-         For EACH sub-task, create a markdown file in docs/tickets/ named TICKET-NNN-<slug>.md \
-         (use the next available ticket number). Each file must contain:\n\
-         - A one-sentence goal\n\
-         - Specific files to change (exact paths)\n\
-         - Concrete acceptance criteria (each criterion must be independently verifiable)\n\
-         - The exact pytest command to verify it (e.g. `pytest tests/test_foo.py::test_bar -x`)\n\n\
-         Rules:\n\
-         - Do NOT write any code — only create the sub-ticket markdown files.\n\
-         - Each sub-ticket must be completable without depending on another sub-ticket.\n\
-         - Each sub-ticket should fix 1-3 specific failing tests, not the whole batch.\n\n\
-         ## Ticket to decompose:\n\n{}\n",
-        profile.display_name, profile.repo, profile.local_path, profile.default_target_branch,
-        args.target,
-    );
+    let task = build_pm_task(profile, repo, &args.target)?;
 
     let attempt_dir = session_dir.join("pm-run");
     fs::create_dir_all(&attempt_dir)?;
     fs::write(attempt_dir.join("task.md"), &task)?;
 
     // Run in the live repo (PM only creates docs — no code changes, low risk)
-    let result = run_backend(&args.backend, profile, repo, &task, &attempt_dir, &llm, None)?;
-    println!("PM backend finished: exit={} duration={:.0}s log={}", result.exit_code, result.duration_secs, result.log_path);
+    let result = run_backend(
+        &args.backend,
+        profile,
+        repo,
+        &task,
+        &attempt_dir,
+        &llm,
+        None,
+    )?;
+    println!(
+        "PM backend finished: exit={} duration={:.0}s log={}",
+        result.exit_code, result.duration_secs, result.log_path
+    );
 
     // List resulting ticket files so the manager can dispatch them
     let tickets_dir = repo.join("docs/tickets");
@@ -672,6 +747,153 @@ fn pm(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs, session_dir: &Pat
     }
 
     Ok(())
+}
+
+fn build_pm_task(profile: &Profile, repo: &Path, target: &str) -> Result<String> {
+    let preflight = collect_pm_preflight_context(profile, repo)?;
+    Ok(format!(
+        "Repository: {} ({})\nLocal path: {}\nTarget branch: {}\n\n\
+         You are a project manager. Use only the preflight context below plus the target request. \
+         Do not assume you will remember to inspect the repo yourself.\n\
+         Do not write code in PM mode.\n\n\
+         Rules:\n\
+         - Default action is to avoid creating new tickets.\n\
+         - Do not create a ticket if an open MR already covers the issue.\n\
+         - Do not create a ticket if an existing ticket already covers the issue.\n\
+         - Do not create a ticket if a recently merged MR already fixed the issue.\n\
+         - Consolidate small related fixes into one ticket.\n\
+         - Prefer \"already covered\" or \"update existing ticket\" when unsure.\n\
+         - If creating tickets, create only genuinely uncovered, atomic work.\n\
+         - Cite the relevant MR or ticket evidence whenever you decide work is already covered.\n\
+         - If the work is already covered, do not create any new ticket files.\n\
+         - If you do create tickets, create them in docs/tickets/ as TICKET-NNN-<slug>.md using the next available number.\n\
+         - Each new ticket must contain: a one-sentence goal, exact files to change, concrete acceptance criteria, and the exact verification command.\n\
+         - Each new ticket must be independently completable in one session.\n\n\
+         ## Preflight Context\n\n{}\n\n\
+         ## Target Request\n\n{}\n",
+        profile.display_name,
+        profile.repo,
+        profile.local_path,
+        profile.default_target_branch,
+        preflight,
+        target,
+    ))
+}
+
+fn collect_pm_preflight_context(profile: &Profile, repo: &Path) -> Result<String> {
+    let memory_path = repo.join("docs/MANAGER_MEMORY.md");
+    let manager_memory = fs::read_to_string(&memory_path).with_context(|| {
+        format!(
+            "PM mode requires manager memory at {}",
+            memory_path.display()
+        )
+    })?;
+
+    let repo_state = collect_pm_repo_state(repo);
+    let tickets = collect_ticket_summaries(&repo.join("docs/tickets"))?;
+
+    let mut out = String::new();
+    out.push_str("### Manager Memory\n");
+    out.push_str(&manager_memory);
+    if !manager_memory.ends_with('\n') {
+        out.push('\n');
+    }
+
+    out.push_str("\n### Open Merge Requests\n");
+    out.push_str(&collect_mr_context(profile, repo, "opened", None)?);
+    out.push_str("\n\n### Recently Merged Merge Requests\n");
+    out.push_str(&collect_mr_context(profile, repo, "merged", Some("20"))?);
+    out.push_str("\n\n### Existing Tickets\n");
+    if tickets.is_empty() {
+        out.push_str("(none found)");
+    } else {
+        out.push_str(&tickets.join("\n"));
+    }
+    out.push_str("\n\n### Repo State\n");
+    out.push_str(&repo_state);
+    Ok(out)
+}
+
+fn collect_mr_context(
+    profile: &Profile,
+    repo: &Path,
+    state: &str,
+    per_page: Option<&str>,
+) -> Result<String> {
+    if profile.provider != "gitlab" {
+        return Ok("(provider is not gitlab)".to_string());
+    }
+
+    ensure_bin("glab")?;
+    let mut args = vec![
+        "mr",
+        "list",
+        "--repo",
+        profile.repo.as_str(),
+        "--state",
+        state,
+    ];
+    if let Some(per_page) = per_page {
+        args.push("--per-page");
+        args.push(per_page);
+    }
+    let output = command_output("glab", &args, repo)?;
+    if output.is_empty() {
+        Ok("(none)".to_string())
+    } else {
+        Ok(output)
+    }
+}
+
+fn collect_ticket_summaries(tickets_dir: &Path) -> Result<Vec<String>> {
+    if !tickets_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut tickets = vec![];
+    for entry in fs::read_dir(tickets_dir)
+        .with_context(|| format!("reading {}", tickets_dir.display()))?
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let body = fs::read_to_string(&path).unwrap_or_default();
+        let title = first_markdown_heading(&body).unwrap_or("(no heading)");
+        tickets.push(format!(
+            "- {}: {}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            title
+        ));
+    }
+    tickets.sort();
+    Ok(tickets)
+}
+
+fn first_markdown_heading(body: &str) -> Option<&str> {
+    body.lines().map(str::trim).find_map(|line| {
+        if !line.starts_with('#') {
+            return None;
+        }
+        let stripped = line.trim_start_matches('#').trim();
+        (!stripped.is_empty()).then_some(stripped)
+    })
+}
+
+fn collect_pm_repo_state(repo: &Path) -> String {
+    let branch = command_output("git", &["rev-parse", "--abbrev-ref", "HEAD"], repo)
+        .unwrap_or_else(|e| format!("(unavailable: {:#})", e));
+    let dirty = command_output("git", &["status", "--short"], repo)
+        .map(|s| if s.is_empty() { "clean".to_string() } else { s })
+        .unwrap_or_else(|e| format!("(unavailable: {:#})", e));
+    let commits = command_output("git", &["log", "--oneline", "-5"], repo)
+        .unwrap_or_else(|e| format!("(unavailable: {:#})", e));
+
+    format!(
+        "Current branch: {}\n\nDirty status:\n{}\n\nRecent commits:\n{}",
+        branch, dirty, commits
+    )
 }
 
 fn review(profile: &Profile, args: &DispatchArgs, session_dir: &Path) -> Result<()> {
@@ -817,7 +1039,10 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
             if args.target.is_empty() {
                 println!("Steps: git log → test count → CI check → write pm-report.md")
             } else {
-                println!("Steps: {} backend → decompose target into sub-tickets in docs/tickets/", args.backend)
+                println!(
+                    "Steps: collect manager memory/MRs/tickets/repo state → {} backend → decompose target into sub-tickets in docs/tickets/",
+                    args.backend
+                )
             }
         }
         "review" => println!("Steps: git diff → bundle → claude review"),
@@ -872,7 +1097,11 @@ fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String 
 
     let mut task = format!(
         "Repository: {} ({})\nWorking directory: {}\nTarget branch: {}\n\n{}\n",
-        profile.display_name, profile.repo, wt.display(), profile.default_target_branch, instruction,
+        profile.display_name,
+        profile.repo,
+        wt.display(),
+        profile.default_target_branch,
+        instruction,
     );
     if !target.is_empty() {
         task.push_str(&format!("\n## Focus\n\n{}\n", target));
@@ -880,7 +1109,12 @@ fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String 
     task
 }
 
-fn format_candidate_task(profile: &Profile, _wt: &Path, mode: &str, c: &crate::models::Candidate) -> String {
+fn format_candidate_task(
+    profile: &Profile,
+    _wt: &Path,
+    mode: &str,
+    c: &crate::models::Candidate,
+) -> String {
     let mut out = format!(
         "# Task: {}\n\n\
          Repository: {} ({})\n\
@@ -941,6 +1175,128 @@ fn format_candidate_task(profile: &Profile, _wt: &Path, mode: &str, c: &crate::m
     };
     out.push_str(closing);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_pm_task, collect_pm_preflight_context, collect_ticket_summaries,
+        first_markdown_heading,
+    };
+    use crate::config::Profile;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn profile(local_path: &Path) -> Profile {
+        Profile {
+            display_name: "Repo".into(),
+            repo_id: "repo".into(),
+            provider: "github".into(),
+            repo: "owner/repo".into(),
+            local_path: local_path.display().to_string(),
+            artifact_root: "/tmp/artifacts".into(),
+            default_target_branch: "main".into(),
+            provider_api_base: None,
+            provider_project_id: None,
+            oh_profile: None,
+            openhands_args: vec![],
+            codex_args: vec![],
+            claude_args: vec![],
+            policy_path: None,
+            env_file: None,
+            env_file_prod: None,
+            validation_commands: vec![],
+            test_file_patterns: vec![],
+            model_improve: None,
+            model_pm: None,
+            model_review: None,
+        }
+    }
+
+    fn init_repo(repo: &Path) {
+        fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        fs::write(repo.join("README.md"), "hi\n").unwrap();
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+    }
+
+    #[test]
+    fn ticket_summaries_include_filename_and_heading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tickets = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&tickets).unwrap();
+        fs::write(tickets.join("TICKET-001-fix.md"), "# Fix login\nbody\n").unwrap();
+
+        assert_eq!(
+            collect_ticket_summaries(&tickets).unwrap(),
+            vec!["- TICKET-001-fix.md: Fix login"]
+        );
+    }
+
+    #[test]
+    fn pm_preflight_requires_manager_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+
+        let err = collect_pm_preflight_context(&profile(tmp.path()), tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("PM mode requires manager memory"));
+    }
+
+    #[test]
+    fn pm_task_includes_preflight_context_and_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        fs::write(
+            tmp.path().join("docs/MANAGER_MEMORY.md"),
+            "# Memory\nRemember open work.\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("docs/tickets/TICKET-002-auth.md"),
+            "# Fix push auth\n",
+        )
+        .unwrap();
+
+        let task = build_pm_task(&profile(tmp.path()), tmp.path(), "Fix push auth").unwrap();
+        assert!(task.contains("## Preflight Context"));
+        assert!(task.contains("Remember open work."));
+        assert!(task.contains("TICKET-002-auth.md: Fix push auth"));
+        assert!(task.contains("Default action is to avoid creating new tickets."));
+        assert!(task.contains("Current branch: main"));
+    }
+
+    #[test]
+    fn first_heading_skips_non_headings() {
+        assert_eq!(
+            first_markdown_heading("intro\n## Heading\n"),
+            Some("Heading")
+        );
+    }
 }
 
 fn git_output(args: &[&str], cwd: &Path) -> Result<String> {
