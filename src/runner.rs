@@ -6,12 +6,17 @@ use std::time::Instant;
 
 /// Parse a KEY=VALUE env file, skipping blank lines and comments.
 pub fn load_env_file(path: &str) -> Vec<(String, String)> {
-    let Ok(text) = fs::read_to_string(path) else { return vec![] };
+    let Ok(text) = fs::read_to_string(path) else {
+        return vec![];
+    };
     text.lines()
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .filter_map(|l| {
             let (k, v) = l.split_once('=')?;
-            Some((k.trim().to_string(), v.trim().trim_matches('"').trim_matches('\'').to_string()))
+            Some((
+                k.trim().to_string(),
+                v.trim().trim_matches('"').trim_matches('\'').to_string(),
+            ))
         })
         .collect()
 }
@@ -85,26 +90,28 @@ pub fn run_openhands(
     let start = Instant::now();
     let mut cmd = Command::new("openhands");
     cmd.args([
-            "--headless",
-            "--json",
-            "-t",
-            task,
-            "--exit-without-confirmation",
-            "--always-approve",
-            "--override-with-envs",
-        ])
-        .args(extra_args)
-        .env("OPENHANDS_SUPPRESS_BANNER", "1")
-        .env("LLM_BASE_URL", &llm.base_url)
-        .env("LLM_API_KEY", &llm.api_key)
-        .env("LLM_MODEL", &llm.model)
-        .current_dir(worktree)
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err));
+        "--headless",
+        "--json",
+        "-t",
+        task,
+        "--exit-without-confirmation",
+        "--always-approve",
+        "--override-with-envs",
+    ])
+    .args(extra_args)
+    .env("OPENHANDS_SUPPRESS_BANNER", "1")
+    .env("LLM_BASE_URL", &llm.base_url)
+    .env("LLM_API_KEY", &llm.api_key)
+    .env("LLM_MODEL", &llm.model)
+    .current_dir(worktree)
+    .stdout(Stdio::from(log_file))
+    .stderr(Stdio::from(log_err));
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
-    let status = cmd.status().context("launching openhands; is it installed and on PATH?")?;
+    let status = cmd
+        .status()
+        .context("launching openhands; is it installed and on PATH?")?;
 
     Ok(RunResult {
         exit_code: status.code().unwrap_or(-1),
@@ -135,8 +142,12 @@ pub fn run_codex(
         .current_dir(worktree)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_err));
-    for (k, v) in env_vars { cmd.env(k, v); }
-    let status = cmd.status().context("launching codex; is it installed and on PATH?")?;
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let status = cmd
+        .status()
+        .context("launching codex; is it installed and on PATH?")?;
 
     Ok(RunResult {
         exit_code: status.code().unwrap_or(-1),
@@ -167,8 +178,12 @@ pub fn run_claude(
         .current_dir(worktree)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_err));
-    for (k, v) in env_vars { cmd.env(k, v); }
-    let status = cmd.status().context("launching claude; is it installed and on PATH?")?;
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let status = cmd
+        .status()
+        .context("launching claude; is it installed and on PATH?")?;
 
     Ok(RunResult {
         exit_code: status.code().unwrap_or(-1),
