@@ -9,7 +9,7 @@
 - One backend CLI:
   - `codex`
   - `claude`
-  - `openhands` for `openhands` or `cloud-coder`
+  - `openhands`
 - Provider tooling:
   - GitHub: `gh`
   - GitLab: `glab` for PM MR preflight, plus token env vars for push/MR creation
