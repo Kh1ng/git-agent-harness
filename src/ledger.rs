@@ -1,13 +1,13 @@
 use crate::config::{GahConfig, Profile};
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-#[derive(Debug, Serialize, Default, Clone)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -16,7 +16,7 @@ pub struct LedgerUsage {
     pub usage_source: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LedgerEntry {
     pub timestamp: String,
     pub session_id: Option<String>,
@@ -27,6 +27,14 @@ pub struct LedgerEntry {
     pub local_path: String,
     pub provider: String,
     pub backend: String,
+    pub requested_backend: String,
+    pub effective_backend: String,
+    pub requested_model: Option<String>,
+    pub effective_model: Option<String>,
+    pub routing_reason: Option<String>,
+    pub fallback_used: bool,
+    pub confidence_impact: Option<String>,
+    pub human_required: bool,
     pub mode: String,
     pub target_summary: Option<String>,
     pub branch: Option<String>,
@@ -70,6 +78,14 @@ impl LedgerEntry {
             local_path: profile.local_path.clone(),
             provider: profile.provider.clone(),
             backend: backend.to_string(),
+            requested_backend: backend.to_string(),
+            effective_backend: backend.to_string(),
+            requested_model: None,
+            effective_model: None,
+            routing_reason: None,
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
             mode: mode.to_string(),
             target_summary: summarize_target(target),
             branch: None,
@@ -109,6 +125,24 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
+    let path = cfg.defaults.ledger_path();
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let mut entries = vec![];
+    for (idx, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = serde_json::from_str::<LedgerEntry>(line)
+            .with_context(|| format!("parsing ledger entry {} from {}", idx + 1, path.display()))?;
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
 fn summarize_target(target: &str) -> Option<String> {
     let trimmed = target.trim();
     if trimmed.is_empty() {
@@ -123,10 +157,96 @@ fn summarize_target(target: &str) -> Option<String> {
     Some(summary)
 }
 
+pub mod summary {
+    use super::{read_entries, LedgerEntry};
+    use crate::config;
+    use anyhow::Result;
+    use std::collections::HashMap;
+    use time::{Duration, OffsetDateTime};
+
+    pub fn run(since: &str, profile: Option<&str>, config_path: Option<&str>) -> Result<()> {
+        let cfg = config::load(config_path)?;
+        let cutoff = parse_since(since)?;
+        let mut entries = read_entries(&cfg)?;
+        if let Some(profile) = profile {
+            entries.retain(|entry| entry.profile == profile);
+        }
+        entries.retain(|entry| entry.timestamp >= cutoff);
+
+        println!("Ledger: {}", cfg.defaults.ledger_path().display());
+        println!("Entries: {}", entries.len());
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_mode: HashMap<String, usize> = HashMap::new();
+        let mut by_backend: HashMap<String, usize> = HashMap::new();
+        let mut success = 0usize;
+        let mut failed = 0usize;
+        for entry in &entries {
+            *by_mode.entry(entry.mode.clone()).or_default() += 1;
+            *by_backend
+                .entry(entry.effective_backend.clone())
+                .or_default() += 1;
+            if entry.error_summary.is_some() {
+                failed += 1;
+            } else {
+                success += 1;
+            }
+        }
+
+        println!("Success: {}", success);
+        println!("Failed:  {}", failed);
+        println!("By mode:");
+        print_counts(&by_mode);
+        println!("By backend:");
+        print_counts(&by_backend);
+        if let Some(last) = entries.last() {
+            println!(
+                "Last run: {} {} {} {}",
+                last.timestamp, last.profile, last.mode, last.effective_backend
+            );
+        }
+        Ok(())
+    }
+
+    fn print_counts(counts: &HashMap<String, usize>) {
+        let mut pairs: Vec<_> = counts.iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, count) in pairs {
+            println!("  {:<16} {}", key, count);
+        }
+    }
+
+    fn parse_since(input: &str) -> Result<String> {
+        let now = OffsetDateTime::now_utc();
+        let trimmed = input.trim();
+        if let Some(days) = trimmed.strip_suffix('d') {
+            let days = days.parse::<i64>()?;
+            return Ok((now - Duration::days(days))
+                .format(&time::format_description::well_known::Rfc3339)?);
+        }
+        if let Some(hours) = trimmed.strip_suffix('h') {
+            let hours = hours.parse::<i64>()?;
+            return Ok((now - Duration::hours(hours))
+                .format(&time::format_description::well_known::Rfc3339)?);
+        }
+        anyhow::bail!(
+            "invalid --since value '{}'; use forms like 7d or 24h",
+            input
+        )
+    }
+
+    #[allow(dead_code)]
+    fn _success(entry: &LedgerEntry) -> bool {
+        entry.error_summary.is_none()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{append, LedgerEntry};
-    use crate::config::{Defaults, GahConfig, Profile};
+    use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
 
     fn profile() -> Profile {
@@ -152,6 +272,7 @@ mod tests {
             model_improve: None,
             model_pm: None,
             model_review: None,
+            routing: RoutingPolicy::default(),
         }
     }
 
@@ -179,6 +300,7 @@ mod tests {
                 llm_base_url: String::new(),
                 llm_model_local: String::new(),
                 llm_model_cloud: String::new(),
+                routing: RoutingPolicy::default(),
             },
             profiles: HashMap::new(),
         };

@@ -75,6 +75,27 @@ provider_project_id = "12345"
 
 Secrets do not go in config.
 
+Routing precedence:
+
+1. explicit CLI backend/model override
+2. profile routing config
+3. global `defaults.routing`
+4. built-in fallback
+
+Example:
+
+```toml
+[defaults.routing]
+default_backend = "openhands"
+review_backend = "claude"
+weak_review_backend = "codex"
+allow_review_fallback = true
+
+[profiles.my-repo.routing]
+pm_backend = "claude"
+improve_backend = "codex"
+```
+
 ## Auth
 
 - GitHub: set `GITHUB_TOKEN` or `GH_TOKEN`
@@ -194,6 +215,8 @@ PM mode with a target now injects preflight context before the manager runs:
 
 Missing `docs/MANAGER_MEMORY.md` is a hard failure for PM decomposition.
 
+With a target, PM mode now asks the manager for structured JSON, validates it, dedupes it against existing tickets/open MRs/recent merged MRs, assigns ticket IDs, and then writes the ticket markdown files itself.
+
 ## Ledger
 
 Inspect recent runs:
@@ -204,6 +227,13 @@ jq . ~/.config/gah/ledger.jsonl | less
 ```
 
 Fields include mode, backend, branch, session dir, validation status, commit/push/MR status, diff stats, error summary, and nullable usage/cost placeholders.
+
+Summarize the ledger:
+
+```bash
+gah ledger summary --since 7d
+gah ledger summary --profile my-repo --since 24h
+```
 
 ## Prune
 
@@ -224,6 +254,7 @@ Prune only touches:
 - `gah init`
 - `gah doctor`
 - `gah dispatch`
+- `gah ledger summary`
 - `gah prune`
 - `gah profile list`
 - `gah profile show <name>`

@@ -140,3 +140,30 @@ pub struct RepoPolicy {
     pub allow_issue_write: bool,
     pub allow_project_write: bool,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PmPlan {
+    pub title: String,
+    pub summary: String,
+    #[serde(default)]
+    pub tickets: Vec<PmPlanTicket>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PmPlanTicket {
+    pub title: String,
+    pub summary: String,
+    pub difficulty: String,
+    pub risk: String,
+    #[serde(default)]
+    pub recommended_backend: Option<String>,
+    #[serde(default)]
+    pub duplicate_evidence: Vec<String>,
+    #[serde(default)]
+    pub affected_files: Vec<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    pub verification_commands: Vec<String>,
+    pub uncovered_reason: String,
+}

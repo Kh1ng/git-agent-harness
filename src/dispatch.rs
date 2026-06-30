@@ -1,6 +1,8 @@
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
 use crate::models::CandidateArtifact;
+use crate::models::{PmPlan, PmPlanTicket};
+use crate::routing::{self, RouteDecision, RouteRequest};
 use crate::{provider, runner, worktree};
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -60,7 +62,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     let result = match args.mode.as_str() {
         "improve" | "fix" => improve(cfg, profile, args, &session_dir, &mut ledger),
         "pm" => pm(cfg, profile, args, &session_dir, &mut ledger),
-        "review" => review(profile, args, &session_dir, &mut ledger),
+        "review" => review(cfg, profile, args, &session_dir, &mut ledger),
         "experiment" => experiment(cfg, profile, args, &session_dir, &mut ledger),
         other => anyhow::bail!("unknown mode: {}", other),
     };
@@ -78,6 +80,7 @@ fn resolve_llm(
     cfg: &GahConfig,
     args: &DispatchArgs,
     profile_oh: Option<&str>,
+    effective_model: Option<&str>,
 ) -> Result<runner::LlmConfig> {
     // CLI flag wins, then profile config, then default
     let effective_oh_profile = args.oh_profile.as_deref().or(profile_oh);
@@ -85,6 +88,9 @@ fn resolve_llm(
         let mut llm = runner::load_oh_profile(name)?;
         if let Some(m) = &args.model {
             llm.model = m.clone();
+        }
+        if let Some(m) = effective_model {
+            llm.model = m.to_string();
         }
         if let Ok(v) = std::env::var("LLM_BASE_URL") {
             llm.base_url = v;
@@ -103,6 +109,13 @@ fn resolve_llm(
             base_url: cfg.defaults.llm_base_url(),
             api_key: cfg.defaults.llm_api_key(),
             model: m.clone(),
+        });
+    }
+    if let Some(m) = effective_model {
+        return Ok(runner::LlmConfig {
+            base_url: cfg.defaults.llm_base_url(),
+            api_key: cfg.defaults.llm_api_key(),
+            model: m.to_string(),
         });
     }
     // Check profile-level mode-specific override, then global default
@@ -268,8 +281,25 @@ fn improve(
     enforce_policy(profile, "open-draft-pr")?;
     enforce_policy(profile, push_action)?;
 
-    preflight(&args.backend)?;
-    let llm = resolve_llm(cfg, args, profile.oh_profile.as_deref())?;
+    let route = routing::decide(
+        &cfg.defaults,
+        profile,
+        RouteRequest {
+            mode: &args.mode,
+            requested_backend: &args.backend,
+            requested_model: args.model.as_deref(),
+            recommended_backend: None,
+            recommended_model: None,
+        },
+    )?;
+    apply_route_to_ledger(ledger, &route);
+    preflight(&route.effective_backend)?;
+    let llm = resolve_llm(
+        cfg,
+        args,
+        profile.oh_profile.as_deref(),
+        route.effective_model.as_deref(),
+    )?;
 
     // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
     let resolved_env = if args.prod {
@@ -325,7 +355,7 @@ fn improve(
             "\nAttempt {}/{}: running {} backend...",
             attempt + 1,
             max_attempts,
-            args.backend
+            route.effective_backend
         );
         let attempt_session = session_dir.join(format!("attempt-{}", attempt + 1));
         fs::create_dir_all(&attempt_session)?;
@@ -336,7 +366,7 @@ fn improve(
             None
         };
         let result = run_backend(
-            &args.backend,
+            &route.effective_backend,
             profile,
             &wt,
             &task,
@@ -497,8 +527,25 @@ fn experiment(
     session_dir: &Path,
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
-    preflight(&args.backend)?;
-    let llm = resolve_llm(cfg, args, profile.oh_profile.as_deref())?;
+    let route = routing::decide(
+        &cfg.defaults,
+        profile,
+        RouteRequest {
+            mode: "experiment",
+            requested_backend: &args.backend,
+            requested_model: args.model.as_deref(),
+            recommended_backend: None,
+            recommended_model: None,
+        },
+    )?;
+    apply_route_to_ledger(ledger, &route);
+    preflight(&route.effective_backend)?;
+    let llm = resolve_llm(
+        cfg,
+        args,
+        profile.oh_profile.as_deref(),
+        route.effective_model.as_deref(),
+    )?;
 
     // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
     let resolved_env = if args.prod {
@@ -542,7 +589,7 @@ fn experiment(
         None
     };
     let result = match run_backend(
-        &args.backend,
+        &route.effective_backend,
         profile,
         &wt,
         &task,
@@ -759,9 +806,27 @@ fn pm(
         return Ok(());
     }
 
-    // With a target: dispatch an LLM to decompose it into atomic sub-tickets.
-    preflight(&args.backend)?;
-    let llm = resolve_llm(cfg, args, profile.oh_profile.as_deref())?;
+    // With a target: dispatch an LLM to produce a structured ticket plan.
+    let preflight_ctx = collect_pm_preflight(profile, repo)?;
+    let plan_route = routing::decide(
+        &cfg.defaults,
+        profile,
+        RouteRequest {
+            mode: "pm",
+            requested_backend: &args.backend,
+            requested_model: args.model.as_deref(),
+            recommended_backend: None,
+            recommended_model: None,
+        },
+    )?;
+    apply_route_to_ledger(ledger, &plan_route);
+    preflight(&plan_route.effective_backend)?;
+    let llm = resolve_llm(
+        cfg,
+        args,
+        profile.oh_profile.as_deref(),
+        plan_route.effective_model.as_deref(),
+    )?;
 
     // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
     let resolved_env = if args.prod {
@@ -776,7 +841,7 @@ fn pm(
         }
     }
 
-    let task = build_pm_task(profile, repo, &args.target)?;
+    let task = build_pm_plan_task(profile, &preflight_ctx, &args.target)?;
 
     let attempt_dir = session_dir.join("pm-run");
     fs::create_dir_all(&attempt_dir)?;
@@ -784,7 +849,7 @@ fn pm(
 
     // Run in the live repo (PM only creates docs — no code changes, low risk)
     let result = run_backend(
-        &args.backend,
+        &plan_route.effective_backend,
         profile,
         repo,
         &task,
@@ -799,31 +864,25 @@ fn pm(
     ledger.backend_exit_code = Some(result.exit_code);
     ledger.validation_result = Some("not_run".into());
 
-    // List resulting ticket files so the manager can dispatch them
-    let tickets_dir = repo.join("docs/tickets");
-    if tickets_dir.exists() {
-        let mut tickets: Vec<_> = fs::read_dir(&tickets_dir)
-            .unwrap_or_else(|_| fs::read_dir(".").unwrap())
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
-            .collect();
-        tickets.sort_by_key(|e| e.file_name());
-        println!("\nTickets in docs/tickets/:");
-        for t in &tickets {
-            println!("  {}", t.file_name().to_string_lossy());
-        }
+    let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+    let plan = parse_pm_plan(&log_text)?;
+    let written = apply_pm_plan(repo, &preflight_ctx, &plan)?;
+    println!("\nCreated {} ticket(s):", written.len());
+    for path in &written {
+        println!("  {}", path.display());
     }
 
     Ok(())
 }
 
-fn build_pm_task(profile: &Profile, repo: &Path, target: &str) -> Result<String> {
-    let preflight = collect_pm_preflight_context(profile, repo)?;
+fn build_pm_plan_task(profile: &Profile, ctx: &PmPreflight, target: &str) -> Result<String> {
     Ok(format!(
         "Repository: {} ({})\nLocal path: {}\nTarget branch: {}\n\n\
          You are a project manager. Use only the preflight context below plus the target request. \
          Do not assume you will remember to inspect the repo yourself.\n\
-         Do not write code in PM mode.\n\n\
+         Do not write code in PM mode.\n\
+         Return only valid JSON matching this schema:\n\
+         {{\"title\":string,\"summary\":string,\"tickets\":[{{\"title\":string,\"summary\":string,\"difficulty\":\"easy|medium|hard\",\"risk\":\"low|medium|high\",\"recommended_backend\":string|null,\"duplicate_evidence\":[string],\"affected_files\":[string],\"acceptance_criteria\":[string],\"verification_commands\":[string],\"uncovered_reason\":string}}]}}\n\n\
          Rules:\n\
          - Default action is to avoid creating new tickets.\n\
          - Do not create a ticket if an open MR already covers the issue.\n\
@@ -833,9 +892,7 @@ fn build_pm_task(profile: &Profile, repo: &Path, target: &str) -> Result<String>
          - Prefer \"already covered\" or \"update existing ticket\" when unsure.\n\
          - If creating tickets, create only genuinely uncovered, atomic work.\n\
          - Cite the relevant MR or ticket evidence whenever you decide work is already covered.\n\
-         - If the work is already covered, do not create any new ticket files.\n\
-         - If you do create tickets, create them in docs/tickets/ as TICKET-NNN-<slug>.md using the next available number.\n\
-         - Each new ticket must contain: a one-sentence goal, exact files to change, concrete acceptance criteria, and the exact verification command.\n\
+         - If the work is already covered, return an empty tickets array.\n\
          - Each new ticket must be independently completable in one session.\n\n\
          ## Preflight Context\n\n{}\n\n\
          ## Target Request\n\n{}\n",
@@ -843,12 +900,12 @@ fn build_pm_task(profile: &Profile, repo: &Path, target: &str) -> Result<String>
         profile.repo,
         profile.local_path,
         profile.default_target_branch,
-        preflight,
+        ctx.rendered,
         target,
     ))
 }
 
-fn collect_pm_preflight_context(profile: &Profile, repo: &Path) -> Result<String> {
+fn collect_pm_preflight(profile: &Profile, repo: &Path) -> Result<PmPreflight> {
     let memory_path = repo.join("docs/MANAGER_MEMORY.md");
     let manager_memory = fs::read_to_string(&memory_path).with_context(|| {
         format!(
@@ -859,6 +916,8 @@ fn collect_pm_preflight_context(profile: &Profile, repo: &Path) -> Result<String
 
     let repo_state = collect_pm_repo_state(repo);
     let tickets = collect_ticket_summaries(&repo.join("docs/tickets"))?;
+    let open_mrs = collect_mr_context(profile, repo, "opened", None)?;
+    let merged_mrs = collect_mr_context(profile, repo, "merged", Some("20"))?;
 
     let mut out = String::new();
     out.push_str("### Manager Memory\n");
@@ -868,9 +927,9 @@ fn collect_pm_preflight_context(profile: &Profile, repo: &Path) -> Result<String
     }
 
     out.push_str("\n### Open Merge Requests\n");
-    out.push_str(&collect_mr_context(profile, repo, "opened", None)?);
+    out.push_str(&open_mrs);
     out.push_str("\n\n### Recently Merged Merge Requests\n");
-    out.push_str(&collect_mr_context(profile, repo, "merged", Some("20"))?);
+    out.push_str(&merged_mrs);
     out.push_str("\n\n### Existing Tickets\n");
     if tickets.is_empty() {
         out.push_str("(none found)");
@@ -879,7 +938,12 @@ fn collect_pm_preflight_context(profile: &Profile, repo: &Path) -> Result<String
     }
     out.push_str("\n\n### Repo State\n");
     out.push_str(&repo_state);
-    Ok(out)
+    Ok(PmPreflight {
+        rendered: out,
+        existing_tickets: tickets,
+        open_mrs,
+        merged_mrs,
+    })
 }
 
 fn collect_mr_context(
@@ -965,12 +1029,25 @@ fn collect_pm_repo_state(repo: &Path) -> String {
 }
 
 fn review(
+    cfg: &GahConfig,
     profile: &Profile,
     args: &DispatchArgs,
     session_dir: &Path,
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
     let repo = Path::new(&profile.local_path);
+    let route = routing::decide(
+        &cfg.defaults,
+        profile,
+        RouteRequest {
+            mode: "review",
+            requested_backend: &args.backend,
+            requested_model: args.model.as_deref(),
+            recommended_backend: None,
+            recommended_model: None,
+        },
+    )?;
+    apply_route_to_ledger(ledger, &route);
     let branch = if args.target.is_empty() {
         git_output(&["rev-parse", "--abbrev-ref", "HEAD"], repo)
             .unwrap_or_else(|_| "HEAD".to_string())
@@ -1016,18 +1093,9 @@ fn review(
         files,
     );
 
-    let effective_backend = if args.backend == "auto" || args.backend.is_empty() {
-        if which("claude").is_some() {
-            "claude"
-        } else {
-            "openhands"
-        }
-    } else {
-        &args.backend
-    };
-
-    let result = match effective_backend {
+    let result = match route.effective_backend.as_str() {
         "claude" => Command::new("claude").args(["-p", &prompt]).output().ok(),
+        "codex" => Command::new("codex").args(["exec", &prompt]).output().ok(),
         _ => None,
     };
 
@@ -1039,6 +1107,10 @@ fn review(
             println!("{}", review_text);
             println!("Written: {}", report_path.display());
             ledger.backend_exit_code = o.status.code();
+            if route.fallback_used {
+                println!("Review confidence reduced; human review required.");
+                ledger.validation_result = Some("human-review".into());
+            }
         }
         _ => {
             println!("Review bundle written to: {}", bundle.display());
@@ -1070,6 +1142,7 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
     );
     match args.mode.as_str() {
         "improve" | "fix" => {
+            let route = dry_run_route(cfg, profile, &args.mode, args);
             if let Some(name) = args.oh_profile.as_deref() {
                 println!(
                     "OH profile:   {} (~/.openhands/profiles/{}.json)",
@@ -1086,6 +1159,10 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
                 println!("LLM base:     {}", cfg.defaults.llm_base_url());
             }
             println!("Backend:      {}", args.backend);
+            if let Some(route) = &route {
+                println!("Effective:    {}", route.effective_backend);
+                println!("Routing:      {}", route.routing_reason);
+            }
             println!("Retries:      {}", args.retries);
             println!("Allow draft fail: {}", args.allow_draft_fail);
             println!("Prod env:         {}", args.prod);
@@ -1108,20 +1185,34 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
             }
             println!(
                 "\nSteps: fetch → worktree → {} → [validate → retry]* → commit → push → draft MR",
-                args.backend
+                route.as_ref().map(|r| r.effective_backend.as_str()).unwrap_or(args.backend.as_str())
             );
         }
         "pm" => {
             if args.target.is_empty() {
                 println!("Steps: git log → test count → CI check → write pm-report.md")
             } else {
+                let route = dry_run_route(cfg, profile, "pm", args);
+                println!("Backend:      {}", args.backend);
+                if let Some(route) = &route {
+                    println!("Effective:    {}", route.effective_backend);
+                    println!("Routing:      {}", route.routing_reason);
+                }
                 println!(
-                    "Steps: collect manager memory/MRs/tickets/repo state → {} backend → decompose target into sub-tickets in docs/tickets/",
-                    args.backend
+                    "Steps: collect manager memory/MRs/tickets/repo state → {} backend → structured PM plan → validated tickets in docs/tickets/",
+                    route.as_ref().map(|r| r.effective_backend.as_str()).unwrap_or(args.backend.as_str())
                 )
             }
         }
-        "review" => println!("Steps: git diff → bundle → claude review"),
+        "review" => {
+            let route = dry_run_route(cfg, profile, "review", args);
+            println!("Backend:      {}", args.backend);
+            if let Some(route) = &route {
+                println!("Effective:    {}", route.effective_backend);
+                println!("Routing:      {}", route.routing_reason);
+            }
+            println!("Steps: git diff → bundle → routed review");
+        }
         "experiment" => println!(
             "Steps: worktree → {} backend (research prompt) → collect artifacts → LLM judge → commit → draft MR",
             args.backend
@@ -1256,10 +1347,11 @@ fn format_candidate_task(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pm_task, collect_pm_preflight_context, collect_ticket_summaries,
-        first_markdown_heading,
+        apply_pm_plan, build_pm_plan_task, collect_pm_preflight, collect_ticket_summaries,
+        first_markdown_heading, parse_pm_plan,
     };
-    use crate::config::Profile;
+    use crate::config::{Profile, RoutingPolicy};
+    use crate::models::PmPlan;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -1287,6 +1379,7 @@ mod tests {
             model_improve: None,
             model_pm: None,
             model_review: None,
+            routing: RoutingPolicy::default(),
         }
     }
 
@@ -1338,7 +1431,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         init_repo(tmp.path());
 
-        let err = collect_pm_preflight_context(&profile(tmp.path()), tmp.path()).unwrap_err();
+        let err = collect_pm_preflight(&profile(tmp.path()), tmp.path()).unwrap_err();
         assert!(err.to_string().contains("PM mode requires manager memory"));
     }
 
@@ -1358,7 +1451,8 @@ mod tests {
         )
         .unwrap();
 
-        let task = build_pm_task(&profile(tmp.path()), tmp.path(), "Fix push auth").unwrap();
+        let ctx = collect_pm_preflight(&profile(tmp.path()), tmp.path()).unwrap();
+        let task = build_pm_plan_task(&profile(tmp.path()), &ctx, "Fix push auth").unwrap();
         assert!(task.contains("## Preflight Context"));
         assert!(task.contains("Remember open work."));
         assert!(task.contains("TICKET-002-auth.md: Fix push auth"));
@@ -1372,6 +1466,37 @@ mod tests {
             first_markdown_heading("intro\n## Heading\n"),
             Some("Heading")
         );
+    }
+
+    #[test]
+    fn parse_pm_plan_extracts_json_from_log() {
+        let plan =
+            parse_pm_plan("noise\n{\"title\":\"T\",\"summary\":\"S\",\"tickets\":[]}\n").unwrap();
+        assert_eq!(plan.title, "T");
+    }
+
+    #[test]
+    fn apply_pm_plan_skips_duplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+        let ctx = super::PmPreflight {
+            rendered: String::new(),
+            existing_tickets: vec!["- TICKET-001-fix.md: Fix login".into()],
+            open_mrs: String::new(),
+            merged_mrs: String::new(),
+        };
+        let plan: PmPlan = serde_json::from_str(
+            r#"{"title":"Plan","summary":"Summary","tickets":[
+                {"title":"Fix login","summary":"dup","difficulty":"easy","risk":"low","recommended_backend":null,"duplicate_evidence":[],"affected_files":["a"],"acceptance_criteria":["b"],"verification_commands":["pytest"],"uncovered_reason":"x"},
+                {"title":"Fix auth","summary":"new","difficulty":"easy","risk":"low","recommended_backend":null,"duplicate_evidence":[],"affected_files":["a"],"acceptance_criteria":["b"],"verification_commands":["pytest"],"uncovered_reason":"x"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let written = apply_pm_plan(repo, &ctx, &plan).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(written[0].display().to_string().contains("fix-auth"));
     }
 }
 
@@ -1394,6 +1519,237 @@ fn summarize_error(err: &anyhow::Error) -> String {
         text.push_str("...");
     }
     text
+}
+
+fn dry_run_route(
+    cfg: &GahConfig,
+    profile: &Profile,
+    mode: &str,
+    args: &DispatchArgs,
+) -> Option<RouteDecision> {
+    routing::decide(
+        &cfg.defaults,
+        profile,
+        RouteRequest {
+            mode,
+            requested_backend: &args.backend,
+            requested_model: args.model.as_deref(),
+            recommended_backend: None,
+            recommended_model: None,
+        },
+    )
+    .ok()
+}
+
+#[derive(Debug, Clone)]
+struct PmPreflight {
+    rendered: String,
+    existing_tickets: Vec<String>,
+    open_mrs: String,
+    merged_mrs: String,
+}
+
+fn parse_pm_plan(log_text: &str) -> Result<PmPlan> {
+    let json = extract_first_json_object(log_text)
+        .ok_or_else(|| anyhow::anyhow!("PM planner did not return valid JSON"))?;
+    let plan = serde_json::from_str::<PmPlan>(&json)?;
+    if plan.title.trim().is_empty() || plan.summary.trim().is_empty() {
+        anyhow::bail!("PM plan missing title or summary");
+    }
+    Ok(plan)
+}
+
+fn extract_first_json_object(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    for start in 0..bytes.len() {
+        if bytes[start] != b'{' {
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escaped = false;
+        for end in start..bytes.len() {
+            let ch = bytes[end] as char;
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let candidate = &text[start..=end];
+                        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                            return Some(candidate.to_string());
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<PathBuf>> {
+    let tickets_dir = repo.join("docs/tickets");
+    fs::create_dir_all(&tickets_dir)?;
+    let next_id = next_ticket_id(&tickets_dir)?;
+    let mut written = vec![];
+    let mut id = next_id;
+    for ticket in &plan.tickets {
+        if should_skip_ticket(ctx, ticket) {
+            continue;
+        }
+        validate_ticket(ticket)?;
+        let slug = slugify(&ticket.title);
+        let filename = format!("TICKET-{:03}-{}.md", id, slug);
+        let path = tickets_dir.join(filename);
+        fs::write(&path, render_ticket(ticket, id))?;
+        written.push(path);
+        id += 1;
+    }
+    Ok(written)
+}
+
+fn should_skip_ticket(ctx: &PmPreflight, ticket: &PmPlanTicket) -> bool {
+    let title = normalize_match(&ticket.title);
+    if title.is_empty() {
+        return true;
+    }
+    ctx.existing_tickets
+        .iter()
+        .any(|item| normalize_match(item).contains(&title))
+        || normalize_match(&ctx.open_mrs).contains(&title)
+        || normalize_match(&ctx.merged_mrs).contains(&title)
+}
+
+fn validate_ticket(ticket: &PmPlanTicket) -> Result<()> {
+    if ticket.title.trim().is_empty() || ticket.summary.trim().is_empty() {
+        anyhow::bail!("ticket missing title or summary");
+    }
+    if !matches!(ticket.difficulty.as_str(), "easy" | "medium" | "hard") {
+        anyhow::bail!("ticket '{}' has invalid difficulty", ticket.title);
+    }
+    if !matches!(ticket.risk.as_str(), "low" | "medium" | "high") {
+        anyhow::bail!("ticket '{}' has invalid risk", ticket.title);
+    }
+    if ticket.acceptance_criteria.is_empty() || ticket.verification_commands.is_empty() {
+        anyhow::bail!(
+            "ticket '{}' missing acceptance or verification",
+            ticket.title
+        );
+    }
+    Ok(())
+}
+
+fn render_ticket(ticket: &PmPlanTicket, id: usize) -> String {
+    let mut out = format!(
+        "# TICKET-{id:03}: {title}\n\n\
+Goal: {summary}\n\n\
+Difficulty: {difficulty}\n\
+Risk: {risk}\n\
+Recommended backend: {backend}\n\n\
+## Why This Is Uncovered\n{reason}\n\n\
+## Affected Files\n",
+        id = id,
+        title = ticket.title,
+        summary = ticket.summary,
+        difficulty = ticket.difficulty,
+        risk = ticket.risk,
+        backend = ticket
+            .recommended_backend
+            .as_deref()
+            .unwrap_or("unspecified"),
+        reason = ticket.uncovered_reason,
+    );
+    for file in &ticket.affected_files {
+        out.push_str(&format!("- {}\n", file));
+    }
+    if !ticket.duplicate_evidence.is_empty() {
+        out.push_str("\n## Duplicate Evidence Considered\n");
+        for item in &ticket.duplicate_evidence {
+            out.push_str(&format!("- {}\n", item));
+        }
+    }
+    out.push_str("\n## Acceptance Criteria\n");
+    for item in &ticket.acceptance_criteria {
+        out.push_str(&format!("- {}\n", item));
+    }
+    out.push_str("\n## Verification Commands\n");
+    for cmd in &ticket.verification_commands {
+        out.push_str(&format!("- `{}`\n", cmd));
+    }
+    out
+}
+
+fn next_ticket_id(tickets_dir: &Path) -> Result<usize> {
+    let mut max_id = 0usize;
+    if tickets_dir.exists() {
+        for entry in fs::read_dir(tickets_dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(rest) = name.strip_prefix("TICKET-") {
+                if let Some((num, _)) = rest.split_once('-') {
+                    max_id = max_id.max(num.parse::<usize>().unwrap_or(0));
+                }
+            }
+        }
+    }
+    Ok(max_id + 1)
+}
+
+fn slugify(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in input.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn normalize_match(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecision) {
+    ledger.backend = route.effective_backend.clone();
+    ledger.requested_backend = route.requested_backend.clone();
+    ledger.effective_backend = route.effective_backend.clone();
+    ledger.requested_model = route.requested_model.clone();
+    ledger.effective_model = route.effective_model.clone();
+    ledger.routing_reason = Some(route.routing_reason.clone());
+    ledger.fallback_used = route.fallback_used;
+    ledger.confidence_impact = route.confidence_impact.clone();
+    ledger.human_required = route.human_required;
 }
 
 fn count_test_files(profile: &Profile, root: &Path) -> usize {

@@ -9,6 +9,7 @@ mod policy;
 mod price_guard;
 mod provider;
 mod prune;
+mod routing;
 mod runner;
 mod worktree;
 
@@ -94,6 +95,11 @@ enum Commands {
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },
+    /// Inspect ledger data
+    Ledger {
+        #[command(subcommand)]
+        command: LedgerCommands,
+    },
     /// Dispatch a job to a backend (improve, pm, review, fix, experiment)
     Dispatch {
         #[arg(long)]
@@ -149,6 +155,19 @@ enum ProfileCommands {
         name: String,
         #[arg(long)]
         config: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum LedgerCommands {
+    /// Summarize recent ledger entries
+    Summary {
+        #[arg(long, default_value = "7d")]
+        since: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
     },
 }
 
@@ -211,6 +230,14 @@ fn main() -> Result<()> {
             older_than,
             dry_run,
         )?,
+
+        Commands::Ledger { command } => match command {
+            LedgerCommands::Summary {
+                since,
+                profile,
+                config_path,
+            } => ledger::summary::run(&since, profile.as_deref(), config_path.as_deref())?,
+        },
 
         Commands::Dispatch {
             profile,

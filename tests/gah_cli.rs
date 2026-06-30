@@ -50,6 +50,14 @@ fn make_fake_bin(dir: &std::path::Path, name: &str) {
     fs::set_permissions(&path, perms).unwrap();
 }
 
+fn make_fake_bin_with_body(dir: &std::path::Path, name: &str, body: &str) {
+    let path = dir.join(name);
+    fs::write(&path, body).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+}
+
 fn prepend_path(dir: &std::path::Path) -> String {
     let old = std::env::var("PATH").unwrap_or_default();
     format!("{}:{}", dir.display(), old)
@@ -91,6 +99,16 @@ fn write_real_repo_config(
     repo: &std::path::Path,
     provider: &str,
 ) -> std::path::PathBuf {
+    write_real_repo_config_with_extra(tmp, repo, provider, "", "")
+}
+
+fn write_real_repo_config_with_extra(
+    tmp: &TempDir,
+    repo: &std::path::Path,
+    provider: &str,
+    extra_profile: &str,
+    extra_defaults: &str,
+) -> std::path::PathBuf {
     let cfg = tmp.path().join("gah-config-real.toml");
     let extra = match provider {
         "gitlab" => "provider_api_base = \"https://gitlab.example.com/api/v4\"\nprovider_project_id = \"42\"\n",
@@ -106,6 +124,7 @@ worktree_base = "{root}/worktrees"
 llm_base_url  = "http://localhost:4000"
 llm_model_local = "local/test"
 llm_model_cloud = "cloud/test"
+{extra_defaults}
 
 [profiles.real]
 display_name          = "Real Repo"
@@ -116,11 +135,14 @@ local_path            = "{repo}"
 artifact_root         = "{root}/artifacts/real"
 default_target_branch = "main"
 {extra}
+{extra_profile}
 "#,
             root = tmp.path().display(),
             provider = provider,
             repo = repo.display(),
             extra = extra,
+            extra_profile = extra_profile,
+            extra_defaults = extra_defaults,
         ),
     )
     .unwrap();
@@ -925,4 +947,95 @@ fn prune_dry_run_reports_old_sessions_and_worktrees() {
         .success()
         .stdout(predicate::str::contains("would remove session"))
         .stdout(predicate::str::contains("would remove worktree"));
+}
+
+#[test]
+fn dispatch_pm_target_parses_structured_plan_and_writes_ticket() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\npm_backend = \"claude\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\nprintf '%s\n' '{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Fix auth\",\"summary\":\"Tighten auth checks\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"codex\",\"duplicate_evidence\":[],\"affected_files\":[\"src/auth.rs\"],\"acceptance_criteria\":[\"auth rejects invalid token\"],\"verification_commands\":[\"pytest tests/test_auth.py -x\"],\"uncovered_reason\":\"No open MR or ticket covers this auth edge case.\"}]}'\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--target",
+            "Plan auth work",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created 1 ticket"));
+
+    let tickets_dir = repo.join("docs/tickets");
+    let entries: Vec<_> = fs::read_dir(&tickets_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(entries.iter().any(|name| name.contains("fix-auth")));
+}
+
+#[test]
+fn ledger_summary_reports_recent_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("gah.toml");
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[defaults]
+artifact_root = "{root}/artifacts"
+worktree_base = "{root}/worktrees"
+llm_base_url = ""
+llm_model_local = ""
+llm_model_cloud = ""
+"#,
+            root = tmp.path().display()
+        ),
+    )
+    .unwrap();
+    let ledger_dir = tmp.path().join("artifacts");
+    fs::create_dir_all(&ledger_dir).unwrap();
+    fs::write(
+        ledger_dir.join("ledger.jsonl"),
+        "{\"timestamp\":\"2099-01-01T00:00:00Z\",\"session_id\":\"1\",\"profile\":\"real\",\"display_name\":\"Real\",\"repo_id\":\"real\",\"repo\":\"owner/real\",\"local_path\":\"/tmp/repo\",\"provider\":\"github\",\"backend\":\"claude\",\"requested_backend\":\"claude\",\"effective_backend\":\"claude\",\"requested_model\":null,\"effective_model\":null,\"routing_reason\":\"explicit\",\"fallback_used\":false,\"confidence_impact\":null,\"human_required\":false,\"mode\":\"pm\",\"target_summary\":\"x\",\"branch\":null,\"session_dir\":null,\"duration_seconds\":1.0,\"backend_exit_code\":0,\"validation_result\":\"not_run\",\"commit_attempted\":false,\"commit_created\":false,\"push_attempted\":false,\"push_succeeded\":false,\"mr_attempted\":false,\"mr_created\":false,\"mr_url\":null,\"files_changed\":null,\"insertions\":null,\"deletions\":null,\"error_summary\":null,\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"total_tokens\":null,\"estimated_cost_usd\":null,\"usage_source\":null}}\n",
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "ledger",
+            "summary",
+            "--since",
+            "7d",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Entries: 1"))
+        .stdout(predicate::str::contains("By mode:"))
+        .stdout(predicate::str::contains("pm"));
 }

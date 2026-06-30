@@ -212,7 +212,7 @@ impl CheckStatus {
 #[cfg(test)]
 mod tests {
     use super::check_push_url;
-    use crate::config::Profile;
+    use crate::config::{Profile, RoutingPolicy};
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
@@ -237,6 +237,7 @@ mod tests {
             model_improve: None,
             model_pm: None,
             model_review: None,
+            routing: RoutingPolicy::default(),
         }
     }
 

@@ -23,6 +23,8 @@ pub struct Defaults {
     pub llm_model_local: String,
     #[serde(default)]
     pub llm_model_cloud: String,
+    #[serde(default)]
+    pub routing: RoutingPolicy,
 }
 
 impl Defaults {
@@ -106,6 +108,40 @@ pub struct Profile {
     /// Model override for `review` mode
     #[serde(default)]
     pub model_review: Option<String>,
+    #[serde(default)]
+    pub routing: RoutingPolicy,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct RoutingPolicy {
+    #[serde(default)]
+    pub default_backend: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub pm_backend: Option<String>,
+    #[serde(default)]
+    pub pm_model: Option<String>,
+    #[serde(default)]
+    pub improve_backend: Option<String>,
+    #[serde(default)]
+    pub improve_model: Option<String>,
+    #[serde(default)]
+    pub review_backend: Option<String>,
+    #[serde(default)]
+    pub review_model: Option<String>,
+    #[serde(default)]
+    pub strong_review_backend: Option<String>,
+    #[serde(default)]
+    pub strong_review_model: Option<String>,
+    #[serde(default)]
+    pub weak_review_backend: Option<String>,
+    #[serde(default)]
+    pub weak_review_model: Option<String>,
+    #[serde(default)]
+    pub allow_review_fallback: bool,
+    #[serde(default)]
+    pub allow_implementation_fallback: bool,
 }
 
 impl Profile {
@@ -230,7 +266,7 @@ pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile>
 
 #[cfg(test)]
 mod tests {
-    use super::Profile;
+    use super::{Profile, RoutingPolicy};
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
@@ -255,6 +291,7 @@ mod tests {
             model_improve: None,
             model_pm: None,
             model_review: None,
+            routing: RoutingPolicy::default(),
         }
     }
 
