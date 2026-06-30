@@ -128,6 +128,14 @@ fn add_origin_and_feature_commit(repo: &std::path::Path) {
         .unwrap();
 }
 
+fn configure_git_url_instead_of(home: &std::path::Path, from: &str, to: &str) {
+    fs::write(
+        home.join(".gitconfig"),
+        format!("[url \"{}\"]\n\tinsteadOf = {}\n", to, from),
+    )
+    .unwrap();
+}
+
 fn write_real_repo_config(
     tmp: &TempDir,
     repo: &std::path::Path,
@@ -1123,6 +1131,148 @@ fn review_writes_structured_verdict_and_posts_comment() {
     assert!(report.contains("Review notes"));
     assert!(verdict.contains("\"verdict\": \"APPROVE_STRONG\""));
     assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
+}
+
+#[test]
+fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "gitlab",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    let curl_log = tmp.path().join("curl.log");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}\nEOF\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "curl",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *\"merge_requests?state=opened&source_branch=feature/review\"*)\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7}}]'\n    ;;\n  *\"/merge_requests/7/notes\"*)\n    printf '%s\\n' '{{\"id\":1}}'\n    ;;\n  *\"/merge_requests/7\"*)\n    printf '%s\\n' '{{\"iid\":7}}'\n    ;;\n  *)\n    printf '%s\\n' '{{}}'\n    ;;\n esac\n",
+            curl_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITLAB_PAT", "token")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Resolved MR: https://gitlab.example.com/owner/real/-/merge_requests/7",
+        ));
+
+    let curl_log = fs::read_to_string(curl_log).unwrap();
+    assert!(curl_log.contains("merge_requests?state=opened&source_branch=feature/review"));
+    assert!(curl_log.contains("/merge_requests/7/notes"));
+    assert!(curl_log.contains("add_labels\":\"gah-ready-for-human\""));
+}
+
+#[test]
+fn fix_mode_uses_ticket_title_in_mr_title() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    let github_root = tmp.path().join("github-root");
+    let origin = github_root.join("owner/real.git");
+    let ticket = repo.join("docs/tickets/TICKET-058-descriptive-mr-titles.md");
+    let gh_log = tmp.path().join("gh.log");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    init_git_repo(&repo);
+    fs::create_dir_all(origin.parent().unwrap()).unwrap();
+    ProcessCommand::new("git")
+        .args(["init", "--bare", origin.to_str().unwrap()])
+        .output()
+        .unwrap();
+    configure_git_url_instead_of(
+        &home,
+        "https://github.com/",
+        &format!("file://{}/", github_root.display()),
+    );
+    ProcessCommand::new("git")
+        .args(["remote", "add", "origin", "https://github.com/owner/real.git"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    fs::create_dir_all(ticket.parent().unwrap()).unwrap();
+    fs::write(
+        &ticket,
+        "# TICKET-058: Descriptive Title Here\n\nDifficulty: easy\nRisk: low\n",
+    )
+    .unwrap();
+
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nimprove_backend = \"codex\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'ticket context update\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf '%s\\n' 'https://github.com/owner/real/pull/7'; exit 0; fi\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            ticket.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", home)
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .success();
+
+    let gh_log = fs::read_to_string(gh_log).unwrap();
+    assert!(gh_log.contains("--title Draft: [GAH] Fix: TICKET-058 Descriptive Title Here"));
 }
 
 #[test]

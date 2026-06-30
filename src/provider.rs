@@ -204,7 +204,7 @@ fn github_post_review_comment(
     Ok(())
 }
 
-fn gitlab_find_mr_by_branch(profile: &Profile, branch: &str) -> Result<MrResult> {
+pub fn gitlab_find_mr_by_branch(profile: &Profile, branch: &str) -> Result<MrResult> {
     let api_base = profile
         .provider_api_base
         .as_deref()
