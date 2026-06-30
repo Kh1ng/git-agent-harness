@@ -120,6 +120,12 @@ enum Commands {
         backend: String,
         #[arg(long, default_value = "")]
         target: String,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        mr: Option<String>,
+        #[arg(long, default_value_t = false)]
+        current_branch: bool,
         #[arg(long, default_value = "1")]
         budget: u32,
         #[arg(long, default_value_t = false)]
@@ -261,6 +267,9 @@ fn main() -> Result<()> {
             mode,
             backend,
             target,
+            branch,
+            mr,
+            current_branch,
             budget,
             dry_run,
             config_path,
@@ -278,6 +287,9 @@ fn main() -> Result<()> {
                     mode,
                     backend,
                     target,
+                    branch,
+                    mr,
+                    current_branch,
                     budget,
                     dry_run,
                     config_path,

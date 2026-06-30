@@ -126,6 +126,19 @@ fn add_origin_and_feature_commit(repo: &std::path::Path) {
         .current_dir(repo)
         .output()
         .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "feature/review"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+}
+
+fn checkout_branch(repo: &std::path::Path, branch: &str) {
+    ProcessCommand::new("git")
+        .args(["checkout", branch])
+        .current_dir(repo)
+        .output()
+        .unwrap();
 }
 
 fn configure_git_url_instead_of(home: &std::path::Path, from: &str, to: &str) {
@@ -1086,9 +1099,11 @@ llm_model_cloud = ""
 fn review_writes_structured_verdict_and_posts_comment() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
+    let prompt_log = tmp.path().join("review-prompt.txt");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
     add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
     let cfg = write_real_repo_config_with_extra(
         &tmp,
         &repo,
@@ -1102,12 +1117,15 @@ fn review_writes_structured_verdict_and_posts_comment() {
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
-        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}\nEOF\n",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
+            prompt_log.display()
+        ),
     );
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
     );
 
     bin()
@@ -1117,6 +1135,8 @@ fn review_writes_structured_verdict_and_posts_comment() {
             "real",
             "--mode",
             "review",
+            "--branch",
+            "feature/review",
             "--config-path",
             cfg.to_str().unwrap(),
         ])
@@ -1128,9 +1148,13 @@ fn review_writes_structured_verdict_and_posts_comment() {
     let session = latest_child_dir(&sessions);
     let report = fs::read_to_string(session.join("review-report.md")).unwrap();
     let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
+    let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(report.contains("Review notes"));
     assert!(verdict.contains("\"verdict\": \"APPROVE_STRONG\""));
     assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
+    assert!(prompt.contains("Source: feature/review"));
+    assert!(prompt.contains("Target: main"));
+    assert!(prompt.contains("Changed files:\nsrc.txt"));
 }
 
 #[test]
@@ -1140,6 +1164,7 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
     add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
     let cfg = write_real_repo_config_with_extra(
         &tmp,
         &repo,
@@ -1172,6 +1197,8 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
             "real",
             "--mode",
             "review",
+            "--branch",
+            "feature/review",
             "--config-path",
             cfg.to_str().unwrap(),
         ])
@@ -1187,6 +1214,187 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
     assert!(curl_log.contains("merge_requests?state=opened&source_branch=feature/review"));
     assert!(curl_log.contains("/merge_requests/7/notes"));
     assert!(curl_log.contains("add_labels\":\"gah-ready-for-human\""));
+}
+
+#[test]
+fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let prompt_log = tmp.path().join("review-prompt-mr.txt");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "gitlab",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            prompt_log.display()
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "curl",
+        "#!/bin/sh\ncase \"$*\" in\n  *\"/merge_requests/7\"*) printf '%s\\n' '{\"iid\":7,\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"source_branch\":\"feature/review\",\"target_branch\":\"main\",\"title\":\"Draft: [GAH] Fix\",\"description\":\"MR body\",\"detailed_merge_status\":\"mergeable\"}' ;;\n  *\"merge_requests?state=opened&source_branch=feature/review\"*) printf '%s\\n' '[{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\",\"title\":\"Draft: [GAH] Fix\",\"description\":\"MR body\",\"detailed_merge_status\":\"mergeable\"}]' ;;\n  *\"/merge_requests/7/notes\"*) printf '%s\\n' '{\"id\":1}' ;;\n  *) printf '%s\\n' '{}' ;;\n esac\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--mr",
+            "7",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITLAB_PAT", "token")
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("MR: 7"));
+    assert!(prompt.contains("Source: feature/review"));
+    assert!(prompt.contains("Target: main"));
+    assert!(prompt.contains("MR title: Draft: [GAH] Fix"));
+    assert!(prompt.contains("MR body:\nMR body"));
+}
+
+#[test]
+fn review_uses_profile_repo_not_current_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let worktree = tmp.path().join("review-wt");
+    let prompt_log = tmp.path().join("review-prompt-worktree.txt");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
+    ProcessCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree.to_str().unwrap(),
+            "feature/review",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            prompt_log.display()
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .current_dir(&worktree)
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Source: feature/review"));
+}
+
+#[test]
+fn review_empty_diff_fails_loudly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let bare = repo.parent().unwrap().join("origin.git");
+    ProcessCommand::new("git")
+        .args(["init", "--bare", bare.to_str().unwrap()])
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["remote", "add", "origin", bare.to_str().unwrap()])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+        "",
+    );
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "claude");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "main",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("empty review diff"))
+        .stderr(predicate::str::contains("profile.local_path"))
+        .stderr(predicate::str::contains("source branch: main"))
+        .stderr(predicate::str::contains("target branch: main"));
 }
 
 #[test]
@@ -1212,7 +1420,12 @@ fn fix_mode_uses_ticket_title_in_mr_title() {
         &format!("file://{}/", github_root.display()),
     );
     ProcessCommand::new("git")
-        .args(["remote", "add", "origin", "https://github.com/owner/real.git"])
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/real.git",
+        ])
         .current_dir(&repo)
         .output()
         .unwrap();
@@ -1273,6 +1486,8 @@ fn fix_mode_uses_ticket_title_in_mr_title() {
 
     let gh_log = fs::read_to_string(gh_log).unwrap();
     assert!(gh_log.contains("--title Draft: [GAH] Fix: TICKET-058 Descriptive Title Here"));
+    assert!(gh_log.contains("Backend/model: `codex` / `local/test`"));
+    assert!(gh_log.contains("Ticket: TICKET-058 Descriptive Title Here"));
 }
 
 #[test]

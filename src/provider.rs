@@ -7,6 +7,16 @@ pub struct MrResult {
     pub id: String,
 }
 
+pub struct ReviewTarget {
+    pub id: String,
+    pub url: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub ci_status: Option<String>,
+}
+
 pub fn create_draft_mr(
     profile: &Profile,
     branch: &str,
@@ -29,6 +39,22 @@ pub fn post_review_comment(
     match profile.provider.as_str() {
         "gitlab" => gitlab_post_review_comment(profile, branch, body, labels),
         "github" => github_post_review_comment(profile, branch, body, labels),
+        other => anyhow::bail!("unsupported provider: {}", other),
+    }
+}
+
+pub fn find_review_target_by_branch(profile: &Profile, branch: &str) -> Result<ReviewTarget> {
+    match profile.provider.as_str() {
+        "gitlab" => gitlab_review_target_by_branch(profile, branch),
+        "github" => github_review_target_by_branch(profile, branch),
+        other => anyhow::bail!("unsupported provider: {}", other),
+    }
+}
+
+pub fn find_review_target_by_mr(profile: &Profile, mr: &str) -> Result<ReviewTarget> {
+    match profile.provider.as_str() {
+        "gitlab" => gitlab_review_target_by_iid(profile, mr),
+        "github" => github_review_target_by_number(profile, mr),
         other => anyhow::bail!("unsupported provider: {}", other),
     }
 }
@@ -205,6 +231,14 @@ fn github_post_review_comment(
 }
 
 pub fn gitlab_find_mr_by_branch(profile: &Profile, branch: &str) -> Result<MrResult> {
+    let target = gitlab_review_target_by_branch(profile, branch)?;
+    Ok(MrResult {
+        url: target.url,
+        id: target.id,
+    })
+}
+
+fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<ReviewTarget> {
     let api_base = profile
         .provider_api_base
         .as_deref()
@@ -224,10 +258,23 @@ pub fn gitlab_find_mr_by_branch(profile: &Profile, branch: &str) -> Result<MrRes
         .as_array()
         .and_then(|items| items.first())
         .ok_or_else(|| anyhow::anyhow!("no open GitLab MR found for branch '{}'", branch))?;
-    Ok(MrResult {
-        url: first["web_url"].as_str().unwrap_or("").to_string(),
-        id: first["iid"].to_string(),
-    })
+    Ok(gitlab_target_from_value(first))
+}
+
+fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarget> {
+    let api_base = profile
+        .provider_api_base
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let pat = profile.pat();
+    let url = format!("{}/projects/{}/merge_requests/{}", api_base, project_id, mr);
+    let out = run_curl_json(&["-s", "-H", &format!("PRIVATE-TOKEN: {}", pat), &url])?;
+    let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    Ok(gitlab_target_from_value(&resp))
 }
 
 fn github_find_pr_number_by_branch(profile: &Profile, branch: &str) -> Result<String> {
@@ -259,6 +306,70 @@ fn github_find_pr_number_by_branch(profile: &Profile, branch: &str) -> Result<St
         .and_then(|item| item["number"].as_i64())
         .ok_or_else(|| anyhow::anyhow!("no open GitHub PR found for branch '{}'", branch))?;
     Ok(number.to_string())
+}
+
+fn github_review_target_by_branch(profile: &Profile, branch: &str) -> Result<ReviewTarget> {
+    let number = github_find_pr_number_by_branch(profile, branch)?;
+    github_review_target_by_number(profile, &number)
+}
+
+fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<ReviewTarget> {
+    let out = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            number,
+            "--repo",
+            &profile.repo,
+            "--json",
+            "number,url,title,body,headRefName,baseRefName,statusCheckRollup",
+        ])
+        .output()
+        .context("gh pr view")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh pr view failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let ci_status = resp["statusCheckRollup"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| {
+            item["conclusion"]
+                .as_str()
+                .or_else(|| item["status"].as_str())
+        })
+        .map(str::to_string);
+    Ok(ReviewTarget {
+        id: resp["number"]
+            .as_i64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| number.to_string()),
+        url: resp["url"].as_str().unwrap_or("").to_string(),
+        source_branch: resp["headRefName"].as_str().unwrap_or("").to_string(),
+        target_branch: resp["baseRefName"].as_str().unwrap_or("").to_string(),
+        title: resp["title"].as_str().map(str::to_string),
+        body: resp["body"].as_str().map(str::to_string),
+        ci_status,
+    })
+}
+
+fn gitlab_target_from_value(value: &serde_json::Value) -> ReviewTarget {
+    let ci_status = value["detailed_merge_status"]
+        .as_str()
+        .or_else(|| value["merge_status"].as_str())
+        .map(str::to_string);
+    ReviewTarget {
+        id: value["iid"].to_string().trim_matches('"').to_string(),
+        url: value["web_url"].as_str().unwrap_or("").to_string(),
+        source_branch: value["source_branch"].as_str().unwrap_or("").to_string(),
+        target_branch: value["target_branch"].as_str().unwrap_or("").to_string(),
+        title: value["title"].as_str().map(str::to_string),
+        body: value["description"].as_str().map(str::to_string),
+        ci_status,
+    }
 }
 
 fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
