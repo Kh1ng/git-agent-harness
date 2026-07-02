@@ -58,6 +58,46 @@ fn make_fake_bin_with_body(dir: &std::path::Path, name: &str, body: &str) {
     fs::set_permissions(&path, perms).unwrap();
 }
 
+#[test]
+fn dispatch_records_effective_model_for_routed_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let ticket = tmp.path().join("ticket.md");
+    fs::write(
+        &ticket,
+        "Recommended backend: claude\nRecommended model: claude-sonnet-4\n",
+    )
+    .unwrap();
+    let cfg = write_real_repo_config_with_extra(&tmp, &repo, "github", "", "");
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "claude");
+    make_fake_bin(&fake_bin, "git");
+    let ledger_path = tmp.path().join("artifacts/ledger.jsonl");
+    bin()
+        .args([
+            "dispatch",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--profile",
+            "real",
+            "--mode",
+            "improve",
+            "--backend",
+            "auto",
+            "--target",
+            ticket.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success();
+    let ledger = fs::read_to_string(ledger_path).unwrap();
+    assert!(ledger.contains("\"effective_model\":\"claude-sonnet-4\""));
+    assert!(ledger.contains("\"requested_model\":null"));
+}
+
 fn prepend_path(dir: &std::path::Path) -> String {
     let old = std::env::var("PATH").unwrap_or_default();
     format!("{}:{}", dir.display(), old)
@@ -1370,6 +1410,7 @@ fn review_empty_diff_fails_loudly() {
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
     make_fake_bin(&fake_bin, "claude");
+    make_fake_bin(&fake_bin, "git");
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
@@ -1524,7 +1565,7 @@ fn dispatch_dry_run_ticket_metadata_feeds_routing() {
         .env("PATH", prepend_path(&fake_bin))
         .assert()
         .success()
-        .stdout(predicate::str::contains("Effective:    codex"));
+        .stdout(predicate::str::contains("Effective:    openhands"));
 }
 
 #[test]

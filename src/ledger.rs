@@ -408,9 +408,7 @@ pub fn usage_summary_for_backend(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        append, is_strong_model, usage_summary_for_backend, LedgerEntry,
-    };
+    use super::{append, is_strong_model, usage_summary_for_backend, LedgerEntry};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
 

@@ -62,6 +62,21 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     fs::create_dir_all(&session_dir)?;
     println!("Session: {}", session_dir.display());
 
+    let route = routing::decide(
+        &cfg.defaults,
+        profile,
+        RouteRequest {
+            mode: &args.mode,
+            requested_backend: &args.backend,
+            requested_model: args.model.as_deref(),
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: session_dir.file_name().and_then(|s| s.to_str()),
+            usage_summary: None,
+        },
+    )?;
+    apply_route_to_ledger(&mut ledger, &route);
+
     let result = match args.mode.as_str() {
         "improve" | "fix" => improve(cfg, profile, args, &session_dir, &mut ledger),
         "pm" => pm(cfg, profile, args, &session_dir, &mut ledger),
