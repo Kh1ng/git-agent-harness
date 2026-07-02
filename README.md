@@ -219,6 +219,40 @@ With a target, PM mode now asks the manager for structured JSON, validates it, d
 
 When `improve` or `fix` targets a ticket markdown file, GAH also reads ticket metadata such as difficulty, risk, recommended backend/model, affected files, and verification commands before routing the worker.
 
+## Retries
+
+`improve`/`fix` retry failed validation up to `--retries` times (default 2).
+Between attempts the worktree is hard-reset (`git reset --hard` + `git clean -fd`)
+so each attempt starts from a pristine tree, with the previous failure output
+appended to the prompt. The failed attempt's diff is saved to
+`sessions/<ts>/attempt-N/attempt-diff.patch` before the wipe.
+
+`--allow-draft-fail` pushes a `[DRAFT-FAIL]` MR even if validation never passes.
+
+## Experiment Mode
+
+```bash
+gah dispatch --profile my-repo --mode experiment --target "research question"
+```
+
+Runs the backend with a research prompt, collects untracked artifacts
+(`*.ipynb`, `*.html`, `*.png`, `*.csv`, `*.parquet`) into the session dir,
+asks an LLM judge whether the task was answered, and opens a draft MR only
+if code changed.
+
+## Env Files
+
+Profiles may set `env_file` (dev credentials, loaded by default) and
+`env_file_prod` (loaded only with `--prod`). Keep prod credentials out of
+dev runs; `--prod` also switches policy enforcement to `git-push-prod`.
+
+## Manager Agent
+
+`docs/gah-manager-skill.md` is the system prompt / skill file for a manager
+agent that orchestrates GAH: decomposes work via PM mode, dispatches workers,
+tracks state in the target repo's `docs/MANAGER_MEMORY.md`, and escalates
+failed tickets to stronger models.
+
 ## Review Gate
 
 Review mode now produces:
@@ -309,4 +343,21 @@ Prune only touches:
 
 ## TODO / Backlog
 
+Contract tests for the first two exist in `tests/gah_cli.rs` as `#[ignore]`d
+tests — implement until they pass, then remove the ignore.
+
+- **`gah sync --json`**: machine-readable MR classification so a manager agent
+  can consume state without parsing pretty-print. See
+  `sync_json_outputs_machine_readable_classification`.
+- **`gah ledger summary --json`**: same for run history/costs. See
+  `ledger_summary_json_outputs_machine_readable_counts`.
+- **Populate ledger usage/cost fields**: `usage.*` is always null, so the
+  routing cost caps (`max_known_estimated_cost_per_week` etc.) can never
+  trigger. Parse token/cost data from backend output (`claude -p
+  --output-format json` reports cost; openhands logs tokens) in
+  `runner.rs` and write it into `LedgerEntry.usage`.
+- **Fix strong-run heuristic**: `ledger::usage_summary_for_backend` counts
+  every improve/fix/review run as "strong" unless `confidence_impact == low`.
+  Strongness should be determined by model/backend (e.g. a configured
+  strong-model list), not by mode.
 - **Smart MR titles from ticket**: Parse `Suggested MR Title:` field from the ticket file and use it as the MR title instead of the generic `[GAH] improve: <repo>`. Fall back to generic if field not present.

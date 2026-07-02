@@ -1559,3 +1559,77 @@ fn sync_classifies_open_gah_prs() {
             "recommended: human review and merge decision",
         ));
 }
+
+// ── TDD: machine-readable state for autonomous manager agents ──────────────
+// These define the contract for junior-agent tickets. Remove #[ignore] when
+// implementing.
+
+#[test]
+#[ignore = "TICKET: gah sync --json"]
+fn sync_json_outputs_machine_readable_classification() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] fix\",\"headRefName\":\"gah/test-1\",\"url\":\"https://example/pr/1\",\"labels\":[{\"name\":\"gah-ready-for-human\"}],\"mergedAt\":null,\"updatedAt\":\"2099-01-01T00:00:00Z\",\"statusCheckRollup\":[]}]'; exit 0; fi\nexit 0\n",
+    );
+
+    let out = bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--json",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    let mrs = parsed.as_array().expect("top level must be an array");
+    assert_eq!(mrs[0]["classification"], "READY_FOR_HUMAN");
+    assert_eq!(mrs[0]["branch"], "gah/test-1");
+    assert!(mrs[0]["recommended_action"].is_string());
+    assert_eq!(mrs[0]["url"], "https://example/pr/1");
+}
+
+#[test]
+#[ignore = "TICKET: gah ledger summary --json"]
+fn ledger_summary_json_outputs_machine_readable_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    // Empty ledger: still valid JSON with zero counts
+    fs::write(&ledger_path, "").unwrap();
+    let out = bin()
+        .args([
+            "ledger",
+            "summary",
+            "--since",
+            "7d",
+            "--json",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("GAH_LEDGER_PATH", ledger_path.to_str().unwrap())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    assert_eq!(parsed["entries"], 0);
+    assert!(parsed["by_mode"].is_object());
+    assert!(parsed["by_backend"].is_object());
+}

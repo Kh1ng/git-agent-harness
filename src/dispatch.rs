@@ -441,6 +441,12 @@ fn improve(
                 println!("Validation failed ({})", failure_path.display());
 
                 if attempt + 1 < max_attempts {
+                    // Save the failed attempt's diff before wiping, so the
+                    // session artifact shows what the agent actually wrote.
+                    let _ = worktree::git(&["add", "-A"], &wt);
+                    if let Ok(diff) = worktree::git(&["diff", "--cached"], &wt) {
+                        let _ = fs::write(attempt_session.join("attempt-diff.patch"), diff);
+                    }
                     // Wipe bad code so next attempt starts clean
                     let _ = worktree::git(&["reset", "--hard", "HEAD"], &wt);
                     let _ = worktree::git(&["clean", "-fd"], &wt);
