@@ -1,17 +1,35 @@
 use crate::config::{self, GahConfig};
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-pub fn run(cfg: &GahConfig, profile_name: &str) -> Result<()> {
+pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
     let profile = config::get_profile(cfg, profile_name)?;
     let mrs = match profile.provider.as_str() {
         "github" => github_prs(profile)?,
         "gitlab" => gitlab_mrs(profile)?,
         other => anyhow::bail!("unsupported provider: {}", other),
     };
+
+    if json {
+        let output: Vec<SyncReport> = mrs
+            .into_iter()
+            .map(|mr| {
+                let classification = classify(&mr);
+                SyncReport {
+                    classification: classification.to_string(),
+                    branch: mr.branch,
+                    title: mr.title,
+                    url: mr.url,
+                    recommended_action: recommended_action(classification).to_string(),
+                }
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
 
     println!("Profile: {}", profile_name);
     for mr in mrs {
@@ -26,6 +44,15 @@ pub fn run(cfg: &GahConfig, profile_name: &str) -> Result<()> {
         println!("  recommended: {}", recommended_action(class));
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct SyncReport {
+    classification: String,
+    branch: String,
+    title: String,
+    url: Option<String>,
+    recommended_action: String,
 }
 
 #[derive(Debug, Clone)]

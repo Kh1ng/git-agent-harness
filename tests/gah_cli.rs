@@ -1565,7 +1565,6 @@ fn sync_classifies_open_gah_prs() {
 // implementing.
 
 #[test]
-#[ignore = "TICKET: gah sync --json"]
 fn sync_json_outputs_machine_readable_classification() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
