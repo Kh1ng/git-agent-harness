@@ -336,6 +336,32 @@ pub struct BackendUsageSummary {
     pub strong_runs_this_session: u64,
 }
 
+/// Returns `true` if the model name indicates a strong (capable) model.
+///
+/// Checks the final path segment of the model name (after the last `/`)
+/// for weak-model substrings: "flash", "mini", "tiny", "lite".
+/// This is a heuristic — it assumes models without these substrings are strong.
+fn is_strong_model(model: &str) -> bool {
+    let segment = model.rsplit('/').next().unwrap_or(model);
+    let lower = segment.to_lowercase();
+    !(lower.contains("flash")
+        || lower.contains("mini")
+        || lower.contains("tiny")
+        || lower.contains("lite"))
+}
+
+/// Resolve the best available model name from a ledger entry.
+/// Prefers effective_model, falls back to requested_model.
+/// Returns None if both are missing, empty, or whitespace-only.
+fn ledger_entry_model_name(entry: &LedgerEntry) -> Option<&str> {
+    entry
+        .effective_model
+        .as_deref()
+        .or(entry.requested_model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+}
+
 pub fn usage_summary_for_backend(
     cfg: &GahConfig,
     backend: &str,
@@ -347,7 +373,7 @@ pub fn usage_summary_for_backend(
         .format(&Rfc3339)
         .unwrap_or_default();
     let mut out = BackendUsageSummary::default();
-    for entry in entries {
+    for entry in &entries {
         let same_backend = entry.effective_backend == backend;
         let same_model = model
             .map(|m| entry.effective_model.as_deref() == Some(m))
@@ -365,7 +391,9 @@ pub fn usage_summary_for_backend(
             out.runs_this_session += 1;
         }
         if entry.confidence_impact.as_deref() != Some("low")
-            && matches!(entry.mode.as_str(), "review" | "improve" | "fix")
+            && ledger_entry_model_name(entry)
+                .map(is_strong_model)
+                .unwrap_or(false)
         {
             if this_week {
                 out.strong_runs_this_week += 1;
@@ -380,7 +408,9 @@ pub fn usage_summary_for_backend(
 
 #[cfg(test)]
 mod tests {
-    use super::{append, LedgerEntry};
+    use super::{
+        append, is_strong_model, usage_summary_for_backend, LedgerEntry,
+    };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
 
@@ -411,6 +441,22 @@ mod tests {
         }
     }
 
+    fn test_config() -> (tempfile::TempDir, GahConfig) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = GahConfig {
+            defaults: Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: String::new(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: RoutingPolicy::default(),
+            },
+            profiles: HashMap::new(),
+        };
+        (tmp, cfg)
+    }
+
     #[test]
     fn target_summary_is_trimmed_to_first_line() {
         let entry = LedgerEntry::new(
@@ -427,18 +473,7 @@ mod tests {
 
     #[test]
     fn ledger_append_writes_jsonl() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = GahConfig {
-            defaults: Defaults {
-                artifact_root: tmp.path().to_string_lossy().into_owned(),
-                worktree_base: String::new(),
-                llm_base_url: String::new(),
-                llm_model_local: String::new(),
-                llm_model_cloud: String::new(),
-                routing: RoutingPolicy::default(),
-            },
-            profiles: HashMap::new(),
-        };
+        let (_tmp, cfg) = test_config();
         let entry = LedgerEntry::new(
             "test",
             &profile(),
@@ -452,5 +487,247 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(text.contains("\"profile\":\"test\""));
         assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn is_strong_model_returns_false_for_cheap_models() {
+        assert!(!is_strong_model("deepseek-flash"));
+        assert!(!is_strong_model("gpt-4o-mini"));
+        assert!(!is_strong_model("claude-sonnet-tiny"));
+        assert!(!is_strong_model("llama-lite"));
+        assert!(!is_strong_model("openai/gpt-4o-mini"));
+        assert!(!is_strong_model("anthropic/claude-3-haiku-flash"));
+        assert!(!is_strong_model("deepseek/deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn is_strong_model_returns_true_for_strong_models() {
+        assert!(is_strong_model("claude-sonnet-4"));
+        assert!(is_strong_model("gpt-4o"));
+        assert!(is_strong_model("anthropic/claude-opus-4"));
+        assert!(is_strong_model("openai/gpt-4o"));
+        assert!(is_strong_model("gpt-5.5"));
+    }
+
+    #[test]
+    fn cheap_flash_model_does_not_increment_strong_run_count() {
+        let (_tmp, cfg) = test_config();
+
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "improve",
+            "do something",
+            Some("session-1".into()),
+            None,
+        );
+        entry.effective_model = Some("deepseek-flash".into());
+        append(&cfg, &entry).unwrap();
+
+        let summary = usage_summary_for_backend(&cfg, "codex", None, None).unwrap();
+        assert_eq!(
+            summary.runs_this_week, 1,
+            "cheap model run should still be counted as a run"
+        );
+        assert_eq!(summary.strong_runs_this_week, 0);
+        assert_eq!(summary.strong_runs_this_session, 0);
+    }
+
+    #[test]
+    fn strong_model_increments_strong_run_count() {
+        let (_tmp, cfg) = test_config();
+
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "improve",
+            "do something",
+            Some("session-1".into()),
+            None,
+        );
+        entry.effective_model = Some("claude-sonnet-4".into());
+        append(&cfg, &entry).unwrap();
+
+        // Verify the entry was written and can be read back
+        let entries = super::read_entries(&cfg).unwrap();
+        assert_eq!(entries.len(), 1, "should have 1 entry");
+        assert_eq!(
+            entries[0].effective_model.as_deref(),
+            Some("claude-sonnet-4")
+        );
+        assert!(super::is_strong_model(
+            entries[0].effective_model.as_deref().unwrap()
+        ));
+
+        let summary = usage_summary_for_backend(&cfg, "codex", None, None).unwrap();
+        assert_eq!(summary.runs_this_week, 1, "should count as a run");
+        assert_eq!(summary.strong_runs_this_week, 1);
+        assert_eq!(
+            summary.strong_runs_this_session, 0,
+            "no session filter applied"
+        );
+    }
+
+    #[test]
+    fn usage_summary_preserves_existing_counts() {
+        let (_tmp, cfg) = test_config();
+
+        // Cheap model run — should NOT count as strong but should count as a run
+        let mut e1 = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "improve",
+            "task 1",
+            Some("session-1".into()),
+            None,
+        );
+        e1.effective_model = Some("deepseek-flash".into());
+        e1.usage.estimated_cost_usd = Some(0.01);
+        e1.usage.actual_cost_usd = Some(0.01);
+        append(&cfg, &e1).unwrap();
+
+        // Strong model run — should count as both run and strong run
+        let mut e2 = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "fix",
+            "task 2",
+            Some("session-1".into()),
+            None,
+        );
+        e2.effective_model = Some("claude-sonnet-4".into());
+        e2.usage.estimated_cost_usd = Some(0.10);
+        e2.usage.actual_cost_usd = Some(0.10);
+        append(&cfg, &e2).unwrap();
+
+        // Another strong model run in review mode
+        let mut e3 = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "review",
+            "task 3",
+            Some("session-1".into()),
+            None,
+        );
+        e3.effective_model = Some("gpt-4o".into());
+        e3.usage.estimated_cost_usd = Some(0.05);
+        e3.usage.actual_cost_usd = Some(0.05);
+        append(&cfg, &e3).unwrap();
+
+        // Strong model run with low confidence — should NOT count as strong
+        let mut e4 = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "improve",
+            "task 4",
+            Some("session-1".into()),
+            None,
+        );
+        e4.effective_model = Some("claude-sonnet-4".into());
+        e4.confidence_impact = Some("low".into());
+        e4.usage.estimated_cost_usd = Some(0.10);
+        e4.usage.actual_cost_usd = Some(0.10);
+        append(&cfg, &e4).unwrap();
+
+        let summary = usage_summary_for_backend(&cfg, "codex", None, None).unwrap();
+        assert_eq!(summary.runs_this_week, 4);
+        assert_eq!(summary.runs_this_session, 0, "no session filter applied");
+        assert_eq!(summary.strong_runs_this_week, 2); // e2 (claude-sonnet-4, fix) + e3 (gpt-4o, review)
+        assert_eq!(
+            summary.strong_runs_this_session, 0,
+            "no session filter applied"
+        );
+        assert!((summary.estimated_cost_this_week - 0.26).abs() < 0.001);
+        assert!((summary.actual_cost_this_week - 0.26).abs() < 0.001);
+    }
+
+    #[test]
+    fn effective_model_takes_priority_over_requested_model() {
+        let (_tmp, cfg) = test_config();
+        let mut entry =
+            LedgerEntry::new("test", &profile(), "codex", "improve", "task", None, None);
+        entry.effective_model = Some("claude-sonnet-4".into());
+        entry.requested_model = Some("deepseek-flash".into());
+        append(&cfg, &entry).unwrap();
+
+        let summary = usage_summary_for_backend(&cfg, "codex", None, None).unwrap();
+        assert_eq!(
+            summary.strong_runs_this_week, 1,
+            "effective_model should take priority over requested_model"
+        );
+    }
+
+    #[test]
+    fn requested_model_fallback_counts_strong_when_effective_missing() {
+        let (_tmp, cfg) = test_config();
+        let mut entry = LedgerEntry::new("test", &profile(), "codex", "fix", "task", None, None);
+        entry.effective_model = None;
+        entry.requested_model = Some("claude-sonnet-4".into());
+        append(&cfg, &entry).unwrap();
+
+        let summary = usage_summary_for_backend(&cfg, "codex", None, None).unwrap();
+        assert_eq!(
+            summary.strong_runs_this_week, 1,
+            "requested_model fallback should count when effective_model is None"
+        );
+    }
+
+    #[test]
+    fn unknown_model_identity_does_not_count_as_strong() {
+        let (_tmp, cfg) = test_config();
+        // Empty string and whitespace-only models are filtered by ledger_entry_model_name
+        // Note: "unknown" model strings are treated as strong by is_strong_model heuristic
+        // (conservative assumption). Only truly missing/empty identities are not-strong.
+        let mut e1 = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "improve",
+            "task-empty",
+            None,
+            None,
+        );
+        e1.effective_model = Some("".into());
+        append(&cfg, &e1).unwrap();
+
+        let mut e2 = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "improve",
+            "task-whitespace",
+            None,
+            None,
+        );
+        e2.effective_model = Some("  ".into());
+        append(&cfg, &e2).unwrap();
+
+        let mut e3 = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "improve",
+            "task-none",
+            None,
+            None,
+        );
+        e3.effective_model = None;
+        append(&cfg, &e3).unwrap();
+
+        let summary = usage_summary_for_backend(&cfg, "codex", None, None).unwrap();
+        assert_eq!(
+            summary.strong_runs_this_week, 0,
+            "missing/empty/whitespace model should not count as strong"
+        );
+        assert_eq!(
+            summary.runs_this_week, 3,
+            "all entries should count as regular runs"
+        );
     }
 }
