@@ -106,6 +106,8 @@ enum Commands {
     Sync {
         #[arg(long)]
         profile: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },
@@ -181,6 +183,8 @@ enum LedgerCommands {
         since: String,
         #[arg(long)]
         profile: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },
@@ -250,16 +254,18 @@ fn main() -> Result<()> {
             LedgerCommands::Summary {
                 since,
                 profile,
+                json,
                 config_path,
-            } => ledger::summary::run(&since, profile.as_deref(), config_path.as_deref())?,
+            } => ledger::summary::run(&since, profile.as_deref(), json, config_path.as_deref())?,
         },
 
         Commands::Sync {
             profile,
+            json,
             config_path,
         } => {
             let cfg = config::load(config_path.as_deref())?;
-            sync::run(&cfg, &profile)?;
+            sync::run(&cfg, &profile, json)?;
         }
 
         Commands::Dispatch {

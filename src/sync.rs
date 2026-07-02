@@ -5,13 +5,31 @@ use std::process::Command;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-pub fn run(cfg: &GahConfig, profile_name: &str) -> Result<()> {
+pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
     let profile = config::get_profile(cfg, profile_name)?;
     let mrs = match profile.provider.as_str() {
         "github" => github_prs(profile)?,
         "gitlab" => gitlab_mrs(profile)?,
         other => anyhow::bail!("unsupported provider: {}", other),
     };
+
+    if json {
+        let items: Vec<_> = mrs
+            .into_iter()
+            .map(|mr| {
+                let class = classify(&mr);
+                serde_json::json!({
+                    "class": class,
+                    "branch": mr.branch,
+                    "title": mr.title,
+                    "url": mr.url,
+                    "recommended": recommended_action(class),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
 
     println!("Profile: {}", profile_name);
     for mr in mrs {

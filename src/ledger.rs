@@ -172,7 +172,7 @@ pub mod summary {
     use std::collections::HashMap;
     use time::{Duration, OffsetDateTime};
 
-    pub fn run(since: &str, profile: Option<&str>, config_path: Option<&str>) -> Result<()> {
+    pub fn run(since: &str, profile: Option<&str>, json: bool, config_path: Option<&str>) -> Result<()> {
         let cfg = config::load(config_path)?;
         let cutoff = parse_since(since)?;
         let mut entries = read_entries(&cfg)?;
@@ -180,6 +180,14 @@ pub mod summary {
             entries.retain(|entry| entry.profile == profile);
         }
         entries.retain(|entry| entry.timestamp >= cutoff);
+
+        if json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "ledger": cfg.defaults.ledger_path(),
+                "entries": entries.len(),
+            }))?);
+            return Ok(());
+        }
 
         println!("Ledger: {}", cfg.defaults.ledger_path().display());
         println!("Entries: {}", entries.len());

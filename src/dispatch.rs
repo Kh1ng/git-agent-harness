@@ -1648,15 +1648,35 @@ fn dry_run_route(
     mode: &str,
     args: &DispatchArgs,
 ) -> Option<RouteDecision> {
+    let recommended = if args.target.is_empty() {
+        None
+    } else {
+        parse_ticket_metadata(Path::new(&args.target)).ok()
+    };
+    let requested_backend = if args.backend == "auto" {
+        recommended
+            .as_ref()
+            .and_then(|m| m.as_ref().and_then(|t| t.recommended_backend.as_deref()))
+            .unwrap_or(&args.backend)
+    } else {
+        &args.backend
+    };
+    let requested_model = if args.model.is_some() {
+        args.model.as_deref()
+    } else {
+        recommended
+            .as_ref()
+            .and_then(|m| m.as_ref().and_then(|t| t.recommended_model.as_deref()))
+    };
     routing::decide(
         &cfg.defaults,
         profile,
         RouteRequest {
             mode,
-            requested_backend: &args.backend,
-            requested_model: args.model.as_deref(),
-            recommended_backend: None,
-            recommended_model: None,
+            requested_backend,
+            requested_model,
+            recommended_backend: recommended.as_ref().and_then(|m| m.as_ref().and_then(|t| t.recommended_backend.as_deref())),
+            recommended_model: recommended.as_ref().and_then(|m| m.as_ref().and_then(|t| t.recommended_model.as_deref())),
             session_id: None,
             usage_summary: None,
         },
