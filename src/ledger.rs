@@ -410,9 +410,7 @@ pub fn usage_summary_for_backend(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        append, is_strong_model, usage_summary_for_backend, LedgerEntry,
-    };
+    use super::{append, is_strong_model, usage_summary_for_backend, LedgerEntry};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
 
@@ -734,13 +732,9 @@ mod tests {
         other_model.effective_model = Some("gpt-4o".into());
         append(&cfg, &other_model).unwrap();
 
-        let summary = usage_summary_for_backend(
-            &cfg,
-            "codex",
-            Some("claude-sonnet-4"),
-            Some("session-1"),
-        )
-        .unwrap();
+        let summary =
+            usage_summary_for_backend(&cfg, "codex", Some("claude-sonnet-4"), Some("session-1"))
+                .unwrap();
         assert_eq!(summary.runs_this_session, 1);
         assert_eq!(summary.strong_runs_this_session, 1);
         assert_eq!(summary.strong_runs_this_week, 1);

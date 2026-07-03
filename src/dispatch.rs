@@ -55,7 +55,9 @@ impl ValidationFailureProgress {
     }
 }
 
-fn validation_failure_no_progress_reason(progress: ValidationFailureProgress) -> Option<&'static str> {
+fn validation_failure_no_progress_reason(
+    progress: ValidationFailureProgress,
+) -> Option<&'static str> {
     match progress {
         ValidationFailureProgress::Changed => None,
         ValidationFailureProgress::UnchangedFromBaseline => Some(
@@ -541,8 +543,7 @@ fn improve(
                         &failure_output[..failure_output.len().min(8_000)],
                     );
                 } else if attempt + 1 < max_attempts && !args.allow_draft_fail {
-                    let Some(reason) =
-                        validation_failure_no_progress_reason(failure_progress)
+                    let Some(reason) = validation_failure_no_progress_reason(failure_progress)
                     else {
                         worktree::cleanup(&wt, repo);
                         anyhow::bail!(
@@ -1533,8 +1534,9 @@ mod tests {
     use super::{
         apply_pm_plan, apply_route_to_ledger, build_mr_title, build_pm_plan_task,
         classify_validation_failure_progress, collect_pm_preflight, collect_ticket_summaries,
-        first_markdown_heading, parse_pm_plan, parse_ticket_metadata, RouteDecision,
-        TicketMetadata, ValidationFailureProgress, validation_failure_no_progress_reason,
+        first_markdown_heading, parse_pm_plan, parse_ticket_metadata,
+        validation_failure_no_progress_reason, RouteDecision, TicketMetadata,
+        ValidationFailureProgress,
     };
     use crate::config::{Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
@@ -1777,20 +1779,16 @@ mod tests {
 
     #[test]
     fn validation_failure_reasons_explain_baseline_vs_previous_attempt() {
-        assert!(
-            validation_failure_no_progress_reason(
-                ValidationFailureProgress::UnchangedFromBaseline
-            )
-            .unwrap()
-            .contains("pristine-tree baseline")
-        );
-        assert!(
-            validation_failure_no_progress_reason(
-                ValidationFailureProgress::UnchangedFromPreviousAttempt
-            )
-            .unwrap()
-            .contains("previous attempt")
-        );
+        assert!(validation_failure_no_progress_reason(
+            ValidationFailureProgress::UnchangedFromBaseline
+        )
+        .unwrap()
+        .contains("pristine-tree baseline"));
+        assert!(validation_failure_no_progress_reason(
+            ValidationFailureProgress::UnchangedFromPreviousAttempt
+        )
+        .unwrap()
+        .contains("previous attempt"));
     }
 
     #[test]

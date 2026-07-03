@@ -1682,6 +1682,135 @@ fn dispatch_fix_validation_never_passes_records_no_push_no_mr() {
     ));
 }
 
+/// TICKET-062: a validation failure identical to the pristine-tree baseline
+/// on attempt 1 must abort immediately — there is no "previous attempt" yet
+/// to compare against, so the old prev_failure-only comparison couldn't
+/// catch this and would burn a second paid attempt for free. `--retries 2`
+/// (3 attempts available) proves only ONE was actually consumed: no
+/// attempt-2 session directory is ever created.
+#[test]
+fn dispatch_fix_aborts_on_first_attempt_when_failure_matches_baseline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"false\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+
+    let out = bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "2",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pristine-tree baseline"));
+
+    // Only attempt-1 ever ran. If the baseline/previous-attempt distinction
+    // regressed back to prev_failure-only comparison, this would burn a
+    // second attempt before aborting and attempt-2 would exist.
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    assert!(session_dir.join("attempt-1").exists());
+    assert!(!session_dir.join("attempt-2").exists());
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["push_attempted"], false);
+    let _ = out;
+}
+
+/// TICKET-062, test case 4: an "expected red" ticket — where the baseline
+/// is genuinely broken and the ticket's job is to fix it — must still be
+/// able to succeed. Attempt 1 changes the failure text (real progress, not
+/// a no-op), so it must retry rather than abort; attempt 2 then passes.
+#[test]
+fn dispatch_fix_expected_red_baseline_can_still_succeed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        "validation_commands = [\"cat marker.txt; grep -q '^done$' marker.txt\"]\n",
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    // marker.txt does not exist on the pristine branch, so the baseline
+    // validation fails ("No such file or directory"). The fake backend
+    // tracks its own call count in a file outside the worktree (the
+    // worktree gets git-reset between attempts) and writes progressively
+    // closer output: attempt 1 writes "partial" (still fails, but with
+    // different captured output than the missing-file baseline — real
+    // progress); attempt 2 writes "done" (passes).
+    let counter = tmp.path().join("codex-call-count");
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nn=$( [ -f '{counter}' ] && cat '{counter}' || echo 0 )\nn=$((n+1))\necho \"$n\" > '{counter}'\nif [ \"$n\" -eq 1 ]; then echo partial > marker.txt; else echo done > marker.txt; fi\nexit 0\n",
+            counter = counter.display(),
+        ),
+    );
+    let gh_log = tmp.path().join("gh.log");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the marker file",
+            "--retries",
+            "2",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    assert!(session_dir.join("attempt-1").exists());
+    assert!(session_dir.join("attempt-2").exists());
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["validation_result"], "passed");
+    assert!(gh_log.exists());
+    assert!(fs::read_to_string(&gh_log).unwrap().contains("pr create"));
+    let _ = repo;
+}
+
 /// Priority-3 coverage: the git push can genuinely succeed while the
 /// provider CLI (MR creation) fails afterward. That is a real partial
 /// completion, not a false success — the ledger must show push_succeeded
