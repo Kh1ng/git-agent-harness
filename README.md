@@ -223,9 +223,25 @@ When `improve` or `fix` targets a ticket markdown file, GAH also reads ticket me
 
 `improve`/`fix` retry failed validation up to `--retries` times (default 2).
 Between attempts the worktree is hard-reset (`git reset --hard` + `git clean -fd`)
-so each attempt starts from a pristine tree, with the previous failure output
-appended to the prompt. The failed attempt's diff is saved to
-`sessions/<ts>/attempt-N/attempt-diff.patch` before the wipe.
+so each attempt starts from a pristine tree. The retry prompt is rebuilt from
+the base task with only the *latest* failure output (retry blocks are not
+accumulated — that confuses smaller models). The failed attempt's diff is
+saved to `sessions/<ts>/attempt-N/attempt-diff.patch` before the wipe.
+
+If the validation failure is byte-identical to the previous attempt, the run
+aborts early: an unchanged error means the agent's edits had no effect on it,
+which almost always indicates an environment or config problem (missing tool,
+bad validation command) that no retry can fix.
+
+Validation commands run through `sh -c`, so shell syntax (`cd x && y`, pipes,
+env vars) works.
+
+Before attempt 1, validation runs once on the pristine worktree (baseline).
+A failing baseline is recorded to `sessions/<ts>/baseline-validation-failure.txt`
+and injected into the task prompt, so the agent knows whether a failure is
+pre-existing. If the final failure is identical to the baseline, the error
+message says so — the agent's changes never affected it, which means the
+validation command or environment is broken, not the code.
 
 `--allow-draft-fail` pushes a `[DRAFT-FAIL]` MR even if validation never passes.
 
@@ -353,11 +369,50 @@ tests — implement until they pass, then remove the ignore.
   `ledger_summary_json_outputs_machine_readable_counts`.
 - **Populate ledger usage/cost fields**: `usage.*` is always null, so the
   routing cost caps (`max_known_estimated_cost_per_week` etc.) can never
-  trigger. Parse token/cost data from backend output (`claude -p
-  --output-format json` reports cost; openhands logs tokens) in
-  `runner.rs` and write it into `LedgerEntry.usage`.
+  trigger. Implementation plan (TDD):
+  1. Grab 2-3 real `backend-output.log` files from
+     `artifact_root/sessions/*/attempt-*/` (openhands runs with `--json`, so
+     the log is JSON event lines) and commit trimmed excerpts containing the
+     token/cost fields as `tests/fixtures/usage-logs/*.log`. Do NOT guess the
+     field names — read them from real logs.
+  2. Add `pub fn parse_usage_from_log(log_path: &Path, backend: &str) ->
+     LedgerUsage` in `runner.rs`: scan lines for JSON objects, take the last
+     one containing usage keys (openhands: accumulated cost/token metrics in
+     its event stream; claude: run with `--output-format json` and read
+     `total_cost_usd` / `usage` from the final result object). Unknown
+     format → `LedgerUsage::default()`, never an error.
+  3. Call it after each `run_backend` in `dispatch.rs` (improve, pm, review,
+     experiment) and assign to `ledger.usage`; set `usage_source` to the
+     backend name.
+  4. Unit tests against the fixtures; assert `gah ledger summary` then shows
+     nonzero cost totals.
 - **Fix strong-run heuristic**: `ledger::usage_summary_for_backend` counts
   every improve/fix/review run as "strong" unless `confidence_impact == low`.
   Strongness should be determined by model/backend (e.g. a configured
   strong-model list), not by mode.
+- **Failure taxonomy + attempts in ledger**: add to `LedgerEntry`:
+  `attempts: u32`, `baseline_validation: Option<String>` ("passed"/"failed"),
+  and `failure_class: Option<String>` with values `harness_error` (validation
+  command could not run / config bug), `env_error` (baseline failing and
+  failure identical to baseline), `agent_no_progress` (failure identical
+  across attempts), `agent_failure` (real failing validation), `backend_error`
+  (nonzero backend exit). Set these at each bail/success site in
+  `dispatch::improve`. Without this, model-economics stats bill config bugs
+  to the model.
+- **Outcome backfill**: a dispatch's real outcome (merged / closed / rotting)
+  is only known later. Extend `gah sync` to join provider MR state back onto
+  ledger entries by branch name and append a
+  `{"type":"outcome","branch":...,"state":"merged|closed|open","merged_at":...}`
+  record to the ledger (append-only, no rewriting). TDD against the existing
+  fake-`gh` pattern in `tests/gah_cli.rs`.
+- **`gah ledger models --since 30d`**: the economics report. Per
+  (effective_backend, effective_model): dispatches, avg attempts, validation
+  pass rate, harness-vs-agent failure split, MRs opened, MRs merged (from
+  outcome records), total cost, and **cost per merged MR** — the number that
+  answers "deepseek retries more but is still cheaper than codex". Requires
+  the cost-parsing and outcome-backfill tickets. `--json` output included.
+- **`gah doctor --validate`**: run the profile's `validation_commands` in the
+  live repo (read-only) and `sh -n`-check their syntax, so broken validation
+  config is caught at setup time, not inside a paid dispatch loop. Doctor
+  passing should mean "dispatch will not waste money on config errors".
 - **Smart MR titles from ticket**: Parse `Suggested MR Title:` field from the ticket file and use it as the MR title instead of the generic `[GAH] improve: <repo>`. Fall back to generic if field not present.

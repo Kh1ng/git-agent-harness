@@ -390,7 +390,9 @@ pub fn usage_summary_for_backend(
         if same_backend && same_model && this_session {
             out.runs_this_session += 1;
         }
-        if entry.confidence_impact.as_deref() != Some("low")
+        if same_backend
+            && same_model
+            && entry.confidence_impact.as_deref() != Some("low")
             && ledger_entry_model_name(entry)
                 .map(is_strong_model)
                 .unwrap_or(false)
@@ -645,6 +647,103 @@ mod tests {
         );
         assert!((summary.estimated_cost_this_week - 0.26).abs() < 0.001);
         assert!((summary.actual_cost_this_week - 0.26).abs() < 0.001);
+    }
+
+    #[test]
+    fn strong_run_on_other_backend_does_not_increment_summary() {
+        let (_tmp, cfg) = test_config();
+
+        let mut claude = LedgerEntry::new(
+            "test",
+            &profile(),
+            "claude",
+            "fix",
+            "task",
+            Some("session-1".into()),
+            None,
+        );
+        claude.effective_model = Some("claude-sonnet-4".into());
+        append(&cfg, &claude).unwrap();
+
+        let summary = usage_summary_for_backend(&cfg, "codex", None, Some("session-1")).unwrap();
+        assert_eq!(summary.runs_this_week, 0);
+        assert_eq!(summary.strong_runs_this_week, 0);
+        assert_eq!(summary.strong_runs_this_session, 0);
+    }
+
+    #[test]
+    fn strong_run_on_other_model_does_not_increment_filtered_model_summary() {
+        let (_tmp, cfg) = test_config();
+
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "fix",
+            "task",
+            Some("session-1".into()),
+            None,
+        );
+        entry.effective_model = Some("claude-sonnet-4".into());
+        append(&cfg, &entry).unwrap();
+
+        let summary =
+            usage_summary_for_backend(&cfg, "codex", Some("gpt-4o"), Some("session-1")).unwrap();
+        assert_eq!(summary.runs_this_week, 0);
+        assert_eq!(summary.strong_runs_this_week, 0);
+        assert_eq!(summary.strong_runs_this_session, 0);
+    }
+
+    #[test]
+    fn strong_session_count_only_uses_same_backend_and_model() {
+        let (_tmp, cfg) = test_config();
+
+        let mut same = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "fix",
+            "task-same",
+            Some("session-1".into()),
+            None,
+        );
+        same.effective_model = Some("claude-sonnet-4".into());
+        append(&cfg, &same).unwrap();
+
+        let mut other_backend = LedgerEntry::new(
+            "test",
+            &profile(),
+            "claude",
+            "fix",
+            "task-other-backend",
+            Some("session-1".into()),
+            None,
+        );
+        other_backend.effective_model = Some("claude-sonnet-4".into());
+        append(&cfg, &other_backend).unwrap();
+
+        let mut other_model = LedgerEntry::new(
+            "test",
+            &profile(),
+            "codex",
+            "fix",
+            "task-other-model",
+            Some("session-1".into()),
+            None,
+        );
+        other_model.effective_model = Some("gpt-4o".into());
+        append(&cfg, &other_model).unwrap();
+
+        let summary = usage_summary_for_backend(
+            &cfg,
+            "codex",
+            Some("claude-sonnet-4"),
+            Some("session-1"),
+        )
+        .unwrap();
+        assert_eq!(summary.runs_this_session, 1);
+        assert_eq!(summary.strong_runs_this_session, 1);
+        assert_eq!(summary.strong_runs_this_week, 1);
     }
 
     #[test]

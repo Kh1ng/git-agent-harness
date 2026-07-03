@@ -31,6 +31,45 @@ pub struct DispatchArgs {
     pub prod: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationFailureProgress {
+    Changed,
+    UnchangedFromBaseline,
+    UnchangedFromPreviousAttempt,
+    UnchangedFromBaselineAndPreviousAttempt,
+}
+
+impl ValidationFailureProgress {
+    fn unchanged_from_baseline(self) -> bool {
+        matches!(
+            self,
+            Self::UnchangedFromBaseline | Self::UnchangedFromBaselineAndPreviousAttempt
+        )
+    }
+
+    fn unchanged_from_previous_attempt(self) -> bool {
+        matches!(
+            self,
+            Self::UnchangedFromPreviousAttempt | Self::UnchangedFromBaselineAndPreviousAttempt
+        )
+    }
+}
+
+fn validation_failure_no_progress_reason(progress: ValidationFailureProgress) -> Option<&'static str> {
+    match progress {
+        ValidationFailureProgress::Changed => None,
+        ValidationFailureProgress::UnchangedFromBaseline => Some(
+            "validation failure identical to the pristine-tree baseline — the agent's changes never affected this error. Fix the validation command or environment, not the ticket.",
+        ),
+        ValidationFailureProgress::UnchangedFromPreviousAttempt => Some(
+            "validation failure identical to the previous attempt — the agent made no progress on the failing check.",
+        ),
+        ValidationFailureProgress::UnchangedFromBaselineAndPreviousAttempt => Some(
+            "validation failure identical to both the pristine-tree baseline and the previous attempt — the agent made no progress and never affected the original error.",
+        ),
+    }
+}
+
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     let profile = config::get_profile(cfg, &args.profile)?;
 
@@ -164,17 +203,16 @@ fn run_backend(
 }
 
 /// Run validation_commands in the worktree. Returns Err(combined output) on first failure.
-fn validate(profile: &Profile, wt: &Path) -> Result<()> {
-    for cmd_str in &profile.validation_commands {
-        let parts = shlex::split(cmd_str).ok_or_else(|| {
-            anyhow::anyhow!("invalid command string (unterminated quote?): {}", cmd_str)
-        })?;
-        let Some((bin, rest)) = parts.split_first() else {
+fn validate(commands: &[String], wt: &Path) -> Result<()> {
+    for cmd_str in commands {
+        if cmd_str.trim().is_empty() {
             continue;
-        };
+        }
         println!("  Validating: {}", cmd_str);
-        let out = Command::new(bin)
-            .args(rest)
+        // Run through the shell: validation commands routinely use `cd x && y`,
+        // pipes, and env vars, which Command::new(bin) cannot execute.
+        let out = Command::new("sh")
+            .args(["-c", cmd_str])
             .current_dir(wt)
             .output()
             .with_context(|| format!("failed to run '{}'", cmd_str))?;
@@ -368,9 +406,37 @@ fn improve(
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
-    let mut task = build_task(profile, &wt, &args.mode, &target);
+    let mut base_task = build_task(profile, &wt, &args.mode, &target);
+
+    // Baseline: run validation once on the pristine worktree BEFORE spending
+    // tokens. A failure here is a config error or a pre-existing red repo —
+    // either way the agent must know, and later failures can be compared
+    // against it to tell "agent made no progress" from "agent broke it".
+    let baseline_failure = if profile.validation_commands.is_empty() {
+        None
+    } else {
+        println!("Baseline validation on pristine worktree...");
+        match validate(&profile.validation_commands, &wt) {
+            Ok(()) => {
+                println!("Baseline validation passed.");
+                None
+            }
+            Err(e) => Some(format!("{:#}", e)),
+        }
+    };
+    if let Some(b) = &baseline_failure {
+        fs::write(session_dir.join("baseline-validation-failure.txt"), b)?;
+        println!("Baseline validation ALREADY FAILING on untouched branch (recorded).");
+        base_task.push_str(&format!(
+            "\n\n## Warning: validation already fails on the untouched branch\n\n```\n{}\n```\n\nIf this ticket is about fixing that failure, fix it. Otherwise it is pre-existing — your changes must not add new failures.\n",
+            &b[..b.len().min(4_000)],
+        ));
+    }
+
+    let mut task = base_task.clone();
     let max_attempts = args.retries + 1;
     let mut validation_failed = false;
+    let mut prev_failure: Option<String> = None;
     for attempt in 0..max_attempts {
         println!(
             "\nAttempt {}/{}: running {} backend...",
@@ -426,7 +492,7 @@ fn improve(
             "Running validation ({} commands)...",
             profile.validation_commands.len()
         );
-        match validate(profile, &wt) {
+        match validate(&profile.validation_commands, &wt) {
             Ok(()) => {
                 println!("Validation passed.");
                 validation_failed = false;
@@ -440,7 +506,21 @@ fn improve(
                 fs::write(&failure_path, &failure_output)?;
                 println!("Validation failed ({})", failure_path.display());
 
-                if attempt + 1 < max_attempts {
+                // Identical failure to the previous attempt means the agent's
+                // changes had no effect on the error — almost always an
+                // environment/config problem the agent cannot fix. Stop burning
+                // attempts.
+                let failure_progress = classify_validation_failure_progress(
+                    baseline_failure.as_deref(),
+                    prev_failure.as_deref(),
+                    &failure_output,
+                );
+                prev_failure = Some(failure_output.clone());
+
+                if attempt + 1 < max_attempts
+                    && !failure_progress.unchanged_from_baseline()
+                    && !failure_progress.unchanged_from_previous_attempt()
+                {
                     // Save the failed attempt's diff before wiping, so the
                     // session artifact shows what the agent actually wrote.
                     let _ = worktree::git(&["add", "-A"], &wt);
@@ -451,17 +531,39 @@ fn improve(
                     let _ = worktree::git(&["reset", "--hard", "HEAD"], &wt);
                     let _ = worktree::git(&["clean", "-fd"], &wt);
                     println!("Retrying with failure context...");
+                    // Rebuild from the base task with only the latest failure —
+                    // accumulating retry blocks confuses smaller models.
                     task = format!(
-                        "{}\n\n## Retry {}: validation failed\n\nFix the following before completing the task:\n\n```\n{}\n```",
-                        task,
+                        "{}\n\n## Previous attempt failed validation (attempt {}/{})\n\nYour previous attempt was discarded. The worktree is clean again.\nFix the following before completing the task:\n\n```\n{}\n```",
+                        base_task,
                         attempt + 1,
+                        max_attempts,
                         &failure_output[..failure_output.len().min(8_000)],
+                    );
+                } else if attempt + 1 < max_attempts && !args.allow_draft_fail {
+                    let Some(reason) =
+                        validation_failure_no_progress_reason(failure_progress)
+                    else {
+                        worktree::cleanup(&wt, repo);
+                        anyhow::bail!(
+                            "validation failed after {} attempt(s). Use --allow-draft-fail to push anyway.\n\n{}",
+                            max_attempts,
+                            &failure_output[..failure_output.len().min(4_000)],
+                        );
+                    };
+                    worktree::cleanup(&wt, repo);
+                    anyhow::bail!(
+                        "{} Aborting early after attempt {}.\n\n{}",
+                        reason,
+                        attempt + 1,
+                        &failure_output[..failure_output.len().min(4_000)],
                     );
                 } else if args.allow_draft_fail {
                     println!(
                         "Validation still failing; --allow-draft-fail set — pushing as draft."
                     );
                     ledger.validation_result = Some("failed-draft".into());
+                    break;
                 } else {
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
@@ -1427,10 +1529,12 @@ fn format_candidate_task(
 
 #[cfg(test)]
 mod tests {
+    use super::validate;
     use super::{
         apply_pm_plan, apply_route_to_ledger, build_mr_title, build_pm_plan_task,
-        collect_pm_preflight, collect_ticket_summaries, first_markdown_heading, parse_pm_plan,
-        parse_ticket_metadata, RouteDecision, TicketMetadata,
+        classify_validation_failure_progress, collect_pm_preflight, collect_ticket_summaries,
+        first_markdown_heading, parse_pm_plan, parse_ticket_metadata, RouteDecision,
+        TicketMetadata, ValidationFailureProgress, validation_failure_no_progress_reason,
     };
     use crate::config::{Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
@@ -1621,6 +1725,75 @@ mod tests {
     }
 
     #[test]
+    fn validation_failure_matching_baseline_is_classified_separately() {
+        let progress =
+            classify_validation_failure_progress(Some("same failure"), None, "same failure");
+        assert_eq!(progress, ValidationFailureProgress::UnchangedFromBaseline);
+        assert!(progress.unchanged_from_baseline());
+        assert!(!progress.unchanged_from_previous_attempt());
+    }
+
+    #[test]
+    fn validation_failure_matching_previous_attempt_is_classified_separately() {
+        let progress = classify_validation_failure_progress(
+            Some("baseline failure"),
+            Some("same failure"),
+            "same failure",
+        );
+        assert_eq!(
+            progress,
+            ValidationFailureProgress::UnchangedFromPreviousAttempt
+        );
+        assert!(!progress.unchanged_from_baseline());
+        assert!(progress.unchanged_from_previous_attempt());
+    }
+
+    #[test]
+    fn validation_failure_matching_both_baseline_and_previous_is_distinct() {
+        let progress = classify_validation_failure_progress(
+            Some("same failure"),
+            Some("same failure"),
+            "same failure",
+        );
+        assert_eq!(
+            progress,
+            ValidationFailureProgress::UnchangedFromBaselineAndPreviousAttempt
+        );
+        assert!(progress.unchanged_from_baseline());
+        assert!(progress.unchanged_from_previous_attempt());
+    }
+
+    #[test]
+    fn validation_failure_changes_are_not_misclassified() {
+        let progress = classify_validation_failure_progress(
+            Some("baseline failure"),
+            Some("previous failure"),
+            "new failure",
+        );
+        assert_eq!(progress, ValidationFailureProgress::Changed);
+        assert!(!progress.unchanged_from_baseline());
+        assert!(!progress.unchanged_from_previous_attempt());
+    }
+
+    #[test]
+    fn validation_failure_reasons_explain_baseline_vs_previous_attempt() {
+        assert!(
+            validation_failure_no_progress_reason(
+                ValidationFailureProgress::UnchangedFromBaseline
+            )
+            .unwrap()
+            .contains("pristine-tree baseline")
+        );
+        assert!(
+            validation_failure_no_progress_reason(
+                ValidationFailureProgress::UnchangedFromPreviousAttempt
+            )
+            .unwrap()
+            .contains("previous attempt")
+        );
+    }
+
+    #[test]
     fn apply_pm_plan_skips_duplicates() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
@@ -1682,6 +1855,23 @@ mod tests {
             "[GAH][DRAFT-FAIL] Fix: TICKET-058 Descriptive MR Titles"
         );
     }
+
+    #[test]
+    fn validate_runs_shell_syntax() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        // `cd x && y` requires a shell — this was silently impossible before
+        let cmds = vec!["cd sub && true".to_string()];
+        assert!(validate(&cmds, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn validate_reports_failing_command_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cmds = vec!["echo oops >&2 && false".to_string()];
+        let err = validate(&cmds, tmp.path()).unwrap_err();
+        assert!(format!("{:#}", err).contains("oops"));
+    }
 }
 
 fn git_output(args: &[&str], cwd: &Path) -> Result<String> {
@@ -1736,6 +1926,21 @@ fn dry_run_route(
         },
     )
     .ok()
+}
+
+fn classify_validation_failure_progress(
+    baseline_failure: Option<&str>,
+    previous_failure: Option<&str>,
+    current_failure: &str,
+) -> ValidationFailureProgress {
+    let same_as_baseline = baseline_failure == Some(current_failure);
+    let same_as_previous = previous_failure == Some(current_failure);
+    match (same_as_baseline, same_as_previous) {
+        (true, true) => ValidationFailureProgress::UnchangedFromBaselineAndPreviousAttempt,
+        (true, false) => ValidationFailureProgress::UnchangedFromBaseline,
+        (false, true) => ValidationFailureProgress::UnchangedFromPreviousAttempt,
+        (false, false) => ValidationFailureProgress::Changed,
+    }
 }
 
 fn resolve_review_target(
