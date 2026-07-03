@@ -1811,6 +1811,44 @@ fn dispatch_fix_expected_red_baseline_can_still_succeed() {
     let _ = repo;
 }
 
+/// TICKET-063: a representative dispatch failure (backend exits nonzero)
+/// must populate structured failure_class/failure_stage on the ledger
+/// entry, not just the old free-text error_summary.
+#[test]
+fn dispatch_fix_backend_nonzero_exit_records_structured_failure_attribution() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\nexit 1\n");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure();
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["failure_class"], "backend_error");
+    assert_eq!(entry["failure_stage"], "agent_run");
+}
+
 /// Priority-3 coverage: the git push can genuinely succeed while the
 /// provider CLI (MR creation) fails afterward. That is a real partial
 /// completion, not a false success — the ledger must show push_succeeded

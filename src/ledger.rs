@@ -7,6 +7,75 @@ use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+/// Coarse attribution for why a dispatch failed. Deliberately not
+/// exhaustively wired everywhere yet (TICKET-063): only the least ambiguous
+/// boundaries in dispatch.rs set this. Everything else stays `None` rather
+/// than guess. Persisted as a plain lowercase string, matching this
+/// codebase's existing convention for enum-like ledger fields (e.g.
+/// `validation_result`) rather than a serde-tagged enum, so the wire format
+/// never breaks if variants are renamed internally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    HarnessError,
+    EnvironmentError,
+    BackendError,
+    AgentNoProgress,
+    AgentFailure,
+    ValidationFailure,
+    HumanBlocked,
+    Unknown,
+}
+
+impl FailureClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HarnessError => "harness_error",
+            Self::EnvironmentError => "environment_error",
+            Self::BackendError => "backend_error",
+            Self::AgentNoProgress => "agent_no_progress",
+            Self::AgentFailure => "agent_failure",
+            Self::ValidationFailure => "validation_failure",
+            Self::HumanBlocked => "human_blocked",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Where in the dispatch pipeline a failure occurred. See `FailureClass` for
+/// the "not exhaustively wired yet" caveat — same applies here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureStage {
+    Preflight,
+    BaselineValidation,
+    Route,
+    BackendLaunch,
+    AgentRun,
+    PostValidation,
+    Commit,
+    Push,
+    MrCreate,
+    Review,
+    Sync,
+}
+
+impl FailureStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::BaselineValidation => "baseline_validation",
+            Self::Route => "route",
+            Self::BackendLaunch => "backend_launch",
+            Self::AgentRun => "agent_run",
+            Self::PostValidation => "post_validation",
+            Self::Commit => "commit",
+            Self::Push => "push",
+            Self::MrCreate => "mr_create",
+            Self::Review => "review",
+            Self::Sync => "sync",
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
@@ -61,6 +130,13 @@ pub struct LedgerEntry {
     pub insertions: Option<u32>,
     pub deletions: Option<u32>,
     pub error_summary: Option<String>,
+    /// TICKET-063: coarse failure attribution, populated at only the
+    /// clearest boundaries so far. `#[serde(default)]` so pre-existing
+    /// JSONL ledger lines without these keys still deserialize.
+    #[serde(default)]
+    pub failure_class: Option<String>,
+    #[serde(default)]
+    pub failure_stage: Option<String>,
     pub usage: LedgerUsage,
 }
 
@@ -112,8 +188,19 @@ impl LedgerEntry {
             insertions: None,
             deletions: None,
             error_summary: None,
+            failure_class: None,
+            failure_stage: None,
             usage: LedgerUsage::default(),
         }
+    }
+
+    /// Set failure attribution. Call this at the specific error site, not
+    /// generically in the top-level error handler — the whole point is to
+    /// know *which* boundary failed, and that context is only available
+    /// where the error actually originates.
+    pub fn set_failure(&mut self, class: FailureClass, stage: FailureStage) {
+        self.failure_class = Some(class.as_str().to_string());
+        self.failure_stage = Some(stage.as_str().to_string());
     }
 }
 
@@ -410,7 +497,9 @@ pub fn usage_summary_for_backend(
 
 #[cfg(test)]
 mod tests {
-    use super::{append, is_strong_model, usage_summary_for_backend, LedgerEntry};
+    use super::{
+        append, is_strong_model, usage_summary_for_backend, FailureClass, FailureStage, LedgerEntry,
+    };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
 
@@ -487,6 +576,49 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(text.contains("\"profile\":\"test\""));
         assert!(text.ends_with('\n'));
+    }
+
+    // ── TICKET-063: structured failure_class / failure_stage ───────────────
+
+    #[test]
+    fn new_entry_has_no_failure_attribution_by_default() {
+        let entry = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
+        assert_eq!(entry.failure_class, None);
+        assert_eq!(entry.failure_stage, None);
+    }
+
+    #[test]
+    fn set_failure_populates_both_fields_as_lowercase_strings() {
+        let mut entry = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
+        entry.set_failure(FailureClass::BackendError, FailureStage::AgentRun);
+        assert_eq!(entry.failure_class.as_deref(), Some("backend_error"));
+        assert_eq!(entry.failure_stage.as_deref(), Some("agent_run"));
+    }
+
+    #[test]
+    fn failure_attribution_round_trips_through_json() {
+        let mut entry = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
+        entry.set_failure(FailureClass::AgentNoProgress, FailureStage::PostValidation);
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"failure_class\":\"agent_no_progress\""));
+        assert!(json.contains("\"failure_stage\":\"post_validation\""));
+        let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.failure_class.as_deref(), Some("agent_no_progress"));
+        assert_eq!(parsed.failure_stage.as_deref(), Some("post_validation"));
+    }
+
+    /// TICKET-063 requirement: existing historical JSONL entries — written
+    /// before failure_class/failure_stage existed — must still deserialize.
+    /// This is the exact fixture line used in
+    /// tests/gah_cli.rs::ledger_summary_reports_recent_counts, which has no
+    /// failure_class/failure_stage keys at all.
+    #[test]
+    fn pre_existing_ledger_line_without_failure_fields_still_deserializes() {
+        let old_line = "{\"timestamp\":\"2099-01-01T00:00:00Z\",\"session_id\":\"1\",\"profile\":\"real\",\"display_name\":\"Real\",\"repo_id\":\"real\",\"repo\":\"owner/real\",\"local_path\":\"/tmp/repo\",\"provider\":\"github\",\"backend\":\"claude\",\"requested_backend\":\"claude\",\"effective_backend\":\"claude\",\"requested_model\":null,\"effective_model\":null,\"routing_reason\":\"explicit\",\"fallback_used\":false,\"confidence_impact\":null,\"human_required\":false,\"mode\":\"pm\",\"target_summary\":\"x\",\"branch\":null,\"session_dir\":null,\"duration_seconds\":1.0,\"backend_exit_code\":0,\"validation_result\":\"not_run\",\"commit_attempted\":false,\"commit_created\":false,\"push_attempted\":false,\"push_succeeded\":false,\"mr_attempted\":false,\"mr_created\":false,\"mr_url\":null,\"files_changed\":null,\"insertions\":null,\"deletions\":null,\"error_summary\":null,\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"total_tokens\":null,\"estimated_cost_usd\":null,\"usage_source\":null}}";
+        let parsed: LedgerEntry = serde_json::from_str(old_line).unwrap();
+        assert_eq!(parsed.failure_class, None);
+        assert_eq!(parsed.failure_stage, None);
+        assert_eq!(parsed.profile, "real");
     }
 
     #[test]

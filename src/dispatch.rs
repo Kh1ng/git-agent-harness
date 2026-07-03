@@ -466,6 +466,13 @@ fn improve(
         let result = match result {
             Ok(r) => r,
             Err(e) => {
+                // The backend process itself couldn't launch (binary missing,
+                // exec failure) — this is a setup/harness problem, not the
+                // agent or backend failing at its job.
+                ledger.set_failure(
+                    crate::ledger::FailureClass::HarnessError,
+                    crate::ledger::FailureStage::BackendLaunch,
+                );
                 worktree::cleanup(&wt, repo);
                 return Err(e);
             }
@@ -478,6 +485,12 @@ fn improve(
         ledger.backend_exit_code = Some(result.exit_code);
 
         if result.exit_code != 0 {
+            // The backend launched but exited nonzero — the backend itself
+            // failed at its job, distinct from it never starting at all.
+            ledger.set_failure(
+                crate::ledger::FailureClass::BackendError,
+                crate::ledger::FailureStage::AgentRun,
+            );
             worktree::cleanup(&wt, repo);
             anyhow::bail!(
                 "backend exited {} on attempt {}",
@@ -552,6 +565,13 @@ fn improve(
                             &failure_output[..failure_output.len().min(4_000)],
                         );
                     };
+                    // Identical to baseline and/or the previous attempt: the
+                    // agent made no measurable progress, which is a distinct
+                    // failure mode from "tried and failed differently."
+                    ledger.set_failure(
+                        crate::ledger::FailureClass::AgentNoProgress,
+                        crate::ledger::FailureStage::PostValidation,
+                    );
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
                         "{} Aborting early after attempt {}.\n\n{}",
