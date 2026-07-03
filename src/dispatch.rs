@@ -1428,11 +1428,12 @@ fn format_candidate_task(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_pm_plan, build_mr_title, build_pm_plan_task, collect_pm_preflight,
-        collect_ticket_summaries, first_markdown_heading, parse_pm_plan, parse_ticket_metadata,
-        TicketMetadata,
+        apply_pm_plan, apply_route_to_ledger, build_mr_title, build_pm_plan_task,
+        collect_pm_preflight, collect_ticket_summaries, first_markdown_heading, parse_pm_plan,
+        parse_ticket_metadata, RouteDecision, TicketMetadata,
     };
     use crate::config::{Profile, RoutingPolicy};
+    use crate::ledger::LedgerEntry;
     use crate::models::PmPlan;
     use std::fs;
     use std::path::Path;
@@ -1493,6 +1494,68 @@ mod tests {
             .current_dir(repo)
             .output()
             .unwrap();
+    }
+
+    #[test]
+    fn apply_route_to_ledger_records_effective_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile(tmp.path()),
+            "codex",
+            "improve",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+        let route = RouteDecision {
+            requested_backend: "auto".into(),
+            effective_backend: "codex".into(),
+            requested_model: None,
+            effective_model: Some("claude-sonnet-4".into()),
+            routing_reason: "ticket recommendation".into(),
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
+        };
+
+        apply_route_to_ledger(&mut entry, &route);
+
+        assert_eq!(entry.effective_model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(entry.effective_backend, "codex");
+        assert_eq!(
+            entry.routing_reason.as_deref(),
+            Some("ticket recommendation")
+        );
+    }
+
+    #[test]
+    fn apply_route_to_ledger_leaves_null_when_no_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+        let route = RouteDecision {
+            requested_backend: "auto".into(),
+            effective_backend: "openhands".into(),
+            requested_model: None,
+            effective_model: None,
+            routing_reason: "profile routing policy".into(),
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
+        };
+
+        apply_route_to_ledger(&mut entry, &route);
+
+        assert_eq!(entry.effective_model, None);
+        assert_eq!(entry.effective_backend, "openhands");
     }
 
     #[test]
@@ -1648,6 +1711,13 @@ fn dry_run_route(
     mode: &str,
     args: &DispatchArgs,
 ) -> Option<RouteDecision> {
+    let ticket_meta = if matches!(mode, "improve" | "fix") && !args.target.is_empty() {
+        parse_ticket_metadata(Path::new(&args.target))
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
     routing::decide(
         &cfg.defaults,
         profile,
@@ -1655,8 +1725,12 @@ fn dry_run_route(
             mode,
             requested_backend: &args.backend,
             requested_model: args.model.as_deref(),
-            recommended_backend: None,
-            recommended_model: None,
+            recommended_backend: ticket_meta
+                .as_ref()
+                .and_then(|m| m.recommended_backend.as_deref()),
+            recommended_model: ticket_meta
+                .as_ref()
+                .and_then(|m| m.recommended_model.as_deref()),
             session_id: None,
             usage_summary: None,
         },

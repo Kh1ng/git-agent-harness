@@ -951,6 +951,62 @@ fn dispatch_pm_writes_ledger_entry() {
 }
 
 #[test]
+fn dispatch_records_effective_model_for_routed_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let bare = repo.parent().unwrap().join("origin.git");
+    ProcessCommand::new("git")
+        .args(["init", "--bare", bare.to_str().unwrap()])
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["remote", "add", "origin", bare.to_str().unwrap()])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let ticket = tmp.path().join("ticket.md");
+    fs::write(
+        &ticket,
+        "# Ticket\n\nRecommended backend: claude\nRecommended model: claude-sonnet-4\n",
+    )
+    .unwrap();
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "claude");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "improve",
+            "--target",
+            ticket.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success();
+
+    let ledger = tmp.path().join("artifacts/ledger.jsonl");
+    let text = fs::read_to_string(ledger).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["effective_backend"], "claude");
+    assert_eq!(entry["effective_model"], "claude-sonnet-4");
+}
+
+#[test]
 fn prune_dry_run_reports_old_sessions_and_worktrees() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
