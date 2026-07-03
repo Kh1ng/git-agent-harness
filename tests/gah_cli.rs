@@ -1546,6 +1546,201 @@ fn fix_mode_uses_ticket_title_in_mr_title() {
     assert!(gh_log.contains("Ticket: TICKET-058 Descriptive Title Here"));
 }
 
+/// Sets up a real local repo pushed to a bare "origin.git" that GitHub-style
+/// URLs are redirected to via git's `insteadOf`, matching the pattern in
+/// `fix_mode_uses_ticket_title_in_mr_title`. Returns (repo, home, cfg).
+fn setup_fix_dispatch_repo(
+    tmp: &TempDir,
+    extra_profile: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    let github_root = tmp.path().join("github-root");
+    let origin = github_root.join("owner/real.git");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    init_git_repo(&repo);
+    fs::create_dir_all(origin.parent().unwrap()).unwrap();
+    ProcessCommand::new("git")
+        .args(["init", "--bare", origin.to_str().unwrap()])
+        .output()
+        .unwrap();
+    configure_git_url_instead_of(
+        &home,
+        "https://github.com/",
+        &format!("file://{}/", github_root.display()),
+    );
+    ProcessCommand::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/real.git",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    // Plain keys must appear before the nested [profiles.real.routing] table
+    // in TOML, or they get parsed as belonging to that subtable instead.
+    let cfg = write_real_repo_config_with_extra(
+        tmp,
+        &repo,
+        "github",
+        &format!(
+            "{}\n[profiles.real.routing]\nimprove_backend = \"codex\"\n",
+            extra_profile
+        ),
+        "",
+    );
+    (repo, home, cfg)
+}
+
+fn branch_exists_on_bare_origin(github_root: &std::path::Path, branch: &str) -> bool {
+    let origin = github_root.join("owner/real.git");
+    let out = ProcessCommand::new("git")
+        .args(["branch", "--list", branch])
+        .current_dir(&origin)
+        .output()
+        .unwrap();
+    !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+}
+
+/// Priority-3 coverage: validation that never passes must not produce a
+/// false success. No push, no MR, and the CLI itself must exit nonzero with
+/// actionable output — the exact class of silent-waste bug this harness
+/// exists to prevent (see baseline-validation work in dispatch.rs).
+#[test]
+fn dispatch_fix_validation_never_passes_records_no_push_no_mr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"false\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    let gh_log = tmp.path().join("gh.log");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "0",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("validation failed after"));
+
+    // No MR was ever attempted.
+    assert!(!gh_log.exists() || !fs::read_to_string(&gh_log).unwrap().contains("pr create"));
+
+    // The push never happened: the branch GAH created does not exist on origin.
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["push_attempted"], false);
+    assert_eq!(entry["push_succeeded"], false);
+    assert_eq!(entry["mr_attempted"], false);
+    assert_eq!(entry["mr_created"], false);
+    assert!(entry["error_summary"]
+        .as_str()
+        .unwrap()
+        .contains("validation failed"));
+    let branch = entry["branch"].as_str().unwrap();
+    assert!(!branch_exists_on_bare_origin(
+        &repo.parent().unwrap().join("github-root"),
+        branch
+    ));
+}
+
+/// Priority-3 coverage: the git push can genuinely succeed while the
+/// provider CLI (MR creation) fails afterward. That is a real partial
+/// completion, not a false success — the ledger must show push_succeeded
+/// true and mr_created false, and the CLI must still exit nonzero with the
+/// provider's own error text surfaced.
+#[test]
+fn dispatch_fix_provider_cli_nonzero_after_successful_push() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\necho 'insufficient permission to create pr' >&2\nexit 1\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "insufficient permission to create pr",
+        ));
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["push_attempted"], true);
+    assert_eq!(entry["push_succeeded"], true);
+    assert_eq!(entry["mr_attempted"], true);
+    assert_eq!(entry["mr_created"], false);
+    let branch = entry["branch"].as_str().unwrap();
+    assert!(branch_exists_on_bare_origin(
+        &repo.parent().unwrap().join("github-root"),
+        branch
+    ));
+}
+
 #[test]
 fn dispatch_dry_run_ticket_metadata_feeds_routing() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1614,6 +1809,229 @@ fn sync_classifies_open_gah_prs() {
         .stdout(predicate::str::contains(
             "recommended: human review and merge decision",
         ));
+}
+
+/// Build a fake `glab` that responds to `mr list` with the given JSON body
+/// and exits 0. Anything else exits 0 with no output.
+fn make_fake_glab(dir: &std::path::Path, mr_list_json: &str) {
+    make_fake_bin_with_body(
+        dir,
+        "glab",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"mr\" ] && [ \"$2\" = \"list\" ]; then echo '{}'; exit 0; fi\nexit 0\n",
+            mr_list_json.replace('\'', "'\\''"),
+        ),
+    );
+}
+
+#[test]
+fn sync_gitlab_classifies_open_mr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "gitlab");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_glab(
+        &fake_bin,
+        r#"[{"title":"[GAH] fix","source_branch":"gah/test-1","web_url":"https://example/mr/1","labels":["gah-ready-for-human"],"state":"opened","merged_at":null,"updated_at":"2099-01-01T00:00:00Z"}]"#,
+    );
+
+    bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("READY_FOR_HUMAN"))
+        .stdout(predicate::str::contains("gah/test-1"));
+}
+
+#[test]
+fn sync_gitlab_classifies_merged_mr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "gitlab");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_glab(
+        &fake_bin,
+        r#"[{"title":"[GAH] fix","source_branch":"gah/test-2","web_url":"https://example/mr/2","labels":[],"state":"merged","merged_at":"2099-01-01T00:00:00Z","updated_at":"2099-01-01T00:00:00Z"}]"#,
+    );
+
+    bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MERGED"))
+        .stdout(predicate::str::contains("gah/test-2"))
+        .stdout(predicate::str::contains("recommended: none"));
+}
+
+/// Documents current behavior, not a spec: sync.rs does not parse the
+/// GitLab MR `state` field, so a closed-and-unmerged MR is indistinguishable
+/// from an open one and is classified the same way (NEEDS_REVIEW here,
+/// since it carries no gah-* label and isn't stale). This is a known gap,
+/// not a fix — see TODO.md for the failure-taxonomy work. If this test ever
+/// starts failing because classify() now reads `state`, that's progress;
+/// update the assertion, don't just delete the test.
+#[test]
+fn sync_gitlab_closed_unmerged_mr_is_indistinguishable_from_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "gitlab");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_glab(
+        &fake_bin,
+        r#"[{"title":"[GAH] fix","source_branch":"gah/test-3","web_url":"https://example/mr/3","labels":[],"state":"closed","merged_at":null,"updated_at":"2099-01-01T00:00:00Z"}]"#,
+    );
+
+    bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("NEEDS_REVIEW"))
+        .stdout(predicate::str::contains("gah/test-3"));
+}
+
+#[test]
+fn sync_gitlab_malformed_json_fails_loudly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "gitlab");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "glab",
+        "#!/bin/sh\nif [ \"$1\" = \"mr\" ] && [ \"$2\" = \"list\" ]; then echo 'not json at all'; exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .failure();
+}
+
+#[test]
+fn sync_gitlab_no_matching_mr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "gitlab");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "glab",
+        "#!/bin/sh\nif [ \"$1\" = \"mr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nexit 0\n",
+    );
+
+    let out = bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(!stdout.contains("gah/test"));
+}
+
+#[test]
+fn sync_gitlab_fails_when_glab_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "gitlab");
+
+    bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", "")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("glab mr list"));
+}
+
+#[test]
+fn sync_gitlab_fails_when_glab_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "gitlab");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "glab",
+        "#!/bin/sh\necho \"API ERROR\" >&2\nexit 1\n",
+    );
+
+    bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("API ERROR"));
 }
 
 // ── TDD: machine-readable state for autonomous manager agents ──────────────

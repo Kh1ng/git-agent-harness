@@ -211,3 +211,144 @@ pub fn cleanup(worktree: &Path, repo: &Path) {
     );
     let _ = git_raw(&["worktree", "prune"], repo);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+    use tempfile::TempDir;
+
+    fn init_bare_repo_with_main(dir: &Path) {
+        StdCommand::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        fs::write(dir.join("f.txt"), "content\n").unwrap();
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
+
+    fn add_bare_origin(repo: &Path) -> PathBuf {
+        let bare = repo.parent().unwrap().join("origin.git");
+        StdCommand::new("git")
+            .args(["init", "--bare", "-q", bare.to_str().unwrap()])
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["remote", "add", "origin", bare.to_str().unwrap()])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["push", "-q", "-u", "origin", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        bare
+    }
+
+    // ── git() / git_raw() ───────────────────────────────────────────────
+
+    #[test]
+    fn git_bails_on_nonzero_exit_with_stderr_context() {
+        let tmp = TempDir::new().unwrap();
+        init_bare_repo_with_main(tmp.path());
+
+        let err = git(&["not-a-real-git-subcommand"], tmp.path()).unwrap_err();
+
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("git not-a-real-git-subcommand"), "{msg}");
+    }
+
+    #[test]
+    fn git_missing_working_directory_surfaces_actionable_error() {
+        let missing = std::env::temp_dir().join("gah-test-definitely-missing-dir-xyz");
+        let _ = fs::remove_dir_all(&missing);
+
+        let err = git(&["status"], &missing).unwrap_err();
+
+        // std::process::Command surfaces this as a launch error via the
+        // anyhow context wired in git_raw(), not a git stderr message.
+        assert!(format!("{:#}", err).contains("git status"));
+    }
+
+    // ── create() ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn create_fails_loudly_when_target_branch_does_not_exist_on_origin() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        let err = create(&repo, "does-not-exist", "gah/test-1", &worktree_base).unwrap_err();
+
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("creating worktree from origin/does-not-exist"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn create_succeeds_for_real_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        let wt = create(&repo, "main", "gah/test-2", &worktree_base).unwrap();
+
+        assert!(wt.join("f.txt").exists());
+    }
+
+    // ── ensure_staged() ──────────────────────────────────────────────────
+
+    #[test]
+    fn ensure_staged_fails_when_nothing_is_staged() {
+        let tmp = TempDir::new().unwrap();
+        init_bare_repo_with_main(tmp.path());
+
+        let err = ensure_staged(tmp.path()).unwrap_err();
+
+        assert!(format!("{:#}", err).contains("nothing to commit"));
+    }
+
+    // ── push_branch() ────────────────────────────────────────────────────
+
+    #[test]
+    fn push_branch_fails_loudly_for_unreachable_remote() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        let bogus_remote = tmp.path().join("does-not-exist-as-a-remote");
+
+        let err = push_branch(&repo, "main", bogus_remote.to_str().unwrap(), "").unwrap_err();
+
+        assert!(format!("{:#}", err).contains("push failed"));
+    }
+}

@@ -2,6 +2,35 @@ use crate::config::Profile;
 use anyhow::{Context, Result};
 use std::process::Command;
 
+#[cfg(test)]
+thread_local! {
+    /// Per-thread PATH override for provider CLI tests. Thread-local (not a
+    /// process-global env var) so parallel tests in other modules that need
+    /// the real PATH (git, sh, ...) are never affected — see
+    /// tests::PathOverride below for why this exists.
+    static TEST_PATH_OVERRIDE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Construct a Command for an external provider CLI (`gh`, `curl`). In test
+/// builds, honors a thread-local PATH override so tests can hide/replace
+/// these binaries without touching the process-wide PATH.
+fn provider_command(name: &str) -> Command {
+    // `mut` is only needed under #[cfg(test)] below; clippy flags it as
+    // unused in non-test builds where that block is compiled out.
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(name);
+    #[cfg(test)]
+    {
+        TEST_PATH_OVERRIDE.with(|p| {
+            if let Some(path) = p.borrow().as_ref() {
+                cmd.env("PATH", path);
+            }
+        });
+    }
+    cmd
+}
+
+#[derive(Debug)]
 pub struct MrResult {
     pub url: String,
     pub id: String,
@@ -77,7 +106,7 @@ fn gitlab_mr(profile: &Profile, branch: &str, title: &str, body: &str) -> Result
         "description": body,
     });
 
-    let out = Command::new("curl")
+    let out = provider_command("curl")
         .args([
             "-s",
             "-X",
@@ -102,7 +131,7 @@ fn gitlab_mr(profile: &Profile, branch: &str, title: &str, body: &str) -> Result
 }
 
 fn github_mr(profile: &Profile, branch: &str, title: &str, body: &str) -> Result<MrResult> {
-    let out = Command::new("gh")
+    let out = provider_command("gh")
         .args([
             "pr",
             "create",
@@ -196,7 +225,7 @@ fn github_post_review_comment(
     labels: &[&str],
 ) -> Result<()> {
     let pr_number = github_find_pr_number_by_branch(profile, branch)?;
-    let out = Command::new("gh")
+    let out = provider_command("gh")
         .args([
             "pr",
             "comment",
@@ -215,7 +244,7 @@ fn github_post_review_comment(
         );
     }
     if !labels.is_empty() {
-        let _ = Command::new("gh")
+        let _ = provider_command("gh")
             .args([
                 "pr",
                 "edit",
@@ -278,7 +307,7 @@ fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarg
 }
 
 fn github_find_pr_number_by_branch(profile: &Profile, branch: &str) -> Result<String> {
-    let out = Command::new("gh")
+    let out = provider_command("gh")
         .args([
             "pr",
             "list",
@@ -314,7 +343,7 @@ fn github_review_target_by_branch(profile: &Profile, branch: &str) -> Result<Rev
 }
 
 fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<ReviewTarget> {
-    let out = Command::new("gh")
+    let out = provider_command("gh")
         .args([
             "pr",
             "view",
@@ -373,7 +402,7 @@ fn gitlab_target_from_value(value: &serde_json::Value) -> ReviewTarget {
 }
 
 fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
-    let out = Command::new("curl")
+    let out = provider_command("curl")
         .args(args)
         .output()
         .context("curl request")?;
@@ -384,4 +413,142 @@ fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
         );
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{create_draft_mr, TEST_PATH_OVERRIDE};
+    use crate::config::{Profile, RoutingPolicy};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    /// Sets the PATH override consulted by `provider_command()` for the
+    /// *current test thread only* (a thread-local, not `std::env::set_var`).
+    /// Rust runs tests in parallel threads within one process, and PATH is
+    /// process-global — mutating it directly corrupts unrelated tests in
+    /// other modules (worktree, dispatch, routing) that need the real PATH
+    /// for `git`/`sh` mid-run. This was tried and reproduced that exact
+    /// failure before being replaced with this seam.
+    struct PathOverride;
+
+    impl PathOverride {
+        fn set(path: String) -> Self {
+            TEST_PATH_OVERRIDE.with(|p| *p.borrow_mut() = Some(path));
+            PathOverride
+        }
+    }
+
+    impl Drop for PathOverride {
+        fn drop(&mut self) {
+            TEST_PATH_OVERRIDE.with(|p| *p.borrow_mut() = None);
+        }
+    }
+
+    fn make_fake_bin(dir: &Path, name: &str, body: &str) {
+        let path = dir.join(name);
+        fs::write(&path, body).unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+    }
+
+    fn github_profile() -> Profile {
+        Profile {
+            display_name: "Repo".into(),
+            repo_id: "repo".into(),
+            provider: "github".into(),
+            repo: "owner/repo".into(),
+            local_path: "/tmp/repo".into(),
+            artifact_root: "/tmp/artifacts".into(),
+            default_target_branch: "main".into(),
+            provider_api_base: None,
+            provider_project_id: None,
+            oh_profile: None,
+            openhands_args: vec![],
+            codex_args: vec![],
+            claude_args: vec![],
+            policy_path: None,
+            env_file: None,
+            env_file_prod: None,
+            validation_commands: vec![],
+            test_file_patterns: vec![],
+            model_improve: None,
+            model_pm: None,
+            model_review: None,
+            routing: RoutingPolicy::default(),
+        }
+    }
+
+    fn gitlab_profile() -> Profile {
+        Profile {
+            provider: "gitlab".into(),
+            provider_api_base: Some("https://gitlab.example.com/api/v4".into()),
+            provider_project_id: Some("42".into()),
+            ..github_profile()
+        }
+    }
+
+    #[test]
+    fn github_mr_missing_gh_produces_actionable_error() {
+        let tmp = TempDir::new().unwrap();
+        let empty_bin = tmp.path().join("bin");
+        fs::create_dir_all(&empty_bin).unwrap();
+        // PATH deliberately has no fallback to the real system PATH: this
+        // must fail even on a machine where `gh` happens to be installed.
+        let _guard = PathOverride::set(empty_bin.to_str().unwrap().to_string());
+
+        let err = create_draft_mr(&github_profile(), "gah/test", "title", "body").unwrap_err();
+
+        assert!(format!("{:#}", err).contains("gh pr create"));
+    }
+
+    #[test]
+    fn github_mr_nonzero_exit_surfaces_stderr() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            "#!/bin/sh\necho 'insufficient scope' >&2\nexit 1\n",
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        let err = create_draft_mr(&github_profile(), "gah/test", "title", "body").unwrap_err();
+
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("gh pr create failed"));
+        assert!(msg.contains("insufficient scope"));
+    }
+
+    #[test]
+    fn gitlab_mr_malformed_curl_response_fails_to_parse() {
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "curl",
+            "#!/bin/sh\necho 'not json at all'\nexit 0\n",
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        let err = create_draft_mr(&gitlab_profile(), "gah/test", "title", "body").unwrap_err();
+
+        assert!(format!("{:#}", err).contains("parsing gitlab MR response"));
+    }
+
+    #[test]
+    fn gitlab_mr_missing_curl_produces_actionable_error() {
+        let tmp = TempDir::new().unwrap();
+        let empty_bin = tmp.path().join("bin");
+        fs::create_dir_all(&empty_bin).unwrap();
+        let _guard = PathOverride::set(empty_bin.to_str().unwrap().to_string());
+
+        let err = create_draft_mr(&gitlab_profile(), "gah/test", "title", "body").unwrap_err();
+
+        assert!(format!("{:#}", err).contains("curl gitlab create mr"));
+    }
 }
