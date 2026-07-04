@@ -1173,6 +1173,78 @@ fn dispatch_pm_target_parses_structured_plan_and_writes_ticket() {
 }
 
 #[test]
+fn dispatch_pm_skips_unavailable_preferred_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\npm_backend = \"claude\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let claude_marker = tmp.path().join("claude-launched.txt");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '%s\n' '{{\"title\":\"Wrong\",\"summary\":\"Wrong\",\"tickets\":[]}}'\n",
+            claude_marker.display()
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf '%s\n' '{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Fallback ticket\",\"summary\":\"Handled by codex fallback\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"codex\",\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"test -f docs/tickets\"],\"uncovered_reason\":\"No duplicate work found.\"}]}'\n",
+    );
+
+    let availability_path = tmp.path().join("availability.json");
+    fs::write(
+        &availability_path,
+        "{\"version\":1,\"records\":[{\"backend\":\"claude\",\"status\":\"unavailable\",\"reason\":\"quota_exhausted\",\"observed_at\":\"2099-01-01T00:00:00Z\",\"unavailable_until\":\"2099-01-02T00:00:00Z\",\"source\":\"backend_error\"}]}",
+    )
+    .unwrap();
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--target",
+            "Plan fallback work",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created 1 ticket"));
+
+    assert!(
+        !claude_marker.exists(),
+        "preferred unavailable backend should not be launched"
+    );
+    let ledger = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(ledger.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["effective_backend"], "codex");
+    assert_eq!(entry["fallback_used"], true);
+    assert!(entry["routing_reason"]
+        .as_str()
+        .unwrap()
+        .contains("quota_exhausted"));
+}
+
+#[test]
 fn ledger_summary_reports_recent_counts() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = tmp.path().join("gah.toml");

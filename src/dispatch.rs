@@ -2,7 +2,7 @@ use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
 use crate::models::{PmPlan, PmPlanTicket};
-use crate::routing::{self, RouteDecision, RouteRequest};
+use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -350,8 +350,8 @@ fn improve(
         ),
     )
     .ok();
-    let route = routing::decide(
-        &cfg.defaults,
+    let route = decide_route(
+        cfg,
         profile,
         RouteRequest {
             mode: &args.mode,
@@ -366,6 +366,7 @@ fn improve(
             session_id: session_dir.file_name().and_then(|s| s.to_str()),
             usage_summary,
         },
+        ledger,
     )?;
     apply_route_to_ledger(ledger, &route);
     preflight(&route.effective_backend)?;
@@ -798,8 +799,8 @@ fn experiment(
     session_dir: &Path,
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
-    let route = routing::decide(
-        &cfg.defaults,
+    let route = decide_route(
+        cfg,
         profile,
         RouteRequest {
             mode: "experiment",
@@ -810,6 +811,7 @@ fn experiment(
             session_id: session_dir.file_name().and_then(|s| s.to_str()),
             usage_summary: None,
         },
+        ledger,
     )?;
     apply_route_to_ledger(ledger, &route);
     preflight(&route.effective_backend)?;
@@ -1083,8 +1085,8 @@ fn pm(
 
     // With a target: dispatch an LLM to produce a structured ticket plan.
     let preflight_ctx = collect_pm_preflight(profile, repo)?;
-    let plan_route = routing::decide(
-        &cfg.defaults,
+    let plan_route = decide_route(
+        cfg,
         profile,
         RouteRequest {
             mode: "pm",
@@ -1095,6 +1097,7 @@ fn pm(
             session_id: session_dir.file_name().and_then(|s| s.to_str()),
             usage_summary: None,
         },
+        ledger,
     )?;
     apply_route_to_ledger(ledger, &plan_route);
     preflight(&plan_route.effective_backend)?;
@@ -1313,8 +1316,8 @@ fn review(
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
     let repo = Path::new(&profile.local_path);
-    let route = routing::decide(
-        &cfg.defaults,
+    let route = decide_route(
+        cfg,
         profile,
         RouteRequest {
             mode: "review",
@@ -1325,6 +1328,7 @@ fn review(
             session_id: session_dir.file_name().and_then(|s| s.to_str()),
             usage_summary: None,
         },
+        ledger,
     )?;
     apply_route_to_ledger(ledger, &route);
     let mut target = resolve_review_target(cfg, profile, args)?;
@@ -2557,6 +2561,31 @@ fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecision) {
     ledger.fallback_used = route.fallback_used;
     ledger.confidence_impact = route.confidence_impact.clone();
     ledger.human_required = route.human_required;
+}
+
+fn decide_route(
+    cfg: &GahConfig,
+    profile: &Profile,
+    req: RouteRequest<'_>,
+    ledger: &mut LedgerEntry,
+) -> Result<RouteDecision> {
+    match routing::decide(&cfg.defaults, profile, req) {
+        Ok(route) => Ok(route),
+        Err(err) => {
+            if err.downcast_ref::<RouteError>().is_some() {
+                ledger.set_failure(
+                    crate::ledger::FailureClass::HumanBlocked,
+                    crate::ledger::FailureStage::Route,
+                );
+            } else if format!("{:#}", err).contains("parsing availability state") {
+                ledger.set_failure(
+                    crate::ledger::FailureClass::EnvironmentError,
+                    crate::ledger::FailureStage::Route,
+                );
+            }
+            Err(err)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
