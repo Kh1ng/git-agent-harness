@@ -448,6 +448,8 @@ fn improve(
         );
         let attempt_session = session_dir.join(format!("attempt-{}", attempt + 1));
         fs::create_dir_all(&attempt_session)?;
+        ledger.attempts_started += 1;
+        let attempt_start = std::time::Instant::now();
 
         let env_path = if !resolved_env.is_empty() {
             Some(resolved_env)
@@ -473,10 +475,25 @@ fn improve(
                     crate::ledger::FailureClass::HarnessError,
                     crate::ledger::FailureStage::BackendLaunch,
                 );
+                ledger.attempts.push(crate::ledger::AttemptRecord {
+                    attempt_number: attempt + 1,
+                    backend: route.effective_backend.clone(),
+                    effective_model: Some(llm.model.clone()),
+                    exit_code: None,
+                    validation_result: None,
+                    failure_class: Some(crate::ledger::FailureClass::HarnessError.as_str().into()),
+                    failure_stage: Some(crate::ledger::FailureStage::BackendLaunch.as_str().into()),
+                    duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                    diff_path: None,
+                });
                 worktree::cleanup(&wt, repo);
                 return Err(e);
             }
         };
+        // The backend process launched and ran to an exit code, regardless
+        // of what that code was — "completed" tracks whether the attempt
+        // got a fair shot, not whether it succeeded.
+        ledger.attempts_completed += 1;
 
         println!(
             "Backend finished: exit={} duration={:.0}s log={}",
@@ -491,6 +508,17 @@ fn improve(
                 crate::ledger::FailureClass::BackendError,
                 crate::ledger::FailureStage::AgentRun,
             );
+            ledger.attempts.push(crate::ledger::AttemptRecord {
+                attempt_number: attempt + 1,
+                backend: route.effective_backend.clone(),
+                effective_model: Some(llm.model.clone()),
+                exit_code: Some(result.exit_code),
+                validation_result: None,
+                failure_class: Some(crate::ledger::FailureClass::BackendError.as_str().into()),
+                failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
+                duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                diff_path: None,
+            });
             worktree::cleanup(&wt, repo);
             anyhow::bail!(
                 "backend exited {} on attempt {}",
@@ -500,6 +528,17 @@ fn improve(
         }
 
         if profile.validation_commands.is_empty() {
+            ledger.attempts.push(crate::ledger::AttemptRecord {
+                attempt_number: attempt + 1,
+                backend: route.effective_backend.clone(),
+                effective_model: Some(llm.model.clone()),
+                exit_code: Some(0),
+                validation_result: None,
+                failure_class: None,
+                failure_stage: None,
+                duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                diff_path: None,
+            });
             break;
         }
 
@@ -512,6 +551,17 @@ fn improve(
                 println!("Validation passed.");
                 validation_failed = false;
                 ledger.validation_result = Some("passed".into());
+                ledger.attempts.push(crate::ledger::AttemptRecord {
+                    attempt_number: attempt + 1,
+                    backend: route.effective_backend.clone(),
+                    effective_model: Some(llm.model.clone()),
+                    exit_code: Some(0),
+                    validation_result: Some("passed".into()),
+                    failure_class: None,
+                    failure_stage: None,
+                    duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                    diff_path: None,
+                });
                 break;
             }
             Err(e) => {
@@ -539,13 +589,34 @@ fn improve(
                     // Save the failed attempt's diff before wiping, so the
                     // session artifact shows what the agent actually wrote.
                     let _ = worktree::git(&["add", "-A"], &wt);
+                    let mut diff_path = None;
                     if let Ok(diff) = worktree::git(&["diff", "--cached"], &wt) {
-                        let _ = fs::write(attempt_session.join("attempt-diff.patch"), diff);
+                        let path = attempt_session.join("attempt-diff.patch");
+                        if fs::write(&path, diff).is_ok() {
+                            diff_path = Some(path.display().to_string());
+                        }
                     }
                     // Wipe bad code so next attempt starts clean
                     let _ = worktree::git(&["reset", "--hard", "HEAD"], &wt);
                     let _ = worktree::git(&["clean", "-fd"], &wt);
                     println!("Retrying with failure context...");
+                    ledger.attempts.push(crate::ledger::AttemptRecord {
+                        attempt_number: attempt + 1,
+                        backend: route.effective_backend.clone(),
+                        effective_model: Some(llm.model.clone()),
+                        exit_code: Some(0),
+                        validation_result: Some("failed".into()),
+                        failure_class: Some(
+                            crate::ledger::FailureClass::ValidationFailure
+                                .as_str()
+                                .into(),
+                        ),
+                        failure_stage: Some(
+                            crate::ledger::FailureStage::PostValidation.as_str().into(),
+                        ),
+                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                        diff_path,
+                    });
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
                     task = format!(
@@ -572,6 +643,21 @@ fn improve(
                         crate::ledger::FailureClass::AgentNoProgress,
                         crate::ledger::FailureStage::PostValidation,
                     );
+                    ledger.attempts.push(crate::ledger::AttemptRecord {
+                        attempt_number: attempt + 1,
+                        backend: route.effective_backend.clone(),
+                        effective_model: Some(llm.model.clone()),
+                        exit_code: Some(0),
+                        validation_result: Some("failed".into()),
+                        failure_class: Some(
+                            crate::ledger::FailureClass::AgentNoProgress.as_str().into(),
+                        ),
+                        failure_stage: Some(
+                            crate::ledger::FailureStage::PostValidation.as_str().into(),
+                        ),
+                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                        diff_path: None,
+                    });
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
                         "{} Aborting early after attempt {}.\n\n{}",
@@ -584,8 +670,36 @@ fn improve(
                         "Validation still failing; --allow-draft-fail set — pushing as draft."
                     );
                     ledger.validation_result = Some("failed-draft".into());
+                    ledger.attempts.push(crate::ledger::AttemptRecord {
+                        attempt_number: attempt + 1,
+                        backend: route.effective_backend.clone(),
+                        effective_model: Some(llm.model.clone()),
+                        exit_code: Some(0),
+                        validation_result: Some("failed-draft".into()),
+                        failure_class: None,
+                        failure_stage: None,
+                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                        diff_path: None,
+                    });
                     break;
                 } else {
+                    ledger.attempts.push(crate::ledger::AttemptRecord {
+                        attempt_number: attempt + 1,
+                        backend: route.effective_backend.clone(),
+                        effective_model: Some(llm.model.clone()),
+                        exit_code: Some(0),
+                        validation_result: Some("failed".into()),
+                        failure_class: Some(
+                            crate::ledger::FailureClass::ValidationFailure
+                                .as_str()
+                                .into(),
+                        ),
+                        failure_stage: Some(
+                            crate::ledger::FailureStage::PostValidation.as_str().into(),
+                        ),
+                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                        diff_path: None,
+                    });
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
                         "validation failed after {} attempt(s). Use --allow-draft-fail to push anyway.\n\n{}",

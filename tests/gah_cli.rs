@@ -1682,6 +1682,178 @@ fn dispatch_fix_validation_never_passes_records_no_push_no_mr() {
     ));
 }
 
+/// TICKET-064, test 1: a one-shot success (no validation failures at all)
+/// must record exactly one attempt, started and completed.
+#[test]
+fn dispatch_fix_one_shot_success_records_one_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    let gh_log = tmp.path().join("gh.log");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["attempts_started"], 1);
+    assert_eq!(entry["attempts_completed"], 1);
+    let attempts = entry["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["attempt_number"], 1);
+    assert_eq!(attempts[0]["validation_result"], "passed");
+    assert_eq!(attempts[0]["failure_class"], Value::Null);
+}
+
+/// TICKET-064, test 2: an attempt that fails validation (differently from
+/// baseline, so it retries) followed by a passing attempt must record
+/// exactly two attempts, with attempt 1's failure and attempt 2's success
+/// both preserved — not just the final outcome.
+#[test]
+fn dispatch_fix_fail_then_success_records_two_attempts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        "validation_commands = [\"cat marker.txt; grep -q '^done$' marker.txt\"]\n",
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let counter = tmp.path().join("codex-call-count");
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nn=$( [ -f '{counter}' ] && cat '{counter}' || echo 0 )\nn=$((n+1))\necho \"$n\" > '{counter}'\nif [ \"$n\" -eq 1 ]; then echo partial > marker.txt; else echo done > marker.txt; fi\nexit 0\n",
+            counter = counter.display(),
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the marker file",
+            "--retries",
+            "2",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["attempts_started"], 2);
+    assert_eq!(entry["attempts_completed"], 2);
+    let attempts = entry["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["attempt_number"], 1);
+    assert_eq!(attempts[0]["validation_result"], "failed");
+    assert_eq!(attempts[0]["failure_class"], "validation_failure");
+    assert!(attempts[0]["diff_path"]
+        .as_str()
+        .unwrap()
+        .contains("attempt-diff.patch"));
+    assert_eq!(attempts[1]["attempt_number"], 2);
+    assert_eq!(attempts[1]["validation_result"], "passed");
+}
+
+/// TICKET-064, test 3: a no-progress abort (TICKET-062) must record exactly
+/// the attempts that were actually consumed, not the full retry budget.
+/// `--retries 2` gives 3 attempts available; only 1 should be consumed
+/// since attempt 1 already matches the baseline.
+#[test]
+fn dispatch_fix_no_progress_abort_records_exact_consumed_attempts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"false\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "2",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure();
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["attempts_started"], 1);
+    assert_eq!(entry["attempts_completed"], 1);
+    let attempts = entry["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["failure_class"], "agent_no_progress");
+    assert_eq!(entry["failure_class"], "agent_no_progress");
+}
+
 /// TICKET-062: a validation failure identical to the pristine-tree baseline
 /// on attempt 1 must abort immediately — there is no "previous attempt" yet
 /// to compare against, so the old prev_failure-only comparison couldn't

@@ -15,6 +15,7 @@ use time::OffsetDateTime;
 /// `validation_result`) rather than a serde-tagged enum, so the wire format
 /// never breaks if variants are renamed internally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // unwired variants are the schema for future tickets, not unused code
 pub enum FailureClass {
     HarnessError,
     EnvironmentError,
@@ -44,6 +45,7 @@ impl FailureClass {
 /// Where in the dispatch pipeline a failure occurred. See `FailureClass` for
 /// the "not exhaustively wired yet" caveat — same applies here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // unwired variants are the schema for future tickets, not unused code
 pub enum FailureStage {
     Preflight,
     BaselineValidation,
@@ -74,6 +76,26 @@ impl FailureStage {
             Self::Sync => "sync",
         }
     }
+}
+
+/// TICKET-064: one record per retry-loop attempt within a single dispatch.
+/// Embedded in LedgerEntry (not a separate append-only stream) — a
+/// deliberate scope reduction from the ticket's stated preference, chosen
+/// for simplicity (one file, one read path). The tradeoff: if the process
+/// crashes mid-retry, in-progress attempts are lost along with the rest of
+/// the not-yet-appended ledger line, same as every other field on this
+/// struct today.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct AttemptRecord {
+    pub attempt_number: u32,
+    pub backend: String,
+    pub effective_model: Option<String>,
+    pub exit_code: Option<i32>,
+    pub validation_result: Option<String>,
+    pub failure_class: Option<String>,
+    pub failure_stage: Option<String>,
+    pub duration_seconds: Option<f64>,
+    pub diff_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -137,6 +159,16 @@ pub struct LedgerEntry {
     pub failure_class: Option<String>,
     #[serde(default)]
     pub failure_stage: Option<String>,
+    /// TICKET-064: how many retry-loop iterations were entered vs. ran
+    /// their backend to completion (launched and exited, regardless of
+    /// whether validation then passed). `#[serde(default)]` for pre-existing
+    /// ledger lines.
+    #[serde(default)]
+    pub attempts_started: u32,
+    #[serde(default)]
+    pub attempts_completed: u32,
+    #[serde(default)]
+    pub attempts: Vec<AttemptRecord>,
     pub usage: LedgerUsage,
 }
 
@@ -190,6 +222,9 @@ impl LedgerEntry {
             error_summary: None,
             failure_class: None,
             failure_stage: None,
+            attempts_started: 0,
+            attempts_completed: 0,
+            attempts: Vec::new(),
             usage: LedgerUsage::default(),
         }
     }
