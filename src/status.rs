@@ -47,6 +47,8 @@ pub struct ObservationStatus {
 pub struct ScopeStatusJson {
     pub backend: String,
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_pool: Option<String>,
     pub eligible_now: bool,
     pub reason: Option<String>,
     pub unavailable_until: Option<String>,
@@ -162,6 +164,7 @@ pub fn build_snapshot(
                 .map(|s| ScopeStatusJson {
                     backend: s.backend,
                     model: s.model,
+                    quota_pool: s.quota_pool,
                     eligible_now: s.eligible,
                     reason: s.reason.map(|r| r.as_str().to_string()),
                     unavailable_until: s.unavailable_until,
@@ -171,6 +174,7 @@ pub fn build_snapshot(
                     scope: s.scope.map(|s| match s {
                         availability::BlockScope::BackendWide => "backend_wide".into(),
                         availability::BlockScope::ModelSpecific => "model_specific".into(),
+                        availability::BlockScope::QuotaPool => "quota_pool".into(),
                     }),
                 })
                 .collect();
@@ -414,6 +418,7 @@ default_target_branch = "main"
             records: vec![AvailabilityRecord {
                 backend: "claude".into(),
                 model: None,
+                quota_pool: None,
                 status: Status::Unavailable,
                 reason: Reason::RateLimited,
                 observed_at: "2026-07-04T00:00:00Z".into(),
@@ -450,6 +455,7 @@ default_target_branch = "main"
             records: vec![AvailabilityRecord {
                 backend: "claude".into(),
                 model: Some("claude-3-5".into()),
+                quota_pool: None,
                 status: Status::Unavailable,
                 reason: Reason::RateLimited,
                 observed_at: "2026-07-04T00:00:00Z".into(),
@@ -484,6 +490,7 @@ default_target_branch = "main"
             records: vec![AvailabilityRecord {
                 backend: "claude".into(),
                 model: None,
+                quota_pool: None,
                 status: Status::Unavailable,
                 reason: Reason::RateLimited,
                 observed_at: "2026-07-04T00:00:00Z".into(),

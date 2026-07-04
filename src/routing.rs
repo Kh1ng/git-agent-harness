@@ -26,6 +26,7 @@ pub struct RouteDecision {
     pub effective_backend: String,
     pub requested_model: Option<String>,
     pub effective_model: Option<String>,
+    pub effective_quota_pool: Option<String>,
     pub routing_reason: String,
     pub fallback_used: bool,
     pub confidence_impact: Option<String>,
@@ -82,6 +83,7 @@ impl std::error::Error for RouteError {}
 struct RouteCandidate {
     backend: String,
     model: Option<String>,
+    quota_pool: Option<String>,
 }
 
 pub fn decide(
@@ -169,6 +171,7 @@ where
             effective_backend: selected.backend,
             requested_model,
             effective_model: selected.model,
+            effective_quota_pool: selected.quota_pool,
             routing_reason: reason,
             fallback_used,
             confidence_impact,
@@ -248,6 +251,14 @@ where
     let primary = RouteCandidate {
         backend: backend.clone(),
         model: model.clone(),
+        quota_pool: profile
+            .routing
+            .find_quota_pool(req.mode, &backend, model.as_deref())
+            .or_else(|| {
+                defaults
+                    .routing
+                    .find_quota_pool(req.mode, &backend, model.as_deref())
+            }),
     };
     let (selected, skipped) = pick_route_candidate(
         auto_candidates(defaults, profile, req.mode, &primary),
@@ -271,6 +282,7 @@ where
         effective_backend: selected.backend,
         requested_model,
         effective_model: selected.model,
+        effective_quota_pool: selected.quota_pool,
         routing_reason: reason,
         fallback_used,
         confidence_impact,
@@ -300,6 +312,16 @@ where
     let primary = RouteCandidate {
         backend: requested_backend.clone(),
         model: requested_model.clone(),
+        quota_pool: profile
+            .routing
+            .find_quota_pool(req.mode, &requested_backend, requested_model.as_deref())
+            .or_else(|| {
+                defaults.routing.find_quota_pool(
+                    req.mode,
+                    &requested_backend,
+                    requested_model.as_deref(),
+                )
+            }),
     };
     let candidates = explicit_candidates(
         defaults,
@@ -318,6 +340,7 @@ where
             effective_backend: requested_backend,
             requested_model: requested_model.clone(),
             effective_model: requested_model,
+            effective_quota_pool: primary.quota_pool,
             routing_reason: "explicit CLI override".into(),
             fallback_used: false,
             confidence_impact: None,
@@ -342,6 +365,7 @@ where
         effective_backend: selected.backend,
         requested_model: requested_model.clone(),
         effective_model: selected.model,
+        effective_quota_pool: selected.quota_pool,
         routing_reason,
         fallback_used: true,
         confidence_impact: if req.mode == "review" {
@@ -409,6 +433,7 @@ where
             state_path,
             &candidate.backend,
             candidate.model.as_deref(),
+            candidate.quota_pool.as_deref(),
             now,
             backend_available,
         )? {
@@ -430,6 +455,7 @@ fn skip_reason_for_candidate<F>(
     state_path: &Path,
     backend: &str,
     model: Option<&str>,
+    quota_pool: Option<&str>,
     now: OffsetDateTime,
     backend_available: F,
 ) -> Result<Option<SkippedBackend>>
@@ -445,7 +471,7 @@ where
         }));
     }
 
-    let decision = availability::availability_for(state_path, backend, model, now)?;
+    let decision = availability::availability_for(state_path, backend, model, quota_pool, now)?;
     if decision.eligible {
         return Ok(None);
     }
@@ -462,6 +488,7 @@ fn availability_reason(decision: &AvailabilityDecision) -> String {
     let scope = match decision.scope {
         Some(BlockScope::BackendWide) => "backend-wide",
         Some(BlockScope::ModelSpecific) => "model-specific",
+        Some(BlockScope::QuotaPool) => "quota-pool",
         None => "availability",
     };
     let reason = decision
@@ -492,13 +519,28 @@ fn auto_candidates(
             let weak_model = review_fallback_model(defaults, profile)
                 .map(str::to_string)
                 .or_else(|| primary.model.clone());
+            let quota_pool = profile
+                .routing
+                .find_quota_pool(mode, weak_backend, weak_model.as_deref())
+                .or_else(|| {
+                    defaults
+                        .routing
+                        .find_quota_pool(mode, weak_backend, weak_model.as_deref())
+                });
             candidates.push(RouteCandidate {
                 backend: weak_backend.to_string(),
                 model: weak_model,
+                quota_pool,
             });
         }
     }
-    extend_remaining_candidates(&mut candidates, mode, primary.model.clone());
+    extend_remaining_candidates(
+        defaults,
+        profile,
+        &mut candidates,
+        mode,
+        primary.model.clone(),
+    );
     dedupe_candidates(candidates)
 }
 
@@ -520,27 +562,59 @@ where
             let weak_model = review_fallback_model(defaults, profile)
                 .map(str::to_string)
                 .or_else(|| primary.model.clone());
+            let quota_pool = profile
+                .routing
+                .find_quota_pool(mode, &weak_backend, weak_model.as_deref())
+                .or_else(|| {
+                    defaults
+                        .routing
+                        .find_quota_pool(mode, &weak_backend, weak_model.as_deref())
+                });
             candidates.push(RouteCandidate {
                 backend: weak_backend,
                 model: weak_model,
+                quota_pool,
             });
         }
-        extend_remaining_candidates(&mut candidates, mode, primary.model.clone());
+        extend_remaining_candidates(
+            defaults,
+            profile,
+            &mut candidates,
+            mode,
+            primary.model.clone(),
+        );
     } else if mode != "review" && allow_impl_fallback {
-        extend_remaining_candidates(&mut candidates, mode, primary.model.clone());
+        extend_remaining_candidates(
+            defaults,
+            profile,
+            &mut candidates,
+            mode,
+            primary.model.clone(),
+        );
     }
     dedupe_candidates(candidates)
 }
 
 fn extend_remaining_candidates(
+    defaults: &Defaults,
+    profile: &Profile,
     candidates: &mut Vec<RouteCandidate>,
     mode: &str,
     model: Option<String>,
 ) {
     for backend in mode_backend_preference(mode) {
+        let quota_pool = profile
+            .routing
+            .find_quota_pool(mode, backend, model.as_deref())
+            .or_else(|| {
+                defaults
+                    .routing
+                    .find_quota_pool(mode, backend, model.as_deref())
+            });
         candidates.push(RouteCandidate {
             backend: backend.to_string(),
             model: model.clone(),
+            quota_pool,
         });
     }
 }
@@ -624,6 +698,7 @@ fn policy_candidates(policy: &RoutingPolicy, mode: &str) -> Option<Vec<RouteCand
             .map(|c| RouteCandidate {
                 backend: c.backend.clone(),
                 model: c.model.clone(),
+                quota_pool: c.quota_pool.clone(),
             })
             .collect()
     })
@@ -770,8 +845,42 @@ fn over_cap_reason(
 #[cfg(test)]
 mod tests {
     use super::{decide_with, RouteError, RouteRequest};
-    use crate::availability::{record_available, record_unavailable, Reason, Source};
+    use crate::availability::{Reason, Source};
     use crate::config::{Defaults, Profile, RoutingPolicy};
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_unavailable(
+        state_path: &std::path::Path,
+        backend: &str,
+        model: Option<&str>,
+        reason: Reason,
+        source: Source,
+        unavailable_until: Option<OffsetDateTime>,
+        last_error_summary: Option<String>,
+        now: OffsetDateTime,
+    ) -> anyhow::Result<()> {
+        crate::availability::record_unavailable(
+            state_path,
+            backend,
+            model,
+            None,
+            reason,
+            source,
+            unavailable_until,
+            last_error_summary,
+            now,
+        )
+    }
+
+    fn record_available(
+        state_path: &std::path::Path,
+        backend: &str,
+        model: Option<&str>,
+        source: Source,
+        now: OffsetDateTime,
+    ) -> anyhow::Result<()> {
+        crate::availability::record_available(state_path, backend, model, None, source, now)
+    }
     use tempfile::TempDir;
     use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
@@ -1249,10 +1358,12 @@ mod tests {
             crate::config::CandidateConfig {
                 backend: "codex".into(),
                 model: Some("gpt-4".into()),
+                quota_pool: None,
             },
             crate::config::CandidateConfig {
                 backend: "claude".into(),
                 model: None,
+                quota_pool: None,
             },
         ]);
 
@@ -1302,10 +1413,12 @@ mod tests {
             crate::config::CandidateConfig {
                 backend: "codex".into(),
                 model: Some("gpt-4".into()),
+                quota_pool: None,
             },
             crate::config::CandidateConfig {
                 backend: "claude".into(),
                 model: None,
+                quota_pool: None,
             },
         ]);
 
@@ -1357,10 +1470,12 @@ mod tests {
             crate::config::CandidateConfig {
                 backend: "codex".into(),
                 model: Some("gpt-4".into()),
+                quota_pool: None,
             },
             crate::config::CandidateConfig {
                 backend: "claude".into(),
                 model: None,
+                quota_pool: None,
             },
         ]);
 
@@ -1411,10 +1526,12 @@ mod tests {
             crate::config::CandidateConfig {
                 backend: "codex".into(),
                 model: Some("gpt-4".into()),
+                quota_pool: None,
             },
             crate::config::CandidateConfig {
                 backend: "claude".into(),
                 model: None,
+                quota_pool: None,
             },
         ]);
 
@@ -1454,5 +1571,92 @@ mod tests {
                 assert!(earliest_reset.is_some());
             }
         }
+    }
+
+    #[test]
+    fn routing_honors_shared_quota_pool() {
+        let tmp = TempDir::new().unwrap();
+        let now = OffsetDateTime::now_utc();
+
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "claude".into(),
+                model: Some("claude-sonnet".into()),
+                quota_pool: Some("claude-main".into()),
+            },
+            crate::config::CandidateConfig {
+                backend: "claude".into(),
+                model: Some("claude-haiku".into()),
+                quota_pool: Some("claude-main".into()),
+            },
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-4".into()),
+                quota_pool: Some("codex-main".into()),
+            },
+        ]);
+
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            now,
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(decision.effective_backend, "claude");
+        assert_eq!(decision.effective_model.as_deref(), Some("claude-sonnet"));
+        assert_eq!(
+            decision.effective_quota_pool.as_deref(),
+            Some("claude-main")
+        );
+
+        crate::availability::record_unavailable(
+            &path(&tmp),
+            "claude",
+            Some("claude-sonnet"),
+            Some("claude-main"),
+            Reason::QuotaExhausted,
+            Source::BackendError,
+            Some(now + time::Duration::minutes(10)),
+            None,
+            now,
+        )
+        .unwrap();
+
+        let decision2 = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            now,
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(decision2.effective_backend, "codex");
+        assert_eq!(decision2.effective_model.as_deref(), Some("gpt-4"));
+        assert_eq!(
+            decision2.effective_quota_pool.as_deref(),
+            Some("codex-main")
+        );
+        assert!(decision2.fallback_used);
     }
 }

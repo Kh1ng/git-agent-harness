@@ -686,6 +686,7 @@ fn improve(
                 if let Some(parsed) = mark_backend_unavailable_from_output(
                     &route.effective_backend,
                     route.effective_model.as_deref(),
+                    route.effective_quota_pool.as_deref(),
                     &log_text,
                     &result.log_path,
                 )? {
@@ -1375,6 +1376,7 @@ fn pm(
         let parsed = mark_backend_unavailable_from_output(
             &plan_route.effective_backend,
             plan_route.effective_model.as_deref(),
+            plan_route.effective_quota_pool.as_deref(),
             &log_text,
             &result.log_path,
         )?;
@@ -2121,6 +2123,7 @@ mod tests {
             effective_backend: "codex".into(),
             requested_model: None,
             effective_model: Some("claude-sonnet-4".into()),
+            effective_quota_pool: None,
             routing_reason: "ticket recommendation".into(),
             fallback_used: false,
             confidence_impact: None,
@@ -2154,6 +2157,7 @@ mod tests {
             effective_backend: "openhands".into(),
             requested_model: None,
             effective_model: None,
+            effective_quota_pool: None,
             routing_reason: "profile routing policy".into(),
             fallback_used: false,
             confidence_impact: None,
@@ -2204,6 +2208,7 @@ mod tests {
             &state,
             "codex",
             Some("local/test"),
+            None,
             CODEX_FULL_RESET,
             "/tmp/backend-output.log",
         )
@@ -2230,6 +2235,7 @@ mod tests {
             &state,
             "codex",
             Some("local/test"),
+            None,
             "plain old crash with no quota language",
             "/tmp/backend-output.log",
         )
@@ -2240,6 +2246,7 @@ mod tests {
             &state,
             "codex",
             Some("local/test"),
+            None,
             OffsetDateTime::now_utc(),
         )
         .unwrap();
@@ -3551,6 +3558,7 @@ fn route_identity(backend: &str, model: Option<&str>) -> String {
 fn mark_backend_unavailable_from_output(
     backend: &str,
     model: Option<&str>,
+    quota_pool: Option<&str>,
     log_text: &str,
     log_path: &str,
 ) -> Result<Option<crate::quota_parser::ParsedFailure>> {
@@ -3558,6 +3566,7 @@ fn mark_backend_unavailable_from_output(
         &crate::availability::resolve_state_path(),
         backend,
         model,
+        quota_pool,
         log_text,
         log_path,
     )
@@ -3567,6 +3576,7 @@ fn mark_backend_unavailable_from_output_at(
     state_path: &Path,
     backend: &str,
     model: Option<&str>,
+    quota_pool: Option<&str>,
     log_text: &str,
     log_path: &str,
 ) -> Result<Option<crate::quota_parser::ParsedFailure>> {
@@ -3596,6 +3606,7 @@ fn mark_backend_unavailable_from_output_at(
         state_path,
         backend,
         model.filter(|m| !m.is_empty()),
+        quota_pool,
         reason,
         crate::availability::Source::BackendError,
         unavailable_until,
