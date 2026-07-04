@@ -22,8 +22,12 @@ pub struct DispatchArgs {
     pub branch: Option<String>,
     pub mr: Option<String>,
     pub current_branch: bool,
+    /// Reserved for future per-run cost/turn budget enforcement; not yet read.
+    #[allow(dead_code)]
     pub budget: u32,
     pub dry_run: bool,
+    /// Already consumed by the caller to load `cfg`; kept on the struct for CLI plumbing symmetry.
+    #[allow(dead_code)]
     pub config_path: Option<String>,
     pub oh_profile: Option<String>,
     pub model: Option<String>,
@@ -76,8 +80,6 @@ fn validation_failure_no_progress_reason(
 }
 
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
-    let _ = args.budget;
-    let _ = &args.config_path;
     let profile = config::get_profile(cfg, &args.profile)?;
 
     println!("Profile: {}", profile.display_name);

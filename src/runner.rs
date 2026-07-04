@@ -55,6 +55,7 @@ pub fn load_oh_profile(name: &str) -> Result<LlmConfig> {
 }
 
 /// List available OpenHands profiles by name (without .json extension).
+#[allow(dead_code)]
 pub fn list_oh_profiles() -> Vec<String> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     let dir = PathBuf::from(format!("{}/.openhands/profiles", home));
