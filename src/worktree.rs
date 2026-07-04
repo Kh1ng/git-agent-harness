@@ -76,6 +76,7 @@ pub fn has_changes(worktree: &Path, target_branch: &str) -> Result<bool> {
     Ok(!diff.stdout.is_empty())
 }
 
+#[allow(dead_code)]
 pub fn diff_patch(worktree: &Path, target_branch: &str) -> Result<String> {
     let origin_ref = format!("origin/{}", target_branch);
     Ok(
@@ -84,6 +85,7 @@ pub fn diff_patch(worktree: &Path, target_branch: &str) -> Result<String> {
     )
 }
 
+#[allow(dead_code)]
 pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>> {
     let origin_ref = format!("origin/{}", target_branch);
     let out = git_raw(&["diff", "--name-only", &origin_ref, "HEAD"], worktree)?;
@@ -98,7 +100,7 @@ pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>
         if line.is_empty() {
             continue;
         }
-        let first = line.as_bytes().get(0).copied().unwrap_or(b' ');
+        let first = line.as_bytes().first().copied().unwrap_or(b' ');
         let second = line.as_bytes().get(1).copied().unwrap_or(b' ');
         if first != b' ' || second != b' ' {
             files.push(line[3..].trim().to_string());
@@ -123,6 +125,7 @@ pub fn diff_stats(worktree: &Path, target_branch: &str) -> Result<DiffStats> {
     Ok(stats)
 }
 
+#[allow(dead_code)]
 pub fn commit_and_push(
     worktree: &Path,
     branch: &str,
@@ -191,6 +194,7 @@ pub fn push_branch(worktree: &Path, branch: &str, push_url: &str, pat: &str) -> 
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn commit_and_push_msg(
     worktree: &Path,
     branch: &str,

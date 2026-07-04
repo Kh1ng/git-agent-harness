@@ -55,6 +55,7 @@ pub fn load_oh_profile(name: &str) -> Result<LlmConfig> {
 }
 
 /// List available OpenHands profiles by name (without .json extension).
+#[allow(dead_code)]
 pub fn list_oh_profiles() -> Vec<String> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     let dir = PathBuf::from(format!("{}/.openhands/profiles", home));
@@ -229,6 +230,7 @@ pub fn run_agy(
     session_dir: &Path,
     llm: &LlmConfig,
     env_vars: &[(String, String)],
+    executable_name: &str,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
@@ -237,7 +239,7 @@ pub fn run_agy(
     let log_err = log_file.try_clone()?;
 
     let start = Instant::now();
-    let mut cmd = Command::new("agy");
+    let mut cmd = Command::new(executable_name);
     cmd.arg("--print");
     cmd.arg(task);
     cmd.args(["--model", llm.model.as_str()]);
@@ -248,9 +250,10 @@ pub fn run_agy(
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
-    let status = cmd
-        .status()
-        .context("launching agy; is it installed and on PATH?")?;
+    let status = cmd.status().context(format!(
+        "launching {}; is it installed and on PATH?",
+        executable_name
+    ))?;
 
     Ok(RunResult {
         exit_code: status.code().unwrap_or(-1),
@@ -265,6 +268,8 @@ pub fn backend_available(name: &str) -> bool {
         "codex" => "codex",
         "claude" => "claude",
         "agy" => "agy",
+        "agy-main" => "agy-main",
+        "agy-second" => "agy-second",
         _ => return false,
     };
     Command::new("which")
@@ -672,6 +677,7 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
+            "agy",
         )
         .unwrap();
 
@@ -697,6 +703,7 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
+            "agy",
         )
         .unwrap();
 
@@ -723,6 +730,7 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
+            "agy",
         )
         .unwrap_err();
 
