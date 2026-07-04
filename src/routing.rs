@@ -760,7 +760,10 @@ mod tests {
     }
 
     fn backend_available(name: &str) -> bool {
-        matches!(name, "claude" | "codex" | "openhands" | "agy")
+        matches!(
+            name,
+            "claude" | "codex" | "openhands" | "agy" | "agy-main" | "agy-second"
+        )
     }
 
     #[test]

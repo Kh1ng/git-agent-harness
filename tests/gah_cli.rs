@@ -2897,3 +2897,130 @@ fn status_reports_human_and_json_views() {
         .stdout(predicate::str::contains("Status for Profile: test-repo"))
         .stdout(predicate::str::contains("Observations: Sync="));
 }
+
+#[test]
+fn dispatch_agy_multi_instance() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\npm_backend = \"agy-second\"\nimprove_backend = \"agy-main\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+
+    // mock agy-main
+    make_fake_bin_with_body(
+        &fake_bin,
+        "agy-main",
+        "#!/bin/sh\nprintf '%s\\n' '{\"title\":\"Plan Main\",\"summary\":\"Summary Main\",\"tickets\":[]}'\n",
+    );
+
+    // mock agy-second
+    make_fake_bin_with_body(
+        &fake_bin,
+        "agy-second",
+        "#!/bin/sh\nprintf '%s\\n' '{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Second ticket\",\"summary\":\"Handled by agy-second\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"agy-second\",\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"true\"],\"uncovered_reason\":\"\"}]}'\n",
+    );
+
+    let availability_path = tmp.path().join("availability.json");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    // 1. Run pm mode where preferred is agy-second. Should invoke agy-second.
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--target",
+            "Plan work",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    // Verify agy-second was recorded in the ledger
+    let ledger_content = fs::read_to_string(&ledger_path).unwrap();
+    assert!(ledger_content.contains("\"effective_backend\":\"agy-second\""));
+
+    // 2. Mark agy-second as unavailable (quota_exhausted).
+    // Let's run a pm mode again, but this time since agy-second is unavailable, it should skip it.
+    fs::write(
+        &availability_path,
+        "{\"version\":1,\"records\":[{\"backend\":\"agy-second\",\"status\":\"unavailable\",\"reason\":\"quota_exhausted\",\"observed_at\":\"2099-01-01T00:00:00Z\",\"unavailable_until\":\"2099-01-02T00:00:00Z\",\"source\":\"backend_error\"}]}",
+    )
+    .unwrap();
+
+    // Mock claude fallback bin
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\nprintf '%s\\n' '{\"title\":\"Plan Claude\",\"summary\":\"Claude Summary\",\"tickets\":[]}'\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--target",
+            "Plan work fallback",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let ledger_content_after = fs::read_to_string(&ledger_path).unwrap();
+    // It should have routed to claude
+    assert!(ledger_content_after.contains("\"effective_backend\":\"claude\""));
+
+    // 3. But agy-main should still be available! Let's verify agy-main is still routed if requested.
+    // We will update the config to routing pm_backend to "agy-main"
+    let cfg_main = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\npm_backend = \"agy-main\"\n",
+        "",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--target",
+            "Plan work main",
+            "--config-path",
+            cfg_main.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let ledger_content_final = fs::read_to_string(&ledger_path).unwrap();
+    assert!(ledger_content_final.contains("\"effective_backend\":\"agy-main\""));
+}

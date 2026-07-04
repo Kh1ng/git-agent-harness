@@ -205,7 +205,9 @@ fn run_backend(
             &env_vars,
         ),
         "claude" => runner::run_claude(wt, task, session_dir, &profile.claude_args, &env_vars),
-        "agy" => runner::run_agy(wt, task, session_dir, llm, &env_vars),
+        "agy" => runner::run_agy(wt, task, session_dir, llm, &env_vars, "agy"),
+        "agy-main" => runner::run_agy(wt, task, session_dir, llm, &env_vars, "agy-main"),
+        "agy-second" => runner::run_agy(wt, task, session_dir, llm, &env_vars, "agy-second"),
         _ => runner::run_openhands(
             wt,
             task,
@@ -249,6 +251,8 @@ fn preflight(backend: &str) -> Result<()> {
         "codex" => "codex",
         "claude" => "claude",
         "agy" => "agy",
+        "agy-main" => "agy-main",
+        "agy-second" => "agy-second",
         _ => "openhands",
     };
     for bin in &["git", backend_bin] {

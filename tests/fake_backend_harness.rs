@@ -203,7 +203,15 @@ fn independent_state_per_instance_of_the_same_backend_name() {
 #[test]
 fn supports_all_five_named_backends() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    for name in ["openhands", "opencode", "claude", "codex", "agy"] {
+    for name in [
+        "openhands",
+        "opencode",
+        "claude",
+        "codex",
+        "agy",
+        "agy-main",
+        "agy-second",
+    ] {
         let tmp = TempDir::new().unwrap();
         let backend = FakeBackend::new(tmp.path(), name);
         backend.install(Scenario::success().with_stdout(format!("{name} ran")));
@@ -215,4 +223,33 @@ fn supports_all_five_named_backends() {
             "backend {name} should produce its configured stdout"
         );
     }
+}
+
+#[test]
+fn agy_multi_instance_auth_isolation() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let tmp = TempDir::new().unwrap();
+
+    // First instance (agy-main) starts authenticated.
+    let agy_main = FakeBackend::new(&tmp.path().join("main"), "agy-main");
+    agy_main.install(Scenario::success().with_stdout("main instance ok"));
+
+    // Second instance (agy-second) starts unauthenticated.
+    let agy_second = FakeBackend::new(&tmp.path().join("second"), "agy-second");
+    agy_second.install(Scenario::failure(1).with_stderr("authentication failed"));
+
+    // 12. Second instance starts unauthenticated (tested: auth failure)
+    let out_second = run(agy_second.bin_dir(), "agy-second", &[]);
+    assert_eq!(out_second.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out_second.stderr).contains("authentication failed"));
+
+    // 13. Running second instance does not alter first instance auth
+    let out_main = run(agy_main.bin_dir(), "agy-main", &[]);
+    assert_eq!(out_main.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out_main.stdout).contains("main instance ok"));
+
+    // 14. Running first instance does not authenticate second
+    let out_second_again = run(agy_second.bin_dir(), "agy-second", &[]);
+    assert_eq!(out_second_again.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out_second_again.stderr).contains("authentication failed"));
 }
