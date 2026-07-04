@@ -29,6 +29,9 @@ pub enum FailureKind {
     /// unspecified "rate limit" with no indication it's account-level
     /// exhaustion). Worth retrying after a short cooldown.
     RateLimited,
+    /// Authentication or authorization failure. Not worth retrying unless
+    /// configuration/credentials are updated.
+    AuthenticationError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -87,6 +90,57 @@ fn usage_or_weekly_limit_re() -> &'static Regex {
 fn generic_rate_limit_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)rate limit").unwrap())
+}
+
+fn agy_quota_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(RESOURCE_EXHAUSTED|Individual quota reached|code 429|AGY quota exhausted)",
+        )
+        .unwrap()
+    })
+}
+
+fn agy_auth_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(not logged into Antigravity|not logged in|AGY not authenticated)")
+            .unwrap()
+    })
+}
+
+fn parse_agy_cooldown_seconds(text: &str) -> Option<u64> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)\bResets\s+(?:in|~)\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?\b").unwrap()
+    });
+    if let Some(caps) = re.captures(text) {
+        let mut total_secs = 0u64;
+        let mut matched = false;
+        if let Some(h_match) = caps.get(1) {
+            if let Ok(h) = h_match.as_str().parse::<u64>() {
+                total_secs += h * 3600;
+                matched = true;
+            }
+        }
+        if let Some(m_match) = caps.get(2) {
+            if let Ok(m) = m_match.as_str().parse::<u64>() {
+                total_secs += m * 60;
+                matched = true;
+            }
+        }
+        if let Some(s_match) = caps.get(3) {
+            if let Ok(s) = s_match.as_str().parse::<u64>() {
+                total_secs += s;
+                matched = true;
+            }
+        }
+        if matched {
+            return Some(total_secs);
+        }
+    }
+    None
 }
 
 /// Shape: "Feb 23rd, 2026 9:01 PM" / "Apr 7th, 2026 1:07 AM" — full date
@@ -224,6 +278,38 @@ fn extract_reset(text: &str, now: OffsetDateTime) -> (Option<String>, Option<Str
 /// must be able to tell "we saw this and don't know what it is" apart from
 /// "we're confident this isn't a quota/rate-limit failure at all".
 pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFailure> {
+    if backend.starts_with("agy") {
+        if let Some(m) = agy_auth_re().find(text) {
+            return Some(ParsedFailure {
+                backend: backend.to_string(),
+                kind: FailureKind::AuthenticationError,
+                retryable: false,
+                reset_at: None,
+                retry_after_seconds: None,
+                confidence: Confidence::High,
+                matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+                unresolved_timezone: None,
+            });
+        }
+        if let Some(m) = agy_quota_re().find(text) {
+            let reset_at = parse_agy_cooldown_seconds(text).map(|secs| {
+                let dt = now + time::Duration::seconds(secs as i64);
+                dt.format(&time::format_description::well_known::Rfc3339)
+                    .unwrap()
+            });
+            return Some(ParsedFailure {
+                backend: backend.to_string(),
+                kind: FailureKind::QuotaExhausted,
+                retryable: false,
+                reset_at,
+                retry_after_seconds: None,
+                confidence: Confidence::High,
+                matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+                unresolved_timezone: None,
+            });
+        }
+    }
+
     // Highest precedence: an explicit "not your usage limit" disclaimer
     // must never be classified as quota exhaustion, even though the phrase
     // itself contains the substring "usage limit".
@@ -326,6 +412,8 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/claude_generic_rate_limit_zero_tokens.json");
     const CLAUDE_TRANSIENT_THROTTLE: &str =
         include_str!("../tests/fixtures/quota-logs/claude_transient_throttle.json");
+    const AGY_QUOTA: &str = include_str!("../tests/fixtures/quota-logs/agy_quota_exhausted.txt");
+    const AGY_AUTH: &str = include_str!("../tests/fixtures/quota-logs/agy_auth_failed.txt");
 
     // ── Codex: full date+time, no timezone (openai/codex #12299) ───────────
 
@@ -491,17 +579,67 @@ mod tests {
     #[test]
     fn evidence_is_preserved_and_nonempty_for_every_match() {
         let now = utc(2026, Month::January, 1, 0, 0);
-        for fixture in [
-            CODEX_FULL_RESET,
-            CODEX_ADMIN_VARIANT,
-            CODEX_TIME_ONLY,
-            CLAUDE_TZ_RESET,
-            CLAUDE_WEEKLY_LIMIT,
-            CLAUDE_GENERIC_RATE_LIMIT,
-            CLAUDE_TRANSIENT_THROTTLE,
+        for (backend, fixture) in [
+            ("codex", CODEX_FULL_RESET),
+            ("codex", CODEX_ADMIN_VARIANT),
+            ("codex", CODEX_TIME_ONLY),
+            ("claude", CLAUDE_TZ_RESET),
+            ("claude", CLAUDE_WEEKLY_LIMIT),
+            ("claude", CLAUDE_GENERIC_RATE_LIMIT),
+            ("claude", CLAUDE_TRANSIENT_THROTTLE),
+            ("agy", AGY_QUOTA),
+            ("agy", AGY_AUTH),
         ] {
-            let parsed = parse("test", fixture, now).unwrap();
+            let parsed = parse(backend, fixture, now).unwrap();
             assert!(!parsed.matched_evidence.trim().is_empty());
         }
+    }
+
+    // ── AGY ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn agy_quota_resolves_and_extracts_duration() {
+        let now = utc(2026, Month::January, 1, 12, 0);
+        let parsed = parse("agy-main", AGY_QUOTA, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+        assert!(!parsed.retryable);
+        assert_eq!(parsed.confidence, Confidence::High);
+        // 2h23m6s = 8586 seconds. 12:00:00 + 02:23:06 = 14:23:06
+        assert_eq!(parsed.reset_at.as_deref(), Some("2026-01-01T14:23:06Z"));
+        assert!(parsed.matched_evidence.contains("RESOURCE_EXHAUSTED"));
+    }
+
+    #[test]
+    fn agy_auth_resolves_distinctly() {
+        let now = utc(2026, Month::January, 1, 12, 0);
+        let parsed = parse("agy-second", AGY_AUTH, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::AuthenticationError);
+        assert!(!parsed.retryable);
+        assert_eq!(parsed.confidence, Confidence::High);
+        assert_eq!(parsed.reset_at, None);
+        assert!(parsed
+            .matched_evidence
+            .contains("You are not logged into Antigravity"));
+    }
+
+    #[test]
+    fn agy_naked_429_does_not_match() {
+        let now = utc(2026, Month::January, 1, 12, 0);
+        let text = "We received a response code of 429 from some unrelated request.";
+        assert!(parse("agy", text, now).is_none());
+    }
+
+    #[test]
+    fn agy_non_matching_empty_is_none() {
+        let now = utc(2026, Month::January, 1, 12, 0);
+        assert!(parse("agy", "", now).is_none());
+    }
+
+    #[test]
+    fn agy_patterns_dont_false_positive_other_backends() {
+        let now = utc(2026, Month::January, 1, 12, 0);
+        // Even if Codex output has "RESOURCE_EXHAUSTED", it shouldn't match
+        // because it's not starting with "agy" and we want to preserve Codex behavior.
+        assert!(parse("codex", "RESOURCE_EXHAUSTED", now).is_none());
     }
 }

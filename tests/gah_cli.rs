@@ -3223,3 +3223,142 @@ fn dispatch_agy_multi_instance_isolated_execution() {
     let entry3: Value = serde_json::from_str(text3.lines().next().unwrap()).unwrap();
     assert_eq!(entry3["effective_backend"], "agy");
 }
+
+#[test]
+fn dispatch_pm_agy_quota_failure_updates_availability_and_reroutes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\npm_candidates = [{ backend = \"agy-main\" }, { backend = \"agy-second\" }]\n",
+        "",
+    );
+
+    let agy_main = FakeBackend::new(&tmp.path().join("agy-main-backend"), "agy-main");
+    agy_main.install(Scenario::failure(1).with_stderr(
+        "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h23m6s."
+    ));
+    let agy_second = FakeBackend::new(&tmp.path().join("agy-second-backend"), "agy-second");
+    agy_second.install(Scenario::success().with_stdout(
+        "{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Fallback ticket\",\"summary\":\"Handled by reroute\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"claude\",\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"test -d docs/tickets\"],\"uncovered_reason\":\"No duplicate work found.\"}]}",
+    ));
+
+    let path = format!(
+        "{}:{}:{}",
+        agy_main.bin_dir().display(),
+        agy_second.bin_dir().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let availability_path = tmp.path().join("availability.json");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--target",
+            "Plan fallback work",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", path)
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "PM rerouting: agy-main -> agy-second",
+        ));
+
+    assert_eq!(agy_main.call_count(), 1);
+    assert_eq!(agy_second.call_count(), 1);
+
+    let availability: Value =
+        serde_json::from_str(&fs::read_to_string(&availability_path).unwrap()).unwrap();
+    let records = availability["records"].as_array().unwrap();
+    assert!(!records.is_empty());
+    assert_eq!(records[0]["backend"], "agy-main");
+    assert_eq!(records[0]["reason"], "quota_exhausted");
+
+    let ledger = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(ledger.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["effective_backend"], "agy-second");
+    assert_eq!(entry["fallback_used"], true);
+}
+
+#[test]
+fn dispatch_pm_agy_auth_failure_updates_availability_and_reroutes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\npm_candidates = [{ backend = \"agy-second\" }, { backend = \"claude\" }]\n",
+        "",
+    );
+
+    let agy_second = FakeBackend::new(&tmp.path().join("agy-second-backend"), "agy-second");
+    agy_second.install(
+        Scenario::failure(1)
+            .with_stderr("error getting token source: You are not logged into Antigravity."),
+    );
+    let claude = FakeBackend::new(&tmp.path().join("claude-backend"), "claude");
+    claude.install(Scenario::success().with_stdout(
+        "{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Fallback ticket\",\"summary\":\"Handled by reroute\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"claude\",\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"test -d docs/tickets\"],\"uncovered_reason\":\"No duplicate work found.\"}]}",
+    ));
+
+    let path = format!(
+        "{}:{}:{}",
+        agy_second.bin_dir().display(),
+        claude.bin_dir().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let availability_path = tmp.path().join("availability.json");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--target",
+            "Plan fallback work",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", path)
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "PM rerouting: agy-second -> claude",
+        ));
+
+    assert_eq!(agy_second.call_count(), 1);
+    assert_eq!(claude.call_count(), 1);
+
+    let availability: Value =
+        serde_json::from_str(&fs::read_to_string(&availability_path).unwrap()).unwrap();
+    let records = availability["records"].as_array().unwrap();
+    assert!(!records.is_empty());
+    assert_eq!(records[0]["backend"], "agy-second");
+    assert_eq!(records[0]["reason"], "authentication_error");
+
+    let ledger = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(ledger.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["effective_backend"], "claude");
+    assert_eq!(entry["fallback_used"], true);
+}
