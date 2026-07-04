@@ -5,6 +5,12 @@ llm_base_url = "http://localhost:4000"
 llm_model_local = "your/local-model"
 llm_model_cloud = "your/cloud-model"
 
+[defaults.routing]
+default_backend = "openhands"
+review_backend = "claude"
+weak_review_backend = "codex"
+allow_review_fallback = true
+
 [profiles.self-hosted-gitlab]
 display_name = "Self-Hosted GitLab Repo"
 repo_id = "self-hosted-gitlab"
@@ -17,3 +23,7 @@ provider_api_base = "https://gitlab.example.com/api/v4"
 provider_project_id = "12345"
 oh_profile = "cloud-coder"
 validation_commands = []
+
+[profiles.self-hosted-gitlab.routing]
+pm_backend = "claude"
+improve_backend = "codex"
