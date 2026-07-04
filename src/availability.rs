@@ -92,6 +92,8 @@ pub struct AvailabilityRecord {
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_pool: Option<String>,
     pub status: Status,
     pub reason: Reason,
     /// RFC3339 timestamp.
@@ -128,6 +130,7 @@ impl Default for AvailabilityState {
 pub enum BlockScope {
     BackendWide,
     ModelSpecific,
+    QuotaPool,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +285,7 @@ pub fn record_unavailable(
     state_path: &Path,
     backend: &str,
     model: Option<&str>,
+    quota_pool: Option<&str>,
     reason: Reason,
     source: Source,
     unavailable_until: Option<OffsetDateTime>,
@@ -291,6 +295,7 @@ pub fn record_unavailable(
     let record = AvailabilityRecord {
         backend: backend.to_string(),
         model: model.map(str::to_string),
+        quota_pool: quota_pool.map(str::to_string),
         status: Status::Unavailable,
         reason,
         observed_at: now_rfc3339(now),
@@ -307,12 +312,14 @@ pub fn record_available(
     state_path: &Path,
     backend: &str,
     model: Option<&str>,
+    quota_pool: Option<&str>,
     source: Source,
     now: OffsetDateTime,
 ) -> Result<()> {
     let record = AvailabilityRecord {
         backend: backend.to_string(),
         model: model.map(str::to_string),
+        quota_pool: quota_pool.map(str::to_string),
         status: Status::Available,
         reason: Reason::Unknown,
         observed_at: now_rfc3339(now),
@@ -351,19 +358,45 @@ fn latest_for_scope<'a>(
         .find(|r| r.backend == backend && r.model.as_deref() == model)
 }
 
-/// Eligibility for `backend`/`model` at `now`. Precedence:
-/// 1. an active backend-wide record (model = None) blocks everything on
+fn latest_for_pool<'a>(
+    records: &'a [AvailabilityRecord],
+    pool: &str,
+) -> Option<&'a AvailabilityRecord> {
+    records
+        .iter()
+        .rev()
+        .find(|r| r.quota_pool.as_deref() == Some(pool))
+}
+
+/// Eligibility for `backend`/`model`/`quota_pool` at `now`. Precedence:
+/// 1. an active pool-wide record (quota_pool matches) blocks any candidate
+///    assigned to that pool;
+/// 2. otherwise an active backend-wide record (model = None) blocks everything on
 ///    that backend, including manual_disable, which is just a backend-wide
 ///    record with no expiry;
-/// 2. otherwise an active model-specific record blocks that model only;
-/// 3. otherwise eligible.
+/// 3. otherwise an active model-specific record blocks that model only;
+/// 4. otherwise eligible.
 pub fn availability_for(
     state_path: &Path,
     backend: &str,
     model: Option<&str>,
+    quota_pool: Option<&str>,
     now: OffsetDateTime,
 ) -> Result<AvailabilityDecision> {
     let state = load_state(state_path)?;
+
+    if let Some(pool) = quota_pool {
+        if let Some(record) = latest_for_pool(&state.records, pool) {
+            if is_active(record, now) {
+                return Ok(AvailabilityDecision {
+                    eligible: false,
+                    reason: Some(record.reason),
+                    unavailable_until: record.unavailable_until.clone(),
+                    scope: Some(BlockScope::QuotaPool),
+                });
+            }
+        }
+    }
 
     if let Some(record) = latest_for_scope(&state.records, backend, None) {
         if is_active(record, now) {
@@ -401,6 +434,7 @@ pub fn availability_for(
 pub struct ScopeStatus {
     pub backend: String,
     pub model: Option<String>,
+    pub quota_pool: Option<String>,
     pub eligible: bool,
     pub reason: Option<Reason>,
     pub unavailable_until: Option<String>,
@@ -410,15 +444,19 @@ pub struct ScopeStatus {
     pub observed_at: Option<String>,
 }
 
-/// One row per distinct (backend, model) scope that has ever appeared in
+/// One row per distinct (backend, model, quota_pool) scope that has ever appeared in
 /// the state file, sorted by backend then model (backend-wide rows, i.e.
 /// model = None, sort first for a given backend).
 pub fn list_scopes(state_path: &Path, now: OffsetDateTime) -> Result<Vec<ScopeStatus>> {
     let state = load_state(state_path)?;
 
-    let mut seen: Vec<(String, Option<String>)> = Vec::new();
+    let mut seen: Vec<(String, Option<String>, Option<String>)> = Vec::new();
     for record in &state.records {
-        let key = (record.backend.clone(), record.model.clone());
+        let key = (
+            record.backend.clone(),
+            record.model.clone(),
+            record.quota_pool.clone(),
+        );
         if !seen.contains(&key) {
             seen.push(key);
         }
@@ -426,15 +464,25 @@ pub fn list_scopes(state_path: &Path, now: OffsetDateTime) -> Result<Vec<ScopeSt
     seen.sort();
 
     let mut out = Vec::with_capacity(seen.len());
-    for (backend, model) in seen {
-        let decision = availability_for(state_path, &backend, model.as_deref(), now)?;
+    for (backend, model, quota_pool) in seen {
+        let decision = availability_for(
+            state_path,
+            &backend,
+            model.as_deref(),
+            quota_pool.as_deref(),
+            now,
+        )?;
         let informative = match decision.scope {
             Some(BlockScope::BackendWide) => latest_for_scope(&state.records, &backend, None),
+            Some(BlockScope::QuotaPool) => quota_pool
+                .as_deref()
+                .and_then(|p| latest_for_pool(&state.records, p)),
             _ => latest_for_scope(&state.records, &backend, model.as_deref()),
         };
         out.push(ScopeStatus {
             backend,
             model,
+            quota_pool,
             eligible: decision.eligible,
             reason: decision.reason,
             unavailable_until: decision.unavailable_until,
@@ -480,6 +528,8 @@ pub mod cli {
         backend: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quota_pool: Option<String>,
         eligible: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<&'static str>,
@@ -498,6 +548,7 @@ pub mod cli {
             Row {
                 backend: s.backend.clone(),
                 model: s.model.clone(),
+                quota_pool: s.quota_pool.clone(),
                 eligible: s.eligible,
                 reason: s.reason.map(super::Reason::as_str),
                 remaining_cooldown: s
@@ -527,10 +578,13 @@ pub mod cli {
             return Ok(());
         }
         for row in &rows {
-            let name = match &row.model {
+            let mut name = match &row.model {
                 Some(model) => format!("{}/{}", row.backend, model),
                 None => row.backend.clone(),
             };
+            if let Some(pool) = &row.quota_pool {
+                name = format!("{} (pool: {})", name, pool);
+            }
             if row.eligible {
                 println!("{:<28} available", name);
             } else {
@@ -556,6 +610,49 @@ mod tests {
 
     fn path(tmp: &TempDir) -> PathBuf {
         tmp.path().join("availability.json")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_unavailable(
+        state_path: &Path,
+        backend: &str,
+        model: Option<&str>,
+        reason: Reason,
+        source: Source,
+        unavailable_until: Option<OffsetDateTime>,
+        last_error_summary: Option<String>,
+        now: OffsetDateTime,
+    ) -> Result<()> {
+        super::record_unavailable(
+            state_path,
+            backend,
+            model,
+            None,
+            reason,
+            source,
+            unavailable_until,
+            last_error_summary,
+            now,
+        )
+    }
+
+    fn record_available(
+        state_path: &Path,
+        backend: &str,
+        model: Option<&str>,
+        source: Source,
+        now: OffsetDateTime,
+    ) -> Result<()> {
+        super::record_available(state_path, backend, model, None, source, now)
+    }
+
+    fn availability_for(
+        state_path: &Path,
+        backend: &str,
+        model: Option<&str>,
+        now: OffsetDateTime,
+    ) -> Result<AvailabilityDecision> {
+        super::availability_for(state_path, backend, model, None, now)
     }
 
     #[test]
@@ -987,5 +1084,87 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let until = now_rfc3339(now - time::Duration::minutes(5));
         assert_eq!(format_remaining(&until, now), None);
+    }
+
+    #[test]
+    fn quota_pool_blocks_associated_candidates() {
+        let tmp = TempDir::new().unwrap();
+        let p = path(&tmp);
+        let now = OffsetDateTime::now_utc();
+
+        // 1. Initially it should be eligible
+        let d = super::availability_for(
+            &p,
+            "claude",
+            Some("claude-sonnet"),
+            Some("claude-main"),
+            now,
+        )
+        .unwrap();
+        assert!(d.eligible);
+
+        // 2. Mark the pool unavailable
+        super::record_unavailable(
+            &p,
+            "claude",
+            Some("claude-sonnet"),
+            Some("claude-main"),
+            Reason::QuotaExhausted,
+            Source::BackendError,
+            Some(now + time::Duration::hours(1)),
+            None,
+            now,
+        )
+        .unwrap();
+
+        // 3. Now the candidate with that pool is blocked
+        let d1 = super::availability_for(
+            &p,
+            "claude",
+            Some("claude-sonnet"),
+            Some("claude-main"),
+            now,
+        )
+        .unwrap();
+        assert!(!d1.eligible);
+        assert_eq!(d1.scope, Some(BlockScope::QuotaPool));
+
+        // 4. A different candidate sharing the pool is also blocked!
+        let d2 =
+            super::availability_for(&p, "claude", Some("claude-haiku"), Some("claude-main"), now)
+                .unwrap();
+        assert!(!d2.eligible);
+        assert_eq!(d2.scope, Some(BlockScope::QuotaPool));
+
+        // 5. A candidate NOT sharing the pool is eligible
+        let d3 = super::availability_for(
+            &p,
+            "claude",
+            Some("claude-haiku"),
+            Some("claude-other"),
+            now,
+        )
+        .unwrap();
+        assert!(d3.eligible);
+
+        // 6. Clearing the pool with record_available
+        super::record_available(
+            &p,
+            "claude",
+            Some("claude-sonnet"),
+            Some("claude-main"),
+            Source::Manual,
+            now,
+        )
+        .unwrap();
+        let d4 = super::availability_for(
+            &p,
+            "claude",
+            Some("claude-sonnet"),
+            Some("claude-main"),
+            now,
+        )
+        .unwrap();
+        assert!(d4.eligible);
     }
 }

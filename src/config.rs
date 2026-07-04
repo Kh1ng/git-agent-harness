@@ -124,11 +124,13 @@ pub struct Profile {
     pub routing: RoutingPolicy,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct CandidateConfig {
     pub backend: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_pool: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -179,6 +181,30 @@ pub struct RoutingPolicy {
     pub max_known_estimated_cost_per_week: Option<f64>,
     #[serde(default)]
     pub max_known_actual_cost_per_week: Option<f64>,
+}
+
+impl RoutingPolicy {
+    pub fn find_quota_pool(
+        &self,
+        mode: &str,
+        backend: &str,
+        model: Option<&str>,
+    ) -> Option<String> {
+        let candidates = match mode {
+            "pm" => self.pm_candidates.as_ref(),
+            "review" => self.review_candidates.as_ref(),
+            "improve" | "fix" | "experiment" => self.improve_candidates.as_ref(),
+            _ => None,
+        };
+        if let Some(list) = candidates {
+            for c in list {
+                if c.backend == backend && c.model.as_deref() == model {
+                    return c.quota_pool.clone();
+                }
+            }
+        }
+        None
+    }
 }
 
 impl Profile {
