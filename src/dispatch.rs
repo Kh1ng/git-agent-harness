@@ -183,6 +183,7 @@ fn resolve_llm(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_backend(
     backend: &str,
     profile: &Profile,
@@ -190,11 +191,19 @@ fn run_backend(
     task: &str,
     session_dir: &Path,
     llm: &runner::LlmConfig,
+    effective_model: Option<&str>,
     env_path: Option<&str>,
 ) -> Result<runner::RunResult> {
     let env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
     match backend {
-        "codex" => runner::run_codex(wt, task, session_dir, &profile.codex_args, &env_vars),
+        "codex" => runner::run_codex(
+            wt,
+            task,
+            session_dir,
+            effective_model,
+            &profile.codex_args,
+            &env_vars,
+        ),
         "claude" => runner::run_claude(wt, task, session_dir, &profile.claude_args, &env_vars),
         _ => runner::run_openhands(
             wt,
@@ -463,6 +472,7 @@ fn improve(
             &task,
             &attempt_session,
             &llm,
+            route.effective_model.as_deref(),
             env_path,
         );
         let result = match result {
@@ -902,6 +912,7 @@ fn experiment(
         &task,
         &attempt_dir,
         &llm,
+        route.effective_model.as_deref(),
         env_path,
     ) {
         Ok(r) => r,
@@ -1165,6 +1176,7 @@ fn pm(
             &task,
             &attempt_dir,
             &llm,
+            plan_route.effective_model.as_deref(),
             None,
         )?;
         println!(
