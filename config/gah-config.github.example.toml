@@ -5,6 +5,12 @@ llm_base_url = "http://localhost:4000"
 llm_model_local = "your/local-model"
 llm_model_cloud = "your/cloud-model"
 
+[defaults.routing]
+default_backend = "openhands"
+review_backend = "claude"
+weak_review_backend = "codex"
+allow_review_fallback = true
+
 [profiles.github-repo]
 display_name = "GitHub Repo"
 repo_id = "github-repo"
@@ -15,3 +21,7 @@ artifact_root = "/home/you/.local/share/gah/artifacts/github-repo"
 default_target_branch = "main"
 oh_profile = "cloud-coder"
 validation_commands = []
+
+[profiles.github-repo.routing]
+pm_backend = "claude"
+improve_backend = "codex"
