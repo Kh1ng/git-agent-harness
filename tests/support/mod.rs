@@ -7,9 +7,9 @@
 //! Name-agnostic: the harness writes a POSIX shell script named after
 //! whatever `name` you pass `FakeBackend::new`, so it works for any
 //! executable GAH shells out to. It is explicitly exercised in
-//! `tests/fake_backend_harness.rs` for the four backends GAH cares about
+//! `tests/fake_backend_harness.rs` for the five backends GAH cares about
 //! today and may care about soon: `openhands`, `opencode`, `claude`,
-//! `codex`. (OpenCode is not currently a real `gah` runner backend — this
+//! `codex`, `agy`. (OpenCode is not currently a real `gah` runner backend — this
 //! harness supports faking it anyway, ahead of any production integration,
 //! because the instruction was to build the harness for it now.)
 //!
