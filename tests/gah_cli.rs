@@ -2699,3 +2699,138 @@ fn ledger_summary_json_outputs_machine_readable_counts() {
     assert!(parsed["by_mode"].is_object());
     assert!(parsed["by_backend"].is_object());
 }
+
+#[test]
+fn status_reports_human_and_json_views() {
+    let tmp = write_fixture_dir();
+    let cfg = write_dispatch_config(&tmp);
+    let root = tmp.path().join("real");
+    init_git_repo(&root);
+    write_real_repo_config(&tmp, &root, "test-repo");
+
+    let availability_path = tmp.path().join("avail.json");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    // Write a mock availability record
+    let avail_state = serde_json::json!({
+        "version": 1,
+        "records": [
+            {
+                "backend": "claude",
+                "model": "claude-3-5",
+                "status": "unavailable",
+                "reason": "rate_limited",
+                "observed_at": "2026-07-04T12:00:00Z",
+                "unavailable_until": "2099-01-01T00:00:00Z",
+                "source": "backend_error"
+            }
+        ]
+    });
+    fs::write(
+        &availability_path,
+        serde_json::to_string(&avail_state).unwrap(),
+    )
+    .unwrap();
+
+    // Write a mock ledger entry
+    let ledger_entry = serde_json::json!({
+        "timestamp": "2026-07-04T13:00:00Z",
+        "profile": "test-repo",
+        "display_name": "Test Repo",
+        "repo_id": "test-repo",
+        "repo": "owner/test-repo",
+        "local_path": "/tmp",
+        "provider": "github",
+        "backend": "claude",
+        "requested_backend": "claude",
+        "effective_backend": "claude",
+        "requested_model": null,
+        "effective_model": Some("claude-3-5"),
+        "routing_reason": "explicit",
+        "fallback_used": false,
+        "confidence_impact": null,
+        "human_required": false,
+        "mode": "improve",
+        "target_summary": null,
+        "branch": "gah/test-branch",
+        "session_dir": null,
+        "duration_seconds": null,
+        "backend_exit_code": null,
+        "validation_result": null,
+        "commit_attempted": false,
+        "commit_created": false,
+        "push_attempted": false,
+        "push_succeeded": false,
+        "mr_attempted": false,
+        "mr_created": false,
+        "mr_url": null,
+        "files_changed": null,
+        "insertions": null,
+        "deletions": null,
+        "error_summary": null,
+        "failure_class": "backend_error",
+        "failure_stage": "agent_run",
+        "attempts_started": 3,
+        "attempts_completed": 2,
+        "usage": {}
+    });
+    fs::write(
+        &ledger_path,
+        serde_json::to_string(&ledger_entry).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let out = bin()
+        .current_dir(&root)
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .args([
+            "status",
+            "--json",
+            "--profile",
+            "test-repo",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+
+    assert_eq!(parsed["schema_version"], 1);
+    assert_eq!(parsed["profile"]["display_name"], "Test Repo");
+    assert_eq!(parsed["profile"]["provider"], "github");
+    assert!(parsed["observations"]["sync"]["status"].is_string());
+    assert!(parsed["observations"]["availability"]["status"].is_string());
+    assert!(parsed["observations"]["ledger"]["status"].is_string());
+
+    // Verify availability fields, specifically observed_at is populated
+    let avail = &parsed["availability"][0];
+    assert_eq!(avail["backend"], "claude");
+    assert_eq!(avail["model"], "claude-3-5");
+    assert_eq!(avail["observed_at"], "2026-07-04T12:00:00Z");
+
+    // Verify ledger fields
+    let ledger = &parsed["recent_ledger"];
+    assert_eq!(ledger["most_recent_failure_class"], "backend_error");
+    assert_eq!(ledger["most_recent_failure_stage"], "agent_run");
+    assert_eq!(ledger["attempts_started"], 3);
+    assert_eq!(ledger["attempts_completed"], 2);
+
+    bin()
+        .current_dir(&root)
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .args([
+            "status",
+            "--profile",
+            "test-repo",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Status for Profile: test-repo"))
+        .stdout(predicate::str::contains("Observations: Sync="));
+}

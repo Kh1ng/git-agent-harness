@@ -13,6 +13,7 @@ mod prune;
 mod quota_parser;
 mod routing;
 mod runner;
+mod status;
 mod sync;
 mod usage;
 mod worktree;
@@ -108,6 +109,15 @@ enum Commands {
     Ledger {
         #[command(subcommand)]
         command: LedgerCommands,
+    },
+    /// Provide a single machine-readable controller snapshot of all state
+    Status {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
     },
     /// Classify open GAH-created merge requests / pull requests
     Sync {
@@ -264,6 +274,15 @@ fn main() -> Result<()> {
                 config_path,
             } => ledger::summary::run(&since, profile.as_deref(), config_path.as_deref())?,
         },
+
+        Commands::Status {
+            profile,
+            json,
+            config_path,
+        } => {
+            let cfg = config::load(config_path.as_deref())?;
+            status::run(&cfg, &profile, json)?;
+        }
 
         Commands::Sync {
             profile,

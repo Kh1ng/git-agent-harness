@@ -11,17 +11,13 @@ use time::{Duration, OffsetDateTime};
 /// parse pretty-printed terminal output to learn MR state.
 pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
     let profile = config::get_profile(cfg, profile_name)?;
-    let mrs = match profile.provider.as_str() {
-        "github" => github_prs(profile)?,
-        "gitlab" => gitlab_mrs(profile)?,
-        other => anyhow::bail!("unsupported provider: {}", other),
-    };
+    let mrs = fetch_mrs(profile)?;
 
     if json {
         let rows: Vec<SyncMrJson> = mrs
             .iter()
             .map(|mr| SyncMrJson {
-                profile: profile_name.to_string(),
+                profile: Some(profile_name.to_string()),
                 branch: mr.branch.clone(),
                 id: mr.id.clone(),
                 url: mr.url.clone(),
@@ -30,7 +26,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
                 merge_status: mr.merge_status.clone(),
                 merged: mr.merged,
                 classification: classify(mr).to_string(),
-                recommended_action: recommended_action(classify(mr)).to_string(),
+                recommended_action: RecommendedAction::from_class(classify(mr)),
             })
             .collect();
         println!("{}", serde_json::to_string(&rows)?);
@@ -52,39 +48,72 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RecommendedAction {
+    ReuseBranch,
+    HumanMergeDecision,
+    RunReview,
+    None,
+    InspectBranch,
+    InspectManually,
+}
+
+impl RecommendedAction {
+    pub fn from_class(class: &str) -> Self {
+        match class {
+            "CI_FAILED" | "NEEDS_FIX" => RecommendedAction::ReuseBranch,
+            "READY_FOR_HUMAN" => RecommendedAction::HumanMergeDecision,
+            "NEEDS_REVIEW" => RecommendedAction::RunReview,
+            "MERGED" => RecommendedAction::None,
+            "STALE" => RecommendedAction::InspectBranch,
+            _ => RecommendedAction::InspectManually,
+        }
+    }
+}
+
 /// Machine-readable row for `gah sync --json`. Field set is the ticket's
 /// "at minimum" list: profile, branch, MR identifier, MR URL, state, draft,
 /// merge status if available, classification, recommended next action.
-#[derive(Debug, Serialize)]
-struct SyncMrJson {
-    profile: String,
-    branch: String,
-    id: Option<String>,
-    url: Option<String>,
-    state: Option<String>,
-    draft: bool,
-    merge_status: Option<String>,
-    merged: bool,
-    classification: String,
-    recommended_action: String,
+#[derive(Debug, Serialize, Clone)]
+pub struct SyncMrJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub branch: String,
+    pub id: Option<String>,
+    pub url: Option<String>,
+    pub state: Option<String>,
+    pub draft: bool,
+    pub merge_status: Option<String>,
+    pub merged: bool,
+    pub classification: String,
+    pub recommended_action: RecommendedAction,
 }
 
 #[derive(Debug, Clone)]
-struct SyncMr {
-    title: String,
-    branch: String,
-    labels: Vec<String>,
-    url: Option<String>,
-    id: Option<String>,
-    state: Option<String>,
-    draft: bool,
-    merge_status: Option<String>,
-    merged: bool,
-    updated_at: Option<String>,
-    ci_failed: bool,
+pub struct SyncMr {
+    pub title: String,
+    pub branch: String,
+    pub labels: Vec<String>,
+    pub url: Option<String>,
+    pub id: Option<String>,
+    pub state: Option<String>,
+    pub draft: bool,
+    pub merge_status: Option<String>,
+    pub merged: bool,
+    pub updated_at: Option<String>,
+    pub ci_failed: bool,
 }
 
-fn classify(mr: &SyncMr) -> &'static str {
+pub fn fetch_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
+    match profile.provider.as_str() {
+        "github" => github_prs(profile),
+        "gitlab" => gitlab_mrs(profile),
+        other => anyhow::bail!("unsupported provider: {}", other),
+    }
+}
+
+pub fn classify(mr: &SyncMr) -> &'static str {
     if mr.merged {
         return "MERGED";
     }
@@ -113,7 +142,7 @@ fn classify(mr: &SyncMr) -> &'static str {
     "UNKNOWN"
 }
 
-fn recommended_action(class: &str) -> &'static str {
+pub fn recommended_action(class: &str) -> &'static str {
     match class {
         "CI_FAILED" => "reuse same branch/MR for a fix run",
         "NEEDS_FIX" => "reuse same branch/MR for a fix run",
