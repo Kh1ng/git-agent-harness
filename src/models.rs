@@ -1,5 +1,43 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct WorkMetadata {
+    #[serde(default)]
+    pub ticket_id: Option<String>,
+    #[serde(default)]
+    pub work_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub problem: Option<String>,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub suggested_mr_title: Option<String>,
+    #[serde(default)]
+    pub difficulty: Option<String>,
+    #[serde(default)]
+    pub risk: Option<String>,
+    #[serde(default)]
+    pub recommended_backend: Option<String>,
+    #[serde(default)]
+    pub recommended_model: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub verification_commands: Vec<String>,
+    #[serde(default)]
+    pub affected_files: Vec<String>,
+    #[serde(default)]
+    pub is_authoritative: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GateArtifact {
     #[serde(default)]
