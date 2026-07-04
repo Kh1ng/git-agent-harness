@@ -187,11 +187,11 @@ fn independent_state_per_instance_of_the_same_backend_name() {
 }
 
 /// TICKET request: the harness must support OpenHands, OpenCode, Claude,
-/// and Codex by name. (OpenCode is not a real `gah` runner backend today —
+/// Codex, and Agy by name. (OpenCode is not a real `gah` runner backend today —
 /// the harness is name-agnostic and supports faking it regardless.)
 #[test]
-fn supports_all_four_named_backends() {
-    for name in ["openhands", "opencode", "claude", "codex"] {
+fn supports_all_five_named_backends() {
+    for name in ["openhands", "opencode", "claude", "codex", "agy"] {
         let tmp = TempDir::new().unwrap();
         let backend = FakeBackend::new(tmp.path(), name);
         backend.install(Scenario::success().with_stdout(format!("{name} ran")));

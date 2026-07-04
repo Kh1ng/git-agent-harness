@@ -760,7 +760,7 @@ mod tests {
     }
 
     fn backend_available(name: &str) -> bool {
-        matches!(name, "claude" | "codex" | "openhands")
+        matches!(name, "claude" | "codex" | "openhands" | "agy")
     }
 
     #[test]
@@ -784,6 +784,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decision.effective_backend, "claude");
+        assert_eq!(decision.routing_reason, "profile routing policy");
+    }
+
+    #[test]
+    fn profile_routing_can_select_agy() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.default_backend = Some("agy".into());
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "improve",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "agy");
         assert_eq!(decision.routing_reason, "profile routing policy");
     }
 

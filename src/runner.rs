@@ -222,11 +222,49 @@ pub fn run_claude(
     })
 }
 
+/// Run Antigravity CLI non-interactively via `agy --print`.
+pub fn run_agy(
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    llm: &LlmConfig,
+    env_vars: &[(String, String)],
+) -> Result<RunResult> {
+    let log_path = session_dir.join("backend-output.log");
+    fs::write(session_dir.join("task.md"), task)?;
+
+    let log_file = fs::File::create(&log_path).context("creating log file")?;
+    let log_err = log_file.try_clone()?;
+
+    let start = Instant::now();
+    let mut cmd = Command::new("agy");
+    cmd.arg("--print");
+    cmd.args(["--model", llm.model.as_str()]);
+    cmd.arg("--dangerously-skip-permissions")
+        .arg(task)
+        .current_dir(worktree)
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err));
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let status = cmd
+        .status()
+        .context("launching agy; is it installed and on PATH?")?;
+
+    Ok(RunResult {
+        exit_code: status.code().unwrap_or(-1),
+        duration_secs: start.elapsed().as_secs_f64(),
+        log_path: log_path.to_string_lossy().into_owned(),
+    })
+}
+
 pub fn backend_available(name: &str) -> bool {
     let cmd = match name {
         "openhands" | "cloud-coder" | "auto" => "openhands",
         "codex" => "codex",
         "claude" => "claude",
+        "agy" => "agy",
         _ => return false,
     };
     Command::new("which")
@@ -614,6 +652,81 @@ mod tests {
         assert!(err
             .to_string()
             .contains("launching claude; is it installed"));
+    }
+
+    // ── run_agy ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_agy_success_writes_stdout_and_stderr_to_log() {
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        let result = run_agy(
+            &f.worktree,
+            "agy task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "gpt-5.4".into(),
+            },
+            &envs,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("stdout-marker-agy"));
+        assert!(log.contains("stderr-marker-agy"));
+    }
+
+    #[test]
+    fn run_agy_core_argv_and_model_present() {
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_agy(
+            &f.worktree,
+            "the agy task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "gpt-5.4".into(),
+            },
+            &envs,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "--print");
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"gpt-5.4".to_string()));
+        assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(argv.contains(&"the agy task".to_string()));
+    }
+
+    #[test]
+    fn run_agy_missing_binary_produces_useful_error() {
+        let f = fixture();
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        let err = run_agy(
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "gpt-5.4".into(),
+            },
+            &envs,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("launching agy; is it installed"));
     }
 
     // ── backend_available ────────────────────────────────────────────────

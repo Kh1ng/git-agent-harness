@@ -205,6 +205,7 @@ fn run_backend(
             &env_vars,
         ),
         "claude" => runner::run_claude(wt, task, session_dir, &profile.claude_args, &env_vars),
+        "agy" => runner::run_agy(wt, task, session_dir, llm, &env_vars),
         _ => runner::run_openhands(
             wt,
             task,
@@ -247,6 +248,7 @@ fn preflight(backend: &str) -> Result<()> {
     let backend_bin = match backend {
         "codex" => "codex",
         "claude" => "claude",
+        "agy" => "agy",
         _ => "openhands",
     };
     for bin in &["git", backend_bin] {
