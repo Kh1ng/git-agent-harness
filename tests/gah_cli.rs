@@ -2378,7 +2378,6 @@ fn sync_gitlab_fails_when_glab_fails() {
 // implementing.
 
 #[test]
-#[ignore = "TICKET: gah sync --json"]
 fn sync_json_outputs_machine_readable_classification() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
@@ -2413,6 +2412,54 @@ fn sync_json_outputs_machine_readable_classification() {
     assert_eq!(mrs[0]["branch"], "gah/test-1");
     assert!(mrs[0]["recommended_action"].is_string());
     assert_eq!(mrs[0]["url"], "https://example/pr/1");
+}
+
+/// TICKET-070: the JSON view must expose the richer fields the ticket
+/// requires ("at minimum": MR identifier, state, draft, merge status), not
+/// just the classification/recommendation floor the contract test checks.
+/// Also verifies --json prints ONLY JSON — no "Profile: ..." human header
+/// mixed into stdout, since that would break every consumer that expects
+/// pure JSON on stdout.
+#[test]
+fn sync_json_includes_id_state_draft_and_merge_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] fix\",\"headRefName\":\"gah/test-1\",\"url\":\"https://example/pr/1\",\"labels\":[],\"number\":42,\"state\":\"OPEN\",\"isDraft\":true,\"mergeStateStatus\":\"BEHIND\",\"mergedAt\":null,\"updatedAt\":\"2099-01-01T00:00:00Z\",\"statusCheckRollup\":[]}]'; exit 0; fi\nexit 0\n",
+    );
+
+    let out = bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--json",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(
+        !stdout.contains("Profile:"),
+        "--json must print only JSON, not the human header: {stdout}"
+    );
+    let parsed: Value = serde_json::from_str(&stdout).unwrap();
+    let mrs = parsed.as_array().unwrap();
+    assert_eq!(mrs[0]["id"], "42");
+    assert_eq!(mrs[0]["state"], "OPEN");
+    assert_eq!(mrs[0]["draft"], true);
+    assert_eq!(mrs[0]["merge_status"], "BEHIND");
+    assert_eq!(mrs[0]["profile"], "real");
 }
 
 #[test]

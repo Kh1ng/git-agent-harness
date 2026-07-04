@@ -109,6 +109,8 @@ enum Commands {
         profile: String,
         #[arg(long, name = "config")]
         config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Dispatch a job to a backend (improve, pm, review, fix, experiment)
     Dispatch {
@@ -258,9 +260,10 @@ fn main() -> Result<()> {
         Commands::Sync {
             profile,
             config_path,
+            json,
         } => {
             let cfg = config::load(config_path.as_deref())?;
-            sync::run(&cfg, &profile)?;
+            sync::run(&cfg, &profile, json)?;
         }
 
         Commands::Dispatch {

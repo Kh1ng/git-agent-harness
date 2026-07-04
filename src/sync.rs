@@ -1,11 +1,15 @@
 use crate::config::{self, GahConfig};
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-pub fn run(cfg: &GahConfig, profile_name: &str) -> Result<()> {
+/// TICKET-070: `json = true` prints one JSON array to stdout and nothing
+/// else (the existing human-readable output is otherwise unchanged when
+/// `json = false`) -- Hermes and other automation should never have to
+/// parse pretty-printed terminal output to learn MR state.
+pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
     let profile = config::get_profile(cfg, profile_name)?;
     let mrs = match profile.provider.as_str() {
         "github" => github_prs(profile)?,
@@ -13,9 +17,29 @@ pub fn run(cfg: &GahConfig, profile_name: &str) -> Result<()> {
         other => anyhow::bail!("unsupported provider: {}", other),
     };
 
+    if json {
+        let rows: Vec<SyncMrJson> = mrs
+            .iter()
+            .map(|mr| SyncMrJson {
+                profile: profile_name.to_string(),
+                branch: mr.branch.clone(),
+                id: mr.id.clone(),
+                url: mr.url.clone(),
+                state: mr.state.clone(),
+                draft: mr.draft,
+                merge_status: mr.merge_status.clone(),
+                merged: mr.merged,
+                classification: classify(mr).to_string(),
+                recommended_action: recommended_action(classify(mr)).to_string(),
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&rows)?);
+        return Ok(());
+    }
+
     println!("Profile: {}", profile_name);
-    for mr in mrs {
-        let class = classify(&mr);
+    for mr in &mrs {
+        let class = classify(mr);
         println!(
             "{}  {}  {}  {}",
             class,
@@ -28,12 +52,33 @@ pub fn run(cfg: &GahConfig, profile_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Machine-readable row for `gah sync --json`. Field set is the ticket's
+/// "at minimum" list: profile, branch, MR identifier, MR URL, state, draft,
+/// merge status if available, classification, recommended next action.
+#[derive(Debug, Serialize)]
+struct SyncMrJson {
+    profile: String,
+    branch: String,
+    id: Option<String>,
+    url: Option<String>,
+    state: Option<String>,
+    draft: bool,
+    merge_status: Option<String>,
+    merged: bool,
+    classification: String,
+    recommended_action: String,
+}
+
 #[derive(Debug, Clone)]
 struct SyncMr {
     title: String,
     branch: String,
     labels: Vec<String>,
     url: Option<String>,
+    id: Option<String>,
+    state: Option<String>,
+    draft: bool,
+    merge_status: Option<String>,
     merged: bool,
     updated_at: Option<String>,
     ci_failed: bool,
@@ -100,6 +145,16 @@ struct GithubPr {
     #[serde(default)]
     labels: Vec<GithubLabel>,
     #[serde(default)]
+    number: Option<i64>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    #[serde(default)]
+    #[serde(rename = "mergeStateStatus")]
+    merge_state_status: Option<String>,
+    #[serde(default)]
     #[serde(rename = "mergedAt")]
     merged_at: Option<String>,
     #[serde(default)]
@@ -131,7 +186,7 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             "--state",
             "all",
             "--json",
-            "title,headRefName,url,labels,mergedAt,updatedAt,statusCheckRollup",
+            "title,headRefName,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
         ])
         .output()
         .context("gh pr list")?;
@@ -150,6 +205,10 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             branch: pr.head_ref_name,
             labels: pr.labels.into_iter().map(|l| l.name).collect(),
             url: pr.url,
+            id: pr.number.map(|n| n.to_string()),
+            state: pr.state,
+            draft: pr.is_draft,
+            merge_status: pr.merge_state_status,
             merged: pr.merged_at.is_some(),
             updated_at: pr.updated_at,
             ci_failed: pr
@@ -168,6 +227,16 @@ struct GitlabMr {
     web_url: Option<String>,
     #[serde(default)]
     labels: Vec<String>,
+    #[serde(default)]
+    iid: Option<serde_json::Value>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    detailed_merge_status: Option<String>,
+    #[serde(default)]
+    merge_status: Option<String>,
     #[serde(default)]
     merged_at: Option<String>,
     #[serde(default)]
@@ -202,6 +271,10 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             branch: mr.source_branch,
             labels: mr.labels,
             url: mr.web_url,
+            id: mr.iid.map(|v| v.to_string().trim_matches('"').to_string()),
+            state: mr.state,
+            draft: mr.draft,
+            merge_status: mr.detailed_merge_status.or(mr.merge_status),
             merged: mr.merged_at.is_some(),
             updated_at: mr.updated_at,
             ci_failed: false,
@@ -220,6 +293,10 @@ mod tests {
             branch: "gah/test".into(),
             labels: vec!["gah-ready-for-human".into()],
             url: None,
+            id: None,
+            state: None,
+            draft: false,
+            merge_status: None,
             merged: false,
             updated_at: None,
             ci_failed: false,
