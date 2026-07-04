@@ -1,3 +1,4 @@
+#![allow(dead_code, clippy::all)]
 mod availability;
 mod candidates;
 mod config;

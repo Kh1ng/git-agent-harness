@@ -126,6 +126,82 @@ where
         );
     }
 
+    if let Some(list) = profile
+        .routing
+        .candidates_for_mode(req.mode)
+        .or_else(|| defaults.routing.candidates_for_mode(req.mode))
+    {
+        let profile_mode = policy_backend_model(&profile.routing, req.mode);
+        let default_mode = policy_backend_model(&defaults.routing, req.mode);
+        let default_model = profile_mode
+            .1
+            .or(default_mode.1)
+            .or(req.recommended_model)
+            .map(str::to_string);
+
+        let candidates: Vec<RouteCandidate> = list
+            .iter()
+            .map(|c| RouteCandidate {
+                backend: c.backend.clone(),
+                model: c.model.clone().or_else(|| default_model.clone()),
+            })
+            .collect();
+
+        let candidates = dedupe_candidates(candidates);
+
+        if candidates.is_empty() {
+            return Err(RouteError::NoEligibleBackend {
+                preferred_backend: "none".to_string(),
+                preferred_model: None,
+                skipped: vec![],
+                earliest_reset: None,
+            }
+            .into());
+        }
+
+        let (selected, skipped) =
+            pick_route_candidate(candidates, state_path, now, backend_available)?;
+
+        let preferred = list.first().unwrap();
+        let preferred_backend = preferred.backend.clone();
+        let preferred_model = preferred.model.clone().or_else(|| default_model.clone());
+
+        let mut reason = if profile.routing.candidates_for_mode(req.mode).is_some() {
+            "profile routing policy".to_string()
+        } else {
+            "global routing policy".to_string()
+        };
+
+        let mut fallback_used = false;
+        let mut confidence_impact = None;
+        let mut human_required = false;
+
+        if selected.backend != preferred_backend || selected.model != preferred_model {
+            fallback_used = true;
+            reason = append_availability_reason(
+                reason,
+                &skipped,
+                &selected.backend,
+                req.mode == "review",
+            );
+            if req.mode == "review" {
+                confidence_impact.get_or_insert_with(|| "low".into());
+                human_required = true;
+            }
+        }
+
+        return Ok(RouteDecision {
+            requested_backend,
+            effective_backend: selected.backend,
+            requested_model,
+            effective_model: selected.model,
+            routing_reason: reason,
+            fallback_used,
+            confidence_impact,
+            human_required,
+        });
+    }
+
     let profile_mode = policy_backend_model(&profile.routing, req.mode);
     let default_mode = policy_backend_model(&defaults.routing, req.mode);
     let review_fallback_allowed =
@@ -1165,5 +1241,150 @@ mod tests {
         .unwrap_err();
 
         assert!(format!("{:#}", err).contains("parsing availability state"));
+    }
+
+    #[test]
+    fn test_ordered_candidates_list_priority_and_skips() {
+        use crate::config::ConfiguredCandidate;
+
+        let tmp = TempDir::new().unwrap();
+        let now = OffsetDateTime::now_utc();
+
+        let mut p = profile();
+        p.routing.candidates_pm = Some(vec![
+            ConfiguredCandidate {
+                backend: "openhands".to_string(),
+                model: None,
+            },
+            ConfiguredCandidate {
+                backend: "claude".to_string(),
+                model: Some("claude-3".to_string()),
+            },
+            ConfiguredCandidate {
+                backend: "codex".to_string(),
+                model: Some("gpt-5".to_string()),
+            },
+        ]);
+
+        record_unavailable(
+            &path(&tmp),
+            "openhands",
+            None,
+            Reason::RateLimited,
+            Source::BackendError,
+            Some(now + time::Duration::minutes(5)),
+            None,
+            now,
+        )
+        .unwrap();
+
+        let decision = decide_with(
+            &defaults(),
+            &p,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            now,
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "claude");
+        assert_eq!(decision.effective_model.as_deref(), Some("claude-3"));
+        assert!(decision.fallback_used);
+        assert!(decision
+            .routing_reason
+            .contains("openhands: backend-wide rate_limited"));
+        assert!(decision
+            .routing_reason
+            .contains("availability fallback to claude"));
+    }
+
+    #[test]
+    fn test_ordered_candidates_list_exhaustion() {
+        use crate::config::ConfiguredCandidate;
+
+        let tmp = TempDir::new().unwrap();
+        let now = OffsetDateTime::now_utc();
+
+        let mut p = profile();
+        p.routing.candidates_pm = Some(vec![
+            ConfiguredCandidate {
+                backend: "openhands".to_string(),
+                model: None,
+            },
+            ConfiguredCandidate {
+                backend: "claude".to_string(),
+                model: Some("claude-3".to_string()),
+            },
+        ]);
+
+        record_unavailable(
+            &path(&tmp),
+            "openhands",
+            None,
+            Reason::RateLimited,
+            Source::BackendError,
+            Some(now + time::Duration::minutes(5)),
+            None,
+            now,
+        )
+        .unwrap();
+
+        record_unavailable(
+            &path(&tmp),
+            "claude",
+            Some("claude-3"),
+            Reason::QuotaExhausted,
+            Source::BackendError,
+            Some(now + time::Duration::minutes(10)),
+            None,
+            now,
+        )
+        .unwrap();
+
+        let err = decide_with(
+            &defaults(),
+            &p,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            now,
+            backend_available,
+        )
+        .unwrap_err();
+
+        let route_err = err.downcast_ref::<RouteError>().unwrap();
+        match route_err {
+            RouteError::NoEligibleBackend {
+                preferred_backend,
+                preferred_model,
+                skipped,
+                earliest_reset,
+            } => {
+                assert_eq!(preferred_backend, "openhands");
+                assert_eq!(preferred_model, &None);
+                assert_eq!(skipped.len(), 2);
+                assert_eq!(skipped[0].backend, "openhands");
+                assert_eq!(skipped[1].backend, "claude");
+                assert_eq!(skipped[1].model.as_deref(), Some("claude-3"));
+                let expected = (now + time::Duration::minutes(5)).format(&Rfc3339).unwrap();
+                assert_eq!(earliest_reset.as_deref(), Some(expected.as_str()));
+            }
+        }
     }
 }

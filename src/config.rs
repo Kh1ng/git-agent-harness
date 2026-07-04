@@ -154,6 +154,36 @@ pub struct RoutingPolicy {
     pub max_known_estimated_cost_per_week: Option<f64>,
     #[serde(default)]
     pub max_known_actual_cost_per_week: Option<f64>,
+    #[serde(default)]
+    pub candidates_pm: Option<Vec<ConfiguredCandidate>>,
+    #[serde(default)]
+    pub candidates_review: Option<Vec<ConfiguredCandidate>>,
+    #[serde(default)]
+    pub candidates_improve: Option<Vec<ConfiguredCandidate>>,
+    #[serde(default)]
+    pub candidates_fix: Option<Vec<ConfiguredCandidate>>,
+    #[serde(default)]
+    pub candidates_experiment: Option<Vec<ConfiguredCandidate>>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct ConfiguredCandidate {
+    pub backend: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl RoutingPolicy {
+    pub fn candidates_for_mode(&self, mode: &str) -> Option<&Vec<ConfiguredCandidate>> {
+        match mode {
+            "pm" => self.candidates_pm.as_ref(),
+            "review" => self.candidates_review.as_ref(),
+            "improve" => self.candidates_improve.as_ref(),
+            "fix" => self.candidates_fix.as_ref(),
+            "experiment" => self.candidates_experiment.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 impl Profile {
