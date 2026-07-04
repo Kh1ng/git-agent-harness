@@ -78,9 +78,18 @@ pub struct Profile {
     /// Extra CLI args appended to `codex exec` for invariant non-model flags.
     #[serde(default)]
     pub codex_args: Vec<String>,
+    /// Optional absolute/relative path to the Codex CLI executable.
+    #[serde(default)]
+    pub codex_path: Option<String>,
     /// Extra CLI args appended to `claude -p` (e.g. `--allowedTools Edit,Write,Bash`)
     #[serde(default)]
     pub claude_args: Vec<String>,
+    /// Optional absolute/relative path to the Claude CLI executable.
+    #[serde(default)]
+    pub claude_path: Option<String>,
+    /// Optional absolute/relative path to the Antigravity CLI executable.
+    #[serde(default)]
+    pub agy_path: Option<String>,
     /// Path to a policy TOML file (see gah policy-check). When set, dispatch
     /// enforces permissions before provisioning any worktree.
     #[serde(default)]
@@ -108,6 +117,9 @@ pub struct Profile {
     /// Model override for `review` mode
     #[serde(default)]
     pub model_review: Option<String>,
+    /// Review subprocess timeout. Defaults to 300 seconds when unset.
+    #[serde(default)]
+    pub review_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub routing: RoutingPolicy,
 }
@@ -170,6 +182,19 @@ pub struct RoutingPolicy {
 }
 
 impl Profile {
+    pub fn configured_backend_path(&self, backend: &str) -> Option<&str> {
+        match backend {
+            "codex" => self.codex_path.as_deref(),
+            "claude" => self.claude_path.as_deref(),
+            "agy" | "agy-main" | "agy-second" => self.agy_path.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn review_timeout_seconds(&self) -> u64 {
+        self.review_timeout_seconds.unwrap_or(300).max(1)
+    }
+
     pub fn pat(&self) -> String {
         match self.provider.as_str() {
             "gitlab" => std::env::var("GITLAB_PAT2")
@@ -307,7 +332,10 @@ mod tests {
             oh_profile: None,
             openhands_args: vec![],
             codex_args: vec![],
+            codex_path: None,
             claude_args: vec![],
+            claude_path: None,
+            agy_path: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -316,6 +344,7 @@ mod tests {
             model_improve: None,
             model_pm: None,
             model_review: None,
+            review_timeout_seconds: None,
             routing: RoutingPolicy::default(),
         }
     }

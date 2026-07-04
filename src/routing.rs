@@ -95,7 +95,7 @@ pub fn decide(
         req,
         &availability::resolve_state_path(),
         OffsetDateTime::now_utc(),
-        runner::backend_available,
+        |backend| runner::backend_available_for_profile(profile, backend),
     )
 }
 
@@ -806,7 +806,10 @@ mod tests {
             oh_profile: None,
             openhands_args: vec![],
             codex_args: vec![],
+            codex_path: None,
             claude_args: vec![],
+            claude_path: None,
+            agy_path: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -815,6 +818,7 @@ mod tests {
             model_improve: None,
             model_pm: None,
             model_review: None,
+            review_timeout_seconds: None,
             routing: RoutingPolicy {
                 pm_backend: Some("claude".into()),
                 ..RoutingPolicy::default()
