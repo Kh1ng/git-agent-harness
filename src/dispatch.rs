@@ -358,7 +358,8 @@ fn improve(
     } else {
         args.target.clone()
     };
-    let ticket_meta = parse_ticket_metadata(Path::new(&target)).ok().flatten();
+    let ticket_meta = parse_ticket_metadata(Path::new(&target))?;
+    ledger.work_id = Some(resolve_work_id_from_ticket_meta(ticket_meta.as_ref()));
     let usage_summary = ledger::usage_summary_for_backend(
         cfg,
         args.backend.as_str(),
@@ -850,6 +851,8 @@ fn experiment(
     session_dir: &Path,
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
+    let ticket_meta = parse_ticket_metadata(Path::new(&args.target))?;
+    ledger.work_id = Some(resolve_work_id_from_ticket_meta(ticket_meta.as_ref()));
     let route = decide_route(
         cfg,
         profile,
@@ -1100,6 +1103,7 @@ fn pm(
     session_dir: &Path,
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
+    ledger.work_id = Some(crate::ledger::WorkId::Internal(generate_uuid()));
     let repo = Path::new(&profile.local_path);
 
     // Without a target: static repo snapshot (context for the agent, not a dispatch)
@@ -1437,6 +1441,19 @@ fn review(
     )?;
     apply_route_to_ledger(ledger, &route);
     let mut target = resolve_review_target(cfg, profile, args)?;
+    let work_id = if let Some(ref mr_id) = target.mr_id {
+        crate::ledger::WorkId::External(mr_id.clone())
+    } else {
+        let ticket_meta = if !args.target.is_empty() {
+            parse_ticket_metadata(Path::new(&args.target))
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        resolve_work_id_from_ticket_meta(ticket_meta.as_ref())
+    };
+    ledger.work_id = Some(work_id);
     if target.prior_state.is_none() {
         target.prior_state =
             lookup_review_state_by_branch(cfg, &args.profile, &target.source_branch);
@@ -1849,9 +1866,10 @@ mod tests {
     use super::{
         apply_pm_plan, apply_route_to_ledger, build_mr_title, build_pm_plan_task,
         classify_validation_failure_progress, collect_pm_preflight, collect_ticket_summaries,
-        first_markdown_heading, mark_backend_unavailable_from_output_at, parse_pm_plan,
-        parse_ticket_metadata, validation_failure_no_progress_reason, RouteDecision,
-        TicketMetadata, ValidationFailureProgress,
+        first_markdown_heading, mark_backend_unavailable_from_output_at, next_ticket_id,
+        parse_pm_plan, parse_ticket_metadata, resolve_work_id_from_ticket_meta,
+        validation_failure_no_progress_reason, RouteDecision, TicketMetadata,
+        ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Profile, RoutingPolicy};
@@ -2240,6 +2258,70 @@ mod tests {
             meta.verification_commands,
             vec!["pytest tests/test_auth.py -x"]
         );
+    }
+
+    #[test]
+    fn parses_ticket_metadata_fails_on_divergence() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // 1. Divergent ID in heading
+        let ticket_div = tmp.path().join("TICKET-058-title.md");
+        fs::write(
+            &ticket_div,
+            "# TICKET-059: Descriptive MR Titles\nDifficulty: easy\n",
+        )
+        .unwrap();
+        let err = parse_ticket_metadata(&ticket_div).unwrap_err();
+        assert!(err.to_string().contains("diverges from filename ID"));
+
+        // 2. Missing ID in heading
+        let ticket_miss = tmp.path().join("TICKET-058-title.md");
+        fs::write(&ticket_miss, "# Just a title\nDifficulty: easy\n").unwrap();
+        let err2 = parse_ticket_metadata(&ticket_miss).unwrap_err();
+        assert!(err2
+            .to_string()
+            .contains("does not contain a valid TICKET-NNN heading"));
+    }
+
+    #[test]
+    fn next_ticket_id_checks_manager_memory_for_collisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tickets_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&tickets_dir).unwrap();
+
+        // Write TICKET-005 to tickets_dir
+        fs::write(tickets_dir.join("TICKET-005-x.md"), "# TICKET-005: x\n").unwrap();
+
+        // At this point, next ID should be 6
+        assert_eq!(next_ticket_id(&tickets_dir).unwrap(), 6);
+
+        // Write TICKET-012 in MANAGER_MEMORY.md (even if stale)
+        fs::write(
+            tmp.path().join("docs/MANAGER_MEMORY.md"),
+            "# Memory\n- [MERGED] TICKET-012: Done\n- TICKET-002: Stale\n",
+        )
+        .unwrap();
+
+        // Now, next ID should be 13, avoiding collision with both 5 and 12
+        assert_eq!(next_ticket_id(&tickets_dir).unwrap(), 13);
+    }
+
+    #[test]
+    fn test_resolve_work_id_from_ticket_meta_works() {
+        let meta_some = TicketMetadata {
+            ticket_id: Some("TICKET-077".into()),
+            ..TicketMetadata::default()
+        };
+        let work_id = resolve_work_id_from_ticket_meta(Some(&meta_some));
+        assert_eq!(work_id, crate::ledger::WorkId::Ticket(77));
+
+        let work_id_none = resolve_work_id_from_ticket_meta(None);
+        match work_id_none {
+            crate::ledger::WorkId::Internal(uuid) => {
+                assert_eq!(uuid.len(), 36);
+            }
+            _ => panic!("Expected WorkId::Internal"),
+        }
     }
 
     #[test]
@@ -2783,6 +2865,23 @@ fn next_ticket_id(tickets_dir: &Path) -> Result<usize> {
             }
         }
     }
+
+    if let Some(parent) = tickets_dir.parent() {
+        let memory_path = parent.join("MANAGER_MEMORY.md");
+        if memory_path.exists() {
+            let content = fs::read_to_string(&memory_path)?;
+            let re = regex::Regex::new(r"TICKET-(\d+)")
+                .map_err(|e| anyhow::anyhow!("invalid regex: {}", e))?;
+            for cap in re.captures_iter(&content) {
+                if let Some(m) = cap.get(1) {
+                    if let Ok(num) = m.as_str().parse::<usize>() {
+                        max_id = max_id.max(num);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(max_id + 1)
 }
 
@@ -2928,6 +3027,55 @@ struct TicketMetadata {
     affected_files: Vec<String>,
 }
 
+fn extract_id_from_heading(heading: &str) -> Option<String> {
+    let heading = heading.trim();
+    if let Some(rest) = heading.strip_prefix("TICKET-") {
+        let num_len = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        if num_len > 0 {
+            return Some(format!("TICKET-{}", &rest[..num_len]));
+        }
+    }
+    None
+}
+
+fn generate_uuid() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut rng = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut next_random = move || {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        rng as u32
+    };
+    let r1 = next_random();
+    let r2 = next_random();
+    let r3 = next_random();
+    let r4 = next_random();
+    format!(
+        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:04x}{:08x}",
+        r1,
+        (r2 >> 16),
+        (r2 & 0x0FFF),
+        (r3 >> 20),
+        (r3 & 0xFFFF),
+        r4
+    )
+}
+
+fn resolve_work_id_from_ticket_meta(meta: Option<&TicketMetadata>) -> crate::ledger::WorkId {
+    if let Some(meta) = meta {
+        if let Some(ref tid) = meta.ticket_id {
+            if let Some(num_str) = tid.strip_prefix("TICKET-") {
+                if let Ok(num) = num_str.parse::<usize>() {
+                    return crate::ledger::WorkId::Ticket(num);
+                }
+            }
+        }
+    }
+    crate::ledger::WorkId::Internal(generate_uuid())
+}
+
 fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
     if path.extension().and_then(|e| e.to_str()) != Some("md") || !path.exists() {
         return Ok(None);
@@ -2945,7 +3093,31 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
                 _ => None,
             }
         });
-    let title = first_markdown_heading(&body).map(|title| normalize_ticket_title(title.into()));
+
+    let heading = first_markdown_heading(&body);
+    let heading_id = heading.and_then(extract_id_from_heading);
+
+    if let Some(ref file_id) = ticket_id {
+        match heading_id {
+            Some(ref h_id) => {
+                if h_id != file_id {
+                    anyhow::bail!(
+                        "Authoritative ticket ID in heading ({}) diverges from filename ID ({})",
+                        h_id,
+                        file_id
+                    );
+                }
+            }
+            None => {
+                anyhow::bail!(
+                    "Ticket file does not contain a valid TICKET-NNN heading matching filename ID ({})",
+                    file_id
+                );
+            }
+        }
+    }
+
+    let title = heading.map(|t| normalize_ticket_title(t.into()));
     let mut meta = TicketMetadata {
         ticket_id,
         title,

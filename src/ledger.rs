@@ -115,6 +115,25 @@ pub struct LedgerUsage {
     pub quota_reset_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "id")]
+#[serde(rename_all = "snake_case")]
+pub enum WorkId {
+    Ticket(usize),
+    Internal(String),
+    External(String),
+}
+
+impl std::fmt::Display for WorkId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ticket(n) => write!(f, "TICKET-{:03}", n),
+            Self::Internal(id) => write!(f, "{}", id),
+            Self::External(id) => write!(f, "{}", id),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LedgerEntry {
     pub timestamp: String,
@@ -170,6 +189,8 @@ pub struct LedgerEntry {
     #[serde(default)]
     pub attempts: Vec<AttemptRecord>,
     pub usage: LedgerUsage,
+    #[serde(default)]
+    pub work_id: Option<WorkId>,
 }
 
 impl LedgerEntry {
@@ -226,6 +247,7 @@ impl LedgerEntry {
             attempts_completed: 0,
             attempts: Vec::new(),
             usage: LedgerUsage::default(),
+            work_id: None,
         }
     }
 
@@ -993,5 +1015,34 @@ mod tests {
             summary.runs_this_week, 3,
             "all entries should count as regular runs"
         );
+    }
+
+    #[test]
+    fn work_id_round_trips_through_json() {
+        let mut entry = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
+        entry.work_id = Some(super::WorkId::Ticket(91));
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r#""work_id":{"type":"ticket","id":91}"#));
+
+        let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.work_id, Some(super::WorkId::Ticket(91)));
+
+        let mut entry_int = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
+        entry_int.work_id = Some(super::WorkId::Internal("abc-123".into()));
+        let json_int = serde_json::to_string(&entry_int).unwrap();
+        assert!(json_int.contains(r#""work_id":{"type":"internal","id":"abc-123"}"#));
+
+        let mut entry_ext = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
+        entry_ext.work_id = Some(super::WorkId::External("gl-5".into()));
+        let json_ext = serde_json::to_string(&entry_ext).unwrap();
+        assert!(json_ext.contains(r#""work_id":{"type":"external","id":"gl-5"}"#));
+    }
+
+    #[test]
+    fn pre_existing_ledger_line_without_work_id_still_deserializes() {
+        let old_line = "{\"timestamp\":\"2099-01-01T00:00:00Z\",\"session_id\":\"1\",\"profile\":\"real\",\"display_name\":\"Real\",\"repo_id\":\"real\",\"repo\":\"owner/real\",\"local_path\":\"/tmp/repo\",\"provider\":\"github\",\"backend\":\"claude\",\"requested_backend\":\"claude\",\"effective_backend\":\"claude\",\"requested_model\":null,\"effective_model\":null,\"routing_reason\":\"explicit\",\"fallback_used\":false,\"confidence_impact\":null,\"human_required\":false,\"mode\":\"pm\",\"target_summary\":\"x\",\"branch\":null,\"session_dir\":null,\"duration_seconds\":1.0,\"backend_exit_code\":0,\"validation_result\":\"not_run\",\"commit_attempted\":false,\"commit_created\":false,\"push_attempted\":false,\"push_succeeded\":false,\"mr_attempted\":false,\"mr_created\":false,\"mr_url\":null,\"files_changed\":null,\"insertions\":null,\"deletions\":null,\"error_summary\":null,\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"total_tokens\":null,\"estimated_cost_usd\":null,\"usage_source\":null}}";
+        let parsed: LedgerEntry = serde_json::from_str(old_line).unwrap();
+        assert_eq!(parsed.work_id, None);
+        assert_eq!(parsed.profile, "real");
     }
 }
