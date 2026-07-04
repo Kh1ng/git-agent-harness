@@ -2246,7 +2246,9 @@ mod tests {
     fn mr_title_uses_ticket_context_and_preserves_draft_fail_prefix() {
         let ticket = TicketMetadata {
             ticket_id: Some("TICKET-058".into()),
+            work_id: Some("TICKET-058".into()),
             title: Some("Descriptive MR Titles".into()),
+            is_authoritative: true,
             ..TicketMetadata::default()
         };
         assert_eq!(
@@ -2257,6 +2259,85 @@ mod tests {
             build_mr_title("fix", "real", true, Some(&ticket)),
             "[GAH][DRAFT-FAIL] Fix: TICKET-058 Descriptive MR Titles"
         );
+    }
+
+    #[test]
+    fn mr_title_collision_detection_prevents_stale_id_in_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let tickets_dir = repo.join("docs/tickets");
+        fs::create_dir_all(&tickets_dir).unwrap();
+
+        // Write MANAGER_MEMORY.md with TICKET-074 mapped to baseline disposition
+        fs::write(
+            repo.join("docs/MANAGER_MEMORY.md"),
+            "- [MERGED] TICKET-074: Baseline disposition classifier\n",
+        )
+        .unwrap();
+
+        // Write ticket file with filename TICKET-074-fix...md but heading has a different title
+        let ticket_path = tickets_dir.join("TICKET-074-fix-closed-unmerged-classification.md");
+        fs::write(
+            &ticket_path,
+            "# TICKET-074: Fix closed unmerged MR classification\n\nGoal: Treat closed unmerged MRs as terminal\n",
+        )
+        .unwrap();
+
+        // Parse should detect collision and set is_authoritative to false
+        let meta = parse_ticket_metadata(&ticket_path).unwrap().unwrap();
+        assert!(!meta.is_authoritative);
+
+        // Since it's not authoritative, the MR title should NOT contain the ID "TICKET-074"
+        let title = build_mr_title("fix", "real", false, Some(&meta));
+        assert_eq!(title, "[GAH] Fix: Fix closed unmerged MR classification");
+        assert!(!title.contains("TICKET-074"));
+    }
+
+    #[test]
+    fn mr_title_missing_metadata_fallback() {
+        // Without ticket metadata, it should fall back to mode + repo_id
+        let title = build_mr_title("fix", "real", false, None);
+        assert_eq!(title, "[GAH] Fix: real");
+
+        let title_draft = build_mr_title("fix", "real", true, None);
+        assert_eq!(title_draft, "[GAH][DRAFT-FAIL] Fix: real");
+    }
+
+    #[test]
+    fn mr_title_suggested_mr_title_used() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-093".into()),
+            work_id: Some("TICKET-093".into()),
+            title: Some("Heading Title".into()),
+            suggested_mr_title: Some(
+                "Derive PR titles from authoritative structured work metadata".into(),
+            ),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+
+        // When suggested_mr_title is present and authoritative, use it with the ID
+        let title = build_mr_title("fix", "real", false, Some(&ticket));
+        assert_eq!(
+            title,
+            "[GAH] Fix: TICKET-093 Derive PR titles from authoritative structured work metadata"
+        );
+    }
+
+    #[test]
+    fn mr_title_graceful_truncation() {
+        let long_title = "a".repeat(300);
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-093".into()),
+            work_id: Some("TICKET-093".into()),
+            title: Some(long_title),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+
+        let title = build_mr_title("fix", "real", false, Some(&ticket));
+        assert!(title.len() <= 255);
+        assert!(title.ends_with("..."));
     }
 
     #[test]
@@ -2919,13 +3000,16 @@ fn mark_backend_unavailable_from_output_at(
 #[derive(Debug, Clone, Default)]
 struct TicketMetadata {
     ticket_id: Option<String>,
+    work_id: Option<String>,
     title: Option<String>,
+    suggested_mr_title: Option<String>,
     difficulty: Option<String>,
     risk: Option<String>,
     recommended_backend: Option<String>,
     recommended_model: Option<String>,
     verification_commands: Vec<String>,
     affected_files: Vec<String>,
+    is_authoritative: bool,
 }
 
 fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
@@ -2945,7 +3029,17 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
                 _ => None,
             }
         });
-    let title = first_markdown_heading(&body).map(|title| normalize_ticket_title(title.into()));
+    let raw_heading = first_markdown_heading(&body);
+    let mut work_id_from_heading = None;
+    if let Some(heading) = raw_heading {
+        let trimmed = heading.trim();
+        if trimmed.starts_with("TICKET-") {
+            if let Some((id, _)) = trimmed.split_once(':') {
+                work_id_from_heading = Some(id.trim().to_string());
+            }
+        }
+    }
+    let title = raw_heading.map(|title| normalize_ticket_title(title.into()));
     let mut meta = TicketMetadata {
         ticket_id,
         title,
@@ -2971,6 +3065,10 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
             if meta.title.is_none() && !value.is_empty() {
                 meta.title = Some(value.to_string());
             }
+        } else if let Some(value) = line.strip_prefix("Suggested MR Title:") {
+            meta.suggested_mr_title = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Work ID:") {
+            meta.work_id = Some(value.trim().to_string());
         } else if line.starts_with("- `") && line.ends_with('`') {
             meta.verification_commands.push(
                 line.trim_start_matches("- `")
@@ -2983,6 +3081,46 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
             }
         }
     }
+    if meta.work_id.is_none() {
+        meta.work_id = work_id_from_heading;
+    }
+
+    let mut is_authoritative = false;
+    if let Some(ref file_id) = meta.ticket_id {
+        if let Some(ref cont_id) = meta.work_id {
+            if file_id == cont_id {
+                is_authoritative = true;
+            }
+        }
+    }
+    if is_authoritative {
+        let repo_dir = path.parent().and_then(|p| p.parent());
+        let manager_memory_path = repo_dir.map(|p| p.join("MANAGER_MEMORY.md"));
+        if let Some(ref p) = manager_memory_path {
+            if p.exists() {
+                if let Ok(content) = fs::read_to_string(p) {
+                    let file_id = meta.ticket_id.as_ref().unwrap();
+                    for line in content.lines() {
+                        if line.contains(file_id) {
+                            if let Some(ref title) = meta.title {
+                                let norm_line = normalize_match(line);
+                                let norm_title = normalize_match(title);
+                                if !norm_line.contains(&norm_title) {
+                                    is_authoritative = false;
+                                    break;
+                                }
+                            } else {
+                                is_authoritative = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    meta.is_authoritative = is_authoritative;
+
     Ok(Some(meta))
 }
 
@@ -3006,6 +3144,25 @@ fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
     }
 }
 
+fn truncate_title(title: &str, limit: usize) -> String {
+    if title.len() <= limit {
+        title.to_string()
+    } else {
+        let mut truncated = String::new();
+        let mut char_count = 0;
+        for c in title.chars() {
+            if char_count < limit - 3 {
+                truncated.push(c);
+                char_count += 1;
+            } else {
+                break;
+            }
+        }
+        truncated.push_str("...");
+        truncated
+    }
+}
+
 fn build_mr_title(
     mode: &str,
     repo_id: &str,
@@ -3024,16 +3181,31 @@ fn build_mr_title(
     } else {
         "[GAH]"
     };
-    if let Some(ticket) = ticket {
-        if let Some(title) = ticket.title.as_deref() {
-            let detail = match ticket.ticket_id.as_deref() {
-                Some(ticket_id) if !ticket_id.is_empty() => format!("{ticket_id} {title}"),
-                _ => title.to_string(),
+    let title_string = if let Some(ticket) = ticket {
+        let title_text = ticket
+            .suggested_mr_title
+            .as_deref()
+            .or(ticket.title.as_deref());
+        if let Some(title) = title_text {
+            let detail = if ticket.is_authoritative {
+                if let Some(ref work_id) = ticket.work_id {
+                    format!("{work_id} {title}")
+                } else if let Some(ref ticket_id) = ticket.ticket_id {
+                    format!("{ticket_id} {title}")
+                } else {
+                    title.to_string()
+                }
+            } else {
+                title.to_string()
             };
-            return format!("{prefix} {mode_label}: {detail}");
+            format!("{prefix} {mode_label}: {detail}")
+        } else {
+            format!("{prefix} {mode_label}: {repo_id}")
         }
-    }
-    format!("{prefix} {mode_label}: {repo_id}")
+    } else {
+        format!("{prefix} {mode_label}: {repo_id}")
+    };
+    truncate_title(&title_string, 255)
 }
 
 fn parse_review_verdict(
