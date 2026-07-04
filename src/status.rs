@@ -613,4 +613,25 @@ default_target_branch = "main"
         let action = sync::RecommendedAction::from_class(class);
         assert_eq!(action, sync::RecommendedAction::HumanMergeDecision);
     }
+
+    #[test]
+    fn mr_closed_unmerged_is_terminal_in_snapshot() {
+        let mr = sync::SyncMr {
+            title: "Closed PR".into(),
+            branch: "gah/closed-branch".into(),
+            labels: vec!["gah-human-review".into()],
+            url: Some("https://github.com/owner/repo/pull/2".into()),
+            id: Some("2".into()),
+            state: Some("closed".into()),
+            draft: true,
+            merge_status: Some("DIRTY".into()),
+            merged: false,
+            updated_at: None,
+            ci_failed: true,
+        };
+        let class = sync::classify(&mr);
+        assert_eq!(class, "CLOSED_UNMERGED");
+        let action = sync::RecommendedAction::from_class(class);
+        assert_eq!(action, sync::RecommendedAction::None);
+    }
 }

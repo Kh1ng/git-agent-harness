@@ -228,11 +228,10 @@ mod tests {
     /// backend CLIs never run in tests, but the *contract* GAH relies on
     /// (which flags, which env vars, what happens on nonzero exit) does.
     fn make_recording_bin(dir: &Path, name: &str, record_dir: &Path, exit_code: i32) {
-        // Use the `set` shell builtin, not the external `env` binary: tests
-        // deliberately restrict PATH to the fake bin dir, so `env` itself
-        // would not be found.
+        // Use absolute paths for the environment dump so the fake PATH does
+        // not interfere with the recorder itself.
         let body = format!(
-            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{argv}'\nset > '{env}'\necho 'stdout-marker-{name}'\necho 'stderr-marker-{name}' >&2\nexit {exit_code}\n",
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{argv}'\n/usr/bin/env | /usr/bin/sort > '{env}'\necho 'stdout-marker-{name}'\necho 'stderr-marker-{name}' >&2\nexit {exit_code}\n",
             argv = record_dir.join("argv.txt").display(),
             env = record_dir.join("env.txt").display(),
             name = name,

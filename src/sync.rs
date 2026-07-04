@@ -65,7 +65,7 @@ impl RecommendedAction {
             "CI_FAILED" | "NEEDS_FIX" => RecommendedAction::ReuseBranch,
             "READY_FOR_HUMAN" => RecommendedAction::HumanMergeDecision,
             "NEEDS_REVIEW" => RecommendedAction::RunReview,
-            "MERGED" => RecommendedAction::None,
+            "MERGED" | "CLOSED_UNMERGED" => RecommendedAction::None,
             "STALE" => RecommendedAction::InspectBranch,
             _ => RecommendedAction::InspectManually,
         }
@@ -117,6 +117,9 @@ pub fn classify(mr: &SyncMr) -> &'static str {
     if mr.merged {
         return "MERGED";
     }
+    if is_closed_unmerged(mr.state.as_deref(), mr.merged) {
+        return "CLOSED_UNMERGED";
+    }
     if mr.ci_failed {
         return "CI_FAILED";
     }
@@ -149,9 +152,14 @@ pub fn recommended_action(class: &str) -> &'static str {
         "READY_FOR_HUMAN" => "human review and merge decision",
         "NEEDS_REVIEW" => "run review or request human review",
         "MERGED" => "none",
+        "CLOSED_UNMERGED" => "none",
         "STALE" => "inspect before reusing branch",
         _ => "inspect manually",
     }
+}
+
+fn is_closed_unmerged(state: Option<&str>, merged: bool) -> bool {
+    !merged && matches!(state.map(|s| s.to_ascii_lowercase()), Some(ref s) if s == "closed")
 }
 
 fn is_stale(updated_at: Option<&str>) -> bool {
@@ -313,23 +321,50 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, SyncMr};
+    use super::{classify, recommended_action, SyncMr};
 
-    #[test]
-    fn ready_label_maps_to_ready_for_human() {
-        let mr = SyncMr {
+    fn base_mr() -> SyncMr {
+        SyncMr {
             title: "x".into(),
             branch: "gah/test".into(),
-            labels: vec!["gah-ready-for-human".into()],
+            labels: vec![],
             url: None,
             id: None,
-            state: None,
+            state: Some("OPEN".into()),
             draft: false,
             merge_status: None,
             merged: false,
             updated_at: None,
             ci_failed: false,
-        };
+        }
+    }
+
+    #[test]
+    fn ready_label_maps_to_ready_for_human() {
+        let mut mr = base_mr();
+        mr.labels = vec!["gah-ready-for-human".into()];
         assert_eq!(classify(&mr), "READY_FOR_HUMAN");
+    }
+
+    #[test]
+    fn closed_unmerged_takes_precedence_over_labels_and_other_state() {
+        let mut mr = base_mr();
+        mr.state = Some("closed".into());
+        mr.draft = true;
+        mr.merge_status = Some("DIRTY".into());
+        mr.labels = vec!["gah-ready-for-human".into(), "gah-human-review".into()];
+        mr.ci_failed = true;
+
+        assert_eq!(classify(&mr), "CLOSED_UNMERGED");
+        assert_eq!(recommended_action(classify(&mr)), "none");
+    }
+
+    #[test]
+    fn merged_still_wins_over_closed_state() {
+        let mut mr = base_mr();
+        mr.state = Some("closed".into());
+        mr.merged = true;
+
+        assert_eq!(classify(&mr), "MERGED");
     }
 }
