@@ -122,6 +122,9 @@ pub struct Profile {
     pub review_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub routing: RoutingPolicy,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub pacing: crate::quota::PacingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -372,6 +375,7 @@ mod tests {
             model_review: None,
             review_timeout_seconds: None,
             routing: RoutingPolicy::default(),
+            pacing: Default::default(),
         }
     }
 

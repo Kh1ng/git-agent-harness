@@ -932,6 +932,7 @@ mod tests {
                 pm_backend: Some("claude".into()),
                 ..RoutingPolicy::default()
             },
+            pacing: Default::default(),
         }
     }
 
