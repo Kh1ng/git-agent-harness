@@ -468,6 +468,13 @@ pub fn run_review_backend(
                 .args(filtered_codex_args(&profile.codex_args))
                 .args(codex_model_args(effective_model));
         }
+        "agy" | "agy-main" | "agy-second" => {
+            cmd.arg("--print").arg(prompt);
+            if let Some(model) = effective_model {
+                cmd.args(["--model", model]);
+            }
+            cmd.arg("--dangerously-skip-permissions");
+        }
         _ => {
             return ReviewRunResult {
                 outcome: ReviewProcessOutcome::SpawnFailure,
@@ -1175,6 +1182,38 @@ mod tests {
 
         assert_eq!(result.outcome, ReviewProcessOutcome::Timeout);
         assert!(result.stdout.contains("partial review"));
+    }
+
+    #[test]
+    fn run_review_backend_supports_agy_with_model_and_env() {
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
+        let profile = test_profile();
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let result = run_review_backend(
+            &profile,
+            "agy",
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            Some("Claude Sonnet 4.6 (Thinking)"),
+            &[("FROM_ENV_FILE".into(), "agy-review-env".into())],
+        );
+
+        assert_eq!(result.outcome, ReviewProcessOutcome::Success);
+        assert!(result.stdout.contains("stdout-marker-agy"));
+        assert!(result.stderr.contains("stderr-marker-agy"));
+
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "--print");
+        assert!(argv.contains(&"task".to_string()));
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"Claude Sonnet 4.6 (Thinking)".to_string()));
+        assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));
+
+        let env = recorded_env(&f.record_dir);
+        assert!(env.contains("FROM_ENV_FILE=agy-review-env"));
     }
 
     // ── backend_available ────────────────────────────────────────────────
