@@ -2356,6 +2356,38 @@ fn sync_classifies_open_gah_prs() {
         ));
 }
 
+#[test]
+fn sync_classifies_closed_unmerged_github_prs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] fix\",\"headRefName\":\"gah/test-closed\",\"url\":\"https://example/pr/closed\",\"labels\":[{\"name\":\"gah-ready-for-human\"}],\"state\":\"CLOSED\",\"isDraft\":true,\"mergeStateStatus\":\"DIRTY\",\"mergedAt\":null,\"updatedAt\":\"2099-01-01T00:00:00Z\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"FAILURE\"}]}]'; exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "sync",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CLOSED_UNMERGED"))
+        .stdout(predicate::str::contains("recommended: none"))
+        .stdout(predicate::str::contains("gah/test-closed"));
+}
+
 /// Build a fake `glab` that responds to `mr list` with the given JSON body
 /// and exits 0. Anything else exits 0 with no output.
 fn make_fake_glab(dir: &std::path::Path, mr_list_json: &str) {
@@ -2430,15 +2462,8 @@ fn sync_gitlab_classifies_merged_mr() {
         .stdout(predicate::str::contains("recommended: none"));
 }
 
-/// Documents current behavior, not a spec: sync.rs does not parse the
-/// GitLab MR `state` field, so a closed-and-unmerged MR is indistinguishable
-/// from an open one and is classified the same way (NEEDS_REVIEW here,
-/// since it carries no gah-* label and isn't stale). This is a known gap,
-/// not a fix — see TODO.md for the failure-taxonomy work. If this test ever
-/// starts failing because classify() now reads `state`, that's progress;
-/// update the assertion, don't just delete the test.
 #[test]
-fn sync_gitlab_closed_unmerged_mr_is_indistinguishable_from_open() {
+fn sync_gitlab_closed_unmerged_mr_is_terminal() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -2463,8 +2488,46 @@ fn sync_gitlab_closed_unmerged_mr_is_indistinguishable_from_open() {
         .env("PATH", prepend_path(&fake_bin))
         .assert()
         .success()
-        .stdout(predicate::str::contains("NEEDS_REVIEW"))
+        .stdout(predicate::str::contains("CLOSED_UNMERGED"))
+        .stdout(predicate::str::contains("recommended: none"))
         .stdout(predicate::str::contains("gah/test-3"));
+}
+
+#[test]
+fn status_json_reports_closed_unmerged_mr_consistently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] fix\",\"headRefName\":\"gah/test-status\",\"url\":\"https://example/pr/status\",\"labels\":[{\"name\":\"gah-human-review\"}],\"state\":\"closed\",\"isDraft\":true,\"mergeStateStatus\":\"DIRTY\",\"mergedAt\":null,\"updatedAt\":\"2099-01-01T00:00:00Z\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"FAILURE\"}]}]'; exit 0; fi\nexit 0\n",
+    );
+
+    let out = bin()
+        .args([
+            "status",
+            "--profile",
+            "real",
+            "--json",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: Value = serde_json::from_str(&stdout).expect("status stdout must be valid JSON");
+    let mrs = parsed["merge_requests"]
+        .as_array()
+        .expect("merge_requests must be an array");
+    assert_eq!(mrs[0]["classification"], "CLOSED_UNMERGED");
+    assert_eq!(mrs[0]["recommended_action"], "NONE");
 }
 
 #[test]
