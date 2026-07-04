@@ -79,6 +79,144 @@ fn validation_failure_no_progress_reason(
     }
 }
 
+fn is_ledger_entry_stale(entry: &LedgerEntry) -> bool {
+    let entry_time = if let Ok(parsed) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
+        parsed
+    } else if let Ok(secs) = entry.timestamp.parse::<i64>() {
+        if let Ok(dt) = OffsetDateTime::from_unix_timestamp(secs) {
+            dt
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    };
+    let now = OffsetDateTime::now_utc();
+    now - entry_time > time::Duration::days(14)
+}
+
+fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()> {
+    let target = if args.target.is_empty() {
+        if args.mode == "improve" || args.mode == "fix" {
+            let default = PathBuf::from(&profile.artifact_root)
+                .join("candidates")
+                .join("latest.json");
+            if default.exists() {
+                default.to_string_lossy().into_owned()
+            } else {
+                args.target.clone()
+            }
+        } else {
+            args.target.clone()
+        }
+    } else {
+        args.target.clone()
+    };
+
+    if target.is_empty() {
+        return Ok(());
+    }
+
+    let p = Path::new(&target);
+    let work_id = if p.extension().is_some_and(|e| e == "json") && p.exists() {
+        if let Ok(text) = fs::read_to_string(p) {
+            if let Ok(artifact) = serde_json::from_str::<CandidateArtifact>(&text) {
+                artifact.candidates.first().map(|c| c.candidate_id.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else if p.extension().is_some_and(|e| e == "md") && p.exists() {
+        if let Ok(Some(ticket)) = parse_ticket_metadata(p) {
+            ticket.work_id.clone().or(ticket.ticket_id.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let Some(work_id) = work_id else {
+        return Ok(());
+    };
+
+    let entries = match crate::ledger::read_entries(cfg) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("warning: failed to read ledger entries: {:#}", e);
+            return Ok(());
+        }
+    };
+
+    // Filter matching entries
+    let matching_entries: Vec<&LedgerEntry> = entries
+        .iter()
+        .filter(|e| e.work_id.as_ref() == Some(&work_id))
+        .collect();
+
+    if matching_entries.is_empty() {
+        return Ok(());
+    }
+
+    // Try to fetch MRs/PRs from provider
+    let mrs = crate::sync::fetch_mrs(profile).unwrap_or_default();
+
+    for entry in matching_entries {
+        if is_ledger_entry_stale(entry) {
+            continue;
+        }
+
+        // Check if there is a matching MR
+        let matching_mr = mrs.iter().find(|mr| {
+            if let Some(ref entry_branch) = entry.branch {
+                if mr.branch == *entry_branch {
+                    return true;
+                }
+            }
+            if let Some(ref entry_mr_url) = entry.mr_url {
+                if mr.url.as_ref() == Some(entry_mr_url) {
+                    return true;
+                }
+            }
+            false
+        });
+
+        if let Some(mr) = matching_mr {
+            let class = crate::sync::classify(mr);
+            if class == "MERGED" {
+                continue;
+            }
+            if class == "CLOSED_UNMERGED" {
+                continue;
+            }
+            if class == "STALE" {
+                continue;
+            }
+            // Otherwise, it's an active open PR -> Block
+            anyhow::bail!(
+                "Refusing dispatch: active open PR already exists for work ID '{}' ({})",
+                work_id,
+                mr.url.as_deref().unwrap_or("")
+            );
+        }
+
+        // If no matching MR is found, check if branch exists
+        let repo_path = Path::new(&profile.local_path);
+        if let Some(ref branch_name) = entry.branch {
+            if command_output("git", &["rev-parse", "--verify", branch_name], repo_path).is_ok() {
+                println!(
+                    "Warning: active branch '{}' may already own work for work ID '{}'",
+                    branch_name, work_id
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     let profile = config::get_profile(cfg, &args.profile)?;
 
@@ -91,6 +229,10 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
 
     if args.dry_run {
         return dry_run(cfg, profile, args);
+    }
+
+    if args.mode == "improve" || args.mode == "fix" || args.mode == "experiment" {
+        check_duplicate_work(cfg, profile, args)?;
     }
 
     let ts = timestamp();
@@ -2663,6 +2805,164 @@ The parser should retain structured sections.\n\n\
         let cmds = vec!["echo oops >&2 && false".to_string()];
         let err = validate(&cmds, tmp.path()).unwrap_err();
         assert!(format!("{:#}", err).contains("oops"));
+    }
+
+    fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
+        let gh_path = bin_dir.join("gh");
+        let content = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+                 echo '{}'\n\
+             fi\n",
+            response_json.replace('\'', "'\\''")
+        );
+        fs::write(&gh_path, content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&gh_path, perms).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_check_duplicate_work_cases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        // 1. Create a fake ticket markdown
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        let ticket_path = ticket_dir.join("TICKET-097-test.md");
+        fs::write(
+            &ticket_path,
+            "# TICKET-097: Test ticket\n\n\
+             Goal: Test duplicate work guard\n\n\
+             ## Problem\n\
+             Test\n",
+        )
+        .unwrap();
+
+        // 2. Setup config & profile
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+
+        let mut prof = profile(tmp.path());
+        prof.provider = "github".to_string();
+        prof.repo = "owner/repo".to_string();
+
+        let ledger_path = tmp.path().join("ledger.jsonl");
+
+        // 3. Case A: No previous work -> Should pass
+        let args = super::DispatchArgs {
+            profile: "test".to_string(),
+            mode: "improve".to_string(),
+            backend: "codex".to_string(),
+            target: ticket_path.display().to_string(),
+            branch: None,
+            mr: None,
+            current_branch: false,
+            budget: 0,
+            dry_run: false,
+            config_path: None,
+            oh_profile: None,
+            model: None,
+            retries: 0,
+            allow_draft_fail: false,
+            prod: false,
+        };
+
+        // No ledger exists yet.
+        let res = super::check_duplicate_work(&cfg, &prof, &args);
+        assert!(res.is_ok());
+
+        // 4. Case B: Active open PR exists -> Should block
+        let pr_json = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"OPEN","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":null,"updatedAt":"2026-07-04T17:22:35-05:00","statusCheckRollup":[]}]"#;
+        setup_fake_gh(&bin_dir, pr_json);
+        let _guard = PathGuard::set(&bin_dir);
+
+        // Write ledger entry matching the ticket and branch
+        let mut entry = LedgerEntry::new(
+            "test",
+            &prof,
+            "codex",
+            "improve",
+            &ticket_path.display().to_string(),
+            Some("session-1".into()),
+            None,
+        );
+        entry.work_id = Some("TICKET-097".to_string());
+        entry.branch = Some("gah/repo-active".to_string());
+        entry.mr_url = Some("https://github.com/owner/repo/pull/1".to_string());
+        entry.timestamp = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+
+        let ledger_line = serde_json::to_string(&entry).unwrap();
+        fs::write(&ledger_path, format!("{}\n", ledger_line)).unwrap();
+
+        let res = super::check_duplicate_work(&cfg, &prof, &args);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("Refusing dispatch: active open PR already exists"));
+
+        // 5. Case C: PR is merged -> Should pass
+        let pr_json_merged = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"MERGED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":"2026-07-04T17:22:35-05:00","updatedAt":"2026-07-04T17:22:35-05:00","statusCheckRollup":[]}]"#;
+        setup_fake_gh(&bin_dir, pr_json_merged);
+
+        let res = super::check_duplicate_work(&cfg, &prof, &args);
+        assert!(res.is_ok());
+
+        // 6. Case D: PR is closed unmerged -> Should pass
+        let pr_json_closed = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"CLOSED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":null,"updatedAt":"2026-07-04T17:22:35-05:00","statusCheckRollup":[]}]"#;
+        setup_fake_gh(&bin_dir, pr_json_closed);
+
+        let res = super::check_duplicate_work(&cfg, &prof, &args);
+        assert!(res.is_ok());
+
+        // 7. Case E: Ledger entry is stale (> 14 days) -> Should pass
+        setup_fake_gh(&bin_dir, pr_json);
+        entry.timestamp = (OffsetDateTime::now_utc() - time::Duration::days(15))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let ledger_line_stale = serde_json::to_string(&entry).unwrap();
+        fs::write(&ledger_path, format!("{}\n", ledger_line_stale)).unwrap();
+
+        let res = super::check_duplicate_work(&cfg, &prof, &args);
+        assert!(res.is_ok());
+
+        // 8. Case F: Active branch may own work -> Warn
+        setup_fake_gh(&bin_dir, "[]");
+        let local_repo_path = tmp.path().join("local_repo");
+        fs::create_dir_all(&local_repo_path).unwrap();
+        init_repo(&local_repo_path);
+        Command::new("git")
+            .args(["branch", "gah/repo-active"])
+            .current_dir(&local_repo_path)
+            .output()
+            .unwrap();
+        let mut prof_with_repo = prof.clone();
+        prof_with_repo.local_path = local_repo_path.display().to_string();
+
+        entry.timestamp = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let ledger_line_active_branch = serde_json::to_string(&entry).unwrap();
+        fs::write(&ledger_path, format!("{}\n", ledger_line_active_branch)).unwrap();
+
+        let res = super::check_duplicate_work(&cfg, &prof_with_repo, &args);
+        assert!(res.is_ok());
     }
 }
 
