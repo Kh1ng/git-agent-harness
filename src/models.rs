@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct GateArtifact {
@@ -173,11 +173,11 @@ pub struct ReviewVerdict {
     pub verdict: String,
     pub confidence: String,
     pub human_required: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     pub blocking_findings: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     pub non_blocking_findings: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list")]
     pub risk_notes: Vec<String>,
     #[serde(default)]
     pub reviewer_backend: Option<String>,
@@ -205,4 +205,81 @@ pub struct ReviewVerdict {
     pub estimated_cost_usd: Option<f64>,
     #[serde(default)]
     pub actual_cost_usd: Option<f64>,
+}
+
+fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(vec![]),
+        Some(serde_json::Value::String(item)) => Ok(vec![item]),
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|item| match item {
+                serde_json::Value::String(value) => Ok(value),
+                other => Err(serde::de::Error::custom(format!(
+                    "expected string in array, got {other}"
+                ))),
+            })
+            .collect(),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected string, array, or null, got {other}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReviewVerdict;
+
+    #[test]
+    fn review_verdict_accepts_string_arrays() {
+        let verdict: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":["a"],"non_blocking_findings":["b"],"risk_notes":["c"]}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict.blocking_findings, vec!["a"]);
+        assert_eq!(verdict.non_blocking_findings, vec!["b"]);
+        assert_eq!(verdict.risk_notes, vec!["c"]);
+    }
+
+    #[test]
+    fn review_verdict_normalizes_single_strings() {
+        let verdict: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":"a","non_blocking_findings":"b","risk_notes":"c"}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict.blocking_findings, vec!["a"]);
+        assert_eq!(verdict.non_blocking_findings, vec!["b"]);
+        assert_eq!(verdict.risk_notes, vec!["c"]);
+    }
+
+    #[test]
+    fn review_verdict_normalizes_null_and_missing_lists() {
+        let with_null: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":null,"non_blocking_findings":null,"risk_notes":null}"#,
+        )
+        .unwrap();
+        assert!(with_null.blocking_findings.is_empty());
+        assert!(with_null.non_blocking_findings.is_empty());
+        assert!(with_null.risk_notes.is_empty());
+
+        let missing: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false}"#,
+        )
+        .unwrap();
+        assert!(missing.blocking_findings.is_empty());
+        assert!(missing.non_blocking_findings.is_empty());
+        assert!(missing.risk_notes.is_empty());
+    }
+
+    #[test]
+    fn review_verdict_still_rejects_malformed_json() {
+        serde_json::from_str::<ReviewVerdict>(
+            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false"#,
+        )
+        .unwrap_err();
+    }
 }

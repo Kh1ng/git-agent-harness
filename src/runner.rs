@@ -1,7 +1,12 @@
+use crate::config::Profile;
 use anyhow::{Context, Result};
+use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 use std::time::Instant;
 
 /// Parse a KEY=VALUE env file, skipping blank lines and comments.
@@ -32,6 +37,33 @@ pub struct LlmConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutableResolution {
+    Found(PathBuf),
+    MissingExplicitPath(PathBuf),
+    MissingFromPath(String),
+    UnknownBackend(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewProcessOutcome {
+    Success,
+    ExecutableUnavailable,
+    SpawnFailure,
+    NonZeroExit(i32),
+    SignalTermination(i32),
+    Timeout,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+pub struct ReviewRunResult {
+    pub outcome: ReviewProcessOutcome,
+    pub duration_secs: f64,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 /// Load LLM config from an OpenHands named profile (~/.openhands/profiles/<name>.json).
@@ -125,7 +157,28 @@ pub fn run_openhands(
 /// Run Codex non-interactively via `codex exec`.
 /// extra_args come from profile.codex_args, but stale model flags are
 /// stripped so the resolved route controls the launched model.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn run_codex(
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    model: Option<&str>,
+    extra_args: &[String],
+    env_vars: &[(String, String)],
+) -> Result<RunResult> {
+    run_codex_with_executable(
+        Path::new("codex"),
+        worktree,
+        task,
+        session_dir,
+        model,
+        extra_args,
+        env_vars,
+    )
+}
+
+pub fn run_codex_with_executable(
+    executable: &Path,
     worktree: &Path,
     task: &str,
     session_dir: &Path,
@@ -140,7 +193,7 @@ pub fn run_codex(
     let log_err = log_file.try_clone()?;
 
     let start = Instant::now();
-    let mut cmd = Command::new("codex");
+    let mut cmd = Command::new(executable);
     cmd.arg("exec")
         .arg(task)
         .args(filtered_codex_args(extra_args))
@@ -189,7 +242,26 @@ fn filtered_codex_args(extra_args: &[String]) -> Vec<String> {
 
 /// Run Claude CLI non-interactively via `claude -p`.
 /// extra_args come from profile.claude_args (e.g. `--allowedTools Edit,Write,Bash`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn run_claude(
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    extra_args: &[String],
+    env_vars: &[(String, String)],
+) -> Result<RunResult> {
+    run_claude_with_executable(
+        Path::new("claude"),
+        worktree,
+        task,
+        session_dir,
+        extra_args,
+        env_vars,
+    )
+}
+
+pub fn run_claude_with_executable(
+    executable: &Path,
     worktree: &Path,
     task: &str,
     session_dir: &Path,
@@ -203,7 +275,7 @@ pub fn run_claude(
     let log_err = log_file.try_clone()?;
 
     let start = Instant::now();
-    let mut cmd = Command::new("claude");
+    let mut cmd = Command::new(executable);
     cmd.args(["-p", task])
         .args(extra_args)
         .current_dir(worktree)
@@ -224,6 +296,7 @@ pub fn run_claude(
 }
 
 /// Run Antigravity CLI non-interactively via `agy --print`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn run_agy(
     worktree: &Path,
     task: &str,
@@ -232,6 +305,24 @@ pub fn run_agy(
     env_vars: &[(String, String)],
     executable_name: &str,
 ) -> Result<RunResult> {
+    run_agy_with_executable(
+        Path::new(executable_name),
+        worktree,
+        task,
+        session_dir,
+        llm,
+        env_vars,
+    )
+}
+
+pub fn run_agy_with_executable(
+    executable: &Path,
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    llm: &LlmConfig,
+    env_vars: &[(String, String)],
+) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
 
@@ -239,7 +330,7 @@ pub fn run_agy(
     let log_err = log_file.try_clone()?;
 
     let start = Instant::now();
-    let mut cmd = Command::new(executable_name);
+    let mut cmd = Command::new(executable);
     cmd.arg("--print");
     cmd.arg(task);
     cmd.args(["--model", llm.model.as_str()]);
@@ -252,7 +343,7 @@ pub fn run_agy(
     }
     let status = cmd.status().context(format!(
         "launching {}; is it installed and on PATH?",
-        executable_name
+        executable.display()
     ))?;
 
     Ok(RunResult {
@@ -262,26 +353,255 @@ pub fn run_agy(
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn backend_available(name: &str) -> bool {
-    let cmd = match name {
-        "openhands" | "cloud-coder" | "auto" => "openhands",
-        "codex" => "codex",
-        "claude" => "claude",
-        "agy" => "agy",
-        "agy-main" => "agy-main",
-        "agy-second" => "agy-second",
-        _ => return false,
+    backend_command_name(name)
+        .and_then(resolve_executable_on_path)
+        .is_some()
+}
+
+pub fn backend_available_for_profile(profile: &Profile, name: &str) -> bool {
+    matches!(
+        resolve_backend_executable(profile, name),
+        ExecutableResolution::Found(_)
+    )
+}
+
+pub fn require_backend_executable(profile: &Profile, backend: &str) -> Result<PathBuf> {
+    match resolve_backend_executable(profile, backend) {
+        ExecutableResolution::Found(path) => Ok(path),
+        ExecutableResolution::MissingExplicitPath(path) => {
+            anyhow::bail!("configured executable '{}' does not exist", path.display())
+        }
+        ExecutableResolution::MissingFromPath(cmd) => {
+            anyhow::bail!("required binary '{}' not found on PATH", cmd)
+        }
+        ExecutableResolution::UnknownBackend(backend) => {
+            anyhow::bail!("unknown backend '{}'", backend)
+        }
+    }
+}
+
+pub fn resolve_backend_executable(profile: &Profile, backend: &str) -> ExecutableResolution {
+    let Some(command) = backend_command_name(backend) else {
+        return ExecutableResolution::UnknownBackend(backend.to_string());
     };
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    if let Some(explicit) = profile.configured_backend_path(backend) {
+        let path = PathBuf::from(explicit);
+        return if is_executable_path(&path) {
+            ExecutableResolution::Found(path)
+        } else {
+            ExecutableResolution::MissingExplicitPath(path)
+        };
+    }
+    match resolve_executable_on_path(command) {
+        Some(path) => ExecutableResolution::Found(path),
+        None => ExecutableResolution::MissingFromPath(command.to_string()),
+    }
+}
+
+pub fn run_review_backend(
+    profile: &Profile,
+    backend: &str,
+    worktree: &Path,
+    prompt: &str,
+    session_dir: &Path,
+    effective_model: Option<&str>,
+    env_vars: &[(String, String)],
+) -> ReviewRunResult {
+    let start = Instant::now();
+    let stdout_path = session_dir.join("review-stdout.log");
+    let stderr_path = session_dir.join("review-stderr.log");
+    let _ = fs::write(session_dir.join("task.md"), prompt);
+
+    let executable = match resolve_backend_executable(profile, backend) {
+        ExecutableResolution::Found(path) => path,
+        ExecutableResolution::MissingExplicitPath(_) | ExecutableResolution::MissingFromPath(_) => {
+            return ReviewRunResult {
+                outcome: ReviewProcessOutcome::ExecutableUnavailable,
+                duration_secs: start.elapsed().as_secs_f64(),
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+        }
+        ExecutableResolution::UnknownBackend(_) => {
+            return ReviewRunResult {
+                outcome: ReviewProcessOutcome::SpawnFailure,
+                duration_secs: start.elapsed().as_secs_f64(),
+                stdout: String::new(),
+                stderr: format!("unsupported review backend: {backend}"),
+            };
+        }
+    };
+
+    let stdout_file = match fs::File::create(&stdout_path) {
+        Ok(file) => file,
+        Err(err) => {
+            return ReviewRunResult {
+                outcome: ReviewProcessOutcome::SpawnFailure,
+                duration_secs: start.elapsed().as_secs_f64(),
+                stdout: String::new(),
+                stderr: format!("creating {}: {err}", stdout_path.display()),
+            };
+        }
+    };
+    let stderr_file = match fs::File::create(&stderr_path) {
+        Ok(file) => file,
+        Err(err) => {
+            return ReviewRunResult {
+                outcome: ReviewProcessOutcome::SpawnFailure,
+                duration_secs: start.elapsed().as_secs_f64(),
+                stdout: String::new(),
+                stderr: format!("creating {}: {err}", stderr_path.display()),
+            };
+        }
+    };
+
+    let mut cmd = Command::new(&executable);
+    match backend {
+        "claude" => {
+            cmd.args(["-p", prompt]).args(&profile.claude_args);
+        }
+        "codex" => {
+            cmd.arg("exec")
+                .arg(prompt)
+                .args(filtered_codex_args(&profile.codex_args))
+                .args(codex_model_args(effective_model));
+        }
+        _ => {
+            return ReviewRunResult {
+                outcome: ReviewProcessOutcome::SpawnFailure,
+                duration_secs: start.elapsed().as_secs_f64(),
+                stdout: String::new(),
+                stderr: format!("unsupported review backend: {backend}"),
+            };
+        }
+    }
+    cmd.current_dir(worktree)
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            return ReviewRunResult {
+                outcome: ReviewProcessOutcome::SpawnFailure,
+                duration_secs: start.elapsed().as_secs_f64(),
+                stdout: String::new(),
+                stderr: err.to_string(),
+            };
+        }
+    };
+
+    let timeout = Duration::from_secs(profile.review_timeout_seconds());
+    let poll_interval = Duration::from_millis(25);
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    break ReviewProcessOutcome::Success;
+                }
+                if let Some(code) = status.code() {
+                    break ReviewProcessOutcome::NonZeroExit(code);
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(signal) = status.signal() {
+                        break ReviewProcessOutcome::SignalTermination(signal);
+                    }
+                }
+                break ReviewProcessOutcome::SpawnFailure;
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break ReviewProcessOutcome::Timeout;
+                }
+                thread::sleep(poll_interval);
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let mut stderr = read_text_file(&stderr_path);
+                if !stderr.is_empty() {
+                    stderr.push('\n');
+                }
+                stderr.push_str(&err.to_string());
+                return ReviewRunResult {
+                    outcome: ReviewProcessOutcome::SpawnFailure,
+                    duration_secs: start.elapsed().as_secs_f64(),
+                    stdout: read_text_file(&stdout_path),
+                    stderr,
+                };
+            }
+        }
+    };
+
+    ReviewRunResult {
+        outcome,
+        duration_secs: start.elapsed().as_secs_f64(),
+        stdout: read_text_file(&stdout_path),
+        stderr: read_text_file(&stderr_path),
+    }
+}
+
+fn backend_command_name(name: &str) -> Option<&'static str> {
+    match name {
+        "openhands" | "cloud-coder" | "auto" => Some("openhands"),
+        "codex" => Some("codex"),
+        "claude" => Some("claude"),
+        "agy" => Some("agy"),
+        "agy-main" => Some("agy-main"),
+        "agy-second" => Some("agy-second"),
+        _ => None,
+    }
+}
+
+fn resolve_executable_on_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_path(candidate))
+}
+
+fn is_executable_path(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn read_text_file(path: &Path) -> String {
+    let mut buf = Vec::new();
+    let Ok(mut file) = fs::File::open(path) else {
+        return String::new();
+    };
+    if file.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf).to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Profile, RoutingPolicy};
+    use crate::test_support::PathGuard;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -355,6 +675,37 @@ mod tests {
             base_url: "http://llm.test".into(),
             api_key: "test-key".into(),
             model: "test-model".into(),
+        }
+    }
+
+    fn test_profile() -> Profile {
+        Profile {
+            display_name: "Repo".into(),
+            repo_id: "repo".into(),
+            provider: "github".into(),
+            repo: "owner/repo".into(),
+            local_path: "/tmp/repo".into(),
+            artifact_root: "/tmp/artifacts".into(),
+            default_target_branch: "main".into(),
+            provider_api_base: None,
+            provider_project_id: None,
+            oh_profile: None,
+            openhands_args: vec![],
+            codex_args: vec![],
+            codex_path: None,
+            claude_args: vec![],
+            claude_path: None,
+            agy_path: None,
+            policy_path: None,
+            env_file: None,
+            env_file_prod: None,
+            validation_commands: vec![],
+            test_file_patterns: vec![],
+            model_improve: None,
+            model_pm: None,
+            model_review: None,
+            review_timeout_seconds: None,
+            routing: RoutingPolicy::default(),
         }
     }
 
@@ -735,6 +1086,95 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("launching agy; is it installed"));
+    }
+
+    #[test]
+    fn resolve_backend_executable_prefers_explicit_path() {
+        let f = fixture();
+        make_fake_bin(&f.bin_dir, "claude-explicit", "#!/bin/sh\nexit 0\n");
+        let mut profile = test_profile();
+        profile.claude_path = Some(f.bin_dir.join("claude-explicit").display().to_string());
+        let _guard = PathGuard::set("");
+
+        let resolved = resolve_backend_executable(&profile, "claude");
+
+        assert_eq!(
+            resolved,
+            ExecutableResolution::Found(f.bin_dir.join("claude-explicit"))
+        );
+    }
+
+    #[test]
+    fn resolve_backend_executable_falls_back_to_path_when_unset() {
+        let f = fixture();
+        make_fake_bin(&f.bin_dir, "claude", "#!/bin/sh\nexit 0\n");
+        let profile = test_profile();
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let resolved = resolve_backend_executable(&profile, "claude");
+
+        assert_eq!(
+            resolved,
+            ExecutableResolution::Found(f.bin_dir.join("claude"))
+        );
+    }
+
+    #[test]
+    fn resolve_backend_executable_invalid_explicit_path_is_unavailable() {
+        let mut profile = test_profile();
+        profile.claude_path = Some("/definitely/missing/claude".into());
+
+        let resolved = resolve_backend_executable(&profile, "claude");
+
+        assert_eq!(
+            resolved,
+            ExecutableResolution::MissingExplicitPath(PathBuf::from("/definitely/missing/claude"))
+        );
+    }
+
+    #[test]
+    fn resolve_backend_executable_supports_codex_and_agy_paths() {
+        let f = fixture();
+        make_fake_bin(&f.bin_dir, "codex-explicit", "#!/bin/sh\nexit 0\n");
+        make_fake_bin(&f.bin_dir, "agy-explicit", "#!/bin/sh\nexit 0\n");
+        let mut profile = test_profile();
+        profile.codex_path = Some(f.bin_dir.join("codex-explicit").display().to_string());
+        profile.agy_path = Some(f.bin_dir.join("agy-explicit").display().to_string());
+
+        assert_eq!(
+            resolve_backend_executable(&profile, "codex"),
+            ExecutableResolution::Found(f.bin_dir.join("codex-explicit"))
+        );
+        assert_eq!(
+            resolve_backend_executable(&profile, "agy"),
+            ExecutableResolution::Found(f.bin_dir.join("agy-explicit"))
+        );
+    }
+
+    #[test]
+    fn run_review_backend_times_out_and_preserves_partial_output() {
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "claude",
+            "#!/bin/sh\necho 'partial review'\nsleep 2\necho 'late stderr' >&2\n",
+        );
+        let mut profile = test_profile();
+        profile.review_timeout_seconds = Some(1);
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let result = run_review_backend(
+            &profile,
+            "claude",
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+        );
+
+        assert_eq!(result.outcome, ReviewProcessOutcome::Timeout);
+        assert!(result.stdout.contains("partial review"));
     }
 
     // ── backend_available ────────────────────────────────────────────────

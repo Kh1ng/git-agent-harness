@@ -200,7 +200,8 @@ fn run_backend(
 ) -> Result<runner::RunResult> {
     let env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
     match backend {
-        "codex" => runner::run_codex(
+        "codex" => runner::run_codex_with_executable(
+            &runner::require_backend_executable(profile, backend)?,
             wt,
             task,
             session_dir,
@@ -208,10 +209,22 @@ fn run_backend(
             &profile.codex_args,
             &env_vars,
         ),
-        "claude" => runner::run_claude(wt, task, session_dir, &profile.claude_args, &env_vars),
-        "agy" | "agy-main" | "agy-second" => {
-            runner::run_agy(wt, task, session_dir, llm, &env_vars, backend)
-        }
+        "claude" => runner::run_claude_with_executable(
+            &runner::require_backend_executable(profile, backend)?,
+            wt,
+            task,
+            session_dir,
+            &profile.claude_args,
+            &env_vars,
+        ),
+        "agy" | "agy-main" | "agy-second" => runner::run_agy_with_executable(
+            &runner::require_backend_executable(profile, backend)?,
+            wt,
+            task,
+            session_dir,
+            llm,
+            &env_vars,
+        ),
         _ => runner::run_openhands(
             wt,
             task,
@@ -250,18 +263,9 @@ fn validate(commands: &[String], wt: &Path) -> Result<()> {
     Ok(())
 }
 
-fn preflight(backend: &str) -> Result<()> {
-    let backend_bin = match backend {
-        "codex" => "codex",
-        "claude" => "claude",
-        "agy" => "agy",
-        "agy-main" => "agy-main",
-        "agy-second" => "agy-second",
-        _ => "openhands",
-    };
-    for bin in &["git", backend_bin] {
-        ensure_bin(bin)?;
-    }
+fn preflight(profile: &Profile, backend: &str) -> Result<()> {
+    ensure_bin("git")?;
+    runner::require_backend_executable(profile, backend)?;
     Ok(())
 }
 
@@ -382,7 +386,7 @@ fn improve(
     };
     let mut route = decide_route(cfg, profile, route_req.clone(), ledger)?;
     apply_route_to_ledger(ledger, &route);
-    preflight(&route.effective_backend)?;
+    preflight(profile, &route.effective_backend)?;
     let mut llm = resolve_llm(
         cfg,
         args,
@@ -556,7 +560,7 @@ fn improve(
                         );
                         route = rerouted;
                         apply_route_to_ledger(ledger, &route);
-                        preflight(&route.effective_backend)?;
+                        preflight(profile, &route.effective_backend)?;
                         llm = resolve_llm(
                             cfg,
                             args,
@@ -861,7 +865,7 @@ fn experiment(
         ledger,
     )?;
     apply_route_to_ledger(ledger, &route);
-    preflight(&route.effective_backend)?;
+    preflight(profile, &route.effective_backend)?;
     let llm = resolve_llm(
         cfg,
         args,
@@ -1144,7 +1148,7 @@ fn pm(
     };
     let mut plan_route = decide_route(cfg, profile, route_req.clone(), ledger)?;
     apply_route_to_ledger(ledger, &plan_route);
-    preflight(&plan_route.effective_backend)?;
+    preflight(profile, &plan_route.effective_backend)?;
     let mut llm = resolve_llm(
         cfg,
         args,
@@ -1237,7 +1241,7 @@ fn pm(
         );
         plan_route = rerouted;
         apply_route_to_ledger(ledger, &plan_route);
-        preflight(&plan_route.effective_backend)?;
+        preflight(profile, &plan_route.effective_backend)?;
         llm = resolve_llm(
             cfg,
             args,
@@ -1468,6 +1472,7 @@ fn review(
          Return two sections:\n\
          1. Markdown review notes.\n\
          2. A JSON object with fields: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes.\n\
+         blocking_findings, non_blocking_findings, and risk_notes must be JSON arrays of strings, even when empty or when only one item exists.\n\
          Verdict must be one of APPROVE_STRONG, APPROVE_WEAK, NEEDS_FIX, REJECT, HUMAN_REVIEW.\n\
          Repo: {}. MR: {}. Source: {}. Target: {}. CI status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
@@ -1484,25 +1489,53 @@ fn review(
         diff_bundle.files,
     );
 
-    let result = match route.effective_backend.as_str() {
-        "claude" => Command::new("claude").args(["-p", &prompt]).output().ok(),
-        "codex" => Command::new("codex").args(["exec", &prompt]).output().ok(),
-        _ => None,
+    let resolved_env = if args.prod {
+        profile.env_file_prod.as_deref().unwrap_or("")
+    } else {
+        profile.env_file.as_deref().unwrap_or("")
     };
+    let env_vars = if resolved_env.is_empty() {
+        vec![]
+    } else {
+        runner::load_env_file(resolved_env)
+    };
+    let result = runner::run_review_backend(
+        profile,
+        &route.effective_backend,
+        repo,
+        &prompt,
+        session_dir,
+        route.effective_model.as_deref(),
+        &env_vars,
+    );
+    println!("Review backend duration: {:.1}s", result.duration_secs);
+    let report_path = session_dir.join("review-report.md");
+    let verdict_path = session_dir.join("review-verdict.json");
+    fs::write(&report_path, &result.stdout)?;
+    if !result.stderr.trim().is_empty() {
+        fs::write(session_dir.join("review-stderr.log"), &result.stderr)?;
+    }
 
-    match result {
-        Some(o) if o.status.success() => {
-            let review_text = String::from_utf8_lossy(&o.stdout).to_string();
-            let review_usage = usage::parse_generic_usage(&review_text, "review_output_log");
-            let verdict = parse_review_verdict(&review_text, &route, &review_usage)?;
-            let report_path = session_dir.join("review-report.md");
-            let verdict_path = session_dir.join("review-verdict.json");
-            fs::write(&report_path, &review_text)?;
+    match result.outcome {
+        runner::ReviewProcessOutcome::Success => {
+            let review_usage = usage::parse_generic_usage(&result.stdout, "review_output_log");
+            let verdict = match parse_review_verdict(&result.stdout, &route, &review_usage) {
+                Ok(verdict) => verdict,
+                Err(err) => {
+                    ledger.set_failure(
+                        crate::ledger::FailureClass::BackendError,
+                        crate::ledger::FailureStage::Review,
+                    );
+                    ledger.backend_exit_code = Some(0);
+                    ledger.validation_result = Some("invalid_output".into());
+                    return Err(err);
+                }
+            };
             fs::write(&verdict_path, serde_json::to_string_pretty(&verdict)?)?;
-            println!("{}", review_text);
+            println!("{}", result.stdout);
             println!("Written: {}", report_path.display());
             println!("Written: {}", verdict_path.display());
-            ledger.backend_exit_code = o.status.code();
+            ledger.backend_exit_code = Some(0);
             ledger.validation_result = Some(verdict.verdict.clone());
             ledger.human_required = verdict.human_required;
             ledger.confidence_impact = Some(verdict.confidence.clone());
@@ -1526,13 +1559,55 @@ fn review(
                 println!("Review requires human attention.");
             }
         }
-        _ => {
-            println!("Review bundle written to: {}", bundle.display());
-            println!(
-                "Run `claude -p \"$(cat {}/diff.patch)\"` to review manually.",
-                bundle.display()
+        runner::ReviewProcessOutcome::ExecutableUnavailable => {
+            ledger.set_failure(
+                crate::ledger::FailureClass::EnvironmentError,
+                crate::ledger::FailureStage::Review,
             );
             ledger.validation_result = Some("not_run".into());
+            println!("Review backend is unavailable.");
+            println!("Review bundle written to: {}", bundle.display());
+        }
+        runner::ReviewProcessOutcome::SpawnFailure => {
+            ledger.set_failure(
+                crate::ledger::FailureClass::HarnessError,
+                crate::ledger::FailureStage::BackendLaunch,
+            );
+            ledger.validation_result = Some("not_run".into());
+            println!("Review backend failed to launch.");
+            println!("Review bundle written to: {}", bundle.display());
+        }
+        runner::ReviewProcessOutcome::NonZeroExit(code) => {
+            ledger.set_failure(
+                crate::ledger::FailureClass::BackendError,
+                crate::ledger::FailureStage::Review,
+            );
+            ledger.backend_exit_code = Some(code);
+            ledger.validation_result = Some("not_run".into());
+            println!("Review backend exited with status {}.", code);
+            println!("Review bundle written to: {}", bundle.display());
+        }
+        runner::ReviewProcessOutcome::SignalTermination(signal) => {
+            ledger.set_failure(
+                crate::ledger::FailureClass::BackendError,
+                crate::ledger::FailureStage::Review,
+            );
+            ledger.backend_exit_code = Some(-signal);
+            ledger.validation_result = Some("not_run".into());
+            println!("Review backend terminated by signal {}.", signal);
+            println!("Review bundle written to: {}", bundle.display());
+        }
+        runner::ReviewProcessOutcome::Timeout => {
+            ledger.set_failure(
+                crate::ledger::FailureClass::BackendError,
+                crate::ledger::FailureStage::Review,
+            );
+            ledger.validation_result = Some("not_run".into());
+            println!(
+                "Review backend timed out after {} seconds.",
+                profile.review_timeout_seconds()
+            );
+            println!("Review bundle written to: {}", bundle.display());
         }
     }
     Ok(())
@@ -1769,6 +1844,7 @@ fn format_candidate_task(
 
 #[cfg(test)]
 mod tests {
+    use super::preflight;
     use super::validate;
     use super::{
         apply_pm_plan, apply_route_to_ledger, build_mr_title, build_pm_plan_task,
@@ -1781,6 +1857,7 @@ mod tests {
     use crate::config::{Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
     use crate::models::PmPlan;
+    use crate::test_support::PathGuard;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -1803,7 +1880,10 @@ mod tests {
             oh_profile: None,
             openhands_args: vec![],
             codex_args: vec![],
+            codex_path: None,
             claude_args: vec![],
+            claude_path: None,
+            agy_path: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -1812,6 +1892,7 @@ mod tests {
             model_improve: None,
             model_pm: None,
             model_review: None,
+            review_timeout_seconds: None,
             routing: RoutingPolicy::default(),
         }
     }
@@ -1844,6 +1925,19 @@ mod tests {
             .current_dir(repo)
             .output()
             .unwrap();
+    }
+
+    fn make_fake_bin(dir: &Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).unwrap();
+        }
+        path
     }
 
     #[test]
@@ -1906,6 +2000,23 @@ mod tests {
 
         assert_eq!(entry.effective_model, None);
         assert_eq!(entry.effective_backend, "openhands");
+    }
+
+    #[test]
+    fn preflight_uses_profile_executable_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let claude_path = make_fake_bin(&bin_dir, "claude-explicit");
+        let git_path = make_fake_bin(&bin_dir, "git");
+        let _guard = PathGuard::set(git_path.parent().unwrap());
+
+        let mut profile = profile(tmp.path());
+        profile.claude_path = Some(claude_path.display().to_string());
+
+        let result = preflight(&profile, "claude");
+
+        assert!(result.is_ok());
     }
 
     #[test]
