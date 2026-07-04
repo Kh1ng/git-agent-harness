@@ -345,12 +345,71 @@ pub fn run_agy_with_executable(
         "launching {}; is it installed and on PATH?",
         executable.display()
     ))?;
+    let duration = start.elapsed();
+    let exit_code = status.code().unwrap_or(-1);
+
+    // Read captured stdout to detect silent failures.
+    let output = fs::read_to_string(&log_path).unwrap_or_default();
+    let trimmed = output.trim();
+
+    // AGY sometimes exits 0 with empty output when quota is exhausted or
+    // auth has expired.  Treat empty output after a non-trivial duration
+    // as a failure and try to classify the real cause from AGY's own log.
+    if trimmed.is_empty() && exit_code == 0 {
+        let agy_home = env_vars
+            .iter()
+            .find(|(k, _)| k == "HOME")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("/home/khing");
+        let agy_log = PathBuf::from(agy_home)
+            .join(".gemini/antigravity-cli/cli.log");
+        if let Ok(contents) = fs::read_to_string(&agy_log) {
+            if contents.contains("RESOURCE_EXHAUSTED") || contents.contains("429") {
+                anyhow::bail!(
+                    "AGY quota exhausted (exit=0 empty output).  See {}.  Resets ~{}.",
+                    agy_log.display(),
+                    extract_reset_time(&contents).unwrap_or("unknown"),
+                );
+            }
+            if contents.contains("not logged into Antigravity") || contents.contains("not logged in") {
+                anyhow::bail!(
+                    "AGY not authenticated.  Run `{} --print \"hello\"` interactively to log in.",
+                    executable.display(),
+                );
+            }
+        }
+        anyhow::bail!(
+            "AGY produced no output (exit=0).  Check {} for details.",
+            agy_log.display(),
+        );
+    }
 
     Ok(RunResult {
-        exit_code: status.code().unwrap_or(-1),
-        duration_secs: start.elapsed().as_secs_f64(),
+        exit_code,
+        duration_secs: duration.as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
     })
+}
+
+/// Crude extraction of a reset timestamp from an AGY cli.log line such as
+/// "Resets in 16m44s."  Returns `Some(ref)`, or `None` if no pattern found.
+fn extract_reset_time(log: &str) -> Option<&str> {
+    for line in log.lines().rev() {
+        if let Some(pos) = line.find("Resets in ") {
+            let rest = &line[pos + 10..];
+            if let Some(end) = rest.find(|c: char| c == '.' || c == ':') {
+                let reset = rest[..end].trim();
+                if !reset.is_empty() {
+                    return Some(reset);
+                }
+            }
+            let end = rest.trim_end_matches('.');
+            if !end.is_empty() {
+                return Some(end);
+            }
+        }
+    }
+    None
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
