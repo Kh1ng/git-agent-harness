@@ -22,11 +22,12 @@ pub struct DispatchArgs {
     pub branch: Option<String>,
     pub mr: Option<String>,
     pub current_branch: bool,
-    /// Reserved for future per-run cost/turn budget enforcement; not yet read.
+    /// Reserved for TICKET-082 (loop budget/concurrency guards, docs/MANAGER_MEMORY.md); not yet read.
     #[allow(dead_code)]
     pub budget: u32,
     pub dry_run: bool,
-    /// Already consumed by the caller to load `cfg`; kept on the struct for CLI plumbing symmetry.
+    /// Already consumed by the caller to load `cfg` before this struct is built; not tied to
+    /// any planned ticket. Candidate for removal, not just annotation.
     #[allow(dead_code)]
     pub config_path: Option<String>,
     pub oh_profile: Option<String>,
