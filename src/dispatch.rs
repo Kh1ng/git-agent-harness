@@ -1,7 +1,7 @@
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
-use crate::models::{PmPlan, PmPlanTicket};
+use crate::models::{PmPlan, TicketMetadata};
 use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
@@ -2230,7 +2230,7 @@ mod tests {
         )
         .unwrap();
         let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
-        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-058"));
+        assert_eq!(meta.work_id.as_deref(), Some("TICKET-058"));
         assert_eq!(meta.title.as_deref(), Some("Descriptive MR Titles"));
         assert_eq!(meta.recommended_backend.as_deref(), Some("codex"));
         assert_eq!(meta.recommended_model.as_deref(), Some("gpt-x"));
@@ -2245,7 +2245,7 @@ mod tests {
     #[test]
     fn mr_title_uses_ticket_context_and_preserves_draft_fail_prefix() {
         let ticket = TicketMetadata {
-            ticket_id: Some("TICKET-058".into()),
+            work_id: Some("TICKET-058".into()),
             title: Some("Descriptive MR Titles".into()),
             ..TicketMetadata::default()
         };
@@ -2257,6 +2257,161 @@ mod tests {
             build_mr_title("fix", "real", true, Some(&ticket)),
             "[GAH][DRAFT-FAIL] Fix: TICKET-058 Descriptive MR Titles"
         );
+    }
+
+    #[test]
+    fn test_structured_metadata_parsing() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // 1. Test JSON frontmatter
+        let ticket_json = tmp.path().join("TICKET-092-json.md");
+        fs::write(
+            &ticket_json,
+            r#"---
+{
+  "work_id": "TICKET-092",
+  "title": "Structured work metadata",
+  "summary": "Represent task metadata as typed structured fields rather than prompt parsing.",
+  "difficulty": "medium",
+  "risk": "medium",
+  "recommended_backend": "codex",
+  "recommended_model": "gpt-5.4",
+  "acceptance_criteria": ["Criteria 1", "Criteria 2"],
+  "constraints": ["Constraint 1"],
+  "affected_files": ["src/dispatch.rs", "src/models.rs"],
+  "verification_commands": ["cargo test"]
+}
+---
+# TICKET-092: Structured work metadata
+"#,
+        )
+        .unwrap();
+        let meta_json = parse_ticket_metadata(&ticket_json).unwrap().unwrap();
+        assert_eq!(meta_json.work_id.as_deref(), Some("TICKET-092"));
+        assert_eq!(meta_json.title.as_deref(), Some("Structured work metadata"));
+        assert_eq!(
+            meta_json.summary.as_deref(),
+            Some("Represent task metadata as typed structured fields rather than prompt parsing.")
+        );
+        assert_eq!(meta_json.difficulty.as_deref(), Some("medium"));
+        assert_eq!(meta_json.risk.as_deref(), Some("medium"));
+        assert_eq!(meta_json.recommended_backend.as_deref(), Some("codex"));
+        assert_eq!(meta_json.recommended_model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(
+            meta_json.acceptance_criteria,
+            vec!["Criteria 1", "Criteria 2"]
+        );
+        assert_eq!(meta_json.constraints, vec!["Constraint 1"]);
+        assert_eq!(
+            meta_json.affected_files,
+            vec!["src/dispatch.rs", "src/models.rs"]
+        );
+        assert_eq!(meta_json.verification_commands, vec!["cargo test"]);
+
+        // 2. Test YAML frontmatter
+        let ticket_yaml = tmp.path().join("TICKET-092-yaml.md");
+        fs::write(
+            &ticket_yaml,
+            r#"---
+work_id: TICKET-092
+title: "Structured work metadata"
+summary: "Represent task metadata as typed structured fields rather than prompt parsing."
+difficulty: medium
+risk: medium
+recommended_backend: codex
+recommended_model: gpt-5.4
+acceptance_criteria:
+  - Criteria 1
+  - Criteria 2
+constraints:
+  - Constraint 1
+affected_files:
+  - src/dispatch.rs
+  - src/models.rs
+verification_commands:
+  - cargo test
+---
+# TICKET-092: Structured work metadata
+"#,
+        )
+        .unwrap();
+        let meta_yaml = parse_ticket_metadata(&ticket_yaml).unwrap().unwrap();
+        assert_eq!(meta_yaml.work_id.as_deref(), Some("TICKET-092"));
+        assert_eq!(meta_yaml.title.as_deref(), Some("Structured work metadata"));
+        assert_eq!(
+            meta_yaml.summary.as_deref(),
+            Some("Represent task metadata as typed structured fields rather than prompt parsing.")
+        );
+        assert_eq!(meta_yaml.difficulty.as_deref(), Some("medium"));
+        assert_eq!(meta_yaml.risk.as_deref(), Some("medium"));
+        assert_eq!(meta_yaml.recommended_backend.as_deref(), Some("codex"));
+        assert_eq!(meta_yaml.recommended_model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(
+            meta_yaml.acceptance_criteria,
+            vec!["Criteria 1", "Criteria 2"]
+        );
+        assert_eq!(meta_yaml.constraints, vec!["Constraint 1"]);
+        assert_eq!(
+            meta_yaml.affected_files,
+            vec!["src/dispatch.rs", "src/models.rs"]
+        );
+        assert_eq!(meta_yaml.verification_commands, vec!["cargo test"]);
+
+        // 3. Test Markdown fallback sections
+        let ticket_md = tmp.path().join("TICKET-092-md.md");
+        fs::write(
+            &ticket_md,
+            r#"# TICKET-092: Structured work metadata
+
+Goal: Represent task metadata as typed structured fields rather than prompt parsing.
+
+Difficulty: medium
+Risk: medium
+Recommended backend: codex
+Recommended model: gpt-5.4
+
+## Problem
+
+The current TicketMetadata struct covers basic fields but the struct is not serialized independently.
+
+## Acceptance Criteria
+
+- Criteria 1
+- Criteria 2
+
+## Constraints
+
+- Constraint 1
+
+## Affected Files
+
+- src/dispatch.rs
+- src/models.rs
+
+## Verification Commands
+
+- `cargo test`
+"#,
+        )
+        .unwrap();
+        let meta_md = parse_ticket_metadata(&ticket_md).unwrap().unwrap();
+        assert_eq!(meta_md.work_id.as_deref(), Some("TICKET-092"));
+        assert_eq!(meta_md.title.as_deref(), Some("Structured work metadata"));
+        assert_eq!(meta_md.summary.as_deref(), Some("The current TicketMetadata struct covers basic fields but the struct is not serialized independently."));
+        assert_eq!(meta_md.difficulty.as_deref(), Some("medium"));
+        assert_eq!(meta_md.risk.as_deref(), Some("medium"));
+        assert_eq!(meta_md.recommended_backend.as_deref(), Some("codex"));
+        assert_eq!(meta_md.recommended_model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(
+            meta_md.acceptance_criteria,
+            vec!["Criteria 1", "Criteria 2"]
+        );
+        assert_eq!(meta_md.constraints, vec!["Constraint 1"]);
+        assert_eq!(
+            meta_md.affected_files,
+            vec!["src/dispatch.rs", "src/models.rs"]
+        );
+        assert_eq!(meta_md.verification_commands, vec!["cargo test"]);
     }
 
     #[test]
@@ -2448,7 +2603,7 @@ fn lookup_review_state(
     ticket: &TicketMetadata,
 ) -> Option<ReviewTarget> {
     let entries = ledger::read_entries(cfg).ok()?;
-    let ticket_id = ticket.ticket_id.as_deref();
+    let ticket_id = ticket.work_id.as_deref();
     let ticket_title = ticket.title.as_deref().map(normalize_match);
     entries
         .into_iter()
@@ -2689,7 +2844,7 @@ fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<Pa
             continue;
         }
         validate_ticket(ticket)?;
-        let slug = slugify(&ticket.title);
+        let slug = slugify(ticket.title.as_deref().unwrap_or(""));
         let filename = format!("TICKET-{:03}-{}.md", id, slug);
         let path = tickets_dir.join(filename);
         fs::write(&path, render_ticket(ticket, id))?;
@@ -2699,8 +2854,8 @@ fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<Pa
     Ok(written)
 }
 
-fn should_skip_ticket(ctx: &PmPreflight, ticket: &PmPlanTicket) -> bool {
-    let title = normalize_match(&ticket.title);
+fn should_skip_ticket(ctx: &PmPreflight, ticket: &TicketMetadata) -> bool {
+    let title = normalize_match(ticket.title.as_deref().unwrap_or(""));
     if title.is_empty() {
         return true;
     }
@@ -2711,44 +2866,46 @@ fn should_skip_ticket(ctx: &PmPreflight, ticket: &PmPlanTicket) -> bool {
         || normalize_match(&ctx.merged_mrs).contains(&title)
 }
 
-fn validate_ticket(ticket: &PmPlanTicket) -> Result<()> {
-    if ticket.title.trim().is_empty() || ticket.summary.trim().is_empty() {
+fn validate_ticket(ticket: &TicketMetadata) -> Result<()> {
+    let title = ticket.title.as_deref().unwrap_or("").trim();
+    let summary = ticket.summary.as_deref().unwrap_or("").trim();
+    if title.is_empty() || summary.is_empty() {
         anyhow::bail!("ticket missing title or summary");
     }
-    if !matches!(ticket.difficulty.as_str(), "easy" | "medium" | "hard") {
-        anyhow::bail!("ticket '{}' has invalid difficulty", ticket.title);
+    let difficulty = ticket.difficulty.as_deref().unwrap_or("");
+    if !matches!(difficulty, "easy" | "medium" | "hard") {
+        anyhow::bail!("ticket '{}' has invalid difficulty", title);
     }
-    if !matches!(ticket.risk.as_str(), "low" | "medium" | "high") {
-        anyhow::bail!("ticket '{}' has invalid risk", ticket.title);
+    let risk = ticket.risk.as_deref().unwrap_or("");
+    if !matches!(risk, "low" | "medium" | "high") {
+        anyhow::bail!("ticket '{}' has invalid risk", title);
     }
     if ticket.acceptance_criteria.is_empty() || ticket.verification_commands.is_empty() {
-        anyhow::bail!(
-            "ticket '{}' missing acceptance or verification",
-            ticket.title
-        );
+        anyhow::bail!("ticket '{}' missing acceptance or verification", title);
     }
     Ok(())
 }
 
-fn render_ticket(ticket: &PmPlanTicket, id: usize) -> String {
+fn render_ticket(ticket: &TicketMetadata, id: usize) -> String {
+    let reason = ticket.uncovered_reason.as_deref().unwrap_or("");
     let mut out = format!(
         "# TICKET-{id:03}: {title}\n\n\
-Goal: {summary}\n\n\
-Difficulty: {difficulty}\n\
-Risk: {risk}\n\
-Recommended backend: {backend}\n\n\
-## Why This Is Uncovered\n{reason}\n\n\
-## Affected Files\n",
+        Goal: {summary}\n\n\
+        Difficulty: {difficulty}\n\
+        Risk: {risk}\n\
+        Recommended backend: {backend}\n\n\
+        ## Why This Is Uncovered\n{reason}\n\n\
+        ## Affected Files\n",
         id = id,
-        title = ticket.title,
-        summary = ticket.summary,
-        difficulty = ticket.difficulty,
-        risk = ticket.risk,
+        title = ticket.title.as_deref().unwrap_or(""),
+        summary = ticket.summary.as_deref().unwrap_or(""),
+        difficulty = ticket.difficulty.as_deref().unwrap_or("medium"),
+        risk = ticket.risk.as_deref().unwrap_or("medium"),
         backend = ticket
             .recommended_backend
             .as_deref()
             .unwrap_or("unspecified"),
-        reason = ticket.uncovered_reason,
+        reason = reason,
     );
     for file in &ticket.affected_files {
         out.push_str(&format!("- {}\n", file));
@@ -2763,9 +2920,20 @@ Recommended backend: {backend}\n\n\
     for item in &ticket.acceptance_criteria {
         out.push_str(&format!("- {}\n", item));
     }
+    if !ticket.constraints.is_empty() {
+        out.push_str("\n## Constraints\n");
+        for item in &ticket.constraints {
+            out.push_str(&format!("- {}\n", item));
+        }
+    }
     out.push_str("\n## Verification Commands\n");
     for cmd in &ticket.verification_commands {
         out.push_str(&format!("- `{}`\n", cmd));
+    }
+    if let Some(src) = ticket.source.as_ref() {
+        if !src.is_empty() {
+            out.push_str(&format!("\n## Source\n{}\n", src));
+        }
     }
     out
 }
@@ -2916,16 +3084,254 @@ fn mark_backend_unavailable_from_output_at(
     Ok(Some(parsed))
 }
 
-#[derive(Debug, Clone, Default)]
-struct TicketMetadata {
+fn parse_yaml_frontmatter(content: &str) -> TicketMetadata {
+    let mut meta = TicketMetadata::default();
+    let mut current_key: Option<String> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('-') {
+            let val = trimmed.strip_prefix('-').unwrap().trim();
+            let val = val
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(val);
+            let val = val
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+                .unwrap_or(val);
+            if let Some(ref key) = current_key {
+                match key.as_str() {
+                    "acceptance_criteria" => meta.acceptance_criteria.push(val.to_string()),
+                    "constraints" => meta.constraints.push(val.to_string()),
+                    "affected_files" => meta.affected_files.push(val.to_string()),
+                    "verification_commands" => meta.verification_commands.push(val.to_string()),
+                    _ => {}
+                }
+            }
+        } else if let Some((key, val)) = trimmed.split_once(':') {
+            let key = key.trim();
+            let val = val.trim();
+            current_key = Some(key.to_string());
+
+            if !val.is_empty() {
+                let val_clean = val
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .unwrap_or(val);
+                let val_clean = val_clean
+                    .strip_prefix('\'')
+                    .and_then(|v| v.strip_suffix('\''))
+                    .unwrap_or(val_clean);
+
+                if val_clean.starts_with('[') && val_clean.ends_with(']') {
+                    let items: Vec<String> = val_clean[1..val_clean.len() - 1]
+                        .split(',')
+                        .map(|s| {
+                            let s = s.trim();
+                            let s = s
+                                .strip_prefix('"')
+                                .and_then(|v| v.strip_suffix('"'))
+                                .unwrap_or(s);
+                            s.strip_prefix('\'')
+                                .and_then(|v| v.strip_suffix('\''))
+                                .unwrap_or(s)
+                                .to_string()
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    match key {
+                        "acceptance_criteria" => meta.acceptance_criteria = items,
+                        "constraints" => meta.constraints = items,
+                        "affected_files" => meta.affected_files = items,
+                        "verification_commands" => meta.verification_commands = items,
+                        _ => {}
+                    }
+                } else {
+                    let val_str = val_clean.to_string();
+                    match key {
+                        "work_id" | "ticket_id" => meta.work_id = Some(val_str),
+                        "title" => meta.title = Some(val_str),
+                        "summary" | "problem" => meta.summary = Some(val_str),
+                        "recommended_backend" => meta.recommended_backend = Some(val_str),
+                        "recommended_model" => meta.recommended_model = Some(val_str),
+                        "risk" => meta.risk = Some(val_str),
+                        "difficulty" => meta.difficulty = Some(val_str),
+                        "source" => meta.source = Some(val_str),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    meta
+}
+
+fn parse_frontmatter(content: &str) -> Option<TicketMetadata> {
+    let content = content.trim_start();
+    if !content.starts_with("---") {
+        return None;
+    }
+    // skip the first ---
+    let rest = &content[3..];
+    // find the next ---
+    let end_idx = rest.find("---")?;
+    let block = &rest[..end_idx];
+
+    // Try to parse as JSON first
+    if let Ok(mut meta) = serde_json::from_str::<TicketMetadata>(block.trim()) {
+        meta.normalize();
+        return Some(meta);
+    }
+
+    // Otherwise parse as YAML
+    let mut meta = parse_yaml_frontmatter(block);
+    meta.normalize();
+    Some(meta)
+}
+
+fn parse_ticket_metadata_fallback(
+    body: &str,
     ticket_id: Option<String>,
     title: Option<String>,
-    difficulty: Option<String>,
-    risk: Option<String>,
-    recommended_backend: Option<String>,
-    recommended_model: Option<String>,
-    verification_commands: Vec<String>,
-    affected_files: Vec<String>,
+) -> TicketMetadata {
+    let mut meta = TicketMetadata {
+        work_id: ticket_id,
+        title,
+        ..TicketMetadata::default()
+    };
+
+    let mut current_section: Option<&str> = None;
+    let mut problem_lines = Vec::new();
+    let mut source_lines = Vec::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            let sec_name = trimmed.strip_prefix("## ").unwrap().trim().to_lowercase();
+            if sec_name.contains("problem") || sec_name.contains("summary") {
+                current_section = Some("summary");
+            } else if sec_name.contains("acceptance criteria") {
+                current_section = Some("acceptance_criteria");
+            } else if sec_name.contains("constraint") {
+                current_section = Some("constraints");
+            } else if sec_name.contains("affected file") {
+                current_section = Some("affected_files");
+            } else if sec_name.contains("verification command") {
+                current_section = Some("verification_commands");
+            } else if sec_name.contains("source") || sec_name.contains("authority") {
+                current_section = Some("source");
+            } else {
+                current_section = None;
+            }
+            continue;
+        } else if trimmed.starts_with("# ") {
+            current_section = None;
+            continue;
+        }
+
+        // Handle inline key-value pairs (independent of sections)
+        if let Some(val) = trimmed.strip_prefix("Difficulty:") {
+            meta.difficulty = Some(val.trim().to_string());
+            continue;
+        } else if let Some(val) = trimmed.strip_prefix("Risk:") {
+            meta.risk = Some(val.trim().to_string());
+            continue;
+        } else if let Some(val) = trimmed.strip_prefix("Recommended backend:") {
+            let val = val.trim();
+            if !val.is_empty() && val != "unspecified" {
+                meta.recommended_backend = Some(val.to_string());
+            }
+            continue;
+        } else if let Some(val) = trimmed.strip_prefix("Recommended model:") {
+            let val = val.trim();
+            if !val.is_empty() && val != "unspecified" {
+                meta.recommended_model = Some(val.to_string());
+            }
+            continue;
+        } else if let Some(val) = trimmed.strip_prefix("Goal:") {
+            let val = val.trim();
+            if meta.summary.is_none() && !val.is_empty() {
+                meta.summary = Some(val.to_string());
+            }
+            continue;
+        } else if let Some(val) = trimmed.strip_prefix("Source:") {
+            meta.source = Some(val.trim().to_string());
+            continue;
+        } else if let Some(val) = trimmed.strip_prefix("Work ID:") {
+            meta.work_id = Some(val.trim().to_string());
+            continue;
+        } else if let Some(val) = trimmed.strip_prefix("Ticket ID:") {
+            meta.work_id = Some(val.trim().to_string());
+            continue;
+        }
+
+        // Parse based on the current section
+        if let Some(sec) = current_section {
+            match sec {
+                "summary" => {
+                    if !trimmed.is_empty() {
+                        problem_lines.push(trimmed);
+                    }
+                }
+                "source" => {
+                    if !trimmed.is_empty() {
+                        source_lines.push(trimmed);
+                    }
+                }
+                "acceptance_criteria" => {
+                    if let Some(val) = trimmed.strip_prefix("- ") {
+                        meta.acceptance_criteria.push(val.trim().to_string());
+                    }
+                }
+                "constraints" => {
+                    if let Some(val) = trimmed.strip_prefix("- ") {
+                        meta.constraints.push(val.trim().to_string());
+                    }
+                }
+                "affected_files" => {
+                    if let Some(val) = trimmed.strip_prefix("- ") {
+                        let clean_val = val.trim().trim_matches('`').to_string();
+                        meta.affected_files.push(clean_val);
+                    }
+                }
+                "verification_commands" => {
+                    if let Some(val) = trimmed.strip_prefix("- ") {
+                        let clean_val = val.trim().trim_matches('`').to_string();
+                        meta.verification_commands.push(clean_val);
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            // Fallback for files without headings
+            if trimmed.starts_with("- `") && trimmed.ends_with('`') {
+                meta.verification_commands.push(
+                    trimmed
+                        .trim_start_matches("- `")
+                        .trim_end_matches('`')
+                        .to_string(),
+                );
+            } else if let Some(value) = trimmed.strip_prefix("- ") {
+                if value.contains('/') || value.contains('.') {
+                    meta.affected_files
+                        .push(value.trim().trim_matches('`').to_string());
+                }
+            }
+        }
+    }
+
+    if !problem_lines.is_empty() {
+        meta.summary = Some(problem_lines.join("\n"));
+    }
+    if !source_lines.is_empty() {
+        meta.source = Some(source_lines.join("\n"));
+    }
+
+    meta
 }
 
 fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
@@ -2933,56 +3339,45 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
         return Ok(None);
     }
     let body = fs::read_to_string(path)?;
-    let ticket_id = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .and_then(|stem| {
-            let mut parts = stem.split('-');
-            match (parts.next(), parts.next()) {
-                (Some("TICKET"), Some(number)) if !number.is_empty() => {
-                    Some(format!("TICKET-{number}"))
-                }
-                _ => None,
-            }
-        });
-    let title = first_markdown_heading(&body).map(|title| normalize_ticket_title(title.into()));
-    let mut meta = TicketMetadata {
-        ticket_id,
-        title,
-        ..TicketMetadata::default()
-    };
-    for line in body.lines().map(str::trim) {
-        if let Some(value) = line.strip_prefix("Difficulty:") {
-            meta.difficulty = Some(value.trim().to_string());
-        } else if let Some(value) = line.strip_prefix("Risk:") {
-            meta.risk = Some(value.trim().to_string());
-        } else if let Some(value) = line.strip_prefix("Recommended backend:") {
-            let value = value.trim();
-            if !value.is_empty() && value != "unspecified" {
-                meta.recommended_backend = Some(value.to_string());
-            }
-        } else if let Some(value) = line.strip_prefix("Recommended model:") {
-            let value = value.trim();
-            if !value.is_empty() && value != "unspecified" {
-                meta.recommended_model = Some(value.to_string());
-            }
-        } else if let Some(value) = line.strip_prefix("Goal:") {
-            let value = value.trim();
-            if meta.title.is_none() && !value.is_empty() {
-                meta.title = Some(value.to_string());
-            }
-        } else if line.starts_with("- `") && line.ends_with('`') {
-            meta.verification_commands.push(
-                line.trim_start_matches("- `")
-                    .trim_end_matches('`')
-                    .to_string(),
-            );
-        } else if let Some(value) = line.strip_prefix("- ") {
-            if value.contains('/') || value.contains('.') {
-                meta.affected_files.push(value.to_string());
-            }
+
+    let mut meta = if let Some(mut parsed) = parse_frontmatter(&body) {
+        if parsed.work_id.is_none() {
+            parsed.work_id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| {
+                    let mut parts = stem.split('-');
+                    match (parts.next(), parts.next()) {
+                        (Some("TICKET"), Some(number)) if !number.is_empty() => {
+                            Some(format!("TICKET-{number}"))
+                        }
+                        _ => None,
+                    }
+                });
         }
-    }
+        if parsed.title.is_none() {
+            parsed.title =
+                first_markdown_heading(&body).map(|title| normalize_ticket_title(title.into()));
+        }
+        parsed
+    } else {
+        let ticket_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| {
+                let mut parts = stem.split('-');
+                match (parts.next(), parts.next()) {
+                    (Some("TICKET"), Some(number)) if !number.is_empty() => {
+                        Some(format!("TICKET-{number}"))
+                    }
+                    _ => None,
+                }
+            });
+        let title = first_markdown_heading(&body).map(|title| normalize_ticket_title(title.into()));
+        parse_ticket_metadata_fallback(&body, ticket_id, title)
+    };
+
+    meta.normalize();
     Ok(Some(meta))
 }
 
@@ -2998,9 +3393,9 @@ fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
     let Some(ticket) = ticket else {
         return "n/a".into();
     };
-    match (ticket.ticket_id.as_deref(), ticket.title.as_deref()) {
-        (Some(ticket_id), Some(title)) => format!("{ticket_id} {title}"),
-        (Some(ticket_id), None) => ticket_id.to_string(),
+    match (ticket.work_id.as_deref(), ticket.title.as_deref()) {
+        (Some(work_id), Some(title)) => format!("{work_id} {title}"),
+        (Some(work_id), None) => work_id.to_string(),
         (None, Some(title)) => title.to_string(),
         (None, None) => "n/a".into(),
     }
@@ -3026,8 +3421,8 @@ fn build_mr_title(
     };
     if let Some(ticket) = ticket {
         if let Some(title) = ticket.title.as_deref() {
-            let detail = match ticket.ticket_id.as_deref() {
-                Some(ticket_id) if !ticket_id.is_empty() => format!("{ticket_id} {title}"),
+            let detail = match ticket.work_id.as_deref() {
+                Some(work_id) if !work_id.is_empty() => format!("{work_id} {title}"),
                 _ => title.to_string(),
             };
             return format!("{prefix} {mode_label}: {detail}");

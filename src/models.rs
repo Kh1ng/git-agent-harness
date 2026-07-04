@@ -146,26 +146,84 @@ pub struct PmPlan {
     pub title: String,
     pub summary: String,
     #[serde(default)]
-    pub tickets: Vec<PmPlanTicket>,
+    pub tickets: Vec<TicketMetadata>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PmPlanTicket {
-    pub title: String,
-    pub summary: String,
-    pub difficulty: String,
-    pub risk: String,
-    #[serde(default)]
-    pub recommended_backend: Option<String>,
-    #[serde(default)]
-    pub duplicate_evidence: Vec<String>,
-    #[serde(default)]
-    pub affected_files: Vec<String>,
-    #[serde(default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct TicketMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(alias = "problem", skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub acceptance_criteria: Vec<String>,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub constraints: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub difficulty: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub affected_files: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub verification_commands: Vec<String>,
-    pub uncovered_reason: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub duplicate_evidence: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uncovered_reason: Option<String>,
+}
+
+impl TicketMetadata {
+    pub fn normalize(&mut self) {
+        if let Some(ref val) = self.recommended_backend {
+            if val.trim().is_empty() || val.trim() == "unspecified" {
+                self.recommended_backend = None;
+            }
+        }
+        if let Some(ref val) = self.recommended_model {
+            if val.trim().is_empty() || val.trim() == "unspecified" {
+                self.recommended_model = None;
+            }
+        }
+        if let Some(ref val) = self.difficulty {
+            if val.trim().is_empty() || val.trim() == "unspecified" {
+                self.difficulty = None;
+            }
+        }
+        if let Some(ref val) = self.risk {
+            if val.trim().is_empty() || val.trim() == "unspecified" {
+                self.risk = None;
+            }
+        }
+        if let Some(ref val) = self.summary {
+            if val.trim().is_empty() {
+                self.summary = None;
+            }
+        }
+        if let Some(ref val) = self.work_id {
+            if val.trim().is_empty() {
+                self.work_id = None;
+            }
+        }
+        if let Some(ref val) = self.title {
+            if val.trim().is_empty() {
+                self.title = None;
+            }
+        }
+        if let Some(ref val) = self.source {
+            if val.trim().is_empty() {
+                self.source = None;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
