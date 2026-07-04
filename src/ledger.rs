@@ -136,6 +136,10 @@ pub struct LedgerEntry {
     pub human_required: bool,
     pub mode: String,
     pub target_summary: Option<String>,
+    #[serde(default)]
+    pub work_id: Option<String>,
+    #[serde(default)]
+    pub work_title: Option<String>,
     pub branch: Option<String>,
     pub session_dir: Option<String>,
     pub duration_seconds: Option<f64>,
@@ -204,6 +208,8 @@ impl LedgerEntry {
             human_required: false,
             mode: mode.to_string(),
             target_summary: summarize_target(target),
+            work_id: None,
+            work_title: None,
             branch: None,
             session_dir: session_dir.map(|p| p.display().to_string()),
             duration_seconds: None,
@@ -624,6 +630,8 @@ mod tests {
         let entry = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
         assert_eq!(entry.failure_class, None);
         assert_eq!(entry.failure_stage, None);
+        assert_eq!(entry.work_id, None);
+        assert_eq!(entry.work_title, None);
     }
 
     #[test]
@@ -657,6 +665,8 @@ mod tests {
         let parsed: LedgerEntry = serde_json::from_str(old_line).unwrap();
         assert_eq!(parsed.failure_class, None);
         assert_eq!(parsed.failure_stage, None);
+        assert_eq!(parsed.work_id, None);
+        assert_eq!(parsed.work_title, None);
         assert_eq!(parsed.profile, "real");
     }
 

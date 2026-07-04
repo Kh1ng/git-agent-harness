@@ -61,6 +61,7 @@ pub struct RecentLedgerSummary {
     pub most_recent_dispatch_timestamp: String,
     pub most_recent_effective_backend: String,
     pub most_recent_effective_model: Option<String>,
+    pub most_recent_work_id: Option<String>,
     pub most_recent_mode: String,
     pub most_recent_validation_result: Option<String>,
     pub most_recent_failure_class: Option<String>,
@@ -217,6 +218,7 @@ pub fn build_snapshot(
                     most_recent_dispatch_timestamp: entry.timestamp.clone(),
                     most_recent_effective_backend: entry.effective_backend.clone(),
                     most_recent_effective_model: entry.effective_model.clone(),
+                    most_recent_work_id: entry.work_id.clone(),
                     most_recent_mode: entry.mode.clone(),
                     most_recent_validation_result: entry.validation_result.clone(),
                     most_recent_failure_class: entry.failure_class.clone(),
@@ -591,6 +593,36 @@ default_target_branch = "main"
         );
         assert_eq!(summary.attempts_started, Some(3));
         assert_eq!(summary.attempts_completed, Some(2));
+    }
+
+    #[test]
+    fn recent_ledger_exposes_work_id() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_test_cfg(&tmp);
+        let ledger_path = tmp.path().join("ledger.jsonl");
+        std::env::set_var("GAH_LEDGER_PATH", &ledger_path);
+
+        let mut entry = LedgerEntry::new(
+            "test",
+            &cfg.profiles["test"],
+            "codex",
+            "fix",
+            "docs/tickets/TICKET-095-ledger-work-identity.md",
+            None,
+            None,
+        );
+        entry.work_id = Some("TICKET-095".into());
+        entry.timestamp = "2026-07-04T00:00:00Z".into();
+        fs::write(&ledger_path, serde_json::to_string(&entry).unwrap() + "\n").unwrap();
+
+        let now = OffsetDateTime::now_utc();
+        let snap = build_snapshot(&cfg, "test", now).unwrap();
+
+        assert_eq!(
+            snap.recent_ledger.unwrap().most_recent_work_id.as_deref(),
+            Some("TICKET-095")
+        );
     }
 
     #[test]
