@@ -2243,6 +2243,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_ticket_metadata_preserves_colons_in_normal_headings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket = tmp.path().join("TICKET-104-auth-hardening.md");
+        fs::write(
+            &ticket,
+            "# Auth: reject empty token\n\nDifficulty: medium\nRisk: low\n",
+        )
+        .unwrap();
+
+        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
+        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-104"));
+        assert_eq!(meta.title.as_deref(), Some("Auth: reject empty token"));
+    }
+
+    #[test]
+    fn parses_ticket_metadata_strips_ticket_prefix_from_heading_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket = tmp.path().join("TICKET-105-heading-title.md");
+        fs::write(&ticket, "# TICKET-105: Keep title intact\n").unwrap();
+
+        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
+        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-105"));
+        assert_eq!(meta.title.as_deref(), Some("Keep title intact"));
+    }
+
+    #[test]
     fn mr_title_uses_ticket_context_and_preserves_draft_fail_prefix() {
         let ticket = TicketMetadata {
             ticket_id: Some("TICKET-058".into()),
@@ -2987,11 +3013,27 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
 }
 
 fn normalize_ticket_title(title: String) -> String {
-    title
-        .split_once(':')
-        .map(|(_, rest)| rest.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(title)
+    let trimmed = title.trim();
+    let Some(rest) = trimmed.strip_prefix("TICKET-") else {
+        return title;
+    };
+
+    let digit_count = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return title;
+    }
+
+    let remainder = rest[digit_count..].trim_start();
+    let normalized = remainder
+        .trim_start_matches([':', '-'])
+        .trim_start()
+        .to_string();
+
+    if normalized.is_empty() {
+        title
+    } else {
+        normalized
+    }
 }
 
 fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
