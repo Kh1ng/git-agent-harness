@@ -75,7 +75,7 @@ pub struct Profile {
     /// Extra CLI args appended to the openhands invocation (e.g. plugins, skill flags)
     #[serde(default)]
     pub openhands_args: Vec<String>,
-    /// Extra CLI args appended to `codex exec` (e.g. `-c model=gpt-4o`)
+    /// Extra CLI args appended to `codex exec` for invariant non-model flags.
     #[serde(default)]
     pub codex_args: Vec<String>,
     /// Extra CLI args appended to `claude -p` (e.g. `--allowedTools Edit,Write,Bash`)
