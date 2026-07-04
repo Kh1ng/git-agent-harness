@@ -359,6 +359,7 @@ fn improve(
         args.target.clone()
     };
     let ticket_meta = parse_ticket_metadata(Path::new(&target)).ok().flatten();
+    apply_authoritative_work_identity(ledger, ticket_meta.as_ref());
     let usage_summary = ledger::usage_summary_for_backend(
         cfg,
         args.backend.as_str(),
@@ -848,6 +849,17 @@ fn improve(
 
     worktree::cleanup(&wt, repo);
     Ok(())
+}
+
+fn apply_authoritative_work_identity(ledger: &mut LedgerEntry, ticket: Option<&TicketMetadata>) {
+    let Some(ticket) = ticket else {
+        return;
+    };
+    if !ticket.is_authoritative {
+        return;
+    }
+    ledger.work_id = ticket.work_id.clone().or_else(|| ticket.ticket_id.clone());
+    ledger.work_title = ticket.title.clone();
 }
 
 fn experiment(
@@ -1856,8 +1868,8 @@ mod tests {
     use super::preflight;
     use super::validate;
     use super::{
-        apply_pm_plan, apply_route_to_ledger, build_experiment_mr_body,
-        build_fix_or_improve_mr_body, build_mr_title, build_pm_plan_task,
+        apply_authoritative_work_identity, apply_pm_plan, apply_route_to_ledger,
+        build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title, build_pm_plan_task,
         classify_validation_failure_progress, collect_pm_preflight, collect_ticket_summaries,
         first_markdown_heading, mark_backend_unavailable_from_output_at, parse_pm_plan,
         parse_ticket_metadata, validation_failure_no_progress_reason, ExperimentMrRenderContext,
@@ -2437,6 +2449,61 @@ The parser should retain structured sections.\n\n\
         let title = build_mr_title("fix", "real", false, Some(&ticket));
         assert!(title.len() <= 255);
         assert!(title.ends_with("..."));
+    }
+
+    #[test]
+    fn authoritative_ticket_metadata_populates_ledger_work_identity() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-095".into()),
+            work_id: Some("TICKET-095".into()),
+            title: Some("Ledger work identity propagation".into()),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ledger = LedgerEntry::new(
+            "real",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+
+        apply_authoritative_work_identity(&mut ledger, Some(&ticket));
+
+        assert_eq!(ledger.work_id.as_deref(), Some("TICKET-095"));
+        assert_eq!(
+            ledger.work_title.as_deref(),
+            Some("Ledger work identity propagation")
+        );
+    }
+
+    #[test]
+    fn non_authoritative_ticket_metadata_does_not_populate_ledger_work_identity() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-095".into()),
+            work_id: Some("TICKET-095".into()),
+            title: Some("Ledger work identity propagation".into()),
+            is_authoritative: false,
+            ..TicketMetadata::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ledger = LedgerEntry::new(
+            "real",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+
+        apply_authoritative_work_identity(&mut ledger, Some(&ticket));
+
+        assert_eq!(ledger.work_id, None);
+        assert_eq!(ledger.work_title, None);
     }
 
     #[test]

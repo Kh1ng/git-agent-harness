@@ -2468,6 +2468,7 @@ fn dispatch_fix_provider_cli_nonzero_after_successful_push() {
 fn dispatch_dry_run_ticket_metadata_feeds_routing() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
+    let availability_path = tmp.path().join("availability.json");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
     let ticket = tmp.path().join("ticket.md");
@@ -2496,6 +2497,7 @@ fn dispatch_dry_run_ticket_metadata_feeds_routing() {
             cfg.to_str().unwrap(),
         ])
         .env("PATH", prepend_path(&fake_bin))
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
         .assert()
         .success()
         .stdout(predicate::str::contains("Effective:    codex"));
