@@ -127,13 +127,23 @@ pub struct Profile {
     pub pacing: crate::quota::PacingConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CandidateConfig {
     pub backend: String,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_pool: Option<String>,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub included_in_quota: bool,
+    #[serde(default)]
+    pub marginal_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub quota_usage_percent: Option<f64>,
+    #[serde(default)]
+    pub quota_days_remaining: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

@@ -1,8 +1,10 @@
 use crate::availability::{self, AvailabilityDecision, BlockScope};
 use crate::config::{Defaults, Profile, RoutingPolicy};
 use crate::ledger::BackendUsageSummary;
+use crate::quota::{self, PaceBand};
 use crate::runner;
 use anyhow::Result;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
@@ -84,6 +86,17 @@ struct RouteCandidate {
     backend: String,
     model: Option<String>,
     quota_pool: Option<String>,
+    priority: i32,
+    included_in_quota: bool,
+    marginal_cost_usd: Option<f64>,
+    quota_usage_percent: Option<f64>,
+    quota_days_remaining: Option<f64>,
+    original_order: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ReorderDecision {
+    selected_over: Vec<String>,
 }
 
 pub fn decide(
@@ -139,6 +152,7 @@ where
         };
 
     if let Some(candidates) = candidates {
+        let (candidates, reorder) = order_candidates(profile, candidates);
         let preferred = candidates.first().cloned().expect("non-empty list");
         let (selected, skipped) =
             pick_route_candidate(candidates, state_path, now, backend_available)?;
@@ -151,6 +165,10 @@ where
         } else {
             "global routing policy".to_string()
         };
+
+        if let Some(reorder) = reorder.as_ref().filter(|r| !r.selected_over.is_empty()) {
+            reason = append_reorder_reason(reason, &selected, reorder, &profile.pacing);
+        }
 
         if selected.backend != preferred.backend || selected.model != preferred.model {
             fallback_used = true;
@@ -259,6 +277,12 @@ where
                     .routing
                     .find_quota_pool(req.mode, &backend, model.as_deref())
             }),
+        priority: 0,
+        included_in_quota: false,
+        marginal_cost_usd: None,
+        quota_usage_percent: None,
+        quota_days_remaining: None,
+        original_order: 0,
     };
     let (selected, skipped) = pick_route_candidate(
         auto_candidates(defaults, profile, req.mode, &primary),
@@ -322,6 +346,12 @@ where
                     requested_model.as_deref(),
                 )
             }),
+        priority: 0,
+        included_in_quota: false,
+        marginal_cost_usd: None,
+        quota_usage_percent: None,
+        quota_days_remaining: None,
+        original_order: 0,
     };
     let candidates = explicit_candidates(
         defaults,
@@ -392,6 +422,19 @@ fn append_availability_reason(
     if mention_human_review {
         base.push_str(" (human review required)");
     }
+    base
+}
+
+fn append_reorder_reason(
+    mut base: String,
+    selected: &RouteCandidate,
+    reorder: &ReorderDecision,
+    pacing: &crate::quota::PacingConfig,
+) -> String {
+    base.push_str("; cost-aware reorder selected ");
+    base.push_str(&describe_candidate(selected, pacing));
+    base.push_str(" over ");
+    base.push_str(&reorder.selected_over.join(", "));
     base
 }
 
@@ -531,6 +574,12 @@ fn auto_candidates(
                 backend: weak_backend.to_string(),
                 model: weak_model,
                 quota_pool,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+                original_order: candidates.len(),
             });
         }
     }
@@ -574,6 +623,12 @@ where
                 backend: weak_backend,
                 model: weak_model,
                 quota_pool,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+                original_order: candidates.len(),
             });
         }
         extend_remaining_candidates(
@@ -615,6 +670,12 @@ fn extend_remaining_candidates(
             backend: backend.to_string(),
             model: model.clone(),
             quota_pool,
+            priority: 0,
+            included_in_quota: false,
+            marginal_cost_usd: None,
+            quota_usage_percent: None,
+            quota_days_remaining: None,
+            original_order: candidates.len(),
         });
     }
 }
@@ -633,6 +694,123 @@ fn dedupe_candidates(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
         }
     }
     out
+}
+
+fn order_candidates(
+    profile: &Profile,
+    candidates: Vec<RouteCandidate>,
+) -> (Vec<RouteCandidate>, Option<ReorderDecision>) {
+    let mut candidates = with_original_order(candidates);
+    if !candidates.iter().any(RouteCandidate::has_cost_policy) {
+        return (candidates, None);
+    }
+
+    let original = candidates.clone();
+    candidates.sort_by(|left, right| compare_candidates(left, right, &profile.pacing));
+
+    let Some(selected) = candidates.first() else {
+        return (candidates, None);
+    };
+    let selected_over = original
+        .iter()
+        .take_while(|candidate| {
+            candidate.backend != selected.backend || candidate.model != selected.model
+        })
+        .filter(|candidate| {
+            compare_candidates(selected, candidate, &profile.pacing) == Ordering::Less
+        })
+        .map(|candidate| describe_candidate(candidate, &profile.pacing))
+        .collect::<Vec<_>>();
+
+    let reorder = if selected_over.is_empty() {
+        None
+    } else {
+        Some(ReorderDecision { selected_over })
+    };
+    (candidates, reorder)
+}
+
+fn compare_candidates(
+    left: &RouteCandidate,
+    right: &RouteCandidate,
+    pacing: &crate::quota::PacingConfig,
+) -> Ordering {
+    right
+        .priority
+        .cmp(&left.priority)
+        .then_with(|| economic_rank(left, pacing).cmp(&economic_rank(right, pacing)))
+        .then_with(|| compare_optional_f64(left.marginal_cost_usd, right.marginal_cost_usd))
+        .then_with(|| left.original_order.cmp(&right.original_order))
+}
+
+fn economic_rank(candidate: &RouteCandidate, pacing: &crate::quota::PacingConfig) -> u8 {
+    if !candidate.included_in_quota {
+        return 1;
+    }
+
+    match quota::quota_pace(
+        candidate.quota_usage_percent,
+        candidate.quota_days_remaining,
+        pacing,
+    )
+    .unwrap_or(PaceBand::HardConserve)
+    {
+        PaceBand::AggressiveBurn | PaceBand::MildBurn | PaceBand::Normal => 0,
+        PaceBand::Conserve => 2,
+        PaceBand::HardConserve => 3,
+    }
+}
+
+fn compare_optional_f64(left: Option<f64>, right: Option<f64>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn describe_candidate(candidate: &RouteCandidate, pacing: &crate::quota::PacingConfig) -> String {
+    let mut details = Vec::new();
+    if candidate.included_in_quota {
+        details.push(
+            match quota::quota_pace(
+                candidate.quota_usage_percent,
+                candidate.quota_days_remaining,
+                pacing,
+            )
+            .unwrap_or(PaceBand::Normal)
+            {
+                PaceBand::AggressiveBurn => "included quota aggressive-burn".into(),
+                PaceBand::MildBurn => "included quota mild-burn".into(),
+                PaceBand::Normal => "included quota normal".into(),
+                PaceBand::Conserve => "included quota conserve".into(),
+                PaceBand::HardConserve => "included quota hard-conserve".into(),
+            },
+        );
+    } else if let Some(cost) = candidate.marginal_cost_usd {
+        details.push(format!("paid ${cost:.4}"));
+    }
+    if candidate.priority != 0 {
+        details.push(format!("priority {}", candidate.priority));
+    }
+    let label = candidate_label(&candidate.backend, candidate.model.as_deref());
+    if details.is_empty() {
+        label
+    } else {
+        format!("{label} ({})", details.join(", "))
+    }
+}
+
+fn with_original_order(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
+    candidates
+        .into_iter()
+        .enumerate()
+        .map(|(idx, mut candidate)| {
+            candidate.original_order = idx;
+            candidate
+        })
+        .collect()
 }
 
 fn candidate_label(backend: &str, model: Option<&str>) -> String {
@@ -695,13 +873,30 @@ fn policy_candidates(policy: &RoutingPolicy, mode: &str) -> Option<Vec<RouteCand
     };
     raw.map(|list| {
         list.iter()
-            .map(|c| RouteCandidate {
+            .enumerate()
+            .map(|(idx, c)| RouteCandidate {
                 backend: c.backend.clone(),
                 model: c.model.clone(),
                 quota_pool: c.quota_pool.clone(),
+                priority: c.priority,
+                included_in_quota: c.included_in_quota,
+                marginal_cost_usd: c.marginal_cost_usd,
+                quota_usage_percent: c.quota_usage_percent,
+                quota_days_remaining: c.quota_days_remaining,
+                original_order: idx,
             })
             .collect()
     })
+}
+
+impl RouteCandidate {
+    fn has_cost_policy(&self) -> bool {
+        self.priority != 0
+            || self.included_in_quota
+            || self.marginal_cost_usd.is_some()
+            || self.quota_usage_percent.is_some()
+            || self.quota_days_remaining.is_some()
+    }
 }
 
 fn review_fallback_backend_name<'a>(
@@ -945,6 +1140,23 @@ mod tests {
             name,
             "claude" | "codex" | "openhands" | "agy" | "agy-main" | "agy-second"
         )
+    }
+
+    fn candidate_config(
+        backend: &str,
+        model: Option<&str>,
+        quota_pool: Option<&str>,
+    ) -> crate::config::CandidateConfig {
+        crate::config::CandidateConfig {
+            backend: backend.into(),
+            model: model.map(str::to_string),
+            quota_pool: quota_pool.map(str::to_string),
+            priority: 0,
+            included_in_quota: false,
+            marginal_cost_usd: None,
+            quota_usage_percent: None,
+            quota_days_remaining: None,
+        }
     }
 
     #[test]
@@ -1356,16 +1568,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut profile = profile();
         profile.routing.pm_candidates = Some(vec![
-            crate::config::CandidateConfig {
-                backend: "codex".into(),
-                model: Some("gpt-4".into()),
-                quota_pool: None,
-            },
-            crate::config::CandidateConfig {
-                backend: "claude".into(),
-                model: None,
-                quota_pool: None,
-            },
+            candidate_config("codex", Some("gpt-4"), None),
+            candidate_config("claude", None, None),
         ]);
 
         let decision = decide_with(
@@ -1411,16 +1615,8 @@ mod tests {
 
         let mut profile = profile();
         profile.routing.pm_candidates = Some(vec![
-            crate::config::CandidateConfig {
-                backend: "codex".into(),
-                model: Some("gpt-4".into()),
-                quota_pool: None,
-            },
-            crate::config::CandidateConfig {
-                backend: "claude".into(),
-                model: None,
-                quota_pool: None,
-            },
+            candidate_config("codex", Some("gpt-4"), None),
+            candidate_config("claude", None, None),
         ]);
 
         let decision = decide_with(
@@ -1468,16 +1664,8 @@ mod tests {
 
         let mut profile = profile();
         profile.routing.pm_candidates = Some(vec![
-            crate::config::CandidateConfig {
-                backend: "codex".into(),
-                model: Some("gpt-4".into()),
-                quota_pool: None,
-            },
-            crate::config::CandidateConfig {
-                backend: "claude".into(),
-                model: None,
-                quota_pool: None,
-            },
+            candidate_config("codex", Some("gpt-4"), None),
+            candidate_config("claude", None, None),
         ]);
 
         let decision = decide_with(
@@ -1524,16 +1712,8 @@ mod tests {
 
         let mut profile = profile();
         profile.routing.pm_candidates = Some(vec![
-            crate::config::CandidateConfig {
-                backend: "codex".into(),
-                model: Some("gpt-4".into()),
-                quota_pool: None,
-            },
-            crate::config::CandidateConfig {
-                backend: "claude".into(),
-                model: None,
-                quota_pool: None,
-            },
+            candidate_config("codex", Some("gpt-4"), None),
+            candidate_config("claude", None, None),
         ]);
 
         let err = decide_with(
@@ -1581,21 +1761,9 @@ mod tests {
 
         let mut profile = profile();
         profile.routing.pm_candidates = Some(vec![
-            crate::config::CandidateConfig {
-                backend: "claude".into(),
-                model: Some("claude-sonnet".into()),
-                quota_pool: Some("claude-main".into()),
-            },
-            crate::config::CandidateConfig {
-                backend: "claude".into(),
-                model: Some("claude-haiku".into()),
-                quota_pool: Some("claude-main".into()),
-            },
-            crate::config::CandidateConfig {
-                backend: "codex".into(),
-                model: Some("gpt-4".into()),
-                quota_pool: Some("codex-main".into()),
-            },
+            candidate_config("claude", Some("claude-sonnet"), Some("claude-main")),
+            candidate_config("claude", Some("claude-haiku"), Some("claude-main")),
+            candidate_config("codex", Some("gpt-4"), Some("codex-main")),
         ]);
 
         let decision = decide_with(
@@ -1659,5 +1827,158 @@ mod tests {
             Some("codex-main")
         );
         assert!(decision2.fallback_used);
+    }
+
+    #[test]
+    fn cost_aware_ordering_prefers_underpace_included_quota() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "openhands".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: Some(0.25),
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            },
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: Some("codex-main".into()),
+                priority: 0,
+                included_in_quota: true,
+                marginal_cost_usd: Some(0.0),
+                quota_usage_percent: Some(20.0),
+                quota_days_remaining: Some(5.0),
+            },
+        ]);
+
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
+        assert!(!decision.fallback_used);
+        assert!(decision.routing_reason.contains("cost-aware reorder"));
+        assert!(decision.routing_reason.contains("openhands/gpt-5.4"));
+    }
+
+    #[test]
+    fn cost_aware_ordering_conserves_scarce_included_quota() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: Some("codex-main".into()),
+                priority: 0,
+                included_in_quota: true,
+                marginal_cost_usd: Some(0.0),
+                quota_usage_percent: Some(85.0),
+                quota_days_remaining: Some(5.0),
+            },
+            crate::config::CandidateConfig {
+                backend: "openhands".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: Some(0.25),
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            },
+        ]);
+
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "openhands");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
+        assert!(!decision.fallback_used);
+        assert!(decision.routing_reason.contains("codex/gpt-5.4"));
+    }
+
+    #[test]
+    fn cost_aware_ordering_respects_explicit_priority_override() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: Some("codex-main".into()),
+                priority: 10,
+                included_in_quota: true,
+                marginal_cost_usd: Some(0.0),
+                quota_usage_percent: Some(85.0),
+                quota_days_remaining: Some(5.0),
+            },
+            crate::config::CandidateConfig {
+                backend: "openhands".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: Some(0.25),
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            },
+        ]);
+
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
+        assert!(!decision.routing_reason.contains("cost-aware reorder"));
     }
 }
