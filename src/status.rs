@@ -1,6 +1,6 @@
 use crate::availability;
 use crate::config::GahConfig;
-use crate::ledger::{self, LedgerEntry};
+use crate::ledger::{self, LedgerEntry, RoutingDiagnostics};
 use crate::sync;
 use anyhow::Result;
 use serde::Serialize;
@@ -73,6 +73,8 @@ pub struct RecentLedgerSummary {
     pub attempts_started: Option<u32>,
     pub attempts_completed: Option<u32>,
     pub human_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing_diagnostics: Option<RoutingDiagnostics>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
@@ -232,6 +234,7 @@ pub fn build_snapshot(
                     attempts_started: Some(entry.attempts_started),
                     attempts_completed: Some(entry.attempts_completed),
                     human_required: entry.human_required,
+                    routing_diagnostics: entry.routing_diagnostics.clone(),
                 });
             }
         }
@@ -347,6 +350,37 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
                 println!("  - [{}] {}", e.subsystem, e.message);
             }
         }
+
+        if let Some(ledger) = &snapshot.recent_ledger {
+            if let Some(diag) = &ledger.routing_diagnostics {
+                println!("Recent Routing:");
+                if let Some(summary) = &diag.human_summary {
+                    println!("  {}", summary);
+                }
+                for candidate in &diag.candidates {
+                    let mut line = format!(
+                        "  - {}",
+                        match &candidate.model {
+                            Some(model) => format!("{}/{}", candidate.backend, model),
+                            None => candidate.backend.clone(),
+                        }
+                    );
+                    if let Some(pool) = &candidate.quota_pool {
+                        line.push_str(&format!(" pool={pool}"));
+                    }
+                    if let Some(pace) = &candidate.pace_band {
+                        line.push_str(&format!(" pace={pace}"));
+                    }
+                    if let Some(cost_class) = &candidate.cost_class {
+                        line.push_str(&format!(" cost={cost_class}"));
+                    }
+                    if let Some(skip_reason) = &candidate.skip_reason {
+                        line.push_str(&format!(" skipped={skip_reason}"));
+                    }
+                    println!("{line}");
+                }
+            }
+        }
     }
 
     Ok(())
@@ -356,7 +390,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::availability::{AvailabilityRecord, AvailabilityState, Reason, Source, Status};
-    use crate::ledger::LedgerEntry;
+    use crate::ledger::{LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics};
     use std::fs;
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -629,6 +663,56 @@ default_target_branch = "main"
         assert_eq!(
             snap.recent_ledger.unwrap().most_recent_work_id.as_deref(),
             Some("TICKET-095")
+        );
+    }
+
+    #[test]
+    fn recent_ledger_exposes_routing_diagnostics() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_test_cfg(&tmp);
+        let ledger_path = tmp.path().join("ledger.jsonl");
+        std::env::set_var("GAH_LEDGER_PATH", &ledger_path);
+
+        let mut entry = LedgerEntry::new(
+            "test",
+            &cfg.profiles["test"],
+            "codex",
+            "fix",
+            "test",
+            None,
+            None,
+        );
+        entry.timestamp = "2026-07-04T00:00:00Z".into();
+        entry.routing_diagnostics = Some(RoutingDiagnostics {
+            policy_reordered_candidates: true,
+            selected_backend: Some("codex".into()),
+            selected_model: Some("gpt-5.4".into()),
+            selected_quota_pool: Some("codex-main".into()),
+            selected_pace_band: Some("aggressive_burn".into()),
+            selected_cost_class: Some("included_quota".into()),
+            selected_over: vec!["openhands/gpt-5.4 (paid $0.2500)".into()],
+            candidates: vec![RoutingCandidateDiagnostic {
+                backend: "codex".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: Some("codex-main".into()),
+                default_order: Some(1),
+                consideration_order: Some(0),
+                pace_band: Some("aggressive_burn".into()),
+                cost_class: Some("included_quota".into()),
+                skip_reason: None,
+                unavailable_until: None,
+            }],
+            human_summary: Some("selected codex/gpt-5.4".into()),
+        });
+        fs::write(&ledger_path, serde_json::to_string(&entry).unwrap() + "\n").unwrap();
+
+        let snap = build_snapshot(&cfg, "test", OffsetDateTime::now_utc()).unwrap();
+        let diagnostics = snap.recent_ledger.unwrap().routing_diagnostics.unwrap();
+        assert!(diagnostics.policy_reordered_candidates);
+        assert_eq!(
+            diagnostics.selected_quota_pool.as_deref(),
+            Some("codex-main")
         );
     }
 
