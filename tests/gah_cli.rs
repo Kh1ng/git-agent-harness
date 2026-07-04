@@ -2976,47 +2976,73 @@ fn status_reports_human_and_json_views() {
     .unwrap();
 
     // Write a mock ledger entry
-    let ledger_entry = serde_json::json!({
-        "timestamp": "2026-07-04T13:00:00Z",
-        "profile": "test-repo",
-        "display_name": "Test Repo",
-        "repo_id": "test-repo",
-        "repo": "owner/test-repo",
-        "local_path": "/tmp",
-        "provider": "github",
-        "backend": "claude",
-        "requested_backend": "claude",
-        "effective_backend": "claude",
-        "requested_model": null,
-        "effective_model": Some("claude-3-5"),
-        "routing_reason": "explicit",
-        "fallback_used": false,
-        "confidence_impact": null,
-        "human_required": false,
-        "mode": "improve",
-        "target_summary": null,
-        "branch": "gah/test-branch",
-        "session_dir": null,
-        "duration_seconds": null,
-        "backend_exit_code": null,
-        "validation_result": null,
-        "commit_attempted": false,
-        "commit_created": false,
-        "push_attempted": false,
-        "push_succeeded": false,
-        "mr_attempted": false,
-        "mr_created": false,
-        "mr_url": null,
-        "files_changed": null,
-        "insertions": null,
-        "deletions": null,
-        "error_summary": null,
-        "failure_class": "backend_error",
-        "failure_stage": "agent_run",
-        "attempts_started": 3,
-        "attempts_completed": 2,
-        "usage": {}
-    });
+    let ledger_entry: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-07-04T13:00:00Z",
+            "profile": "test-repo",
+            "display_name": "Test Repo",
+            "repo_id": "test-repo",
+            "repo": "owner/test-repo",
+            "local_path": "/tmp",
+            "provider": "github",
+            "backend": "claude",
+            "requested_backend": "claude",
+            "effective_backend": "claude",
+            "requested_model": null,
+            "effective_model": "claude-3-5",
+            "routing_reason": "explicit",
+            "fallback_used": false,
+            "confidence_impact": null,
+            "human_required": false,
+            "mode": "improve",
+            "target_summary": null,
+            "branch": "gah/test-branch",
+            "session_dir": null,
+            "duration_seconds": null,
+            "backend_exit_code": null,
+            "validation_result": null,
+            "commit_attempted": false,
+            "commit_created": false,
+            "push_attempted": false,
+            "push_succeeded": false,
+            "mr_attempted": false,
+            "mr_created": false,
+            "mr_url": null,
+            "files_changed": null,
+            "insertions": null,
+            "deletions": null,
+            "error_summary": null,
+            "failure_class": "backend_error",
+            "failure_stage": "agent_run",
+            "attempts_started": 3,
+            "attempts_completed": 2,
+            "routing_diagnostics": {
+                "policy_reordered_candidates": true,
+                "selected_backend": "claude",
+                "selected_model": "claude-3-5",
+                "selected_quota_pool": "claude-main",
+                "selected_pace_band": "normal",
+                "selected_cost_class": "included_quota",
+                "selected_over": ["codex/gpt-5.4 (paid $0.2500)"],
+                "candidates": [
+                    {
+                        "backend": "claude",
+                        "model": "claude-3-5",
+                        "quota_pool": "claude-main",
+                        "default_order": 1,
+                        "consideration_order": 0,
+                        "pace_band": "normal",
+                        "cost_class": "included_quota",
+                        "skip_reason": null,
+                        "unavailable_until": null
+                    }
+                ],
+                "human_summary": "selected claude/claude-3-5"
+            },
+            "usage": {}
+        }"#,
+    )
+    .unwrap();
     fs::write(
         &ledger_path,
         serde_json::to_string(&ledger_entry).unwrap() + "\n",
@@ -3060,6 +3086,10 @@ fn status_reports_human_and_json_views() {
     assert_eq!(ledger["most_recent_failure_stage"], "agent_run");
     assert_eq!(ledger["attempts_started"], 3);
     assert_eq!(ledger["attempts_completed"], 2);
+    assert_eq!(
+        ledger["routing_diagnostics"]["selected_quota_pool"],
+        "claude-main"
+    );
 
     bin()
         .current_dir(&root)
@@ -3075,7 +3105,9 @@ fn status_reports_human_and_json_views() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Status for Profile: test-repo"))
-        .stdout(predicate::str::contains("Observations: Sync="));
+        .stdout(predicate::str::contains("Observations: Sync="))
+        .stdout(predicate::str::contains("Recent Routing:"))
+        .stdout(predicate::str::contains("selected claude/claude-3-5"));
 }
 
 #[test]

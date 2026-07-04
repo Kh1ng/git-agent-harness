@@ -1,6 +1,6 @@
 use crate::availability::{self, AvailabilityDecision, BlockScope};
 use crate::config::{Defaults, Profile, RoutingPolicy};
-use crate::ledger::BackendUsageSummary;
+use crate::ledger::{BackendUsageSummary, RoutingCandidateDiagnostic, RoutingDiagnostics};
 use crate::quota::{self, PaceBand};
 use crate::runner;
 use anyhow::Result;
@@ -33,6 +33,7 @@ pub struct RouteDecision {
     pub fallback_used: bool,
     pub confidence_impact: Option<String>,
     pub human_required: bool,
+    pub routing_diagnostics: Option<RoutingDiagnostics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +155,7 @@ where
     if let Some(candidates) = candidates {
         let (candidates, reorder) = order_candidates(profile, candidates);
         let preferred = candidates.first().cloned().expect("non-empty list");
+        let candidates_for_diagnostics = candidates.clone();
         let (selected, skipped) =
             pick_route_candidate(candidates, state_path, now, backend_available)?;
 
@@ -184,16 +186,24 @@ where
             }
         }
 
+        let routing_diagnostics = Some(build_routing_diagnostics(
+            &candidates_for_diagnostics,
+            &selected,
+            &skipped,
+            reorder.as_ref(),
+            &profile.pacing,
+        ));
         return Ok(RouteDecision {
             requested_backend,
-            effective_backend: selected.backend,
+            effective_backend: selected.backend.clone(),
             requested_model,
-            effective_model: selected.model,
-            effective_quota_pool: selected.quota_pool,
+            effective_model: selected.model.clone(),
+            effective_quota_pool: selected.quota_pool.clone(),
             routing_reason: reason,
             fallback_used,
             confidence_impact,
             human_required,
+            routing_diagnostics,
         });
     }
 
@@ -284,12 +294,9 @@ where
         quota_days_remaining: None,
         original_order: 0,
     };
-    let (selected, skipped) = pick_route_candidate(
-        auto_candidates(defaults, profile, req.mode, &primary),
-        state_path,
-        now,
-        backend_available,
-    )?;
+    let candidates = auto_candidates(defaults, profile, req.mode, &primary);
+    let candidates_for_diagnostics = candidates.clone();
+    let (selected, skipped) = pick_route_candidate(candidates, state_path, now, backend_available)?;
 
     if selected.backend != primary.backend || selected.model != primary.model {
         fallback_used = true;
@@ -301,16 +308,24 @@ where
         }
     }
 
+    let routing_diagnostics = Some(build_routing_diagnostics(
+        &candidates_for_diagnostics,
+        &selected,
+        &skipped,
+        None,
+        &profile.pacing,
+    ));
     Ok(RouteDecision {
         requested_backend,
-        effective_backend: selected.backend,
+        effective_backend: selected.backend.clone(),
         requested_model,
-        effective_model: selected.model,
-        effective_quota_pool: selected.quota_pool,
+        effective_model: selected.model.clone(),
+        effective_quota_pool: selected.quota_pool.clone(),
         routing_reason: reason,
         fallback_used,
         confidence_impact,
         human_required,
+        routing_diagnostics,
     })
 }
 
@@ -362,9 +377,17 @@ where
         allow_impl_fallback,
         backend_available,
     );
+    let candidates_for_diagnostics = candidates.clone();
     let (selected, skipped) = pick_route_candidate(candidates, state_path, now, backend_available)?;
 
     if selected.backend == primary.backend && selected.model == primary.model {
+        let routing_diagnostics = Some(build_routing_diagnostics(
+            &candidates_for_diagnostics,
+            &selected,
+            &skipped,
+            None,
+            &profile.pacing,
+        ));
         return Ok(RouteDecision {
             requested_backend: requested_backend.clone(),
             effective_backend: requested_backend,
@@ -375,6 +398,7 @@ where
             fallback_used: false,
             confidence_impact: None,
             human_required: false,
+            routing_diagnostics,
         });
     }
 
@@ -390,12 +414,19 @@ where
         req.mode == "review",
     );
 
+    let routing_diagnostics = Some(build_routing_diagnostics(
+        &candidates_for_diagnostics,
+        &selected,
+        &skipped,
+        None,
+        &profile.pacing,
+    ));
     Ok(RouteDecision {
         requested_backend,
-        effective_backend: selected.backend,
+        effective_backend: selected.backend.clone(),
         requested_model: requested_model.clone(),
-        effective_model: selected.model,
-        effective_quota_pool: selected.quota_pool,
+        effective_model: selected.model.clone(),
+        effective_quota_pool: selected.quota_pool.clone(),
         routing_reason,
         fallback_used: true,
         confidence_impact: if req.mode == "review" {
@@ -404,6 +435,7 @@ where
             Some("medium".into())
         },
         human_required: req.mode == "review",
+        routing_diagnostics,
     })
 }
 
@@ -799,6 +831,110 @@ fn describe_candidate(candidate: &RouteCandidate, pacing: &crate::quota::PacingC
         label
     } else {
         format!("{label} ({})", details.join(", "))
+    }
+}
+
+fn build_routing_diagnostics(
+    candidates: &[RouteCandidate],
+    selected: &RouteCandidate,
+    skipped: &[SkippedBackend],
+    reorder: Option<&ReorderDecision>,
+    pacing: &crate::quota::PacingConfig,
+) -> RoutingDiagnostics {
+    let candidates = candidates
+        .iter()
+        .enumerate()
+        .map(|(consideration_order, candidate)| {
+            let skipped = skipped
+                .iter()
+                .find(|skip| skip.backend == candidate.backend && skip.model == candidate.model);
+            RoutingCandidateDiagnostic {
+                backend: candidate.backend.clone(),
+                model: candidate.model.clone(),
+                quota_pool: candidate.quota_pool.clone(),
+                default_order: Some(candidate.original_order),
+                consideration_order: Some(consideration_order),
+                pace_band: candidate_pace_band(candidate, pacing),
+                cost_class: Some(candidate_cost_class(candidate)),
+                skip_reason: skipped.map(|skip| skip.reason.clone()),
+                unavailable_until: skipped.and_then(|skip| skip.unavailable_until.clone()),
+            }
+        })
+        .collect();
+
+    RoutingDiagnostics {
+        policy_reordered_candidates: reorder.is_some(),
+        selected_backend: Some(selected.backend.clone()),
+        selected_model: selected.model.clone(),
+        selected_quota_pool: selected.quota_pool.clone(),
+        selected_pace_band: candidate_pace_band(selected, pacing),
+        selected_cost_class: Some(candidate_cost_class(selected)),
+        selected_over: reorder.map(|r| r.selected_over.clone()).unwrap_or_default(),
+        human_summary: Some(render_routing_diagnostics_human(
+            selected, skipped, reorder, pacing,
+        )),
+        candidates,
+    }
+}
+
+fn render_routing_diagnostics_human(
+    selected: &RouteCandidate,
+    skipped: &[SkippedBackend],
+    reorder: Option<&ReorderDecision>,
+    pacing: &crate::quota::PacingConfig,
+) -> String {
+    let mut parts = vec![format!("selected {}", describe_candidate(selected, pacing))];
+    if let Some(pool) = &selected.quota_pool {
+        parts.push(format!("quota pool {}", pool));
+    }
+    if let Some(band) = candidate_pace_band(selected, pacing) {
+        parts.push(format!("pace {}", band));
+    }
+    parts.push(format!("cost {}", candidate_cost_class(selected)));
+    if let Some(reorder) = reorder.filter(|r| !r.selected_over.is_empty()) {
+        parts.push(format!(
+            "policy reordered defaults over {}",
+            reorder.selected_over.join(", ")
+        ));
+    }
+    if !skipped.is_empty() {
+        parts.push(format!("skipped {}", render_skips(skipped)));
+    }
+    parts.join("; ")
+}
+
+fn candidate_pace_band(
+    candidate: &RouteCandidate,
+    pacing: &crate::quota::PacingConfig,
+) -> Option<String> {
+    if !candidate.included_in_quota {
+        return None;
+    }
+    Some(
+        match quota::quota_pace(
+            candidate.quota_usage_percent,
+            candidate.quota_days_remaining,
+            pacing,
+        )
+        .unwrap_or(PaceBand::Normal)
+        {
+            PaceBand::AggressiveBurn => "aggressive_burn",
+            PaceBand::MildBurn => "mild_burn",
+            PaceBand::Normal => "normal",
+            PaceBand::Conserve => "conserve",
+            PaceBand::HardConserve => "hard_conserve",
+        }
+        .to_string(),
+    )
+}
+
+fn candidate_cost_class(candidate: &RouteCandidate) -> String {
+    if candidate.included_in_quota {
+        "included_quota".into()
+    } else if candidate.marginal_cost_usd.unwrap_or(0.0) > 0.0 {
+        "paid".into()
+    } else {
+        "standard".into()
     }
 }
 
@@ -1643,6 +1779,16 @@ mod tests {
         assert!(decision
             .routing_reason
             .contains("codex/gpt-4: model-specific rate_limited"));
+        let diagnostics = decision.routing_diagnostics.as_ref().unwrap();
+        assert!(!diagnostics.policy_reordered_candidates);
+        assert_eq!(diagnostics.candidates.len(), 2);
+        assert_eq!(diagnostics.candidates[0].backend, "codex");
+        assert_eq!(
+            diagnostics.candidates[0].skip_reason.as_deref(),
+            Some("model-specific rate_limited")
+        );
+        assert_eq!(diagnostics.candidates[1].backend, "claude");
+        assert_eq!(diagnostics.selected_backend.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -1879,6 +2025,26 @@ mod tests {
         assert!(!decision.fallback_used);
         assert!(decision.routing_reason.contains("cost-aware reorder"));
         assert!(decision.routing_reason.contains("openhands/gpt-5.4"));
+        let diagnostics = decision.routing_diagnostics.as_ref().unwrap();
+        assert!(diagnostics.policy_reordered_candidates);
+        assert_eq!(
+            diagnostics.selected_quota_pool.as_deref(),
+            Some("codex-main")
+        );
+        assert_eq!(
+            diagnostics.selected_pace_band.as_deref(),
+            Some("aggressive_burn")
+        );
+        assert_eq!(
+            diagnostics.selected_cost_class.as_deref(),
+            Some("included_quota")
+        );
+        assert_eq!(diagnostics.selected_over.len(), 1);
+        assert!(diagnostics
+            .human_summary
+            .as_deref()
+            .unwrap()
+            .contains("policy reordered defaults"));
     }
 
     #[test]

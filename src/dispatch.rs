@@ -2129,6 +2129,7 @@ mod tests {
             fallback_used: false,
             confidence_impact: None,
             human_required: false,
+            routing_diagnostics: None,
         };
 
         apply_route_to_ledger(&mut entry, &route);
@@ -2163,6 +2164,7 @@ mod tests {
             fallback_used: false,
             confidence_impact: None,
             human_required: false,
+            routing_diagnostics: None,
         };
 
         apply_route_to_ledger(&mut entry, &route);
@@ -3525,6 +3527,7 @@ fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecision) {
     ledger.fallback_used = route.fallback_used;
     ledger.confidence_impact = route.confidence_impact.clone();
     ledger.human_required = route.human_required;
+    ledger.routing_diagnostics = route.routing_diagnostics.clone();
 }
 
 fn decide_route(

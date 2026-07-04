@@ -115,6 +115,49 @@ pub struct LedgerUsage {
     pub quota_reset_at: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
+pub struct RoutingDiagnostics {
+    #[serde(default)]
+    pub policy_reordered_candidates: bool,
+    #[serde(default)]
+    pub selected_backend: Option<String>,
+    #[serde(default)]
+    pub selected_model: Option<String>,
+    #[serde(default)]
+    pub selected_quota_pool: Option<String>,
+    #[serde(default)]
+    pub selected_pace_band: Option<String>,
+    #[serde(default)]
+    pub selected_cost_class: Option<String>,
+    #[serde(default)]
+    pub selected_over: Vec<String>,
+    #[serde(default)]
+    pub candidates: Vec<RoutingCandidateDiagnostic>,
+    #[serde(default)]
+    pub human_summary: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
+pub struct RoutingCandidateDiagnostic {
+    pub backend: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub quota_pool: Option<String>,
+    #[serde(default)]
+    pub default_order: Option<usize>,
+    #[serde(default)]
+    pub consideration_order: Option<usize>,
+    #[serde(default)]
+    pub pace_band: Option<String>,
+    #[serde(default)]
+    pub cost_class: Option<String>,
+    #[serde(default)]
+    pub skip_reason: Option<String>,
+    #[serde(default)]
+    pub unavailable_until: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LedgerEntry {
     pub timestamp: String,
@@ -134,6 +177,8 @@ pub struct LedgerEntry {
     pub fallback_used: bool,
     pub confidence_impact: Option<String>,
     pub human_required: bool,
+    #[serde(default)]
+    pub routing_diagnostics: Option<RoutingDiagnostics>,
     pub mode: String,
     pub target_summary: Option<String>,
     #[serde(default)]
@@ -206,6 +251,7 @@ impl LedgerEntry {
             fallback_used: false,
             confidence_impact: None,
             human_required: false,
+            routing_diagnostics: None,
             mode: mode.to_string(),
             target_summary: summarize_target(target),
             work_id: None,
@@ -539,7 +585,8 @@ pub fn usage_summary_for_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        append, is_strong_model, usage_summary_for_backend, FailureClass, FailureStage, LedgerEntry,
+        append, is_strong_model, usage_summary_for_backend, FailureClass, FailureStage,
+        LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
@@ -624,6 +671,43 @@ mod tests {
         assert!(text.ends_with('\n'));
     }
 
+    #[test]
+    fn routing_diagnostics_round_trip_through_json() {
+        let mut entry = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
+        entry.routing_diagnostics = Some(RoutingDiagnostics {
+            policy_reordered_candidates: true,
+            selected_backend: Some("codex".into()),
+            selected_model: Some("gpt-5.4".into()),
+            selected_quota_pool: Some("codex-main".into()),
+            selected_pace_band: Some("aggressive_burn".into()),
+            selected_cost_class: Some("included_quota".into()),
+            selected_over: vec!["openhands/gpt-5.4 (paid $0.2500)".into()],
+            candidates: vec![RoutingCandidateDiagnostic {
+                backend: "codex".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: Some("codex-main".into()),
+                default_order: Some(1),
+                consideration_order: Some(0),
+                pace_band: Some("aggressive_burn".into()),
+                cost_class: Some("included_quota".into()),
+                skip_reason: None,
+                unavailable_until: None,
+            }],
+            human_summary: Some("selected codex/gpt-5.4".into()),
+        });
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed
+                .routing_diagnostics
+                .as_ref()
+                .unwrap()
+                .selected_backend
+                .as_deref(),
+            Some("codex")
+        );
+    }
+
     // ── TICKET-063: structured failure_class / failure_stage ───────────────
 
     #[test]
@@ -666,6 +750,7 @@ mod tests {
         let parsed: LedgerEntry = serde_json::from_str(old_line).unwrap();
         assert_eq!(parsed.failure_class, None);
         assert_eq!(parsed.failure_stage, None);
+        assert_eq!(parsed.routing_diagnostics, None);
         assert_eq!(parsed.work_id, None);
         assert_eq!(parsed.work_title, None);
         assert_eq!(parsed.profile, "real");
