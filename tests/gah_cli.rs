@@ -1872,7 +1872,7 @@ fn fix_mode_uses_ticket_title_in_mr_title() {
     fs::create_dir_all(ticket.parent().unwrap()).unwrap();
     fs::write(
         &ticket,
-        "# TICKET-058: Descriptive Title Here\n\nDifficulty: easy\nRisk: low\n",
+        "# TICKET-058: Descriptive Title Here\n\nGoal: Generate a descriptive MR body\nDifficulty: easy\nRisk: low\n\n## Problem\n\nThe old MR body is too sparse.\n",
     )
     .unwrap();
 
@@ -1920,8 +1920,14 @@ fn fix_mode_uses_ticket_title_in_mr_title() {
 
     let gh_log = fs::read_to_string(gh_log).unwrap();
     assert!(gh_log.contains("--title Draft: [GAH] Fix: TICKET-058 Descriptive Title Here"));
-    assert!(gh_log.contains("Backend/model: `codex` / `local/test`"));
-    assert!(gh_log.contains("Ticket: TICKET-058 Descriptive Title Here"));
+    assert!(gh_log.contains("## Work Item"));
+    assert!(gh_log.contains("ID: `TICKET-058`"));
+    assert!(gh_log.contains("## Problem"));
+    assert!(gh_log.contains("The old MR body is too sparse."));
+    assert!(gh_log.contains("## Goal"));
+    assert!(gh_log.contains("Generate a descriptive MR body"));
+    assert!(gh_log.contains("## Validation"));
+    assert!(gh_log.contains("## Backend / Model"));
 }
 
 /// Sets up a real local repo pushed to a bare "origin.git" that GitHub-style
