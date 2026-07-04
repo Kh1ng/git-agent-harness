@@ -1315,6 +1315,86 @@ fn dispatch_pm_quota_failure_updates_availability_and_reroutes() {
 }
 
 #[test]
+fn dispatch_pm_agy_quota_failure_updates_availability_and_reroutes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\npm_candidates = [{ backend = \"agy-main\" }, { backend = \"agy-second\" }]\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+
+    make_fake_bin_with_body(&fake_bin, "gh", "#!/bin/sh\nexit 0\n");
+
+    make_fake_bin_with_body(&fake_bin, "agy-main", "#!/bin/sh\nexit 0\n");
+
+    make_fake_bin_with_body(
+        &fake_bin,
+        "agy-second",
+        "#!/bin/sh\necho '{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Fallback ticket\",\"summary\":\"Handled by reroute\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"claude\",\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"test -d docs/tickets\"],\"uncovered_reason\":\"No duplicate work found.\"}]}'\nexit 0\n",
+    );
+
+    let agy_home = tmp.path().join("mock-home");
+    let agy_log_dir = agy_home.join(".gemini/antigravity-cli");
+    fs::create_dir_all(&agy_log_dir).unwrap();
+    fs::write(
+        agy_log_dir.join("cli.log"),
+        "RESOURCE_EXHAUSTED (code 429): quota. Resets in 10m.\n",
+    )
+    .unwrap();
+
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let availability_path = tmp.path().join("availability.json");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--target",
+            "Plan fallback work",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", path)
+        .env("HOME", &agy_home)
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "PM rerouting: agy-main -> agy-second",
+        ));
+
+    let availability: Value =
+        serde_json::from_str(&fs::read_to_string(&availability_path).unwrap()).unwrap();
+    let records = availability["records"].as_array().unwrap();
+    assert!(!records.is_empty());
+    assert_eq!(records[0]["backend"], "agy-main");
+    assert_eq!(records[0]["reason"], "quota_exhausted");
+
+    let ledger = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(ledger.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["effective_backend"], "agy-second");
+    assert_eq!(entry["fallback_used"], true);
+}
+
+#[test]
 fn ledger_summary_reports_recent_counts() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = tmp.path().join("gah.toml");

@@ -18,3 +18,6 @@ Captured into this repo: 2026-07-04.
 | `claude_generic_rate_limit.json` | github.com/anthropics/claude-code issues #41583, #33840 | Structured event; generic "Rate limit reached" with no reset information. Reports in these issues indicate this can be client-side/session-related rather than account quota exhaustion — treated conservatively (low confidence) by the parser. |
 | `claude_generic_rate_limit_zero_tokens.json` | github.com/anthropics/claude-code issues #41583, #33840 | Same family as above; some captured examples report zero input/output tokens alongside the error. |
 | `claude_transient_throttle.json` | github.com/anthropics/claude-code issue #64030 | Explicit server-side throttling, explicitly NOT account usage-limit exhaustion. |
+| `agy_resource_exhausted.txt` | Local antigravity-cli cli.log | AGY quota exhausted message with reset info. |
+| `agy_auth_failure.txt` | Local antigravity-cli cli.log | AGY auth failure message. |
+

@@ -356,40 +356,57 @@ pub fn run_agy_with_executable(
     // auth has expired.  Treat empty output at exit 0 as a failure and
     // try to classify the real cause from AGY's own log.
     if trimmed.is_empty() && exit_code == 0 {
-        let agy_home = env_vars
-            .iter()
-            .find(|(k, _)| k == "HOME")
-            .map(|(_, v)| v.as_str())
-            .map(|h| h.to_string())
-            .or_else(|| std::env::var("HOME").ok());
-        if let Some(ref home) = agy_home {
-            let agy_log = PathBuf::from(home).join(".gemini/antigravity-cli/cli.log");
-            if let Ok(contents) = fs::read_to_string(&agy_log) {
-                if contents.contains("RESOURCE_EXHAUSTED") || contents.contains("429") {
-                    anyhow::bail!(
-                        "AGY quota exhausted (exit=0 empty output).  See {}.  Resets ~{}.",
+        let err_msg = {
+            let agy_home = env_vars
+                .iter()
+                .find(|(k, _)| k == "HOME")
+                .map(|(_, v)| v.as_str())
+                .map(|h| h.to_string())
+                .or_else(|| std::env::var("HOME").ok());
+            if let Some(ref home) = agy_home {
+                let agy_log = PathBuf::from(home).join(".gemini/antigravity-cli/cli.log");
+                if let Ok(contents) = fs::read_to_string(&agy_log) {
+                    if contents.contains("RESOURCE_EXHAUSTED") || contents.contains("429") {
+                        format!(
+                            "AGY quota exhausted (exit=0 empty output).  See {}.  Resets ~{}.",
+                            agy_log.display(),
+                            extract_reset_time(&contents).unwrap_or_else(|| "unknown".into()),
+                        )
+                    } else if contents.contains("not logged into Antigravity")
+                        || contents.contains("not logged in")
+                    {
+                        format!(
+                            "AGY not authenticated.  Run `{}` interactively to log in.",
+                            executable.display(),
+                        )
+                    } else {
+                        format!(
+                            "AGY produced no output (exit=0).  Check {} for details.",
+                            agy_log.display(),
+                        )
+                    }
+                } else {
+                    format!(
+                        "AGY produced no output (exit=0).  Check {} for details.",
                         agy_log.display(),
-                        extract_reset_time(&contents).unwrap_or_else(|| "unknown".into()),
-                    );
+                    )
                 }
-                if contents.contains("not logged into Antigravity")
-                    || contents.contains("not logged in")
-                {
-                    anyhow::bail!(
-                        "AGY not authenticated.  Run `{}` interactively to log in.",
-                        executable.display(),
-                    );
-                }
+            } else {
+                "AGY produced no output (exit=0) and HOME is unset — cannot inspect cli.log."
+                    .to_string()
             }
-            anyhow::bail!(
-                "AGY produced no output (exit=0).  Check {} for details.",
-                agy_log.display(),
-            );
-        } else {
-            anyhow::bail!(
-                "AGY produced no output (exit=0) and HOME is unset — cannot inspect cli.log.",
-            );
+        };
+
+        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", err_msg);
         }
+
+        return Ok(RunResult {
+            exit_code: -1,
+            duration_secs: duration.as_secs_f64(),
+            log_path: log_path.to_string_lossy().into_owned(),
+        });
     }
 
     Ok(RunResult {
@@ -1325,7 +1342,7 @@ mod tests {
             ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
             ("HOME".to_string(), agy_home.to_string_lossy().to_string()),
         ];
-        let err = run_agy_with_executable(
+        let result = run_agy_with_executable(
             &f.bin_dir.join("agy"),
             &f.worktree,
             "task",
@@ -1337,9 +1354,10 @@ mod tests {
             },
             &envs,
         )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("quota exhausted"), "got: {msg}");
+        .unwrap();
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("quota exhausted"), "got: {log}");
     }
 
     #[test]
@@ -1359,7 +1377,7 @@ mod tests {
             ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
             ("HOME".to_string(), agy_home.to_string_lossy().to_string()),
         ];
-        let err = run_agy_with_executable(
+        let result = run_agy_with_executable(
             &f.bin_dir.join("agy"),
             &f.worktree,
             "task",
@@ -1371,9 +1389,10 @@ mod tests {
             },
             &envs,
         )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("not authenticated"), "got: {msg}");
+        .unwrap();
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("not authenticated"), "got: {log}");
     }
 
     #[test]

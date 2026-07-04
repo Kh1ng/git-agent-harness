@@ -29,6 +29,9 @@ pub enum FailureKind {
     /// unspecified "rate limit" with no indication it's account-level
     /// exhaustion). Worth retrying after a short cooldown.
     RateLimited,
+    /// Authentication failure or credential error. Not worth retrying
+    /// unless the user runs an interactive login command.
+    AuthenticationError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -219,11 +222,130 @@ fn extract_reset(text: &str, now: OffsetDateTime) -> (Option<String>, Option<Str
     (None, None)
 }
 
+fn agy_auth_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:not logged into Antigravity|not logged in|AGY not authenticated|AuthenticationError)").unwrap()
+    })
+}
+
+fn agy_quota_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:RESOURCE_EXHAUSTED|Individual quota reached|AGY quota exhausted)")
+            .unwrap()
+    })
+}
+
+fn agy_contextual_429_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\b(?:code|http|status)\s+429\b").unwrap())
+}
+
+fn find_reset_duration(text: &str) -> Option<u64> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"(?i)resets\s*(?:in|~)\s*([a-z0-9]+)").unwrap());
+    if let Some(caps) = re.captures(text) {
+        parse_duration_to_seconds(&caps[1])
+    } else {
+        None
+    }
+}
+
+fn parse_duration_to_seconds(s: &str) -> Option<u64> {
+    let mut total_secs = 0u64;
+    let mut current_num = 0u64;
+    let mut has_digit = false;
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            if let Some(digit) = c.to_digit(10) {
+                if let Some(mul) = current_num.checked_mul(10) {
+                    if let Some(add) = mul.checked_add(digit as u64) {
+                        current_num = add;
+                        has_digit = true;
+                    }
+                }
+            }
+        } else {
+            match c.to_ascii_lowercase() {
+                'h' => {
+                    if let Some(mul) = current_num.checked_mul(3600) {
+                        if let Some(add) = total_secs.checked_add(mul) {
+                            total_secs = add;
+                        }
+                    }
+                    current_num = 0;
+                    has_digit = false;
+                }
+                'm' => {
+                    if let Some(mul) = current_num.checked_mul(60) {
+                        if let Some(add) = total_secs.checked_add(mul) {
+                            total_secs = add;
+                        }
+                    }
+                    current_num = 0;
+                    has_digit = false;
+                }
+                's' => {
+                    if let Some(add) = total_secs.checked_add(current_num) {
+                        total_secs = add;
+                    }
+                    current_num = 0;
+                    has_digit = false;
+                }
+                _ => {}
+            }
+        }
+    }
+    if has_digit {
+        if let Some(add) = total_secs.checked_add(current_num) {
+            total_secs = add;
+        }
+    }
+    if total_secs > 0 {
+        Some(total_secs)
+    } else {
+        None
+    }
+}
+
 /// Parse a single backend failure message. Returns `None` when nothing
 /// recognizable as quota exhaustion or rate limiting is present — callers
 /// must be able to tell "we saw this and don't know what it is" apart from
 /// "we're confident this isn't a quota/rate-limit failure at all".
 pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFailure> {
+    if backend.starts_with("agy") {
+        if let Some(m) = agy_auth_re().find(text) {
+            return Some(ParsedFailure {
+                backend: backend.to_string(),
+                kind: FailureKind::AuthenticationError,
+                retryable: false,
+                reset_at: None,
+                retry_after_seconds: None,
+                confidence: Confidence::High,
+                matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+                unresolved_timezone: None,
+            });
+        }
+
+        if let Some(m) = agy_quota_re()
+            .find(text)
+            .or_else(|| agy_contextual_429_re().find(text))
+        {
+            let retry_after_seconds = find_reset_duration(text);
+            return Some(ParsedFailure {
+                backend: backend.to_string(),
+                kind: FailureKind::QuotaExhausted,
+                retryable: false,
+                reset_at: None,
+                retry_after_seconds,
+                confidence: Confidence::High,
+                matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+                unresolved_timezone: None,
+            });
+        }
+    }
+
     // Highest precedence: an explicit "not your usage limit" disclaimer
     // must never be classified as quota exhaustion, even though the phrase
     // itself contains the substring "usage limit".
@@ -326,6 +448,10 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/claude_generic_rate_limit_zero_tokens.json");
     const CLAUDE_TRANSIENT_THROTTLE: &str =
         include_str!("../tests/fixtures/quota-logs/claude_transient_throttle.json");
+    const AGY_RESOURCE_EXHAUSTED: &str =
+        include_str!("../tests/fixtures/quota-logs/agy_resource_exhausted.txt");
+    const AGY_AUTH_FAILURE: &str =
+        include_str!("../tests/fixtures/quota-logs/agy_auth_failure.txt");
 
     // ── Codex: full date+time, no timezone (openai/codex #12299) ───────────
 
@@ -489,6 +615,49 @@ mod tests {
     }
 
     #[test]
+    fn agy_resource_exhausted_classifies_as_quota_exhaustion() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("agy-main", AGY_RESOURCE_EXHAUSTED, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+        assert!(!parsed.retryable);
+        assert_eq!(parsed.retry_after_seconds, Some(1004));
+        assert_eq!(parsed.confidence, Confidence::High);
+    }
+
+    #[test]
+    fn agy_contextual_429_classifies_as_quota_exhaustion() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let log = "API request failed with code 429.";
+        let parsed = parse("agy-second", log, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+        assert!(!parsed.retryable);
+        assert_eq!(parsed.retry_after_seconds, None);
+    }
+
+    #[test]
+    fn agy_individual_quota_classifies_as_quota_exhaustion() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let log = "Individual quota reached.";
+        let parsed = parse("agy", log, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+    }
+
+    #[test]
+    fn agy_auth_failure_classifies_as_auth_failure() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("agy-main", AGY_AUTH_FAILURE, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::AuthenticationError);
+        assert!(!parsed.retryable);
+    }
+
+    #[test]
+    fn agy_naked_429_does_not_match() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let log = "We have 429 items in the inventory.";
+        assert!(parse("agy", log, now).is_none());
+    }
+
+    #[test]
     fn evidence_is_preserved_and_nonempty_for_every_match() {
         let now = utc(2026, Month::January, 1, 0, 0);
         for fixture in [
@@ -501,6 +670,10 @@ mod tests {
             CLAUDE_TRANSIENT_THROTTLE,
         ] {
             let parsed = parse("test", fixture, now).unwrap();
+            assert!(!parsed.matched_evidence.trim().is_empty());
+        }
+        for fixture in [AGY_RESOURCE_EXHAUSTED, AGY_AUTH_FAILURE] {
+            let parsed = parse("agy", fixture, now).unwrap();
             assert!(!parsed.matched_evidence.trim().is_empty());
         }
     }
