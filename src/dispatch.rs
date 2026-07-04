@@ -5,11 +5,14 @@ use crate::models::{PmPlan, PmPlanTicket};
 use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 pub struct DispatchArgs {
     pub profile: String,
@@ -350,27 +353,23 @@ fn improve(
         ),
     )
     .ok();
-    let route = decide_route(
-        cfg,
-        profile,
-        RouteRequest {
-            mode: &args.mode,
-            requested_backend: &args.backend,
-            requested_model: args.model.as_deref(),
-            recommended_backend: ticket_meta
-                .as_ref()
-                .and_then(|m| m.recommended_backend.as_deref()),
-            recommended_model: ticket_meta
-                .as_ref()
-                .and_then(|m| m.recommended_model.as_deref()),
-            session_id: session_dir.file_name().and_then(|s| s.to_str()),
-            usage_summary,
-        },
-        ledger,
-    )?;
+    let route_req = RouteRequest {
+        mode: &args.mode,
+        requested_backend: &args.backend,
+        requested_model: args.model.as_deref(),
+        recommended_backend: ticket_meta
+            .as_ref()
+            .and_then(|m| m.recommended_backend.as_deref()),
+        recommended_model: ticket_meta
+            .as_ref()
+            .and_then(|m| m.recommended_model.as_deref()),
+        session_id: session_dir.file_name().and_then(|s| s.to_str()),
+        usage_summary,
+    };
+    let mut route = decide_route(cfg, profile, route_req.clone(), ledger)?;
     apply_route_to_ledger(ledger, &route);
     preflight(&route.effective_backend)?;
-    let llm = resolve_llm(
+    let mut llm = resolve_llm(
         cfg,
         args,
         profile.oh_profile.as_deref(),
@@ -520,6 +519,39 @@ fn improve(
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
             });
+            let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+            if attempt + 1 < max_attempts {
+                if let Some(parsed) = mark_backend_unavailable_from_output(
+                    &route.effective_backend,
+                    route.effective_model.as_deref(),
+                    &log_text,
+                    &result.log_path,
+                )? {
+                    let rerouted = decide_route(cfg, profile, route_req.clone(), ledger)?;
+                    let current_identity =
+                        route_identity(&route.effective_backend, route.effective_model.as_deref());
+                    let rerouted_identity = route_identity(
+                        &rerouted.effective_backend,
+                        rerouted.effective_model.as_deref(),
+                    );
+                    if rerouted_identity != current_identity {
+                        println!(
+                            "Backend unavailable; retrying next attempt with {} instead of {} ({:?})",
+                            rerouted.effective_backend, route.effective_backend, parsed.kind
+                        );
+                        route = rerouted;
+                        apply_route_to_ledger(ledger, &route);
+                        preflight(&route.effective_backend)?;
+                        llm = resolve_llm(
+                            cfg,
+                            args,
+                            profile.oh_profile.as_deref(),
+                            route.effective_model.as_deref(),
+                        )?;
+                        continue;
+                    }
+                }
+            }
             worktree::cleanup(&wt, repo);
             anyhow::bail!(
                 "backend exited {} on attempt {}",
@@ -1085,23 +1117,19 @@ fn pm(
 
     // With a target: dispatch an LLM to produce a structured ticket plan.
     let preflight_ctx = collect_pm_preflight(profile, repo)?;
-    let plan_route = decide_route(
-        cfg,
-        profile,
-        RouteRequest {
-            mode: "pm",
-            requested_backend: &args.backend,
-            requested_model: args.model.as_deref(),
-            recommended_backend: None,
-            recommended_model: None,
-            session_id: session_dir.file_name().and_then(|s| s.to_str()),
-            usage_summary: None,
-        },
-        ledger,
-    )?;
+    let route_req = RouteRequest {
+        mode: "pm",
+        requested_backend: &args.backend,
+        requested_model: args.model.as_deref(),
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: session_dir.file_name().and_then(|s| s.to_str()),
+        usage_summary: None,
+    };
+    let mut plan_route = decide_route(cfg, profile, route_req.clone(), ledger)?;
     apply_route_to_ledger(ledger, &plan_route);
     preflight(&plan_route.effective_backend)?;
-    let llm = resolve_llm(
+    let mut llm = resolve_llm(
         cfg,
         args,
         profile.oh_profile.as_deref(),
@@ -1123,28 +1151,84 @@ fn pm(
 
     let task = build_pm_plan_task(profile, &preflight_ctx, &args.target)?;
 
-    let attempt_dir = session_dir.join("pm-run");
-    fs::create_dir_all(&attempt_dir)?;
-    fs::write(attempt_dir.join("task.md"), &task)?;
+    let mut attempted_routes = HashSet::new();
+    let log_text = loop {
+        let attempt_index = attempted_routes.len() + 1;
+        let attempt_dir = session_dir.join(format!("pm-run-{attempt_index}"));
+        fs::create_dir_all(&attempt_dir)?;
+        fs::write(attempt_dir.join("task.md"), &task)?;
 
-    // Run in the live repo (PM only creates docs — no code changes, low risk)
-    let result = run_backend(
-        &plan_route.effective_backend,
-        profile,
-        repo,
-        &task,
-        &attempt_dir,
-        &llm,
-        None,
-    )?;
-    println!(
-        "PM backend finished: exit={} duration={:.0}s log={}",
-        result.exit_code, result.duration_secs, result.log_path
-    );
-    ledger.backend_exit_code = Some(result.exit_code);
-    ledger.validation_result = Some("not_run".into());
+        let result = run_backend(
+            &plan_route.effective_backend,
+            profile,
+            repo,
+            &task,
+            &attempt_dir,
+            &llm,
+            None,
+        )?;
+        println!(
+            "PM backend finished: exit={} duration={:.0}s log={}",
+            result.exit_code, result.duration_secs, result.log_path
+        );
+        ledger.backend_exit_code = Some(result.exit_code);
+        ledger.validation_result = Some("not_run".into());
 
-    let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+        let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+        if result.exit_code == 0 {
+            break log_text;
+        }
+
+        ledger.set_failure(
+            crate::ledger::FailureClass::BackendError,
+            crate::ledger::FailureStage::AgentRun,
+        );
+        let route_key = route_identity(
+            &plan_route.effective_backend,
+            plan_route.effective_model.as_deref(),
+        );
+        attempted_routes.insert(route_key);
+        let parsed = mark_backend_unavailable_from_output(
+            &plan_route.effective_backend,
+            plan_route.effective_model.as_deref(),
+            &log_text,
+            &result.log_path,
+        )?;
+        let Some(parsed) = parsed else {
+            anyhow::bail!(
+                "PM backend exited {} with no recognized quota/rate-limit signal in {}",
+                result.exit_code,
+                result.log_path
+            );
+        };
+
+        let rerouted = decide_route(cfg, profile, route_req.clone(), ledger)?;
+        let rerouted_key = route_identity(
+            &rerouted.effective_backend,
+            rerouted.effective_model.as_deref(),
+        );
+        if attempted_routes.contains(&rerouted_key) {
+            anyhow::bail!(
+                "PM backend {} became unavailable ({:?}) and no new eligible backend remained",
+                plan_route.effective_backend,
+                parsed.kind
+            );
+        }
+        println!(
+            "PM rerouting: {} -> {} ({:?})",
+            plan_route.effective_backend, rerouted.effective_backend, parsed.kind
+        );
+        plan_route = rerouted;
+        apply_route_to_ledger(ledger, &plan_route);
+        preflight(&plan_route.effective_backend)?;
+        llm = resolve_llm(
+            cfg,
+            args,
+            profile.oh_profile.as_deref(),
+            plan_route.effective_model.as_deref(),
+        )?;
+    };
+
     let plan = parse_pm_plan(&log_text)?;
     let written = apply_pm_plan(repo, &preflight_ctx, &plan)?;
     println!("\nCreated {} ticket(s):", written.len());
@@ -1672,16 +1756,21 @@ mod tests {
     use super::{
         apply_pm_plan, apply_route_to_ledger, build_mr_title, build_pm_plan_task,
         classify_validation_failure_progress, collect_pm_preflight, collect_ticket_summaries,
-        first_markdown_heading, parse_pm_plan, parse_ticket_metadata,
-        validation_failure_no_progress_reason, RouteDecision, TicketMetadata,
-        ValidationFailureProgress,
+        first_markdown_heading, mark_backend_unavailable_from_output_at, parse_pm_plan,
+        parse_ticket_metadata, validation_failure_no_progress_reason, RouteDecision,
+        TicketMetadata, ValidationFailureProgress,
     };
+    use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
     use crate::models::PmPlan;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use time::OffsetDateTime;
+
+    const CODEX_FULL_RESET: &str =
+        include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
 
     fn profile(local_path: &Path) -> Profile {
         Profile {
@@ -1813,6 +1902,56 @@ mod tests {
             collect_ticket_summaries(&tickets).unwrap(),
             vec!["- TICKET-001-fix.md: Fix login"]
         );
+    }
+
+    #[test]
+    fn backend_failure_fixture_marks_unavailability() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("availability.json");
+        let parsed = mark_backend_unavailable_from_output_at(
+            &state,
+            "codex",
+            Some("local/test"),
+            CODEX_FULL_RESET,
+            "/tmp/backend-output.log",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            parsed.kind,
+            crate::quota_parser::FailureKind::QuotaExhausted
+        );
+        let state = load_state(&state).unwrap();
+        assert_eq!(state.records.len(), 1);
+        assert_eq!(state.records[0].backend, "codex");
+        assert_eq!(state.records[0].model.as_deref(), Some("local/test"));
+        assert_eq!(state.records[0].reason, Reason::QuotaExhausted);
+        assert!(state.records[0].unavailable_until.is_some());
+    }
+
+    #[test]
+    fn unrecognized_backend_failure_does_not_invent_unavailability() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("availability.json");
+        let parsed = mark_backend_unavailable_from_output_at(
+            &state,
+            "codex",
+            Some("local/test"),
+            "plain old crash with no quota language",
+            "/tmp/backend-output.log",
+        )
+        .unwrap();
+
+        assert!(parsed.is_none());
+        let decision = availability_for(
+            &state,
+            "codex",
+            Some("local/test"),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        assert!(decision.eligible);
     }
 
     #[test]
@@ -2586,6 +2725,67 @@ fn decide_route(
             Err(err)
         }
     }
+}
+
+fn route_identity(backend: &str, model: Option<&str>) -> String {
+    format!("{backend}\u{0}{}", model.unwrap_or(""))
+}
+
+fn mark_backend_unavailable_from_output(
+    backend: &str,
+    model: Option<&str>,
+    log_text: &str,
+    log_path: &str,
+) -> Result<Option<crate::quota_parser::ParsedFailure>> {
+    mark_backend_unavailable_from_output_at(
+        &crate::availability::resolve_state_path(),
+        backend,
+        model,
+        log_text,
+        log_path,
+    )
+}
+
+fn mark_backend_unavailable_from_output_at(
+    state_path: &Path,
+    backend: &str,
+    model: Option<&str>,
+    log_text: &str,
+    log_path: &str,
+) -> Result<Option<crate::quota_parser::ParsedFailure>> {
+    let now = OffsetDateTime::now_utc();
+    let Some(parsed) = crate::quota_parser::parse(backend, log_text, now) else {
+        return Ok(None);
+    };
+
+    let unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {
+        OffsetDateTime::parse(reset_at, &Rfc3339).ok()
+    } else {
+        parsed
+            .retry_after_seconds
+            .map(|secs| now + time::Duration::seconds(secs as i64))
+    };
+    let reason = match parsed.kind {
+        crate::quota_parser::FailureKind::QuotaExhausted => {
+            crate::availability::Reason::QuotaExhausted
+        }
+        crate::quota_parser::FailureKind::RateLimited => crate::availability::Reason::RateLimited,
+    };
+    let summary = format!(
+        "{}; confidence={:?}; log={}",
+        parsed.matched_evidence, parsed.confidence, log_path
+    );
+    crate::availability::record_unavailable(
+        state_path,
+        backend,
+        model.filter(|m| !m.is_empty()),
+        reason,
+        crate::availability::Source::BackendError,
+        unavailable_until,
+        Some(summary),
+        now,
+    )?;
+    Ok(Some(parsed))
 }
 
 #[derive(Debug, Clone, Default)]

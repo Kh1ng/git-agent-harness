@@ -1,9 +1,12 @@
+mod support;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command as ProcessCommand;
+use support::{FakeBackend, Scenario};
 use tempfile::TempDir;
 
 fn bin() -> Command {
@@ -1242,6 +1245,73 @@ fn dispatch_pm_skips_unavailable_preferred_backend() {
         .as_str()
         .unwrap()
         .contains("quota_exhausted"));
+}
+
+#[test]
+fn dispatch_pm_quota_failure_updates_availability_and_reroutes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\npm_backend = \"claude\"\n",
+        "",
+    );
+
+    let claude = FakeBackend::new(&tmp.path().join("claude-backend"), "claude");
+    claude.install(Scenario::failure(1).with_stderr(include_str!(
+        "fixtures/quota-logs/claude_generic_rate_limit.json"
+    )));
+    let codex = FakeBackend::new(&tmp.path().join("codex-backend"), "codex");
+    codex.install(Scenario::success().with_stdout(
+        "{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Fallback ticket\",\"summary\":\"Handled by reroute\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"claude\",\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"test -d docs/tickets\"],\"uncovered_reason\":\"No duplicate work found.\"}]}",
+    ));
+
+    let path = format!(
+        "{}:{}:{}",
+        codex.bin_dir().display(),
+        claude.bin_dir().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let availability_path = tmp.path().join("availability.json");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "pm",
+            "--target",
+            "Plan fallback work",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", path)
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PM rerouting: claude -> codex"));
+
+    assert_eq!(claude.call_count(), 1);
+    assert_eq!(codex.call_count(), 1);
+
+    let availability: Value =
+        serde_json::from_str(&fs::read_to_string(&availability_path).unwrap()).unwrap();
+    let records = availability["records"].as_array().unwrap();
+    assert!(!records.is_empty());
+    assert_eq!(records[0]["backend"], "claude");
+    assert_eq!(records[0]["reason"], "rate_limited");
+
+    let ledger = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(ledger.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["effective_backend"], "codex");
+    assert_eq!(entry["fallback_used"], true);
 }
 
 #[test]
