@@ -2,7 +2,7 @@
 
 Priority: P0
 Difficulty: Small
-Status: TODO
+Status: COMPLETE
 
 ## Problem
 
