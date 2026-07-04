@@ -1,7 +1,7 @@
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
-use crate::models::{PmPlan, PmPlanTicket};
+use crate::models::{PmPlan, PmPlanTicket, WorkMetadata};
 use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
@@ -2253,6 +2253,69 @@ mod tests {
     }
 
     #[test]
+    fn parses_structured_ticket_sections_into_typed_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket = tmp.path().join("TICKET-092-structured-work-metadata.md");
+        fs::write(
+            &ticket,
+            "# TICKET-092: Structured work metadata\n\n\
+Goal: Represent task metadata as typed structured fields rather than prompt parsing.\n\n\
+Difficulty: medium\n\
+Risk: medium\n\
+Recommended backend: codex\n\
+Recommended model: gpt-5.4\n\
+Source: docs/tickets/TICKET-092-structured-work-metadata.md\n\n\
+## Problem\n\
+The parser should retain structured sections.\n\n\
+## Acceptance Criteria\n\
+- Define a single structured metadata type\n\
+- Missing fields handled explicitly\n\n\
+## Constraints\n\
+- Do not require a new file format\n\
+- No database\n\n\
+## Affected Files\n\
+- src/dispatch.rs\n\
+- src/models.rs\n\n\
+## Verification Commands\n\
+- `cargo fmt --check`\n\
+- `cargo test`\n",
+        )
+        .unwrap();
+
+        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
+        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-092"));
+        assert_eq!(meta.work_id.as_deref(), Some("TICKET-092"));
+        assert_eq!(meta.summary.as_deref(), Some("Structured work metadata"));
+        assert_eq!(
+            meta.problem.as_deref(),
+            Some("The parser should retain structured sections.")
+        );
+        assert_eq!(
+            meta.acceptance_criteria,
+            vec![
+                "Define a single structured metadata type",
+                "Missing fields handled explicitly"
+            ]
+        );
+        assert_eq!(
+            meta.constraints,
+            vec!["Do not require a new file format", "No database"]
+        );
+        assert_eq!(
+            meta.affected_files,
+            vec!["src/dispatch.rs", "src/models.rs"]
+        );
+        assert_eq!(
+            meta.verification_commands,
+            vec!["cargo fmt --check", "cargo test"]
+        );
+        assert_eq!(
+            meta.source.as_deref(),
+            Some("docs/tickets/TICKET-092-structured-work-metadata.md")
+        );
+    }
+
+    #[test]
     fn parses_ticket_metadata_preserves_colons_in_normal_headings() {
         let tmp = tempfile::tempdir().unwrap();
         let ticket = tmp.path().join("TICKET-104-auth-hardening.md");
@@ -2382,8 +2445,15 @@ mod tests {
             ticket_id: Some("TICKET-094".into()),
             work_id: Some("TICKET-094".into()),
             title: Some("Authoritative PR Description".into()),
+            summary: Some("Authoritative PR Description".into()),
             problem: Some("The old MR body only showed a minimal template.".into()),
             goal: Some("Generate PR descriptions from structured metadata.".into()),
+            acceptance_criteria: vec![
+                "Description includes structured sections".into(),
+                "Legacy fallback remains available".into(),
+            ],
+            constraints: vec!["Do not dump raw prompts".into()],
+            source: Some("docs/tickets/TICKET-094-authoritative-pr-description.md".into()),
             is_authoritative: true,
             ..TicketMetadata::default()
         };
@@ -2423,6 +2493,10 @@ mod tests {
         assert!(body.contains("## Problem"));
         assert!(body.contains("The old MR body only showed a minimal template."));
         assert!(body.contains("## Goal"));
+        assert!(body.contains("## Acceptance Criteria"));
+        assert!(body.contains("- Description includes structured sections"));
+        assert!(body.contains("## Constraints"));
+        assert!(body.contains("- Do not dump raw prompts"));
         assert!(body.contains("## Changes"));
         assert!(body.contains("Summary: 2 file(s) changed, +14, -3"));
         assert!(body.contains("- `src/dispatch.rs`"));
@@ -2433,6 +2507,8 @@ mod tests {
         assert!(body.contains("## Attempts"));
         assert!(body.contains("Fallback used: yes"));
         assert!(body.contains("## Branch"));
+        assert!(body.contains("## Source"));
+        assert!(body.contains("docs/tickets/TICKET-094-authoritative-pr-description.md"));
         assert!(!body.contains("## Failure / Stop State"));
     }
 
@@ -3162,22 +3238,7 @@ fn mark_backend_unavailable_from_output_at(
     Ok(Some(parsed))
 }
 
-#[derive(Debug, Clone, Default)]
-struct TicketMetadata {
-    ticket_id: Option<String>,
-    work_id: Option<String>,
-    title: Option<String>,
-    problem: Option<String>,
-    goal: Option<String>,
-    suggested_mr_title: Option<String>,
-    difficulty: Option<String>,
-    risk: Option<String>,
-    recommended_backend: Option<String>,
-    recommended_model: Option<String>,
-    verification_commands: Vec<String>,
-    affected_files: Vec<String>,
-    is_authoritative: bool,
-}
+type TicketMetadata = WorkMetadata;
 
 fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
     if path.extension().and_then(|e| e.to_str()) != Some("md") || !path.exists() {
@@ -3212,7 +3273,16 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
         title,
         ..TicketMetadata::default()
     };
+    meta.summary = meta.title.clone();
     meta.problem = extract_markdown_section(&body, "Problem");
+    meta.acceptance_criteria = extract_markdown_list_section(&body, "Acceptance Criteria");
+    meta.constraints = extract_markdown_list_section(&body, "Constraints");
+    meta.verification_commands = extract_markdown_code_list_section(&body, "Verification Commands");
+    meta.affected_files = extract_markdown_list_section(&body, "Affected Files");
+    meta.source = extract_field_value(&body, "Source")
+        .or_else(|| extract_markdown_section(&body, "Source"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     for line in body.lines().map(str::trim) {
         if let Some(value) = line.strip_prefix("Difficulty:") {
             meta.difficulty = Some(value.trim().to_string());
@@ -3240,16 +3310,6 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
             meta.suggested_mr_title = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Work ID:") {
             meta.work_id = Some(value.trim().to_string());
-        } else if line.starts_with("- `") && line.ends_with('`') {
-            meta.verification_commands.push(
-                line.trim_start_matches("- `")
-                    .trim_end_matches('`')
-                    .to_string(),
-            );
-        } else if let Some(value) = line.strip_prefix("- ") {
-            if value.contains('/') || value.contains('.') {
-                meta.affected_files.push(value.to_string());
-            }
         }
     }
     if meta.work_id.is_none() {
@@ -3318,6 +3378,44 @@ fn extract_markdown_section(body: &str, heading: &str) -> Option<String> {
     } else {
         Some(section)
     }
+}
+
+fn extract_markdown_list_section(body: &str, heading: &str) -> Vec<String> {
+    extract_markdown_section(body, heading)
+        .map(|section| {
+            section
+                .lines()
+                .map(str::trim)
+                .filter_map(|line| {
+                    line.strip_prefix("- ")
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn extract_markdown_code_list_section(body: &str, heading: &str) -> Vec<String> {
+    extract_markdown_list_section(body, heading)
+        .into_iter()
+        .map(|item| {
+            item.strip_prefix('`')
+                .and_then(|value| value.strip_suffix('`'))
+                .unwrap_or(item.as_str())
+                .to_string()
+        })
+        .collect()
+}
+
+fn extract_field_value(body: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    body.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(&prefix).map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn normalize_ticket_title(title: String) -> String {
@@ -3471,6 +3569,24 @@ fn build_metadata_rich_mr_body(
     if let Some(goal) = ticket.goal.as_deref() {
         sections.push(format!("## Goal\n\n{}", goal.trim()));
     }
+    if !ticket.acceptance_criteria.is_empty() {
+        let lines = ticket
+            .acceptance_criteria
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("## Acceptance Criteria\n\n{lines}"));
+    }
+    if !ticket.constraints.is_empty() {
+        let lines = ticket
+            .constraints
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("## Constraints\n\n{lines}"));
+    }
     if let Some(changes) = render_changed_files(ctx.changed_files, ctx.ledger) {
         sections.push(format!("## Changes\n\n{changes}"));
     }
@@ -3508,6 +3624,9 @@ fn build_metadata_rich_mr_body(
         "## Branch\n\nSource: `{}`\nTarget: `{}`",
         ctx.branch, ctx.target_branch
     ));
+    if let Some(source) = ticket.source.as_deref() {
+        sections.push(format!("## Source\n\n{}", source.trim()));
+    }
 
     sections.push(format!("Generated by `gah dispatch --mode {mode}`."));
     sections.join("\n\n")
