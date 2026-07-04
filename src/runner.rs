@@ -405,7 +405,7 @@ fn extract_reset_time(log: &str) -> Option<String> {
     for line in log.lines().rev() {
         if let Some(pos) = line.find("Resets in ") {
             let rest = &line[pos + 10..];
-            if let Some(end) = rest.find(|c: char| c == '.' || c == ':') {
+            if let Some(end) = rest.find(['.', ':']) {
                 let reset = rest[..end].trim();
                 if !reset.is_empty() {
                     return Some(reset.to_string());
