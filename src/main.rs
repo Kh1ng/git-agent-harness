@@ -28,6 +28,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Show durable backend/model availability state (global, not per-profile)
+    Availability {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Convert gate findings into backlog candidates
     Candidates {
         #[arg(long)]
@@ -192,6 +197,8 @@ enum LedgerCommands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Availability { json } => availability::cli::run(json)?,
+
         Commands::Candidates {
             gate_artifact,
             include_warnings,

@@ -54,12 +54,37 @@ pub enum Reason {
     Unknown,
 }
 
+impl Reason {
+    /// For human/JSON display in the `cli` module. Kept in sync with the
+    /// `#[serde(rename_all = "snake_case")]` wire format by a unit test.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RateLimited => "rate_limited",
+            Self::QuotaExhausted => "quota_exhausted",
+            Self::AuthenticationError => "authentication_error",
+            Self::BackendOutage => "backend_outage",
+            Self::ManualDisable => "manual_disable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     BackendError,
     Manual,
     Imported,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BackendError => "backend_error",
+            Self::Manual => "manual",
+            Self::Imported => "imported",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,6 +390,161 @@ pub fn availability_for(
     }
 
     Ok(AvailabilityDecision::eligible())
+}
+
+/// TICKET-069: one row of `gah availability` output. Combines the
+/// eligibility decision (which already correctly applies backend-wide
+/// precedence over model-specific state) with the informational fields
+/// (source, last error, when it was observed) pulled from whichever record
+/// actually produced that decision.
+#[derive(Debug, Clone)]
+pub struct ScopeStatus {
+    pub backend: String,
+    pub model: Option<String>,
+    pub eligible: bool,
+    pub reason: Option<Reason>,
+    pub unavailable_until: Option<String>,
+    pub scope: Option<BlockScope>,
+    pub source: Option<Source>,
+    pub last_error_summary: Option<String>,
+    pub observed_at: Option<String>,
+}
+
+/// One row per distinct (backend, model) scope that has ever appeared in
+/// the state file, sorted by backend then model (backend-wide rows, i.e.
+/// model = None, sort first for a given backend).
+pub fn list_scopes(state_path: &Path, now: OffsetDateTime) -> Result<Vec<ScopeStatus>> {
+    let state = load_state(state_path)?;
+
+    let mut seen: Vec<(String, Option<String>)> = Vec::new();
+    for record in &state.records {
+        let key = (record.backend.clone(), record.model.clone());
+        if !seen.contains(&key) {
+            seen.push(key);
+        }
+    }
+    seen.sort();
+
+    let mut out = Vec::with_capacity(seen.len());
+    for (backend, model) in seen {
+        let decision = availability_for(state_path, &backend, model.as_deref(), now)?;
+        let informative = match decision.scope {
+            Some(BlockScope::BackendWide) => latest_for_scope(&state.records, &backend, None),
+            _ => latest_for_scope(&state.records, &backend, model.as_deref()),
+        };
+        out.push(ScopeStatus {
+            backend,
+            model,
+            eligible: decision.eligible,
+            reason: decision.reason,
+            unavailable_until: decision.unavailable_until,
+            scope: decision.scope,
+            source: informative.map(|r| r.source),
+            last_error_summary: informative.and_then(|r| r.last_error_summary.clone()),
+            observed_at: informative.map(|r| r.observed_at.clone()),
+        });
+    }
+    Ok(out)
+}
+
+/// Format a remaining duration until an RFC3339 timestamp as e.g. "2h 14m",
+/// "14m", or "less than a minute". Returns `None` if `until` can't be
+/// parsed or has already passed (callers only show this for active blocks).
+fn format_remaining(until: &str, now: OffsetDateTime) -> Option<String> {
+    let until = OffsetDateTime::parse(until, &Rfc3339).ok()?;
+    let remaining = until - now;
+    if remaining.is_negative() {
+        return None;
+    }
+    let total_minutes = remaining.whole_minutes();
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    if hours > 0 {
+        Some(format!("{}h {}m", hours, minutes))
+    } else if minutes > 0 {
+        Some(format!("{}m", minutes))
+    } else {
+        Some("less than a minute".to_string())
+    }
+}
+
+/// TICKET-069: `gah availability` (human) and `gah availability --json`.
+pub mod cli {
+    use super::{format_remaining, list_scopes, resolve_state_path, ScopeStatus};
+    use anyhow::Result;
+    use serde::Serialize;
+    use time::OffsetDateTime;
+
+    #[derive(Debug, Serialize)]
+    struct Row {
+        backend: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        eligible: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unavailable_until: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remaining_cooldown: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_error_summary: Option<String>,
+    }
+
+    impl Row {
+        fn from_status(s: &ScopeStatus, now: OffsetDateTime) -> Self {
+            Row {
+                backend: s.backend.clone(),
+                model: s.model.clone(),
+                eligible: s.eligible,
+                reason: s.reason.map(super::Reason::as_str),
+                remaining_cooldown: s
+                    .unavailable_until
+                    .as_deref()
+                    .and_then(|u| format_remaining(u, now)),
+                unavailable_until: s.unavailable_until.clone(),
+                source: s.source.map(super::Source::as_str),
+                last_error_summary: s.last_error_summary.clone(),
+            }
+        }
+    }
+
+    pub fn run(json: bool) -> Result<()> {
+        let state_path = resolve_state_path();
+        let now = OffsetDateTime::now_utc();
+        let statuses = list_scopes(&state_path, now)?;
+        let rows: Vec<Row> = statuses.iter().map(|s| Row::from_status(s, now)).collect();
+
+        if json {
+            println!("{}", serde_json::to_string(&rows)?);
+            return Ok(());
+        }
+
+        if rows.is_empty() {
+            println!("No availability state recorded — everything is eligible by default.");
+            return Ok(());
+        }
+        for row in &rows {
+            let name = match &row.model {
+                Some(model) => format!("{}/{}", row.backend, model),
+                None => row.backend.clone(),
+            };
+            if row.eligible {
+                println!("{:<28} available", name);
+            } else {
+                let reason = row.reason.unwrap_or("unknown");
+                let cooldown = row
+                    .remaining_cooldown
+                    .as_deref()
+                    .map(|c| format!("resets in {c}"))
+                    .unwrap_or_else(|| "no expiry (manual or unresolved)".to_string());
+                println!("{:<28} unavailable   {:<18} {}", name, reason, cooldown);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -694,5 +874,118 @@ mod tests {
             resolved,
             PathBuf::from("/home/user/.local/state/gah/availability.json")
         );
+    }
+
+    // ── TICKET-069: reason/source display strings match the wire format ────
+
+    #[test]
+    fn reason_as_str_matches_serde_snake_case_wire_format() {
+        for reason in [
+            Reason::RateLimited,
+            Reason::QuotaExhausted,
+            Reason::AuthenticationError,
+            Reason::BackendOutage,
+            Reason::ManualDisable,
+            Reason::Unknown,
+        ] {
+            let wire = serde_json::to_string(&reason).unwrap();
+            assert_eq!(wire, format!("\"{}\"", reason.as_str()));
+        }
+    }
+
+    #[test]
+    fn source_as_str_matches_serde_snake_case_wire_format() {
+        for source in [Source::BackendError, Source::Manual, Source::Imported] {
+            let wire = serde_json::to_string(&source).unwrap();
+            assert_eq!(wire, format!("\"{}\"", source.as_str()));
+        }
+    }
+
+    // ── TICKET-069: list_scopes / format_remaining ──────────────────────────
+
+    #[test]
+    fn list_scopes_is_empty_for_missing_state_file() {
+        let tmp = TempDir::new().unwrap();
+        let scopes = list_scopes(&path(&tmp), OffsetDateTime::now_utc()).unwrap();
+        assert!(scopes.is_empty());
+    }
+
+    #[test]
+    fn list_scopes_covers_backend_wide_and_model_specific_rows() {
+        let tmp = TempDir::new().unwrap();
+        let p = path(&tmp);
+        let now = OffsetDateTime::now_utc();
+        record_unavailable(
+            &p,
+            "openhands",
+            None,
+            Reason::BackendOutage,
+            Source::BackendError,
+            Some(now + time::Duration::hours(1)),
+            Some("outage".into()),
+            now,
+        )
+        .unwrap();
+        record_unavailable(
+            &p,
+            "openhands",
+            Some("litellm_proxy/deepseek-v4"),
+            Reason::RateLimited,
+            Source::BackendError,
+            Some(now + time::Duration::minutes(5)),
+            None,
+            now,
+        )
+        .unwrap();
+        record_available(&p, "codex", None, Source::Manual, now).unwrap();
+
+        let scopes = list_scopes(&p, now).unwrap();
+        assert_eq!(scopes.len(), 3);
+
+        let openhands_backend = scopes
+            .iter()
+            .find(|s| s.backend == "openhands" && s.model.is_none())
+            .unwrap();
+        assert!(!openhands_backend.eligible);
+        assert_eq!(openhands_backend.reason, Some(Reason::BackendOutage));
+        assert_eq!(openhands_backend.source, Some(Source::BackendError));
+        assert_eq!(
+            openhands_backend.last_error_summary.as_deref(),
+            Some("outage")
+        );
+
+        let openhands_model = scopes
+            .iter()
+            .find(|s| s.backend == "openhands" && s.model.is_some())
+            .unwrap();
+        // Backend-wide outage takes precedence, so this row is also
+        // ineligible, and its *reported* reason is the backend-wide one --
+        // the model-specific rate-limit is masked, same as availability_for.
+        assert!(!openhands_model.eligible);
+        assert_eq!(openhands_model.reason, Some(Reason::BackendOutage));
+
+        let codex = scopes.iter().find(|s| s.backend == "codex").unwrap();
+        assert!(codex.eligible);
+    }
+
+    #[test]
+    fn format_remaining_renders_hours_and_minutes() {
+        let now = OffsetDateTime::now_utc();
+        let until = now_rfc3339(now + time::Duration::minutes(134)); // 2h 14m
+        assert_eq!(format_remaining(&until, now).as_deref(), Some("2h 14m"));
+    }
+
+    #[test]
+    fn format_remaining_renders_minutes_only_under_an_hour() {
+        let now = OffsetDateTime::now_utc();
+        let until = now_rfc3339(now + time::Duration::minutes(9));
+        assert_eq!(format_remaining(&until, now).as_deref(), Some("9m"));
+    }
+
+    #[test]
+    fn format_remaining_returns_none_for_a_past_timestamp() {
+        let now = OffsetDateTime::now_utc();
+        let until = now_rfc3339(now - time::Duration::minutes(5));
+        assert_eq!(format_remaining(&until, now), None);
     }
 }
