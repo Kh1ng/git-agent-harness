@@ -112,6 +112,13 @@ pub struct Profile {
     pub routing: RoutingPolicy,
 }
 
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct CandidateConfig {
+    pub backend: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct RoutingPolicy {
     #[serde(default)]
@@ -138,6 +145,12 @@ pub struct RoutingPolicy {
     pub weak_review_backend: Option<String>,
     #[serde(default)]
     pub weak_review_model: Option<String>,
+    #[serde(default)]
+    pub pm_candidates: Option<Vec<CandidateConfig>>,
+    #[serde(default)]
+    pub improve_candidates: Option<Vec<CandidateConfig>>,
+    #[serde(default)]
+    pub review_candidates: Option<Vec<CandidateConfig>>,
     #[serde(default)]
     pub allow_review_fallback: bool,
     #[serde(default)]

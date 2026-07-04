@@ -126,6 +126,56 @@ where
         );
     }
 
+    let mut is_profile_policy = false;
+
+    let candidates =
+        if let Some(c) = policy_candidates(&profile.routing, req.mode).filter(|l| !l.is_empty()) {
+            is_profile_policy = true;
+            Some(c)
+        } else {
+            policy_candidates(&defaults.routing, req.mode).filter(|l| !l.is_empty())
+        };
+
+    if let Some(candidates) = candidates {
+        let preferred = candidates.first().cloned().expect("non-empty list");
+        let (selected, skipped) =
+            pick_route_candidate(candidates, state_path, now, backend_available)?;
+
+        let mut fallback_used = false;
+        let mut confidence_impact = None;
+        let mut human_required = false;
+        let mut reason = if is_profile_policy {
+            "profile routing policy".to_string()
+        } else {
+            "global routing policy".to_string()
+        };
+
+        if selected.backend != preferred.backend || selected.model != preferred.model {
+            fallback_used = true;
+            reason = append_availability_reason(
+                reason,
+                &skipped,
+                &selected.backend,
+                req.mode == "review",
+            );
+            if req.mode == "review" {
+                confidence_impact = Some("low".into());
+                human_required = true;
+            }
+        }
+
+        return Ok(RouteDecision {
+            requested_backend,
+            effective_backend: selected.backend,
+            requested_model,
+            effective_model: selected.model,
+            routing_reason: reason,
+            fallback_used,
+            confidence_impact,
+            human_required,
+        });
+    }
+
     let profile_mode = policy_backend_model(&profile.routing, req.mode);
     let default_mode = policy_backend_model(&defaults.routing, req.mode);
     let review_fallback_allowed =
@@ -560,6 +610,23 @@ fn policy_backend_model<'a>(
             policy.default_model.as_deref(),
         ),
     }
+}
+
+fn policy_candidates(policy: &RoutingPolicy, mode: &str) -> Option<Vec<RouteCandidate>> {
+    let raw = match mode {
+        "pm" => policy.pm_candidates.as_ref(),
+        "review" => policy.review_candidates.as_ref(),
+        "improve" | "fix" | "experiment" => policy.improve_candidates.as_ref(),
+        _ => None,
+    };
+    raw.map(|list| {
+        list.iter()
+            .map(|c| RouteCandidate {
+                backend: c.backend.clone(),
+                model: c.model.clone(),
+            })
+            .collect()
+    })
 }
 
 fn review_fallback_backend_name<'a>(
@@ -1168,5 +1235,220 @@ mod tests {
         .unwrap_err();
 
         assert!(format!("{:#}", err).contains("parsing availability state"));
+    }
+
+    #[test]
+    fn candidate_list_honored_when_available() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-4".into()),
+            },
+            crate::config::CandidateConfig {
+                backend: "claude".into(),
+                model: None,
+            },
+        ]);
+
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-4"));
+        assert_eq!(decision.routing_reason, "profile routing policy");
+        assert!(!decision.fallback_used);
+    }
+
+    #[test]
+    fn candidate_list_skips_unavailable_candidates() {
+        let tmp = TempDir::new().unwrap();
+        let now = OffsetDateTime::now_utc();
+
+        record_unavailable(
+            &path(&tmp),
+            "codex",
+            Some("gpt-4"),
+            Reason::RateLimited,
+            Source::BackendError,
+            Some(now + time::Duration::minutes(10)),
+            None,
+            now,
+        )
+        .unwrap();
+
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-4".into()),
+            },
+            crate::config::CandidateConfig {
+                backend: "claude".into(),
+                model: None,
+            },
+        ]);
+
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            now,
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "claude");
+        assert_eq!(decision.effective_model, None);
+        assert!(decision.fallback_used);
+        assert!(decision
+            .routing_reason
+            .contains("codex/gpt-4: model-specific rate_limited"));
+    }
+
+    #[test]
+    fn candidate_list_expired_availability_re_enters() {
+        let tmp = TempDir::new().unwrap();
+        let observed = OffsetDateTime::now_utc() - time::Duration::hours(2);
+
+        record_unavailable(
+            &path(&tmp),
+            "codex",
+            Some("gpt-4"),
+            Reason::RateLimited,
+            Source::BackendError,
+            Some(observed + time::Duration::minutes(30)),
+            None,
+            observed,
+        )
+        .unwrap();
+
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-4".into()),
+            },
+            crate::config::CandidateConfig {
+                backend: "claude".into(),
+                model: None,
+            },
+        ]);
+
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-4"));
+        assert!(!decision.fallback_used);
+    }
+
+    #[test]
+    fn candidate_list_exhausted_errors() {
+        let tmp = TempDir::new().unwrap();
+        let now = OffsetDateTime::now_utc();
+
+        for (backend, model) in [("codex", Some("gpt-4")), ("claude", None)] {
+            record_unavailable(
+                &path(&tmp),
+                backend,
+                model,
+                Reason::RateLimited,
+                Source::BackendError,
+                Some(now + time::Duration::minutes(10)),
+                None,
+                now,
+            )
+            .unwrap();
+        }
+
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-4".into()),
+            },
+            crate::config::CandidateConfig {
+                backend: "claude".into(),
+                model: None,
+            },
+        ]);
+
+        let err = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            now,
+            backend_available,
+        )
+        .unwrap_err();
+
+        let route_err = err.downcast_ref::<RouteError>().unwrap();
+        match route_err {
+            RouteError::NoEligibleBackend {
+                preferred_backend,
+                preferred_model,
+                skipped,
+                earliest_reset,
+            } => {
+                assert_eq!(preferred_backend, "codex");
+                assert_eq!(preferred_model.as_deref(), Some("gpt-4"));
+                assert_eq!(skipped.len(), 2);
+                assert_eq!(skipped[0].backend, "codex");
+                assert_eq!(skipped[0].reason, "model-specific rate_limited");
+                assert_eq!(skipped[1].backend, "claude");
+                assert_eq!(skipped[1].reason, "backend-wide rate_limited");
+                assert!(earliest_reset.is_some());
+            }
+        }
     }
 }
