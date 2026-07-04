@@ -239,9 +239,9 @@ pub fn run_agy(
     let start = Instant::now();
     let mut cmd = Command::new("agy");
     cmd.arg("--print");
+    cmd.arg(task);
     cmd.args(["--model", llm.model.as_str()]);
     cmd.arg("--dangerously-skip-permissions")
-        .arg(task)
         .current_dir(worktree)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_err));
