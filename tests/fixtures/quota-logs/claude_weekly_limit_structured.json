@@ -1,0 +1,6 @@
+{
+  "error": "rate_limit",
+  "apiErrorStatus": 429,
+  "model": "<synthetic>",
+  "text": "You've hit your weekly limit · resets Jun 3 at 4pm (Europe/Berlin)"
+}

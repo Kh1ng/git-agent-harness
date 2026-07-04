@@ -10,6 +10,7 @@ mod policy;
 mod price_guard;
 mod provider;
 mod prune;
+mod quota_parser;
 mod routing;
 mod runner;
 mod sync;

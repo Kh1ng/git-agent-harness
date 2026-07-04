@@ -1,0 +1,6 @@
+{
+  "error": "rate_limit",
+  "isApiErrorMessage": true,
+  "model": "<synthetic>",
+  "text": "API Error: Rate limit reached"
+}

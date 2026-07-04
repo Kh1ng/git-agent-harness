@@ -1,0 +1,10 @@
+{
+  "error": "rate_limit",
+  "isApiErrorMessage": true,
+  "model": "<synthetic>",
+  "text": "API Error: Rate limit reached",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  }
+}
