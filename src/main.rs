@@ -1,3 +1,4 @@
+mod availability;
 mod candidates;
 mod config;
 mod dispatch;
