@@ -3601,6 +3601,9 @@ fn mark_backend_unavailable_from_output_at(
             crate::availability::Reason::QuotaExhausted
         }
         crate::quota_parser::FailureKind::RateLimited => crate::availability::Reason::RateLimited,
+        crate::quota_parser::FailureKind::AuthenticationError => {
+            crate::availability::Reason::AuthenticationError
+        }
     };
     let summary = format!(
         "{}; confidence={:?}; log={}",

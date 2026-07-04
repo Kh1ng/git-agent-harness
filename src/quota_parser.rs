@@ -29,6 +29,8 @@ pub enum FailureKind {
     /// unspecified "rate limit" with no indication it's account-level
     /// exhaustion). Worth retrying after a short cooldown.
     RateLimited,
+    /// Authentication failure (invalid token, not logged in, etc).
+    AuthenticationError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -128,6 +130,57 @@ fn month_day_time_with_tz_re() -> &'static Regex {
     })
 }
 
+fn agy_quota_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(RESOURCE_EXHAUSTED|Individual quota reached|code 429|AGY quota exhausted)",
+        )
+        .unwrap()
+    })
+}
+
+fn agy_auth_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(not logged into Antigravity|not logged in|AGY not authenticated)")
+            .unwrap()
+    })
+}
+
+fn parse_agy_cooldown_seconds(text: &str) -> Option<u64> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)\bResets\s+(?:in|~)\s*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?\b").unwrap()
+    });
+    if let Some(caps) = re.captures(text) {
+        let mut total_secs = 0u64;
+        let mut matched = false;
+        if let Some(h_match) = caps.get(1) {
+            if let Ok(h) = h_match.as_str().parse::<u64>() {
+                total_secs += h * 3600;
+                matched = true;
+            }
+        }
+        if let Some(m_match) = caps.get(2) {
+            if let Ok(m) = m_match.as_str().parse::<u64>() {
+                total_secs += m * 60;
+                matched = true;
+            }
+        }
+        if let Some(s_match) = caps.get(3) {
+            if let Ok(s) = s_match.as_str().parse::<u64>() {
+                total_secs += s;
+                matched = true;
+            }
+        }
+        if matched && total_secs > 0 {
+            return Some(total_secs);
+        }
+    }
+    None
+}
+
 fn parse_month(name: &str) -> Option<Month> {
     let lower = name.to_ascii_lowercase();
     let key = &lower[..lower.len().min(3)];
@@ -224,6 +277,41 @@ fn extract_reset(text: &str, now: OffsetDateTime) -> (Option<String>, Option<Str
 /// must be able to tell "we saw this and don't know what it is" apart from
 /// "we're confident this isn't a quota/rate-limit failure at all".
 pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFailure> {
+    // AGY-specific patterns checked first: auth errors and quota exhaustion.
+    if matches!(backend, "agy" | "agy-main" | "agy-second") {
+        if let Some(m) = agy_auth_re().find(text) {
+            return Some(ParsedFailure {
+                backend: backend.to_string(),
+                kind: FailureKind::AuthenticationError,
+                retryable: true,
+                reset_at: None,
+                retry_after_seconds: None,
+                confidence: Confidence::High,
+                matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+                unresolved_timezone: None,
+            });
+        }
+
+        if let Some(m) = agy_quota_re().find(text) {
+            let reset_at = parse_agy_cooldown_seconds(text).map(|secs| {
+                let reset_time = now + time::Duration::seconds(secs as i64);
+                reset_time
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default()
+            });
+            return Some(ParsedFailure {
+                backend: backend.to_string(),
+                kind: FailureKind::QuotaExhausted,
+                retryable: false,
+                reset_at,
+                retry_after_seconds: None,
+                confidence: Confidence::High,
+                matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+                unresolved_timezone: None,
+            });
+        }
+    }
+
     // Highest precedence: an explicit "not your usage limit" disclaimer
     // must never be classified as quota exhaustion, even though the phrase
     // itself contains the substring "usage limit".
