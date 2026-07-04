@@ -5,6 +5,7 @@ use crate::models::{PmPlan, PmPlanTicket};
 use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1400,7 +1401,10 @@ fn first_markdown_heading(body: &str) -> Option<&str> {
 
 fn collect_pm_repo_state(repo: &Path) -> String {
     let branch = command_output("git", &["rev-parse", "--abbrev-ref", "HEAD"], repo)
-        .unwrap_or_else(|e| format!("(unavailable: {:#})", e));
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| read_git_head_branch(repo))
+        .unwrap_or_else(|| "(unavailable)".to_string());
     let dirty = command_output("git", &["status", "--short"], repo)
         .map(|s| if s.is_empty() { "clean".to_string() } else { s })
         .unwrap_or_else(|e| format!("(unavailable: {:#})", e));
@@ -1411,6 +1415,32 @@ fn collect_pm_repo_state(repo: &Path) -> String {
         "Current branch: {}\n\nDirty status:\n{}\n\nRecent commits:\n{}",
         branch, dirty, commits
     )
+}
+
+fn read_git_head_branch(repo: &Path) -> Option<String> {
+    let git_path = repo.join(".git");
+    let git_dir = if git_path.is_dir() {
+        git_path
+    } else {
+        let pointer = fs::read_to_string(&git_path).ok()?;
+        let gitdir = pointer.strip_prefix("gitdir:")?.trim();
+        let gitdir_path = Path::new(gitdir);
+        if gitdir_path.is_absolute() {
+            gitdir_path.to_path_buf()
+        } else {
+            repo.join(gitdir_path)
+        }
+    };
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(reference) = head.strip_prefix("ref:") {
+        return reference.rsplit('/').next().map(str::to_string);
+    }
+    if head.is_empty() {
+        None
+    } else {
+        Some(head.chars().take(12).collect())
+    }
 }
 
 fn review(
@@ -2008,8 +2038,7 @@ mod tests {
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let claude_path = make_fake_bin(&bin_dir, "claude-explicit");
-        let git_path = make_fake_bin(&bin_dir, "git");
-        let _guard = PathGuard::set(git_path.parent().unwrap());
+        let _guard = PathGuard::set(bin_dir.as_os_str());
 
         let mut profile = profile(tmp.path());
         profile.claude_path = Some(claude_path.display().to_string());
@@ -2240,6 +2269,47 @@ mod tests {
             meta.verification_commands,
             vec!["pytest tests/test_auth.py -x"]
         );
+    }
+
+    #[test]
+    fn parses_ticket_metadata_from_yaml_front_matter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket = tmp.path().join("TICKET-092-fix-yaml-parsing.md");
+        fs::write(
+            &ticket,
+            "---\n\
+title: YAML Parsing\n\
+difficulty: medium\n\
+risk: low\n\
+recommended_backend: codex\n\
+recommended_model: gpt-5.4\n\
+affected_files:\n\
+  - src/dispatch.rs\n\
+verification_commands:\n\
+  - cargo test\n\
+---\n\
+\n# TICKET-092: ignored heading fallback\n",
+        )
+        .unwrap();
+        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
+        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-092"));
+        assert_eq!(meta.title.as_deref(), Some("YAML Parsing"));
+        assert_eq!(meta.recommended_backend.as_deref(), Some("codex"));
+        assert_eq!(meta.recommended_model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(meta.difficulty.as_deref(), Some("medium"));
+        assert_eq!(meta.risk.as_deref(), Some("low"));
+        assert_eq!(meta.affected_files, vec!["src/dispatch.rs"]);
+        assert_eq!(meta.verification_commands, vec!["cargo test"]);
+    }
+
+    #[test]
+    fn invalid_yaml_front_matter_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket = tmp.path().join("TICKET-092-fix-yaml-parsing.md");
+        fs::write(&ticket, "---\ntitle: [broken\n---\n# TICKET-092: Broken\n").unwrap();
+
+        let err = parse_ticket_metadata(&ticket).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid YAML front matter"));
     }
 
     #[test]
@@ -2928,11 +2998,45 @@ struct TicketMetadata {
     affected_files: Vec<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct YamlTicketMetadata {
+    title: Option<String>,
+    goal: Option<String>,
+    difficulty: Option<String>,
+    risk: Option<String>,
+    recommended_backend: Option<String>,
+    recommended_model: Option<String>,
+    #[serde(default)]
+    verification_commands: StringOrVec,
+    #[serde(default)]
+    affected_files: StringOrVec,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(untagged)]
+enum StringOrVec {
+    #[default]
+    Empty,
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StringOrVec {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
+}
+
 fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
     if path.extension().and_then(|e| e.to_str()) != Some("md") || !path.exists() {
         return Ok(None);
     }
     let body = fs::read_to_string(path)?;
+    let (yaml_front_matter, markdown_body) = split_yaml_front_matter(&body)?;
     let ticket_id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -2945,13 +3049,52 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
                 _ => None,
             }
         });
-    let title = first_markdown_heading(&body).map(|title| normalize_ticket_title(title.into()));
+    let title =
+        first_markdown_heading(markdown_body).map(|title| normalize_ticket_title(title.into()));
     let mut meta = TicketMetadata {
         ticket_id,
         title,
         ..TicketMetadata::default()
     };
-    for line in body.lines().map(str::trim) {
+    if let Some(front_matter) = yaml_front_matter {
+        let yaml: YamlTicketMetadata = serde_yaml::from_str(front_matter).with_context(|| {
+            format!(
+                "invalid YAML front matter in ticket metadata: {}",
+                path.display()
+            )
+        })?;
+        if let Some(title) = yaml.title.or(yaml.goal) {
+            let title = title.trim();
+            if !title.is_empty() {
+                meta.title = Some(normalize_ticket_title(title.to_string()));
+            }
+        }
+        meta.difficulty = yaml.difficulty.filter(|value| !value.trim().is_empty());
+        meta.risk = yaml.risk.filter(|value| !value.trim().is_empty());
+        meta.recommended_backend = yaml
+            .recommended_backend
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && value != "unspecified");
+        meta.recommended_model = yaml
+            .recommended_model
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && value != "unspecified");
+        meta.verification_commands.extend(
+            yaml.verification_commands
+                .into_vec()
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        );
+        meta.affected_files.extend(
+            yaml.affected_files
+                .into_vec()
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        );
+    }
+    for line in markdown_body.lines().map(str::trim) {
         if let Some(value) = line.strip_prefix("Difficulty:") {
             meta.difficulty = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Risk:") {
@@ -2984,6 +3127,22 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
         }
     }
     Ok(Some(meta))
+}
+
+fn split_yaml_front_matter(body: &str) -> Result<(Option<&str>, &str)> {
+    let body = body.strip_prefix('\u{feff}').unwrap_or(body);
+    let Some(rest) = body
+        .strip_prefix("---\n")
+        .or_else(|| body.strip_prefix("---\r\n"))
+    else {
+        return Ok((None, body));
+    };
+    for marker in ["\n---\n", "\r\n---\r\n", "\n...\n", "\r\n...\r\n"] {
+        if let Some((front_matter, markdown_body)) = rest.split_once(marker) {
+            return Ok((Some(front_matter), markdown_body));
+        }
+    }
+    bail!("invalid YAML front matter in ticket metadata: missing closing --- delimiter");
 }
 
 fn normalize_ticket_title(title: String) -> String {
