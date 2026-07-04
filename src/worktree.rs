@@ -98,7 +98,7 @@ pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>
         if line.is_empty() {
             continue;
         }
-        let first = line.as_bytes().get(0).copied().unwrap_or(b' ');
+        let first = line.as_bytes().first().copied().unwrap_or(b' ');
         let second = line.as_bytes().get(1).copied().unwrap_or(b' ');
         if first != b' ' || second != b' ' {
             files.push(line[3..].trim().to_string());

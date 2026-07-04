@@ -76,6 +76,8 @@ fn validation_failure_no_progress_reason(
 }
 
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
+    let _ = args.budget;
+    let _ = &args.config_path;
     let profile = config::get_profile(cfg, &args.profile)?;
 
     println!("Profile: {}", profile.display_name);
@@ -205,7 +207,9 @@ fn run_backend(
             &env_vars,
         ),
         "claude" => runner::run_claude(wt, task, session_dir, &profile.claude_args, &env_vars),
-        "agy" => runner::run_agy(wt, task, session_dir, llm, &env_vars),
+        "agy" | "agy-main" | "agy-second" => {
+            runner::run_agy(wt, task, session_dir, llm, &env_vars, backend)
+        }
         _ => runner::run_openhands(
             wt,
             task,
@@ -249,6 +253,8 @@ fn preflight(backend: &str) -> Result<()> {
         "codex" => "codex",
         "claude" => "claude",
         "agy" => "agy",
+        "agy-main" => "agy-main",
+        "agy-second" => "agy-second",
         _ => "openhands",
     };
     for bin in &["git", backend_bin] {
@@ -258,12 +264,7 @@ fn preflight(backend: &str) -> Result<()> {
 }
 
 fn ensure_bin(bin: &str) -> Result<()> {
-    let found = Command::new("which")
-        .arg(bin)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if found {
+    if which(bin).is_some() {
         Ok(())
     } else {
         anyhow::bail!("required binary '{}' not found on PATH", bin);
@@ -1586,7 +1587,7 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
             if !args.target.is_empty() {
                 let task_type = if Path::new(&args.target)
                     .extension()
-                    .map_or(false, |e| e == "json")
+                    .is_some_and(|e| e == "json")
                 {
                     "candidate JSON"
                 } else {
@@ -1650,7 +1651,7 @@ fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String 
     // Try to load as candidate artifact
     if !target.is_empty() {
         let p = Path::new(target);
-        if p.extension().map_or(false, |e| e == "json") && p.exists() {
+        if p.extension().is_some_and(|e| e == "json") && p.exists() {
             if let Ok(text) = fs::read_to_string(p) {
                 if let Ok(artifact) = serde_json::from_str::<CandidateArtifact>(&text) {
                     if let Some(candidate) = artifact.candidates.first() {
@@ -2819,8 +2820,7 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
         return Ok(None);
     }
     let body = fs::read_to_string(path)?;
-    let mut meta = TicketMetadata::default();
-    meta.ticket_id = path
+    let ticket_id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .and_then(|stem| {
@@ -2832,7 +2832,12 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
                 _ => None,
             }
         });
-    meta.title = first_markdown_heading(&body).map(|title| normalize_ticket_title(title.into()));
+    let title = first_markdown_heading(&body).map(|title| normalize_ticket_title(title.into()));
+    let mut meta = TicketMetadata {
+        ticket_id,
+        title,
+        ..TicketMetadata::default()
+    };
     for line in body.lines().map(str::trim) {
         if let Some(value) = line.strip_prefix("Difficulty:") {
             meta.difficulty = Some(value.trim().to_string());

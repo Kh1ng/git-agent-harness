@@ -2897,3 +2897,149 @@ fn status_reports_human_and_json_views() {
         .stdout(predicate::str::contains("Status for Profile: test-repo"))
         .stdout(predicate::str::contains("Observations: Sync="));
 }
+
+#[test]
+fn dispatch_agy_multi_instance_isolated_execution() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+
+    // Setup git stub, just in case
+    make_fake_bin_with_body(&fake_bin, "gh", "#!/bin/sh\nexit 0\n");
+
+    // Let's create fake binaries for agy, agy-main, and agy-second.
+    // They will write distinct strings to files under tmp so we can verify they executed.
+    let agy_log = tmp.path().join("agy.log");
+    let agy_main_log = tmp.path().join("agy_main.log");
+    let agy_second_log = tmp.path().join("agy_second.log");
+
+    make_fake_bin_with_body(
+        &fake_bin,
+        "agy",
+        &format!(
+            "#!/bin/sh\necho \"agy\" >> \"{}\"\nexit 0\n",
+            agy_log.display()
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "agy-main",
+        &format!(
+            "#!/bin/sh\necho \"agy-main\" >> \"{}\"\nexit 0\n",
+            agy_main_log.display()
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "agy-second",
+        &format!(
+            "#!/bin/sh\necho \"agy-second\" >> \"{}\"\nexit 0\n",
+            agy_second_log.display()
+        ),
+    );
+
+    // 1. Dispatch with backend agy-main
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--backend",
+            "agy-main",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "test target",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    // Verify agy-main was executed, and ledger recorded "agy-main"
+    assert!(agy_main_log.exists());
+    assert!(!agy_second_log.exists());
+    assert!(!agy_log.exists());
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["effective_backend"], "agy-main");
+
+    // Clear ledger for the next check
+    let _ = fs::remove_file(&ledger_path);
+
+    // Sleep for 1.1s to avoid timestamp/worktree conflict
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    // 2. Dispatch with backend agy-second
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--backend",
+            "agy-second",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "test target",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    // Verify agy-second was executed, and ledger recorded "agy-second"
+    assert!(agy_second_log.exists());
+    assert!(!agy_log.exists());
+
+    let text2 = fs::read_to_string(&ledger_path).unwrap();
+    let entry2: Value = serde_json::from_str(text2.lines().next().unwrap()).unwrap();
+    assert_eq!(entry2["effective_backend"], "agy-second");
+
+    // Clear ledger again
+    let _ = fs::remove_file(&ledger_path);
+
+    // Sleep for 1.1s to avoid timestamp/worktree conflict
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    // 3. Dispatch with backend agy (fallback)
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--backend",
+            "agy",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "test target",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    // Verify agy was executed, and ledger recorded "agy"
+    assert!(agy_log.exists());
+
+    let text3 = fs::read_to_string(&ledger_path).unwrap();
+    let entry3: Value = serde_json::from_str(text3.lines().next().unwrap()).unwrap();
+    assert_eq!(entry3["effective_backend"], "agy");
+}

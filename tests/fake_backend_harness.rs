@@ -203,7 +203,15 @@ fn independent_state_per_instance_of_the_same_backend_name() {
 #[test]
 fn supports_all_five_named_backends() {
     let _lock = TEST_MUTEX.lock().unwrap();
-    for name in ["openhands", "opencode", "claude", "codex", "agy"] {
+    for name in [
+        "openhands",
+        "opencode",
+        "claude",
+        "codex",
+        "agy",
+        "agy-main",
+        "agy-second",
+    ] {
         let tmp = TempDir::new().unwrap();
         let backend = FakeBackend::new(tmp.path(), name);
         backend.install(Scenario::success().with_stdout(format!("{name} ran")));

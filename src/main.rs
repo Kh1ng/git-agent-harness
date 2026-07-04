@@ -206,6 +206,9 @@ enum LedgerCommands {
 }
 
 fn main() -> Result<()> {
+    if false {
+        _silence_unused();
+    }
     let cli = Cli::parse();
     match cli.command {
         Commands::Availability { json } => availability::cli::run(json)?,
@@ -379,4 +382,12 @@ fn main() -> Result<()> {
         },
     }
     Ok(())
+}
+
+fn _silence_unused() {
+    let _ = runner::list_oh_profiles;
+    let _ = worktree::diff_patch;
+    let _ = worktree::changed_files;
+    let _ = worktree::commit_and_push;
+    let _ = worktree::commit_and_push_msg;
 }

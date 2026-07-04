@@ -2,28 +2,43 @@ use crate::ledger::LedgerUsage;
 use regex::Regex;
 
 pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
-    let mut usage = LedgerUsage::default();
-    usage.input_tokens = find_u64(text, &["input_tokens", "input tokens", "prompt_tokens"]);
-    usage.output_tokens = find_u64(
+    let input_tokens = find_u64(text, &["input_tokens", "input tokens", "prompt_tokens"]);
+    let output_tokens = find_u64(
         text,
         &["output_tokens", "output tokens", "completion_tokens"],
     );
-    usage.cache_read_tokens = find_u64(text, &["cache_read_tokens", "cache read tokens"]);
-    usage.cache_write_tokens = find_u64(text, &["cache_write_tokens", "cache write tokens"]);
-    usage.total_tokens = find_u64(text, &["total_tokens", "total tokens"]);
-    usage.requests_count = find_u64(text, &["requests_count", "requests count"]);
-    usage.estimated_cost_usd = find_f64(
+    let cache_read_tokens = find_u64(text, &["cache_read_tokens", "cache read tokens"]);
+    let cache_write_tokens = find_u64(text, &["cache_write_tokens", "cache write tokens"]);
+    let total_tokens = find_u64(text, &["total_tokens", "total tokens"]);
+    let requests_count = find_u64(text, &["requests_count", "requests count"]);
+    let estimated_cost_usd = find_f64(
         text,
         &["estimated_cost_usd", "estimated cost usd", "cost usd"],
     );
-    usage.actual_cost_usd = find_f64(text, &["actual_cost_usd", "actual cost usd"]);
-    usage.quota_used_percent = find_f64(text, &["quota_used_percent", "quota used percent"]);
-    usage.quota_remaining_percent = find_f64(
+    let actual_cost_usd = find_f64(text, &["actual_cost_usd", "actual cost usd"]);
+    let quota_used_percent = find_f64(text, &["quota_used_percent", "quota used percent"]);
+    let quota_remaining_percent = find_f64(
         text,
         &["quota_remaining_percent", "quota remaining percent"],
     );
-    usage.quota_window = find_string_after(text, &["quota_window", "quota window"]);
-    usage.quota_reset_at = find_string_after(text, &["quota_reset_at", "quota reset at"]);
+    let quota_window = find_string_after(text, &["quota_window", "quota window"]);
+    let quota_reset_at = find_string_after(text, &["quota_reset_at", "quota reset at"]);
+
+    let mut usage = LedgerUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        total_tokens,
+        requests_count,
+        estimated_cost_usd,
+        actual_cost_usd,
+        quota_used_percent,
+        quota_remaining_percent,
+        quota_window,
+        quota_reset_at,
+        ..LedgerUsage::default()
+    };
 
     if usage.total_tokens.is_none() {
         usage.total_tokens = match (usage.input_tokens, usage.output_tokens) {
