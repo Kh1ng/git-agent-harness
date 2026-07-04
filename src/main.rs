@@ -15,6 +15,8 @@ mod routing;
 mod runner;
 mod status;
 mod sync;
+#[cfg(test)]
+mod test_support;
 mod usage;
 mod worktree;
 

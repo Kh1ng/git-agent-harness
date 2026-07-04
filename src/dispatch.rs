@@ -1857,13 +1857,11 @@ mod tests {
     use crate::config::{Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
     use crate::models::PmPlan;
+    use crate::test_support::PathGuard;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
-    use std::sync::{Mutex, MutexGuard};
     use time::OffsetDateTime;
-
-    static PATH_LOCK: Mutex<()> = Mutex::new(());
 
     const CODEX_FULL_RESET: &str =
         include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
@@ -1940,44 +1938,6 @@ mod tests {
             fs::set_permissions(&path, perms).unwrap();
         }
         path
-    }
-
-    struct PathGuard {
-        _lock: MutexGuard<'static, ()>,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl PathGuard {
-        fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
-            let lock = PATH_LOCK.lock().unwrap();
-            let original = std::env::var_os("PATH");
-            let requested = path.as_ref();
-            let combined = match (requested.is_empty(), &original) {
-                (true, Some(existing)) => existing.clone(),
-                (true, None) => std::ffi::OsString::new(),
-                (false, Some(existing)) => {
-                    let mut joined = std::ffi::OsString::from(requested);
-                    joined.push(":");
-                    joined.push(existing);
-                    joined
-                }
-                (false, None) => std::ffi::OsString::from(requested),
-            };
-            std::env::set_var("PATH", combined);
-            Self {
-                _lock: lock,
-                original,
-            }
-        }
-    }
-
-    impl Drop for PathGuard {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(path) => std::env::set_var("PATH", path),
-                None => std::env::remove_var("PATH"),
-            }
-        }
     }
 
     #[test]
