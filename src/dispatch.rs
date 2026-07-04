@@ -5,6 +5,7 @@ use crate::models::{PmPlan, PmPlanTicket};
 use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -2093,6 +2094,7 @@ mod tests {
 
     #[test]
     fn pm_task_includes_preflight_context_and_rules() {
+        let _guard = PathGuard::set("");
         let tmp = tempfile::tempdir().unwrap();
         init_repo(tmp.path());
         fs::create_dir_all(tmp.path().join("docs")).unwrap();
@@ -2240,6 +2242,57 @@ mod tests {
             meta.verification_commands,
             vec!["pytest tests/test_auth.py -x"]
         );
+    }
+
+    #[test]
+    fn parses_yaml_front_matter_ticket_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket = tmp.path().join("TICKET-092-yaml-parsing.md");
+        fs::write(
+            &ticket,
+            "---\n\
+ticket_id: TICKET-092\n\
+title: YAML Parsing\n\
+difficulty: medium\n\
+risk: low\n\
+recommended_backend: codex\n\
+recommended_model: gpt-yaml\n\
+affected_files:\n\
+  - src/dispatch.rs\n\
+verification_commands:\n\
+  - cargo test\n\
+---\n\
+# TICKET-092: Wrong Legacy Title\n\n\
+## Affected Files\n\
+- src/ignored.rs\n\n\
+## Verification Commands\n\
+- `cargo clippy`\n",
+        )
+        .unwrap();
+        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
+        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-092"));
+        assert_eq!(meta.title.as_deref(), Some("YAML Parsing"));
+        assert_eq!(meta.recommended_backend.as_deref(), Some("codex"));
+        assert_eq!(meta.recommended_model.as_deref(), Some("gpt-yaml"));
+        assert_eq!(meta.difficulty.as_deref(), Some("medium"));
+        assert_eq!(meta.risk.as_deref(), Some("low"));
+        assert_eq!(meta.affected_files, vec!["src/dispatch.rs"]);
+        assert_eq!(meta.verification_commands, vec!["cargo test"]);
+    }
+
+    #[test]
+    fn parses_bare_verification_bullets_inside_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket = tmp.path().join("TICKET-093-bare-verification.md");
+        fs::write(
+            &ticket,
+            "# TICKET-093: Bare Verification\n\n\
+## Verification Commands\n\
+- cargo test --lib\n",
+        )
+        .unwrap();
+        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
+        assert_eq!(meta.verification_commands, vec!["cargo test --lib"]);
     }
 
     #[test]
@@ -2928,11 +2981,47 @@ struct TicketMetadata {
     affected_files: Vec<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct TicketYamlMetadata {
+    #[serde(default, alias = "ticket-id")]
+    ticket_id: Option<String>,
+    #[serde(default, alias = "goal", alias = "summary")]
+    title: Option<String>,
+    #[serde(default)]
+    difficulty: Option<String>,
+    #[serde(default)]
+    risk: Option<String>,
+    #[serde(default, alias = "recommended-backend")]
+    recommended_backend: Option<String>,
+    #[serde(default, alias = "recommended-model")]
+    recommended_model: Option<String>,
+    #[serde(
+        default,
+        alias = "verification-commands",
+        deserialize_with = "deserialize_yaml_string_list"
+    )]
+    verification_commands: Vec<String>,
+    #[serde(
+        default,
+        alias = "affected-files",
+        deserialize_with = "deserialize_yaml_string_list"
+    )]
+    affected_files: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TicketSection {
+    None,
+    AffectedFiles,
+    VerificationCommands,
+}
+
 fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
     if path.extension().and_then(|e| e.to_str()) != Some("md") || !path.exists() {
         return Ok(None);
     }
-    let body = fs::read_to_string(path)?;
+    let body = fs::read_to_string(path)?.replace("\r\n", "\n");
+    let (yaml_meta, markdown_body) = parse_yaml_front_matter(&body)?;
     let ticket_id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -2945,25 +3034,38 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
                 _ => None,
             }
         });
-    let title = first_markdown_heading(&body).map(|title| normalize_ticket_title(title.into()));
     let mut meta = TicketMetadata {
         ticket_id,
-        title,
+        title: first_markdown_heading(markdown_body)
+            .map(|title| normalize_ticket_title(title.into())),
         ..TicketMetadata::default()
     };
-    for line in body.lines().map(str::trim) {
+    if let Some(yaml) = yaml_meta {
+        meta = merge_yaml_ticket_metadata(meta, yaml);
+    }
+    let mut section = TicketSection::None;
+    for line in markdown_body.lines().map(str::trim) {
+        if line.starts_with('#') {
+            section = match line.trim_start_matches('#').trim() {
+                "Affected Files" => TicketSection::AffectedFiles,
+                "Verification Commands" => TicketSection::VerificationCommands,
+                _ => TicketSection::None,
+            };
+            continue;
+        }
         if let Some(value) = line.strip_prefix("Difficulty:") {
-            meta.difficulty = Some(value.trim().to_string());
+            meta.difficulty
+                .get_or_insert_with(|| value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Risk:") {
-            meta.risk = Some(value.trim().to_string());
+            meta.risk.get_or_insert_with(|| value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Recommended backend:") {
             let value = value.trim();
-            if !value.is_empty() && value != "unspecified" {
+            if meta.recommended_backend.is_none() && !value.is_empty() && value != "unspecified" {
                 meta.recommended_backend = Some(value.to_string());
             }
         } else if let Some(value) = line.strip_prefix("Recommended model:") {
             let value = value.trim();
-            if !value.is_empty() && value != "unspecified" {
+            if meta.recommended_model.is_none() && !value.is_empty() && value != "unspecified" {
                 meta.recommended_model = Some(value.to_string());
             }
         } else if let Some(value) = line.strip_prefix("Goal:") {
@@ -2971,19 +3073,90 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
             if meta.title.is_none() && !value.is_empty() {
                 meta.title = Some(value.to_string());
             }
-        } else if line.starts_with("- `") && line.ends_with('`') {
-            meta.verification_commands.push(
-                line.trim_start_matches("- `")
-                    .trim_end_matches('`')
-                    .to_string(),
-            );
         } else if let Some(value) = line.strip_prefix("- ") {
-            if value.contains('/') || value.contains('.') {
-                meta.affected_files.push(value.to_string());
+            match section {
+                TicketSection::AffectedFiles if meta.affected_files.is_empty() => {
+                    meta.affected_files.push(value.to_string())
+                }
+                TicketSection::VerificationCommands if meta.verification_commands.is_empty() => {
+                    meta.verification_commands
+                        .push(value.trim_matches('`').to_string());
+                }
+                _ => {}
             }
         }
     }
     Ok(Some(meta))
+}
+
+fn merge_yaml_ticket_metadata(
+    mut meta: TicketMetadata,
+    yaml: TicketYamlMetadata,
+) -> TicketMetadata {
+    if yaml.ticket_id.is_some() {
+        meta.ticket_id = yaml.ticket_id;
+    }
+    if yaml.title.is_some() {
+        meta.title = yaml.title.map(normalize_ticket_title);
+    }
+    if yaml.difficulty.is_some() {
+        meta.difficulty = yaml.difficulty;
+    }
+    if yaml.risk.is_some() {
+        meta.risk = yaml.risk;
+    }
+    meta.recommended_backend = yaml
+        .recommended_backend
+        .filter(|value| !value.is_empty() && value != "unspecified")
+        .or(meta.recommended_backend);
+    meta.recommended_model = yaml
+        .recommended_model
+        .filter(|value| !value.is_empty() && value != "unspecified")
+        .or(meta.recommended_model);
+    if !yaml.verification_commands.is_empty() {
+        meta.verification_commands = yaml.verification_commands;
+    }
+    if !yaml.affected_files.is_empty() {
+        meta.affected_files = yaml.affected_files;
+    }
+    meta
+}
+
+fn parse_yaml_front_matter(body: &str) -> Result<(Option<TicketYamlMetadata>, &str)> {
+    let Some(rest) = body.strip_prefix("---\n") else {
+        return Ok((None, body));
+    };
+    let Some((yaml_block, markdown_body)) = rest.split_once("\n---\n") else {
+        return Ok((None, body));
+    };
+    let yaml = serde_yaml::from_str::<TicketYamlMetadata>(yaml_block)
+        .context("failed to parse ticket YAML front matter")?;
+    Ok((Some(yaml), markdown_body))
+}
+
+fn deserialize_yaml_string_list<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_yaml::Value::Null) => Ok(vec![]),
+        Some(serde_yaml::Value::String(value)) => Ok(vec![value]),
+        Some(serde_yaml::Value::Sequence(items)) => items
+            .into_iter()
+            .map(|item| match item {
+                serde_yaml::Value::String(value) => Ok(value),
+                other => Err(serde::de::Error::custom(format!(
+                    "expected string in YAML array, got {other:?}"
+                ))),
+            })
+            .collect(),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected string, YAML array, or null, got {other:?}"
+        ))),
+    }
 }
 
 fn normalize_ticket_title(title: String) -> String {
