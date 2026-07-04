@@ -3100,7 +3100,7 @@ fn dispatch_agy_multi_instance_isolated_execution() {
         &fake_bin,
         "agy",
         &format!(
-            "#!/bin/sh\necho \"agy\" >> \"{}\"\nexit 0\n",
+            "#!/bin/sh\necho \"agy\" | tee -a \"{}\"\nexit 0\n",
             agy_log.display()
         ),
     );
@@ -3108,7 +3108,7 @@ fn dispatch_agy_multi_instance_isolated_execution() {
         &fake_bin,
         "agy-main",
         &format!(
-            "#!/bin/sh\necho \"agy-main\" >> \"{}\"\nexit 0\n",
+            "#!/bin/sh\necho \"agy-main\" | tee -a \"{}\"\nexit 0\n",
             agy_main_log.display()
         ),
     );
@@ -3116,7 +3116,7 @@ fn dispatch_agy_multi_instance_isolated_execution() {
         &fake_bin,
         "agy-second",
         &format!(
-            "#!/bin/sh\necho \"agy-second\" >> \"{}\"\nexit 0\n",
+            "#!/bin/sh\necho \"agy-second\" | tee -a \"{}\"\nexit 0\n",
             agy_second_log.display()
         ),
     );

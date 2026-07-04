@@ -353,35 +353,43 @@ pub fn run_agy_with_executable(
     let trimmed = output.trim();
 
     // AGY sometimes exits 0 with empty output when quota is exhausted or
-    // auth has expired.  Treat empty output after a non-trivial duration
-    // as a failure and try to classify the real cause from AGY's own log.
+    // auth has expired.  Treat empty output at exit 0 as a failure and
+    // try to classify the real cause from AGY's own log.
     if trimmed.is_empty() && exit_code == 0 {
         let agy_home = env_vars
             .iter()
             .find(|(k, _)| k == "HOME")
             .map(|(_, v)| v.as_str())
-            .unwrap_or("/home/khing");
-        let agy_log = PathBuf::from(agy_home)
-            .join(".gemini/antigravity-cli/cli.log");
-        if let Ok(contents) = fs::read_to_string(&agy_log) {
-            if contents.contains("RESOURCE_EXHAUSTED") || contents.contains("429") {
-                anyhow::bail!(
-                    "AGY quota exhausted (exit=0 empty output).  See {}.  Resets ~{}.",
-                    agy_log.display(),
-                    extract_reset_time(&contents).unwrap_or("unknown"),
-                );
+            .map(|h| h.to_string())
+            .or_else(|| std::env::var("HOME").ok());
+        if let Some(ref home) = agy_home {
+            let agy_log = PathBuf::from(home).join(".gemini/antigravity-cli/cli.log");
+            if let Ok(contents) = fs::read_to_string(&agy_log) {
+                if contents.contains("RESOURCE_EXHAUSTED") || contents.contains("429") {
+                    anyhow::bail!(
+                        "AGY quota exhausted (exit=0 empty output).  See {}.  Resets ~{}.",
+                        agy_log.display(),
+                        extract_reset_time(&contents).unwrap_or_else(|| "unknown".into()),
+                    );
+                }
+                if contents.contains("not logged into Antigravity")
+                    || contents.contains("not logged in")
+                {
+                    anyhow::bail!(
+                        "AGY not authenticated.  Run `{}` interactively to log in.",
+                        executable.display(),
+                    );
+                }
             }
-            if contents.contains("not logged into Antigravity") || contents.contains("not logged in") {
-                anyhow::bail!(
-                    "AGY not authenticated.  Run `{} --print \"hello\"` interactively to log in.",
-                    executable.display(),
-                );
-            }
+            anyhow::bail!(
+                "AGY produced no output (exit=0).  Check {} for details.",
+                agy_log.display(),
+            );
+        } else {
+            anyhow::bail!(
+                "AGY produced no output (exit=0) and HOME is unset — cannot inspect cli.log.",
+            );
         }
-        anyhow::bail!(
-            "AGY produced no output (exit=0).  Check {} for details.",
-            agy_log.display(),
-        );
     }
 
     Ok(RunResult {
@@ -392,20 +400,20 @@ pub fn run_agy_with_executable(
 }
 
 /// Crude extraction of a reset timestamp from an AGY cli.log line such as
-/// "Resets in 16m44s."  Returns `Some(ref)`, or `None` if no pattern found.
-fn extract_reset_time(log: &str) -> Option<&str> {
+/// "Resets in 16m44s."  Returns `Some(..)` or `None` if no pattern found.
+fn extract_reset_time(log: &str) -> Option<String> {
     for line in log.lines().rev() {
         if let Some(pos) = line.find("Resets in ") {
             let rest = &line[pos + 10..];
-            if let Some(end) = rest.find(|c: char| c == '.' || c == ':') {
+            if let Some(end) = rest.find(['.', ':']) {
                 let reset = rest[..end].trim();
                 if !reset.is_empty() {
-                    return Some(reset);
+                    return Some(reset.to_string());
                 }
             }
             let end = rest.trim_end_matches('.');
             if !end.is_empty() {
-                return Some(end);
+                return Some(end.to_string());
             }
         }
     }
@@ -1283,5 +1291,113 @@ mod tests {
     #[test]
     fn backend_available_false_for_unknown_backend_name() {
         assert!(!backend_available("not-a-real-backend"));
+    }
+
+    // ── AGY empty-output detection ────────────────────────────────────
+
+    #[test]
+    fn extract_reset_time_parses_standard_format() {
+        let log = "RESOURCE_EXHAUSTED (code 429): quota. Resets in 16m44s.";
+        assert_eq!(extract_reset_time(log).as_deref(), Some("16m44s"));
+    }
+
+    #[test]
+    fn extract_reset_time_returns_none_when_absent() {
+        assert_eq!(extract_reset_time("no reset info here"), None);
+    }
+
+    #[test]
+    fn agy_empty_output_with_quota_log_detected_as_error() {
+        let f = fixture();
+        // Fake agy that exits 0 with no stdout/stderr.
+        make_fake_bin(&f.bin_dir, "agy", "#!/bin/sh\nexit 0\n");
+        // Write a cli.log with quota error text.
+        let agy_home = f.record_dir.parent().unwrap();
+        let agy_log_dir = agy_home.join(".gemini/antigravity-cli");
+        fs::create_dir_all(&agy_log_dir).unwrap();
+        fs::write(
+            agy_log_dir.join("cli.log"),
+            "RESOURCE_EXHAUSTED (code 429): quota. Resets in 10m.\n",
+        )
+        .unwrap();
+
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            ("HOME".to_string(), agy_home.to_string_lossy().to_string()),
+        ];
+        let err = run_agy_with_executable(
+            &f.bin_dir.join("agy"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "gpt-5.4".into(),
+            },
+            &envs,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("quota exhausted"), "got: {msg}");
+    }
+
+    #[test]
+    fn agy_empty_output_with_auth_log_detected_as_auth_failure() {
+        let f = fixture();
+        make_fake_bin(&f.bin_dir, "agy", "#!/bin/sh\nexit 0\n");
+        let agy_home = f.record_dir.parent().unwrap();
+        let agy_log_dir = agy_home.join(".gemini/antigravity-cli");
+        fs::create_dir_all(&agy_log_dir).unwrap();
+        fs::write(
+            agy_log_dir.join("cli.log"),
+            "error getting token source: You are not logged into Antigravity.\n",
+        )
+        .unwrap();
+
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            ("HOME".to_string(), agy_home.to_string_lossy().to_string()),
+        ];
+        let err = run_agy_with_executable(
+            &f.bin_dir.join("agy"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "gpt-5.4".into(),
+            },
+            &envs,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not authenticated"), "got: {msg}");
+    }
+
+    #[test]
+    fn agy_successful_output_not_affected_by_detection() {
+        let f = fixture();
+        // Normal agy that produces stdout content.
+        make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        let result = run_agy(
+            &f.worktree,
+            "normal task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "gpt-5.4".into(),
+            },
+            &envs,
+            "agy",
+        )
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("stdout-marker-agy"), "normal output preserved");
     }
 }
