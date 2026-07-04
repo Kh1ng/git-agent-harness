@@ -9,9 +9,12 @@
 mod support;
 
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Instant;
 use support::{FakeBackend, Scenario};
 use tempfile::TempDir;
+
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 fn run(bin_dir: &std::path::Path, name: &str, args: &[&str]) -> std::process::Output {
     Command::new(bin_dir.join(name))
@@ -26,6 +29,7 @@ fn run(bin_dir: &std::path::Path, name: &str, args: &[&str]) -> std::process::Ou
 
 #[test]
 fn configurable_exit_code() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     let backend = FakeBackend::new(tmp.path(), "claude");
     backend.install(Scenario::failure(7));
@@ -36,6 +40,7 @@ fn configurable_exit_code() {
 
 #[test]
 fn configurable_stdout_and_stderr() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     let backend = FakeBackend::new(tmp.path(), "codex");
     backend.install(
@@ -52,6 +57,7 @@ fn configurable_stdout_and_stderr() {
 
 #[test]
 fn argv_capture() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     let backend = FakeBackend::new(tmp.path(), "openhands");
     backend.install(Scenario::success());
@@ -70,6 +76,7 @@ fn argv_capture() {
 
 #[test]
 fn selected_environment_capture() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     let backend =
         FakeBackend::new(tmp.path(), "opencode").capture_env_vars(&["LLM_MODEL", "LLM_API_KEY"]);
@@ -104,6 +111,7 @@ fn selected_environment_capture() {
 
 #[test]
 fn delay_actually_delays() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     let backend = FakeBackend::new(tmp.path(), "claude");
     backend.install(Scenario::success().with_delay_ms(150));
@@ -118,6 +126,7 @@ fn delay_actually_delays() {
 
 #[test]
 fn deterministic_scenario_sequence_advances_per_call() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     let backend = FakeBackend::new(tmp.path(), "codex");
     backend.install_sequence(vec![
@@ -141,6 +150,7 @@ fn deterministic_scenario_sequence_advances_per_call() {
 
 #[test]
 fn scenario_sequence_repeats_last_entry_beyond_its_length() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     let backend = FakeBackend::new(tmp.path(), "claude");
     backend.install_sequence(vec![Scenario::failure(1), Scenario::success()]);
@@ -159,6 +169,7 @@ fn scenario_sequence_repeats_last_entry_beyond_its_length() {
 
 #[test]
 fn independent_state_per_instance_of_the_same_backend_name() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     // Two independently configured "claude" instances -- e.g. representing
     // two separate subscription accounts in future availability/quota
@@ -191,6 +202,7 @@ fn independent_state_per_instance_of_the_same_backend_name() {
 /// the harness is name-agnostic and supports faking it regardless.)
 #[test]
 fn supports_all_five_named_backends() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     for name in ["openhands", "opencode", "claude", "codex", "agy"] {
         let tmp = TempDir::new().unwrap();
         let backend = FakeBackend::new(tmp.path(), name);
