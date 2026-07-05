@@ -3755,10 +3755,13 @@ The parser should retain structured sections.\n\n\
         let tickets_dir = repo.join("docs/tickets");
         fs::create_dir_all(&tickets_dir).unwrap();
 
-        // Write MANAGER_MEMORY.md with TICKET-074 mapped to baseline disposition
+        // Write MANAGER_MEMORY.md with TICKET-074 mapped to baseline disposition.
+        // Must be a "| TICKET-N | ... |" table row -- that's the only format
+        // parse_ticket_metadata treats as a real status claim (a prose aside
+        // that merely mentions the ID isn't a staleness signal).
         fs::write(
             repo.join("docs/MANAGER_MEMORY.md"),
-            "- [MERGED] TICKET-074: Baseline disposition classifier\n",
+            "| TICKET-074 | P1 | FIX | MERGED | Baseline disposition classifier |\n",
         )
         .unwrap();
 
@@ -3778,6 +3781,37 @@ The parser should retain structured sections.\n\n\
         let title = build_mr_title("fix", "real", false, Some(&meta));
         assert_eq!(title, "[GAH] Fix: Fix closed unmerged MR classification");
         assert!(!title.contains("TICKET-074"));
+    }
+
+    #[test]
+    fn parse_ticket_metadata_ignores_incidental_manager_memory_prose_mentions() {
+        // Regression: MANAGER_MEMORY.md prose that merely cross-references a
+        // ticket ID (an ordering note, a categorization aside) is not a status
+        // claim and must not invalidate an otherwise-consistent ticket file,
+        // even if the wording doesn't literally repeat the ticket's title.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let tickets_dir = repo.join("docs/tickets");
+        fs::create_dir_all(&tickets_dir).unwrap();
+
+        fs::write(
+            repo.join("docs/MANAGER_MEMORY.md"),
+            "- **TICKET-114 is a serving-integrity control**\n\
+             - **TICKET-110 before TICKET-112**\n",
+        )
+        .unwrap();
+
+        let ticket_path = tickets_dir.join("TICKET-114-artifact-load-integrity.md");
+        fs::write(
+            &ticket_path,
+            "# TICKET-114 — Artifact load integrity verification\n\nGoal: test\n",
+        )
+        .unwrap();
+
+        let meta = parse_ticket_metadata(&ticket_path).unwrap().unwrap();
+        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-114"));
+        assert_eq!(meta.work_id.as_deref(), Some("TICKET-114"));
+        assert!(meta.is_authoritative);
     }
 
     #[test]
@@ -4924,7 +4958,14 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
     if let Some(heading) = raw_heading {
         let trimmed = heading.trim();
         if trimmed.starts_with("TICKET-") {
-            if let Some((id, _)) = trimmed.split_once(':') {
+            // Tickets are titled either "TICKET-N: Title" or "TICKET-N — Title"
+            // (em dash, no colon) -- both are in real use across this repo's
+            // own ticket backlog, so both must be recognized or the em-dash
+            // style silently fails is_authoritative and never gets dispatched.
+            if let Some((id, _)) = trimmed
+                .split_once(':')
+                .or_else(|| trimmed.split_once(" — "))
+            {
                 work_id_from_heading = Some(id.trim().to_string());
             }
         }
@@ -4994,7 +5035,13 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
                 if let Ok(content) = fs::read_to_string(p) {
                     let file_id = meta.ticket_id.as_ref().unwrap();
                     for line in content.lines() {
-                        if line.contains(file_id) {
+                        // Only a "| TICKET-N | ... |" status-table row is a real
+                        // status claim about this ticket -- any other prose
+                        // mention (a cross-reference, an ordering note, a
+                        // one-off aside) isn't a staleness signal and shouldn't
+                        // be able to invalidate the ticket file over wording.
+                        let is_table_row = line.trim_start().starts_with('|');
+                        if is_table_row && line.contains(file_id) {
                             if let Some(ref title) = meta.title {
                                 let norm_line = normalize_match(line);
                                 let norm_title = normalize_match(title);
