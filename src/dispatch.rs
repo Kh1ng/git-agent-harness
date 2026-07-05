@@ -454,6 +454,7 @@ fn run_backend(
                 .agy_print_timeout_seconds
                 .get(llm.model.as_str())
                 .copied(),
+            profile.agy_idle_timeout_seconds(),
         ),
         _ => runner::run_openhands(
             wt,
@@ -2388,6 +2389,7 @@ mod tests {
             agy_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
+            agy_idle_timeout_seconds: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,

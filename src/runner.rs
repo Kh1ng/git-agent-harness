@@ -313,9 +313,11 @@ pub fn run_agy(
         llm,
         env_vars,
         None,
+        120,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_agy_with_executable(
     executable: &Path,
     worktree: &Path,
@@ -324,6 +326,7 @@ pub fn run_agy_with_executable(
     llm: &LlmConfig,
     env_vars: &[(String, String)],
     print_timeout_seconds: Option<u64>,
+    idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
@@ -346,12 +349,60 @@ pub fn run_agy_with_executable(
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
-    let status = cmd.status().context(format!(
+
+    let mut child = cmd.spawn().context(format!(
         "launching {}; is it installed and on PATH?",
         executable.display()
     ))?;
+
+    // GAH-side supervision: kill only when the log has genuinely gone quiet
+    // for idle_timeout_seconds, not on a flat wall-clock budget. A model
+    // that's slow but still producing output (still working) is never
+    // killed for being slow; --print-timeout above stays as an outer
+    // safety backstop for a truly hung process.
+    let idle_timeout = Duration::from_secs(idle_timeout_seconds);
+    let poll_interval = Duration::from_millis(500);
+    let mut last_seen_len = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+    let mut last_progress_at = Instant::now();
+    let mut killed_for_idle = false;
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(-1),
+            Ok(None) => {
+                if let Ok(meta) = fs::metadata(&log_path) {
+                    let len = meta.len();
+                    if len != last_seen_len {
+                        last_seen_len = len;
+                        last_progress_at = Instant::now();
+                    }
+                }
+                if last_progress_at.elapsed() >= idle_timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    killed_for_idle = true;
+                    break -1;
+                }
+                thread::sleep(poll_interval);
+            }
+            Err(_) => break -1,
+        }
+    };
     let duration = start.elapsed();
-    let exit_code = status.code().unwrap_or(-1);
+
+    if killed_for_idle {
+        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
+            use std::io::Write;
+            let _ = writeln!(
+                file,
+                "GAH: killed after {idle_timeout_seconds}s with no new output (stalled, not just slow)."
+            );
+        }
+        return Ok(RunResult {
+            exit_code: -1,
+            duration_secs: duration.as_secs_f64(),
+            log_path: log_path.to_string_lossy().into_owned(),
+        });
+    }
 
     // Read captured stdout to detect silent failures.
     let output = fs::read_to_string(&log_path).unwrap_or_default();
@@ -794,6 +845,7 @@ mod tests {
             agy_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
+            agy_idle_timeout_seconds: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -1156,6 +1208,7 @@ mod tests {
             },
             &envs,
             Some(900),
+            120,
         )
         .unwrap();
 
@@ -1182,11 +1235,93 @@ mod tests {
             },
             &envs,
             None,
+            120,
         )
         .unwrap();
 
         let argv = recorded_argv(&f.record_dir);
         assert!(!argv.iter().any(|a| a == "--print-timeout"));
+    }
+
+    #[test]
+    fn run_agy_with_executable_kills_process_after_idle_timeout_with_no_new_output() {
+        let f = fixture();
+        // Writes one line, then goes silent for far longer than the idle
+        // timeout below -- this must be killed, not allowed to keep running.
+        make_fake_bin(
+            &f.bin_dir,
+            "agy",
+            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+        );
+        // Needs the real `sleep` binary reachable, not just the fake bin_dir.
+        let envs = vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )];
+
+        let result = run_agy_with_executable(
+            &f.bin_dir.join("agy"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            &test_llm(),
+            &envs,
+            None,
+            1, // idle timeout: 1s of silence is stalled
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("step1"));
+        assert!(!log.contains("step2"));
+        assert!(
+            log.contains("killed after 1s with no new output"),
+            "got log: {log}"
+        );
+    }
+
+    #[test]
+    fn run_agy_with_executable_does_not_kill_while_output_keeps_arriving() {
+        let f = fixture();
+        // Writes output every ~1s for 3s total -- longer than the 2s idle
+        // timeout below, but never actually goes quiet for that long. Must
+        // be allowed to finish naturally, not killed for being slow overall.
+        make_fake_bin(
+            &f.bin_dir,
+            "agy",
+            "#!/bin/sh\nfor i in 1 2 3; do echo \"step$i\"; sleep 1; done\n",
+        );
+        // Needs the real `sleep` binary reachable, not just the fake bin_dir.
+        let envs = vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )];
+
+        let result = run_agy_with_executable(
+            &f.bin_dir.join("agy"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            &test_llm(),
+            &envs,
+            None,
+            2, // idle timeout: longer than any single gap between writes
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("step1") && log.contains("step2") && log.contains("step3"));
+        assert!(!log.contains("killed after"));
     }
 
     #[test]
@@ -1414,6 +1549,7 @@ mod tests {
             },
             &envs,
             None,
+            120,
         )
         .unwrap();
         // Empty output with quota error becomes exit_code=-1
@@ -1451,6 +1587,7 @@ mod tests {
             },
             &envs,
             None,
+            120,
         )
         .unwrap();
         // Empty output with auth error becomes exit_code=-1

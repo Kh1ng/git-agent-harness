@@ -123,11 +123,23 @@ pub struct Profile {
     pub agy_second_home: Option<String>,
     /// Per-model override for AGY's own `--print-timeout` (default 5m0s in
     /// the `agy` CLI itself). Keyed by the exact AGY model name (e.g.
-    /// "Gemini 3.5 Flash (Medium)"). AGY is the only backend GAH invokes
-    /// that exposes a print-timeout flag today, so this is scoped to AGY
+    /// "Gemini 3.5 Flash (Medium)"). This is now an outer safety backstop
+    /// only -- the primary enforcement is `agy_idle_timeout_seconds` below,
+    /// which kills based on whether AGY is still producing output, not a
+    /// flat wall-clock budget. AGY is the only backend GAH invokes that
+    /// exposes a print-timeout flag today, so this stays scoped to AGY
     /// rather than a generic cross-backend timeout abstraction.
     #[serde(default)]
     pub agy_print_timeout_seconds: HashMap<String, u64>,
+    /// How long AGY's own log output can go quiet before GAH considers it
+    /// stalled and kills it, in seconds. Deliberately not per-model: a
+    /// working model of any speed should produce *some* log output
+    /// periodically as it takes actions, so a flat idle threshold is the
+    /// right granularity here (unlike agy_print_timeout_seconds, which is
+    /// about total budget and genuinely varies by model). Defaults to 120s
+    /// when unset (see `Profile::agy_idle_timeout_seconds`).
+    #[serde(default)]
+    pub agy_idle_timeout_seconds: Option<u64>,
     /// Path to a policy TOML file (see gah policy-check). When set, dispatch
     /// enforces permissions before provisioning any worktree.
     #[serde(default)]
@@ -377,6 +389,10 @@ impl Profile {
         self.review_timeout_seconds.unwrap_or(300).max(1)
     }
 
+    pub fn agy_idle_timeout_seconds(&self) -> u64 {
+        self.agy_idle_timeout_seconds.unwrap_or(120).max(1)
+    }
+
     pub fn pat(&self) -> String {
         match self.provider.as_str() {
             "gitlab" => std::env::var("GITLAB_PAT2")
@@ -616,6 +632,7 @@ mod tests {
             agy_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
+            agy_idle_timeout_seconds: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
