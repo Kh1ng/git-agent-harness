@@ -17,6 +17,8 @@ regex = "1"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 toml = "0.8"
 fs2 = "0.4"
+ratatui = "0.30"
+crossterm = "0.29"
 
 [dev-dependencies]
 assert_cmd = "2"
