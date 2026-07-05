@@ -291,6 +291,16 @@ pub fn scan_available_tickets(
                 let mut has_active_mr = false;
                 let mut has_merged_mr = false;
                 for e in entries.into_iter().flatten() {
+                    // The ledger is a single global file shared by every profile
+                    // (Defaults::ledger_path, not per-profile), and work_id is
+                    // just a heading-derived string like "TICKET-090" with no
+                    // repo namespace -- two unrelated repos (or even two ticket
+                    // files in the same repo) can legitimately share that exact
+                    // string. Scope to this profile's own repo so another
+                    // repo's history can't poison this one's retry count.
+                    if e.repo_id != profile.repo_id {
+                        continue;
+                    }
                     if is_ledger_entry_stale(e) {
                         continue;
                     }
@@ -2832,6 +2842,65 @@ mod tests {
             candidates.is_empty(),
             "ticket completed via merged MR must be excluded entirely, got {candidates:?}"
         );
+    }
+
+    #[test]
+    fn scan_available_tickets_ignores_ledger_entries_from_a_different_repo() {
+        // Regression: the ledger is one global file shared by every profile,
+        // and work_id is just a heading-derived string like "TICKET-090" with
+        // no repo namespace. A totally unrelated repo's failed/merged history
+        // for the same literal work_id must not poison this repo's ticket.
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-090-test.md"),
+            "# TICKET-090: Test ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.repo_id = "worldcup-props".into();
+        prof.local_path = tmp.path().display().to_string();
+
+        let mut other_repo_prof = profile(tmp.path());
+        other_repo_prof.repo_id = "gah".into();
+
+        let mut failed_entry =
+            LedgerEntry::new("test", &other_repo_prof, "codex", "fix", "x", None, None);
+        failed_entry.work_id = Some("TICKET-090".into());
+        failed_entry.set_failure(
+            crate::ledger::FailureClass::AgentNoProgress,
+            crate::ledger::FailureStage::PostValidation,
+        );
+        crate::ledger::append(&cfg, &failed_entry).unwrap();
+
+        let mut second_entry =
+            LedgerEntry::new("test", &other_repo_prof, "codex", "fix", "y", None, None);
+        second_entry.work_id = Some("TICKET-090".into());
+        crate::ledger::append(&cfg, &second_entry).unwrap();
+
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].prior_attempt_count, 0,
+            "another repo's ledger entries for the same literal work_id must not count here"
+        );
+        assert!(!candidates[0].has_active_mr);
     }
 
     #[test]
