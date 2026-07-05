@@ -1,8 +1,11 @@
-# TICKET-103: Separate Reviewer Strength from Review Verdict Confidence
+# TICKET-108: Separate Reviewer Strength from Review Verdict Confidence
 
 Priority: P0
 Difficulty: Medium
 Status: TODO
+
+Renumbered from TICKET-103 on 2026-07-04 — TICKET-103 collided with the pre-existing
+TICKET-103 (add AGY as review backend, complete). See docs/MANAGER_MEMORY.md Ticket ID Rules.
 
 ## Summary
 

@@ -1,5 +1,13 @@
 # TICKET-099: Stabilize logical backend-instance test isolation
 
+Status: CLOSED — SATISFIED (verified 2026-07-04)
+
+Current `main` already satisfies this: a file-level `TEST_MUTEX` (`tests/fake_backend_harness.rs:17`)
+already guards every test in the file, including `independent_state_per_instance_of_the_same_backend_name`
+(line 172). Verified 20 consecutive `cargo test --test fake_backend_harness` runs (parallel)
+plus a `--test-threads=1` run, all 9/9 passing every time. No changes to `FakeBackend`,
+`Scenario`, or `run()`. No further implementation needed.
+
 Goal: Fix the flaky `independent_state_per_instance_of_the_same_backend_name` test so it reliably passes under `cargo test` (parallel execution).
 
 Difficulty: easy

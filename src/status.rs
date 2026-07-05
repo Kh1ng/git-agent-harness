@@ -133,6 +133,7 @@ pub fn build_snapshot(
                     sync::SyncMrJson {
                         profile: None,
                         branch: mr.branch,
+                        work_id: mr.work_id,
                         id: mr.id,
                         url: mr.url,
                         state: mr.state,
@@ -730,6 +731,7 @@ default_target_branch = "main"
             merged: false,
             updated_at: None,
             ci_failed: false,
+            work_id: None,
         };
         let class = sync::classify(&mr);
         assert_eq!(class, "READY_FOR_HUMAN");
@@ -751,6 +753,7 @@ default_target_branch = "main"
             merged: false,
             updated_at: None,
             ci_failed: true,
+            work_id: None,
         };
         let class = sync::classify(&mr);
         assert_eq!(class, "CLOSED_UNMERGED");

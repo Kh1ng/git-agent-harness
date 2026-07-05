@@ -414,6 +414,8 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/claude_generic_rate_limit_zero_tokens.json");
     const CLAUDE_TRANSIENT_THROTTLE: &str =
         include_str!("../tests/fixtures/quota-logs/claude_transient_throttle.json");
+    const AGY_AUTH_NOT_LOGGED_IN: &str =
+        include_str!("../tests/fixtures/quota-logs/agy_auth_not_logged_in.txt");
 
     // ── Codex: full date+time, no timezone (openai/codex #12299) ───────────
 
@@ -591,5 +593,65 @@ mod tests {
             let parsed = parse("test", fixture, now).unwrap();
             assert!(!parsed.matched_evidence.trim().is_empty());
         }
+    }
+
+    // ── AGY: quota/auth classification (TICKET-107) ─────────────────────
+    //
+    // Real evidence exists on this host only for the auth-failure text
+    // (see PROVENANCE.md, `agy_auth_not_logged_in.txt`). No real AGY
+    // quota-exhaustion capture exists yet, so the quota-branch tests below
+    // exercise the literal strings already shipped in `agy_quota_re`
+    // rather than an external fixture -- see PROVENANCE.md for the caveat.
+
+    #[test]
+    fn agy_resource_exhausted_classifies_as_quota_exhaustion() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("agy-main", "Error: RESOURCE_EXHAUSTED", now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+        assert!(!parsed.retryable);
+        assert_eq!(parsed.confidence, Confidence::High);
+    }
+
+    #[test]
+    fn agy_contextual_code_429_classifies_as_quota_exhaustion() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("agy-second", "request failed with code 429", now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+    }
+
+    #[test]
+    fn agy_individual_quota_reached_classifies_as_quota_exhaustion() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("agy", "Individual quota reached. Resets in 2h 15m.", now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+        assert_eq!(parsed.reset_at.as_deref(), Some("2026-01-01T02:15:00Z"));
+    }
+
+    #[test]
+    fn agy_auth_failure_classifies_as_authentication_error() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("agy-main", AGY_AUTH_NOT_LOGGED_IN, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::AuthenticationError);
+        assert!(parsed.retryable);
+        assert_eq!(parsed.confidence, Confidence::High);
+    }
+
+    #[test]
+    fn agy_naked_429_without_context_does_not_match() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        // The regex requires the literal phrase "code 429" -- a bare 429
+        // digit sequence elsewhere in unrelated text must not classify.
+        let text = "The bus route 429 was delayed this morning.";
+        assert!(
+            parse("agy-main", text, now).is_none(),
+            "a naked 429 unrelated to an HTTP/error code must not classify as quota exhaustion"
+        );
+    }
+
+    #[test]
+    fn agy_unknown_empty_failure_returns_none() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        assert!(parse("agy-main", "", now).is_none());
+        assert!(parse("agy-second", "process exited with no output", now).is_none());
     }
 }

@@ -1,8 +1,11 @@
-# TICKET-104: Make Ponytail a Canonical Reviewer Capability
+# TICKET-109: Make Ponytail a Canonical Reviewer Capability
 
 Priority: P0
 Difficulty: Medium
 Status: TODO
+
+Renumbered from TICKET-104 on 2026-07-04 — TICKET-104 collided with the pre-existing
+TICKET-104 (hierarchical shared configuration). See docs/MANAGER_MEMORY.md Ticket ID Rules.
 
 ## Summary
 

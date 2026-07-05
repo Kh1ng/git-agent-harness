@@ -67,6 +67,10 @@ enum Commands {
         profile: Option<String>,
         #[arg(long, name = "config")]
         config_path: Option<String>,
+        /// Also verify execution prerequisites: validation commands resolve,
+        /// declared env files exist, backend executables are present.
+        #[arg(long)]
+        validate: bool,
     },
     /// Create or print a starter GAH config/profile
     Init {
@@ -205,6 +209,8 @@ enum LedgerCommands {
         profile: Option<String>,
         #[arg(long, name = "config")]
         config_path: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -226,7 +232,8 @@ fn main() -> Result<()> {
         Commands::Doctor {
             profile,
             config_path,
-        } => doctor::run(profile.as_deref(), config_path.as_deref())?,
+            validate,
+        } => doctor::run_with_validate(profile.as_deref(), config_path.as_deref(), validate)?,
 
         Commands::Init {
             profile,
@@ -275,7 +282,13 @@ fn main() -> Result<()> {
                 since,
                 profile,
                 config_path,
-            } => ledger::summary::run(&since, profile.as_deref(), config_path.as_deref())?,
+                json,
+            } => ledger::summary::run_with_json(
+                &since,
+                profile.as_deref(),
+                config_path.as_deref(),
+                json,
+            )?,
         },
 
         Commands::Status {

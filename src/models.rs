@@ -36,6 +36,13 @@ pub struct WorkMetadata {
     pub affected_files: Vec<String>,
     #[serde(default)]
     pub is_authoritative: bool,
+    /// PM-plan-mode only: prior evidence the PM cited for why this isn't a
+    /// duplicate of existing work.
+    #[serde(default)]
+    pub duplicate_evidence: Vec<String>,
+    /// PM-plan-mode only: why this gap isn't already covered.
+    #[serde(default)]
+    pub uncovered_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,27 +190,10 @@ pub struct RepoPolicy {
 pub struct PmPlan {
     pub title: String,
     pub summary: String,
+    // TICKET-092: unified onto WorkMetadata (was a separate PmPlanTicket
+    // struct duplicating title/summary/difficulty/risk/etc).
     #[serde(default)]
-    pub tickets: Vec<PmPlanTicket>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PmPlanTicket {
-    pub title: String,
-    pub summary: String,
-    pub difficulty: String,
-    pub risk: String,
-    #[serde(default)]
-    pub recommended_backend: Option<String>,
-    #[serde(default)]
-    pub duplicate_evidence: Vec<String>,
-    #[serde(default)]
-    pub affected_files: Vec<String>,
-    #[serde(default)]
-    pub acceptance_criteria: Vec<String>,
-    #[serde(default)]
-    pub verification_commands: Vec<String>,
-    pub uncovered_reason: String,
+    pub tickets: Vec<WorkMetadata>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

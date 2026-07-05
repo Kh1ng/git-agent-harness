@@ -20,6 +20,13 @@ pub struct RouteRequest<'a> {
     pub recommended_model: Option<&'a str>,
     pub session_id: Option<&'a str>,
     pub usage_summary: Option<BackendUsageSummary>,
+    /// TICKET-089 AC7/8: the `FailureClass::as_str()` of the immediately
+    /// preceding attempt, when this route decision is a same-invocation
+    /// retry. Only `agent_failure`/`agent_no_progress`/`validation_failure`
+    /// (genuine agent-capability failures) may escalate candidate ordering
+    /// toward a stronger model; harness/environment/backend (auth/quota)
+    /// failures must not, since a stronger model doesn't fix those.
+    pub last_failure_class: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +105,7 @@ struct RouteCandidate {
 #[derive(Debug, Clone)]
 struct ReorderDecision {
     selected_over: Vec<String>,
+    escalated: bool,
 }
 
 pub fn decide(
@@ -153,7 +161,8 @@ where
         };
 
     if let Some(candidates) = candidates {
-        let (candidates, reorder) = order_candidates(profile, candidates);
+        let escalate = is_genuine_agent_failure(req.last_failure_class);
+        let (candidates, reorder) = order_candidates(profile, candidates, escalate);
         let preferred = candidates.first().cloned().expect("non-empty list");
         let candidates_for_diagnostics = candidates.clone();
         let (selected, skipped) =
@@ -463,7 +472,11 @@ fn append_reorder_reason(
     reorder: &ReorderDecision,
     pacing: &crate::quota::PacingConfig,
 ) -> String {
-    base.push_str("; cost-aware reorder selected ");
+    if reorder.escalated {
+        base.push_str("; escalated to stronger model after genuine agent failure, selected ");
+    } else {
+        base.push_str("; cost-aware reorder selected ");
+    }
     base.push_str(&describe_candidate(selected, pacing));
     base.push_str(" over ");
     base.push_str(&reorder.selected_over.join(", "));
@@ -728,17 +741,30 @@ fn dedupe_candidates(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
     out
 }
 
+/// TICKET-089 AC7/8: only a genuine agent-capability failure justifies
+/// escalating toward a stronger (likely costlier) model. Harness/environment
+/// failures, backend errors (which cover the AGY/Codex/Claude quota and auth
+/// classifications from TICKET-102/107), and unknown/human-blocked states
+/// must not -- a stronger model doesn't fix a broken auth token.
+fn is_genuine_agent_failure(last_failure_class: Option<&str>) -> bool {
+    matches!(
+        last_failure_class,
+        Some("agent_failure") | Some("agent_no_progress") | Some("validation_failure")
+    )
+}
+
 fn order_candidates(
     profile: &Profile,
     candidates: Vec<RouteCandidate>,
+    escalate: bool,
 ) -> (Vec<RouteCandidate>, Option<ReorderDecision>) {
     let mut candidates = with_original_order(candidates);
-    if !candidates.iter().any(RouteCandidate::has_cost_policy) {
+    if !escalate && !candidates.iter().any(RouteCandidate::has_cost_policy) {
         return (candidates, None);
     }
 
     let original = candidates.clone();
-    candidates.sort_by(|left, right| compare_candidates(left, right, &profile.pacing));
+    candidates.sort_by(|left, right| compare_candidates(left, right, &profile.pacing, escalate));
 
     let Some(selected) = candidates.first() else {
         return (candidates, None);
@@ -749,7 +775,7 @@ fn order_candidates(
             candidate.backend != selected.backend || candidate.model != selected.model
         })
         .filter(|candidate| {
-            compare_candidates(selected, candidate, &profile.pacing) == Ordering::Less
+            compare_candidates(selected, candidate, &profile.pacing, escalate) == Ordering::Less
         })
         .map(|candidate| describe_candidate(candidate, &profile.pacing))
         .collect::<Vec<_>>();
@@ -757,19 +783,38 @@ fn order_candidates(
     let reorder = if selected_over.is_empty() {
         None
     } else {
-        Some(ReorderDecision { selected_over })
+        Some(ReorderDecision {
+            selected_over,
+            escalated: escalate,
+        })
     };
     (candidates, reorder)
+}
+
+fn is_strong_candidate(candidate: &RouteCandidate) -> bool {
+    candidate
+        .model
+        .as_deref()
+        .map(crate::ledger::is_strong_model)
+        .unwrap_or(true)
 }
 
 fn compare_candidates(
     left: &RouteCandidate,
     right: &RouteCandidate,
     pacing: &crate::quota::PacingConfig,
+    escalate: bool,
 ) -> Ordering {
     right
         .priority
         .cmp(&left.priority)
+        .then_with(|| {
+            if escalate {
+                is_strong_candidate(right).cmp(&is_strong_candidate(left))
+            } else {
+                Ordering::Equal
+            }
+        })
         .then_with(|| economic_rank(left, pacing).cmp(&economic_rank(right, pacing)))
         .then_with(|| compare_optional_f64(left.marginal_cost_usd, right.marginal_cost_usd))
         .then_with(|| left.original_order.cmp(&right.original_order))
@@ -1175,7 +1220,7 @@ fn over_cap_reason(
 
 #[cfg(test)]
 mod tests {
-    use super::{decide_with, RouteError, RouteRequest};
+    use super::{decide_with, is_genuine_agent_failure, RouteError, RouteRequest};
     use crate::availability::{Reason, Source};
     use crate::config::{Defaults, Profile, RoutingPolicy};
 
@@ -1302,6 +1347,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1328,6 +1374,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "improve",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1366,6 +1413,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1392,6 +1440,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1430,6 +1479,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1467,6 +1517,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "fix",
                 requested_backend: "auto",
                 requested_model: Some("gpt-5"),
@@ -1515,6 +1566,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "fix",
                 requested_backend: "auto",
                 requested_model: Some("gpt-5"),
@@ -1534,6 +1586,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "fix",
                 requested_backend: "auto",
                 requested_model: Some("gpt-5-mini"),
@@ -1570,6 +1623,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1609,6 +1663,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1654,6 +1709,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "review",
                 requested_backend: "claude",
                 requested_model: None,
@@ -1682,6 +1738,7 @@ mod tests {
             &defaults(),
             &profile(),
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1712,6 +1769,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1759,6 +1817,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1818,6 +1877,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1866,6 +1926,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1916,6 +1977,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1953,6 +2015,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -1973,6 +2036,126 @@ mod tests {
             Some("codex-main")
         );
         assert!(decision2.fallback_used);
+    }
+
+    #[test]
+    fn is_genuine_agent_failure_classifies_correctly() {
+        // TICKET-089 AC7/8
+        assert!(is_genuine_agent_failure(Some("agent_failure")));
+        assert!(is_genuine_agent_failure(Some("agent_no_progress")));
+        assert!(is_genuine_agent_failure(Some("validation_failure")));
+        assert!(!is_genuine_agent_failure(Some("harness_error")));
+        assert!(!is_genuine_agent_failure(Some("environment_error")));
+        assert!(!is_genuine_agent_failure(Some("backend_error")));
+        assert!(!is_genuine_agent_failure(Some("human_blocked")));
+        assert!(!is_genuine_agent_failure(Some("unknown")));
+        assert!(!is_genuine_agent_failure(None));
+    }
+
+    #[test]
+    fn genuine_agent_failure_escalates_to_stronger_model() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "openhands".into(),
+                model: Some("deepseek-flash".into()),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            },
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            },
+        ]);
+
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                last_failure_class: Some("validation_failure"),
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
+        assert!(decision
+            .routing_reason
+            .contains("escalated to stronger model"));
+    }
+
+    #[test]
+    fn non_agent_failure_does_not_escalate() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.pm_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "openhands".into(),
+                model: Some("deepseek-flash".into()),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            },
+            crate::config::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-5.4".into()),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            },
+        ]);
+
+        for failure in [None, Some("backend_error"), Some("harness_error")] {
+            let decision = decide_with(
+                &defaults(),
+                &profile,
+                RouteRequest {
+                    last_failure_class: failure,
+                    mode: "pm",
+                    requested_backend: "auto",
+                    requested_model: None,
+                    recommended_backend: None,
+                    recommended_model: None,
+                    session_id: None,
+                    usage_summary: None,
+                },
+                &path(&tmp),
+                OffsetDateTime::now_utc(),
+                backend_available,
+            )
+            .unwrap();
+
+            assert_eq!(decision.effective_backend, "openhands");
+            assert_eq!(decision.effective_model.as_deref(), Some("deepseek-flash"));
+            assert!(!decision.routing_reason.contains("escalated"));
+        }
     }
 
     #[test]
@@ -2006,6 +2189,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -2078,6 +2262,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,
@@ -2129,6 +2314,7 @@ mod tests {
             &defaults(),
             &profile,
             RouteRequest {
+                last_failure_class: None,
                 mode: "pm",
                 requested_backend: "auto",
                 requested_model: None,

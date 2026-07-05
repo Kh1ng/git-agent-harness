@@ -1,7 +1,7 @@
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
-use crate::models::{PmPlan, PmPlanTicket, WorkMetadata};
+use crate::models::{PmPlan, WorkMetadata};
 use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
@@ -142,19 +142,13 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
         return Ok(());
     };
 
-    let entries = match crate::ledger::read_entries(cfg) {
+    let matching_entries = match crate::ledger::entries_for_work_id(cfg, &work_id) {
         Ok(entries) => entries,
         Err(e) => {
             eprintln!("warning: failed to read ledger entries: {:#}", e);
             return Ok(());
         }
     };
-
-    // Filter matching entries
-    let matching_entries: Vec<&LedgerEntry> = entries
-        .iter()
-        .filter(|e| e.work_id.as_ref() == Some(&work_id))
-        .collect();
 
     if matching_entries.is_empty() {
         return Ok(());
@@ -164,7 +158,7 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
     let mrs = crate::sync::fetch_mrs(profile).unwrap_or_default();
 
     for entry in matching_entries {
-        if is_ledger_entry_stale(entry) {
+        if is_ledger_entry_stale(&entry) {
             continue;
         }
 
@@ -501,7 +495,6 @@ fn improve(
         args.target.clone()
     };
     let ticket_meta = parse_ticket_metadata(Path::new(&target)).ok().flatten();
-    apply_authoritative_work_identity(ledger, ticket_meta.as_ref());
     let usage_summary = ledger::usage_summary_for_backend(
         cfg,
         args.backend.as_str(),
@@ -526,6 +519,7 @@ fn improve(
             .and_then(|m| m.recommended_model.as_deref()),
         session_id: session_dir.file_name().and_then(|s| s.to_str()),
         usage_summary,
+        last_failure_class: None,
     };
     let mut route = decide_route(cfg, profile, route_req.clone(), ledger)?;
     apply_route_to_ledger(ledger, &route);
@@ -566,6 +560,7 @@ fn improve(
         &worktree_base,
     )?;
     ledger.branch = Some(branch.clone());
+    apply_authoritative_work_identity(ledger, ticket_meta.as_ref(), &branch);
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
@@ -822,6 +817,43 @@ fn improve(
                         max_attempts,
                         &failure_output[..failure_output.len().min(8_000)],
                     );
+                    // TICKET-089 AC7: made real (if imperfect) progress and
+                    // failed validation again -- a genuine agent-capability
+                    // failure, distinct from harness/backend/quota failures.
+                    // Route again with that context so cost-aware ordering
+                    // may escalate to a stronger model for the retry.
+                    let mut escalation_req = route_req.clone();
+                    escalation_req.last_failure_class =
+                        Some(crate::ledger::FailureClass::ValidationFailure.as_str());
+                    let rerouted = decide_route(cfg, profile, escalation_req, ledger)?;
+                    let current_identity =
+                        route_identity(&route.effective_backend, route.effective_model.as_deref());
+                    let rerouted_identity = route_identity(
+                        &rerouted.effective_backend,
+                        rerouted.effective_model.as_deref(),
+                    );
+                    if rerouted_identity != current_identity {
+                        println!(
+                            "Escalating retry after validation failure: {} -> {}",
+                            route
+                                .effective_model
+                                .as_deref()
+                                .unwrap_or(&route.effective_backend),
+                            rerouted
+                                .effective_model
+                                .as_deref()
+                                .unwrap_or(&rerouted.effective_backend),
+                        );
+                        route = rerouted;
+                        apply_route_to_ledger(ledger, &route);
+                        preflight(profile, &route.effective_backend)?;
+                        llm = resolve_llm(
+                            cfg,
+                            args,
+                            profile.oh_profile.as_deref(),
+                            route.effective_model.as_deref(),
+                        )?;
+                    }
                 } else if attempt + 1 < max_attempts && !args.allow_draft_fail {
                     let Some(reason) = validation_failure_no_progress_reason(failure_progress)
                     else {
@@ -994,15 +1026,25 @@ fn improve(
     Ok(())
 }
 
-fn apply_authoritative_work_identity(ledger: &mut LedgerEntry, ticket: Option<&TicketMetadata>) {
-    let Some(ticket) = ticket else {
-        return;
-    };
-    if !ticket.is_authoritative {
-        return;
+/// TICKET-091 AC4: when no authoritative external ticket exists, fall back
+/// to the branch name (already unique/timestamped at dispatch time) as a
+/// synthetic internal work ID rather than leaving it unset. This never
+/// collides with a real ticket's work_id in `check_duplicate_work`, which
+/// only ever computes its lookup key from a ticket file or candidate JSON.
+fn apply_authoritative_work_identity(
+    ledger: &mut LedgerEntry,
+    ticket: Option<&TicketMetadata>,
+    fallback_work_id: &str,
+) {
+    match ticket {
+        Some(ticket) if ticket.is_authoritative => {
+            ledger.work_id = ticket.work_id.clone().or_else(|| ticket.ticket_id.clone());
+            ledger.work_title = ticket.title.clone();
+        }
+        _ => {
+            ledger.work_id = Some(fallback_work_id.to_string());
+        }
     }
-    ledger.work_id = ticket.work_id.clone().or_else(|| ticket.ticket_id.clone());
-    ledger.work_title = ticket.title.clone();
 }
 
 fn experiment(
@@ -1016,6 +1058,7 @@ fn experiment(
         cfg,
         profile,
         RouteRequest {
+            last_failure_class: None,
             mode: "experiment",
             requested_backend: &args.backend,
             requested_model: args.model.as_deref(),
@@ -1309,6 +1352,7 @@ fn pm(
         recommended_model: None,
         session_id: session_dir.file_name().and_then(|s| s.to_str()),
         usage_summary: None,
+        last_failure_class: None,
     };
     let mut plan_route = decide_route(cfg, profile, route_req.clone(), ledger)?;
     apply_route_to_ledger(ledger, &plan_route);
@@ -1590,6 +1634,7 @@ fn review(
         cfg,
         profile,
         RouteRequest {
+            last_failure_class: None,
             mode: "review",
             requested_backend: &args.backend,
             requested_model: args.model.as_deref(),
@@ -2015,9 +2060,10 @@ mod tests {
         apply_authoritative_work_identity, apply_pm_plan, apply_route_to_ledger,
         build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title, build_pm_plan_task,
         classify_validation_failure_progress, collect_pm_preflight, collect_ticket_summaries,
-        first_markdown_heading, mark_backend_unavailable_from_output_at, parse_pm_plan,
-        parse_ticket_metadata, validation_failure_no_progress_reason, ExperimentMrRenderContext,
-        MrRenderContext, RouteDecision, TicketMetadata, ValidationFailureProgress,
+        first_markdown_heading, mark_backend_unavailable_from_output_at, next_ticket_id,
+        parse_pm_plan, parse_ticket_metadata, validation_failure_no_progress_reason,
+        ExperimentMrRenderContext, MrRenderContext, RouteDecision, TicketMetadata,
+        ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Profile, RoutingPolicy};
@@ -2395,6 +2441,26 @@ mod tests {
     }
 
     #[test]
+    fn next_ticket_id_avoids_collision_with_manager_memory_reservation() {
+        // TICKET-091 AC6/7: a ticket ID reserved only in manager memory
+        // prose (no docs/tickets/ file yet) must not be reused -- this is
+        // exactly how the TICKET-102/103/104 collisions happened.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let tickets_dir = repo.join("docs/tickets");
+        fs::create_dir_all(&tickets_dir).unwrap();
+        fs::write(tickets_dir.join("TICKET-005-old.md"), "old").unwrap();
+        fs::write(
+            repo.join("docs/MANAGER_MEMORY.md"),
+            "## TICKET-042 -- reserved but not yet filed\n\nStatus: TODO\n",
+        )
+        .unwrap();
+
+        let id = next_ticket_id(&tickets_dir, Some(&repo.join("docs/MANAGER_MEMORY.md"))).unwrap();
+        assert_eq!(id, 43, "must skip past the memory-reserved TICKET-042");
+    }
+
+    #[test]
     fn parses_ticket_metadata_for_routing() {
         let tmp = tempfile::tempdir().unwrap();
         let ticket = tmp.path().join("TICKET-058-descriptive-mr-titles.md");
@@ -2623,7 +2689,7 @@ The parser should retain structured sections.\n\n\
             None,
         );
 
-        apply_authoritative_work_identity(&mut ledger, Some(&ticket));
+        apply_authoritative_work_identity(&mut ledger, Some(&ticket), "gah/real-123");
 
         assert_eq!(ledger.work_id.as_deref(), Some("TICKET-095"));
         assert_eq!(
@@ -2633,7 +2699,9 @@ The parser should retain structured sections.\n\n\
     }
 
     #[test]
-    fn non_authoritative_ticket_metadata_does_not_populate_ledger_work_identity() {
+    fn non_authoritative_ticket_metadata_falls_back_to_synthetic_work_id() {
+        // TICKET-091 AC4: no authoritative external ticket -> generate an
+        // internal ID (the branch name) rather than leaving work_id unset.
         let ticket = TicketMetadata {
             ticket_id: Some("TICKET-095".into()),
             work_id: Some("TICKET-095".into()),
@@ -2652,10 +2720,28 @@ The parser should retain structured sections.\n\n\
             None,
         );
 
-        apply_authoritative_work_identity(&mut ledger, Some(&ticket));
+        apply_authoritative_work_identity(&mut ledger, Some(&ticket), "gah/real-123");
 
-        assert_eq!(ledger.work_id, None);
+        assert_eq!(ledger.work_id.as_deref(), Some("gah/real-123"));
         assert_eq!(ledger.work_title, None);
+    }
+
+    #[test]
+    fn no_ticket_falls_back_to_synthetic_work_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ledger = LedgerEntry::new(
+            "real",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+
+        apply_authoritative_work_identity(&mut ledger, None, "gah/real-456");
+
+        assert_eq!(ledger.work_id.as_deref(), Some("gah/real-456"));
     }
 
     #[test]
@@ -3014,6 +3100,7 @@ fn dry_run_route(
         &cfg.defaults,
         profile,
         RouteRequest {
+            last_failure_class: None,
             mode,
             requested_backend: &args.backend,
             requested_model: args.model.as_deref(),
@@ -3380,7 +3467,8 @@ fn extract_first_json_object(text: &str) -> Option<String> {
 fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<PathBuf>> {
     let tickets_dir = repo.join("docs/tickets");
     fs::create_dir_all(&tickets_dir)?;
-    let next_id = next_ticket_id(&tickets_dir)?;
+    let manager_memory_path = repo.join("docs/MANAGER_MEMORY.md");
+    let next_id = next_ticket_id(&tickets_dir, Some(&manager_memory_path))?;
     let mut written = vec![];
     let mut id = next_id;
     for ticket in &plan.tickets {
@@ -3388,7 +3476,7 @@ fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<Pa
             continue;
         }
         validate_ticket(ticket)?;
-        let slug = slugify(&ticket.title);
+        let slug = slugify(ticket.title.as_deref().unwrap_or(""));
         let filename = format!("TICKET-{:03}-{}.md", id, slug);
         let path = tickets_dir.join(filename);
         fs::write(&path, render_ticket(ticket, id))?;
@@ -3398,8 +3486,8 @@ fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<Pa
     Ok(written)
 }
 
-fn should_skip_ticket(ctx: &PmPreflight, ticket: &PmPlanTicket) -> bool {
-    let title = normalize_match(&ticket.title);
+fn should_skip_ticket(ctx: &PmPreflight, ticket: &WorkMetadata) -> bool {
+    let title = normalize_match(ticket.title.as_deref().unwrap_or(""));
     if title.is_empty() {
         return true;
     }
@@ -3410,26 +3498,27 @@ fn should_skip_ticket(ctx: &PmPreflight, ticket: &PmPlanTicket) -> bool {
         || normalize_match(&ctx.merged_mrs).contains(&title)
 }
 
-fn validate_ticket(ticket: &PmPlanTicket) -> Result<()> {
-    if ticket.title.trim().is_empty() || ticket.summary.trim().is_empty() {
+fn validate_ticket(ticket: &WorkMetadata) -> Result<()> {
+    let title = ticket.title.as_deref().unwrap_or("");
+    if title.trim().is_empty() || ticket.summary.as_deref().unwrap_or("").trim().is_empty() {
         anyhow::bail!("ticket missing title or summary");
     }
-    if !matches!(ticket.difficulty.as_str(), "easy" | "medium" | "hard") {
-        anyhow::bail!("ticket '{}' has invalid difficulty", ticket.title);
+    if !matches!(
+        ticket.difficulty.as_deref(),
+        Some("easy" | "medium" | "hard")
+    ) {
+        anyhow::bail!("ticket '{}' has invalid difficulty", title);
     }
-    if !matches!(ticket.risk.as_str(), "low" | "medium" | "high") {
-        anyhow::bail!("ticket '{}' has invalid risk", ticket.title);
+    if !matches!(ticket.risk.as_deref(), Some("low" | "medium" | "high")) {
+        anyhow::bail!("ticket '{}' has invalid risk", title);
     }
     if ticket.acceptance_criteria.is_empty() || ticket.verification_commands.is_empty() {
-        anyhow::bail!(
-            "ticket '{}' missing acceptance or verification",
-            ticket.title
-        );
+        anyhow::bail!("ticket '{}' missing acceptance or verification", title);
     }
     Ok(())
 }
 
-fn render_ticket(ticket: &PmPlanTicket, id: usize) -> String {
+fn render_ticket(ticket: &WorkMetadata, id: usize) -> String {
     let mut out = format!(
         "# TICKET-{id:03}: {title}\n\n\
 Goal: {summary}\n\n\
@@ -3439,15 +3528,15 @@ Recommended backend: {backend}\n\n\
 ## Why This Is Uncovered\n{reason}\n\n\
 ## Affected Files\n",
         id = id,
-        title = ticket.title,
-        summary = ticket.summary,
-        difficulty = ticket.difficulty,
-        risk = ticket.risk,
+        title = ticket.title.as_deref().unwrap_or(""),
+        summary = ticket.summary.as_deref().unwrap_or(""),
+        difficulty = ticket.difficulty.as_deref().unwrap_or(""),
+        risk = ticket.risk.as_deref().unwrap_or(""),
         backend = ticket
             .recommended_backend
             .as_deref()
             .unwrap_or("unspecified"),
-        reason = ticket.uncovered_reason,
+        reason = ticket.uncovered_reason.as_deref().unwrap_or(""),
     );
     for file in &ticket.affected_files {
         out.push_str(&format!("- {}\n", file));
@@ -3469,7 +3558,10 @@ Recommended backend: {backend}\n\n\
     out
 }
 
-fn next_ticket_id(tickets_dir: &Path) -> Result<usize> {
+/// TICKET-091 AC6/7: a new ticket ID must not collide with one already
+/// reserved in manager memory prose, even if no file exists yet for it
+/// (this is exactly how the TICKET-102/103/104 collisions happened).
+fn next_ticket_id(tickets_dir: &Path, manager_memory_path: Option<&Path>) -> Result<usize> {
     let mut max_id = 0usize;
     if tickets_dir.exists() {
         for entry in fs::read_dir(tickets_dir)? {
@@ -3482,7 +3574,25 @@ fn next_ticket_id(tickets_dir: &Path) -> Result<usize> {
             }
         }
     }
+    if let Some(path) = manager_memory_path {
+        if path.exists() {
+            let content = fs::read_to_string(path)?;
+            for id in scan_ticket_ids(&content) {
+                max_id = max_id.max(id);
+            }
+        }
+    }
     Ok(max_id + 1)
+}
+
+fn scan_ticket_ids(text: &str) -> Vec<usize> {
+    text.split("TICKET-")
+        .skip(1)
+        .filter_map(|rest| {
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse::<usize>().ok()
+        })
+        .collect()
 }
 
 fn slugify(input: &str) -> String {

@@ -325,6 +325,16 @@ pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
     Ok(entries)
 }
 
+/// TICKET-096: the query sync/reconciliation needs to associate a
+/// `SyncMr.work_id` (extracted from a PR/MR title) back to the ledger
+/// entries that dispatched it. No new sync-side structure required.
+pub fn entries_for_work_id(cfg: &GahConfig, work_id: &str) -> Result<Vec<LedgerEntry>> {
+    Ok(read_entries(cfg)?
+        .into_iter()
+        .filter(|e| e.work_id.as_deref() == Some(work_id))
+        .collect())
+}
+
 fn summarize_target(target: &str) -> Option<String> {
     let trimmed = target.trim();
     if trimmed.is_empty() {
@@ -340,36 +350,130 @@ fn summarize_target(target: &str) -> Option<String> {
 }
 
 pub mod summary {
-    use super::{read_entries, LedgerEntry};
+    use super::read_entries;
     use crate::config;
     use anyhow::Result;
-    use std::collections::HashMap;
+    use serde::Serialize;
+    use std::collections::BTreeMap;
     use time::{Duration, OffsetDateTime};
 
-    pub fn run(since: &str, profile: Option<&str>, config_path: Option<&str>) -> Result<()> {
+    /// TICKET-071: stable machine-readable aggregate ledger data. Shared by
+    /// both the human-readable and `--json` output paths so they can never
+    /// drift apart -- no speculative economics logic, just the counts the
+    /// human view already computed.
+    #[derive(Debug, Serialize)]
+    pub struct SummaryData {
+        pub ledger_path: String,
+        pub entries: usize,
+        pub success: usize,
+        pub failed: usize,
+        pub by_mode: BTreeMap<String, usize>,
+        pub by_requested_backend: BTreeMap<String, usize>,
+        pub by_backend: BTreeMap<String, usize>,
+        pub by_model: BTreeMap<String, usize>,
+        pub by_failure_class: BTreeMap<String, usize>,
+        pub fallback_count: usize,
+        pub validation_pass: usize,
+        pub push_success: usize,
+        pub mr_count: usize,
+        pub human_required_count: usize,
+        pub average_duration_seconds: Option<f64>,
+        pub usage_input_tokens: u64,
+        pub usage_output_tokens: u64,
+        pub usage_total_tokens: u64,
+        pub usage_requests_count: u64,
+        pub estimated_cost_usd: Option<f64>,
+        pub actual_cost_usd: Option<f64>,
+        pub last_run: Option<String>,
+    }
+
+    pub fn run_with_json(
+        since: &str,
+        profile: Option<&str>,
+        config_path: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
         let cfg = config::load(config_path)?;
+        let data = build_summary(&cfg, since, profile)?;
+
+        if json {
+            println!("{}", serde_json::to_string(&data)?);
+            return Ok(());
+        }
+
+        println!("Ledger: {}", data.ledger_path);
+        println!("Entries: {}", data.entries);
+        if data.entries == 0 {
+            return Ok(());
+        }
+        println!("Success: {}", data.success);
+        println!("Failed:  {}", data.failed);
+        println!("By mode:");
+        print_counts(&data.by_mode);
+        println!("Requested backend:");
+        print_counts(&data.by_requested_backend);
+        println!("By backend:");
+        print_counts(&data.by_backend);
+        println!("By model:");
+        print_counts(&data.by_model);
+        if !data.by_failure_class.is_empty() {
+            println!("By failure class:");
+            print_counts(&data.by_failure_class);
+        }
+        println!("Fallbacks: {}", data.fallback_count);
+        println!(
+            "Validation pass rate: {}/{}",
+            data.validation_pass, data.entries
+        );
+        println!("Push success rate: {}/{}", data.push_success, data.entries);
+        println!("MR count: {}", data.mr_count);
+        println!("Human required: {}", data.human_required_count);
+        if let Some(avg) = data.average_duration_seconds {
+            println!("Average duration: {:.1}s", avg);
+        }
+        println!(
+            "Usage totals: input={} output={} total={} requests={}",
+            data.usage_input_tokens,
+            data.usage_output_tokens,
+            data.usage_total_tokens,
+            data.usage_requests_count
+        );
+        if let Some(cost) = data.estimated_cost_usd {
+            println!("Estimated cost total: ${:.4}", cost);
+        }
+        if let Some(cost) = data.actual_cost_usd {
+            println!("Actual cost total: ${:.4}", cost);
+        }
+        if let Some(last) = data.last_run {
+            println!("Last run: {}", last);
+        }
+        Ok(())
+    }
+
+    fn build_summary(
+        cfg: &config::GahConfig,
+        since: &str,
+        profile: Option<&str>,
+    ) -> Result<SummaryData> {
         let cutoff = parse_since(since)?;
-        let mut entries = read_entries(&cfg)?;
+        let mut entries = read_entries(cfg)?;
         if let Some(profile) = profile {
             entries.retain(|entry| entry.profile == profile);
         }
         entries.retain(|entry| entry.timestamp >= cutoff);
 
-        println!("Ledger: {}", cfg.defaults.ledger_path().display());
-        println!("Entries: {}", entries.len());
-        if entries.is_empty() {
-            return Ok(());
-        }
-
-        let mut by_mode: HashMap<String, usize> = HashMap::new();
-        let mut by_backend: HashMap<String, usize> = HashMap::new();
-        let mut by_requested_backend: HashMap<String, usize> = HashMap::new();
+        let mut by_mode: BTreeMap<String, usize> = BTreeMap::new();
+        let mut by_backend: BTreeMap<String, usize> = BTreeMap::new();
+        let mut by_requested_backend: BTreeMap<String, usize> = BTreeMap::new();
+        let mut by_model: BTreeMap<String, usize> = BTreeMap::new();
+        let mut by_failure_class: BTreeMap<String, usize> = BTreeMap::new();
         let mut success = 0usize;
         let mut failed = 0usize;
         let mut fallback = 0usize;
         let mut validation_pass = 0usize;
         let mut push_success = 0usize;
         let mut mr_count = 0usize;
+        let mut human_required_count = 0usize;
         let mut duration_total = 0.0f64;
         let mut duration_count = 0usize;
         let mut input_tokens = 0u64;
@@ -388,6 +492,12 @@ pub mod summary {
             *by_requested_backend
                 .entry(entry.requested_backend.clone())
                 .or_default() += 1;
+            if let Some(model) = &entry.effective_model {
+                *by_model.entry(model.clone()).or_default() += 1;
+            }
+            if let Some(class) = &entry.failure_class {
+                *by_failure_class.entry(class.clone()).or_default() += 1;
+            }
             if entry.error_summary.is_some() {
                 failed += 1;
             } else {
@@ -408,6 +518,9 @@ pub mod summary {
             if entry.mr_created {
                 mr_count += 1;
             }
+            if entry.human_required {
+                human_required_count += 1;
+            }
             if let Some(duration) = entry.duration_seconds {
                 duration_total += duration;
                 duration_count += 1;
@@ -426,51 +539,42 @@ pub mod summary {
             }
         }
 
-        println!("Success: {}", success);
-        println!("Failed:  {}", failed);
-        println!("By mode:");
-        print_counts(&by_mode);
-        println!("Requested backend:");
-        print_counts(&by_requested_backend);
-        println!("By backend:");
-        print_counts(&by_backend);
-        println!("Fallbacks: {}", fallback);
-        println!(
-            "Validation pass rate: {}/{}",
-            validation_pass,
-            entries.len()
-        );
-        println!("Push success rate: {}/{}", push_success, entries.len());
-        println!("MR count: {}", mr_count);
-        if duration_count > 0 {
-            println!(
-                "Average duration: {:.1}s",
-                duration_total / duration_count as f64
-            );
-        }
-        println!(
-            "Usage totals: input={} output={} total={} requests={}",
-            input_tokens, output_tokens, total_tokens, requests_count
-        );
-        if estimated_cost_seen {
-            println!("Estimated cost total: ${:.4}", estimated_cost);
-        }
-        if actual_cost_seen {
-            println!("Actual cost total: ${:.4}", actual_cost);
-        }
-        if let Some(last) = entries.last() {
-            println!(
-                "Last run: {} {} {} {}",
+        let last_run = entries.last().map(|last| {
+            format!(
+                "{} {} {} {}",
                 last.timestamp, last.profile, last.mode, last.effective_backend
-            );
-        }
-        Ok(())
+            )
+        });
+
+        Ok(SummaryData {
+            ledger_path: cfg.defaults.ledger_path().display().to_string(),
+            entries: entries.len(),
+            success,
+            failed,
+            by_mode,
+            by_requested_backend,
+            by_backend,
+            by_model,
+            by_failure_class,
+            fallback_count: fallback,
+            validation_pass,
+            push_success,
+            mr_count,
+            human_required_count,
+            average_duration_seconds: (duration_count > 0)
+                .then_some(duration_total / duration_count as f64),
+            usage_input_tokens: input_tokens,
+            usage_output_tokens: output_tokens,
+            usage_total_tokens: total_tokens,
+            usage_requests_count: requests_count,
+            estimated_cost_usd: estimated_cost_seen.then_some(estimated_cost),
+            actual_cost_usd: actual_cost_seen.then_some(actual_cost),
+            last_run,
+        })
     }
 
-    fn print_counts(counts: &HashMap<String, usize>) {
-        let mut pairs: Vec<_> = counts.iter().collect();
-        pairs.sort_by(|a, b| a.0.cmp(b.0));
-        for (key, count) in pairs {
+    fn print_counts(counts: &BTreeMap<String, usize>) {
+        for (key, count) in counts {
             println!("  {:<16} {}", key, count);
         }
     }
@@ -493,11 +597,6 @@ pub mod summary {
             input
         )
     }
-
-    #[allow(dead_code)]
-    fn _success(entry: &LedgerEntry) -> bool {
-        entry.error_summary.is_none()
-    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -515,7 +614,7 @@ pub struct BackendUsageSummary {
 /// Checks the final path segment of the model name (after the last `/`)
 /// for weak-model substrings: "flash", "mini", "tiny", "lite".
 /// This is a heuristic — it assumes models without these substrings are strong.
-fn is_strong_model(model: &str) -> bool {
+pub fn is_strong_model(model: &str) -> bool {
     let segment = model.rsplit('/').next().unwrap_or(model);
     let lower = segment.to_lowercase();
     !(lower.contains("flash")
@@ -585,8 +684,8 @@ pub fn usage_summary_for_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        append, is_strong_model, usage_summary_for_backend, FailureClass, FailureStage,
-        LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
+        append, entries_for_work_id, is_strong_model, usage_summary_for_backend, FailureClass,
+        FailureStage, LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
@@ -669,6 +768,24 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(text.contains("\"profile\":\"test\""));
         assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn entries_for_work_id_filters_by_exact_match() {
+        // TICKET-096: this is the query sync/reconciliation uses to match
+        // a SyncMr.work_id back to the ledger entries that dispatched it.
+        let (_tmp, cfg) = test_config();
+        let mut matching = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
+        matching.work_id = Some("TICKET-096".into());
+        append(&cfg, &matching).unwrap();
+
+        let mut other = LedgerEntry::new("test", &profile(), "claude", "pm", "y", None, None);
+        other.work_id = Some("TICKET-097".into());
+        append(&cfg, &other).unwrap();
+
+        let found = entries_for_work_id(&cfg, "TICKET-096").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].work_id.as_deref(), Some("TICKET-096"));
     }
 
     #[test]

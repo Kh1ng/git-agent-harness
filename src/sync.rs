@@ -19,6 +19,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
             .map(|mr| SyncMrJson {
                 profile: Some(profile_name.to_string()),
                 branch: mr.branch.clone(),
+                work_id: mr.work_id.clone(),
                 id: mr.id.clone(),
                 url: mr.url.clone(),
                 state: mr.state.clone(),
@@ -80,6 +81,8 @@ pub struct SyncMrJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     pub branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<String>,
     pub id: Option<String>,
     pub url: Option<String>,
     pub state: Option<String>,
@@ -103,6 +106,24 @@ pub struct SyncMr {
     pub merged: bool,
     pub updated_at: Option<String>,
     pub ci_failed: bool,
+    /// TICKET-096: populated from an authoritative `TICKET-NNN` token in
+    /// the PR/MR title (see `build_mr_title` in dispatch.rs), not from a
+    /// separate reconciliation structure.
+    pub work_id: Option<String>,
+}
+
+/// TICKET-096 AC2: extract a `TICKET-NNN` work ID from a PR/MR title where
+/// one is present. No attempt to disambiguate authoritative vs stale IDs
+/// here -- that check already happened when the title was generated.
+fn extract_work_id_from_title(title: &str) -> Option<String> {
+    let idx = title.find("TICKET-")?;
+    let rest = &title[idx + "TICKET-".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(format!("TICKET-{digits}"))
+    }
 }
 
 pub fn fetch_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
@@ -238,6 +259,7 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
         .into_iter()
         .filter(|pr| pr.head_ref_name.starts_with("gah/"))
         .map(|pr| SyncMr {
+            work_id: extract_work_id_from_title(&pr.title),
             title: pr.title,
             branch: pr.head_ref_name,
             labels: pr.labels.into_iter().map(|l| l.name).collect(),
@@ -304,6 +326,7 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
         .into_iter()
         .filter(|mr| mr.source_branch.starts_with("gah/"))
         .map(|mr| SyncMr {
+            work_id: extract_work_id_from_title(&mr.title),
             title: mr.title,
             branch: mr.source_branch,
             labels: mr.labels,
@@ -321,7 +344,7 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, recommended_action, SyncMr};
+    use super::{classify, extract_work_id_from_title, recommended_action, SyncMr};
 
     fn base_mr() -> SyncMr {
         SyncMr {
@@ -336,7 +359,21 @@ mod tests {
             merged: false,
             updated_at: None,
             ci_failed: false,
+            work_id: None,
         }
+    }
+
+    #[test]
+    fn work_id_extracted_from_authoritative_title() {
+        assert_eq!(
+            extract_work_id_from_title("[GAH] Fix: TICKET-093 Derive PR titles"),
+            Some("TICKET-093".to_string())
+        );
+    }
+
+    #[test]
+    fn work_id_absent_when_title_has_no_ticket_token() {
+        assert_eq!(extract_work_id_from_title("[GAH] Fix: gah-real-1234"), None);
     }
 
     #[test]

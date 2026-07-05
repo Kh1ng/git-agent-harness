@@ -4,7 +4,11 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-pub fn run(profile_name: Option<&str>, config_path: Option<&str>) -> Result<()> {
+pub fn run_with_validate(
+    profile_name: Option<&str>,
+    config_path: Option<&str>,
+    validate: bool,
+) -> Result<()> {
     let resolved = config::resolve_config_path(config_path);
     let cfg = config::load(config_path)?;
     let profiles = selected_profiles(&cfg, profile_name)?;
@@ -16,6 +20,11 @@ pub fn run(profile_name: Option<&str>, config_path: Option<&str>) -> Result<()> 
     for (name, profile) in profiles {
         println!("\n[{}]", name);
         failed |= !check_profile(&cfg.defaults, profile);
+        if validate {
+            failed |= !check_validation_commands(profile);
+            failed |= !check_env_files(profile);
+            failed |= !check_backend_executables(&cfg.defaults, profile);
+        }
     }
 
     if failed {
@@ -178,6 +187,118 @@ fn check_manager_memory(profile: &Profile) -> bool {
         );
         false
     }
+}
+
+/// TICKET-076: `--validate` extends the existing checks with execution
+/// prerequisites doctor doesn't already cover -- whether the configured
+/// validation commands and backend executables actually resolve, and
+/// whether declared env files exist. Deliberately does not re-check repo
+/// path, provider CLI/token, push URL, or writable roots -- `check_profile`
+/// already covers those.
+fn check_validation_commands(profile: &Profile) -> bool {
+    if profile.validation_commands.is_empty() {
+        print_check(CheckStatus::Warn, "validation commands", "none configured");
+        return true;
+    }
+    let mut failed = false;
+    for cmd in &profile.validation_commands {
+        let Some(bin) = cmd.split_whitespace().next() else {
+            continue;
+        };
+        if which(bin) || Path::new(bin).exists() {
+            print_check(CheckStatus::Pass, "validation command", cmd);
+        } else {
+            print_check(
+                CheckStatus::Fail,
+                "validation command",
+                &format!("'{}' not resolvable (from: {})", bin, cmd),
+            );
+            failed = true;
+        }
+    }
+    !failed
+}
+
+fn check_env_files(profile: &Profile) -> bool {
+    let mut failed = false;
+    for (label, path) in [
+        ("env_file", profile.env_file.as_deref()),
+        ("env_file_prod", profile.env_file_prod.as_deref()),
+    ] {
+        let Some(path) = path else { continue };
+        if Path::new(path).exists() {
+            print_check(CheckStatus::Pass, label, path);
+        } else {
+            print_check(CheckStatus::Fail, label, &format!("missing {}", path));
+            failed = true;
+        }
+    }
+    !failed
+}
+
+fn check_backend_executables(defaults: &Defaults, profile: &Profile) -> bool {
+    let backends = configured_backends(defaults, profile);
+    if backends.is_empty() {
+        print_check(
+            CheckStatus::Warn,
+            "backend executables",
+            "no backend configured in routing policy",
+        );
+        return true;
+    }
+    let mut failed = false;
+    for backend in backends {
+        match crate::runner::resolve_backend_executable(profile, &backend) {
+            crate::runner::ExecutableResolution::Found(path) => {
+                print_check(
+                    CheckStatus::Pass,
+                    "backend executable",
+                    &format!("{}: {}", backend, path.display()),
+                );
+            }
+            other => {
+                print_check(
+                    CheckStatus::Fail,
+                    "backend executable",
+                    &format!("{}: {:?}", backend, other),
+                );
+                failed = true;
+            }
+        }
+    }
+    !failed
+}
+
+fn configured_backends(defaults: &Defaults, profile: &Profile) -> Vec<String> {
+    let mut backends = std::collections::BTreeSet::new();
+    for routing in [&profile.routing, &defaults.routing] {
+        for b in [
+            &routing.default_backend,
+            &routing.pm_backend,
+            &routing.improve_backend,
+            &routing.review_backend,
+            &routing.strong_review_backend,
+            &routing.weak_review_backend,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            backends.insert(b.clone());
+        }
+        for list in [
+            &routing.pm_candidates,
+            &routing.improve_candidates,
+            &routing.review_candidates,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for c in list {
+                backends.insert(c.backend.clone());
+            }
+        }
+    }
+    backends.into_iter().collect()
 }
 
 fn which(bin: &str) -> bool {

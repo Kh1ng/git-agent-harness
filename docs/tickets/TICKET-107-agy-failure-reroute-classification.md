@@ -1,8 +1,21 @@
-# TICKET-102: Add AGY-Specific Failure Classification for Deterministic Rerouting
+# TICKET-107: Add AGY-Specific Failure Classification for Deterministic Rerouting
 
 Priority: P0
 Difficulty: Medium
-Status: TODO
+Status: COMPLETE
+
+Renumbered from TICKET-102 on 2026-07-04 — TICKET-102 collided with the pre-existing
+TICKET-102 (harden Claude review execution, PR #25, complete). See docs/MANAGER_MEMORY.md
+Ticket ID Rules.
+
+Status detail (2026-07-04): `agy_quota_re`/`agy_auth_re` in `src/quota_parser.rs`
+(~lines 133-148) classify real AGY quota/auth text, checked ahead of generic patterns in
+`parse()`, and TICKET-102a wired the empty-output path through to this classifier. Added the
+6 required unit tests (RESOURCE_EXHAUSTED, contextual code 429, Individual quota reached, auth
+failure via a real local `/tmp/agy-debug.log` capture, naked-429 negative case, empty/unknown
+failure). No real local capture of AGY quota exhaustion exists on this host — see
+`tests/fixtures/quota-logs/PROVENANCE.md` for the caveat on those specific patterns.
+`cargo test`/`fmt`/`clippy` all clean.
 
 ## Summary
 

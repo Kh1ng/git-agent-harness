@@ -991,6 +991,162 @@ fn doctor_fails_when_manager_memory_is_missing() {
 }
 
 #[test]
+fn doctor_validate_warns_when_nothing_extra_configured() {
+    // TICKET-076: no validation_commands, no env_file, no routing backend
+    // configured -- --validate must WARN, not FAIL, and doctor must still
+    // pass overall (matches plain `doctor`'s existing passing behavior).
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "gh");
+
+    bin()
+        .args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--validate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("[WARN]").and(predicate::str::contains("validation commands")),
+        )
+        .stdout(predicate::str::contains("backend executables"));
+}
+
+#[test]
+fn doctor_validate_fails_on_unresolvable_validation_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "validation_commands = [\"definitely-not-a-real-tool-xyz test\"]\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "gh");
+
+    bin()
+        .args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--validate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .failure()
+        .stdout(
+            predicate::str::contains("[FAIL]").and(predicate::str::contains("validation command")),
+        );
+}
+
+#[test]
+fn doctor_validate_fails_on_missing_env_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "env_file = \"/definitely/does/not/exist.env\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "gh");
+
+    bin()
+        .args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--validate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[FAIL]").and(predicate::str::contains("env_file")));
+}
+
+#[test]
+fn doctor_validate_fails_on_missing_backend_executable_but_plain_doctor_still_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "codex_path = \"/definitely/does/not/exist/codex\"\n[profiles.real.routing]\ndefault_backend = \"codex\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "gh");
+    // An explicit (nonexistent) codex_path override makes this deterministic
+    // regardless of whether the real dev machine happens to have a codex
+    // binary on PATH.
+
+    bin()
+        .args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--validate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .failure()
+        .stdout(
+            predicate::str::contains("[FAIL]").and(predicate::str::contains("backend executable")),
+        );
+}
+
+#[test]
 fn dispatch_pm_writes_ledger_entry() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
@@ -2912,7 +3068,6 @@ fn sync_json_includes_id_state_draft_and_merge_status() {
 }
 
 #[test]
-#[ignore = "TICKET: gah ledger summary --json"]
 fn ledger_summary_json_outputs_machine_readable_counts() {
     let tmp = tempfile::tempdir().unwrap();
     let ledger_path = tmp.path().join("ledger.jsonl");
@@ -2941,6 +3096,42 @@ fn ledger_summary_json_outputs_machine_readable_counts() {
     assert_eq!(parsed["entries"], 0);
     assert!(parsed["by_mode"].is_object());
     assert!(parsed["by_backend"].is_object());
+}
+
+#[test]
+fn ledger_summary_json_includes_model_and_failure_class_breakdown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    fs::write(
+        &ledger_path,
+        "{\"timestamp\":\"2099-01-01T00:00:00Z\",\"session_id\":\"1\",\"profile\":\"real\",\"display_name\":\"Real\",\"repo_id\":\"real\",\"repo\":\"owner/real\",\"local_path\":\"/tmp/repo\",\"provider\":\"github\",\"backend\":\"claude\",\"requested_backend\":\"claude\",\"effective_backend\":\"claude\",\"requested_model\":null,\"effective_model\":\"claude-sonnet-4\",\"routing_reason\":\"explicit\",\"fallback_used\":false,\"confidence_impact\":null,\"human_required\":true,\"failure_class\":\"agent_failure\",\"mode\":\"pm\",\"target_summary\":\"x\",\"branch\":null,\"session_dir\":null,\"duration_seconds\":1.0,\"backend_exit_code\":0,\"validation_result\":\"not_run\",\"commit_attempted\":false,\"commit_created\":false,\"push_attempted\":false,\"push_succeeded\":false,\"mr_attempted\":false,\"mr_created\":false,\"mr_url\":null,\"files_changed\":null,\"insertions\":null,\"deletions\":null,\"error_summary\":null,\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"total_tokens\":null,\"estimated_cost_usd\":null,\"usage_source\":null}}\n",
+    )
+    .unwrap();
+
+    let out = bin()
+        .args([
+            "ledger",
+            "summary",
+            "--since",
+            "7d",
+            "--json",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("GAH_LEDGER_PATH", ledger_path.to_str().unwrap())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    assert_eq!(parsed["entries"], 1);
+    assert_eq!(parsed["by_model"]["claude-sonnet-4"], 1);
+    assert_eq!(parsed["by_failure_class"]["agent_failure"], 1);
+    assert_eq!(parsed["human_required_count"], 1);
 }
 
 #[test]
