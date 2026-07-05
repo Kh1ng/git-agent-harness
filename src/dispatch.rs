@@ -433,6 +433,17 @@ fn validate_with_exit_code(commands: &[String], wt: &Path) -> Result<(), (String
     Ok(())
 }
 
+/// TICKET-101: usage the backend reported for exactly this attempt.
+/// `RunResult` only carries a log path, not captured stdout in memory (see
+/// `ReviewRunResult` for the pattern that does), so this reads that one
+/// attempt's own log from disk. A read or parse failure yields an empty
+/// (all-`None`) `LedgerUsage`, never a fabricated zero.
+fn attempt_usage(log_path: &str) -> crate::ledger::LedgerUsage {
+    fs::read_to_string(log_path)
+        .map(|text| usage::parse_generic_usage(&text, "attempt_output_log"))
+        .unwrap_or_default()
+}
+
 fn preflight(profile: &Profile, backend: &str) -> Result<()> {
     ensure_bin("git")?;
     runner::require_backend_executable(profile, backend)?;
@@ -777,6 +788,7 @@ fn improve(
                     failure_stage: Some(crate::ledger::FailureStage::BackendLaunch.as_str().into()),
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    usage: crate::ledger::LedgerUsage::default(),
                 });
                 worktree::cleanup(&wt, repo);
                 return Err(e);
@@ -810,6 +822,7 @@ fn improve(
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                usage: attempt_usage(&result.log_path),
             });
             let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
             if attempt + 1 < max_attempts {
@@ -864,6 +877,7 @@ fn improve(
                 failure_stage: None,
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                usage: attempt_usage(&result.log_path),
             });
             break;
         }
@@ -887,6 +901,7 @@ fn improve(
                     failure_stage: None,
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    usage: attempt_usage(&result.log_path),
                 });
                 break;
             }
@@ -942,6 +957,7 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path,
+                        usage: attempt_usage(&result.log_path),
                     });
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
@@ -1020,6 +1036,7 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        usage: attempt_usage(&result.log_path),
                     });
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
@@ -1043,6 +1060,7 @@ fn improve(
                         failure_stage: None,
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        usage: attempt_usage(&result.log_path),
                     });
                     break;
                 } else {
@@ -1062,6 +1080,7 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        usage: attempt_usage(&result.log_path),
                     });
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
@@ -2207,7 +2226,7 @@ mod tests {
     use super::preflight;
     use super::validate;
     use super::{
-        apply_authoritative_work_identity, apply_pm_plan, apply_route_to_ledger,
+        apply_authoritative_work_identity, apply_pm_plan, apply_route_to_ledger, attempt_usage,
         build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title, build_pm_plan_task,
         classify_validation_failure_progress, collect_pm_preflight, collect_ticket_summaries,
         derive_reviewer_tier, first_markdown_heading, mark_backend_unavailable_from_output_at,
@@ -2412,6 +2431,41 @@ mod tests {
 
         let err = review_preflight(&cfg, &prof, "claude").unwrap_err();
         assert!(format!("{:#}", err).contains("backend unavailable"));
+    }
+
+    #[test]
+    fn attempt_usage_parses_real_log_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("backend-output.log");
+        fs::write(
+            &path,
+            "some agent output\ninput_tokens: 500\noutput_tokens: 120\n",
+        )
+        .unwrap();
+
+        let usage = attempt_usage(path.to_str().unwrap());
+        assert_eq!(usage.input_tokens, Some(500));
+        assert_eq!(usage.output_tokens, Some(120));
+        assert_eq!(usage.total_tokens, Some(620));
+    }
+
+    #[test]
+    fn attempt_usage_is_empty_not_zero_when_log_missing() {
+        // TICKET-101: unknown must remain unknown, never a fabricated zero.
+        let usage = attempt_usage("/definitely/does/not/exist/backend-output.log");
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.usage_source, None);
+    }
+
+    #[test]
+    fn attempt_usage_is_empty_when_log_has_no_usage_info() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("backend-output.log");
+        fs::write(&path, "agent made some edits, no usage reported\n").unwrap();
+
+        let usage = attempt_usage(path.to_str().unwrap());
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.usage_source, None);
     }
 
     fn init_repo(repo: &Path) {

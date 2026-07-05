@@ -96,6 +96,14 @@ pub struct AttemptRecord {
     pub failure_stage: Option<String>,
     pub duration_seconds: Option<f64>,
     pub diff_path: Option<String>,
+    /// TICKET-101: provider-reported usage for exactly this attempt, not
+    /// the whole dispatch. Same "unknown stays unknown, never zero"
+    /// discipline as `LedgerEntry.usage` -- an empty `LedgerUsage` (all
+    /// `None`) means "the backend didn't report it," not "zero usage."
+    /// `#[serde(default)]` so historical ledger entries without this field
+    /// still deserialize.
+    #[serde(default)]
+    pub usage: LedgerUsage,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]

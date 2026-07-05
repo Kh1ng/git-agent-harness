@@ -2502,6 +2502,58 @@ fn dispatch_fix_one_shot_success_records_one_attempt() {
     assert_eq!(attempts[0]["failure_class"], Value::Null);
 }
 
+/// TICKET-101: usage the backend reports on stdout for a given attempt is
+/// captured onto that specific attempt record, not just aggregated
+/// somewhere else -- and a backend that reports nothing leaves it
+/// genuinely unknown (None), never a fabricated zero.
+#[test]
+fn dispatch_fix_records_per_attempt_usage_from_backend_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nprintf 'input_tokens: 500\\noutput_tokens: 120\\nestimated_cost_usd: 0.02\\n'\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    let attempts = entry["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["usage"]["input_tokens"], 500);
+    assert_eq!(attempts[0]["usage"]["output_tokens"], 120);
+    assert_eq!(attempts[0]["usage"]["total_tokens"], 620);
+    assert_eq!(attempts[0]["usage"]["estimated_cost_usd"], 0.02);
+}
+
 /// TICKET-064, test 2: an attempt that fails validation (differently from
 /// baseline, so it retries) followed by a passing attempt must record
 /// exactly two attempts, with attempt 1's failure and attempt 2's success
