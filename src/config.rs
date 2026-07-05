@@ -67,6 +67,18 @@ impl Defaults {
         }
         default_config_dir().join("reconciliation.jsonl")
     }
+
+    /// TICKET-083: append-only controller event stream, same convention as
+    /// `GAH_LEDGER_PATH`/`GAH_RECONCILIATION_PATH`.
+    pub fn events_path(&self) -> PathBuf {
+        if let Ok(path) = std::env::var("GAH_EVENTS_PATH") {
+            return PathBuf::from(path);
+        }
+        if !self.artifact_root.trim().is_empty() {
+            return PathBuf::from(self.artifact_root.trim()).join("events.jsonl");
+        }
+        default_config_dir().join("events.jsonl")
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -103,6 +115,19 @@ pub struct Profile {
     /// Optional absolute/relative path to the Antigravity CLI executable.
     #[serde(default)]
     pub agy_path: Option<String>,
+    /// HOME override for the `agy-second` backend name only -- a distinct
+    /// authenticated Antigravity account/quota pool from the default `agy`
+    /// backend, which otherwise runs under the process's real $HOME. Same
+    /// executable (`agy_path`), different account state directory.
+    #[serde(default)]
+    pub agy_second_home: Option<String>,
+    /// Per-model override for AGY's own `--print-timeout` (default 5m0s in
+    /// the `agy` CLI itself). Keyed by the exact AGY model name (e.g.
+    /// "Gemini 3.5 Flash (Medium)"). AGY is the only backend GAH invokes
+    /// that exposes a print-timeout flag today, so this is scoped to AGY
+    /// rather than a generic cross-backend timeout abstraction.
+    #[serde(default)]
+    pub agy_print_timeout_seconds: HashMap<String, u64>,
     /// Path to a policy TOML file (see gah policy-check). When set, dispatch
     /// enforces permissions before provisioning any worktree.
     #[serde(default)]
@@ -494,6 +519,8 @@ mod tests {
             claude_args: vec![],
             claude_path: None,
             agy_path: None,
+            agy_second_home: None,
+            agy_print_timeout_seconds: std::collections::HashMap::new(),
             policy_path: None,
             env_file: None,
             env_file_prod: None,

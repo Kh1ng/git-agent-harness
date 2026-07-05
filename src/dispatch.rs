@@ -1,7 +1,7 @@
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
-use crate::models::{PmPlan, WorkMetadata};
+use crate::models::{AvailableTicket, PmPlan, WorkMetadata};
 use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
@@ -41,6 +41,12 @@ pub struct DispatchArgs {
     /// (`BaselineDisposition::UnknownRed`). Named for exactly what it
     /// overrides, not a generic bypass.
     pub allow_unknown_red_baseline: bool,
+    /// TICKET-079/089: seeds the *initial* route decision as if the prior
+    /// attempt were a genuine agent-capability failure, activating the same
+    /// cost-aware escalation-to-a-stronger-model logic TICKET-089 already
+    /// applies mid-retry-loop -- reused here so `NextAction::Escalate`
+    /// doesn't need a second escalation mechanism.
+    pub escalate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +222,78 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
     Ok(())
 }
 
+/// TICKET-078: observation feed for `decide_next_action` -- one entry per
+/// ticket file in `docs/tickets/`. Reuses exactly the same active-MR
+/// matching logic as `check_duplicate_work` (branch/mr_url against
+/// already-fetched `all_mrs`, MERGED/CLOSED_UNMERGED/STALE = not active)
+/// so the duplicate guard and the controller's view of "is this ticket
+/// available" can never diverge into two different answers.
+pub fn scan_available_tickets(
+    cfg: &GahConfig,
+    profile: &Profile,
+    all_mrs: &[crate::sync::SyncMr],
+) -> Vec<AvailableTicket> {
+    let tickets_dir = Path::new(&profile.local_path).join("docs/tickets");
+    let Ok(read_dir) = fs::read_dir(&tickets_dir) else {
+        return vec![];
+    };
+
+    let mut candidates = vec![];
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(Some(meta)) = parse_ticket_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_authoritative {
+            continue;
+        }
+        let work_id = meta.work_id.clone().or_else(|| meta.ticket_id.clone());
+
+        let (prior_attempt_count, last_failure_class, has_active_mr) = match &work_id {
+            None => (0, None, false),
+            Some(wid) => {
+                let entries = crate::ledger::entries_for_work_id(cfg, wid).unwrap_or_default();
+                let mut count = 0usize;
+                let mut last_failure_class = None;
+                let mut has_active_mr = false;
+                for e in &entries {
+                    if is_ledger_entry_stale(e) {
+                        continue;
+                    }
+                    count += 1;
+                    last_failure_class = e.failure_class.clone().or(last_failure_class);
+                    let matching_mr = all_mrs.iter().find(|mr| {
+                        e.branch.as_deref().is_some_and(|b| b == mr.branch)
+                            || (e.mr_url.is_some() && e.mr_url.as_deref() == mr.url.as_deref())
+                    });
+                    if let Some(mr) = matching_mr {
+                        let class = crate::sync::classify(mr);
+                        if !matches!(class, "MERGED" | "CLOSED_UNMERGED" | "STALE") {
+                            has_active_mr = true;
+                        }
+                    }
+                }
+                (count, last_failure_class, has_active_mr)
+            }
+        };
+
+        candidates.push(AvailableTicket {
+            ticket_path: path.display().to_string(),
+            work_id,
+            title: meta.title.clone(),
+            recommended_backend: meta.recommended_backend.clone(),
+            recommended_model: meta.recommended_model.clone(),
+            prior_attempt_count,
+            last_failure_class,
+            has_active_mr,
+        });
+    }
+    candidates
+}
+
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     let profile = config::get_profile(cfg, &args.profile)?;
 
@@ -339,7 +417,14 @@ fn run_backend(
     effective_model: Option<&str>,
     env_path: Option<&str>,
 ) -> Result<runner::RunResult> {
-    let env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
+    let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
+    if backend == "agy-second" {
+        if let Some(home) = profile.agy_second_home.as_deref().filter(|h| !h.is_empty()) {
+            // Appended last so it overrides any HOME the env_file may have
+            // set -- Command::env keeps the last value for a repeated key.
+            env_vars.push(("HOME".to_string(), home.to_string()));
+        }
+    }
     match backend {
         "codex" => runner::run_codex_with_executable(
             &runner::require_backend_executable(profile, backend)?,
@@ -365,6 +450,10 @@ fn run_backend(
             session_dir,
             llm,
             &env_vars,
+            profile
+                .agy_print_timeout_seconds
+                .get(llm.model.as_str())
+                .copied(),
         ),
         _ => runner::run_openhands(
             wt,
@@ -621,7 +710,11 @@ fn improve(
             .and_then(|m| m.recommended_model.as_deref()),
         session_id: session_dir.file_name().and_then(|s| s.to_str()),
         usage_summary,
-        last_failure_class: None,
+        last_failure_class: if args.escalate {
+            Some(crate::ledger::FailureClass::AgentNoProgress.as_str())
+        } else {
+            None
+        },
     };
     let mut route = decide_route(cfg, profile, route_req.clone(), ledger)?;
     apply_route_to_ledger(ledger, &route);
@@ -2131,6 +2224,13 @@ fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String 
              output files (*.ipynb, *.html, *.csv, *.png, *.md) over clean commits.\n\
              Do not push or create MRs."
         }
+        _ if !target.is_empty() => {
+            "Implement ONLY the specific ticket described in the Focus section below. \
+             Ignore any other backlog items, priorities, or tickets mentioned in Manager \
+             Memory above -- those are background context, not additional work to pick up.\n\
+             Run tests if a test command is available and ensure they pass.\n\
+             Do not push or create MRs."
+        }
         _ => {
             "Select and implement the highest-priority improvement from the backlog, \
              recent CI failures, or test gaps.\n\
@@ -2147,6 +2247,26 @@ fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String 
         profile.default_target_branch,
         instruction,
     );
+
+    // Read from the main checkout (profile.local_path), not the worktree --
+    // same source `collect_pm_preflight` already reads for PM mode. Manager
+    // memory is live operational state, not something that should need a
+    // commit+push round-trip through a target-branch worktree to reach a
+    // dispatched agent. Optional here (unlike PM mode, which requires it)
+    // since not every repo has this file.
+    if let Ok(memory) =
+        fs::read_to_string(Path::new(&profile.local_path).join("docs/MANAGER_MEMORY.md"))
+    {
+        task.push_str(
+            "\n## Manager Memory (read this before exploring -- documents known \
+             environment setup, conventions, and known issues)\n\n",
+        );
+        task.push_str(&memory);
+        if !memory.ends_with('\n') {
+            task.push('\n');
+        }
+    }
+
     if !target.is_empty() {
         task.push_str(&format!("\n## Focus\n\n{}\n", target));
     }
@@ -2228,10 +2348,11 @@ mod tests {
     use super::{
         apply_authoritative_work_identity, apply_pm_plan, apply_route_to_ledger, attempt_usage,
         build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title, build_pm_plan_task,
-        classify_validation_failure_progress, collect_pm_preflight, collect_ticket_summaries,
-        derive_reviewer_tier, first_markdown_heading, mark_backend_unavailable_from_output_at,
-        next_ticket_id, parse_pm_plan, parse_review_verdict, parse_ticket_metadata, review_labels,
-        review_preflight, validation_failure_no_progress_reason, ExperimentMrRenderContext,
+        build_task, classify_validation_failure_progress, collect_pm_preflight,
+        collect_ticket_summaries, derive_reviewer_tier, first_markdown_heading,
+        mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
+        parse_review_verdict, parse_ticket_metadata, review_labels, review_preflight, run_backend,
+        scan_available_tickets, validation_failure_no_progress_reason, ExperimentMrRenderContext,
         MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
@@ -2265,6 +2386,8 @@ mod tests {
             claude_args: vec![],
             claude_path: None,
             agy_path: None,
+            agy_second_home: None,
+            agy_print_timeout_seconds: std::collections::HashMap::new(),
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -2468,6 +2591,130 @@ mod tests {
         assert_eq!(usage.usage_source, None);
     }
 
+    #[test]
+    fn scan_available_tickets_reports_never_dispatched_ticket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-200-test.md"),
+            "# TICKET-200: Test ticket\n\nGoal: test\n\nRecommended backend: codex\nRecommended model: gpt-5.4\n",
+        )
+        .unwrap();
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+
+        let candidates = scan_available_tickets(&cfg, &prof, &[]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].work_id.as_deref(), Some("TICKET-200"));
+        assert_eq!(candidates[0].prior_attempt_count, 0);
+        assert_eq!(candidates[0].last_failure_class, None);
+        assert!(!candidates[0].has_active_mr);
+        assert_eq!(candidates[0].recommended_backend.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn scan_available_tickets_reports_failed_history_with_no_active_mr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-201-test.md"),
+            "# TICKET-201: Test ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+
+        let mut entry = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        entry.work_id = Some("TICKET-201".into());
+        entry.set_failure(
+            crate::ledger::FailureClass::AgentNoProgress,
+            crate::ledger::FailureStage::PostValidation,
+        );
+        crate::ledger::append(&cfg, &entry).unwrap();
+
+        let candidates = scan_available_tickets(&cfg, &prof, &[]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].prior_attempt_count, 1);
+        assert_eq!(
+            candidates[0].last_failure_class.as_deref(),
+            Some("agent_no_progress")
+        );
+        assert!(!candidates[0].has_active_mr);
+    }
+
+    #[test]
+    fn scan_available_tickets_excludes_ticket_with_active_mr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-202-test.md"),
+            "# TICKET-202: Test ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+
+        let mut entry = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        entry.work_id = Some("TICKET-202".into());
+        entry.branch = Some("gah/repo-1".into());
+        crate::ledger::append(&cfg, &entry).unwrap();
+
+        let mrs = vec![crate::sync::SyncMr {
+            title: "[GAH] Fix: TICKET-202".into(),
+            branch: "gah/repo-1".into(),
+            labels: vec![],
+            url: Some("https://example/pull/1".into()),
+            id: Some("1".into()),
+            state: Some("OPEN".into()),
+            draft: false,
+            merge_status: None,
+            merged: false,
+            updated_at: None,
+            ci_failed: false,
+            work_id: Some("TICKET-202".into()),
+        }];
+
+        let candidates = scan_available_tickets(&cfg, &prof, &mrs);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].has_active_mr);
+    }
+
     fn init_repo(repo: &Path) {
         fs::create_dir_all(repo.join("docs/tickets")).unwrap();
         Command::new("git")
@@ -2509,6 +2756,285 @@ mod tests {
             fs::set_permissions(&path, perms).unwrap();
         }
         path
+    }
+
+    #[test]
+    fn agy_second_backend_runs_with_agy_second_home_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let home_capture = tmp.path().join("captured-home.txt");
+
+        let fake_agy = bin_dir.join("agy");
+        fs::write(
+            &fake_agy,
+            format!(
+                "#!/bin/sh\necho \"$HOME\" > {}\nexit 0\n",
+                home_capture.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_agy).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_agy, perms).unwrap();
+        }
+
+        let mut prof = profile(tmp.path());
+        prof.agy_path = Some(fake_agy.display().to_string());
+        prof.agy_second_home = Some("/tmp/second-account-home".to_string());
+
+        let session_dir = tmp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let llm = crate::runner::LlmConfig {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "Gemini 3.5 Flash (Medium)".to_string(),
+        };
+
+        run_backend(
+            "agy-second",
+            &prof,
+            tmp.path(),
+            "do the thing",
+            &session_dir,
+            &llm,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let captured = fs::read_to_string(&home_capture).unwrap();
+        assert_eq!(captured.trim(), "/tmp/second-account-home");
+    }
+
+    #[test]
+    fn agy_backend_without_second_home_uses_real_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let home_capture = tmp.path().join("captured-home.txt");
+
+        let fake_agy = bin_dir.join("agy");
+        fs::write(
+            &fake_agy,
+            format!(
+                "#!/bin/sh\necho \"$HOME\" > {}\nexit 0\n",
+                home_capture.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_agy).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_agy, perms).unwrap();
+        }
+
+        let mut prof = profile(tmp.path());
+        prof.agy_path = Some(fake_agy.display().to_string());
+        prof.agy_second_home = Some("/tmp/second-account-home".to_string());
+
+        let session_dir = tmp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let llm = crate::runner::LlmConfig {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "Gemini 3.5 Flash (Medium)".to_string(),
+        };
+
+        run_backend(
+            "agy",
+            &prof,
+            tmp.path(),
+            "do the thing",
+            &session_dir,
+            &llm,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let captured = fs::read_to_string(&home_capture).unwrap();
+        assert_ne!(captured.trim(), "/tmp/second-account-home");
+    }
+
+    #[test]
+    fn run_backend_looks_up_agy_print_timeout_by_exact_model_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let argv_capture = tmp.path().join("captured-argv.txt");
+
+        let fake_agy = bin_dir.join("agy");
+        fs::write(
+            &fake_agy,
+            format!(
+                "#!/bin/sh\necho \"$@\" > {}\nexit 0\n",
+                argv_capture.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_agy).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_agy, perms).unwrap();
+        }
+
+        let mut prof = profile(tmp.path());
+        prof.agy_path = Some(fake_agy.display().to_string());
+        prof.agy_print_timeout_seconds
+            .insert("Gemini 3.5 Flash (Medium)".to_string(), 900);
+        prof.agy_print_timeout_seconds
+            .insert("Gemini 3.1 Pro (High)".to_string(), 300);
+
+        let session_dir = tmp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let llm = crate::runner::LlmConfig {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "Gemini 3.5 Flash (Medium)".to_string(),
+        };
+
+        run_backend(
+            "agy",
+            &prof,
+            tmp.path(),
+            "do the thing",
+            &session_dir,
+            &llm,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let captured = fs::read_to_string(&argv_capture).unwrap();
+        assert!(captured.contains("--print-timeout 900s"), "got: {captured}");
+    }
+
+    #[test]
+    fn run_backend_omits_print_timeout_for_unmapped_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let argv_capture = tmp.path().join("captured-argv.txt");
+
+        let fake_agy = bin_dir.join("agy");
+        fs::write(
+            &fake_agy,
+            format!(
+                "#!/bin/sh\necho \"$@\" > {}\nexit 0\n",
+                argv_capture.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_agy).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_agy, perms).unwrap();
+        }
+
+        let mut prof = profile(tmp.path());
+        prof.agy_path = Some(fake_agy.display().to_string());
+        prof.agy_print_timeout_seconds
+            .insert("Gemini 3.5 Flash (Medium)".to_string(), 900);
+
+        let session_dir = tmp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let llm = crate::runner::LlmConfig {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "Gemini 3.1 Pro (High)".to_string(), // not in the map
+        };
+
+        run_backend(
+            "agy",
+            &prof,
+            tmp.path(),
+            "do the thing",
+            &session_dir,
+            &llm,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let captured = fs::read_to_string(&argv_capture).unwrap();
+        assert!(!captured.contains("--print-timeout"), "got: {captured}");
+    }
+
+    #[test]
+    fn build_task_includes_manager_memory_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        // profile.local_path == tmp.path() (the main checkout) -- manager
+        // memory must be read from there, not the worktree, so it's live
+        // operational state rather than something pinned to a git ref.
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        fs::write(
+            tmp.path().join("docs/MANAGER_MEMORY.md"),
+            "Use .venv/bin/python, do not pip install from scratch.\n",
+        )
+        .unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+
+        let task = build_task(&prof, &wt, "improve", "some ticket text");
+
+        assert!(task.contains("Manager Memory"));
+        assert!(task.contains("Use .venv/bin/python, do not pip install from scratch."));
+        // Manager Memory must come before Focus so the agent reads
+        // environment/project context before the specific task.
+        let memory_pos = task.find("Manager Memory").unwrap();
+        let focus_pos = task.find("## Focus").unwrap();
+        assert!(memory_pos < focus_pos);
+    }
+
+    #[test]
+    fn build_task_omits_manager_memory_section_when_file_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let prof = profile(tmp.path());
+
+        // Empty target -- the "implement ONLY..." instruction (which itself
+        // mentions "Manager Memory" by name) only applies when a target is
+        // given, so this isolates the file-injection behavior specifically.
+        let task = build_task(&prof, &wt, "improve", "");
+
+        assert!(!task.contains("## Manager Memory"));
+    }
+
+    #[test]
+    fn improve_mode_with_a_target_says_ignore_other_backlog_items() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let prof = profile(tmp.path());
+
+        let task = build_task(&prof, &wt, "improve", "TICKET-014: boost shots ROI");
+
+        assert!(task.contains("Implement ONLY the specific ticket"));
+        assert!(!task.contains("Select and implement the highest-priority"));
+    }
+
+    #[test]
+    fn improve_mode_without_a_target_still_picks_from_backlog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let prof = profile(tmp.path());
+
+        let task = build_task(&prof, &wt, "improve", "");
+
+        assert!(task.contains("Select and implement the highest-priority"));
     }
 
     #[test]
@@ -3336,6 +3862,7 @@ The parser should retain structured sections.\n\n\
             allow_draft_fail: false,
             prod: false,
             allow_unknown_red_baseline: false,
+            escalate: false,
         };
 
         // No ledger exists yet.

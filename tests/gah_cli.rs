@@ -2554,6 +2554,72 @@ fn dispatch_fix_records_per_attempt_usage_from_backend_output() {
     assert_eq!(attempts[0]["usage"]["estimated_cost_usd"], 0.02);
 }
 
+/// TICKET-079: --escalate seeds the *initial* route decision (not just an
+/// internal retry) as a genuine agent-capability failure, so the same
+/// TICKET-089 cost-aware escalation logic picks the stronger candidate on
+/// the very first attempt.
+#[test]
+fn dispatch_fix_escalate_flag_picks_stronger_backend_on_first_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    // setup_fix_dispatch_repo always appends its own single-line
+    // `[profiles.real.routing]` table (a second header would be invalid
+    // TOML), so patch the candidate list into that same table afterward
+    // instead of trying to inject a second `[profiles.real.routing]`.
+    let cfg_text = fs::read_to_string(&cfg).unwrap();
+    let cfg_text = cfg_text.replace(
+        "improve_backend = \"codex\"",
+        "improve_backend = \"codex\"\nimprove_candidates = [{ backend = \"openhands\", model = \"deepseek-flash\" }, { backend = \"codex\", model = \"gpt-5.4\" }]",
+    );
+    fs::write(&cfg, cfg_text).unwrap();
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "openhands",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--backend",
+            "auto",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--escalate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["effective_backend"], "codex");
+    assert_eq!(entry["effective_model"], "gpt-5.4");
+}
+
 /// TICKET-064, test 2: an attempt that fails validation (differently from
 /// baseline, so it retries) followed by a passing attempt must record
 /// exactly two attempts, with attempt 1's failure and attempt 2's success
@@ -3967,4 +4033,291 @@ fn ledger_reconcile_appends_entry_when_mr_state_changed() {
 
     let reconciliation_text = fs::read_to_string(&reconciliation_path).unwrap();
     assert_eq!(reconciliation_text.lines().count(), 1);
+}
+
+/// TICKET-079: `--once` is required -- there is no recurring/daemon mode.
+#[test]
+fn loop_requires_explicit_once_flag() {
+    bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            "/definitely/does/not/exist.toml",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires --once"));
+}
+
+/// TICKET-079: nothing to do (no tickets, no MRs, no availability records)
+/// must report NoOp and exit successfully -- not error, not hang.
+#[test]
+fn loop_once_reports_noop_when_nothing_actionable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nexit 0\n",
+    );
+
+    let events_path = tmp.path().join("events.jsonl");
+    bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_EVENTS_PATH", &events_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no_op"));
+
+    let events_text = fs::read_to_string(&events_path).unwrap();
+    assert!(events_text.contains("observation_completed"));
+    assert!(events_text.contains("action_decided"));
+    assert!(events_text.contains("loop_stopped"));
+}
+
+/// TICKET-079: an eligible never-dispatched ticket actually gets dispatched
+/// (fix mode) -- the full observe -> decide -> execute -> persist path,
+/// not just the decision in isolation.
+#[test]
+fn loop_once_dispatches_an_eligible_ticket() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    let github_root = tmp.path().join("github-root");
+    let origin = github_root.join("owner/real.git");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    init_git_repo(&repo);
+    fs::create_dir_all(origin.parent().unwrap()).unwrap();
+    ProcessCommand::new("git")
+        .args(["init", "--bare", origin.to_str().unwrap()])
+        .output()
+        .unwrap();
+    configure_git_url_instead_of(
+        &home,
+        "https://github.com/",
+        &format!("file://{}/", github_root.display()),
+    );
+    ProcessCommand::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/real.git",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    fs::write(
+        repo.join("docs/tickets/TICKET-300-loop-test.md"),
+        "# TICKET-300: Loop test ticket\n\nGoal: test loop --once dispatch\n\nRecommended backend: codex\n",
+    )
+    .unwrap();
+
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "validation_commands = [\"true\"]\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+    );
+
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let events_path = tmp.path().join("events.jsonl");
+
+    bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .env("GAH_EVENTS_PATH", &events_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dispatch_ticket"));
+
+    let ledger_text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(ledger_text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["work_id"], "TICKET-300");
+    assert_eq!(entry["validation_result"], "passed");
+
+    let events_text = fs::read_to_string(&events_path).unwrap();
+    assert!(events_text.contains("dispatch_started"));
+    assert!(events_text.contains("dispatch_finished"));
+}
+
+/// TICKET-084: `gah events` reads back exactly what `gah loop --once`
+/// wrote, and `--profile` filters to just that profile's events.
+#[test]
+fn events_reads_back_loop_once_output_and_filters_by_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nexit 0\n",
+    );
+
+    let events_path = tmp.path().join("events.jsonl");
+    bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_EVENTS_PATH", &events_path)
+        .assert()
+        .success();
+
+    let out = bin()
+        .args([
+            "events",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--profile",
+            "real",
+            "--json",
+        ])
+        .env("GAH_EVENTS_PATH", &events_path)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    let events = parsed.as_array().unwrap();
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|e| e["profile"] == "real"));
+
+    let out_other = bin()
+        .args([
+            "events",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--profile",
+            "some-other-profile",
+            "--json",
+        ])
+        .env("GAH_EVENTS_PATH", &events_path)
+        .assert()
+        .success();
+    let stdout_other = String::from_utf8_lossy(&out_other.get_output().stdout).to_string();
+    let parsed_other: Value = serde_json::from_str(&stdout_other).unwrap();
+    assert!(parsed_other.as_array().unwrap().is_empty());
+}
+
+/// TICKET-081: an MR that keeps landing on the same decision (ReviewMr,
+/// unchanged classification each time) must trip the stuck-loop detector
+/// on the Nth `--once` invocation instead of re-dispatching a review
+/// forever.
+#[test]
+fn loop_once_stops_on_stuck_loop_instead_of_repeating_forever() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"headRefName\":\"gah/real-1\",\"url\":\"https://github.com/owner/real/pull/1\",\"labels\":[],\"number\":1,\"state\":\"OPEN\",\"isDraft\":false,\"mergeStateStatus\":\"CLEAN\",\"mergedAt\":null,\"updatedAt\":\"2026-07-04T17:22:35-05:00\",\"statusCheckRollup\":[]}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":1,\"url\":\"https://github.com/owner/real/pull/1\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"headRefName\":\"gah/real-1\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 0\n",
+    );
+
+    let events_path = tmp.path().join("events.jsonl");
+    // Pre-seed 3 prior review_mr decisions for this exact work_id -- as if
+    // 3 previous `--once` iterations already tried (and re-tried) the same
+    // review with nothing else happening in between.
+    let mut seeded = String::new();
+    for _ in 0..3 {
+        seeded.push_str(
+            &serde_json::to_string(&serde_json::json!({
+                "timestamp": "2026-07-05T00:00:00Z",
+                "event_type": "action_decided",
+                "profile": "real",
+                "work_id": "TICKET-500",
+                "details": "review_mr: MR needs review"
+            }))
+            .unwrap(),
+        );
+        seeded.push('\n');
+    }
+    fs::write(&events_path, seeded).unwrap();
+
+    bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_EVENTS_PATH", &events_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("human_required"))
+        .stdout(predicate::str::contains("stuck-loop"));
+
+    let events_text = fs::read_to_string(&events_path).unwrap();
+    // No dispatch was triggered for the 4th, stuck iteration.
+    assert!(!events_text.contains("dispatch_started"));
 }

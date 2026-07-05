@@ -312,6 +312,7 @@ pub fn run_agy(
         session_dir,
         llm,
         env_vars,
+        None,
     )
 }
 
@@ -322,6 +323,7 @@ pub fn run_agy_with_executable(
     session_dir: &Path,
     llm: &LlmConfig,
     env_vars: &[(String, String)],
+    print_timeout_seconds: Option<u64>,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
@@ -334,6 +336,9 @@ pub fn run_agy_with_executable(
     cmd.arg("--print");
     cmd.arg(task);
     cmd.args(["--model", llm.model.as_str()]);
+    if let Some(secs) = print_timeout_seconds {
+        cmd.args(["--print-timeout", &format!("{secs}s")]);
+    }
     cmd.arg("--dangerously-skip-permissions")
         .current_dir(worktree)
         .stdout(Stdio::from(log_file))
@@ -787,6 +792,8 @@ mod tests {
             claude_args: vec![],
             claude_path: None,
             agy_path: None,
+            agy_second_home: None,
+            agy_print_timeout_seconds: std::collections::HashMap::new(),
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -1132,6 +1139,57 @@ mod tests {
     }
 
     #[test]
+    fn run_agy_with_executable_passes_print_timeout_when_given() {
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_agy_with_executable(
+            &f.bin_dir.join("agy"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "Gemini 3.5 Flash (Medium)".into(),
+            },
+            &envs,
+            Some(900),
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        let flag_pos = argv.iter().position(|a| a == "--print-timeout").unwrap();
+        assert_eq!(argv[flag_pos + 1], "900s");
+    }
+
+    #[test]
+    fn run_agy_with_executable_omits_print_timeout_when_absent() {
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_agy_with_executable(
+            &f.bin_dir.join("agy"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "Gemini 3.5 Flash (Medium)".into(),
+            },
+            &envs,
+            None,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(!argv.iter().any(|a| a == "--print-timeout"));
+    }
+
+    #[test]
     fn run_agy_core_argv_and_model_present() {
         let f = fixture();
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
@@ -1355,6 +1413,7 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
+            None,
         )
         .unwrap();
         // Empty output with quota error becomes exit_code=-1
@@ -1391,6 +1450,7 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
+            None,
         )
         .unwrap();
         // Empty output with auth error becomes exit_code=-1

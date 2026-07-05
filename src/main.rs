@@ -3,8 +3,10 @@ mod baseline;
 mod candidates;
 mod capability;
 mod config;
+mod controller;
 mod dispatch;
 mod doctor;
+mod events;
 mod init;
 mod ledger;
 mod models;
@@ -20,6 +22,8 @@ mod status;
 mod sync;
 #[cfg(test)]
 mod test_support;
+mod tui;
+mod tui_state;
 mod usage;
 mod worktree;
 
@@ -119,6 +123,31 @@ enum Commands {
         #[command(subcommand)]
         command: LedgerCommands,
     },
+    /// One bounded controller iteration: observe, decide one action,
+    /// execute at most that action, persist, exit. No daemon.
+    Loop {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Required -- this is the only supported mode; named explicitly
+        /// so a future recurring mode can't be silently assumed.
+        #[arg(long, default_value_t = false)]
+        once: bool,
+    },
+    /// Inspect the controller event stream (TICKET-083)
+    Events {
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, default_value = "7d")]
+        since: String,
+    },
     /// Provide a single machine-readable controller snapshot of all state
     Status {
         #[arg(long)]
@@ -182,6 +211,21 @@ enum Commands {
         /// could not attribute to harness/environment/expected-red.
         #[arg(long, default_value_t = false)]
         allow_unknown_red_baseline: bool,
+        /// Seed the initial route decision as a genuine agent-capability
+        /// failure, activating cost-aware escalation to a stronger backend
+        /// (used by `gah loop --once`'s Escalate action).
+        #[arg(long, default_value_t = false)]
+        escalate: bool,
+    },
+    /// Interactive terminal UI: observe state, confirm and run the one
+    /// already-decided next action. Does not let you pick an arbitrary
+    /// action -- see docs/MANAGER_MEMORY.md "Stretch Goal -- Optional
+    /// Operator TUI" (override-next-action is explicitly out of scope).
+    Tui {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
     },
     /// Manage profiles
     Profile {
@@ -314,6 +358,32 @@ fn main() -> Result<()> {
             }
         },
 
+        Commands::Loop {
+            profile,
+            config_path,
+            json,
+            once,
+        } => {
+            if !once {
+                anyhow::bail!(
+                    "gah loop requires --once; there is no recurring/daemon mode yet -- \
+                     see TICKET-079/082"
+                );
+            }
+            let cfg = config::load(config_path.as_deref())?;
+            controller::run_once(&cfg, &profile, json)?;
+        }
+
+        Commands::Events {
+            config_path,
+            profile,
+            json,
+            since,
+        } => {
+            let cfg = config::load(config_path.as_deref())?;
+            events::run(&cfg, &since, profile.as_deref(), json)?;
+        }
+
         Commands::Status {
             profile,
             json,
@@ -349,6 +419,7 @@ fn main() -> Result<()> {
             allow_draft_fail,
             prod,
             allow_unknown_red_baseline,
+            escalate,
         } => {
             let cfg = config::load(config_path.as_deref())?;
             dispatch::run(
@@ -370,8 +441,17 @@ fn main() -> Result<()> {
                     allow_draft_fail,
                     prod,
                     allow_unknown_red_baseline,
+                    escalate,
                 },
             )?;
+        }
+
+        Commands::Tui {
+            profile,
+            config_path,
+        } => {
+            let cfg = config::load(config_path.as_deref())?;
+            tui::run(&cfg, profile.as_deref())?;
         }
 
         Commands::Profile { command } => match command {

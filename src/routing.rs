@@ -1295,6 +1295,8 @@ mod tests {
             claude_args: vec![],
             claude_path: None,
             agy_path: None,
+            agy_second_home: None,
+            agy_print_timeout_seconds: std::collections::HashMap::new(),
             policy_path: None,
             env_file: None,
             env_file_prod: None,
