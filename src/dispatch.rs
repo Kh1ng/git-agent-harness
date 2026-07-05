@@ -439,6 +439,63 @@ fn preflight(profile: &Profile, backend: &str) -> Result<()> {
     Ok(())
 }
 
+/// TICKET-109: capabilities required for `backend` during review, profile
+/// config taking precedence over shared defaults (same precedence
+/// convention as `strong_review_backend`/`weak_review_backend`).
+fn required_review_capabilities(cfg: &GahConfig, profile: &Profile, backend: &str) -> Vec<String> {
+    profile
+        .routing
+        .review_required_capabilities
+        .get(backend)
+        .or_else(|| {
+            cfg.defaults
+                .routing
+                .review_required_capabilities
+                .get(backend)
+        })
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// TICKET-105: preflight for review, extended beyond plain binary
+/// existence. Distinguishes exactly why a review can't proceed with its
+/// configured capability policy:
+/// - "backend unavailable" -- the executable itself doesn't resolve
+/// - "required capability missing" -- executable present, but the
+///   capability (e.g. Ponytail) isn't installed
+/// - "reviewer degraded" -- the capability is required but GAH has no known
+///   way to activate it for this backend (never silently downgrades)
+///
+/// Shared by `review()` (actual invocation) and `doctor.rs --validate`
+/// (preflight only) so the two can never drift into inconsistent checks.
+/// Returns the capabilities that will be applied on success.
+pub fn review_preflight(cfg: &GahConfig, profile: &Profile, backend: &str) -> Result<Vec<String>> {
+    if !matches!(
+        runner::resolve_backend_executable(profile, backend),
+        runner::ExecutableResolution::Found(_)
+    ) {
+        anyhow::bail!("backend unavailable: '{}' executable not found", backend);
+    }
+    let required = required_review_capabilities(cfg, profile, backend);
+    for capability in &required {
+        if !crate::capability::is_capability_available(capability, None) {
+            anyhow::bail!(
+                "required capability missing: '{}' is required for backend '{}' review but is not installed",
+                capability,
+                backend
+            );
+        }
+        if crate::capability::activation_prefix(capability).is_none() {
+            anyhow::bail!(
+                "reviewer degraded: capability '{}' is required for backend '{}', but GAH does not know how to activate it -- refusing to silently run an ordinary review",
+                capability,
+                backend
+            );
+        }
+    }
+    Ok(required)
+}
+
 fn ensure_bin(bin: &str) -> Result<()> {
     if which(bin).is_some() {
         Ok(())
@@ -1724,6 +1781,15 @@ fn review(
         ledger,
     )?;
     apply_route_to_ledger(ledger, &route);
+    let required_capabilities = review_preflight(cfg, profile, &route.effective_backend)?;
+    let mut capability_prefix = String::new();
+    let mut applied_capabilities = vec![];
+    for capability in &required_capabilities {
+        let prefix = crate::capability::activation_prefix(capability)
+            .expect("review_preflight already validated an activation mapping exists");
+        capability_prefix.push_str(prefix);
+        applied_capabilities.push(capability.clone());
+    }
     let mut target = resolve_review_target(cfg, profile, args)?;
     if target.prior_state.is_none() {
         target.prior_state =
@@ -1756,7 +1822,7 @@ fn review(
     );
 
     let prompt = format!(
-        "Review this diff for correctness, test coverage, and safety. \
+        "{}Review this diff for correctness, test coverage, and safety. \
          Return two sections:\n\
          1. Markdown review notes.\n\
          2. A JSON object with fields: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes.\n\
@@ -1765,6 +1831,7 @@ fn review(
          Repo: {}. MR: {}. Source: {}. Target: {}. CI status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
          Prior run state:\n{}\n\nDiff:\n```\n{}\n```\nChanged files:\n{}",
+        capability_prefix,
         profile.repo,
         target.mr_id.as_deref().unwrap_or("n/a"),
         target.source_branch,
@@ -1807,18 +1874,23 @@ fn review(
     match result.outcome {
         runner::ReviewProcessOutcome::Success => {
             let review_usage = usage::parse_generic_usage(&result.stdout, "review_output_log");
-            let verdict = match parse_review_verdict(&result.stdout, &route, &review_usage) {
-                Ok(verdict) => verdict,
-                Err(err) => {
-                    ledger.set_failure(
-                        crate::ledger::FailureClass::BackendError,
-                        crate::ledger::FailureStage::Review,
-                    );
-                    ledger.backend_exit_code = Some(0);
-                    ledger.validation_result = Some("invalid_output".into());
-                    return Err(err);
-                }
-            };
+            let reviewer_tier = derive_reviewer_tier(cfg, profile, &route);
+            let verdict =
+                match parse_review_verdict(&result.stdout, &route, &review_usage, reviewer_tier) {
+                    Ok(mut verdict) => {
+                        verdict.applied_capabilities = applied_capabilities.clone();
+                        verdict
+                    }
+                    Err(err) => {
+                        ledger.set_failure(
+                            crate::ledger::FailureClass::BackendError,
+                            crate::ledger::FailureStage::Review,
+                        );
+                        ledger.backend_exit_code = Some(0);
+                        ledger.validation_result = Some("invalid_output".into());
+                        return Err(err);
+                    }
+                };
             fs::write(&verdict_path, serde_json::to_string_pretty(&verdict)?)?;
             println!("{}", result.stdout);
             println!("Written: {}", report_path.display());
@@ -2138,13 +2210,13 @@ mod tests {
         apply_authoritative_work_identity, apply_pm_plan, apply_route_to_ledger,
         build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title, build_pm_plan_task,
         classify_validation_failure_progress, collect_pm_preflight, collect_ticket_summaries,
-        first_markdown_heading, mark_backend_unavailable_from_output_at, next_ticket_id,
-        parse_pm_plan, parse_ticket_metadata, validation_failure_no_progress_reason,
-        ExperimentMrRenderContext, MrRenderContext, RouteDecision, TicketMetadata,
-        ValidationFailureProgress,
+        derive_reviewer_tier, first_markdown_heading, mark_backend_unavailable_from_output_at,
+        next_ticket_id, parse_pm_plan, parse_review_verdict, parse_ticket_metadata, review_labels,
+        review_preflight, validation_failure_no_progress_reason, ExperimentMrRenderContext,
+        MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
-    use crate::config::{Profile, RoutingPolicy};
+    use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
     use crate::models::PmPlan;
     use crate::test_support::PathGuard;
@@ -2187,6 +2259,159 @@ mod tests {
             routing: RoutingPolicy::default(),
             pacing: Default::default(),
         }
+    }
+
+    fn gah_config(routing: RoutingPolicy) -> GahConfig {
+        GahConfig {
+            defaults: Defaults {
+                artifact_root: String::new(),
+                worktree_base: String::new(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing,
+            },
+            profiles: std::collections::HashMap::new(),
+        }
+    }
+
+    fn route_decision(backend: &str, model: Option<&str>, fallback_used: bool) -> RouteDecision {
+        RouteDecision {
+            requested_backend: backend.to_string(),
+            effective_backend: backend.to_string(),
+            requested_model: model.map(str::to_string),
+            effective_model: model.map(str::to_string),
+            effective_quota_pool: None,
+            routing_reason: "test".to_string(),
+            fallback_used,
+            confidence_impact: None,
+            human_required: false,
+            routing_diagnostics: None,
+        }
+    }
+
+    #[test]
+    fn reviewer_tier_strong_when_backend_and_model_match_strong_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        prof.routing.strong_review_backend = Some("claude".into());
+        prof.routing.strong_review_model = Some("sonnet".into());
+        let cfg = gah_config(RoutingPolicy::default());
+
+        let route = route_decision("claude", Some("sonnet"), false);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Strong
+        );
+    }
+
+    #[test]
+    fn reviewer_tier_weak_when_backend_matches_weak_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        prof.routing.weak_review_backend = Some("codex".into());
+        let cfg = gah_config(RoutingPolicy::default());
+
+        let route = route_decision("codex", None, true);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Weak
+        );
+    }
+
+    #[test]
+    fn reviewer_tier_standard_when_neither_strong_nor_weak_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let cfg = gah_config(RoutingPolicy::default());
+
+        let route = route_decision("claude", Some("haiku"), false);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Standard
+        );
+    }
+
+    #[test]
+    fn reviewer_tier_falls_back_to_defaults_routing_when_profile_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let defaults_routing = RoutingPolicy {
+            strong_review_backend: Some("claude".into()),
+            ..Default::default()
+        };
+        let cfg = gah_config(defaults_routing);
+
+        let route = route_decision("claude", None, false);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Strong
+        );
+    }
+
+    #[test]
+    fn approve_strong_from_weak_tier_still_forces_human_review_and_label() {
+        // TICKET-108: this is the case the old fallback_used-based rewrite
+        // used to handle by corrupting the verdict string. Now the verdict
+        // text is untouched and reviewer_tier carries the distrust signal.
+        let json = r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("codex", None, true);
+        let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Weak).unwrap();
+
+        assert_eq!(
+            verdict.verdict, "APPROVE_STRONG",
+            "verdict text is never rewritten"
+        );
+        assert_eq!(verdict.reviewer_tier.as_deref(), Some("weak"));
+        assert!(verdict.human_required);
+        assert_eq!(verdict.confidence, "medium");
+        assert_eq!(
+            review_labels(&verdict),
+            vec!["gah-review-weak", "gah-human-review"]
+        );
+    }
+
+    #[test]
+    fn approve_strong_from_strong_tier_is_not_forced_to_human_review() {
+        let json = r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("claude", Some("sonnet"), false);
+        let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
+
+        assert_eq!(verdict.reviewer_tier.as_deref(), Some("strong"));
+        assert!(!verdict.human_required);
+        assert_eq!(verdict.confidence, "high");
+        assert_eq!(review_labels(&verdict), vec!["gah-ready-for-human"]);
+    }
+
+    #[test]
+    fn approve_weak_verdict_forces_human_review_regardless_of_tier() {
+        // A weak VERDICT (the reviewer's own uncertainty) is a separate
+        // signal from reviewer TIER (who reviewed) -- even a strong-tier
+        // reviewer returning APPROVE_WEAK must still get human eyes.
+        let json = r#"{"verdict":"APPROVE_WEAK","confidence":"medium","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("claude", Some("sonnet"), false);
+        let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
+
+        assert_eq!(verdict.reviewer_tier.as_deref(), Some("strong"));
+        assert!(verdict.human_required);
+        assert_eq!(
+            review_labels(&verdict),
+            vec!["gah-review-weak", "gah-human-review"]
+        );
+    }
+
+    #[test]
+    fn review_preflight_fails_with_backend_unavailable_when_executable_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        prof.claude_path = Some("/definitely/does/not/exist/claude".into());
+        let cfg = gah_config(RoutingPolicy::default());
+
+        let err = review_preflight(&cfg, &prof, "claude").unwrap_err();
+        assert!(format!("{:#}", err).contains("backend unavailable"));
     }
 
     fn init_repo(repo: &Path) {
@@ -4324,18 +4549,79 @@ fn build_mr_title(
     truncate_title(&title_string, 255)
 }
 
+/// TICKET-108: reviewer authority (who is reviewing) kept as a dimension
+/// separate from review outcome (verdict/confidence, what they said).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewerTier {
+    Strong,
+    Standard,
+    Weak,
+}
+
+impl ReviewerTier {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Strong => "strong",
+            Self::Standard => "standard",
+            Self::Weak => "weak",
+        }
+    }
+}
+
+/// Derived from which configured routing field actually selected this
+/// backend/model, not from anything the reviewer says about itself -- a
+/// weak reviewer cannot self-promote by returning confident-sounding text
+/// (TICKET-108's core requirement).
+fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecision) -> ReviewerTier {
+    let effective_model = route.effective_model.as_deref();
+    let selected = |backend_cfg: Option<&str>, model_cfg: Option<&str>| -> bool {
+        backend_cfg.is_some_and(|b| b == route.effective_backend)
+            && (model_cfg.is_none() || model_cfg == effective_model)
+    };
+    let strong_backend = profile.routing.strong_review_backend.as_deref().or(cfg
+        .defaults
+        .routing
+        .strong_review_backend
+        .as_deref());
+    let strong_model = profile.routing.strong_review_model.as_deref().or(cfg
+        .defaults
+        .routing
+        .strong_review_model
+        .as_deref());
+    let weak_backend = profile.routing.weak_review_backend.as_deref().or(cfg
+        .defaults
+        .routing
+        .weak_review_backend
+        .as_deref());
+    let weak_model = profile.routing.weak_review_model.as_deref().or(cfg
+        .defaults
+        .routing
+        .weak_review_model
+        .as_deref());
+
+    if selected(strong_backend, strong_model) {
+        ReviewerTier::Strong
+    } else if selected(weak_backend, weak_model) {
+        ReviewerTier::Weak
+    } else {
+        ReviewerTier::Standard
+    }
+}
+
 fn parse_review_verdict(
     review_text: &str,
     route: &RouteDecision,
     parsed_usage: &crate::ledger::LedgerUsage,
+    tier: ReviewerTier,
 ) -> Result<crate::models::ReviewVerdict> {
     let json = extract_first_json_object(review_text)
         .ok_or_else(|| anyhow::anyhow!("reviewer did not return verdict JSON"))?;
     let mut verdict = serde_json::from_str::<crate::models::ReviewVerdict>(&json)?;
-    if route.fallback_used && verdict.verdict == "APPROVE_STRONG" {
-        verdict.verdict = "APPROVE_WEAK".into();
-    }
-    if route.fallback_used {
+    // Reviewer identity (tier) and review outcome (verdict text/confidence)
+    // are separate dimensions -- the verdict text itself is never rewritten
+    // based on who reviewed it (see review_labels for how tier affects
+    // labeling instead).
+    if tier == ReviewerTier::Weak {
         verdict.human_required = true;
         if verdict.confidence == "high" {
             verdict.confidence = "medium".into();
@@ -4344,6 +4630,7 @@ fn parse_review_verdict(
     if matches!(verdict.verdict.as_str(), "APPROVE_WEAK" | "HUMAN_REVIEW") {
         verdict.human_required = true;
     }
+    verdict.reviewer_tier = Some(tier.as_str().to_string());
     verdict.reviewer_backend = Some(route.effective_backend.clone());
     verdict.reviewer_model = route.effective_model.clone();
     verdict.requested_backend = Some(route.requested_backend.clone());
@@ -4380,7 +4667,12 @@ fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &P
 }
 
 fn review_labels(verdict: &crate::models::ReviewVerdict) -> Vec<&'static str> {
+    // TICKET-108: an APPROVE_STRONG verdict from a weak-tier reviewer still
+    // needs human eyes -- reviewer identity and verdict text are combined
+    // here, not conflated into a single rewritten string.
+    let is_weak_tier = verdict.reviewer_tier.as_deref() == Some("weak");
     match verdict.verdict.as_str() {
+        "APPROVE_STRONG" if is_weak_tier => vec!["gah-review-weak", "gah-human-review"],
         "APPROVE_STRONG" => vec!["gah-ready-for-human"],
         "APPROVE_WEAK" => vec!["gah-review-weak", "gah-human-review"],
         "NEEDS_FIX" | "REJECT" => vec!["gah-needs-fix"],

@@ -190,6 +190,12 @@ pub struct RoutingPolicy {
     pub weak_review_backend: Option<String>,
     #[serde(default)]
     pub weak_review_model: Option<String>,
+    /// TICKET-109: capabilities required for review, keyed by backend name
+    /// (e.g. `{"claude": ["ponytail"]}`). Checked at preflight (TICKET-105)
+    /// and activated in the review prompt -- missing a required capability
+    /// is a hard stop, never a silent downgrade to an ordinary review.
+    #[serde(default)]
+    pub review_required_capabilities: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub pm_candidates: Option<Vec<CandidateConfig>>,
     #[serde(default)]

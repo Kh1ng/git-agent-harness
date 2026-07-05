@@ -24,6 +24,7 @@ pub fn run_with_validate(
             failed |= !check_validation_commands(profile);
             failed |= !check_env_files(profile);
             failed |= !check_backend_executables(&cfg.defaults, profile);
+            failed |= !check_review_capabilities(&cfg, profile);
         }
     }
 
@@ -261,6 +262,45 @@ fn check_backend_executables(defaults: &Defaults, profile: &Profile) -> bool {
                     CheckStatus::Fail,
                     "backend executable",
                     &format!("{}: {:?}", backend, other),
+                );
+                failed = true;
+            }
+        }
+    }
+    !failed
+}
+
+/// TICKET-105: reuses `dispatch::review_preflight` -- the exact same check
+/// the real review invocation runs -- so preflight and actual invocation
+/// can never drift into inconsistent configuration.
+fn check_review_capabilities(cfg: &GahConfig, profile: &Profile) -> bool {
+    let mut backends = std::collections::BTreeSet::new();
+    for routing in [&profile.routing, &cfg.defaults.routing] {
+        backends.extend(routing.review_required_capabilities.keys().cloned());
+    }
+    if backends.is_empty() {
+        print_check(
+            CheckStatus::Warn,
+            "review capabilities",
+            "no review_required_capabilities configured",
+        );
+        return true;
+    }
+    let mut failed = false;
+    for backend in backends {
+        match crate::dispatch::review_preflight(cfg, profile, &backend) {
+            Ok(capabilities) => {
+                print_check(
+                    CheckStatus::Pass,
+                    "review capabilities",
+                    &format!("{}: {}", backend, capabilities.join(", ")),
+                );
+            }
+            Err(err) => {
+                print_check(
+                    CheckStatus::Fail,
+                    "review capabilities",
+                    &format!("{}: {:#}", backend, err),
                 );
                 failed = true;
             }

@@ -1146,6 +1146,70 @@ fn doctor_validate_fails_on_missing_backend_executable_but_plain_doctor_still_pa
         );
 }
 
+/// TICKET-105: `gah doctor --validate` reuses the exact same
+/// `review_preflight` check as the real review invocation.
+#[test]
+fn doctor_validate_reports_missing_review_capability() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\nreview_required_capabilities = { claude = [\"ponytail\"] }\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin(&fake_bin, "gh");
+    make_fake_bin(&fake_bin, "claude");
+
+    bin()
+        .args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--validate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .failure()
+        .stdout(
+            predicate::str::contains("[FAIL]")
+                .and(predicate::str::contains("review capabilities"))
+                .and(predicate::str::contains("required capability missing")),
+        );
+
+    // Installing the plugin makes the same check pass.
+    fs::create_dir_all(home.join(".claude/plugins/cache/ponytail")).unwrap();
+    bin()
+        .args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--validate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("[PASS]").and(predicate::str::contains("review capabilities")),
+        );
+}
+
 #[test]
 fn dispatch_pm_writes_ledger_entry() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1693,6 +1757,163 @@ fn review_uses_explicit_claude_path() {
 
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(prompt.contains("Source: feature/review"));
+}
+
+fn setup_review_repo_and_gh(
+    tmp: &TempDir,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
+    );
+    (repo, fake_bin, tmp.path().join("home"))
+}
+
+/// TICKET-109/105: reviewing with a required-but-uninstalled capability must
+/// stop the review outright, not silently degrade to an ordinary one.
+/// Uses an isolated HOME with no `.claude/plugins/cache/` at all, so this
+/// doesn't depend on whether the real dev machine happens to have Ponytail
+/// installed.
+#[test]
+fn review_fails_when_required_capability_not_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, fake_bin, home) = setup_review_repo_and_gh(&tmp);
+    fs::create_dir_all(&home).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\necho should never run\nexit 1\n",
+    );
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\nreview_required_capabilities = { claude = [\"ponytail\"] }\n",
+        "",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("ponytail").and(predicate::str::contains("not installed")),
+        );
+}
+
+/// TICKET-109: when the required capability IS installed (fake plugin-cache
+/// directory under an isolated HOME), the review prompt must contain the
+/// activation text, and the verdict must record it in applied_capabilities.
+#[test]
+fn review_activates_and_records_capability_when_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, fake_bin, home) = setup_review_repo_and_gh(&tmp);
+    fs::create_dir_all(home.join(".claude/plugins/cache/ponytail")).unwrap();
+    let prompt_log = tmp.path().join("review-prompt.txt");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            prompt_log.display()
+        ),
+    );
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\nreview_required_capabilities = { claude = [\"ponytail\"] }\n",
+        "",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .assert()
+        .success();
+
+    let prompt = fs::read_to_string(&prompt_log).unwrap();
+    assert!(prompt.starts_with("/ponytail full"));
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    let verdict_text = fs::read_to_string(session_dir.join("review-verdict.json")).unwrap();
+    let verdict: Value = serde_json::from_str(&verdict_text).unwrap();
+    assert_eq!(
+        verdict["applied_capabilities"],
+        serde_json::json!(["ponytail"])
+    );
+}
+
+/// TICKET-105: a capability that IS installed (plugin dir present) but that
+/// GAH has no known activation mapping for must refuse with "reviewer
+/// degraded", not silently run an ordinary review.
+#[test]
+fn review_fails_as_degraded_when_capability_has_no_known_activation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, fake_bin, home) = setup_review_repo_and_gh(&tmp);
+    fs::create_dir_all(home.join(".claude/plugins/cache/some-future-skill")).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\necho should never run\nexit 1\n",
+    );
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\nreview_required_capabilities = { claude = [\"some-future-skill\"] }\n",
+        "",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reviewer degraded"));
 }
 
 #[test]

@@ -1,6 +1,7 @@
 mod availability;
 mod baseline;
 mod candidates;
+mod capability;
 mod config;
 mod dispatch;
 mod doctor;
