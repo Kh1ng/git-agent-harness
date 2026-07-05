@@ -1,5 +1,7 @@
 # TICKET-090: Routing observability
 
+**Status:** [MERGED] — via MR !45
+
 Goal: Expose enough structured detail to debug the routing policy and understand why a specific backend/model was selected.
 
 Difficulty: easy

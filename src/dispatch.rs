@@ -289,6 +289,7 @@ pub fn scan_available_tickets(
                 let mut count = 0usize;
                 let mut last_failure_class = None;
                 let mut has_active_mr = false;
+                let mut has_merged_mr = false;
                 for e in entries.into_iter().flatten() {
                     if is_ledger_entry_stale(e) {
                         continue;
@@ -301,10 +302,18 @@ pub fn scan_available_tickets(
                     });
                     if let Some(mr) = matching_mr {
                         let class = crate::sync::classify(mr);
-                        if !matches!(class, "MERGED" | "CLOSED_UNMERGED" | "STALE") {
+                        if class == "MERGED" {
+                            has_merged_mr = true;
+                        } else if !matches!(class, "CLOSED_UNMERGED" | "STALE") {
                             has_active_mr = true;
                         }
                     }
+                }
+                // A ticket with any merged MR in its history is done -- prior
+                // failed attempts before that merge shouldn't count toward
+                // AUTO_RETRY_CAP and trigger HumanRequired on a completed ticket.
+                if has_merged_mr {
+                    continue;
                 }
                 (count, last_failure_class, has_active_mr)
             }
@@ -2757,6 +2766,72 @@ mod tests {
         );
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].has_active_mr);
+    }
+
+    #[test]
+    fn scan_available_tickets_excludes_ticket_completed_via_merged_mr() {
+        // Regression: a ticket that failed once, then succeeded and got its MR
+        // merged, must not keep poisoning the queue via its old failure count.
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-090-test.md"),
+            "# TICKET-090: Test ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+
+        let mut failed_entry = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        failed_entry.work_id = Some("TICKET-090".into());
+        failed_entry.branch = Some("gah/repo-1".into());
+        failed_entry.set_failure(
+            crate::ledger::FailureClass::AgentNoProgress,
+            crate::ledger::FailureStage::PostValidation,
+        );
+        crate::ledger::append(&cfg, &failed_entry).unwrap();
+
+        let mut merged_entry = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        merged_entry.work_id = Some("TICKET-090".into());
+        merged_entry.branch = Some("gah/repo-2".into());
+        crate::ledger::append(&cfg, &merged_entry).unwrap();
+
+        let mrs = vec![crate::sync::SyncMr {
+            title: "[GAH] Fix: TICKET-090".into(),
+            branch: "gah/repo-2".into(),
+            labels: vec![],
+            url: Some("https://example/pull/45".into()),
+            id: Some("45".into()),
+            state: Some("MERGED".into()),
+            draft: false,
+            merge_status: None,
+            merged: true,
+            updated_at: None,
+            ci_failed: false,
+            work_id: Some("TICKET-090".into()),
+        }];
+
+        let candidates = scan_available_tickets(
+            &prof,
+            &mrs,
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
+        assert!(
+            candidates.is_empty(),
+            "ticket completed via merged MR must be excluded entirely, got {candidates:?}"
+        );
     }
 
     #[test]
