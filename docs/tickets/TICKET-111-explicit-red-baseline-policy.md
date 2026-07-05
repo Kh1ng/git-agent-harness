@@ -1,6 +1,6 @@
 # TICKET-111: Explicit red-baseline policy
 
-Status: TODO
+Status: COMPLETE
 
 Renumbered from TICKET-075 on 2026-07-05 (depends on TICKET-110, itself renumbered from
 TICKET-074 — see that ticket for the collision this avoids).
