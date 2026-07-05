@@ -1,6 +1,6 @@
 # TICKET-110: Baseline disposition classifier
 
-Status: TODO
+Status: COMPLETE
 
 Renumbered from TICKET-074 on 2026-07-05 — TICKET-074 collided with the pre-existing
 TICKET-074 (fix closed unmerged MR classification, PR #17, complete). This is the third
