@@ -1,0 +1,20 @@
+# TICKET-106: shared canonical routing policy, inherited by every repo's
+# own gah-config.toml unless a repo explicitly overrides a field.
+#
+# Lives separately from any single repo's config. Default location:
+# ~/.config/gah/canonical.toml (override with GAH_CANONICAL_CONFIG).
+#
+# Merge precedence: compiled defaults < this file < repo config < CLI override.
+# Repo config wins per-field; unset fields inherit from here. Candidate
+# lists (pm_candidates/improve_candidates/review_candidates) replace
+# wholesale when a repo sets them, they never concatenate. Missing this
+# file entirely is fully backward compatible -- repos behave exactly as
+# they did before this file existed.
+
+[routing]
+strong_review_backend = "claude"
+strong_review_model = "sonnet"
+weak_review_backend = "codex"
+
+[routing.review_required_capabilities]
+claude = ["ponytail"]

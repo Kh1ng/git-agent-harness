@@ -351,6 +351,87 @@ pub fn resolve_config_path(config_path: Option<&str>) -> PathBuf {
         .unwrap_or_else(default_config_path)
 }
 
+/// TICKET-106: shared canonical routing policy, inherited by every repo's
+/// config unless explicitly overridden. Separate file from the per-repo
+/// config (`GAH_CANONICAL_CONFIG` override, else `~/.config/gah/canonical.toml`
+/// -- same `~/.config/gah/` convention as the default repo config path).
+pub fn canonical_config_path() -> PathBuf {
+    std::env::var("GAH_CANONICAL_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| default_config_dir().join("canonical.toml"))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct CanonicalConfig {
+    #[serde(default)]
+    routing: RoutingPolicy,
+}
+
+/// `Ok(None)` when no canonical file exists (legacy standalone behavior).
+/// Malformed canonical config is a hard error, never silently ignored --
+/// an operator's shared policy must not silently fail to apply.
+fn load_canonical_routing() -> Result<Option<RoutingPolicy>> {
+    let path = canonical_config_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let canonical: CanonicalConfig =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Some(canonical.routing))
+}
+
+/// Field-level merge: `repo`'s own explicit values win; unset fields
+/// inherit from `canonical`. Candidate lists (Vec) replace wholesale when
+/// the repo sets them (not concatenate); the capability map merges by key
+/// so a repo declaring one backend's capabilities doesn't erase another
+/// backend's canonical-declared ones.
+fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> RoutingPolicy {
+    repo.default_backend = repo.default_backend.or(canonical.default_backend);
+    repo.default_model = repo.default_model.or(canonical.default_model);
+    repo.pm_backend = repo.pm_backend.or(canonical.pm_backend);
+    repo.pm_model = repo.pm_model.or(canonical.pm_model);
+    repo.improve_backend = repo.improve_backend.or(canonical.improve_backend);
+    repo.improve_model = repo.improve_model.or(canonical.improve_model);
+    repo.review_backend = repo.review_backend.or(canonical.review_backend);
+    repo.review_model = repo.review_model.or(canonical.review_model);
+    repo.strong_review_backend = repo
+        .strong_review_backend
+        .or(canonical.strong_review_backend);
+    repo.strong_review_model = repo.strong_review_model.or(canonical.strong_review_model);
+    repo.weak_review_backend = repo.weak_review_backend.or(canonical.weak_review_backend);
+    repo.weak_review_model = repo.weak_review_model.or(canonical.weak_review_model);
+    repo.pm_candidates = repo.pm_candidates.or(canonical.pm_candidates);
+    repo.improve_candidates = repo.improve_candidates.or(canonical.improve_candidates);
+    repo.review_candidates = repo.review_candidates.or(canonical.review_candidates);
+    repo.allow_review_fallback = repo.allow_review_fallback || canonical.allow_review_fallback;
+    repo.allow_implementation_fallback =
+        repo.allow_implementation_fallback || canonical.allow_implementation_fallback;
+    repo.max_runs_per_backend_per_week = repo
+        .max_runs_per_backend_per_week
+        .or(canonical.max_runs_per_backend_per_week);
+    repo.max_runs_per_backend_per_session = repo
+        .max_runs_per_backend_per_session
+        .or(canonical.max_runs_per_backend_per_session);
+    repo.max_total_strong_model_runs_per_week = repo
+        .max_total_strong_model_runs_per_week
+        .or(canonical.max_total_strong_model_runs_per_week);
+    repo.max_total_strong_model_runs_per_session = repo
+        .max_total_strong_model_runs_per_session
+        .or(canonical.max_total_strong_model_runs_per_session);
+    repo.max_known_estimated_cost_per_week = repo
+        .max_known_estimated_cost_per_week
+        .or(canonical.max_known_estimated_cost_per_week);
+    repo.max_known_actual_cost_per_week = repo
+        .max_known_actual_cost_per_week
+        .or(canonical.max_known_actual_cost_per_week);
+    let mut capabilities = canonical.review_required_capabilities;
+    capabilities.extend(repo.review_required_capabilities);
+    repo.review_required_capabilities = capabilities;
+    repo
+}
+
 pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
     let path = resolve_config_path(config_path);
     if !path.exists() {
@@ -362,7 +443,12 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
 
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+    let mut cfg: GahConfig =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    if let Some(canonical_routing) = load_canonical_routing()? {
+        cfg.defaults.routing = merge_routing_policy(canonical_routing, cfg.defaults.routing);
+    }
+    Ok(cfg)
 }
 
 pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile> {
@@ -379,7 +465,16 @@ pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile>
 
 #[cfg(test)]
 mod tests {
-    use super::{Profile, RoutingPolicy};
+    use super::{
+        load, load_canonical_routing, merge_routing_policy, CandidateConfig, Profile, RoutingPolicy,
+    };
+    use std::sync::Mutex;
+
+    // TICKET-106: GAH_CANONICAL_CONFIG is a process-global env var; every
+    // test that touches it must go through this lock (same reasoning as
+    // test_support::PathGuard for PATH) or parallel test threads corrupt
+    // each other's view of it.
+    static CANONICAL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
@@ -436,5 +531,285 @@ mod tests {
     fn gitlab_push_url_rejects_missing_host() {
         let profile = gitlab_profile(Some("https:///api/v4"));
         assert!(profile.push_url().is_err());
+    }
+
+    #[test]
+    fn merge_keeps_repo_value_when_both_set() {
+        let canonical = RoutingPolicy {
+            default_backend: Some("codex".into()),
+            ..Default::default()
+        };
+        let repo = RoutingPolicy {
+            default_backend: Some("claude".into()),
+            ..Default::default()
+        };
+        let merged = merge_routing_policy(canonical, repo);
+        assert_eq!(merged.default_backend.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn merge_fills_gap_from_canonical_when_repo_unset() {
+        let canonical = RoutingPolicy {
+            default_backend: Some("codex".into()),
+            review_backend: Some("claude".into()),
+            ..Default::default()
+        };
+        let repo = RoutingPolicy::default();
+        let merged = merge_routing_policy(canonical, repo);
+        assert_eq!(merged.default_backend.as_deref(), Some("codex"));
+        assert_eq!(merged.review_backend.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn merge_nested_override_does_not_erase_unrelated_inherited_fields() {
+        // TICKET-106 AC: "one nested override does not erase unrelated
+        // inherited values" -- repo overrides only default_backend, and
+        // review_backend must still come from canonical.
+        let canonical = RoutingPolicy {
+            default_backend: Some("codex".into()),
+            review_backend: Some("claude".into()),
+            ..Default::default()
+        };
+        let repo = RoutingPolicy {
+            default_backend: Some("agy".into()),
+            ..Default::default()
+        };
+        let merged = merge_routing_policy(canonical, repo);
+        assert_eq!(merged.default_backend.as_deref(), Some("agy"));
+        assert_eq!(merged.review_backend.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn merge_candidate_list_replaces_wholesale_not_concatenates() {
+        let canonical = RoutingPolicy {
+            improve_candidates: Some(vec![CandidateConfig {
+                backend: "codex".into(),
+                model: None,
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            }]),
+            ..Default::default()
+        };
+        let repo = RoutingPolicy {
+            improve_candidates: Some(vec![CandidateConfig {
+                backend: "claude".into(),
+                model: None,
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            }]),
+            ..Default::default()
+        };
+        let merged = merge_routing_policy(canonical, repo);
+        let candidates = merged.improve_candidates.unwrap();
+        assert_eq!(candidates.len(), 1, "replace, not concatenate");
+        assert_eq!(candidates[0].backend, "claude");
+    }
+
+    #[test]
+    fn merge_capability_map_merges_by_key() {
+        use std::collections::HashMap;
+        let mut canonical_caps = HashMap::new();
+        canonical_caps.insert("claude".to_string(), vec!["ponytail".to_string()]);
+        let canonical = RoutingPolicy {
+            review_required_capabilities: canonical_caps,
+            ..Default::default()
+        };
+        let mut repo_caps = HashMap::new();
+        repo_caps.insert("codex".to_string(), vec!["something-else".to_string()]);
+        let repo = RoutingPolicy {
+            review_required_capabilities: repo_caps,
+            ..Default::default()
+        };
+        let merged = merge_routing_policy(canonical, repo);
+        assert_eq!(
+            merged.review_required_capabilities.get("claude"),
+            Some(&vec!["ponytail".to_string()])
+        );
+        assert_eq!(
+            merged.review_required_capabilities.get("codex"),
+            Some(&vec!["something-else".to_string()])
+        );
+    }
+
+    #[test]
+    fn merge_capability_map_repo_key_overrides_canonical_same_key() {
+        use std::collections::HashMap;
+        let mut canonical_caps = HashMap::new();
+        canonical_caps.insert("claude".to_string(), vec!["ponytail".to_string()]);
+        let canonical = RoutingPolicy {
+            review_required_capabilities: canonical_caps,
+            ..Default::default()
+        };
+        let mut repo_caps = HashMap::new();
+        repo_caps.insert("claude".to_string(), vec![]);
+        let repo = RoutingPolicy {
+            review_required_capabilities: repo_caps,
+            ..Default::default()
+        };
+        let merged = merge_routing_policy(canonical, repo);
+        assert_eq!(
+            merged.review_required_capabilities.get("claude"),
+            Some(&vec![])
+        );
+    }
+
+    #[test]
+    fn merge_with_all_default_canonical_is_a_no_op() {
+        // TICKET-106 AC: "missing shared defaults preserves backward-
+        // compatible behavior" -- an all-default canonical (equivalent to
+        // no canonical file existing) must not change repo's routing at all.
+        let repo = RoutingPolicy {
+            default_backend: Some("codex".into()),
+            allow_review_fallback: true,
+            ..Default::default()
+        };
+        let merged = merge_routing_policy(RoutingPolicy::default(), repo.clone());
+        assert_eq!(merged.default_backend, repo.default_backend);
+        assert_eq!(merged.allow_review_fallback, repo.allow_review_fallback);
+    }
+
+    #[test]
+    fn load_canonical_routing_is_none_when_file_does_not_exist() {
+        let _lock = CANONICAL_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var(
+            "GAH_CANONICAL_CONFIG",
+            tmp.path().join("does-not-exist.toml"),
+        );
+        let result = load_canonical_routing().unwrap();
+        std::env::remove_var("GAH_CANONICAL_CONFIG");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_canonical_routing_fails_loudly_on_malformed_file() {
+        let _lock = CANONICAL_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("canonical.toml");
+        std::fs::write(&path, "not valid toml [[[").unwrap();
+        std::env::set_var("GAH_CANONICAL_CONFIG", &path);
+        let result = load_canonical_routing();
+        std::env::remove_var("GAH_CANONICAL_CONFIG");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_merges_canonical_into_repo_defaults_routing() {
+        let _lock = CANONICAL_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical_path = tmp.path().join("canonical.toml");
+        std::fs::write(
+            &canonical_path,
+            "[routing]\ndefault_backend = \"codex\"\nreview_backend = \"claude\"\n",
+        )
+        .unwrap();
+        std::env::set_var("GAH_CANONICAL_CONFIG", &canonical_path);
+
+        let repo_config_path = tmp.path().join("gah-config.toml");
+        std::fs::write(
+            &repo_config_path,
+            "[defaults]\nartifact_root = \"\"\nworktree_base = \"\"\nllm_base_url = \"\"\nllm_model_local = \"\"\nllm_model_cloud = \"\"\n[defaults.routing]\ndefault_backend = \"agy\"\n",
+        )
+        .unwrap();
+
+        let cfg = load(Some(repo_config_path.to_str().unwrap())).unwrap();
+        std::env::remove_var("GAH_CANONICAL_CONFIG");
+
+        // repo's own default_backend wins...
+        assert_eq!(cfg.defaults.routing.default_backend.as_deref(), Some("agy"));
+        // ...but review_backend, which repo never set, inherits from canonical.
+        assert_eq!(
+            cfg.defaults.routing.review_backend.as_deref(),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn two_different_repo_configs_both_inherit_the_same_canonical_routing() {
+        // TICKET-106 AC: "World Cup can inherit canonical routing while
+        // overriding repo-specific behavior" -- simulated with two throwaway
+        // repo configs rather than touching a real second repo.
+        let _lock = CANONICAL_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical_path = tmp.path().join("canonical.toml");
+        std::fs::write(
+            &canonical_path,
+            "[routing]\nreview_backend = \"claude\"\nstrong_review_backend = \"claude\"\n",
+        )
+        .unwrap();
+        std::env::set_var("GAH_CANONICAL_CONFIG", &canonical_path);
+
+        let minimal_repo_path = tmp.path().join("minimal-repo.toml");
+        std::fs::write(
+            &minimal_repo_path,
+            "[defaults]\nartifact_root = \"\"\nworktree_base = \"\"\nllm_base_url = \"\"\nllm_model_local = \"\"\nllm_model_cloud = \"\"\n",
+        )
+        .unwrap();
+
+        let overriding_repo_path = tmp.path().join("overriding-repo.toml");
+        std::fs::write(
+            &overriding_repo_path,
+            "[defaults]\nartifact_root = \"\"\nworktree_base = \"\"\nllm_base_url = \"\"\nllm_model_local = \"\"\nllm_model_cloud = \"\"\n[defaults.routing]\nreview_backend = \"codex\"\n",
+        )
+        .unwrap();
+
+        let minimal_cfg = load(Some(minimal_repo_path.to_str().unwrap())).unwrap();
+        let overriding_cfg = load(Some(overriding_repo_path.to_str().unwrap())).unwrap();
+        std::env::remove_var("GAH_CANONICAL_CONFIG");
+
+        // A minimal repo config with no routing section at all still
+        // receives canonical routing automatically.
+        assert_eq!(
+            minimal_cfg.defaults.routing.review_backend.as_deref(),
+            Some("claude")
+        );
+        assert_eq!(
+            minimal_cfg
+                .defaults
+                .routing
+                .strong_review_backend
+                .as_deref(),
+            Some("claude")
+        );
+        // A repo that overrides one field keeps its own value for that
+        // field, but still inherits the other canonical field unchanged.
+        assert_eq!(
+            overriding_cfg.defaults.routing.review_backend.as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            overriding_cfg
+                .defaults
+                .routing
+                .strong_review_backend
+                .as_deref(),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn shipped_canonical_example_parses_as_a_canonical_config() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/config/gah-canonical.example.toml"
+        ))
+        .unwrap();
+        let canonical: super::CanonicalConfig = toml::from_str(&text).unwrap();
+        assert_eq!(
+            canonical.routing.strong_review_backend.as_deref(),
+            Some("claude")
+        );
+        assert_eq!(
+            canonical.routing.review_required_capabilities.get("claude"),
+            Some(&vec!["ponytail".to_string()])
+        );
     }
 }

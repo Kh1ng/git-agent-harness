@@ -1,5 +1,21 @@
 # TICKET-104: Implement hierarchical shared configuration
 
+Status: CLOSED — SUPERSEDED BY TICKET-106 (2026-07-05)
+
+This ticket and TICKET-106 ("Add Canonical Shared Routing Policy Inheritance") describe the
+same feature — a scope duplication, not an ID collision (both numbers were validly assigned,
+but to the same idea). TICKET-106 is the broader, canonical version (full test list, the
+actual priority-board entry, introduces the genuinely new "shared canonical config file"
+layer this ticket's own Pre-Discovery below shows doesn't exist yet — the existing
+`profile.routing` → `defaults.routing` fallback this ticket describes was already true
+before either ticket existed). This ticket's Pre-Discovery was folded into TICKET-106's
+implementation. See docs/tickets/TICKET-106-shared-routing-policy-inheritance.md.
+
+This ticket's narrower remaining ask — actually editing this repo's own `[profiles.gah.routing]`
+to stop duplicating fields now covered by `[defaults.routing]`/the new canonical layer — is an
+operational config edit, not a code change, and is left to the operator (out of scope for a
+"GAH-side only, don't touch other repos' real config" implementation pass).
+
 Goal: Move the current known-good routing/model/backend policy from the GAH repo config into a shared canonical defaults, so all repos inherit automatically unless they explicitly override.
 
 Difficulty: medium
