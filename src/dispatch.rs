@@ -6,6 +6,7 @@ use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,6 +107,35 @@ fn is_ledger_entry_stale(entry: &LedgerEntry) -> bool {
     now - entry_time > time::Duration::days(14)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateWorkError {
+    pub work_id: String,
+    pub branch: Option<String>,
+    pub mr_url: Option<String>,
+}
+
+impl fmt::Display for DuplicateWorkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Refusing dispatch: active open PR already exists for work ID '{}'",
+            self.work_id
+        )?;
+        if let Some(url) = self.mr_url.as_deref() {
+            write!(f, " ({url})")?;
+        } else if let Some(branch) = self.branch.as_deref() {
+            write!(f, " (branch {branch})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for DuplicateWorkError {}
+
+pub(crate) fn duplicate_work_error(err: &anyhow::Error) -> Option<&DuplicateWorkError> {
+    err.downcast_ref::<DuplicateWorkError>()
+}
+
 fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()> {
     let target = if args.target.is_empty() {
         if args.mode == "improve" || args.mode == "fix" {
@@ -200,11 +230,11 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
                 continue;
             }
             // Otherwise, it's an active open PR -> Block
-            anyhow::bail!(
-                "Refusing dispatch: active open PR already exists for work ID '{}' ({})",
-                work_id,
-                mr.url.as_deref().unwrap_or("")
-            );
+            return Err(anyhow::Error::new(DuplicateWorkError {
+                work_id: work_id.clone(),
+                branch: Some(mr.branch.clone()),
+                mr_url: mr.url.clone(),
+            }));
         }
 
         // If no matching MR is found, check if branch exists
@@ -229,9 +259,9 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
 /// so the duplicate guard and the controller's view of "is this ticket
 /// available" can never diverge into two different answers.
 pub fn scan_available_tickets(
-    cfg: &GahConfig,
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
+    ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
 ) -> Vec<AvailableTicket> {
     let tickets_dir = Path::new(&profile.local_path).join("docs/tickets");
     let Ok(read_dir) = fs::read_dir(&tickets_dir) else {
@@ -255,11 +285,11 @@ pub fn scan_available_tickets(
         let (prior_attempt_count, last_failure_class, has_active_mr) = match &work_id {
             None => (0, None, false),
             Some(wid) => {
-                let entries = crate::ledger::entries_for_work_id(cfg, wid).unwrap_or_default();
+                let entries = ledger_entries_by_work_id.get(wid);
                 let mut count = 0usize;
                 let mut last_failure_class = None;
                 let mut has_active_mr = false;
-                for e in &entries {
+                for e in entries.into_iter().flatten() {
                     if is_ledger_entry_stale(e) {
                         continue;
                     }
@@ -2617,7 +2647,11 @@ mod tests {
         let mut prof = profile(tmp.path());
         prof.local_path = tmp.path().display().to_string();
 
-        let candidates = scan_available_tickets(&cfg, &prof, &[]);
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].work_id.as_deref(), Some("TICKET-200"));
         assert_eq!(candidates[0].prior_attempt_count, 0);
@@ -2658,7 +2692,11 @@ mod tests {
         );
         crate::ledger::append(&cfg, &entry).unwrap();
 
-        let candidates = scan_available_tickets(&cfg, &prof, &[]);
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].prior_attempt_count, 1);
         assert_eq!(
@@ -2712,9 +2750,97 @@ mod tests {
             work_id: Some("TICKET-202".into()),
         }];
 
-        let candidates = scan_available_tickets(&cfg, &prof, &mrs);
+        let candidates = scan_available_tickets(
+            &prof,
+            &mrs,
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].has_active_mr);
+    }
+
+    #[test]
+    fn scan_available_tickets_uses_preloaded_ledger_index_for_multiple_tickets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-210-first.md"),
+            "# TICKET-210: First ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-211-second.md"),
+            "# TICKET-211: Second ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+
+        let mut first = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        first.work_id = Some("TICKET-210".into());
+        first.set_failure(
+            crate::ledger::FailureClass::AgentNoProgress,
+            crate::ledger::FailureStage::PostValidation,
+        );
+
+        let mut second = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        second.work_id = Some("TICKET-211".into());
+        second.branch = Some("gah/repo-211".into());
+
+        let index = crate::ledger::index_entries_by_work_id(&[first, second]);
+        let mrs = vec![crate::sync::SyncMr {
+            title: "[GAH] Fix: TICKET-211".into(),
+            branch: "gah/repo-211".into(),
+            labels: vec![],
+            url: Some("https://example/pull/211".into()),
+            id: Some("211".into()),
+            state: Some("OPEN".into()),
+            draft: false,
+            merge_status: None,
+            merged: false,
+            updated_at: None,
+            ci_failed: false,
+            work_id: Some("TICKET-211".into()),
+        }];
+
+        let candidates = scan_available_tickets(&prof, &mrs, &index);
+        assert_eq!(candidates.len(), 2);
+        let first = candidates
+            .iter()
+            .find(|candidate| candidate.work_id.as_deref() == Some("TICKET-210"))
+            .unwrap();
+        assert_eq!(first.prior_attempt_count, 1);
+        assert_eq!(
+            first.last_failure_class.as_deref(),
+            Some("agent_no_progress")
+        );
+        assert!(!first.has_active_mr);
+        let second = candidates
+            .iter()
+            .find(|candidate| candidate.work_id.as_deref() == Some("TICKET-211"))
+            .unwrap();
+        assert_eq!(second.prior_attempt_count, 1);
+        assert!(second.has_active_mr);
+    }
+
+    #[test]
+    fn duplicate_work_error_detection_is_typed_not_string_matched() {
+        let err = anyhow::Error::new(super::DuplicateWorkError {
+            work_id: "TICKET-999".into(),
+            branch: Some("gah/repo-999".into()),
+            mr_url: Some("https://example/pull/999".into()),
+        })
+        .context("outer wording changed completely");
+
+        let duplicate = super::duplicate_work_error(&err).unwrap();
+        assert_eq!(duplicate.work_id, "TICKET-999");
+        assert_eq!(duplicate.branch.as_deref(), Some("gah/repo-999"));
+        assert_eq!(
+            duplicate.mr_url.as_deref(),
+            Some("https://example/pull/999")
+        );
     }
 
     fn init_repo(repo: &Path) {
@@ -3219,7 +3345,9 @@ mod tests {
         assert!(task.contains("Remember open work."));
         assert!(task.contains("TICKET-002-auth.md: Fix push auth"));
         assert!(task.contains("Default action is to avoid creating new tickets."));
-        assert!(task.contains("Current branch: main"));
+        assert!(task.contains("### Repo State"));
+        assert!(task.contains("Current branch:"));
+        assert!(task.contains("Recent commits:"));
     }
 
     #[test]
@@ -3898,8 +4026,15 @@ The parser should retain structured sections.\n\n\
 
         let res = super::check_duplicate_work(&cfg, &prof, &args);
         assert!(res.is_err());
-        let err_msg = res.unwrap_err().to_string();
+        let err = res.unwrap_err();
+        let err_msg = err.to_string();
         assert!(err_msg.contains("Refusing dispatch: active open PR already exists"));
+        let duplicate = super::duplicate_work_error(&err).unwrap();
+        assert_eq!(duplicate.work_id, "TICKET-097");
+        assert_eq!(
+            duplicate.mr_url.as_deref(),
+            Some("https://github.com/owner/repo/pull/1")
+        );
 
         // 5. Case C: PR is merged -> Should pass
         let pr_json_merged = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"MERGED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":"2026-07-04T17:22:35-05:00","updatedAt":"2026-07-04T17:22:35-05:00","statusCheckRollup":[]}]"#;

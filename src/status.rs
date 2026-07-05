@@ -199,9 +199,11 @@ pub fn build_snapshot(
 
     // 3. Ledger State
     let mut recent_ledger = None;
+    let mut ledger_entries_by_work_id = crate::ledger::LedgerEntriesByWorkId::new();
     let mut ledger_obs = ObservationStatus { status: "ok" };
     match ledger::read_entries(cfg) {
         Ok(entries) => {
+            ledger_entries_by_work_id = ledger::index_entries_by_work_id(&entries);
             let mut latest: Option<&LedgerEntry> = None;
             let mut max_ts: Option<OffsetDateTime> = None;
 
@@ -291,7 +293,8 @@ pub fn build_snapshot(
 
     // 5. Available tickets (TICKET-078): reuses the already-fetched `raw_mrs`
     // rather than calling sync::fetch_mrs a second time.
-    let available_tickets = crate::dispatch::scan_available_tickets(cfg, profile, &raw_mrs);
+    let available_tickets =
+        crate::dispatch::scan_available_tickets(profile, &raw_mrs, &ledger_entries_by_work_id);
 
     let snapshot = StatusSnapshot {
         schema_version: 1,

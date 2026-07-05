@@ -129,7 +129,8 @@ impl NextAction {
 /// 1. incomplete critical observation -> stop safely (NoOp)
 /// 2. a recorded blocker (today: ledger human_required) -> HumanRequired
 /// 3. an MR classified NEEDS_REVIEW -> ReviewMr
-/// 4. an MR classified CI_FAILED/NEEDS_FIX -> FixMr
+/// 4. an MR classified CI_FAILED/NEEDS_FIX -> HumanRequired (until
+///    existing-branch continuation exists)
 /// 5. an MR classified READY_FOR_HUMAN -> HumanRequired
 /// 6. a ticket with failed history, no active MR, capability failure,
 ///    under the retry cap -> Escalate
@@ -179,14 +180,15 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         .iter()
         .find(|mr| matches!(mr.classification.as_str(), "CI_FAILED" | "NEEDS_FIX"))
     {
-        return NextAction::FixMr {
-            work_id: mr.work_id.clone(),
-            branch: mr.branch.clone(),
-            mr_url: mr.url.clone(),
+        return NextAction::HumanRequired {
             reason: format!(
-                "MR on branch '{}' classified {}",
+                "MR on branch '{}' classified {} but existing-branch continuation is unsupported",
                 mr.branch, mr.classification
             ),
+            reference: mr
+                .url
+                .clone()
+                .or_else(|| Some(format!("branch {}", mr.branch))),
         };
     }
     if let Some(mr) = mrs.iter().find(|mr| mr.classification == "READY_FOR_HUMAN") {
@@ -335,6 +337,36 @@ fn detect_stuck_loop(
     None
 }
 
+fn record_action_events(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    original_action: &NextAction,
+    effective_action: &NextAction,
+) -> Result<()> {
+    crate::events::record(
+        cfg,
+        crate::events::EventType::ActionDecided,
+        Some(profile_name),
+        original_action.work_id(),
+        format!("{}: {}", original_action.kind(), original_action.reason()),
+    )?;
+    if original_action != effective_action {
+        crate::events::record(
+            cfg,
+            crate::events::EventType::ActionOverridden,
+            Some(profile_name),
+            original_action.work_id(),
+            format!(
+                "{} -> {}: {}",
+                original_action.kind(),
+                effective_action.kind(),
+                effective_action.reason()
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 /// TICKET-079: `gah loop --once` -- exactly one bounded controller
 /// iteration. Build a snapshot, decide one action, execute at most that
 /// one action, persist one controller event trail, exit. No daemon, no
@@ -356,21 +388,16 @@ pub fn run_once(cfg: &crate::config::GahConfig, profile_name: &str, json: bool) 
         format!("profile={profile_name}"),
     )?;
 
-    let mut action = decide_next_action(&snapshot);
+    let original_action = decide_next_action(&snapshot);
     let history = crate::events::read_events(cfg)?;
-    if let Some(reason) = detect_stuck_loop(&history, profile_name, &action) {
+    let mut action = original_action.clone();
+    if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
         action = NextAction::HumanRequired {
             reason,
-            reference: action.work_id().map(str::to_string),
+            reference: original_action.work_id().map(str::to_string),
         };
     }
-    crate::events::record(
-        cfg,
-        crate::events::EventType::ActionDecided,
-        Some(profile_name),
-        action.work_id(),
-        format!("{}: {}", action.kind(), action.reason()),
-    )?;
+    record_action_events(cfg, profile_name, &original_action, &action)?;
 
     let outcome = execute_action(cfg, profile_name, &action)?;
 
@@ -399,12 +426,10 @@ pub fn run_once(cfg: &crate::config::GahConfig, profile_name: &str, json: bool) 
     Ok(())
 }
 
-/// Executes at most one action. `FixMr` is deliberately not executed here:
-/// `fix`/`improve` mode always branches fresh off `default_target_branch`
-/// (see `worktree::create`) -- there is no existing capability in this
-/// codebase to check out and continue an already-open MR's branch. Rather
-/// than silently building that (a separate, larger change) or silently
-/// dropping the decision, this reports it honestly and takes no action.
+/// Executes at most one action. `FixMr` remains a compatibility variant,
+/// but autonomous controller decisions should not emit it until
+/// existing-branch continuation exists. If one does arrive here anyway,
+/// keep the current honest no-op rather than pretending the fix happened.
 pub(crate) fn execute_action(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
@@ -483,12 +508,10 @@ pub(crate) fn execute_action(
 }
 
 /// Records `DispatchStarted`, runs `dispatch::run`, then records either
-/// `DispatchFinished` (success) or `DuplicateGuardTriggered` (the specific,
-/// already-known "active open PR" refusal from TICKET-097's
-/// `check_duplicate_work`) / a generic failure note -- so the event log
-/// distinguishes "the duplicate guard correctly refused this" from an
-/// ordinary dispatch failure, without needing a new typed error variant
-/// threaded through `dispatch::run`'s `Result<()>`.
+/// `DispatchFinished` (success) or `DuplicateGuardTriggered` (the typed
+/// duplicate-work refusal from TICKET-097's `check_duplicate_work`) / a
+/// generic failure note -- so the event log distinguishes "the duplicate
+/// guard correctly refused this" from an ordinary dispatch failure.
 fn run_dispatch_and_record(
     cfg: &crate::config::GahConfig,
     action: &NextAction,
@@ -514,7 +537,7 @@ fn run_dispatch_and_record(
             Ok(())
         }
         Err(e) => {
-            let event_type = if e.to_string().contains("active open PR already exists") {
+            let event_type = if crate::dispatch::duplicate_work_error(&e).is_some() {
                 crate::events::EventType::DuplicateGuardTriggered
             } else {
                 crate::events::EventType::DispatchFinished
@@ -706,11 +729,25 @@ mod tests {
     }
 
     #[test]
-    fn ci_failed_mr_maps_to_fix_mr() {
+    fn ci_failed_mr_requires_human_until_fix_mr_is_supported() {
         let mut snapshot = empty_snapshot();
         snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
         let action = decide_next_action(&snapshot);
-        assert_eq!(action.kind(), "fix_mr");
+        match action {
+            NextAction::HumanRequired { reason, reference } => {
+                assert!(reason.contains("existing-branch continuation is unsupported"));
+                assert_eq!(reference.as_deref(), Some("https://example/gah/real-1"));
+            }
+            other => panic!("expected HumanRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn needs_fix_mr_requires_human_until_fix_mr_is_supported() {
+        let mut snapshot = empty_snapshot();
+        snapshot.merge_requests.push(mr("gah/real-1", "NEEDS_FIX"));
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
     }
 
     #[test]
@@ -862,8 +899,10 @@ mod tests {
         assert_eq!(action.kind(), "no_op");
     }
 
-    use super::{detect_stuck_loop, STUCK_LOOP_THRESHOLD};
+    use super::{detect_stuck_loop, record_action_events, STUCK_LOOP_THRESHOLD};
+    use crate::config::{Defaults, GahConfig, RoutingPolicy};
     use crate::events::ControllerEvent;
+    use std::collections::HashMap;
 
     fn decided_event(profile: &str, work_id: &str, kind: &str) -> ControllerEvent {
         ControllerEvent {
@@ -939,5 +978,45 @@ mod tests {
             reason: "nothing actionable".into(),
         };
         assert!(detect_stuck_loop(&events, "real", &action).is_none());
+    }
+
+    fn event_test_config() -> (tempfile::TempDir, GahConfig) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = GahConfig {
+            defaults: Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: String::new(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: RoutingPolicy::default(),
+            },
+            profiles: HashMap::new(),
+        };
+        (tmp, cfg)
+    }
+
+    #[test]
+    fn stuck_loop_override_records_original_decision_and_override() {
+        let (_tmp, cfg) = event_test_config();
+        let original = NextAction::ReviewMr {
+            work_id: Some("TICKET-500".into()),
+            branch: "gah/real-1".into(),
+            mr_url: Some("https://example/review".into()),
+            reason: "MR on branch 'gah/real-1' classified NEEDS_REVIEW".into(),
+        };
+        let effective = NextAction::HumanRequired {
+            reason: "stuck-loop detected: 'review_mr' selected 3 times in a row for TICKET-500 with no intervening state change".into(),
+            reference: Some("TICKET-500".into()),
+        };
+
+        record_action_events(&cfg, "real", &original, &effective).unwrap();
+
+        let events = crate::events::read_events(&cfg).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "action_decided");
+        assert!(events[0].details.starts_with("review_mr:"));
+        assert_eq!(events[1].event_type, "action_overridden");
+        assert!(events[1].details.contains("review_mr -> human_required"));
     }
 }

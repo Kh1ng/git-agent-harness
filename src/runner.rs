@@ -2,9 +2,10 @@ use crate::config::Profile;
 use anyhow::{Context, Result};
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -64,6 +65,31 @@ pub struct ReviewRunResult {
     pub duration_secs: f64,
     pub stdout: String,
     pub stderr: String,
+}
+
+fn copy_stream_to_file<R: Read + Send + 'static>(
+    mut reader: R,
+    path: PathBuf,
+    progress_tx: Option<mpsc::Sender<()>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+            return;
+        };
+        let mut buf = [0_u8; 8192];
+        while let Ok(read) = reader.read(&mut buf) {
+            if read == 0 {
+                break;
+            }
+            if file.write_all(&buf[..read]).is_err() {
+                break;
+            }
+            let _ = file.flush();
+            if let Some(tx) = &progress_tx {
+                let _ = tx.send(());
+            }
+        }
+    })
 }
 
 /// Load LLM config from an OpenHands named profile (~/.openhands/profiles/<name>.json).
@@ -331,9 +357,6 @@ pub fn run_agy_with_executable(
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
 
-    let log_file = fs::File::create(&log_path).context("creating log file")?;
-    let log_err = log_file.try_clone()?;
-
     let start = Instant::now();
     let mut cmd = Command::new(executable);
     cmd.arg("--print");
@@ -344,8 +367,8 @@ pub fn run_agy_with_executable(
     }
     cmd.arg("--dangerously-skip-permissions")
         .current_dir(worktree)
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
@@ -354,6 +377,15 @@ pub fn run_agy_with_executable(
         "launching {}; is it installed and on PATH?",
         executable.display()
     ))?;
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let stdout_thread = child
+        .stdout
+        .take()
+        .map(|stdout| copy_stream_to_file(stdout, log_path.clone(), Some(progress_tx.clone())));
+    let stderr_thread = child
+        .stderr
+        .take()
+        .map(|stderr| copy_stream_to_file(stderr, log_path.clone(), Some(progress_tx)));
 
     // GAH-side supervision: kill only when the log has genuinely gone quiet
     // for idle_timeout_seconds, not on a flat wall-clock budget. A model
@@ -361,22 +393,37 @@ pub fn run_agy_with_executable(
     // killed for being slow; --print-timeout above stays as an outer
     // safety backstop for a truly hung process.
     let idle_timeout = Duration::from_secs(idle_timeout_seconds);
+    let startup_grace = idle_timeout + idle_timeout;
     let poll_interval = Duration::from_millis(500);
     let mut last_seen_len = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
     let mut last_progress_at = Instant::now();
+    let mut saw_progress = false;
     let mut killed_for_idle = false;
     let exit_code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code().unwrap_or(-1),
             Ok(None) => {
-                if let Ok(meta) = fs::metadata(&log_path) {
-                    let len = meta.len();
-                    if len != last_seen_len {
-                        last_seen_len = len;
-                        last_progress_at = Instant::now();
-                    }
+                while progress_rx.try_recv().is_ok() {
+                    last_seen_len = fs::metadata(&log_path)
+                        .map(|m| m.len())
+                        .unwrap_or(last_seen_len);
+                    last_progress_at = Instant::now();
+                    saw_progress = true;
                 }
-                if last_progress_at.elapsed() >= idle_timeout {
+                let current_len = fs::metadata(&log_path)
+                    .map(|m| m.len())
+                    .unwrap_or(last_seen_len);
+                if current_len != last_seen_len {
+                    last_seen_len = current_len;
+                    last_progress_at = Instant::now();
+                    saw_progress = true;
+                }
+                let stalled = if saw_progress {
+                    last_progress_at.elapsed() >= idle_timeout
+                } else {
+                    start.elapsed() >= startup_grace
+                };
+                if stalled {
                     let _ = child.kill();
                     let _ = child.wait();
                     killed_for_idle = true;
@@ -388,6 +435,12 @@ pub fn run_agy_with_executable(
         }
     };
     let duration = start.elapsed();
+    if let Some(handle) = stdout_thread {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_thread {
+        let _ = handle.join();
+    }
 
     if killed_for_idle {
         if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
@@ -574,28 +627,22 @@ pub fn run_review_backend(
         }
     };
 
-    let stdout_file = match fs::File::create(&stdout_path) {
-        Ok(file) => file,
-        Err(err) => {
-            return ReviewRunResult {
-                outcome: ReviewProcessOutcome::SpawnFailure,
-                duration_secs: start.elapsed().as_secs_f64(),
-                stdout: String::new(),
-                stderr: format!("creating {}: {err}", stdout_path.display()),
-            };
-        }
-    };
-    let stderr_file = match fs::File::create(&stderr_path) {
-        Ok(file) => file,
-        Err(err) => {
-            return ReviewRunResult {
-                outcome: ReviewProcessOutcome::SpawnFailure,
-                duration_secs: start.elapsed().as_secs_f64(),
-                stdout: String::new(),
-                stderr: format!("creating {}: {err}", stderr_path.display()),
-            };
-        }
-    };
+    if let Err(err) = fs::File::create(&stdout_path) {
+        return ReviewRunResult {
+            outcome: ReviewProcessOutcome::SpawnFailure,
+            duration_secs: start.elapsed().as_secs_f64(),
+            stdout: String::new(),
+            stderr: format!("creating {}: {err}", stdout_path.display()),
+        };
+    }
+    if let Err(err) = fs::File::create(&stderr_path) {
+        return ReviewRunResult {
+            outcome: ReviewProcessOutcome::SpawnFailure,
+            duration_secs: start.elapsed().as_secs_f64(),
+            stdout: String::new(),
+            stderr: format!("creating {}: {err}", stderr_path.display()),
+        };
+    }
 
     let mut cmd = Command::new(&executable);
     match backend {
@@ -625,8 +672,8 @@ pub fn run_review_backend(
         }
     }
     cmd.current_dir(worktree)
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
@@ -642,6 +689,14 @@ pub fn run_review_backend(
             };
         }
     };
+    let stdout_thread = child
+        .stdout
+        .take()
+        .map(|stdout| copy_stream_to_file(stdout, stdout_path.clone(), None));
+    let stderr_thread = child
+        .stderr
+        .take()
+        .map(|stderr| copy_stream_to_file(stderr, stderr_path.clone(), None));
 
     let timeout = Duration::from_secs(profile.review_timeout_seconds());
     let poll_interval = Duration::from_millis(25);
@@ -688,6 +743,12 @@ pub fn run_review_backend(
             }
         }
     };
+    if let Some(handle) = stdout_thread {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_thread {
+        let _ = handle.join();
+    }
 
     ReviewRunResult {
         outcome,

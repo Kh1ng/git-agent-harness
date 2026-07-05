@@ -1,6 +1,7 @@
 use crate::config::{GahConfig, Profile};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -341,6 +342,21 @@ pub fn entries_for_work_id(cfg: &GahConfig, work_id: &str) -> Result<Vec<LedgerE
         .into_iter()
         .filter(|e| e.work_id.as_deref() == Some(work_id))
         .collect())
+}
+
+pub type LedgerEntriesByWorkId = BTreeMap<String, Vec<LedgerEntry>>;
+
+pub fn index_entries_by_work_id(entries: &[LedgerEntry]) -> LedgerEntriesByWorkId {
+    let mut index = BTreeMap::new();
+    for entry in entries {
+        if let Some(work_id) = entry.work_id.as_ref() {
+            index
+                .entry(work_id.clone())
+                .or_insert_with(Vec::new)
+                .push(entry.clone());
+        }
+    }
+    index
 }
 
 /// TICKET-072: append-only reconciliation of dispatched work with later
@@ -849,8 +865,9 @@ pub fn usage_summary_for_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        append, entries_for_work_id, is_strong_model, reconcile, usage_summary_for_backend,
-        FailureClass, FailureStage, LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
+        append, entries_for_work_id, index_entries_by_work_id, is_strong_model, reconcile,
+        usage_summary_for_backend, FailureClass, FailureStage, LedgerEntry,
+        RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
@@ -956,6 +973,19 @@ mod tests {
         let found = entries_for_work_id(&cfg, "TICKET-096").unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].work_id.as_deref(), Some("TICKET-096"));
+    }
+
+    #[test]
+    fn index_entries_by_work_id_groups_only_tagged_entries() {
+        let mut first = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
+        first.work_id = Some("TICKET-096".into());
+        let mut second = LedgerEntry::new("test", &profile(), "claude", "pm", "y", None, None);
+        second.work_id = Some("TICKET-096".into());
+        let untagged = LedgerEntry::new("test", &profile(), "claude", "pm", "z", None, None);
+
+        let index = index_entries_by_work_id(&[first, second, untagged]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(index["TICKET-096"].len(), 2);
     }
 
     #[test]

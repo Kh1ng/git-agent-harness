@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 pub enum EventType {
     ObservationCompleted,
     ActionDecided,
+    ActionOverridden,
     DispatchStarted,
     DispatchFinished,
     /// Not yet emitted: would require `dispatch.rs`'s own
@@ -37,6 +38,7 @@ impl EventType {
         match self {
             Self::ObservationCompleted => "observation_completed",
             Self::ActionDecided => "action_decided",
+            Self::ActionOverridden => "action_overridden",
             Self::DispatchStarted => "dispatch_started",
             Self::DispatchFinished => "dispatch_finished",
             Self::BackendMarkedUnavailable => "backend_marked_unavailable",
@@ -183,6 +185,7 @@ mod tests {
             "observation_completed"
         );
         assert_eq!(EventType::ActionDecided.as_str(), "action_decided");
+        assert_eq!(EventType::ActionOverridden.as_str(), "action_overridden");
         assert_eq!(EventType::DispatchStarted.as_str(), "dispatch_started");
         assert_eq!(EventType::DispatchFinished.as_str(), "dispatch_finished");
         assert_eq!(
