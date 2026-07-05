@@ -10,7 +10,12 @@ use support::{FakeBackend, Scenario};
 use tempfile::TempDir;
 
 fn bin() -> Command {
-    Command::cargo_bin("gah").unwrap()
+    let mut cmd = Command::cargo_bin("gah").unwrap();
+    cmd.env(
+        "GAH_AVAILABILITY_PATH",
+        "/nonexistent-availability-path.json",
+    );
+    cmd
 }
 
 fn write_fixture_dir() -> TempDir {

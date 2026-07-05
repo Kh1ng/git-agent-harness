@@ -54,13 +54,13 @@ const ENVIRONMENT_ERROR_SIGNATURES: &[&str] = &[
 /// `known_failure_markers` are case-insensitive substrings the profile has
 /// explicitly configured as expected-red signatures.
 pub fn classify_baseline(
-    text: Option<&str>,
+    text: &str,
     exit_code: Option<i32>,
     known_failure_markers: &[String],
 ) -> BaselineDisposition {
-    let Some(text) = text else {
+    if text.is_empty() && exit_code.is_none() {
         return BaselineDisposition::Clean;
-    };
+    }
 
     if matches!(exit_code, Some(126) | Some(127)) {
         return BaselineDisposition::HarnessError;
@@ -87,16 +87,13 @@ mod tests {
 
     #[test]
     fn no_failure_text_is_clean() {
-        assert_eq!(
-            classify_baseline(None, None, &[]),
-            BaselineDisposition::Clean
-        );
+        assert_eq!(classify_baseline("", None, &[]), BaselineDisposition::Clean);
     }
 
     #[test]
     fn exit_127_is_harness_error_regardless_of_text() {
         assert_eq!(
-            classify_baseline(Some("anything at all"), Some(127), &[]),
+            classify_baseline("anything at all", Some(127), &[]),
             BaselineDisposition::HarnessError
         );
     }
@@ -104,7 +101,7 @@ mod tests {
     #[test]
     fn exit_126_is_harness_error() {
         assert_eq!(
-            classify_baseline(Some("Permission denied"), Some(126), &[]),
+            classify_baseline("Permission denied", Some(126), &[]),
             BaselineDisposition::HarnessError
         );
     }
@@ -114,7 +111,7 @@ mod tests {
         let markers = vec!["known flaky integration test".to_string()];
         assert_eq!(
             classify_baseline(
-                Some("FAILED tests/test_x.py - known flaky integration test"),
+                "FAILED tests/test_x.py - known flaky integration test",
                 Some(1),
                 &markers,
             ),
@@ -126,7 +123,7 @@ mod tests {
     fn marker_match_is_case_insensitive() {
         let markers = vec!["KNOWN FLAKY".to_string()];
         assert_eq!(
-            classify_baseline(Some("known flaky test failure"), Some(1), &markers),
+            classify_baseline("known flaky test failure", Some(1), &markers),
             BaselineDisposition::ExpectedRed
         );
     }
@@ -136,7 +133,7 @@ mod tests {
         // No markers configured -> even a very "expected-sounding" failure
         // must not be auto-promoted to ExpectedRed.
         assert_eq!(
-            classify_baseline(Some("known flaky integration test"), Some(1), &[]),
+            classify_baseline("known flaky integration test", Some(1), &[]),
             BaselineDisposition::UnknownRed
         );
     }
@@ -145,7 +142,7 @@ mod tests {
     fn python_module_not_found_is_environment_error() {
         assert_eq!(
             classify_baseline(
-                Some("ModuleNotFoundError: No module named 'requests'"),
+                "ModuleNotFoundError: No module named 'requests'",
                 Some(1),
                 &[],
             ),
@@ -156,7 +153,7 @@ mod tests {
     #[test]
     fn node_cannot_find_module_is_environment_error() {
         assert_eq!(
-            classify_baseline(Some("Error: Cannot find module 'express'"), Some(1), &[]),
+            classify_baseline("Error: Cannot find module 'express'", Some(1), &[]),
             BaselineDisposition::EnvironmentError
         );
     }
@@ -165,7 +162,7 @@ mod tests {
     fn rust_linker_failure_is_environment_error() {
         assert_eq!(
             classify_baseline(
-                Some("error: linking with `cc` failed: exit status: 1"),
+                "error: linking with `cc` failed: exit status: 1",
                 Some(101),
                 &[],
             ),
@@ -177,7 +174,7 @@ mod tests {
     fn connection_refused_is_environment_error() {
         assert_eq!(
             classify_baseline(
-                Some("psycopg2.OperationalError: Connection refused"),
+                "psycopg2.OperationalError: Connection refused",
                 Some(1),
                 &[]
             ),
@@ -188,7 +185,7 @@ mod tests {
     #[test]
     fn generic_assertion_failure_is_unknown_red() {
         assert_eq!(
-            classify_baseline(Some("AssertionError: expected 5 got 4"), Some(1), &[],),
+            classify_baseline("AssertionError: expected 5 got 4", Some(1), &[],),
             BaselineDisposition::UnknownRed
         );
     }
@@ -201,7 +198,7 @@ mod tests {
         let markers = vec!["module x is expected to be missing in ci".to_string()];
         assert_eq!(
             classify_baseline(
-                Some("ModuleNotFoundError: module x is expected to be missing in CI"),
+                "ModuleNotFoundError: module x is expected to be missing in CI",
                 Some(1),
                 &markers,
             ),

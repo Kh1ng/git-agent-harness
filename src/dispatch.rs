@@ -813,7 +813,7 @@ fn improve(
     // harness_error/environment_error always stop; unknown_red stops unless
     // explicitly overridden. Never let this improvise -- see baseline.rs.
     let baseline_disposition = crate::baseline::classify_baseline(
-        baseline_failure.as_deref(),
+        baseline_failure.as_deref().unwrap_or(""),
         baseline_exit_code,
         &profile.known_baseline_failure_markers,
     );
