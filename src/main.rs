@@ -1,4 +1,5 @@
 mod availability;
+mod baseline;
 mod candidates;
 mod config;
 mod dispatch;
@@ -176,6 +177,10 @@ enum Commands {
         /// Without this flag, only the dev env_file is loaded.
         #[arg(long, default_value_t = false)]
         prod: bool,
+        /// Proceed despite a baseline validation failure the classifier
+        /// could not attribute to harness/environment/expected-red.
+        #[arg(long, default_value_t = false)]
+        allow_unknown_red_baseline: bool,
     },
     /// Manage profiles
     Profile {
@@ -207,6 +212,15 @@ enum LedgerCommands {
         since: String,
         #[arg(long)]
         profile: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Backfill dispatched work with later provider outcomes (MR merged/closed)
+    Reconcile {
+        #[arg(long)]
+        profile: String,
         #[arg(long, name = "config")]
         config_path: Option<String>,
         #[arg(long)]
@@ -289,6 +303,14 @@ fn main() -> Result<()> {
                 config_path.as_deref(),
                 json,
             )?,
+            LedgerCommands::Reconcile {
+                profile,
+                config_path,
+                json,
+            } => {
+                let cfg = config::load(config_path.as_deref())?;
+                ledger::reconcile::run(&cfg, &profile, json)?;
+            }
         },
 
         Commands::Status {
@@ -325,6 +347,7 @@ fn main() -> Result<()> {
             retries,
             allow_draft_fail,
             prod,
+            allow_unknown_red_baseline,
         } => {
             let cfg = config::load(config_path.as_deref())?;
             dispatch::run(
@@ -345,6 +368,7 @@ fn main() -> Result<()> {
                     retries,
                     allow_draft_fail,
                     prod,
+                    allow_unknown_red_baseline,
                 },
             )?;
         }

@@ -36,6 +36,11 @@ pub struct DispatchArgs {
     /// Require explicit --prod flag to load production env_file_prod.
     /// Without this flag, only env_file (dev) is loaded.
     pub prod: bool,
+    /// TICKET-111: proceed despite a baseline validation failure that the
+    /// classifier could not attribute to harness/environment/expected-red
+    /// (`BaselineDisposition::UnknownRed`). Named for exactly what it
+    /// overrides, not a generic bypass.
+    pub allow_unknown_red_baseline: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,6 +404,35 @@ fn validate(commands: &[String], wt: &Path) -> Result<()> {
     Ok(())
 }
 
+/// TICKET-110: like `validate()`, but also surfaces the failing command's
+/// exit code so baseline classification can key on POSIX shell conventions
+/// (127/126) rather than string-matching stdout.
+fn validate_with_exit_code(commands: &[String], wt: &Path) -> Result<(), (String, Option<i32>)> {
+    for cmd_str in commands {
+        if cmd_str.trim().is_empty() {
+            continue;
+        }
+        println!("  Validating: {}", cmd_str);
+        let out = Command::new("sh")
+            .args(["-c", cmd_str])
+            .current_dir(wt)
+            .output()
+            .map_err(|e| (format!("failed to run '{}': {:#}", cmd_str, e), None))?;
+        if !out.status.success() {
+            return Err((
+                format!(
+                    "$ {}\n{}{}",
+                    cmd_str,
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr),
+                ),
+                out.status.code(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn preflight(profile: &Profile, backend: &str) -> Result<()> {
     ensure_bin("git")?;
     runner::require_backend_executable(profile, backend)?;
@@ -570,25 +604,69 @@ fn improve(
     // tokens. A failure here is a config error or a pre-existing red repo —
     // either way the agent must know, and later failures can be compared
     // against it to tell "agent made no progress" from "agent broke it".
-    let baseline_failure = if profile.validation_commands.is_empty() {
-        None
+    let (baseline_failure, baseline_exit_code) = if profile.validation_commands.is_empty() {
+        (None, None)
     } else {
         println!("Baseline validation on pristine worktree...");
-        match validate(&profile.validation_commands, &wt) {
+        match validate_with_exit_code(&profile.validation_commands, &wt) {
             Ok(()) => {
                 println!("Baseline validation passed.");
-                None
+                (None, None)
             }
-            Err(e) => Some(format!("{:#}", e)),
+            Err((text, code)) => (Some(text), code),
         }
     };
+    // TICKET-110/111: classify why the baseline failed, then apply policy.
+    // clean/expected_red proceed (existing warning-in-prompt behavior);
+    // harness_error/environment_error always stop; unknown_red stops unless
+    // explicitly overridden. Never let this improvise -- see baseline.rs.
+    let baseline_disposition = crate::baseline::classify_baseline(
+        baseline_failure.as_deref(),
+        baseline_exit_code,
+        &profile.known_baseline_failure_markers,
+    );
     if let Some(b) = &baseline_failure {
         fs::write(session_dir.join("baseline-validation-failure.txt"), b)?;
-        println!("Baseline validation ALREADY FAILING on untouched branch (recorded).");
-        base_task.push_str(&format!(
-            "\n\n## Warning: validation already fails on the untouched branch\n\n```\n{}\n```\n\nIf this ticket is about fixing that failure, fix it. Otherwise it is pre-existing — your changes must not add new failures.\n",
-            &b[..b.len().min(4_000)],
-        ));
+        println!(
+            "Baseline validation ALREADY FAILING on untouched branch ({}).",
+            baseline_disposition.as_str()
+        );
+        use crate::baseline::BaselineDisposition as BD;
+        match baseline_disposition {
+            BD::Clean => unreachable!("failure text implies a non-Clean disposition"),
+            BD::HarnessError | BD::EnvironmentError => {
+                ledger.set_failure(
+                    match baseline_disposition {
+                        BD::HarnessError => crate::ledger::FailureClass::HarnessError,
+                        _ => crate::ledger::FailureClass::EnvironmentError,
+                    },
+                    crate::ledger::FailureStage::BaselineValidation,
+                );
+                worktree::cleanup(&wt, repo);
+                anyhow::bail!(
+                    "baseline validation stopped ({}): {}",
+                    baseline_disposition.as_str(),
+                    &b[..b.len().min(4_000)],
+                );
+            }
+            BD::UnknownRed if !args.allow_unknown_red_baseline => {
+                ledger.set_failure(
+                    crate::ledger::FailureClass::Unknown,
+                    crate::ledger::FailureStage::BaselineValidation,
+                );
+                worktree::cleanup(&wt, repo);
+                anyhow::bail!(
+                    "baseline validation stopped (unknown_red): {}\n\nUse --allow-unknown-red-baseline to proceed anyway.",
+                    &b[..b.len().min(4_000)],
+                );
+            }
+            BD::UnknownRed | BD::ExpectedRed => {
+                base_task.push_str(&format!(
+                    "\n\n## Warning: validation already fails on the untouched branch\n\n```\n{}\n```\n\nIf this ticket is about fixing that failure, fix it. Otherwise it is pre-existing — your changes must not add new failures.\n",
+                    &b[..b.len().min(4_000)],
+                ));
+            }
+        }
     }
 
     let mut task = base_task.clone();
@@ -2101,6 +2179,7 @@ mod tests {
             env_file_prod: None,
             validation_commands: vec![],
             test_file_patterns: vec![],
+            known_baseline_failure_markers: vec![],
             model_improve: None,
             model_pm: None,
             model_review: None,
@@ -2977,6 +3056,7 @@ The parser should retain structured sections.\n\n\
             retries: 0,
             allow_draft_fail: false,
             prod: false,
+            allow_unknown_red_baseline: false,
         };
 
         // No ledger exists yet.

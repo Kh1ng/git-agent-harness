@@ -335,6 +335,163 @@ pub fn entries_for_work_id(cfg: &GahConfig, work_id: &str) -> Result<Vec<LedgerE
         .collect())
 }
 
+/// TICKET-072: append-only reconciliation of dispatched work with later
+/// provider outcomes (MR merged, closed unmerged, state changed). A
+/// separate log from `ledger.jsonl` -- never rewrites dispatch history,
+/// only ever appends a new entry when a work item's classified state
+/// actually changed since the last known reconciliation.
+pub mod reconcile {
+    use super::{read_entries, LedgerEntry};
+    use crate::config::{self, GahConfig};
+    use crate::sync;
+    use anyhow::{Context, Result};
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+
+    #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+    pub struct ReconciliationEntry {
+        pub timestamp: String,
+        pub work_id: String,
+        pub branch: Option<String>,
+        pub mr_url: Option<String>,
+        pub previous_state: Option<String>,
+        pub new_state: String,
+        pub source: String,
+    }
+
+    pub fn read_reconciliation_entries(cfg: &GahConfig) -> Result<Vec<ReconciliationEntry>> {
+        let path = cfg.defaults.reconciliation_path();
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let mut entries = vec![];
+        for (idx, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let entry = serde_json::from_str::<ReconciliationEntry>(line).with_context(|| {
+                format!(
+                    "parsing reconciliation entry {} from {}",
+                    idx + 1,
+                    path.display()
+                )
+            })?;
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    fn append_reconciliation_entry(cfg: &GahConfig, entry: &ReconciliationEntry) -> Result<()> {
+        let path = cfg.defaults.reconciliation_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("creating reconciliation directory {}", parent.display())
+            })?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening reconciliation log {}", path.display()))?;
+        serde_json::to_writer(&mut file, entry).context("serializing reconciliation entry")?;
+        file.write_all(b"\n")
+            .context("writing reconciliation newline")?;
+        Ok(())
+    }
+
+    /// Most recent recorded state per work_id (reconciliation log is
+    /// chronological, so the last entry for a given work_id wins).
+    fn last_known_states(entries: &[ReconciliationEntry]) -> BTreeMap<String, String> {
+        let mut map = BTreeMap::new();
+        for entry in entries {
+            map.insert(entry.work_id.clone(), entry.new_state.clone());
+        }
+        map
+    }
+
+    /// Most recent branch/mr_url per work_id from dispatch history (ledger
+    /// is chronological, so the last matching entry wins).
+    fn latest_dispatch_identity(
+        entries: &[LedgerEntry],
+    ) -> BTreeMap<String, (Option<String>, Option<String>)> {
+        let mut map = BTreeMap::new();
+        for entry in entries {
+            let Some(work_id) = &entry.work_id else {
+                continue;
+            };
+            map.insert(
+                work_id.clone(),
+                (entry.branch.clone(), entry.mr_url.clone()),
+            );
+        }
+        map
+    }
+
+    pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
+        let profile = config::get_profile(cfg, profile_name)?;
+        let ledger_entries = read_entries(cfg)?;
+        let history = read_reconciliation_entries(cfg)?;
+        let mut last_known = last_known_states(&history);
+        let dispatch_identity = latest_dispatch_identity(&ledger_entries);
+
+        let mrs = sync::fetch_mrs(profile)?;
+
+        let mut new_entries = vec![];
+        for (work_id, (branch, mr_url)) in &dispatch_identity {
+            let matching_mr = mrs.iter().find(|mr| {
+                branch.as_deref() == Some(mr.branch.as_str())
+                    || (mr_url.is_some() && mr_url.as_deref() == mr.url.as_deref())
+            });
+            let Some(mr) = matching_mr else { continue };
+            let new_state = sync::classify(mr).to_string();
+            let previous = last_known.get(work_id).cloned();
+            if previous.as_deref() == Some(new_state.as_str()) {
+                continue;
+            }
+            let entry = ReconciliationEntry {
+                timestamp: OffsetDateTime::now_utc()
+                    .format(&Rfc3339)
+                    .unwrap_or_default(),
+                work_id: work_id.clone(),
+                branch: branch.clone(),
+                mr_url: mr.url.clone(),
+                previous_state: previous,
+                new_state: new_state.clone(),
+                source: "sync".to_string(),
+            };
+            append_reconciliation_entry(cfg, &entry)?;
+            last_known.insert(work_id.clone(), new_state);
+            new_entries.push(entry);
+        }
+
+        if json {
+            println!("{}", serde_json::to_string(&new_entries)?);
+        } else {
+            println!(
+                "Reconciliation log: {}",
+                cfg.defaults.reconciliation_path().display()
+            );
+            println!("New entries: {}", new_entries.len());
+            for entry in &new_entries {
+                println!(
+                    "  {} {} -> {} ({})",
+                    entry.work_id,
+                    entry.previous_state.as_deref().unwrap_or("none"),
+                    entry.new_state,
+                    entry.branch.as_deref().unwrap_or("")
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 fn summarize_target(target: &str) -> Option<String> {
     let trimmed = target.trim();
     if trimmed.is_empty() {
@@ -684,11 +841,12 @@ pub fn usage_summary_for_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        append, entries_for_work_id, is_strong_model, usage_summary_for_backend, FailureClass,
-        FailureStage, LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
+        append, entries_for_work_id, is_strong_model, reconcile, usage_summary_for_backend,
+        FailureClass, FailureStage, LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
+    use std::fs;
 
     fn profile() -> Profile {
         Profile {
@@ -713,6 +871,7 @@ mod tests {
             env_file_prod: None,
             validation_commands: vec![],
             test_file_patterns: vec![],
+            known_baseline_failure_markers: vec![],
             model_improve: None,
             model_pm: None,
             model_review: None,
@@ -786,6 +945,53 @@ mod tests {
         let found = entries_for_work_id(&cfg, "TICKET-096").unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].work_id.as_deref(), Some("TICKET-096"));
+    }
+
+    #[test]
+    fn reconciliation_log_is_empty_when_file_does_not_exist() {
+        let (_tmp, cfg) = test_config();
+        let entries = reconcile::read_reconciliation_entries(&cfg).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn reconciliation_entries_round_trip_through_jsonl() {
+        use reconcile::ReconciliationEntry;
+        // test_config() gives a fresh tempdir-backed artifact_root per test,
+        // so reconciliation_path() resolves there without touching any
+        // process-global env var (avoids the GAH_LEDGER_PATH-style test
+        // race this project's own docs call out as known technical debt).
+        let (_tmp, cfg) = test_config();
+        let path = cfg.defaults.reconciliation_path();
+
+        let entry = ReconciliationEntry {
+            timestamp: "2026-07-05T00:00:00Z".into(),
+            work_id: "TICKET-072".into(),
+            branch: Some("gah/real-1".into()),
+            mr_url: Some("https://github.com/owner/repo/pull/1".into()),
+            previous_state: None,
+            new_state: "NEEDS_REVIEW".into(),
+            source: "sync".into(),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&entry).unwrap()),
+        )
+        .unwrap();
+
+        let entries = reconcile::read_reconciliation_entries(&cfg).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], entry);
+    }
+
+    #[test]
+    fn reconciliation_malformed_line_fails_loudly() {
+        let (_tmp, cfg) = test_config();
+        let path = cfg.defaults.reconciliation_path();
+        fs::write(&path, "not valid json\n").unwrap();
+
+        let result = reconcile::read_reconciliation_entries(&cfg);
+        assert!(result.is_err());
     }
 
     #[test]

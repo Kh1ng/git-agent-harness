@@ -2192,6 +2192,10 @@ fn dispatch_fix_validation_never_passes_records_no_push_no_mr() {
             "fix the thing",
             "--retries",
             "0",
+            // TICKET-111: this test's baseline deliberately fails ("false")
+            // to reach post-attempt validation-exhaustion behavior, not to
+            // test baseline-stop policy itself.
+            "--allow-unknown-red-baseline",
         ])
         .env("PATH", prepend_path(&fake_bin))
         .env("HOME", &home)
@@ -2320,6 +2324,9 @@ fn dispatch_fix_fail_then_success_records_two_attempts() {
             "fix the marker file",
             "--retries",
             "2",
+            // TICKET-111: baseline fails (marker.txt missing on pristine
+            // tree) purely to set up the retry-loop scenario under test.
+            "--allow-unknown-red-baseline",
         ])
         .env("PATH", prepend_path(&fake_bin))
         .env("HOME", &home)
@@ -2376,6 +2383,9 @@ fn dispatch_fix_no_progress_abort_records_exact_consumed_attempts() {
             "fix the thing",
             "--retries",
             "2",
+            // TICKET-111: baseline fails ("false") to set up the
+            // no-progress / attempt-matches-baseline scenario under test.
+            "--allow-unknown-red-baseline",
         ])
         .env("PATH", prepend_path(&fake_bin))
         .env("HOME", &home)
@@ -2427,6 +2437,9 @@ fn dispatch_fix_aborts_on_first_attempt_when_failure_matches_baseline() {
             "fix the thing",
             "--retries",
             "2",
+            // TICKET-111: baseline fails ("false") to set up the
+            // no-progress / attempt-matches-baseline scenario under test.
+            "--allow-unknown-red-baseline",
         ])
         .env("PATH", prepend_path(&fake_bin))
         .env("HOME", &home)
@@ -2453,12 +2466,17 @@ fn dispatch_fix_aborts_on_first_attempt_when_failure_matches_baseline() {
 /// is genuinely broken and the ticket's job is to fix it — must still be
 /// able to succeed. Attempt 1 changes the failure text (real progress, not
 /// a no-op), so it must retry rather than abort; attempt 2 then passes.
+///
+/// Also exercises TICKET-110/111's real `BaselineDisposition::ExpectedRed`:
+/// the profile explicitly configures `known_baseline_failure_markers`
+/// matching the missing-file text, so dispatch proceeds instead of
+/// stopping (the default for an unconfigured/unknown_red baseline).
 #[test]
 fn dispatch_fix_expected_red_baseline_can_still_succeed() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
-        "validation_commands = [\"cat marker.txt; grep -q '^done$' marker.txt\"]\n",
+        "validation_commands = [\"cat marker.txt; grep -q '^done$' marker.txt\"]\nknown_baseline_failure_markers = [\"marker.txt: No such file or directory\"]\n",
     );
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -2521,6 +2539,157 @@ fn dispatch_fix_expected_red_baseline_can_still_succeed() {
     assert!(gh_log.exists());
     assert!(fs::read_to_string(&gh_log).unwrap().contains("pr create"));
     let _ = repo;
+}
+
+/// TICKET-111 AC1: a harness_error baseline (validation command itself
+/// cannot run -- POSIX exit 127) must stop dispatch before any attempt runs,
+/// regardless of --allow-unknown-red-baseline (that flag only covers
+/// unknown_red, not harness/environment errors).
+#[test]
+fn dispatch_fix_harness_error_baseline_always_stops() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        "validation_commands = [\"definitely-not-a-real-command-xyz\"]\n",
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "2",
+            "--allow-unknown-red-baseline",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("harness_error"));
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    assert!(
+        !session_dir.join("attempt-1").exists(),
+        "no attempt should ever run when the baseline is a harness_error"
+    );
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["failure_class"], "harness_error");
+    assert_eq!(entry["failure_stage"], "baseline_validation");
+}
+
+/// TICKET-111 AC1: an environment_error baseline (well-known missing-
+/// dependency signature) must also stop dispatch before any attempt runs.
+#[test]
+fn dispatch_fix_environment_error_baseline_stops() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        "validation_commands = [\"echo 'ModuleNotFoundError: No module named repo_thing'; exit 1\"]\n",
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "2",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("environment_error"));
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    assert!(!session_dir.join("attempt-1").exists());
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["failure_class"], "environment_error");
+}
+
+/// TICKET-111 AC2: unknown_red (a baseline failure matching none of the
+/// known signatures, and not explicitly configured as expected) stops by
+/// default -- proving --allow-unknown-red-baseline in the other tests in
+/// this file is opting into real, non-default behavior rather than masking
+/// a no-op.
+#[test]
+fn dispatch_fix_unknown_red_baseline_stops_without_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"false\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "2",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("unknown_red")
+                .and(predicate::str::contains("--allow-unknown-red-baseline")),
+        );
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    assert!(!session_dir.join("attempt-1").exists());
 }
 
 /// TICKET-063: a representative dispatch failure (backend exits nonzero)
@@ -3445,4 +3614,84 @@ fn dispatch_agy_multi_instance_isolated_execution() {
     let text3 = fs::read_to_string(&ledger_path).unwrap();
     let entry3: Value = serde_json::from_str(text3.lines().next().unwrap()).unwrap();
     assert_eq!(entry3["effective_backend"], "agy");
+}
+
+/// TICKET-072: `gah ledger reconcile` must append a reconciliation entry
+/// when a dispatched work item's MR has since merged, and must never
+/// rewrite `ledger.jsonl` itself.
+#[test]
+fn ledger_reconcile_appends_entry_when_mr_state_changed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let reconciliation_path = tmp.path().join("reconciliation.jsonl");
+
+    fs::write(
+        &ledger_path,
+        "{\"timestamp\":\"2026-07-01T00:00:00Z\",\"session_id\":\"1\",\"profile\":\"real\",\"display_name\":\"Real\",\"repo_id\":\"real\",\"repo\":\"owner/real\",\"local_path\":\"/tmp/repo\",\"provider\":\"github\",\"backend\":\"codex\",\"requested_backend\":\"codex\",\"effective_backend\":\"codex\",\"requested_model\":null,\"effective_model\":null,\"routing_reason\":\"explicit\",\"fallback_used\":false,\"confidence_impact\":null,\"human_required\":false,\"work_id\":\"TICKET-072\",\"mode\":\"fix\",\"target_summary\":\"x\",\"branch\":\"gah/real-1\",\"session_dir\":null,\"duration_seconds\":1.0,\"backend_exit_code\":0,\"validation_result\":\"passed\",\"commit_attempted\":true,\"commit_created\":true,\"push_attempted\":true,\"push_succeeded\":true,\"mr_attempted\":true,\"mr_created\":true,\"mr_url\":\"https://github.com/owner/real/pull/7\",\"files_changed\":null,\"insertions\":null,\"deletions\":null,\"error_summary\":null,\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"total_tokens\":null,\"estimated_cost_usd\":null,\"usage_source\":null}}\n",
+    )
+    .unwrap();
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] Fix: TICKET-072\",\"headRefName\":\"gah/real-1\",\"url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"MERGED\",\"isDraft\":false,\"mergeStateStatus\":\"MERGED\",\"mergedAt\":\"2026-07-05T00:00:00Z\",\"updatedAt\":\"2026-07-05T00:00:00Z\",\"statusCheckRollup\":[]}]'; exit 0; fi\nexit 0\n",
+    );
+
+    let out = bin()
+        .args([
+            "ledger",
+            "reconcile",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--json",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .env("GAH_RECONCILIATION_PATH", &reconciliation_path)
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    let entries = parsed.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["work_id"], "TICKET-072");
+    assert_eq!(entries[0]["new_state"], "MERGED");
+    assert_eq!(entries[0]["previous_state"], Value::Null);
+
+    // ledger.jsonl itself must be untouched (still exactly the one original line).
+    let ledger_text = fs::read_to_string(&ledger_path).unwrap();
+    assert_eq!(ledger_text.lines().count(), 1);
+
+    // Running again with the same (still-MERGED) state must not append a
+    // second, redundant reconciliation entry.
+    bin()
+        .args([
+            "ledger",
+            "reconcile",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--json",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .env("GAH_RECONCILIATION_PATH", &reconciliation_path)
+        .assert()
+        .success()
+        .stdout("[]\n");
+
+    let reconciliation_text = fs::read_to_string(&reconciliation_path).unwrap();
+    assert_eq!(reconciliation_text.lines().count(), 1);
 }

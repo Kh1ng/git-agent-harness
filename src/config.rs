@@ -54,6 +54,19 @@ impl Defaults {
         }
         default_config_dir().join("ledger.jsonl")
     }
+
+    /// TICKET-072: separate append-only log from `ledger.jsonl` (never
+    /// rewrites dispatch history), same directory/override convention as
+    /// `GAH_LEDGER_PATH`.
+    pub fn reconciliation_path(&self) -> PathBuf {
+        if let Ok(path) = std::env::var("GAH_RECONCILIATION_PATH") {
+            return PathBuf::from(path);
+        }
+        if !self.artifact_root.trim().is_empty() {
+            return PathBuf::from(self.artifact_root.trim()).join("reconciliation.jsonl");
+        }
+        default_config_dir().join("reconciliation.jsonl")
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -108,6 +121,11 @@ pub struct Profile {
     pub validation_commands: Vec<String>,
     #[serde(default)]
     pub test_file_patterns: Vec<String>,
+    /// TICKET-110/111: substrings that explicitly mark a baseline validation
+    /// failure as known/expected (case-insensitive). Never inferred by the
+    /// classifier itself -- only reachable via this explicit configuration.
+    #[serde(default)]
+    pub known_baseline_failure_markers: Vec<String>,
     /// Model override for `improve`/`fix` mode (heavy lifting)
     #[serde(default)]
     pub model_improve: Option<String>,
@@ -380,6 +398,7 @@ mod tests {
             env_file_prod: None,
             validation_commands: vec![],
             test_file_patterns: vec![],
+            known_baseline_failure_markers: vec![],
             model_improve: None,
             model_pm: None,
             model_review: None,
