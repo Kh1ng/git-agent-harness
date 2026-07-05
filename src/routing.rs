@@ -136,11 +136,13 @@ where
 {
     let requested_backend = req.requested_backend.to_string();
     let requested_model = req.requested_model.map(str::to_string);
+    let effective_routing = profile.effective_routing(defaults);
 
     if req.requested_backend != "auto" {
         return route_explicit(
             defaults,
             profile,
+            &effective_routing,
             req,
             requested_backend,
             requested_model,
@@ -156,8 +158,13 @@ where
         if let Some(c) = policy_candidates(&profile.routing, req.mode).filter(|l| !l.is_empty()) {
             is_profile_policy = true;
             Some(c)
+        } else if policy_candidates(&defaults.routing, req.mode)
+            .filter(|l| !l.is_empty())
+            .is_some()
+        {
+            policy_candidates(&effective_routing, req.mode).filter(|l| !l.is_empty())
         } else {
-            policy_candidates(&defaults.routing, req.mode).filter(|l| !l.is_empty())
+            None
         };
 
     if let Some(candidates) = candidates {
@@ -218,20 +225,17 @@ where
 
     let profile_mode = policy_backend_model(&profile.routing, req.mode);
     let default_mode = policy_backend_model(&defaults.routing, req.mode);
-    let review_fallback_allowed =
-        profile.routing.allow_review_fallback || defaults.routing.allow_review_fallback;
-    let allow_impl_fallback = profile.routing.allow_implementation_fallback
-        || defaults.routing.allow_implementation_fallback;
+    let effective_mode = policy_backend_model(&effective_routing, req.mode);
+    let review_fallback_allowed = effective_routing.allow_review_fallback;
+    let allow_impl_fallback = effective_routing.allow_implementation_fallback;
 
-    let mut backend = profile_mode
+    let mut backend = effective_mode
         .0
-        .or(default_mode.0)
         .or(req.recommended_backend)
         .map(str::to_string)
         .unwrap_or_else(|| builtin_backend(req.mode, backend_available));
-    let mut model = profile_mode
+    let mut model = effective_mode
         .1
-        .or(default_mode.1)
         .or(req.recommended_model)
         .map(str::to_string);
     let mut reason = if profile_mode.0.is_some() || profile_mode.1.is_some() {
@@ -248,8 +252,8 @@ where
     let mut human_required = false;
     if let Some(summary) = &req.usage_summary {
         if let Some(cap_reason) = over_cap_reason(
-            &profile.routing,
-            &defaults.routing,
+            &effective_routing,
+            &RoutingPolicy::default(),
             &backend,
             req.session_id,
             summary,
@@ -264,7 +268,7 @@ where
                     human_required = true;
                     backend = fallback;
                     if model.is_none() {
-                        model = review_fallback_model(defaults, profile).map(str::to_string);
+                        model = review_fallback_model(&effective_routing).map(str::to_string);
                     }
                 }
             } else if req.mode != "review" && allow_impl_fallback {
@@ -288,14 +292,7 @@ where
     let primary = RouteCandidate {
         backend: backend.clone(),
         model: model.clone(),
-        quota_pool: profile
-            .routing
-            .find_quota_pool(req.mode, &backend, model.as_deref())
-            .or_else(|| {
-                defaults
-                    .routing
-                    .find_quota_pool(req.mode, &backend, model.as_deref())
-            }),
+        quota_pool: effective_routing.find_quota_pool(req.mode, &backend, model.as_deref()),
         priority: 0,
         included_in_quota: false,
         marginal_cost_usd: None,
@@ -303,7 +300,7 @@ where
         quota_days_remaining: None,
         original_order: 0,
     };
-    let candidates = auto_candidates(defaults, profile, req.mode, &primary);
+    let candidates = auto_candidates(&effective_routing, req.mode, &primary);
     let candidates_for_diagnostics = candidates.clone();
     let (selected, skipped) = pick_route_candidate(candidates, state_path, now, backend_available)?;
 
@@ -342,6 +339,7 @@ where
 fn route_explicit<F>(
     defaults: &Defaults,
     profile: &Profile,
+    effective_routing: &RoutingPolicy,
     req: RouteRequest<'_>,
     requested_backend: String,
     requested_model: Option<String>,
@@ -352,24 +350,22 @@ fn route_explicit<F>(
 where
     F: Fn(&str) -> bool + Copy,
 {
-    let allow_impl_fallback = profile.routing.allow_implementation_fallback
-        || defaults.routing.allow_implementation_fallback;
-    let allow_review_fallback =
-        profile.routing.allow_review_fallback || defaults.routing.allow_review_fallback;
+    let allow_impl_fallback = effective_routing.allow_implementation_fallback;
+    let allow_review_fallback = effective_routing.allow_review_fallback;
+    let review_fallback = if req.mode == "review" && allow_review_fallback {
+        review_fallback_backend(defaults, profile, backend_available)
+    } else {
+        None
+    };
 
     let primary = RouteCandidate {
         backend: requested_backend.clone(),
         model: requested_model.clone(),
-        quota_pool: profile
-            .routing
-            .find_quota_pool(req.mode, &requested_backend, requested_model.as_deref())
-            .or_else(|| {
-                defaults.routing.find_quota_pool(
-                    req.mode,
-                    &requested_backend,
-                    requested_model.as_deref(),
-                )
-            }),
+        quota_pool: effective_routing.find_quota_pool(
+            req.mode,
+            &requested_backend,
+            requested_model.as_deref(),
+        ),
         priority: 0,
         included_in_quota: false,
         marginal_cost_usd: None,
@@ -378,13 +374,12 @@ where
         original_order: 0,
     };
     let candidates = explicit_candidates(
-        defaults,
-        profile,
+        effective_routing,
         req.mode,
         &primary,
+        review_fallback,
         allow_review_fallback,
         allow_impl_fallback,
-        backend_available,
     );
     let candidates_for_diagnostics = candidates.clone();
     let (selected, skipped) = pick_route_candidate(candidates, state_path, now, backend_available)?;
@@ -596,25 +591,17 @@ fn earliest_reset(skipped: &[SkippedBackend]) -> Option<String> {
 }
 
 fn auto_candidates(
-    defaults: &Defaults,
-    profile: &Profile,
+    routing: &RoutingPolicy,
     mode: &str,
     primary: &RouteCandidate,
 ) -> Vec<RouteCandidate> {
     let mut candidates = vec![primary.clone()];
     if mode == "review" {
-        if let Some(weak_backend) = review_fallback_backend_name(defaults, profile) {
-            let weak_model = review_fallback_model(defaults, profile)
+        if let Some(weak_backend) = review_fallback_backend_name(routing) {
+            let weak_model = review_fallback_model(routing)
                 .map(str::to_string)
                 .or_else(|| primary.model.clone());
-            let quota_pool = profile
-                .routing
-                .find_quota_pool(mode, weak_backend, weak_model.as_deref())
-                .or_else(|| {
-                    defaults
-                        .routing
-                        .find_quota_pool(mode, weak_backend, weak_model.as_deref())
-                });
+            let quota_pool = routing.find_quota_pool(mode, weak_backend, weak_model.as_deref());
             candidates.push(RouteCandidate {
                 backend: weak_backend.to_string(),
                 model: weak_model,
@@ -628,42 +615,25 @@ fn auto_candidates(
             });
         }
     }
-    extend_remaining_candidates(
-        defaults,
-        profile,
-        &mut candidates,
-        mode,
-        primary.model.clone(),
-    );
+    extend_remaining_candidates(routing, &mut candidates, mode, primary.model.clone());
     dedupe_candidates(candidates)
 }
 
-fn explicit_candidates<F>(
-    defaults: &Defaults,
-    profile: &Profile,
+fn explicit_candidates(
+    routing: &RoutingPolicy,
     mode: &str,
     primary: &RouteCandidate,
+    review_fallback_backend: Option<String>,
     allow_review_fallback: bool,
     allow_impl_fallback: bool,
-    backend_available: F,
-) -> Vec<RouteCandidate>
-where
-    F: Fn(&str) -> bool + Copy,
-{
+) -> Vec<RouteCandidate> {
     let mut candidates = vec![primary.clone()];
     if mode == "review" && allow_review_fallback {
-        if let Some(weak_backend) = review_fallback_backend(defaults, profile, backend_available) {
-            let weak_model = review_fallback_model(defaults, profile)
+        if let Some(weak_backend) = review_fallback_backend {
+            let weak_model = review_fallback_model(routing)
                 .map(str::to_string)
                 .or_else(|| primary.model.clone());
-            let quota_pool = profile
-                .routing
-                .find_quota_pool(mode, &weak_backend, weak_model.as_deref())
-                .or_else(|| {
-                    defaults
-                        .routing
-                        .find_quota_pool(mode, &weak_backend, weak_model.as_deref())
-                });
+            let quota_pool = routing.find_quota_pool(mode, &weak_backend, weak_model.as_deref());
             candidates.push(RouteCandidate {
                 backend: weak_backend,
                 model: weak_model,
@@ -676,41 +646,21 @@ where
                 original_order: candidates.len(),
             });
         }
-        extend_remaining_candidates(
-            defaults,
-            profile,
-            &mut candidates,
-            mode,
-            primary.model.clone(),
-        );
+        extend_remaining_candidates(routing, &mut candidates, mode, primary.model.clone());
     } else if mode != "review" && allow_impl_fallback {
-        extend_remaining_candidates(
-            defaults,
-            profile,
-            &mut candidates,
-            mode,
-            primary.model.clone(),
-        );
+        extend_remaining_candidates(routing, &mut candidates, mode, primary.model.clone());
     }
     dedupe_candidates(candidates)
 }
 
 fn extend_remaining_candidates(
-    defaults: &Defaults,
-    profile: &Profile,
+    routing: &RoutingPolicy,
     candidates: &mut Vec<RouteCandidate>,
     mode: &str,
     model: Option<String>,
 ) {
     for backend in mode_backend_preference(mode) {
-        let quota_pool = profile
-            .routing
-            .find_quota_pool(mode, backend, model.as_deref())
-            .or_else(|| {
-                defaults
-                    .routing
-                    .find_quota_pool(mode, backend, model.as_deref())
-            });
+        let quota_pool = routing.find_quota_pool(mode, backend, model.as_deref());
         candidates.push(RouteCandidate {
             backend: backend.to_string(),
             model: model.clone(),
@@ -1080,15 +1030,8 @@ impl RouteCandidate {
     }
 }
 
-fn review_fallback_backend_name<'a>(
-    defaults: &'a Defaults,
-    profile: &'a Profile,
-) -> Option<&'a str> {
-    profile
-        .routing
-        .weak_review_backend
-        .as_deref()
-        .or(defaults.routing.weak_review_backend.as_deref())
+fn review_fallback_backend_name(routing: &RoutingPolicy) -> Option<&str> {
+    routing.weak_review_backend.as_deref()
 }
 
 fn review_fallback_backend<F>(
@@ -1099,17 +1042,13 @@ fn review_fallback_backend<F>(
 where
     F: Fn(&str) -> bool + Copy,
 {
-    review_fallback_backend_name(defaults, profile)
+    review_fallback_backend_name(&profile.effective_routing(defaults))
         .map(str::to_string)
         .or_else(|| any_available_backend("review", backend_available))
 }
 
-fn review_fallback_model<'a>(defaults: &'a Defaults, profile: &'a Profile) -> Option<&'a str> {
-    profile
-        .routing
-        .weak_review_model
-        .as_deref()
-        .or(defaults.routing.weak_review_model.as_deref())
+fn review_fallback_model(routing: &RoutingPolicy) -> Option<&str> {
+    routing.weak_review_model.as_deref()
 }
 
 fn builtin_backend<F>(mode: &str, backend_available: F) -> String
@@ -1393,6 +1332,73 @@ mod tests {
         .unwrap();
 
         assert_eq!(decision.effective_backend, "agy");
+        assert_eq!(decision.routing_reason, "profile routing policy");
+    }
+
+    #[test]
+    fn default_candidate_list_is_inherited_when_profile_only_overrides_other_fields() {
+        let tmp = TempDir::new().unwrap();
+        let mut defaults = defaults();
+        defaults.routing.pm_candidates = Some(vec![
+            candidate_config("codex", Some("gpt-5"), None),
+            candidate_config("claude", Some("sonnet"), None),
+        ]);
+        let mut profile = profile();
+        profile.routing.improve_backend = Some("agy".into());
+
+        let decision = decide_with(
+            &defaults,
+            &profile,
+            RouteRequest {
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+                last_failure_class: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-5"));
+        assert_eq!(decision.routing_reason, "global routing policy");
+    }
+
+    #[test]
+    fn profile_scalar_override_preserves_inherited_default_model() {
+        let tmp = TempDir::new().unwrap();
+        let mut defaults = defaults();
+        defaults.routing.improve_model = Some("gpt-5.4".into());
+        let mut profile = profile();
+        profile.routing.improve_backend = Some("agy".into());
+
+        let decision = decide_with(
+            &defaults,
+            &profile,
+            RouteRequest {
+                mode: "improve",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+                last_failure_class: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "agy");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
         assert_eq!(decision.routing_reason, "profile routing policy");
     }
 

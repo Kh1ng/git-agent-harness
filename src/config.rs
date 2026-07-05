@@ -246,6 +246,96 @@ pub struct RoutingPolicy {
 }
 
 impl RoutingPolicy {
+    pub fn merged_with_defaults(&self, defaults: &RoutingPolicy) -> RoutingPolicy {
+        RoutingPolicy {
+            default_backend: self
+                .default_backend
+                .clone()
+                .or_else(|| defaults.default_backend.clone()),
+            default_model: self
+                .default_model
+                .clone()
+                .or_else(|| defaults.default_model.clone()),
+            pm_backend: self
+                .pm_backend
+                .clone()
+                .or_else(|| defaults.pm_backend.clone()),
+            pm_model: self.pm_model.clone().or_else(|| defaults.pm_model.clone()),
+            improve_backend: self
+                .improve_backend
+                .clone()
+                .or_else(|| defaults.improve_backend.clone()),
+            improve_model: self
+                .improve_model
+                .clone()
+                .or_else(|| defaults.improve_model.clone()),
+            review_backend: self
+                .review_backend
+                .clone()
+                .or_else(|| defaults.review_backend.clone()),
+            review_model: self
+                .review_model
+                .clone()
+                .or_else(|| defaults.review_model.clone()),
+            strong_review_backend: self
+                .strong_review_backend
+                .clone()
+                .or_else(|| defaults.strong_review_backend.clone()),
+            strong_review_model: self
+                .strong_review_model
+                .clone()
+                .or_else(|| defaults.strong_review_model.clone()),
+            weak_review_backend: self
+                .weak_review_backend
+                .clone()
+                .or_else(|| defaults.weak_review_backend.clone()),
+            weak_review_model: self
+                .weak_review_model
+                .clone()
+                .or_else(|| defaults.weak_review_model.clone()),
+            pm_candidates: self
+                .pm_candidates
+                .clone()
+                .or_else(|| defaults.pm_candidates.clone()),
+            improve_candidates: self
+                .improve_candidates
+                .clone()
+                .or_else(|| defaults.improve_candidates.clone()),
+            review_candidates: self
+                .review_candidates
+                .clone()
+                .or_else(|| defaults.review_candidates.clone()),
+            review_required_capabilities: {
+                // Same merge-by-key semantics as merge_routing_policy (TICKET-106):
+                // repo's own entries win for a given key, defaults fill the rest.
+                let mut merged = defaults.review_required_capabilities.clone();
+                merged.extend(self.review_required_capabilities.clone());
+                merged
+            },
+            allow_review_fallback: self.allow_review_fallback || defaults.allow_review_fallback,
+            allow_implementation_fallback: self.allow_implementation_fallback
+                || defaults.allow_implementation_fallback,
+            max_runs_per_backend_per_week: self
+                .max_runs_per_backend_per_week
+                .or(defaults.max_runs_per_backend_per_week),
+            max_runs_per_backend_per_session: self
+                .max_runs_per_backend_per_session
+                .or(defaults.max_runs_per_backend_per_session),
+            max_total_strong_model_runs_per_week: self
+                .max_total_strong_model_runs_per_week
+                .or(defaults.max_total_strong_model_runs_per_week),
+            max_total_strong_model_runs_per_session: self
+                .max_total_strong_model_runs_per_session
+                .or(defaults.max_total_strong_model_runs_per_session),
+            max_known_estimated_cost_per_week: self
+                .max_known_estimated_cost_per_week
+                .or(defaults.max_known_estimated_cost_per_week),
+            max_known_actual_cost_per_week: self
+                .max_known_actual_cost_per_week
+                .or(defaults.max_known_actual_cost_per_week),
+        }
+    }
+
     pub fn find_quota_pool(
         &self,
         mode: &str,
@@ -270,6 +360,10 @@ impl RoutingPolicy {
 }
 
 impl Profile {
+    pub fn effective_routing(&self, defaults: &Defaults) -> RoutingPolicy {
+        self.routing.merged_with_defaults(&defaults.routing)
+    }
+
     pub fn configured_backend_path(&self, backend: &str) -> Option<&str> {
         match backend {
             "codex" => self.codex_path.as_deref(),
@@ -491,7 +585,8 @@ pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile>
 #[cfg(test)]
 mod tests {
     use super::{
-        load, load_canonical_routing, merge_routing_policy, CandidateConfig, Profile, RoutingPolicy,
+        load, load_canonical_routing, merge_routing_policy, CandidateConfig, GahConfig, Profile,
+        RoutingPolicy,
     };
     use std::sync::Mutex;
 
@@ -838,5 +933,134 @@ mod tests {
             canonical.routing.review_required_capabilities.get("claude"),
             Some(&vec!["ponytail".to_string()])
         );
+    }
+    #[test]
+    fn routing_policy_inherits_missing_fields_from_defaults() {
+        let defaults = RoutingPolicy {
+            default_backend: Some("codex".into()),
+            pm_backend: Some("claude".into()),
+            pm_candidates: Some(vec![super::CandidateConfig {
+                backend: "claude".into(),
+                model: Some("sonnet".into()),
+                quota_pool: Some("claude-main".into()),
+                priority: 2,
+                included_in_quota: true,
+                marginal_cost_usd: Some(0.0),
+                quota_usage_percent: Some(25.0),
+                quota_days_remaining: Some(5.0),
+            }]),
+            allow_review_fallback: true,
+            max_runs_per_backend_per_week: Some(3),
+            ..RoutingPolicy::default()
+        };
+        let profile = RoutingPolicy {
+            improve_backend: Some("agy".into()),
+            ..RoutingPolicy::default()
+        };
+
+        let merged = profile.merged_with_defaults(&defaults);
+
+        assert_eq!(merged.default_backend.as_deref(), Some("codex"));
+        assert_eq!(merged.pm_backend.as_deref(), Some("claude"));
+        assert_eq!(merged.improve_backend.as_deref(), Some("agy"));
+        assert_eq!(merged.pm_candidates.as_ref().map(Vec::len), Some(1));
+        assert!(merged.allow_review_fallback);
+        assert_eq!(merged.max_runs_per_backend_per_week, Some(3));
+    }
+
+    #[test]
+    fn routing_policy_profile_candidate_list_replaces_default_list() {
+        let defaults = RoutingPolicy {
+            pm_candidates: Some(vec![super::CandidateConfig {
+                backend: "claude".into(),
+                model: Some("sonnet".into()),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            }]),
+            ..RoutingPolicy::default()
+        };
+        let profile = RoutingPolicy {
+            pm_candidates: Some(vec![super::CandidateConfig {
+                backend: "codex".into(),
+                model: Some("gpt-5".into()),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+            }]),
+            ..RoutingPolicy::default()
+        };
+
+        let merged = profile.merged_with_defaults(&defaults);
+
+        let candidates = merged.pm_candidates.expect("merged candidate list");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].backend, "codex");
+        assert_eq!(candidates[0].model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn profile_effective_routing_preserves_legacy_standalone_behavior() {
+        let config: GahConfig = toml::from_str(
+            r#"
+[profiles.repo]
+display_name = "Repo"
+repo_id = "repo"
+provider = "github"
+repo = "owner/repo"
+local_path = "/tmp/repo"
+artifact_root = "/tmp/artifacts"
+default_target_branch = "main"
+
+[profiles.repo.routing]
+pm_backend = "claude"
+"#,
+        )
+        .unwrap();
+
+        let profile = config.profiles.get("repo").unwrap();
+        let effective = profile.effective_routing(&config.defaults);
+
+        assert_eq!(effective.pm_backend.as_deref(), Some("claude"));
+        assert_eq!(effective.default_backend, None);
+    }
+
+    #[test]
+    fn profile_effective_routing_inherits_defaults_field_by_field() {
+        let config: GahConfig = toml::from_str(
+            r#"
+[defaults.routing]
+default_backend = "codex"
+pm_candidates = [{ backend = "claude", model = "sonnet" }]
+allow_review_fallback = true
+
+[profiles.repo]
+display_name = "Repo"
+repo_id = "repo"
+provider = "github"
+repo = "owner/repo"
+local_path = "/tmp/repo"
+artifact_root = "/tmp/artifacts"
+default_target_branch = "main"
+
+[profiles.repo.routing]
+improve_backend = "agy"
+"#,
+        )
+        .unwrap();
+
+        let profile = config.profiles.get("repo").unwrap();
+        let effective = profile.effective_routing(&config.defaults);
+
+        assert_eq!(effective.default_backend.as_deref(), Some("codex"));
+        assert_eq!(effective.improve_backend.as_deref(), Some("agy"));
+        assert_eq!(effective.pm_candidates.as_ref().map(Vec::len), Some(1));
+        assert!(effective.allow_review_fallback);
     }
 }
