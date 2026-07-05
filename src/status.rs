@@ -19,6 +19,9 @@ pub struct StatusSnapshot {
     pub constraints: Vec<Blocker>,
     pub blockers: Vec<Blocker>,
     pub errors: Vec<StatusError>,
+    /// TICKET-078: dispatch candidates from `docs/tickets/`, feeding
+    /// `decide_next_action`'s DispatchTicket/Retry/Escalate rules.
+    pub available_tickets: Vec<crate::models::AvailableTicket>,
 }
 
 #[derive(Serialize)]
@@ -122,29 +125,31 @@ pub fn build_snapshot(
 
     // 1. Sync State
     let mut merge_requests = Vec::new();
+    let mut raw_mrs: Vec<sync::SyncMr> = Vec::new();
     let mut sync_obs = ObservationStatus { status: "ok" };
     match sync::fetch_mrs(profile) {
         Ok(mrs) => {
             merge_requests = mrs
-                .into_iter()
+                .iter()
                 .map(|mr| {
-                    let class = sync::classify(&mr);
+                    let class = sync::classify(mr);
                     let action = sync::RecommendedAction::from_class(class);
                     sync::SyncMrJson {
                         profile: None,
-                        branch: mr.branch,
-                        work_id: mr.work_id,
-                        id: mr.id,
-                        url: mr.url,
-                        state: mr.state,
+                        branch: mr.branch.clone(),
+                        work_id: mr.work_id.clone(),
+                        id: mr.id.clone(),
+                        url: mr.url.clone(),
+                        state: mr.state.clone(),
                         draft: mr.draft,
-                        merge_status: mr.merge_status,
+                        merge_status: mr.merge_status.clone(),
                         merged: mr.merged,
                         classification: class.to_string(),
                         recommended_action: action,
                     }
                 })
                 .collect();
+            raw_mrs = mrs;
         }
         Err(e) => {
             sync_obs.status = "error";
@@ -284,6 +289,10 @@ pub fn build_snapshot(
         }
     }
 
+    // 5. Available tickets (TICKET-078): reuses the already-fetched `raw_mrs`
+    // rather than calling sync::fetch_mrs a second time.
+    let available_tickets = crate::dispatch::scan_available_tickets(cfg, profile, &raw_mrs);
+
     let snapshot = StatusSnapshot {
         schema_version: 1,
         generated_at,
@@ -299,6 +308,7 @@ pub fn build_snapshot(
         constraints,
         blockers,
         errors,
+        available_tickets,
     };
 
     Ok(snapshot)

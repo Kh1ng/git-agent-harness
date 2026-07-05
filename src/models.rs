@@ -1,5 +1,25 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// TICKET-078: a ticket in `docs/tickets/` observed as a dispatch candidate.
+/// `has_active_mr` tickets are excluded from consideration entirely --
+/// their work_id is already covered by the MR-classification rules in
+/// `decide_next_action` (ReviewMr/FixMr take precedence). Everything else
+/// is either never-dispatched (`prior_attempt_count == 0`, a
+/// `DispatchTicket` candidate) or has failed history with no active MR
+/// (a `Retry`/`Escalate` candidate, gated by `last_failure_class` and the
+/// retry cap on `prior_attempt_count`).
+#[derive(Debug, Serialize, Clone)]
+pub struct AvailableTicket {
+    pub ticket_path: String,
+    pub work_id: Option<String>,
+    pub title: Option<String>,
+    pub recommended_backend: Option<String>,
+    pub recommended_model: Option<String>,
+    pub prior_attempt_count: usize,
+    pub last_failure_class: Option<String>,
+    pub has_active_mr: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct WorkMetadata {
     #[serde(default)]
