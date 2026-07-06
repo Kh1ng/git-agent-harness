@@ -165,11 +165,11 @@ export async function runStatus(profile: string, config?: string): Promise<Statu
     let stdout = '';
     let stderr = '';
     
-    child.stdout.on('data', (data) => {
+    child.stdout?.on('data', (data) => {
       stdout += data.toString();
     });
     
-    child.stderr.on('data', (data) => {
+    child.stderr?.on('data', (data) => {
       stderr += data.toString();
     });
     
@@ -290,7 +290,7 @@ export async function runDispatch(
     
     let stderr = '';
     
-    child.stdout.on('data', (data) => {
+    child.stdout?.on('data', (data) => {
       const text = data.toString();
       // Split by newlines and forward each line
       const lines = text.split('\n');
@@ -301,7 +301,7 @@ export async function runDispatch(
       }
     });
     
-    child.stderr.on('data', (data) => {
+    child.stderr?.on('data', (data) => {
       stderr += data.toString();
     });
     
@@ -339,11 +339,11 @@ export async function runEvents(profile: string, sinceIso: string, config?: stri
     let stdout = '';
     let stderr = '';
     
-    child.stdout.on('data', (data) => {
+    child.stdout?.on('data', (data) => {
       stdout += data.toString();
     });
     
-    child.stderr.on('data', (data) => {
+    child.stderr?.on('data', (data) => {
       stderr += data.toString();
     });
     

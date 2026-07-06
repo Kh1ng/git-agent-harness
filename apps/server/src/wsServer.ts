@@ -153,6 +153,7 @@ async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage,
   
   try {
     const session = await sessionManager.startSession({
+      profile: message.profile,
       providerKind: message.providerKind,
       instanceId: message.instanceId,
       repo: message.repo,

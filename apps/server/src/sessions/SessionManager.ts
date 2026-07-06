@@ -19,6 +19,9 @@ import type {
 } from '@git-agent-harness/contracts';
 
 type SessionOptions = {
+  // GAH profile id (config.toml's [profiles.<id>]) -- NOT a backend name.
+  // Required: there's no sane default to guess from providerKind/repo.
+  profile: string;
   providerKind: ProviderKind;
   instanceId: ProviderInstanceId;
   repo: string;
@@ -28,7 +31,6 @@ type SessionOptions = {
   backend?: string;
   model?: string;
   budget?: number;
-  profile?: string;
   dryRun?: boolean;
   retries?: number;
   allowDraftFail?: boolean;
@@ -94,12 +96,9 @@ class SessionManagerImpl {
       session
     });
     
-    // Determine profile - use providerKind as profile if not specified
-    const profile = options.profile || options.providerKind;
-    
     // Prepare dispatch options
     const dispatchOptions: DispatchOptions = {
-      profile,
+      profile: options.profile,
       mode: options.mode,
       backend: options.backend,
       target: options.target,

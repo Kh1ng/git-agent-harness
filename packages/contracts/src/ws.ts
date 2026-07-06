@@ -109,6 +109,10 @@ export type ClientMessage =
   | {
       type: "session.start";
       requestId: string;
+      // GAH profile id (config.toml's [profiles.<id>], e.g. "gah",
+      // "worldcup-props") -- NOT a backend name like "codex"/"claude".
+      // `gah dispatch --profile <profile>` needs this exact value.
+      profile: string;
       providerKind: ProviderKind;
       instanceId: ProviderInstanceId;
       repo: string;

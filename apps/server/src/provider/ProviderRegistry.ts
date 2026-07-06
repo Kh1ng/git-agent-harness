@@ -180,11 +180,13 @@ class ProviderRegistryImpl {
     // Mark AI providers based on environment variables
     for (const kind of ['codex', 'claude', 'cursor', 'opencode', 'grok', 'openhands', 'agy', 'vibe']) {
       const envVar = this.getAuthEnvVar(kind as ProviderKind);
-      this.providerStatuses.set(kind as ProviderKind, {
-        type: process.env[envVar] ? 'authenticated' : 'available',
-        version: this.providerVersions.get(kind as ProviderKind) || '1.0.0',
-        userId: process.env[envVar] ? `user_${kind}` : undefined
-      });
+      const version = this.providerVersions.get(kind as ProviderKind) || '1.0.0';
+      this.providerStatuses.set(
+        kind as ProviderKind,
+        process.env[envVar]
+          ? { type: 'authenticated', version, userId: `user_${kind}` }
+          : { type: 'available', version }
+      );
     }
   }
   
@@ -232,18 +234,18 @@ class ProviderRegistryImpl {
     const envVar = this.getAuthEnvVar(kind);
     
     switch (kind) {
-      case 'github':
-        return { 
-          type: process.env.GITHUB_TOKEN ? 'authenticated' : 'available',
-          version: this.providerVersions.get('github') || '1.0.0',
-          userId: process.env.GITHUB_TOKEN ? 'github-user' : undefined
-        };
-      case 'gitlab':
-        return { 
-          type: process.env.GITLAB_PAT ? 'authenticated' : 'available',
-          version: this.providerVersions.get('gitlab') || '1.0.0',
-          userId: process.env.GITLAB_PAT ? 'gitlab-user' : undefined
-        };
+      case 'github': {
+        const version = this.providerVersions.get('github') || '1.0.0';
+        return process.env.GITHUB_TOKEN
+          ? { type: 'authenticated', version, userId: 'github-user' }
+          : { type: 'available', version };
+      }
+      case 'gitlab': {
+        const version = this.providerVersions.get('gitlab') || '1.0.0';
+        return process.env.GITLAB_PAT
+          ? { type: 'authenticated', version, userId: 'gitlab-user' }
+          : { type: 'available', version };
+      }
       case 'codex':
       case 'claude':
       case 'cursor':
@@ -251,12 +253,12 @@ class ProviderRegistryImpl {
       case 'grok':
       case 'openhands':
       case 'agy':
-      case 'vibe':
-        return {
-          type: process.env[envVar] ? 'authenticated' : 'available',
-          version: this.providerVersions.get(kind) || '1.0.0',
-          userId: process.env[envVar] ? `user_${kind}` : undefined
-        };
+      case 'vibe': {
+        const version = this.providerVersions.get(kind) || '1.0.0';
+        return process.env[envVar]
+          ? { type: 'authenticated', version, userId: `user_${kind}` }
+          : { type: 'available', version };
+      }
       default:
         return { type: 'available', version: this.providerVersions.get(kind) || '1.0.0' };
     }

@@ -62,6 +62,7 @@ class GitLabDriverImpl implements ProviderDriverInstance<GitLabDriverEnv> {
   }
   
   async startSession(options: {
+    profile: string;
     repo: string;
     branch?: string;
     target?: string;

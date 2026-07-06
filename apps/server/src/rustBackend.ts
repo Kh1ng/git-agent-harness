@@ -86,6 +86,6 @@ export function getRustBackendProxy(): RustBackendProxy {
 export { RustBackendProxy };
 
 // Re-export the new CLI integration
-import * as gahCli from '../gahCli.js';
+import * as gahCli from './gahCli.js';
 export { gahCli };
 export const { runStatus, runDispatch, runEvents, getGahBinaryPath } = gahCli;

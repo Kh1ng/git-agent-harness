@@ -90,6 +90,7 @@ class ProviderServiceImpl {
   }
   
   async startSessionForProvider(providerKind: ProviderKind, options: {
+    profile: string;
     repo: string;
     branch?: string;
     target?: string;
