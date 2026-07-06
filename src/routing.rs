@@ -134,6 +134,27 @@ fn decide_with<F>(
 where
     F: Fn(&str) -> bool + Copy,
 {
+    let mut decision =
+        decide_with_inner(defaults, profile, req, state_path, now, backend_available)?;
+    if decision.effective_backend == "codex" && decision.effective_model.is_none() {
+        if let Some(model) = runner::extract_model_from_args(&profile.codex_args) {
+            decision.effective_model = Some(model);
+        }
+    }
+    Ok(decision)
+}
+
+fn decide_with_inner<F>(
+    defaults: &Defaults,
+    profile: &Profile,
+    req: RouteRequest<'_>,
+    state_path: &Path,
+    now: OffsetDateTime,
+    backend_available: F,
+) -> Result<RouteDecision>
+where
+    F: Fn(&str) -> bool + Copy,
+{
     let requested_backend = req.requested_backend.to_string();
     let requested_model = req.requested_model.map(str::to_string);
     let effective_routing = profile.effective_routing(defaults);
@@ -1369,6 +1390,66 @@ mod tests {
         assert_eq!(decision.effective_backend, "codex");
         assert_eq!(decision.effective_model.as_deref(), Some("gpt-5"));
         assert_eq!(decision.routing_reason, "global routing policy");
+    }
+
+    #[test]
+    fn codex_fallback_model_extracted_from_profile_codex_args() {
+        let tmp = TempDir::new().unwrap();
+        let defaults = defaults();
+        let mut profile = profile();
+        profile.codex_args = vec!["-m".to_string(), "gpt-5.4-mini".to_string()];
+
+        let decision = decide_with(
+            &defaults,
+            &profile,
+            RouteRequest {
+                mode: "improve",
+                requested_backend: "codex",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+                last_failure_class: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4-mini"));
+    }
+
+    #[test]
+    fn codex_stale_args_do_not_override_resolved_model() {
+        let tmp = TempDir::new().unwrap();
+        let defaults = defaults();
+        let mut profile = profile();
+        profile.codex_args = vec!["-m".to_string(), "gpt-5.4-mini".to_string()];
+
+        let decision = decide_with(
+            &defaults,
+            &profile,
+            RouteRequest {
+                mode: "improve",
+                requested_backend: "codex",
+                requested_model: Some("gpt-5.4"),
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+                last_failure_class: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
     }
 
     #[test]

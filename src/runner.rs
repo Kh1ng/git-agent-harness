@@ -266,6 +266,27 @@ fn filtered_codex_args(extra_args: &[String]) -> Vec<String> {
     filtered
 }
 
+pub fn extract_model_from_args(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if matches!(arg.as_str(), "-m" | "--model") {
+            if i + 1 < args.len() {
+                return Some(args[i + 1].clone());
+            }
+            break;
+        }
+        if let Some(val) = arg.strip_prefix("-m=") {
+            return Some(val.to_string());
+        }
+        if let Some(val) = arg.strip_prefix("--model=") {
+            return Some(val.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Run Claude CLI non-interactively via `claude -p`.
 /// extra_args come from profile.claude_args (e.g. `--allowedTools Edit,Write,Bash`).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1111,6 +1132,28 @@ mod tests {
         let err = run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs).unwrap_err();
 
         assert!(err.to_string().contains("launching codex; is it installed"));
+    }
+
+    #[test]
+    fn test_extract_model_from_args() {
+        assert_eq!(
+            extract_model_from_args(&[
+                "--some-flag".to_string(),
+                "-m".to_string(),
+                "gpt-5.4-mini".to_string()
+            ]),
+            Some("gpt-5.4-mini".to_string())
+        );
+        assert_eq!(
+            extract_model_from_args(&["--model=gpt-5.4".to_string(), "-c".to_string()]),
+            Some("gpt-5.4".to_string())
+        );
+        assert_eq!(
+            extract_model_from_args(&["-m=gpt-5.4-mini".to_string()]),
+            Some("gpt-5.4-mini".to_string())
+        );
+        assert_eq!(extract_model_from_args(&["--some-flag".to_string()]), None);
+        assert_eq!(extract_model_from_args(&["-m".to_string()]), None);
     }
 
     #[test]
