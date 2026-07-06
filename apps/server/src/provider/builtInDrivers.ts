@@ -1,55 +1,25 @@
 /**
  * Built-in drivers configuration
  * Lists all the provider drivers that are available in this build
+ * 
+ * NOTE: Drivers have been replaced with direct GAH CLI integration via gahCli.ts
+ * as per TICKET-113. This file is kept for backward compatibility but exports an
+ * empty list since all provider operations now go through the CLI.
  */
 
-import { GitHubDriver, type GitHubDriverEnv } from './Drivers/GitHubDriver.js';
-import { GitLabDriver, type GitLabDriverEnv } from './Drivers/GitLabDriver.js';
 import type { AnyProviderDriver, ProviderDriverEnv } from './ProviderDriver.js';
-
-// Import stub drivers for t3code providers we don't fully implement yet
-import { CodexDriver, type CodexDriverEnv } from './Drivers/CodexDriver.js';
-import { ClaudeDriver, type ClaudeDriverEnv } from './Drivers/ClaudeDriver.js';
-import { CursorDriver, type CursorDriverEnv } from './Drivers/CursorDriver.js';
-import { OpenCodeDriver, type OpenCodeDriverEnv } from './Drivers/OpenCodeDriver.js';
-import { GrokDriver, type GrokDriverEnv } from './Drivers/GrokDriver.js';
-import { OpenHandsDriver, type OpenHandsDriverEnv } from './Drivers/OpenHandsDriver.js';
-import { AGYDriver, type AGYDriverEnv } from './Drivers/AGYDriver.js';
-import { VibeDriver, type VibeDriverEnv } from './Drivers/VibeDriver.js';
 
 /**
  * Union of infrastructure services required to construct any built-in driver.
- * This is the union of all driver environment requirements.
+ * Currently empty as all drivers have been replaced with CLI integration.
  */
-export type BuiltInDriversEnv =
-  | GitHubDriverEnv
-  | GitLabDriverEnv
-  | CodexDriverEnv
-  | ClaudeDriverEnv
-  | CursorDriverEnv
-  | OpenCodeDriverEnv
-  | GrokDriverEnv
-  | OpenHandsDriverEnv
-  | AGYDriverEnv
-  | VibeDriverEnv;
+export type BuiltInDriversEnv = ProviderDriverEnv;
 
 /**
  * Ordered list of built-in drivers.
- * Order matters for tie-breaking in UI presentation.
- * The registry itself is keyed by driverKind, so iteration order has no functional effect.
+ * Empty as per TICKET-113 - all provider operations now use the GAH CLI directly.
  */
-export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [
-  GitHubDriver,
-  GitLabDriver,
-  CodexDriver,
-  ClaudeDriver,
-  CursorDriver,
-  OpenCodeDriver,
-  GrokDriver,
-  OpenHandsDriver,
-  AGYDriver,
-  VibeDriver,
-];
+export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [];
 
 /**
  * Get a driver by its kind

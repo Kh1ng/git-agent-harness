@@ -15,9 +15,8 @@
     "electron": "^29.0.0",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.6.2",
-    "@git-agent-harness/client-runtime": "workspace:*",
-    "@git-agent-harness/contracts": "workspace:*",
-    "@git-agent-harness/shared": "workspace:*"
+    "@git-agent-harness/contracts": "^0.1.0",
+    "@git-agent-harness/shared": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

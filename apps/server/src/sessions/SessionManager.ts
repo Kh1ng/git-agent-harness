@@ -1,12 +1,13 @@
 /**
  * Session Manager - Manages agent sessions
  * Inspired by t3code's orchestration but adapted for GAH
+ * Updated per TICKET-113 to use GAH CLI directly instead of driver stubs
  */
 
 import { generateSessionId, GAHError } from '@git-agent-harness/shared';
-import { getRustBackendProxy } from '../rustBackend.js';
 import { getProviderRegistry } from '../provider/ProviderRegistry.js';
 import { getServerPushBus } from '../serverPushBus.js';
+import { spawnDispatch, runStatus, isBackendAvailable, type StatusSnapshot } from '../gahCli.js';
 import type {
   Session, 
   SessionId, 
@@ -14,6 +15,8 @@ import type {
   ProviderInstanceId,
   SessionStatus
 } from '@git-agent-harness/contracts';
+import { once } from 'node:events';
+import { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 type SessionOptions = {
   providerKind: ProviderKind;
@@ -31,6 +34,7 @@ class SessionManagerImpl {
   private sessions: Map<SessionId, Session> = new Map();
   private pendingSessions: Map<string, Promise<Session>> = new Map();
   private outputBuffers: Map<SessionId, { stdout: string[]; stderr: string[] }> = new Map();
+  private dispatchProcesses: Map<SessionId, ChildProcessWithoutNullStreams> = new Map();
   
   constructor() {
     // Set up periodic session cleanup
@@ -68,54 +72,104 @@ class SessionManagerImpl {
     this.sessions.set(sessionId, session);
     this.outputBuffers.set(sessionId, { stdout: [], stderr: [] });
     
+    // Notify about session start immediately
+    getServerPushBus().publish({
+      type: 'session.started',
+      session
+    });
+    
+    // Start the actual gah dispatch command in the background
+    // A session IS one gah dispatch invocation per TICKET-113
+    this.startDispatchProcess(sessionId, options);
+    
+    return session;
+  }
+  
+  /**
+   * Start the actual gah dispatch process and stream its output
+   */
+  private async startDispatchProcess(sessionId: SessionId, options: SessionOptions): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      console.warn(`Session ${sessionId} not found when starting dispatch`);
+      return;
+    }
+    
     try {
-      // Try to start the session via Rust backend if available
-      const rustBackend = getRustBackendProxy();
+      // Extract profile from providerKind - for now use the providerKind as profile
+      // TODO: This should be configurable or mapped from provider to profile
+      const profile = options.providerKind;
+      const backend = options.backend || 'auto';
+      const target = options.target || options.repo;
       
-      if (rustBackend.isBackendReady()) {
-        // For now, simulate starting a session
-        // In a real implementation, this would call the Rust backend
-        console.log(`Starting session ${sessionId} with ${options.providerKind}`);
-        
-        // Simulate session starting
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        session.status = 'running';
-        this.sessions.set(sessionId, session);
-        
-        // Notify about session start
-        getServerPushBus().publish({
-          type: 'session.started',
-          session
-        });
-        
-        return session;
-      } else {
-        // TypeScript-only mode
-        console.log(`Starting session ${sessionId} in TypeScript mode with ${options.providerKind}`);
-        
-        // Simulate session starting
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        session.status = 'running';
-        this.sessions.set(sessionId, session);
-        
-        // Notify about session start
-        getServerPushBus().publish({
-          type: 'session.started',
-          session
-        });
-        
-        return session;
+      if (!target) {
+        throw new GAHError('No target specified for dispatch', 'NO_TARGET');
       }
       
-    } catch (error) {
-      session.status = 'error';
-      session.error = error instanceof Error ? error.message : String(error);
+      console.log(`[TICKET-113] Starting gah dispatch for session ${sessionId}: profile=${profile}, mode=${options.mode}, backend=${backend}, target=${target}`);
+      
+      // Update session status to running
+      session.status = 'running';
+      this.sessions.set(sessionId, session);
+      
+      // Spawn gah dispatch process and track it for later cancellation
+      const process = spawnDispatch(
+        profile,
+        options.mode,
+        backend,
+        target,
+        (line) => {
+          // Forward each line as session.stdout message
+          this.addSessionOutput(sessionId, line, false);
+        },
+        undefined,
+        []
+      );
+      
+      // Store the process for later cancellation
+      this.dispatchProcesses.set(sessionId, process);
+      
+      // Wait for process to complete
+      const [exitCode] = await once(process, 'exit');
+      
+      // Clean up process tracking
+      this.dispatchProcesses.delete(sessionId);
+      
+      // Update session based on exit code
+      if (exitCode === 0) {
+        session.status = 'stopped';
+      } else {
+        session.status = 'error';
+        session.error = `Dispatch failed with exit code ${exitCode}`;
+      }
       session.endedAt = new Date().toISOString();
       this.sessions.set(sessionId, session);
       
-      throw error;
+      // Notify about session stop
+      getServerPushBus().publish({
+        type: 'session.stopped',
+        session
+      });
+      
+      console.log(`[TICKET-113] Session ${sessionId} completed with exit code ${exitCode}`);
+      
+    } catch (error) {
+      const session = this.sessions.get(sessionId);
+      this.dispatchProcesses.delete(sessionId);
+      
+      if (session) {
+        session.status = 'error';
+        session.error = error instanceof Error ? error.message : String(error);
+        session.endedAt = new Date().toISOString();
+        this.sessions.set(sessionId, session);
+        
+        getServerPushBus().publish({
+          type: 'session.stopped',
+          session
+        });
+        
+        console.error(`[TICKET-113] Session ${sessionId} failed:`, error);
+      }
     }
   }
   
@@ -131,41 +185,63 @@ class SessionManagerImpl {
     }
     
     try {
-      // Try to stop via Rust backend if available
-      const rustBackend = getRustBackendProxy();
-      
-      if (rustBackend.isBackendReady()) {
-        // Simulate stopping
-        await rustBackend.sendCommand(`session stop ${sessionId}`);
+      // [TICKET-113] Stop the actual gah dispatch process
+      const process = this.dispatchProcesses.get(sessionId);
+      if (process) {
+        console.log(`[TICKET-113] Killing dispatch process for session ${sessionId}`);
+        process.kill('SIGTERM');
+        
+        // Wait a bit for graceful shutdown
+        try {
+          await new Promise((resolve) => {
+            const timeout = setTimeout(resolve, 2000); // 2 second timeout
+            process.on('exit', () => {
+              clearTimeout(timeout);
+              resolve(void 0);
+            });
+          });
+        } catch {
+          // Process already exited or timeout
+        }
+        
+        // Force kill if still running
+        if (!process.killed) {
+          process.kill('SIGKILL');
+        }
+        
+        this.dispatchProcesses.delete(sessionId);
       }
       
       // Update session status
       session.status = 'stopping';
       this.sessions.set(sessionId, session);
       
-      // Simulate graceful stop
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      session.status = 'stopped';
-      session.endedAt = new Date().toISOString();
-      this.sessions.set(sessionId, session);
-      
-      // Clean up output buffers
-      this.outputBuffers.delete(sessionId);
-      
-      // Notify about session stop
-      getServerPushBus().publish({
-        type: 'session.stopped',
-        session
-      });
+      // If process was already dead, mark as stopped
+      if (!process || process.killed) {
+        session.status = 'stopped';
+        session.endedAt = new Date().toISOString();
+        this.sessions.set(sessionId, session);
+        
+        // Clean up output buffers
+        this.outputBuffers.delete(sessionId);
+        
+        // Notify about session stop
+        getServerPushBus().publish({
+          type: 'session.stopped',
+          session
+        });
+      }
       
       return session;
       
     } catch (error) {
-      session.status = 'error';
-      session.error = error instanceof Error ? error.message : String(error);
-      session.endedAt = new Date().toISOString();
-      this.sessions.set(sessionId, session);
+      const currentSession = this.sessions.get(sessionId);
+      if (currentSession) {
+        currentSession.status = 'error';
+        currentSession.error = error instanceof Error ? error.message : String(error);
+        currentSession.endedAt = new Date().toISOString();
+        this.sessions.set(sessionId, currentSession);
+      }
       
       throw error;
     }
@@ -185,32 +261,25 @@ class SessionManagerImpl {
       );
     }
     
-    const rustBackend = getRustBackendProxy();
+    // [TICKET-113] With CLI-based dispatch, interactive commands are not supported
+    // Each gah dispatch runs to completion as a separate process.
+    // This is a known limitation of the current implementation.
+    // For interactive sessions, the Rust WebSocket server (src/server.rs) would be needed,
+    // but TICKET-113 explicitly excludes that from scope.
+    console.log(`[TICKET-113] Session ${sessionId} command (not supported with CLI dispatch): ${command}`);
     
-    if (rustBackend.isBackendReady()) {
-      // Send command via Rust backend
-      await rustBackend.sendCommand(`session ${sessionId} command ${command}`);
-    } else {
-      // TypeScript mode - just log the command
-      console.log(`Session ${sessionId} command: ${command}`);
+    // Add to output buffer
+    const buffers = this.outputBuffers.get(sessionId);
+    if (buffers) {
+      buffers.stdout.push(`[Note: Interactive commands are not supported with CLI-based dispatch]`);
+      buffers.stdout.push(`> ${command}`);
       
-      // Add to output buffer
-      const buffers = this.outputBuffers.get(sessionId);
-      if (buffers) {
-        buffers.stdout.push(`> ${command}`);
-        
-        // Simulate command output
-        setTimeout(() => {
-          buffers.stdout.push(`Command executed: ${command}`);
-          
-          getServerPushBus().publish({
-            type: 'session.stdout',
-            sessionId,
-            data: `Command executed: ${command}\n`,
-            timestamp: Date.now()
-          });
-        }, 100);
-      }
+      getServerPushBus().publish({
+        type: 'session.stdout',
+        sessionId,
+        data: `[Note: Interactive commands are not supported with CLI-based dispatch]\n> ${command}\n`,
+        timestamp: Date.now()
+      });
     }
   }
   
@@ -288,6 +357,7 @@ class SessionManagerImpl {
     for (const sessionId of finishedSessions) {
       this.sessions.delete(sessionId);
       this.outputBuffers.delete(sessionId);
+      this.dispatchProcesses.delete(sessionId);
     }
     
     if (finishedSessions.length > 0) {

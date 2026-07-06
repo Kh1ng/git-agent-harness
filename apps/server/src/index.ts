@@ -3,7 +3,8 @@ export * from './server.js';
 export * from './wsServer.js';
 export * from './serverPushBus.js';
 export * from './serverReadiness.js';
-export * from './rustBackend.js';
+// [TICKET-113] rustBackend replaced with gahCli
+export * from './gahCli.js';
 
 // Re-export provider modules
 export * from './provider/index.js';
@@ -13,3 +14,7 @@ export * from './sessions/SessionManager.js';
 
 // Re-export contracts
 export * from '@git-agent-harness/contracts';
+
+// Keep rustBackend export for backward compatibility (deprecated)
+export * from './rustBackend.js';
+

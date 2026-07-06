@@ -17,7 +17,8 @@ class ServerReadinessImpl {
   
   constructor() {
     // Initialize default checks
-    this.addCheck('rustBackend', 'Rust backend connection');
+    // [TICKET-113] rustBackend check replaced with gahCli
+    this.addCheck('gahCli', 'GAH CLI integration');
     this.addCheck('providerRegistry', 'Provider registry initialization');
     this.addCheck('webSocket', 'WebSocket server initialization');
   }

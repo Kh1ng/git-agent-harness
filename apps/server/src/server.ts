@@ -39,7 +39,8 @@ export function createServer() {
         webSocket: true,
         providerManagement: true,
         sessionManagement: true,
-        rustBackendProxy: true
+        rustBackendProxy: false, // [TICKET-113] Disabled - using CLI directly
+        gahCliProxy: true
       }
     });
   });

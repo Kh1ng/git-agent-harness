@@ -1,11 +1,16 @@
 /**
  * Provider Registry - Tracks available providers and their status
  * Inspired by t3code's provider registry
+ * Updated per TICKET-113 to use GAH CLI for real availability data
  */
 
 import { generateProviderInstanceId, getSupportedProviders } from '@git-agent-harness/shared';
-import { getRustBackendProxy } from '../rustBackend.js';
 import type { ProviderKind, ProviderStatus, ProviderInstanceId } from '@git-agent-harness/contracts';
+import { runStatus, getAvailabilityFromStatus, isBackendAvailable, type StatusSnapshot, type ScopeStatusJson } from '../gahCli.js';
+
+// Cache for status snapshots
+let statusCache: Map<string, { snapshot: StatusSnapshot; timestamp: number }> = new Map();
+const STATUS_CACHE_TTL = 30000; // 30 seconds
 
 class ProviderRegistryImpl {
   private providerStatuses: Map<ProviderKind, ProviderStatus> = new Map();
@@ -32,20 +37,7 @@ class ProviderRegistryImpl {
       'vibe'
     ]);
     
-    // Mark providers that are likely installed and authenticated
-    // This would be detected properly in a real implementation
-    this.providerStatuses.set('github', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('gitlab', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('codex', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('claude', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('cursor', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('opencode', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('grok', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('openhands', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('agy', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('vibe', { type: 'available', version: '1.0.0' });
-    
-    // Set versions for providers we know about
+    // Initialize with default versions
     this.providerVersions.set('github', 'cli-2.0.0');
     this.providerVersions.set('gitlab', 'cli-15.0.0');
     this.providerVersions.set('codex', '1.0.0');
@@ -56,6 +48,11 @@ class ProviderRegistryImpl {
     this.providerVersions.set('openhands', '1.0.0');
     this.providerVersions.set('agy', '1.0.0');
     this.providerVersions.set('vibe', '1.0.0');
+    
+    // Start with unavailable status for all, will be updated from CLI
+    for (const kind of this.availableProviders) {
+      this.providerStatuses.set(kind, { type: 'unavailable' });
+    }
   }
   
   isProviderAvailable(kind: ProviderKind): boolean {
@@ -83,68 +80,85 @@ class ProviderRegistryImpl {
   
   async refreshProviderStatus(kind: ProviderKind): Promise<ProviderStatus> {
     try {
-      // Check if we can detect the provider via Rust backend or environment
-      const rustBackend = getRustBackendProxy();
+      // [TICKET-113] Use GAH CLI to get real availability status
+      // For now, we'll use the provider kind as the profile name
+      // In a real implementation, this would be configurable
+      const profile = kind;
       
-      if (rustBackend.isBackendReady()) {
-        // Try to get provider status from Rust backend
-        try {
-          await rustBackend.sendCommand(`provider check ${kind}`);
-          this.providerStatuses.set(kind, { type: 'available', version: this.providerVersions.get(kind) || '1.0.0' });
-          return this.providerStatuses.get(kind)!;
-        } catch {
-          // Fall through to default detection
-        }
-      }
-      
-      // Default detection logic
-      switch (kind) {
-        case 'github':
-          // Check if gh CLI is available
-          try {
-            await import('node:fs').then(fs => fs.promises.access('/usr/local/bin/gh', fs.constants.X_OK));
-            this.providerStatuses.set(kind, { type: 'available', version: '2.0.0' });
-          } catch {
-            this.providerStatuses.set(kind, { type: 'available', version: '2.0.0' }); // Assume available
-          }
-          break;
+      try {
+        const snapshot = await this.getStatusSnapshot(profile);
+        const availabilityMap = getAvailabilityFromStatus(snapshot);
+        
+        // Check if this backend is available
+        const isAvailable = isBackendAvailable(snapshot, kind);
+        
+        if (isAvailable) {
+          // Find the specific scope for this backend
+          const scope = snapshot.availability.find(s => s.backend === kind);
+          const version = scope?.model ? `${kind}:${scope.model}` : this.providerVersions.get(kind) || '1.0.0';
+          const userId = scope?.model ? `user_${kind}` : undefined;
           
-        case 'gitlab':
-          // GitLab is available if we have curl and a token
           this.providerStatuses.set(kind, { 
-            type: process.env.GITLAB_PAT ? 'authenticated' : 'available', 
-            version: '15.0.0',
-            userId: process.env.GITLAB_PAT ? 'gitlab-user' : undefined
+            type: 'available', 
+            version,
+            userId
           });
-          break;
-          
-        case 'codex':
-        case 'claude':
-        case 'cursor':
-        case 'opencode':
-        case 'grok':
-        case 'openhands':
-        case 'agy':
-        case 'vibe':
-          // For AI providers, check if they're authenticated
-          const envVar = this.getAuthEnvVar(kind);
-          this.providerStatuses.set(kind, {
-            type: process.env[envVar] ? 'authenticated' : 'available',
-            version: this.providerVersions.get(kind) || '1.0.0',
+        } else {
+          // Check if the backend is temporarily unavailable
+          const scope = snapshot.availability.find(s => s.backend === kind);
+          if (scope) {
+            // Backend is known but not currently eligible
+            this.providerStatuses.set(kind, { 
+              type: 'unavailable',
+              version: this.providerVersions.get(kind) || '1.0.0'
+            });
+          } else {
+            // Backend not found in availability list
+            this.providerStatuses.set(kind, { type: 'unavailable' });
+          }
+        }
+        
+        return this.providerStatuses.get(kind)!;
+        
+      } catch (cliError) {
+        console.warn(`[TICKET-113] Failed to get CLI status for ${kind}, falling back to env detection:`, cliError);
+        
+        // Fall back to environment variable detection for AI providers
+        if (['codex', 'claude', 'cursor', 'opencode', 'grok', 'openhands', 'agy', 'vibe'].includes(kind)) {
+          const envVar = this.getAuthEnvVar(kind as any);
+          this.providerStatuses.set(kind as any, {
+            type: process.env[envVar] ? 'authenticated' : 'unavailable',
+            version: this.providerVersions.get(kind as any) || '1.0.0',
             userId: process.env[envVar] ? `user_${kind}` : undefined
           });
-          break;
-          
-        default:
-          this.providerStatuses.set(kind, { type: 'available', version: '1.0.0' });
+        } else {
+          // For github/gitlab, assume unavailable if CLI check failed
+          this.providerStatuses.set(kind as any, { type: 'unavailable' });
+        }
+        
+        return this.providerStatuses.get(kind as any)!;
       }
       
-      return this.providerStatuses.get(kind)!;
-      
     } catch (error) {
-      console.error(`Failed to refresh provider status for ${kind}:`, error);
+      console.error(`[TICKET-113] Failed to refresh provider status for ${kind}:`, error);
       return { type: 'error', error: String(error) };
     }
+  }
+  
+  /**
+   * Get or fetch status snapshot from GAH CLI with caching
+   */
+  private async getStatusSnapshot(profile: string): Promise<StatusSnapshot> {
+    // Check cache
+    const cached = statusCache.get(profile);
+    if (cached && Date.now() - cached.timestamp < STATUS_CACHE_TTL) {
+      return cached.snapshot;
+    }
+    
+    // Fetch fresh snapshot
+    const snapshot = await runStatus(profile);
+    statusCache.set(profile, { snapshot, timestamp: Date.now() });
+    return snapshot;
   }
   
   private getAuthEnvVar(kind: ProviderKind): string {

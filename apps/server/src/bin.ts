@@ -3,21 +3,19 @@
 import { createServer } from './server.js';
 import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
-import { startRustBackendProxy } from './rustBackend.js';
+// [TICKET-113] Rust backend proxy no longer needed - using CLI directly
 
 const PORT = parseInt(process.env.PORT || '3773');
 
 async function main() {
   console.log('Starting Git Agent Harness server...');
+  console.log('[TICKET-113] Using GAH CLI directly instead of Rust backend proxy');
   
   // Create HTTP server
   const server = createServer();
   
   // Create WebSocket server
   const wss = new WebSocketServer({ server });
-  
-  // Start Rust backend proxy
-  await startRustBackendProxy();
   
   // Set up WebSocket handler
   createWebSocketHandler(wss);

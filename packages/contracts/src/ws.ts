@@ -49,7 +49,7 @@ export const SessionSchema = S.Struct({
   budget: S.optional(S.Number),
 });
 
-export type Session = S.Schema.To<typeof SessionSchema>;
+export type Session = typeof SessionSchema.Type;
 
 // WebSocket message types
 export type ServerMessage = 

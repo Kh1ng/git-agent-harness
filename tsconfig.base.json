@@ -10,13 +10,8 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "noEmit": true,
     "jsx": "react-jsx",
-    "baseUrl": ".",
-    "paths": {
-      "@git-agent-harness/contracts": ["packages/contracts/src/index.ts"],
-      "@git-agent-harness/shared": ["packages/shared/src/index.ts"]
-    }
+    "baseUrl": "."
   },
   "references": [
     { "path": "./apps/server" },
