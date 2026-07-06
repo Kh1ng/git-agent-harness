@@ -29,6 +29,8 @@ pub struct WorkMetadata {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
+    pub issue_number: Option<String>,
+    #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
     pub problem: Option<String>,

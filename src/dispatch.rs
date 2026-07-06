@@ -2650,8 +2650,9 @@ mod tests {
     use super::validate;
     use super::{
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
-        attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title,
-        build_pm_plan_task, build_task, classify_validation_failure_progress, collect_pm_preflight,
+        attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body,
+        build_metadata_rich_mr_body, build_mr_title, build_pm_plan_task, build_standard_mr_body,
+        build_task, classify_validation_failure_progress, collect_pm_preflight,
         collect_ticket_summaries, derive_reviewer_tier, extract_issue_number,
         first_markdown_heading, format_issue_for_focus, is_issue_number_reference,
         mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
@@ -4245,6 +4246,7 @@ The parser should retain structured sections.\n\n\
         let meta = parse_ticket_metadata_from_issue(&issue);
         assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-42"));
         assert_eq!(meta.work_id.as_deref(), Some("TICKET-42"));
+        assert_eq!(meta.issue_number.as_deref(), Some("42"));
         assert!(meta.is_authoritative);
         assert!(meta
             .acceptance_criteria
@@ -4797,6 +4799,148 @@ The parser should retain structured sections.\n\n\
 
         let res = super::check_duplicate_work(&cfg, &prof_with_repo, &args);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn metadata_rich_mr_body_includes_closes_directive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = LedgerEntry::new(
+            "real",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-72".to_string()),
+            work_id: Some("TICKET-72".to_string()),
+            title: Some("Test Issue".to_string()),
+            issue_number: Some("72".to_string()),
+            ..TicketMetadata::default()
+        };
+
+        let ctx = MrRenderContext {
+            backend: "test",
+            model: "test-model",
+            branch: "gah/test-123",
+            target_branch: "main",
+            validation_commands: &[],
+            ledger: &ledger,
+            backend_summary: "Test summary",
+        };
+
+        let body = build_metadata_rich_mr_body("fix", &ticket, &ctx);
+
+        // Verify that the Closes directive is included
+        assert!(
+            body.contains("Closes #72"),
+            "MR body should contain 'Closes #72'"
+        );
+
+        // Verify it's not at the very beginning or end (should be after Work Item section)
+        assert!(
+            !body.starts_with("Closes #72"),
+            "Closes directive should not be at the start"
+        );
+    }
+
+    #[test]
+    fn standard_mr_body_includes_closes_directive() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-72".to_string()),
+            work_id: Some("TICKET-72".to_string()),
+            title: Some("Test Issue".to_string()),
+            issue_number: Some("72".to_string()),
+            ..TicketMetadata::default()
+        };
+
+        let body = build_standard_mr_body(
+            "fix",
+            Some(&ticket),
+            "test",
+            "test-model",
+            "branch",
+            "main",
+            true,
+            "Test summary",
+        );
+
+        // Verify that the Closes directive is included
+        assert!(
+            body.contains("Closes #72"),
+            "Standard MR body should contain 'Closes #72'"
+        );
+    }
+
+    #[test]
+    fn mr_body_no_closes_directive_without_issue_number() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-72".to_string()),
+            work_id: Some("TICKET-72".to_string()),
+            title: Some("Test Issue".to_string()),
+            issue_number: None, // No issue number
+            ..TicketMetadata::default()
+        };
+
+        let body = build_standard_mr_body(
+            "fix",
+            Some(&ticket),
+            "test",
+            "test-model",
+            "branch",
+            "main",
+            true,
+            "Test summary",
+        );
+
+        // Verify that the Closes directive is NOT included when there's no issue number
+        assert!(
+            !body.contains("Closes #"),
+            "Standard MR body should not contain Closes directive without issue number"
+        );
+    }
+
+    #[test]
+    fn metadata_rich_mr_body_no_closes_directive_without_issue_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = LedgerEntry::new(
+            "real",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+
+        let ticket = TicketMetadata {
+            ticket_id: None,
+            work_id: None,
+            title: Some("Test Issue".to_string()),
+            issue_number: None, // No issue number
+            ..TicketMetadata::default()
+        };
+
+        let ctx = MrRenderContext {
+            backend: "test",
+            model: "test-model",
+            branch: "gah/test-123",
+            target_branch: "main",
+            validation_commands: &[],
+            ledger: &ledger,
+            backend_summary: "Test summary",
+        };
+
+        let body = build_metadata_rich_mr_body("fix", &ticket, &ctx);
+
+        // Verify that the Closes directive is NOT included when there's no issue number
+        assert!(
+            !body.contains("Closes #"),
+            "MR body should not contain Closes directive without issue number"
+        );
     }
 }
 
@@ -5764,6 +5908,14 @@ fn build_standard_mr_body(
         backend,
         model,
     )];
+
+    // Add Closes directive for GitHub/GitLab auto-close if this came from an issue
+    if let Some(ticket) = ticket {
+        if let Some(ref issue_number) = ticket.issue_number {
+            sections.push(format!("Closes #{}", issue_number));
+        }
+    }
+
     if !backend_summary.is_empty() {
         sections.push(format!("## What changed and why\n\n{}", backend_summary));
     }
@@ -5806,6 +5958,12 @@ fn build_metadata_rich_mr_body(
     if let Some(section) = work_item {
         sections.push(format!("## Work Item\n\n{section}"));
     }
+
+    // Add Closes directive for GitHub/GitLab auto-close if this came from an issue
+    if let Some(ref issue_number) = ticket.issue_number {
+        sections.push(format!("Closes #{}", issue_number));
+    }
+
     if let Some(problem) = ticket.problem.as_deref() {
         sections.push(format!("## Problem\n\n{}", problem.trim()));
     }
@@ -6405,7 +6563,10 @@ fn fetch_issue_details(profile: &Profile, issue_number: &str) -> Result<IssueDet
 
 /// This extracts metadata from the issue title and body instead of from a markdown file.
 fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMetadata {
-    let mut meta = TicketMetadata::default();
+    let mut meta = TicketMetadata {
+        issue_number: Some(issue.number.clone()),
+        ..TicketMetadata::default()
+    };
 
     // Extract ticket ID from title if it follows the TICKET-N pattern
     let title = issue.title.trim();
