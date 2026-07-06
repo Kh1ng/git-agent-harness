@@ -12,6 +12,13 @@ type WebSocketContextType = {
   providerStatuses: Record<ProviderInstanceId, ProviderStatus>;
   serverProviderCatalog: ServerProviderCatalog | null;
   serverVersion: string | null;
+  profile: string | null;
+  mergeRequests: any[];
+  availability: any[];
+  blockers: any[];
+  constraints: any[];
+  errors: any[];
+  recentLedger: any;
   sendMessage: (message: ClientMessage) => void;
   reconnect: () => void;
   disconnect: () => void;
@@ -33,6 +40,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [providerStatuses, setProviderStatuses] = useState<Record<ProviderInstanceId, ProviderStatus>>({});
   const [serverProviderCatalog, setServerProviderCatalog] = useState<ServerProviderCatalog | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const [profile, setProfile] = useState<string | null>(null);
+  const [mergeRequests, setMergeRequests] = useState<any[]>([]);
+  const [availability, setAvailability] = useState<any[]>([]);
+  const [blockers, setBlockers] = useState<any[]>([]);
+  const [constraints, setConstraints] = useState<any[]>([]);
+  const [errors, setErrors] = useState<any[]>([]);
+  const [recentLedger, setRecentLedger] = useState<any>(null);
 
   const connect = useCallback(() => {
     setIsConnecting(true);
@@ -90,6 +104,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               if (message.serverProviderCatalog?.providers) {
                 setProviders(message.serverProviderCatalog.providers);
               }
+              
+              // Extract real GAH data for TICKET-114
+              if (message.profile) setProfile(message.profile);
+              if (message.mergeRequests) setMergeRequests(message.mergeRequests);
+              if (message.availability) setAvailability(message.availability);
+              if (message.blockers) setBlockers(message.blockers);
+              if (message.constraints) setConstraints(message.constraints);
+              if (message.errors) setErrors(message.errors);
+              if (message.recentLedger) setRecentLedger(message.recentLedger);
               break;
               
             case 'session.started':
@@ -226,6 +249,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     providerStatuses,
     serverProviderCatalog,
     serverVersion,
+    profile,
+    mergeRequests,
+    availability,
+    blockers,
+    constraints,
+    errors,
+    recentLedger,
     sendMessage,
     reconnect,
     disconnect

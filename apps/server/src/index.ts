@@ -4,6 +4,7 @@ export * from './wsServer.js';
 export * from './serverPushBus.js';
 export * from './serverReadiness.js';
 export * from './rustBackend.js';
+export * from './gahCli.js';
 
 // Re-export provider modules
 export * from './provider/index.js';

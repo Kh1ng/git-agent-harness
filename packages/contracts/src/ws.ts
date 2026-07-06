@@ -56,6 +56,14 @@ export type ServerMessage =
       serverProviderCatalog: ServerProviderCatalog;
       sessions: Session[];
       providers: Record<ProviderInstanceId, ProviderStatus>;
+      // TICKET-114: Real GAH data from CLI
+      profile?: string;
+      mergeRequests?: any[];
+      availability?: any[];
+      blockers?: any[];
+      constraints?: any[];
+      errors?: any[];
+      recentLedger?: any;
     }
   | {
       type: "server.ping";
@@ -122,6 +130,7 @@ export type ClientMessage =
       backend?: string;
       model?: string;
       budget?: number;
+      profile?: string; // TICKET-113: profile for real GAH CLI integration
     }
   | {
       type: "session.stop";

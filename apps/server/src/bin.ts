@@ -5,6 +5,8 @@ import { createServer as createHttpServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
 import { startRustBackendProxy } from './rustBackend.js';
+import { isGahCliAvailable } from './gahCli.js';
+import { getProviderRegistry } from './provider/ProviderRegistry.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 
@@ -20,8 +22,29 @@ async function main() {
   // Create WebSocket server
   const wss = new WebSocketServer({ server });
   
-  // Start Rust backend proxy
-  await startRustBackendProxy();
+  // Check GAH CLI availability and start legacy Rust backend proxy
+  const cliAvailable = await isGahCliAvailable();
+  if (cliAvailable) {
+    console.log('GAH CLI is available - using real CLI integration');
+  } else {
+    console.log('GAH CLI not found - running in limited mode');
+    // Start legacy Rust backend proxy as fallback
+    await startRustBackendProxy();
+  }
+  
+  // Initialize provider registry with default profile
+  const providerRegistry = getProviderRegistry();
+  providerRegistry.setDefaultProfile('gah');
+  
+  // Try to load real status data if CLI is available
+  if (cliAvailable) {
+    try {
+      await providerRegistry.loadFromGahCli('gah');
+      console.log('Loaded real provider statuses from GAH CLI');
+    } catch (error) {
+      console.warn('Failed to load provider statuses from GAH CLI:', error);
+    }
+  }
   
   // Set up WebSocket handler
   createWebSocketHandler(wss);

@@ -152,6 +152,9 @@ async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage,
   const sessionManager = getSessionManager();
   
   try {
+    // If profile is provided, use it for real GAH CLI integration
+    const profile = message.profile || 'gah'; // Default to 'gah' profile
+    
     const session = await sessionManager.startSession({
       profile: message.profile,
       providerKind: message.providerKind,
@@ -162,7 +165,8 @@ async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage,
       mode: message.mode,
       backend: message.backend,
       model: message.model,
-      budget: message.budget
+      budget: message.budget,
+      profile // Pass profile for real CLI integration
     });
     
     // Notify all clients about new session
@@ -270,12 +274,38 @@ function sendWelcomeMessage(ws: WebSocket) {
     const sessions = sessionManager.getAllSessions();
     const providers = providerRegistry.getAllProviderStatuses();
     
-    const welcomeMessage: ServerMessage = {
+    // Try to include real data from GAH CLI if available
+    const defaultProfile = 'gah';
+    const mergeRequests = providerRegistry.getMergeRequests(defaultProfile);
+    const availability = providerRegistry.getAvailability(defaultProfile);
+    const blockers = providerRegistry.getBlockers(defaultProfile);
+    const constraints = providerRegistry.getConstraints(defaultProfile);
+    const errors = providerRegistry.getErrors(defaultProfile);
+    const recentLedger = providerRegistry.getRecentLedger(defaultProfile);
+    
+    // Create extended welcome message with real data
+    const welcomeMessage: ServerMessage & {
+      profile?: string;
+      mergeRequests?: unknown;
+      availability?: unknown;
+      blockers?: unknown;
+      constraints?: unknown;
+      errors?: unknown;
+      recentLedger?: unknown;
+    } = {
       type: 'server.welcome',
       serverVersion: SERVER_VERSION,
       serverProviderCatalog,
       sessions,
-      providers
+      providers,
+      // Include real GAH data for TICKET-114
+      profile: defaultProfile,
+      mergeRequests,
+      availability,
+      blockers,
+      constraints,
+      errors,
+      recentLedger
     };
     
     ws.send(JSON.stringify(welcomeMessage));
