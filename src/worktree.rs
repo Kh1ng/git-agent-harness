@@ -66,14 +66,23 @@ pub fn create(
 }
 
 pub fn has_changes(worktree: &Path, target_branch: &str) -> Result<bool> {
-    let status = git_raw(&["status", "--porcelain"], worktree)?;
-    if !status.stdout.is_empty() {
+    if has_uncommitted_changes(worktree)? {
         return Ok(true);
     }
     // ponytail: compare against origin/<target> — @{upstream} fails silently on new untracked branches
     let origin_ref = format!("origin/{}", target_branch);
     let diff = git_raw(&["diff", "HEAD", &origin_ref], worktree)?;
     Ok(!diff.stdout.is_empty())
+}
+
+/// Some backends (e.g. vibe) commit their own work during the run instead of
+/// leaving a dirty working tree for GAH to stage. `has_changes` can be true
+/// purely from those already-committed commits sitting ahead of the target
+/// branch -- callers must check this separately before staging, or
+/// `ensure_staged` fails loudly on a clean tree ("nothing to commit").
+pub fn has_uncommitted_changes(worktree: &Path) -> Result<bool> {
+    let status = git_raw(&["status", "--porcelain"], worktree)?;
+    Ok(!status.stdout.is_empty())
 }
 
 #[allow(dead_code)]
@@ -339,6 +348,49 @@ mod tests {
         let err = ensure_staged(tmp.path()).unwrap_err();
 
         assert!(format!("{:#}", err).contains("nothing to commit"));
+    }
+
+    // ── has_uncommitted_changes() ────────────────────────────────────────
+
+    #[test]
+    fn has_uncommitted_changes_false_when_backend_already_committed_its_own_work() {
+        let tmp = TempDir::new().unwrap();
+        // Nest under a `repo` subdir, not tmp.path() directly -- add_bare_origin
+        // creates the bare origin as a *sibling* of its argument, and every
+        // other test in this file uses a repo subdir for exactly this reason
+        // (tmp.path() directly would make the bare origin land in the shared
+        // system temp root, colliding with other parallel tests' origins).
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        // Simulate a backend (e.g. vibe) that commits its own changes during
+        // the run, leaving HEAD ahead of origin/main but a clean working tree.
+        fs::write(repo.join("g.txt"), "backend wrote this\n").unwrap();
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-q", "-m", "backend self-commit"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        assert!(!has_uncommitted_changes(&repo).unwrap());
+        // has_changes must still report true via the origin diff -- this
+        // commit is real work that needs pushing, just not re-staged.
+        assert!(has_changes(&repo, "main").unwrap());
+    }
+
+    #[test]
+    fn has_uncommitted_changes_true_for_a_dirty_working_tree() {
+        let tmp = TempDir::new().unwrap();
+        init_bare_repo_with_main(tmp.path());
+        fs::write(tmp.path().join("f.txt"), "modified\n").unwrap();
+
+        assert!(has_uncommitted_changes(tmp.path()).unwrap());
     }
 
     // ── push_branch() ────────────────────────────────────────────────────

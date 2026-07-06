@@ -18,6 +18,7 @@ mod quota;
 mod quota_parser;
 mod routing;
 mod runner;
+mod server;
 mod status;
 mod sync;
 #[cfg(test)]
@@ -231,6 +232,13 @@ enum Commands {
     Profile {
         #[command(subcommand)]
         command: ProfileCommands,
+    },
+    /// Start the WebSocket server for desktop/web interface
+    Server {
+        #[arg(long, default_value_t = 3773)]
+        port: u16,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
     },
 }
 
@@ -498,6 +506,13 @@ fn main() -> Result<()> {
                 }
             }
         },
+
+        Commands::Server { port, host } => {
+            println!("Starting WebSocket server on {}:{}", host, port);
+            server::run_blocking(&host, port)?;
+            // This will run forever, so we don't need to return
+            std::thread::park();
+        }
     }
     Ok(())
 }

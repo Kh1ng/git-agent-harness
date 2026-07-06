@@ -1314,11 +1314,17 @@ fn improve(
     println!("Changes detected. Committing and pushing...");
     let push_url = profile.push_url()?;
     let push_pat = profile.pat();
-    ledger.commit_attempted = true;
-    worktree::stage_all(&wt)?;
-    worktree::ensure_staged(&wt)?;
-    worktree::commit_msg(&wt, &commit_msg)?;
-    ledger.commit_created = true;
+    if worktree::has_uncommitted_changes(&wt)? {
+        ledger.commit_attempted = true;
+        worktree::stage_all(&wt)?;
+        worktree::ensure_staged(&wt)?;
+        worktree::commit_msg(&wt, &commit_msg)?;
+        ledger.commit_created = true;
+    } else {
+        // Backend committed its own work already (e.g. vibe) -- nothing left
+        // to stage, just push what's already on HEAD.
+        ledger.commit_created = true;
+    }
     // Must run after the commit above -- diff_stats/changed_files compare
     // origin/<target> against HEAD, so computing them beforehand (while the
     // real changes are still uncommitted working-tree modifications) always
@@ -1528,11 +1534,17 @@ fn experiment(
     let commit_msg = format!("gah: experiment for {}", profile.repo_id);
     let push_url = profile.push_url()?;
     let push_pat = profile.pat();
-    ledger.commit_attempted = true;
-    worktree::stage_all(&wt)?;
-    worktree::ensure_staged(&wt)?;
-    worktree::commit_msg(&wt, &commit_msg)?;
-    ledger.commit_created = true;
+    if worktree::has_uncommitted_changes(&wt)? {
+        ledger.commit_attempted = true;
+        worktree::stage_all(&wt)?;
+        worktree::ensure_staged(&wt)?;
+        worktree::commit_msg(&wt, &commit_msg)?;
+        ledger.commit_created = true;
+    } else {
+        // Backend committed its own work already (e.g. vibe) -- nothing left
+        // to stage, just push what's already on HEAD.
+        ledger.commit_created = true;
+    }
     // Must run after the commit above -- see the fix mode call site for why.
     apply_diff_stats(ledger, &wt, &profile.default_target_branch);
     let changed_files =
