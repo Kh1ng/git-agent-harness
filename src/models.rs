@@ -219,6 +219,7 @@ pub struct PmPlan {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReviewVerdict {
     pub verdict: String,
+    #[serde(deserialize_with = "deserialize_flexible_string")]
     pub confidence: String,
     pub human_required: bool,
     #[serde(default, deserialize_with = "deserialize_string_list")]
@@ -266,6 +267,25 @@ pub struct ReviewVerdict {
     pub actual_cost_usd: Option<f64>,
 }
 
+/// Reviewers sometimes answer `confidence` with a raw number (e.g. `0.78`)
+/// instead of the requested "high"/"medium"/"low" string -- same class of
+/// prompt-adherence drift TICKET-102 already hardened for the findings
+/// fields. Accept a number and preserve it as its string form rather than
+/// crashing the whole verdict parse over one field.
+fn deserialize_flexible_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        other => Err(serde::de::Error::custom(format!(
+            "expected string or number, got {other}"
+        ))),
+    }
+}
+
 fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -302,6 +322,18 @@ mod tests {
         assert_eq!(verdict.blocking_findings, vec!["a"]);
         assert_eq!(verdict.non_blocking_findings, vec!["b"]);
         assert_eq!(verdict.risk_notes, vec!["c"]);
+    }
+
+    #[test]
+    fn review_verdict_accepts_numeric_confidence() {
+        // Regression: Claude returned a raw float confidence score (0.78)
+        // instead of "high"/"medium"/"low", crashing the whole verdict
+        // parse with "invalid type: floating point, expected a string".
+        let verdict: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_STRONG","confidence":0.78,"human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict.confidence, "0.78");
     }
 
     #[test]
