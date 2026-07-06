@@ -217,6 +217,9 @@ enum Commands {
         /// (used by `gah loop --once`'s Escalate action).
         #[arg(long, default_value_t = false)]
         escalate: bool,
+        /// TICKET-118: reuse an existing branch for fix operations
+        #[arg(long)]
+        existing_branch: Option<String>,
     },
     /// Interactive terminal UI: observe state, confirm and run the one
     /// already-decided next action. Does not let you pick an arbitrary
@@ -432,6 +435,7 @@ fn main() -> Result<()> {
             prod,
             allow_unknown_red_baseline,
             escalate,
+            existing_branch,
         } => {
             let cfg = config::load(config_path.as_deref())?;
             dispatch::run(
@@ -454,6 +458,7 @@ fn main() -> Result<()> {
                     prod,
                     allow_unknown_red_baseline,
                     escalate,
+                    existing_branch,
                 },
             )?;
         }

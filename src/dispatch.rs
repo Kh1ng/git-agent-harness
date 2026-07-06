@@ -49,6 +49,9 @@ pub struct DispatchArgs {
     /// applies mid-retry-loop -- reused here so `NextAction::Escalate`
     /// doesn't need a second escalation mechanism.
     pub escalate: bool,
+    /// TICKET-118: for FixMr action, reuse an existing branch instead of creating a new one.
+    #[allow(dead_code)]
+    pub existing_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -837,20 +840,35 @@ fn improve(
     }
 
     let ts = timestamp();
-    let branch = format!("gah/{}-{}", profile.repo_id, &ts);
+    let branch = if let Some(ref existing_branch) = args.existing_branch {
+        existing_branch.clone()
+    } else {
+        format!("gah/{}-{}", profile.repo_id, &ts)
+    };
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
     let repo = Path::new(&profile.local_path);
 
-    println!(
-        "Creating worktree from {}...",
-        profile.default_target_branch
-    );
-    let wt = worktree::create(
-        repo,
-        &profile.default_target_branch,
-        &branch,
-        &worktree_base,
-    )?;
+    // TICKET-118: Handle existing branch for FixMr action
+    let (branch, wt) = if let Some(ref existing_branch) = args.existing_branch {
+        println!(
+            "Creating worktree from existing branch '{}'...",
+            existing_branch
+        );
+        let wt = worktree::create_existing(repo, existing_branch, &worktree_base)?;
+        (existing_branch.clone(), wt)
+    } else {
+        println!(
+            "Creating worktree from {}...",
+            profile.default_target_branch
+        );
+        let wt = worktree::create(
+            repo,
+            &profile.default_target_branch,
+            &branch,
+            &worktree_base,
+        )?;
+        (branch, wt)
+    };
     ledger.branch = Some(branch.clone());
     apply_authoritative_work_identity(ledger, ticket_meta.as_ref(), &branch);
     println!("Worktree: {}", wt.display());
@@ -4689,6 +4707,7 @@ The parser should retain structured sections.\n\n\
             prod: false,
             allow_unknown_red_baseline: false,
             escalate: false,
+            existing_branch: None,
         };
 
         // No ledger exists yet.

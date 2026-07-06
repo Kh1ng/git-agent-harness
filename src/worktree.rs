@@ -65,6 +65,32 @@ pub fn create(
     Ok(worktree_path)
 }
 
+pub fn create_existing(
+    repo: &Path,
+    existing_branch: &str,
+    worktree_base: &Path,
+) -> Result<PathBuf> {
+    git(&["fetch", "-q", "origin", "--prune"], repo)?;
+
+    let origin_ref = format!("origin/{}", existing_branch);
+    let worktree_path = worktree_base.join(existing_branch.replace('/', "-"));
+    fs::create_dir_all(worktree_path.parent().unwrap_or(worktree_base))?;
+
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            worktree_path.to_str().unwrap(),
+            &origin_ref,
+        ],
+        repo,
+    )
+    .with_context(|| format!("creating worktree from existing branch {}", origin_ref))?;
+
+    Ok(worktree_path)
+}
+
 pub fn has_changes(worktree: &Path, target_branch: &str) -> Result<bool> {
     if has_uncommitted_changes(worktree)? {
         return Ok(true);
@@ -406,5 +432,40 @@ mod tests {
         let err = push_branch(&repo, "main", bogus_remote.to_str().unwrap(), "").unwrap_err();
 
         assert!(format!("{:#}", err).contains("push failed"));
+    }
+
+    // ── create_existing() ─────────────────────────────────────────────────────
+
+    #[test]
+    fn create_existing_succeeds_for_real_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        // First create a branch on the origin
+        StdCommand::new("git")
+            .args(["checkout", "-b", "test-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["push", "origin", "test-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        // Go back to main
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        // Now try to create worktree from existing branch
+        let wt = create_existing(&repo, "test-branch", &worktree_base).unwrap();
+
+        assert!(wt.join("f.txt").exists());
     }
 }

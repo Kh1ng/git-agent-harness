@@ -22,6 +22,8 @@ pub struct StatusSnapshot {
     /// TICKET-078: dispatch candidates from `docs/tickets/`, feeding
     /// `decide_next_action`'s DispatchTicket/Retry/Escalate rules.
     pub available_tickets: Vec<crate::models::AvailableTicket>,
+    /// TICKET-118: fix attempt counts per branch for retry cap.
+    pub fix_attempt_counts: std::collections::HashMap<String, usize>,
 }
 
 #[derive(Serialize)]
@@ -122,6 +124,9 @@ pub fn build_snapshot(
     };
 
     let mut errors = Vec::new();
+
+    // TICKET-118: Count fix attempts per branch from ledger entries
+    let fix_attempt_counts = sync::count_fix_attempts_per_branch(cfg);
 
     // 1. Sync State
     let mut merge_requests = Vec::new();
@@ -312,6 +317,7 @@ pub fn build_snapshot(
         blockers,
         errors,
         available_tickets,
+        fix_attempt_counts,
     };
 
     Ok(snapshot)
