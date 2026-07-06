@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { createServer } from './server.js';
+import { createServer as createExpressServer } from './server.js';
+import { createServer as createHttpServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
 import { startRustBackendProxy } from './rustBackend.js';
@@ -10,8 +11,11 @@ const PORT = parseInt(process.env.PORT || '3773');
 async function main() {
   console.log('Starting Git Agent Harness server...');
   
-  // Create HTTP server
-  const server = createServer();
+  // Create Express app
+  const app = createExpressServer();
+  
+  // Create HTTP server from Express app
+  const server = createHttpServer(app);
   
   // Create WebSocket server
   const wss = new WebSocketServer({ server });

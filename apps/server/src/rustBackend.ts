@@ -3,7 +3,7 @@
  * This bridges the TypeScript server with the existing Rust backend
  */
 
-import { spawn, ChildProcessWithoutNullStreams, SpawnOptions } from 'node:child_process';
+import { spawn, ChildProcess, ChildProcessWithoutNullStreams, SpawnOptions } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { markReadinessCheck } from './serverReadiness.js';
@@ -11,7 +11,7 @@ import { markReadinessCheck } from './serverReadiness.js';
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 class RustBackendProxy {
-  private rustProcess: ChildProcessWithoutNullStreams | null = null;
+  private rustProcess: ChildProcess | null = null;
   private isReady = false;
   private rustBinPath: string;
   
@@ -63,7 +63,7 @@ class RustBackendProxy {
       this.rustProcess = spawn(finalPath, ['server'], options);
       
       // Handle stdout
-      this.rustProcess.stdout.on('data', (data) => {
+      this.rustProcess.stdout?.on('data', (data) => {
         const message = data.toString().trim();
         if (message) {
           console.log(`[Rust] ${message}`);
@@ -77,7 +77,7 @@ class RustBackendProxy {
       });
       
       // Handle stderr
-      this.rustProcess.stderr.on('data', (data) => {
+      this.rustProcess.stderr?.on('data', (data) => {
         const message = data.toString().trim();
         if (message) {
           console.error(`[Rust Error] ${message}`);
@@ -151,14 +151,18 @@ class RustBackendProxy {
     
     return new Promise((resolve, reject) => {
       const fullCommand = [command, ...args].join(' ');
-      this.rustProcess?.stdin.write(fullCommand + '\n', 'utf8', (error) => {
-        if (error) {
-          reject(error);
-        } else {
-          // For now, just resolve - we'll need proper JSON-RPC for real bidirectional communication
-          resolve('Command sent');
-        }
-      });
+      if (this.rustProcess?.stdin) {
+        this.rustProcess.stdin.write(fullCommand + '\n', 'utf8', (error) => {
+          if (error) {
+            reject(error);
+          } else {
+            // For now, just resolve - we'll need proper JSON-RPC for real bidirectional communication
+            resolve('Command sent');
+          }
+        });
+      } else {
+        reject(new Error('Rust backend stdin not available'));
+      }
     });
   }
   
@@ -166,7 +170,7 @@ class RustBackendProxy {
     return this.isReady;
   }
   
-  getProcess(): ChildProcessWithoutNullStreams | null {
+  getProcess(): ChildProcess | null {
     return this.rustProcess;
   }
 }

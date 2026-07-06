@@ -3,7 +3,8 @@
  * Inspired by t3code's ServerReadiness implementation
  */
 
-import type { ServerReadiness } from '@t3tools/contracts';
+// Note: Using local contracts package instead of @t3tools/contracts
+// import type { ServerReadiness } from '@t3tools/contracts';
 
 type ReadinessCheck = {
   name: string;
@@ -12,7 +13,7 @@ type ReadinessCheck = {
 };
 
 class ServerReadinessImpl {
-  private checks: Map<string, ReadinessCheck> = new Map();
+  private _checks: Map<string, ReadinessCheck> = new Map();
   private barriers: Map<string, () => Promise<boolean>> = new Map();
   
   constructor() {
@@ -23,7 +24,7 @@ class ServerReadinessImpl {
   }
   
   private addCheck(name: string, description: string) {
-    this.checks.set(name, {
+    this._checks.set(name, {
       name,
       ready: false,
       error: undefined
@@ -35,7 +36,7 @@ class ServerReadinessImpl {
   }
   
   async markReady(name: string): Promise<void> {
-    const check = this.checks.get(name);
+    const check = this._checks.get(name);
     if (check) {
       check.ready = true;
       check.error = undefined;
@@ -46,7 +47,7 @@ class ServerReadinessImpl {
   }
   
   markError(name: string, error: string): void {
-    const check = this.checks.get(name);
+    const check = this._checks.get(name);
     if (check) {
       check.ready = false;
       check.error = error;
@@ -68,22 +69,22 @@ class ServerReadinessImpl {
     
     // Check for errors
     for (const result of results) {
-      if (result.reason) {
+      if (result.status === 'rejected' && result.reason) {
         console.error('Barrier error:', result.reason);
       }
     }
   }
   
   get isReady(): boolean {
-    return Array.from(this.checks.values()).every(check => check.ready);
+    return Array.from(this._checks.values()).every(check => check.ready);
   }
   
   get checks(): Record<string, ReadinessCheck> {
-    return Object.fromEntries(this.checks);
+    return Object.fromEntries(this._checks);
   }
   
   getCheck(name: string): ReadinessCheck | undefined {
-    return this.checks.get(name);
+    return this._checks.get(name);
   }
 }
 

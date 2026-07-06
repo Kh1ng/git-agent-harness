@@ -8,7 +8,7 @@ import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
 import type { Session } from '@git-agent-harness/contracts';
 
-type Page = 'dashboard' | 'sessions' | 'providers';
+export type Page = 'dashboard' | 'sessions' | 'providers';
 
 export function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');

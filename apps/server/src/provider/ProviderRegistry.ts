@@ -111,11 +111,18 @@ class ProviderRegistryImpl {
           
         case 'gitlab':
           // GitLab is available if we have curl and a token
-          this.providerStatuses.set(kind, { 
-            type: process.env.GITLAB_PAT ? 'authenticated' : 'available', 
-            version: '15.0.0',
-            userId: process.env.GITLAB_PAT ? 'gitlab-user' : undefined
-          });
+          if (process.env.GITLAB_PAT) {
+            this.providerStatuses.set(kind, { 
+              type: 'authenticated' as const, 
+              version: '15.0.0',
+              userId: 'gitlab-user'
+            });
+          } else {
+            this.providerStatuses.set(kind, { 
+              type: 'available' as const, 
+              version: '15.0.0'
+            });
+          }
           break;
           
         case 'codex':
@@ -128,11 +135,18 @@ class ProviderRegistryImpl {
         case 'vibe':
           // For AI providers, check if they're authenticated
           const envVar = this.getAuthEnvVar(kind);
-          this.providerStatuses.set(kind, {
-            type: process.env[envVar] ? 'authenticated' : 'available',
-            version: this.providerVersions.get(kind) || '1.0.0',
-            userId: process.env[envVar] ? `user_${kind}` : undefined
-          });
+          if (process.env[envVar]) {
+            this.providerStatuses.set(kind, {
+              type: 'authenticated' as const,
+              version: this.providerVersions.get(kind) || '1.0.0',
+              userId: `user_${kind}`
+            });
+          } else {
+            this.providerStatuses.set(kind, {
+              type: 'available' as const,
+              version: this.providerVersions.get(kind) || '1.0.0'
+            });
+          }
           break;
           
         default:

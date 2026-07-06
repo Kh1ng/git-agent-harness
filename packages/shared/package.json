@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "effect": "^3.0.0",
-    "@git-agent-harness/contracts": "workspace:*"
+    "@git-agent-harness/contracts": "*"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

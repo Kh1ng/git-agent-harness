@@ -107,7 +107,7 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
             </div>
             
             <div>
-              <h4 className="text-sm font-medium text-gray-500 mb-2">Backend</4>
+              <h4 className="text-sm font-medium text-gray-500 mb-2">Backend</h4>
               <p className="text-gray-900">{session.backend || 'N/A'}</p>
             </div>
             

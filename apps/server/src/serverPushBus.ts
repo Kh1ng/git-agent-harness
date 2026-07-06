@@ -62,6 +62,23 @@ class ServerPushBusImpl {
 
 const serverPushBus = new ServerPushBusImpl();
 
+// Singleton getter
+export function getServerPushBus(): {
+  subscribe: (subscriber: Subscriber) => () => void;
+  publish: (message: ServerMessage) => void;
+  get subscriberCount(): number;
+  get queueLength(): number;
+  clear: () => void;
+} {
+  return {
+    subscribe: serverPushBus.subscribe.bind(serverPushBus),
+    publish: serverPushBus.publish.bind(serverPushBus),
+    get subscriberCount() { return serverPushBus.subscriberCount; },
+    get queueLength() { return serverPushBus.queueLength; },
+    clear: serverPushBus.clear.bind(serverPushBus)
+  };
+}
+
 export function createServerPushBus(): {
   subscribe: (subscriber: Subscriber) => () => void;
   publish: (message: ServerMessage) => void;

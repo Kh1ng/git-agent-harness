@@ -6,7 +6,7 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
-import { getProviderRegistry } from './provider/ProviderService.js';
+import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { getSessionManager } from './sessions/SessionManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
@@ -105,7 +105,8 @@ export function createWebSocketHandler(wss: WebSocketServer) {
 }
 
 async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
-  const requestId = message.requestId || generateRequestId();
+  // Extract requestId if available in the message type
+  const requestId = 'requestId' in message && message.requestId ? message.requestId : generateRequestId();
   
   switch (message.type) {
     case 'client.hello':
@@ -220,7 +221,9 @@ async function handleSendCommand(ws: WebSocket, message: Extract<ClientMessage, 
 async function handleProviderRefresh(ws: WebSocket, message: Extract<ClientMessage, { type: 'provider.refresh' }>, requestId: string) {
   try {
     const providerRegistry = getProviderRegistry();
-    const status = await providerRegistry.refreshProvider(message.instanceId);
+    // Extract provider kind from instanceId (format: "provider_instance_0")
+    const providerKind = message.instanceId.split('_')[0] as ProviderKind;
+    const status = await providerRegistry.refreshProviderStatus(providerKind);
     
     pushBus.publish({
       type: 'provider.statusChanged',

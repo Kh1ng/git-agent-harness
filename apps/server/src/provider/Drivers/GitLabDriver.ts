@@ -3,7 +3,7 @@
  * Implements the ProviderDriver interface for GitLab
  */
 
-import type { ProviderDriver, ProviderDriverEnv } from '../ProviderDriver.js';
+import type { ProviderDriver, ProviderDriverEnv, ProviderDriverInstance } from '../ProviderDriver.js';
 import type { ProviderKind, ServerProvider, Session } from '@git-agent-harness/contracts';
 import { getProviderRegistry } from '../ProviderRegistry.js';
 import { getSessionManager } from '../../sessions/SessionManager.js';
@@ -24,7 +24,7 @@ export type GitLabCapabilities = {
   ciVariables: boolean;
 };
 
-class GitLabDriverImpl implements ProviderDriver<GitLabDriverEnv> {
+class GitLabDriverImpl implements ProviderDriverInstance<GitLabDriverEnv> {
   readonly kind: ProviderKind = 'gitlab';
   readonly version = '1.0.0';
   readonly capabilities: GitLabCapabilities = {

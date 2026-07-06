@@ -3,7 +3,7 @@
  * Implements the ProviderDriver interface for GitHub
  */
 
-import type { ProviderDriver, ProviderDriverEnv } from '../ProviderDriver.js';
+import type { ProviderDriver, ProviderDriverEnv, ProviderDriverInstance } from '../ProviderDriver.js';
 import type { ProviderKind, ProviderStatus, Session, ServerProvider } from '@git-agent-harness/contracts';
 import { getProviderRegistry } from '../ProviderRegistry.js';
 import { getSessionManager } from '../../sessions/SessionManager.js';
@@ -23,7 +23,7 @@ export type GitHubCapabilities = {
   checks: boolean;
 };
 
-class GitHubDriverImpl implements ProviderDriver<GitHubDriverEnv> {
+class GitHubDriverImpl implements ProviderDriverInstance<GitHubDriverEnv> {
   readonly kind: ProviderKind = 'github';
   readonly version = '1.0.0';
   readonly capabilities: GitHubCapabilities = {

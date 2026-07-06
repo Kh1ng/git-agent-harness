@@ -11,6 +11,7 @@
 /dist-electron
 /dist-electron-packages
 /**.output
+**/dist/
 
 # TypeScript cache
 /.cache
@@ -36,7 +37,7 @@ Thumbs.db
 .env.*.local
 
 # Package manager locks (except pnpm-lock.yaml)
-/package-lock.json
+# Note: package-lock.json is tracked for npm workspaces
 /yarn.lock
 
 # Electron builder
