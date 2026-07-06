@@ -1267,10 +1267,6 @@ fn improve(
         worktree::cleanup(&wt, repo);
         return Ok(());
     }
-    apply_diff_stats(ledger, &wt, &profile.default_target_branch);
-    let changed_files =
-        worktree::changed_files(&wt, &profile.default_target_branch).unwrap_or_default();
-
     let commit_msg = if validation_failed {
         format!(
             "gah: {} changes for {} [validation-failing draft]",
@@ -1288,6 +1284,13 @@ fn improve(
     worktree::ensure_staged(&wt)?;
     worktree::commit_msg(&wt, &commit_msg)?;
     ledger.commit_created = true;
+    // Must run after the commit above -- diff_stats/changed_files compare
+    // origin/<target> against HEAD, so computing them beforehand (while the
+    // real changes are still uncommitted working-tree modifications) always
+    // reported "0 file(s) changed, +0, -0" in the MR body.
+    apply_diff_stats(ledger, &wt, &profile.default_target_branch);
+    let changed_files =
+        worktree::changed_files(&wt, &profile.default_target_branch).unwrap_or_default();
     ledger.push_attempted = true;
     worktree::push_branch(&wt, &branch, &push_url, &push_pat)?;
     ledger.push_succeeded = true;
@@ -1486,10 +1489,6 @@ fn experiment(
     } else {
         "partial".into()
     });
-    apply_diff_stats(ledger, &wt, &profile.default_target_branch);
-    let changed_files =
-        worktree::changed_files(&wt, &profile.default_target_branch).unwrap_or_default();
-
     println!("Changes detected. Committing and pushing...");
     let commit_msg = format!("gah: experiment for {}", profile.repo_id);
     let push_url = profile.push_url()?;
@@ -1499,6 +1498,10 @@ fn experiment(
     worktree::ensure_staged(&wt)?;
     worktree::commit_msg(&wt, &commit_msg)?;
     ledger.commit_created = true;
+    // Must run after the commit above -- see the fix mode call site for why.
+    apply_diff_stats(ledger, &wt, &profile.default_target_branch);
+    let changed_files =
+        worktree::changed_files(&wt, &profile.default_target_branch).unwrap_or_default();
     ledger.push_attempted = true;
     worktree::push_branch(&wt, &branch, &push_url, &push_pat)?;
     ledger.push_succeeded = true;
@@ -2396,14 +2399,15 @@ mod tests {
     use super::preflight;
     use super::validate;
     use super::{
-        apply_authoritative_work_identity, apply_pm_plan, apply_route_to_ledger, attempt_usage,
-        build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title, build_pm_plan_task,
-        build_task, classify_validation_failure_progress, collect_pm_preflight,
+        apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
+        attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title,
+        build_pm_plan_task, build_task, classify_validation_failure_progress, collect_pm_preflight,
         collect_ticket_summaries, derive_reviewer_tier, first_markdown_heading,
         mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
-        parse_review_verdict, parse_ticket_metadata, review_labels, review_preflight, run_backend,
-        scan_available_tickets, validation_failure_no_progress_reason, ExperimentMrRenderContext,
-        MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
+        parse_review_verdict, parse_ticket_metadata, render_review_comment, review_labels,
+        review_preflight, run_backend, scan_available_tickets,
+        validation_failure_no_progress_reason, ExperimentMrRenderContext, MrRenderContext,
+        ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
@@ -3812,6 +3816,88 @@ The parser should retain structured sections.\n\n\
         assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-114"));
         assert_eq!(meta.work_id.as_deref(), Some("TICKET-114"));
         assert!(meta.is_authoritative);
+    }
+
+    #[test]
+    fn render_review_comment_includes_non_blocking_findings_and_risk_notes() {
+        // Regression: a verdict with zero blocking_findings (e.g. APPROVE_WEAK)
+        // still carries real substance in these two fields. The posted PR
+        // comment was silently dropping both, leaving reviewers with nothing
+        // but a bare verdict/confidence line and no actual feedback.
+        let verdict: crate::models::ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_WEAK","confidence":"0.78","human_required":true,
+                "blocking_findings":[],
+                "non_blocking_findings":["missing test coverage on one path"],
+                "risk_notes":["new module coupling"]}"#,
+        )
+        .unwrap();
+        let comment = render_review_comment(&verdict, Path::new("/tmp/session"));
+        assert!(comment.contains("Non-blocking findings:"));
+        assert!(comment.contains("missing test coverage on one path"));
+        assert!(comment.contains("Risk notes:"));
+        assert!(comment.contains("new module coupling"));
+    }
+
+    #[test]
+    fn apply_diff_stats_reports_zero_before_commit_but_correct_after() {
+        // Regression: diff_stats compares origin/<target> against HEAD, so
+        // calling apply_diff_stats while real changes are still uncommitted
+        // working-tree modifications (HEAD hasn't moved) always reports
+        // "0 file(s) changed, +0, -0" -- this is exactly the bug that put
+        // that false summary into real MR bodies. dispatch.rs's real call
+        // sites now run this after the commit; this test pins why order
+        // matters by exercising both states directly.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        let initial_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        // Fake an "origin/main" ref without a real remote, matching how
+        // diff_stats/changed_files/has_changes all resolve their comparison
+        // point in real dispatch runs.
+        Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/main", &initial_sha])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        fs::write(repo.join("new_file.txt"), "line one\nline two\n").unwrap();
+
+        let mut prof = profile(repo);
+        prof.local_path = repo.display().to_string();
+        let mut ledger = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+
+        // Before commit: real change exists in the working tree, but HEAD
+        // hasn't moved, so the origin/main...HEAD comparison sees nothing.
+        apply_diff_stats(&mut ledger, repo, "main");
+        assert_eq!(ledger.files_changed, Some(0));
+
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add file"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        // After commit: HEAD has moved, so the comparison now sees the
+        // real change -- this is what dispatch.rs's real call sites rely on.
+        apply_diff_stats(&mut ledger, repo, "main");
+        assert_eq!(ledger.files_changed, Some(1));
+        assert_eq!(ledger.insertions, Some(2));
+        assert_eq!(ledger.deletions, Some(0));
     }
 
     #[test]
@@ -5569,6 +5655,21 @@ fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &P
     if !verdict.blocking_findings.is_empty() {
         out.push_str("\nBlocking findings:\n");
         for item in &verdict.blocking_findings {
+            out.push_str(&format!("- {}\n", item));
+        }
+    }
+    // A verdict with zero blocking findings (e.g. APPROVE_WEAK) still
+    // carries real substance in these two fields -- dropping them left the
+    // posted PR comment as a bare verdict line with no actual feedback.
+    if !verdict.non_blocking_findings.is_empty() {
+        out.push_str("\nNon-blocking findings:\n");
+        for item in &verdict.non_blocking_findings {
+            out.push_str(&format!("- {}\n", item));
+        }
+    }
+    if !verdict.risk_notes.is_empty() {
+        out.push_str("\nRisk notes:\n");
+        for item in &verdict.risk_notes {
             out.push_str(&format!("- {}\n", item));
         }
     }
