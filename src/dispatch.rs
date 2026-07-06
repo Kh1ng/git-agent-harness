@@ -3192,6 +3192,7 @@ mod tests {
 
     #[test]
     fn agy_second_backend_runs_with_agy_second_home_override() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -3244,6 +3245,7 @@ mod tests {
 
     #[test]
     fn agy_backend_without_second_home_uses_real_home() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -3296,6 +3298,7 @@ mod tests {
 
     #[test]
     fn run_backend_looks_up_agy_print_timeout_by_exact_model_name() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -3351,6 +3354,7 @@ mod tests {
 
     #[test]
     fn run_backend_omits_print_timeout_for_unmapped_model() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -3404,6 +3408,7 @@ mod tests {
 
     #[test]
     fn run_backend_routes_vibe_to_run_vibe_not_the_openhands_fallthrough() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         // Regression: run_backend's match had a catch-all `_ => run_openhands(...)`.
         // An unrecognized backend name silently ran openhands instead of
         // erroring -- adding "vibe" without an explicit match arm would have
@@ -3597,6 +3602,7 @@ mod tests {
 
     #[test]
     fn preflight_uses_profile_executable_override() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -4418,6 +4424,7 @@ The parser should retain structured sections.\n\n\
 
     #[test]
     fn test_check_duplicate_work_cases() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();

@@ -1036,6 +1036,7 @@ mod tests {
 
     #[test]
     fn run_openhands_success_writes_stdout_and_stderr_to_log() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "openhands", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1066,6 +1067,7 @@ mod tests {
 
     #[test]
     fn run_openhands_nonzero_exit_preserved() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "openhands", &f.record_dir, 3);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1078,6 +1080,7 @@ mod tests {
 
     #[test]
     fn run_openhands_core_argv_and_extra_args_present() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "openhands", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1102,6 +1105,7 @@ mod tests {
 
     #[test]
     fn run_openhands_propagates_llm_config_via_env() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "openhands", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1121,6 +1125,7 @@ mod tests {
 
     #[test]
     fn run_openhands_propagates_env_file_vars() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "openhands", &f.record_dir, 0);
         let envs = vec![
@@ -1151,6 +1156,7 @@ mod tests {
 
     #[test]
     fn run_codex_success_writes_stdout_and_stderr_to_log() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1166,6 +1172,7 @@ mod tests {
 
     #[test]
     fn run_codex_nonzero_exit_preserved() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 7);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1177,6 +1184,7 @@ mod tests {
 
     #[test]
     fn run_codex_core_argv_and_extra_args_present() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1200,6 +1208,7 @@ mod tests {
 
     #[test]
     fn run_codex_propagates_env_file_vars() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![
@@ -1247,6 +1256,7 @@ mod tests {
 
     #[test]
     fn run_codex_route_model_overrides_stale_profile_model_flags() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1283,6 +1293,7 @@ mod tests {
 
     #[test]
     fn run_claude_success_writes_stdout_and_stderr_to_log() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1297,6 +1308,7 @@ mod tests {
 
     #[test]
     fn run_claude_nonzero_exit_preserved() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 1);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1308,6 +1320,7 @@ mod tests {
 
     #[test]
     fn run_claude_core_argv_and_extra_args_present() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1330,6 +1343,7 @@ mod tests {
 
     #[test]
     fn run_claude_propagates_env_file_vars() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
         let envs = vec![
@@ -1359,6 +1373,7 @@ mod tests {
 
     #[test]
     fn run_vibe_success_writes_stdout_and_stderr_to_log() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1373,6 +1388,7 @@ mod tests {
 
     #[test]
     fn run_vibe_nonzero_exit_preserved() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 1);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1384,6 +1400,7 @@ mod tests {
 
     #[test]
     fn run_vibe_core_argv_always_includes_trust_and_auto_approve() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1408,6 +1425,7 @@ mod tests {
 
     #[test]
     fn run_vibe_propagates_env_file_vars() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
         let envs = vec![
@@ -1435,6 +1453,7 @@ mod tests {
 
     #[test]
     fn run_agy_success_writes_stdout_and_stderr_to_log() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1461,6 +1480,7 @@ mod tests {
 
     #[test]
     fn run_agy_with_executable_passes_print_timeout_when_given() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1488,6 +1508,7 @@ mod tests {
 
     #[test]
     fn run_agy_with_executable_omits_print_timeout_when_absent() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1514,6 +1535,7 @@ mod tests {
 
     #[test]
     fn run_agy_with_executable_kills_process_after_idle_timeout_with_no_new_output() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         // Writes one line, then goes silent for far longer than the idle
         // timeout below -- this must be killed, not allowed to keep running.
@@ -1556,6 +1578,7 @@ mod tests {
 
     #[test]
     fn run_agy_with_executable_does_not_kill_while_output_keeps_arriving() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         // Writes output every ~1s for 3s total -- longer than the 2s idle
         // timeout below, but never actually goes quiet for that long. Must
@@ -1595,6 +1618,7 @@ mod tests {
 
     #[test]
     fn run_agy_core_argv_and_model_present() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
@@ -1645,6 +1669,7 @@ mod tests {
 
     #[test]
     fn resolve_backend_executable_prefers_explicit_path() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_fake_bin(&f.bin_dir, "claude-explicit", "#!/bin/sh\nexit 0\n");
         let mut profile = test_profile();
@@ -1661,6 +1686,7 @@ mod tests {
 
     #[test]
     fn resolve_backend_executable_falls_back_to_path_when_unset() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_fake_bin(&f.bin_dir, "claude", "#!/bin/sh\nexit 0\n");
         let profile = test_profile();
@@ -1689,6 +1715,7 @@ mod tests {
 
     #[test]
     fn resolve_backend_executable_supports_codex_and_agy_paths() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_fake_bin(&f.bin_dir, "codex-explicit", "#!/bin/sh\nexit 0\n");
         make_fake_bin(&f.bin_dir, "agy-explicit", "#!/bin/sh\nexit 0\n");
@@ -1708,6 +1735,7 @@ mod tests {
 
     #[test]
     fn run_review_backend_times_out_and_preserves_partial_output() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_fake_bin(
             &f.bin_dir,
@@ -1734,6 +1762,7 @@ mod tests {
 
     #[test]
     fn run_review_backend_supports_agy_with_model_and_env() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let profile = test_profile();
@@ -1789,6 +1818,7 @@ mod tests {
 
     #[test]
     fn agy_empty_output_with_quota_log_detected_as_error() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         // Fake agy that exits 0 with no stdout/stderr.
         make_fake_bin(&f.bin_dir, "agy", "#!/bin/sh\nexit 0\n");
@@ -1829,6 +1859,7 @@ mod tests {
 
     #[test]
     fn agy_empty_output_with_auth_log_detected_as_auth_failure() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_fake_bin(&f.bin_dir, "agy", "#!/bin/sh\nexit 0\n");
         let agy_home = f.record_dir.parent().unwrap();
@@ -1867,6 +1898,7 @@ mod tests {
 
     #[test]
     fn agy_successful_output_not_affected_by_detection() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         // Normal agy that produces stdout content.
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
