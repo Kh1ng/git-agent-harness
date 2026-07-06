@@ -2001,7 +2001,7 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
         &fake_bin,
         "curl",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *\"merge_requests?state=opened&source_branch=feature/review\"*)\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7}}]'\n    ;;\n  *\"/merge_requests/7/notes\"*)\n    printf '%s\\n' '{{\"id\":1}}'\n    ;;\n  *\"/merge_requests/7\"*)\n    printf '%s\\n' '{{\"iid\":7}}'\n    ;;\n  *)\n    printf '%s\\n' '{{}}'\n    ;;\n esac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *\"merge_requests?state=opened&source_branch=feature/review\"*)\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}]'\n    ;;\n  *\"/merge_requests/7/notes\"*)\n    printf '%s\\n' '{{\"id\":1}}'\n    ;;\n  *\"/merge_requests/7\"*)\n    printf '%s\\n' '{{\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}'\n    ;;\n  *)\n    printf '%s\\n' '{{}}'\n    ;;\n esac\n",
             curl_log.display()
         ),
     );

@@ -36,6 +36,7 @@ pub struct MrResult {
     pub id: String,
 }
 
+#[derive(Debug)]
 pub struct ReviewTarget {
     pub id: String,
     pub url: String,
@@ -287,7 +288,7 @@ fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<Rev
         .as_array()
         .and_then(|items| items.first())
         .ok_or_else(|| anyhow::anyhow!("no open GitLab MR found for branch '{}'", branch))?;
-    Ok(gitlab_target_from_value(first))
+    gitlab_target_from_value(first)
 }
 
 fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarget> {
@@ -303,7 +304,7 @@ fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarg
     let url = format!("{}/projects/{}/merge_requests/{}", api_base, project_id, mr);
     let out = run_curl_json(&["-s", "-H", &format!("PRIVATE-TOKEN: {}", pat), &url])?;
     let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    Ok(gitlab_target_from_value(&resp))
+    gitlab_target_from_value(&resp)
 }
 
 fn github_find_pr_number_by_branch(profile: &Profile, branch: &str) -> Result<String> {
@@ -385,12 +386,27 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
     })
 }
 
-fn gitlab_target_from_value(value: &serde_json::Value) -> ReviewTarget {
+fn gitlab_target_from_value(value: &serde_json::Value) -> Result<ReviewTarget> {
+    // A failed/unauthenticated GitLab API call still returns 200-shaped JSON
+    // like {"message":"404 Project Not Found"} (e.g. an empty PRIVATE-TOKEN
+    // from a missing GITLAB_PAT env var) -- silently defaulting the branch
+    // fields to "" let that flow all the way into a git fetch refspec
+    // several layers downstream with no indication the real problem was
+    // auth. `iid`/`source_branch`/`target_branch` are always present on a
+    // genuine MR object, so their absence means this wasn't one.
+    if value["iid"].is_null()
+        || value["source_branch"].is_null()
+        || value["target_branch"].is_null()
+    {
+        anyhow::bail!(
+            "GitLab API did not return a merge request (likely an auth/lookup failure): {value}"
+        );
+    }
     let ci_status = value["detailed_merge_status"]
         .as_str()
         .or_else(|| value["merge_status"].as_str())
         .map(str::to_string);
-    ReviewTarget {
+    Ok(ReviewTarget {
         id: value["iid"].to_string().trim_matches('"').to_string(),
         url: value["web_url"].as_str().unwrap_or("").to_string(),
         source_branch: value["source_branch"].as_str().unwrap_or("").to_string(),
@@ -398,7 +414,7 @@ fn gitlab_target_from_value(value: &serde_json::Value) -> ReviewTarget {
         title: value["title"].as_str().map(str::to_string),
         body: value["description"].as_str().map(str::to_string),
         ci_status,
-    }
+    })
 }
 
 fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
@@ -417,7 +433,7 @@ fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_draft_mr, TEST_PATH_OVERRIDE};
+    use super::{create_draft_mr, find_review_target_by_mr, TEST_PATH_OVERRIDE};
     use crate::config::{Profile, RoutingPolicy};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -559,5 +575,28 @@ mod tests {
         let err = create_draft_mr(&gitlab_profile(), "gah/test", "title", "body").unwrap_err();
 
         assert!(format!("{:#}", err).contains("curl gitlab create mr"));
+    }
+
+    #[test]
+    fn gitlab_review_target_errors_loudly_on_api_error_response() {
+        // Regression: a live review dispatch crashed several layers downstream
+        // with "invalid refspec ':refs/remotes/origin/'" because an empty/
+        // invalid PRIVATE-TOKEN (missing GITLAB_PAT env var -- profile.pat()
+        // reads the real process environment, not a loaded-but-unexported
+        // env file) got a 200-shaped GitLab error body back, and the old
+        // code silently defaulted source_branch/target_branch to "".
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "curl",
+            "#!/bin/sh\necho '{\"message\":\"404 Project Not Found\"}'\nexit 0\n",
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        let err = find_review_target_by_mr(&gitlab_profile(), "235").unwrap_err();
+
+        assert!(format!("{:#}", err).contains("did not return a merge request"));
     }
 }
