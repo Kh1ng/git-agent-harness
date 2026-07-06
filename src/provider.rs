@@ -533,6 +533,7 @@ mod tests {
 
     #[test]
     fn github_mr_nonzero_exit_surfaces_stderr() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = TempDir::new().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -552,6 +553,7 @@ mod tests {
 
     #[test]
     fn gitlab_mr_malformed_curl_response_fails_to_parse() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = TempDir::new().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -581,6 +583,7 @@ mod tests {
 
     #[test]
     fn gitlab_review_target_errors_loudly_on_api_error_response() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         // Regression: a live review dispatch crashed several layers downstream
         // with "invalid refspec ':refs/remotes/origin/'" because an empty/
         // invalid PRIVATE-TOKEN (missing GITLAB_PAT env var -- profile.pat()
