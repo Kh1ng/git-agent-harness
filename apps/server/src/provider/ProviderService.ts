@@ -1,11 +1,13 @@
 /**
  * Provider Service - Main provider management service
  * Inspired by t3code's ProviderService but adapted for GAH
+ * 
+ * After TICKET-113: The provider service now sources data from the real
+ * gah CLI via the ProviderRegistry which uses gahCli.ts.
  */
 
 import { getProviderRegistry } from './ProviderRegistry.js';
 import { getSessionManager } from '../sessions/SessionManager.js';
-import { getRustBackendProxy } from '../rustBackend.js';
 import { getSupportedProviders, generateProviderInstanceId } from '@git-agent-harness/shared';
 import type {
   ProviderKind,
@@ -126,44 +128,28 @@ class ProviderServiceImpl {
     escalate?: boolean;
   }): Promise<{ success: boolean; sessionId?: string; error?: string }> {
     try {
-      const rustBackend = getRustBackendProxy();
+      // Start a session which will run gah dispatch via gahCli.ts
+      const sessionManager = getSessionManager();
+      const session = await sessionManager.startSession({
+        providerKind,
+        instanceId: generateProviderInstanceId(providerKind, 0),
+        repo: options.target || '',
+        branch: options.branch,
+        target: options.target,
+        mode: options.mode,
+        backend: options.backend,
+        model: options.model,
+        budget: options.budget,
+        profile: options.profile,
+        dryRun: options.dryRun,
+        retries: options.retries,
+        allowDraftFail: options.allowDraftFail,
+        prod: options.prod,
+        allowUnknownRedBaseline: options.allowUnknownRedBaseline,
+        escalate: options.escalate
+      });
       
-      // If Rust backend is available, use it
-      if (rustBackend.isBackendReady()) {
-        // For now, simulate dispatch via session manager
-        const sessionManager = getSessionManager();
-        const session = await sessionManager.startSession({
-          providerKind,
-          instanceId: generateProviderInstanceId(providerKind, 0),
-          repo: options.target || '',
-          branch: options.branch,
-          target: options.target,
-          mode: options.mode,
-          backend: options.backend,
-          model: options.model,
-          budget: options.budget
-        });
-        
-        return { success: true, sessionId: session.id };
-      } else {
-        // Fallback to TypeScript-only mode
-        console.warn('Rust backend not available, running dispatch in TypeScript mode');
-        
-        const sessionManager = getSessionManager();
-        const session = await sessionManager.startSession({
-          providerKind,
-          instanceId: generateProviderInstanceId(providerKind, 0),
-          repo: options.target || '',
-          branch: options.branch,
-          target: options.target,
-          mode: options.mode,
-          backend: options.backend,
-          model: options.model,
-          budget: options.budget
-        });
-        
-        return { success: true, sessionId: session.id };
-      }
+      return { success: true, sessionId: session.id };
     } catch (error) {
       return { 
         success: false, 

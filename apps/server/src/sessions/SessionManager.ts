@@ -1,12 +1,15 @@
 /**
  * Session Manager - Manages agent sessions
  * Inspired by t3code's orchestration but adapted for GAH
+ * 
+ * After TICKET-113: Sessions now run actual `gah dispatch` commands via gahCli.ts
+ * and stream the real output as session.stdout messages.
  */
 
 import { generateSessionId, GAHError } from '@git-agent-harness/shared';
-import { getRustBackendProxy } from '../rustBackend.js';
 import { getProviderRegistry } from '../provider/ProviderRegistry.js';
 import { getServerPushBus } from '../serverPushBus.js';
+import { runDispatch, type DispatchOptions, type DispatchResult } from '../gahCli.js';
 import type {
   Session, 
   SessionId, 
@@ -25,12 +28,29 @@ type SessionOptions = {
   backend?: string;
   model?: string;
   budget?: number;
+  profile?: string;
+  dryRun?: boolean;
+  retries?: number;
+  allowDraftFail?: boolean;
+  prod?: boolean;
+  allowUnknownRedBaseline?: boolean;
+  escalate?: boolean;
 };
+
+// Active dispatch processes tracked by sessionId
+class ActiveDispatch {
+  constructor(
+    public readonly sessionId: SessionId,
+    public readonly process: Promise<DispatchResult>,
+    public readonly cancel: () => void
+  ) {}
+}
 
 class SessionManagerImpl {
   private sessions: Map<SessionId, Session> = new Map();
   private pendingSessions: Map<string, Promise<Session>> = new Map();
   private outputBuffers: Map<SessionId, { stdout: string[]; stderr: string[] }> = new Map();
+  private activeDispatches: Map<SessionId, ActiveDispatch> = new Map();
   
   constructor() {
     // Set up periodic session cleanup
@@ -68,55 +88,125 @@ class SessionManagerImpl {
     this.sessions.set(sessionId, session);
     this.outputBuffers.set(sessionId, { stdout: [], stderr: [] });
     
-    try {
-      // Try to start the session via Rust backend if available
-      const rustBackend = getRustBackendProxy();
-      
-      if (rustBackend.isBackendReady()) {
-        // For now, simulate starting a session
-        // In a real implementation, this would call the Rust backend
-        console.log(`Starting session ${sessionId} with ${options.providerKind}`);
-        
-        // Simulate session starting
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        session.status = 'running';
-        this.sessions.set(sessionId, session);
-        
-        // Notify about session start
-        getServerPushBus().publish({
-          type: 'session.started',
-          session
-        });
-        
-        return session;
-      } else {
-        // TypeScript-only mode
-        console.log(`Starting session ${sessionId} in TypeScript mode with ${options.providerKind}`);
-        
-        // Simulate session starting
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        session.status = 'running';
-        this.sessions.set(sessionId, session);
-        
-        // Notify about session start
-        getServerPushBus().publish({
-          type: 'session.started',
-          session
-        });
-        
-        return session;
+    // Notify about session start immediately
+    getServerPushBus().publish({
+      type: 'session.started',
+      session
+    });
+    
+    // Determine profile - use providerKind as profile if not specified
+    const profile = options.profile || options.providerKind;
+    
+    // Prepare dispatch options
+    const dispatchOptions: DispatchOptions = {
+      profile,
+      mode: options.mode,
+      backend: options.backend,
+      target: options.target,
+      branch: options.branch,
+      model: options.model,
+      budget: options.budget,
+      dryRun: options.dryRun,
+      retries: options.retries,
+      allowDraftFail: options.allowDraftFail,
+      prod: options.prod,
+      allowUnknownRedBaseline: options.allowUnknownRedBaseline,
+      escalate: options.escalate
+    };
+    
+    // Start the actual gah dispatch process
+    const dispatchPromise = this.runDispatchProcess(sessionId, dispatchOptions);
+    
+    // Store the active dispatch so we can potentially cancel it
+    this.activeDispatches.set(sessionId, new ActiveDispatch(
+      sessionId,
+      dispatchPromise,
+      () => {
+        // Cancel logic would go here
+        // For now, we don't have a way to cancel a running dispatch
+        console.log(`Cancel requested for session ${sessionId}`);
       }
-      
-    } catch (error) {
-      session.status = 'error';
-      session.error = error instanceof Error ? error.message : String(error);
+    ));
+    
+    // Wait for dispatch to complete (but don't block the session start)
+    dispatchPromise.then((result) => {
+      this.handleDispatchComplete(sessionId, result);
+    }).catch((error) => {
+      this.handleDispatchError(sessionId, error);
+    });
+    
+    // Return the session immediately - it's now running
+    session.status = 'running';
+    this.sessions.set(sessionId, session);
+    
+    return session;
+  }
+  
+  /**
+   * Run the actual gah dispatch process and stream output
+   */
+  private async runDispatchProcess(
+    sessionId: SessionId,
+    options: DispatchOptions
+  ): Promise<DispatchResult> {
+    return runDispatch(options, (line: string) => {
+      // Forward each line as session.stdout message
+      this.addSessionOutput(sessionId, line, false);
+    });
+  }
+  
+  /**
+   * Handle completion of a dispatch process
+   */
+  private handleDispatchComplete(sessionId: SessionId, result: DispatchResult): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    
+    this.activeDispatches.delete(sessionId);
+    
+    if (result.exitCode === 0) {
+      session.status = 'stopped';
       session.endedAt = new Date().toISOString();
       this.sessions.set(sessionId, session);
       
-      throw error;
+      getServerPushBus().publish({
+        type: 'session.stopped',
+        session
+      });
+    } else {
+      session.status = 'error';
+      session.error = `Dispatch failed with exit code ${result.exitCode}`;
+      if (result.stderr) {
+        session.error = result.stderr;
+      }
+      session.endedAt = new Date().toISOString();
+      this.sessions.set(sessionId, session);
+      
+      getServerPushBus().publish({
+        type: 'session.stopped',
+        session
+      });
     }
+  }
+  
+  /**
+   * Handle error in dispatch process
+   */
+  private handleDispatchError(sessionId: SessionId, error: unknown): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    
+    this.activeDispatches.delete(sessionId);
+    
+    session.status = 'error';
+    session.error = error instanceof Error ? error.message : String(error);
+    session.endedAt = new Date().toISOString();
+    this.sessions.set(sessionId, session);
+    
+    getServerPushBus().publish({
+      type: 'session.stopped',
+      session
+    });
   }
   
   async stopSession(sessionId: SessionId): Promise<Session> {
@@ -130,45 +220,40 @@ class SessionManagerImpl {
       return session;
     }
     
-    try {
-      // Try to stop via Rust backend if available
-      const rustBackend = getRustBackendProxy();
-      
-      if (rustBackend.isBackendReady()) {
-        // Simulate stopping
-        await rustBackend.sendCommand(`session stop ${sessionId}`);
-      }
-      
-      // Update session status
-      session.status = 'stopping';
-      this.sessions.set(sessionId, session);
-      
-      // Simulate graceful stop
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      session.status = 'stopped';
-      session.endedAt = new Date().toISOString();
-      this.sessions.set(sessionId, session);
-      
-      // Clean up output buffers
-      this.outputBuffers.delete(sessionId);
-      
-      // Notify about session stop
-      getServerPushBus().publish({
-        type: 'session.stopped',
-        session
-      });
-      
-      return session;
-      
-    } catch (error) {
-      session.status = 'error';
-      session.error = error instanceof Error ? error.message : String(error);
-      session.endedAt = new Date().toISOString();
-      this.sessions.set(sessionId, session);
-      
-      throw error;
+    // If there's an active dispatch, cancel it
+    const activeDispatch = this.activeDispatches.get(sessionId);
+    if (activeDispatch) {
+      activeDispatch.cancel();
+      this.activeDispatches.delete(sessionId);
     }
+    
+    // Update session status
+    session.status = 'stopping';
+    this.sessions.set(sessionId, session);
+    
+    // Notify about session stop
+    getServerPushBus().publish({
+      type: 'session.status',
+      session
+    });
+    
+    // Mark as stopped after a brief delay
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    session.status = 'stopped';
+    session.endedAt = new Date().toISOString();
+    this.sessions.set(sessionId, session);
+    
+    // Clean up output buffers
+    this.outputBuffers.delete(sessionId);
+    
+    // Notify about session stop
+    getServerPushBus().publish({
+      type: 'session.stopped',
+      session
+    });
+    
+    return session;
   }
   
   async sendCommand(sessionId: SessionId, command: string): Promise<void> {
@@ -185,32 +270,22 @@ class SessionManagerImpl {
       );
     }
     
-    const rustBackend = getRustBackendProxy();
+    // For now, just log the command and add it to the output
+    // In a future implementation, this could be sent to a running dispatch process
+    console.log(`Session ${sessionId} command: ${command}`);
     
-    if (rustBackend.isBackendReady()) {
-      // Send command via Rust backend
-      await rustBackend.sendCommand(`session ${sessionId} command ${command}`);
-    } else {
-      // TypeScript mode - just log the command
-      console.log(`Session ${sessionId} command: ${command}`);
+    // Add to output buffer
+    const buffers = this.outputBuffers.get(sessionId);
+    if (buffers) {
+      buffers.stdout.push(`> ${command}`);
       
-      // Add to output buffer
-      const buffers = this.outputBuffers.get(sessionId);
-      if (buffers) {
-        buffers.stdout.push(`> ${command}`);
-        
-        // Simulate command output
-        setTimeout(() => {
-          buffers.stdout.push(`Command executed: ${command}`);
-          
-          getServerPushBus().publish({
-            type: 'session.stdout',
-            sessionId,
-            data: `Command executed: ${command}\n`,
-            timestamp: Date.now()
-          });
-        }, 100);
-      }
+      // Publish the command to the push bus
+      getServerPushBus().publish({
+        type: 'session.stdout',
+        sessionId,
+        data: `> ${command}\n`,
+        timestamp: Date.now()
+      });
     }
   }
   

@@ -1,51 +1,37 @@
 /**
  * Provider Registry - Tracks available providers and their status
  * Inspired by t3code's provider registry
+ * 
+ * After TICKET-113: Provider status and availability are now sourced from
+ * the real gah CLI via gahCli.runStatus(). The old hardcoded defaults
+ * have been replaced with dynamic data from the GAH backend.
  */
 
 import { generateProviderInstanceId, getSupportedProviders } from '@git-agent-harness/shared';
-import { getRustBackendProxy } from '../rustBackend.js';
+import { runStatus, type StatusSnapshot } from '../gahCli.js';
 import type { ProviderKind, ProviderStatus, ProviderInstanceId } from '@git-agent-harness/contracts';
+
+interface CachedStatus {
+  snapshot: StatusSnapshot;
+  timestamp: number;
+  ttl: number;
+}
 
 class ProviderRegistryImpl {
   private providerStatuses: Map<ProviderKind, ProviderStatus> = new Map();
   private providerVersions: Map<ProviderKind, string> = new Map();
   private availableProviders: Set<ProviderKind> = new Set();
+  private cachedStatus: CachedStatus | null = null;
+  private refreshPromise: Promise<void> | null = null;
+  private defaultProfile: string = 'gah';
   
   constructor() {
-    // Initialize with default statuses
+    // Initialize with default unavailable statuses for all supported providers
     for (const kind of getSupportedProviders()) {
       this.providerStatuses.set(kind, { type: 'unavailable' });
     }
     
-    // Mark currently supported providers as available
-    this.availableProviders = new Set([
-      'github',
-      'gitlab',
-      'codex',
-      'claude', 
-      'cursor',
-      'opencode',
-      'grok',
-      'openhands',
-      'agy',
-      'vibe'
-    ]);
-    
-    // Mark providers that are likely installed and authenticated
-    // This would be detected properly in a real implementation
-    this.providerStatuses.set('github', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('gitlab', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('codex', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('claude', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('cursor', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('opencode', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('grok', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('openhands', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('agy', { type: 'available', version: '1.0.0' });
-    this.providerStatuses.set('vibe', { type: 'available', version: '1.0.0' });
-    
-    // Set versions for providers we know about
+    // Set default versions for known providers
     this.providerVersions.set('github', 'cli-2.0.0');
     this.providerVersions.set('gitlab', 'cli-15.0.0');
     this.providerVersions.set('codex', '1.0.0');
@@ -81,83 +67,144 @@ class ProviderRegistryImpl {
     return [generateProviderInstanceId(kind, 0)];
   }
   
-  async refreshProviderStatus(kind: ProviderKind): Promise<ProviderStatus> {
+  /**
+   * Set the default profile to use for status queries
+   */
+  setDefaultProfile(profile: string): void {
+    this.defaultProfile = profile;
+  }
+  
+  /**
+   * Refresh all provider statuses from the GAH CLI
+   */
+  async refreshAllFromGah(): Promise<void> {
+    // Avoid concurrent refreshes
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+    
+    this.refreshPromise = this.doRefreshAllFromGah();
     try {
-      // Check if we can detect the provider via Rust backend or environment
-      const rustBackend = getRustBackendProxy();
+      await this.refreshPromise;
+    } finally {
+      this.refreshPromise = null;
+    }
+  }
+  
+  /**
+   * Internal method to refresh all from GAH CLI
+   */
+  private async doRefreshAllFromGah(): Promise<void> {
+    try {
+      // Get fresh status from gah CLI
+      const snapshot = await runStatus(this.defaultProfile);
+      this.cachedStatus = {
+        snapshot,
+        timestamp: Date.now(),
+        ttl: 30000 // 30 second cache
+      };
       
-      if (rustBackend.isBackendReady()) {
-        // Try to get provider status from Rust backend
-        try {
-          await rustBackend.sendCommand(`provider check ${kind}`);
-          this.providerStatuses.set(kind, { type: 'available', version: this.providerVersions.get(kind) || '1.0.0' });
-          return this.providerStatuses.get(kind)!;
-        } catch {
-          // Fall through to default detection
+      // Update provider statuses from the availability data
+      this.updateFromSnapshot(snapshot);
+      
+      console.log(`Refreshed provider statuses from GAH CLI (${snapshot.availability.length} backends)`);
+      
+    } catch (error) {
+      console.error('Failed to refresh provider statuses from GAH CLI:', error);
+      // Fall back to default behavior
+      this.updateDefaultStatuses();
+    }
+  }
+  
+  /**
+   * Update provider statuses from a GAH status snapshot
+   */
+  private updateFromSnapshot(snapshot: StatusSnapshot): void {
+    // Reset available providers based on what GAH knows about
+    this.availableProviders = new Set(getSupportedProviders());
+    
+    // Map availability entries to provider statuses
+    for (const avail of snapshot.availability) {
+      const kind = avail.backend as ProviderKind;
+      
+      // Skip if not a known provider kind
+      if (!getSupportedProviders().includes(kind)) {
+        continue;
+      }
+      
+      if (avail.eligible_now) {
+        this.providerStatuses.set(kind, { 
+          type: 'available', 
+          version: this.providerVersions.get(kind) || '1.0.0'
+        });
+        this.availableProviders.add(kind);
+      } else {
+        // Map unavailable reasons to status types
+        let statusType: 'unavailable' | 'error' = 'unavailable';
+        let errorMessage: string | undefined;
+        
+        if (avail.reason === 'quota_exhausted') {
+          statusType = 'error';
+          errorMessage = `Quota exhausted until ${avail.unavailable_until || 'unknown time'}`;
+        } else if (avail.reason === 'auth_failure') {
+          statusType = 'error';
+          errorMessage = 'Authentication failed';
+        } else if (avail.reason) {
+          errorMessage = avail.reason;
+        }
+        
+        if (statusType === 'error' && errorMessage) {
+          this.providerStatuses.set(kind, { type: 'error', error: errorMessage });
+        } else {
+          this.providerStatuses.set(kind, { type: 'unavailable' });
         }
       }
-      
-      // Default detection logic
-      switch (kind) {
-        case 'github':
-          // Check if gh CLI is available
-          try {
-            await import('node:fs').then(fs => fs.promises.access('/usr/local/bin/gh', fs.constants.X_OK));
-            this.providerStatuses.set(kind, { type: 'available', version: '2.0.0' });
-          } catch {
-            this.providerStatuses.set(kind, { type: 'available', version: '2.0.0' }); // Assume available
-          }
-          break;
-          
-        case 'gitlab':
-          // GitLab is available if we have curl and a token
-          if (process.env.GITLAB_PAT) {
-            this.providerStatuses.set(kind, { 
-              type: 'authenticated' as const, 
-              version: '15.0.0',
-              userId: 'gitlab-user'
-            });
-          } else {
-            this.providerStatuses.set(kind, { 
-              type: 'available' as const, 
-              version: '15.0.0'
-            });
-          }
-          break;
-          
-        case 'codex':
-        case 'claude':
-        case 'cursor':
-        case 'opencode':
-        case 'grok':
-        case 'openhands':
-        case 'agy':
-        case 'vibe':
-          // For AI providers, check if they're authenticated
-          const envVar = this.getAuthEnvVar(kind);
-          if (process.env[envVar]) {
-            this.providerStatuses.set(kind, {
-              type: 'authenticated' as const,
-              version: this.providerVersions.get(kind) || '1.0.0',
-              userId: `user_${kind}`
-            });
-          } else {
-            this.providerStatuses.set(kind, {
-              type: 'available' as const,
-              version: this.providerVersions.get(kind) || '1.0.0'
-            });
-          }
-          break;
-          
-        default:
-          this.providerStatuses.set(kind, { type: 'available', version: '1.0.0' });
+    }
+    
+    // Ensure all supported providers have at least an unavailable status
+    for (const kind of getSupportedProviders()) {
+      if (!this.providerStatuses.has(kind)) {
+        this.providerStatuses.set(kind, { type: 'unavailable' });
+      }
+    }
+  }
+  
+  /**
+   * Update to default statuses when GAH CLI is unavailable
+   */
+  private updateDefaultStatuses(): void {
+    // Mark git providers as available (they don't depend on GAH backends)
+    this.providerStatuses.set('github', { type: 'available', version: this.providerVersions.get('github') || '1.0.0' });
+    this.providerStatuses.set('gitlab', { type: 'available', version: this.providerVersions.get('gitlab') || '1.0.0' });
+    
+    // Mark AI providers based on environment variables
+    for (const kind of ['codex', 'claude', 'cursor', 'opencode', 'grok', 'openhands', 'agy', 'vibe']) {
+      const envVar = this.getAuthEnvVar(kind as ProviderKind);
+      this.providerStatuses.set(kind as ProviderKind, {
+        type: process.env[envVar] ? 'authenticated' : 'available',
+        version: this.providerVersions.get(kind as ProviderKind) || '1.0.0',
+        userId: process.env[envVar] ? `user_${kind}` : undefined
+      });
+    }
+  }
+  
+  async refreshProviderStatus(kind: ProviderKind): Promise<ProviderStatus> {
+    try {
+      // Check if we have a cached status that's still fresh
+      if (this.cachedStatus && (Date.now() - this.cachedStatus.timestamp) < this.cachedStatus.ttl) {
+        return this.providerStatuses.get(kind) || { type: 'unavailable' };
       }
       
-      return this.providerStatuses.get(kind)!;
+      // Refresh all statuses from GAH CLI
+      await this.refreshAllFromGah();
+      
+      return this.providerStatuses.get(kind) || { type: 'unavailable' };
       
     } catch (error) {
       console.error(`Failed to refresh provider status for ${kind}:`, error);
-      return { type: 'error', error: String(error) };
+      
+      // Fall back to environment-based detection
+      return this.getFallbackStatus(kind);
     }
   }
   
@@ -176,6 +223,43 @@ class ProviderRegistryImpl {
       auto: 'AUTO_API_KEY'
     };
     return envVars[kind] || `PROVIDER_${kind.toUpperCase()}_KEY`;
+  }
+  
+  /**
+   * Get fallback status when GAH CLI is unavailable
+   */
+  private getFallbackStatus(kind: ProviderKind): ProviderStatus {
+    const envVar = this.getAuthEnvVar(kind);
+    
+    switch (kind) {
+      case 'github':
+        return { 
+          type: process.env.GITHUB_TOKEN ? 'authenticated' : 'available',
+          version: this.providerVersions.get('github') || '1.0.0',
+          userId: process.env.GITHUB_TOKEN ? 'github-user' : undefined
+        };
+      case 'gitlab':
+        return { 
+          type: process.env.GITLAB_PAT ? 'authenticated' : 'available',
+          version: this.providerVersions.get('gitlab') || '1.0.0',
+          userId: process.env.GITLAB_PAT ? 'gitlab-user' : undefined
+        };
+      case 'codex':
+      case 'claude':
+      case 'cursor':
+      case 'opencode':
+      case 'grok':
+      case 'openhands':
+      case 'agy':
+      case 'vibe':
+        return {
+          type: process.env[envVar] ? 'authenticated' : 'available',
+          version: this.providerVersions.get(kind) || '1.0.0',
+          userId: process.env[envVar] ? `user_${kind}` : undefined
+        };
+      default:
+        return { type: 'available', version: this.providerVersions.get(kind) || '1.0.0' };
+    }
   }
   
   getProviderInstances(): Array<{ 
