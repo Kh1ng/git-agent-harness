@@ -2204,6 +2204,22 @@ fn review(
             ledger.human_required = verdict.human_required;
             ledger.confidence_impact = Some(verdict.confidence.clone());
             ledger.usage = review_usage.clone();
+            // TICKET-125: attribute this verdict back to the branch's
+            // implementation entry (the backend that wrote the code being
+            // reviewed), not this review dispatch's own entry (the reviewer).
+            if let Err(err) = crate::ledger::backfill_review_verdict(
+                cfg,
+                &target.source_branch,
+                &verdict.verdict,
+                &verdict.confidence,
+                &route.effective_backend,
+                route.effective_model.as_deref(),
+            ) {
+                eprintln!(
+                    "warning: failed to backfill review verdict onto ledger: {:#}",
+                    err
+                );
+            }
             let mr_body = render_review_comment(&verdict, session_dir);
             let labels = review_labels(&verdict);
             if profile.provider == "gitlab" {

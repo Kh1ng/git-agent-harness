@@ -199,6 +199,17 @@ pub struct LedgerEntry {
     pub duration_seconds: Option<f64>,
     pub backend_exit_code: Option<i32>,
     pub validation_result: Option<String>,
+    /// TICKET-125: review verdict/confidence/reviewer identity for associating
+    /// review entries back to implementation entries. `#[serde(default)]` for
+    /// pre-existing ledger lines.
+    #[serde(default)]
+    pub review_verdict: Option<String>,
+    #[serde(default)]
+    pub review_confidence: Option<String>,
+    #[serde(default)]
+    pub reviewer_backend: Option<String>,
+    #[serde(default)]
+    pub reviewer_model: Option<String>,
     pub commit_attempted: bool,
     pub commit_created: bool,
     pub push_attempted: bool,
@@ -270,6 +281,10 @@ impl LedgerEntry {
             duration_seconds: None,
             backend_exit_code: None,
             validation_result: None,
+            review_verdict: None,
+            review_confidence: None,
+            reviewer_backend: None,
+            reviewer_model: None,
             commit_attempted: false,
             commit_created: false,
             push_attempted: false,
@@ -332,6 +347,52 @@ pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
         entries.push(entry);
     }
     Ok(entries)
+}
+
+/// TICKET-125: review mode's own ledger entry records the reviewer's
+/// backend/model, not the implementation's -- grouping/cost-vs-quality
+/// reporting needs the verdict attributed back to whichever backend
+/// actually wrote the code being reviewed. Finds the most recent fix/improve
+/// entry for `branch` that doesn't already have a verdict and updates it
+/// in place (the ledger has no other mutation path today; this is the one
+/// exception, and it's rare enough -- once per review completion -- not to
+/// need more than a full read-modify-write of the file).
+pub fn backfill_review_verdict(
+    cfg: &GahConfig,
+    branch: &str,
+    verdict: &str,
+    confidence: &str,
+    reviewer_backend: &str,
+    reviewer_model: Option<&str>,
+) -> Result<bool> {
+    let mut entries = read_entries(cfg)?;
+    let target_idx = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            e.branch.as_deref() == Some(branch)
+                && matches!(e.mode.as_str(), "fix" | "improve")
+                && e.review_verdict.is_none()
+        })
+        .max_by_key(|(_, e)| e.timestamp.clone())
+        .map(|(idx, _)| idx);
+
+    let Some(idx) = target_idx else {
+        return Ok(false);
+    };
+    entries[idx].review_verdict = Some(verdict.to_string());
+    entries[idx].review_confidence = Some(confidence.to_string());
+    entries[idx].reviewer_backend = Some(reviewer_backend.to_string());
+    entries[idx].reviewer_model = reviewer_model.map(|m| m.to_string());
+
+    let path = cfg.defaults.ledger_path();
+    let mut out = String::new();
+    for entry in &entries {
+        out.push_str(&serde_json::to_string(entry).context("serializing ledger entry")?);
+        out.push('\n');
+    }
+    fs::write(&path, out).with_context(|| format!("rewriting ledger {}", path.display()))?;
+    Ok(true)
 }
 
 /// TICKET-096: the query sync/reconciliation needs to associate a
@@ -530,8 +591,33 @@ fn summarize_target(target: &str) -> Option<String> {
     Some(summary)
 }
 
+/// TICKET-125: GroupBy option for ledger summary
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupBy {
+    None,
+    Backend,
+    Model,
+}
+
+impl std::str::FromStr for GroupBy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" => Ok(GroupBy::None),
+            "backend" => Ok(GroupBy::Backend),
+            "model" => Ok(GroupBy::Model),
+            _ => Err(format!(
+                "Invalid group-by value: '{}'. Expected 'none', 'backend' or 'model'",
+                s
+            )),
+        }
+    }
+}
+
 pub mod summary {
-    use super::read_entries;
+    use super::{read_entries, GroupBy};
     use crate::config;
     use anyhow::Result;
     use serde::Serialize;
@@ -542,6 +628,19 @@ pub mod summary {
     /// both the human-readable and `--json` output paths so they can never
     /// drift apart -- no speculative economics logic, just the counts the
     /// human view already computed.
+    /// TICKET-125: Grouped summary data for a specific backend or model
+    #[derive(Debug, Serialize)]
+    pub struct GroupSummary {
+        pub group_key: String,
+        pub entries: usize,
+        pub attempts: usize,
+        pub validation_pass: usize,
+        pub review_verdict_distribution: BTreeMap<String, usize>,
+        pub total_cost_usd: Option<f64>,
+        pub average_cost_usd: Option<f64>,
+        pub cost_per_approve_strong: Option<f64>,
+    }
+
     #[derive(Debug, Serialize)]
     pub struct SummaryData {
         pub ledger_path: String,
@@ -566,6 +665,10 @@ pub mod summary {
         pub estimated_cost_usd: Option<f64>,
         pub actual_cost_usd: Option<f64>,
         pub last_run: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub grouped_by_backend: Option<Vec<GroupSummary>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub grouped_by_model: Option<Vec<GroupSummary>>,
     }
 
     pub fn run_with_json(
@@ -573,9 +676,10 @@ pub mod summary {
         profile: Option<&str>,
         config_path: Option<&str>,
         json: bool,
+        group_by: GroupBy,
     ) -> Result<()> {
         let cfg = config::load(config_path)?;
-        let data = build_summary(&cfg, since, profile)?;
+        let data = build_summary(&cfg, since, profile, group_by)?;
 
         if json {
             println!("{}", serde_json::to_string(&data)?);
@@ -628,6 +732,60 @@ pub mod summary {
         if let Some(last) = data.last_run {
             println!("Last run: {}", last);
         }
+
+        // TICKET-125: Display grouped data if requested
+        if let Some(grouped) = &data.grouped_by_backend {
+            println!("\nGrouped by backend:");
+            for group in grouped {
+                println!("  Backend: {}", group.group_key);
+                println!("    Entries: {}", group.entries);
+                println!("    Attempts: {}", group.attempts);
+                println!(
+                    "    Validation pass: {}/ {}",
+                    group.validation_pass, group.entries
+                );
+                println!("    Review verdict distribution:");
+                for (verdict, count) in &group.review_verdict_distribution {
+                    println!("      {}: {}", verdict, count);
+                }
+                if let Some(cost) = group.total_cost_usd {
+                    println!("    Total cost: ${:.4}", cost);
+                }
+                if let Some(cost) = group.average_cost_usd {
+                    println!("    Average cost: ${:.4}", cost);
+                }
+                if let Some(cost) = group.cost_per_approve_strong {
+                    println!("    Cost per APPROVE_STRONG: ${:.4}", cost);
+                }
+            }
+        }
+
+        if let Some(grouped) = &data.grouped_by_model {
+            println!("\nGrouped by model:");
+            for group in grouped {
+                println!("  Model: {}", group.group_key);
+                println!("    Entries: {}", group.entries);
+                println!("    Attempts: {}", group.attempts);
+                println!(
+                    "    Validation pass: {}/ {}",
+                    group.validation_pass, group.entries
+                );
+                println!("    Review verdict distribution:");
+                for (verdict, count) in &group.review_verdict_distribution {
+                    println!("      {}: {}", verdict, count);
+                }
+                if let Some(cost) = group.total_cost_usd {
+                    println!("    Total cost: ${:.4}", cost);
+                }
+                if let Some(cost) = group.average_cost_usd {
+                    println!("    Average cost: ${:.4}", cost);
+                }
+                if let Some(cost) = group.cost_per_approve_strong {
+                    println!("    Cost per APPROVE_STRONG: ${:.4}", cost);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -635,6 +793,7 @@ pub mod summary {
         cfg: &config::GahConfig,
         since: &str,
         profile: Option<&str>,
+        group_by: GroupBy,
     ) -> Result<SummaryData> {
         let cutoff = parse_since(since)?;
         let mut entries = read_entries(cfg)?;
@@ -727,6 +886,21 @@ pub mod summary {
             )
         });
 
+        // TICKET-125: Build grouped data if requested
+        let grouped_by_backend = if group_by == GroupBy::Backend {
+            build_grouped_summary(&entries, |entry| entry.effective_backend.clone())
+        } else {
+            None
+        };
+
+        let grouped_by_model = if group_by == GroupBy::Model {
+            build_grouped_summary(&entries, |entry| {
+                entry.effective_model.clone().unwrap_or_default()
+            })
+        } else {
+            None
+        };
+
         Ok(SummaryData {
             ledger_path: cfg.defaults.ledger_path().display().to_string(),
             entries: entries.len(),
@@ -751,7 +925,100 @@ pub mod summary {
             estimated_cost_usd: estimated_cost_seen.then_some(estimated_cost),
             actual_cost_usd: actual_cost_seen.then_some(actual_cost),
             last_run,
+            grouped_by_backend,
+            grouped_by_model,
         })
+    }
+
+    /// TICKET-125: Build grouped summary data for a specific grouping key
+    pub fn build_grouped_summary<F>(
+        entries: &[super::LedgerEntry],
+        group_key_fn: F,
+    ) -> Option<Vec<GroupSummary>>
+    where
+        F: Fn(&super::LedgerEntry) -> String,
+    {
+        if entries.is_empty() {
+            return None;
+        }
+
+        use std::collections::BTreeMap;
+
+        // Group entries by the grouping key
+        let mut groups: BTreeMap<String, Vec<&super::LedgerEntry>> = BTreeMap::new();
+        for entry in entries {
+            let key = group_key_fn(entry);
+            groups.entry(key).or_default().push(entry);
+        }
+
+        let mut summaries = Vec::new();
+        for (group_key, group_entries) in groups {
+            let group_entry_count = group_entries.len();
+            let mut attempts = 0usize;
+            let mut validation_pass = 0usize;
+            let mut review_verdict_distribution: BTreeMap<String, usize> = BTreeMap::new();
+            let mut total_cost_usd = 0.0f64;
+            let mut cost_seen = false;
+            let mut approve_strong_count = 0usize;
+
+            for entry in &group_entries {
+                // Count attempts from the attempts vector
+                attempts += entry.attempts.len();
+
+                // Count validation passes
+                if matches!(
+                    entry.validation_result.as_deref(),
+                    Some("passed") | Some("APPROVE_STRONG") | Some("APPROVE_WEAK")
+                ) {
+                    validation_pass += 1;
+                }
+
+                // Count review verdict distribution
+                if let Some(verdict) = &entry.review_verdict {
+                    *review_verdict_distribution
+                        .entry(verdict.clone())
+                        .or_default() += 1;
+                    if verdict == "APPROVE_STRONG" {
+                        approve_strong_count += 1;
+                    }
+                }
+
+                // Sum up costs
+                if let Some(cost) = entry.usage.actual_cost_usd {
+                    total_cost_usd += cost;
+                    cost_seen = true;
+                } else if let Some(cost) = entry.usage.estimated_cost_usd {
+                    total_cost_usd += cost;
+                    cost_seen = true;
+                }
+            }
+
+            let average_cost_usd = if cost_seen && group_entry_count > 0 {
+                Some(total_cost_usd / group_entry_count as f64)
+            } else {
+                None
+            };
+
+            // Calculate cost per APPROVE_STRONG outcome
+            let cost_per_approve_strong = if approve_strong_count > 0 && cost_seen {
+                Some(total_cost_usd / approve_strong_count as f64)
+            } else {
+                None
+            };
+
+            summaries.push(GroupSummary {
+                group_key,
+                entries: group_entry_count,
+                attempts,
+                validation_pass,
+                review_verdict_distribution,
+                total_cost_usd: cost_seen.then_some(total_cost_usd),
+                average_cost_usd,
+                cost_per_approve_strong,
+            });
+        }
+
+        Some(summaries)
     }
 
     fn print_counts(counts: &BTreeMap<String, usize>) {
@@ -865,9 +1132,9 @@ pub fn usage_summary_for_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        append, entries_for_work_id, index_entries_by_work_id, is_strong_model, reconcile,
-        usage_summary_for_backend, FailureClass, FailureStage, LedgerEntry,
-        RoutingCandidateDiagnostic, RoutingDiagnostics,
+        append, backfill_review_verdict, entries_for_work_id, index_entries_by_work_id,
+        is_strong_model, read_entries, reconcile, usage_summary_for_backend, FailureClass,
+        FailureStage, GroupBy, LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
@@ -1456,4 +1723,207 @@ mod tests {
             "all entries should count as regular runs"
         );
     }
+
+    // TICKET-125: Tests for the new grouping functionality
+
+    #[test]
+    fn backfill_review_verdict_attributes_to_implementation_entry_not_reviewer() {
+        let (_tmp, cfg) = test_config();
+        let mut impl_entry =
+            LedgerEntry::new("test", &profile(), "vibe", "improve", "test1", None, None);
+        impl_entry.effective_backend = "vibe".to_string();
+        impl_entry.branch = Some("gah/gah-123".to_string());
+        append(&cfg, &impl_entry).unwrap();
+
+        // The review dispatch's own entry -- a different backend (the
+        // reviewer), must not be the one that ends up carrying the verdict.
+        let mut review_entry =
+            LedgerEntry::new("test", &profile(), "claude", "review", "test1", None, None);
+        review_entry.effective_backend = "claude".to_string();
+        review_entry.branch = Some("gah/gah-123".to_string());
+        append(&cfg, &review_entry).unwrap();
+
+        let found = backfill_review_verdict(
+            &cfg,
+            "gah/gah-123",
+            "NEEDS_FIX",
+            "high",
+            "claude",
+            Some("claude-sonnet-4"),
+        )
+        .unwrap();
+        assert!(found);
+
+        let entries = read_entries(&cfg).unwrap();
+        let updated_impl = entries
+            .iter()
+            .find(|e| e.mode == "improve")
+            .expect("implementation entry still present");
+        assert_eq!(updated_impl.effective_backend, "vibe");
+        assert_eq!(updated_impl.review_verdict.as_deref(), Some("NEEDS_FIX"));
+        assert_eq!(updated_impl.reviewer_backend.as_deref(), Some("claude"));
+
+        let review_entry_after = entries
+            .iter()
+            .find(|e| e.mode == "review")
+            .expect("review entry still present");
+        assert_eq!(
+            review_entry_after.review_verdict, None,
+            "the reviewer's own entry must not be the one carrying the verdict"
+        );
+    }
+
+    #[test]
+    fn backfill_review_verdict_returns_false_when_no_matching_branch() {
+        let (_tmp, cfg) = test_config();
+        let found = backfill_review_verdict(
+            &cfg,
+            "gah/no-such-branch",
+            "APPROVE_STRONG",
+            "high",
+            "codex",
+            None,
+        )
+        .unwrap();
+        assert!(!found);
+    }
+
+    #[test]
+    fn group_by_enum_parsing() {
+        assert_eq!("backend".parse::<GroupBy>().unwrap(), GroupBy::Backend);
+        assert_eq!("model".parse::<GroupBy>().unwrap(), GroupBy::Model);
+        assert_eq!("none".parse::<GroupBy>().unwrap(), GroupBy::None);
+        assert_eq!("BACKEND".parse::<GroupBy>().unwrap(), GroupBy::Backend);
+        assert_eq!("MODEL".parse::<GroupBy>().unwrap(), GroupBy::Model);
+        assert!("invalid".parse::<GroupBy>().is_err());
+    }
+
+    #[test]
+    fn build_grouped_summary_by_backend() {
+        let (_tmp, _cfg) = test_config();
+        let mut entry1 =
+            LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
+        entry1.effective_backend = "codex".to_string();
+        entry1.effective_model = Some("claude-sonnet".to_string());
+        entry1.review_verdict = Some("APPROVE_STRONG".to_string());
+        entry1.review_confidence = Some("high".to_string());
+        entry1.reviewer_backend = Some("codex".to_string());
+        entry1.reviewer_model = Some("claude-sonnet".to_string());
+        entry1.validation_result = Some("passed".to_string());
+        entry1.usage.actual_cost_usd = Some(0.5);
+
+        let mut entry2 =
+            LedgerEntry::new("test", &profile(), "vibe", "improve", "test2", None, None);
+        entry2.effective_backend = "vibe".to_string();
+        entry2.effective_model = Some("mistral-medium".to_string());
+        entry2.review_verdict = Some("NEEDS_FIX".to_string());
+        entry2.review_confidence = Some("medium".to_string());
+        entry2.reviewer_backend = Some("vibe".to_string());
+        entry2.reviewer_model = Some("mistral-medium".to_string());
+        entry2.validation_result = Some("failed".to_string());
+        entry2.usage.actual_cost_usd = Some(0.3);
+
+        let entries = vec![entry1, entry2];
+        let grouped = super::summary::build_grouped_summary(&entries, |entry| {
+            entry.effective_backend.clone()
+        });
+
+        assert!(grouped.is_some());
+        let grouped = grouped.unwrap();
+        assert_eq!(grouped.len(), 2);
+
+        // Find codex group
+        let codex_group = grouped.iter().find(|g| g.group_key == "codex").unwrap();
+        assert_eq!(codex_group.entries, 1);
+        assert_eq!(codex_group.validation_pass, 1);
+        assert_eq!(
+            codex_group
+                .review_verdict_distribution
+                .get("APPROVE_STRONG"),
+            Some(&1)
+        );
+        assert!((codex_group.total_cost_usd.unwrap() - 0.5).abs() < f64::EPSILON);
+
+        // Find vibe group
+        let vibe_group = grouped.iter().find(|g| g.group_key == "vibe").unwrap();
+        assert_eq!(vibe_group.entries, 1);
+        assert_eq!(vibe_group.validation_pass, 0);
+        assert_eq!(
+            vibe_group.review_verdict_distribution.get("NEEDS_FIX"),
+            Some(&1)
+        );
+        assert!((vibe_group.total_cost_usd.unwrap() - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn build_grouped_summary_by_model() {
+        let (_tmp, _cfg) = test_config();
+        let mut entry1 =
+            LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
+        entry1.effective_backend = "codex".to_string();
+        entry1.effective_model = Some("gpt-4".to_string());
+        entry1.review_verdict = Some("APPROVE_STRONG".to_string());
+        entry1.validation_result = Some("passed".to_string());
+        entry1.usage.actual_cost_usd = Some(1.0);
+
+        let mut entry2 =
+            LedgerEntry::new("test", &profile(), "codex", "improve", "test2", None, None);
+        entry2.effective_backend = "codex".to_string();
+        entry2.effective_model = Some("gpt-4".to_string());
+        entry2.review_verdict = Some("APPROVE_STRONG".to_string());
+        entry2.validation_result = Some("passed".to_string());
+        entry2.usage.actual_cost_usd = Some(2.0);
+
+        let mut entry3 =
+            LedgerEntry::new("test", &profile(), "vibe", "improve", "test3", None, None);
+        entry3.effective_backend = "vibe".to_string();
+        entry3.effective_model = Some("mistral-medium".to_string());
+        entry3.review_verdict = Some("REJECT".to_string());
+        entry3.validation_result = Some("failed".to_string());
+        entry3.usage.actual_cost_usd = Some(0.5);
+
+        let entries = vec![entry1, entry2, entry3];
+        let grouped = super::summary::build_grouped_summary(&entries, |entry| {
+            entry.effective_model.clone().unwrap_or_default()
+        });
+
+        assert!(grouped.is_some());
+        let grouped = grouped.unwrap();
+        assert_eq!(grouped.len(), 2); // gpt-4 and mistral-medium
+
+        // Find gpt-4 group
+        let gpt4_group = grouped.iter().find(|g| g.group_key == "gpt-4").unwrap();
+        assert_eq!(gpt4_group.entries, 2);
+        assert_eq!(gpt4_group.validation_pass, 2);
+        assert_eq!(
+            gpt4_group.review_verdict_distribution.get("APPROVE_STRONG"),
+            Some(&2)
+        );
+        assert!((gpt4_group.total_cost_usd.unwrap() - 3.0).abs() < f64::EPSILON);
+        assert!((gpt4_group.average_cost_usd.unwrap() - 1.5).abs() < f64::EPSILON);
+        assert!((gpt4_group.cost_per_approve_strong.unwrap() - 1.5).abs() < f64::EPSILON);
+
+        // Find mistral-medium group
+        let mistral_group = grouped
+            .iter()
+            .find(|g| g.group_key == "mistral-medium")
+            .unwrap();
+        assert_eq!(mistral_group.entries, 1);
+        assert_eq!(mistral_group.validation_pass, 0);
+        assert_eq!(
+            mistral_group.review_verdict_distribution.get("REJECT"),
+            Some(&1)
+        );
+        assert!((mistral_group.total_cost_usd.unwrap() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn build_grouped_summary_empty_entries() {
+        let entries: Vec<LedgerEntry> = vec![];
+        let grouped = super::summary::build_grouped_summary(&entries, |entry| {
+            entry.effective_backend.clone()
+        });
+        assert!(grouped.is_none());
+    }
+
 }
