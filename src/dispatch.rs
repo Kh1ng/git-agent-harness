@@ -199,6 +199,16 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
     let mrs = crate::sync::fetch_mrs(profile).unwrap_or_default();
 
     for entry in matching_entries {
+        // The ledger is a single global file shared by every profile
+        // (Defaults::ledger_path, not per-profile), and work_id is
+        // just a heading-derived string like "TICKET-090" with no
+        // repo namespace -- two unrelated repos (or even two ticket
+        // files in the same repo) can legitimately share that exact
+        // string. Scope to this profile's own repo so another
+        // repo's history can't poison this one's duplicate detection.
+        if entry.repo_id != profile.repo_id {
+            continue;
+        }
         if is_ledger_entry_stale(&entry) {
             continue;
         }
@@ -4562,6 +4572,124 @@ The parser should retain structured sections.\n\n\
 
         let res = super::check_duplicate_work(&cfg, &prof_with_repo, &args);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_check_duplicate_work_ignores_ledger_entries_from_a_different_repo() {
+        // Regression: the ledger is one global file shared by every profile,
+        // and work_id is just a heading-derived string like "TICKET-090" with
+        // no repo namespace. A totally unrelated repo's ledger entries for
+        // the same literal work_id must not block dispatch in this repo.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        // 1. Create a fake ticket markdown for worldcup-props repo
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        let ticket_path = ticket_dir.join("TICKET-090-test.md");
+        fs::write(&ticket_path, "# TICKET-090: Test ticket\n\nGoal: test\n").unwrap();
+
+        // 2. Setup config & profile for worldcup-props repo
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+
+        let mut worldcup_prof = profile(tmp.path());
+        worldcup_prof.repo_id = "worldcup-props".into();
+        worldcup_prof.provider = "github".to_string();
+        worldcup_prof.repo = "owner/worldcup-props".to_string();
+        worldcup_prof.local_path = tmp.path().display().to_string();
+
+        let ledger_path = tmp.path().join("ledger.jsonl");
+
+        // 3. Setup fake gh for worldcup-props (no MRs)
+        setup_fake_gh(&bin_dir, "[]");
+        let _guard = PathGuard::set(&bin_dir);
+
+        // 4. Create ledger entries for a DIFFERENT repo (gah) with the same work_id
+        let mut gah_prof = profile(tmp.path());
+        gah_prof.repo_id = "gah".into();
+        gah_prof.provider = "github".to_string();
+        gah_prof.repo = "owner/gah".to_string();
+
+        let mut entry1 = LedgerEntry::new(
+            "test",
+            &gah_prof,
+            "codex",
+            "improve",
+            &ticket_path.display().to_string(),
+            Some("session-1".into()),
+            None,
+        );
+        entry1.work_id = Some("TICKET-090".to_string());
+        entry1.branch = Some("gah/gah-123".to_string());
+        entry1.mr_url = Some("https://github.com/owner/gah/pull/123".to_string());
+        entry1.timestamp = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+
+        let mut entry2 = LedgerEntry::new(
+            "test",
+            &gah_prof,
+            "codex",
+            "improve",
+            &ticket_path.display().to_string(),
+            Some("session-2".into()),
+            None,
+        );
+        entry2.work_id = Some("TICKET-090".to_string());
+        entry2.branch = Some("gah/gah-456".to_string());
+        entry2.mr_url = Some("https://github.com/owner/gah/pull/456".to_string());
+        entry2.timestamp = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+
+        // Write both entries to the ledger
+        let ledger_line1 = serde_json::to_string(&entry1).unwrap();
+        let ledger_line2 = serde_json::to_string(&entry2).unwrap();
+        fs::write(
+            &ledger_path,
+            format!("{}\n{}\n", ledger_line1, ledger_line2),
+        )
+        .unwrap();
+
+        // Now check duplicate work for worldcup-props repo with the same work_id
+        let args = super::DispatchArgs {
+            profile: "test".to_string(),
+            mode: "improve".to_string(),
+            backend: "codex".to_string(),
+            target: ticket_path.display().to_string(),
+            branch: None,
+            mr: None,
+            current_branch: false,
+            budget: 0,
+            dry_run: false,
+            config_path: None,
+            oh_profile: None,
+            model: None,
+            retries: 0,
+            allow_draft_fail: false,
+            prod: false,
+            allow_unknown_red_baseline: false,
+            escalate: false,
+        };
+
+        // This should NOT fail even though there are ledger entries with the same work_id
+        // because they belong to a different repo (gah vs worldcup-props)
+        let res = super::check_duplicate_work(&cfg, &worldcup_prof, &args);
+        assert!(
+            res.is_ok(),
+            "duplicate-work guard must ignore ledger entries from a different repo"
+        );
     }
 }
 
