@@ -6191,8 +6191,7 @@ fn is_issue_number_reference(s: &str) -> bool {
     }
 
     // Check for "#42" format
-    if trimmed.starts_with('#') {
-        let number_part = &trimmed[1..];
+    if let Some(number_part) = trimmed.strip_prefix('#') {
         return !number_part.is_empty() && number_part.chars().all(|c| c.is_ascii_digit());
     }
 
@@ -6207,8 +6206,7 @@ fn extract_issue_number(s: &str) -> Option<String> {
         return None;
     }
 
-    let number_str = if trimmed.starts_with('#') {
-        let number_part = &trimmed[1..];
+    let number_str = if let Some(number_part) = trimmed.strip_prefix('#') {
         if number_part.is_empty() {
             return None;
         }
