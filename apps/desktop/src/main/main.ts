@@ -23,7 +23,9 @@ function createWindow() {
     title: 'Git Agent Harness Desktop'
   });
 
-  if (import.meta.env.DEV) {
+  // Check if in development mode - Vite/Electron inject import.meta.env
+  const isDev = (import.meta as unknown as { env: { DEV?: boolean } }).env?.DEV || false;
+  if (isDev) {
     mainWindow.loadURL('http://localhost:3000');
     mainWindow.webContents.openDevTools();
   } else {
@@ -35,39 +37,43 @@ function createWindow() {
   });
 }
 
-function startServer() {
-  return new Promise((resolve, reject) => {
-    const serverPath = resolve(__dirname, '../../../apps/server/dist/bin.js');
+function startServer(): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const serverPath = join(__dirname, '../../../apps/server/dist/bin.js');
     
     console.log(`Starting server from: ${serverPath}`);
     
     serverProcess = spawn('node', [serverPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      cwd: resolve(__dirname, '../../../apps/server')
+      cwd: join(__dirname, '../../../apps/server')
     });
 
-    serverProcess.stdout?.on('data', (data) => {
-      console.log(`[Server] ${data.toString().trim()}`);
-      if (data.toString().includes('listening on port')) {
-        resolve(void 0);
-      }
-    });
+    if (serverProcess) {
+      serverProcess.stdout?.on('data', (data) => {
+        console.log(`[Server] ${data.toString().trim()}`);
+        if (data.toString().includes('listening on port')) {
+          resolve();
+        }
+      });
 
-    serverProcess.stderr?.on('data', (data) => {
-      console.error(`[Server Error] ${data.toString().trim()}`);
-    });
+      serverProcess.stderr?.on('data', (data) => {
+        console.error(`[Server Error] ${data.toString().trim()}`);
+      });
 
-    serverProcess.on('error', (error) => {
-      console.error('Server process error:', error);
-      reject(error);
-    });
+      serverProcess.on('error', (error) => {
+        console.error('Server process error:', error);
+        reject(error);
+      });
 
-    serverProcess.on('exit', (code) => {
-      console.log(`Server process exited with code ${code}`);
-      if (code !== 0) {
-        reject(new Error(`Server process exited with code ${code}`));
-      }
-    });
+      serverProcess.on('exit', (code) => {
+        console.log(`Server process exited with code ${code}`);
+        if (code !== 0) {
+          reject(new Error(`Server process exited with code ${code}`));
+        }
+      });
+    } else {
+      reject(new Error('Failed to spawn server process'));
+    }
   });
 }
 

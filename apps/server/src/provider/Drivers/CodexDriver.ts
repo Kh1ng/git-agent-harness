@@ -4,7 +4,7 @@
  * Will be fully implemented to match t3code's CodexDriver
  */
 
-import type { ProviderDriver, ProviderDriverEnv } from '../ProviderDriver.js';
+import type { ProviderDriver, ProviderDriverEnv, ProviderDriverInstance } from '../ProviderDriver.js';
 import type { ProviderKind, ServerProvider, Session } from '@git-agent-harness/contracts';
 import { getProviderRegistry } from '../ProviderRegistry.js';
 import { getSessionManager } from '../../sessions/SessionManager.js';

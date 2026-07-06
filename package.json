@@ -10,13 +10,13 @@
     "dev:desktop": "node scripts/dev-runner.js dev:desktop",
     "start": "node apps/server/dist/bin.js",
     "start:desktop": "node apps/desktop/scripts/start-electron.js",
-    "build": "pnpm run build:rust && pnpm run build:server && pnpm run build:web && pnpm run build:desktop",
-    "build:rust": "cd rust-backend && cargo build --release",
-    "build:server": "cd apps/server && pnpm run build",
-    "build:web": "cd apps/web && pnpm run build",
-    "build:desktop": "cd apps/desktop && pnpm run build",
-    "typecheck": "pnpm run typecheck:server && pnpm run typecheck:web && pnpm run typecheck:desktop",
-    "lint": "pnpm run lint:server && pnpm run lint:web && pnpm run lint:desktop",
+    "build": "npm run build:rust && npm run --workspace=apps/server build && npm run --workspace=apps/web build && npm run --workspace=apps/desktop build",
+    "build:rust": "cargo build --release",
+    "build:server": "npm run --workspace=apps/server build",
+    "build:web": "npm run --workspace=apps/web build",
+    "build:desktop": "npm run --workspace=apps/desktop build",
+    "typecheck": "npm run --workspace=apps/server typecheck && npm run --workspace=apps/web typecheck && npm run --workspace=apps/desktop typecheck",
+    "lint": "npm run --workspace=apps/server lint && npm run --workspace=apps/web lint && npm run --workspace=apps/desktop lint",
     "clean": "rm -rf apps/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist"
   },
   "devDependencies": {
@@ -26,7 +26,6 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "packageManager": "pnpm@8.0.0",
   "workspaces": [
     "apps/*",
     "packages/*"

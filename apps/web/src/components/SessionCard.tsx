@@ -40,7 +40,7 @@ const modeIcons: Record<string, string> = {
 export function SessionCard({ session, onClick }: SessionCardProps) {
   const statusColor = statusColors[session.status] || 'bg-gray-100 text-gray-800';
   const providerIcon = providerIcons[session.providerKind] || '📦';
-  const modeIcon = modeIcons[session.mode] || '🎯';
+  const modeIcon = session.mode ? (modeIcons[session.mode] || '🎯') : '🎯';
 
   return (
     <div 

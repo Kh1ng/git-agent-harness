@@ -19,7 +19,8 @@ type WebSocketContextType = {
 
 const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
 
-const SERVER_WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:3773';
+// Vite injects import.meta.env - use type assertion for TypeScript
+const SERVER_WS_URL = (import.meta as unknown as { env: { VITE_WS_URL?: string } }).env?.VITE_WS_URL || 'ws://localhost:3773';
 
 export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [socket, setSocket] = useState<WebSocket | null>(null);
@@ -63,8 +64,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         setSocket(null);
       };
 
-      newSocket.onerror = (errorEvent) => {
-        setError(errorEvent.message || 'WebSocket connection error');
+      newSocket.onerror = (errorEvent: Event) => {
+        // ErrorEvent has message property but is typed as Event
+        const errorMessage = 'message' in errorEvent && typeof errorEvent.message === 'string' ? errorEvent.message : 'WebSocket connection error';
+        setError(errorMessage);
         setIsConnecting(false);
       };
 

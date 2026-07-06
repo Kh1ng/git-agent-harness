@@ -11,14 +11,14 @@ const command = args[0];
 
 const scripts = {
   'dev': () => {
-    const server = spawn('pnpm', ['--filter', 'gah-server', 'run', 'dev'], {
+    const server = spawn('npm', ['run', 'dev'], {
       stdio: 'inherit',
-      cwd: path.resolve(__dirname, '..')
+      cwd: path.resolve(__dirname, '..', 'apps/server')
     });
     
-    const web = spawn('pnpm', ['--filter', 'gah-web', 'run', 'dev'], {
+    const web = spawn('npm', ['run', 'dev'], {
       stdio: 'inherit',
-      cwd: path.resolve(__dirname, '..')
+      cwd: path.resolve(__dirname, '..', 'apps/web')
     });
     
     ['SIGINT', 'SIGTERM'].forEach(signal => {
@@ -30,21 +30,21 @@ const scripts = {
     });
   },
   'dev:server': () => {
-    spawn('pnpm', ['--filter', 'gah-server', 'run', 'dev'], {
+    spawn('npm', ['run', 'dev'], {
       stdio: 'inherit',
-      cwd: path.resolve(__dirname, '..')
+      cwd: path.resolve(__dirname, '..', 'apps/server')
     });
   },
   'dev:web': () => {
-    spawn('pnpm', ['--filter', 'gah-web', 'run', 'dev'], {
+    spawn('npm', ['run', 'dev'], {
       stdio: 'inherit',
-      cwd: path.resolve(__dirname, '..')
+      cwd: path.resolve(__dirname, '..', 'apps/web')
     });
   },
   'dev:desktop': () => {
-    spawn('pnpm', ['--filter', 'gah-desktop', 'run', 'start'], {
+    spawn('npm', ['run', 'start'], {
       stdio: 'inherit',
-      cwd: path.resolve(__dirname, '..')
+      cwd: path.resolve(__dirname, '..', 'apps/desktop')
     });
   }
 };

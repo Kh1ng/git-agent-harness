@@ -3,9 +3,6 @@
  * Inspired by t3code architecture but adapted for GAH needs
  */
 
-import * as T from "effect/Effect";
-import * as S from "effect/Schema";
-
 // Provider types
 export type ProviderKind = 
   | "github" 
@@ -32,24 +29,24 @@ export type ProviderStatus =
 export type SessionId = string;
 export type SessionStatus = "idle" | "starting" | "running" | "stopping" | "stopped" | "error";
 
-export const SessionSchema = S.Struct({
-  id: S.String,
-  providerKind: S.Literal(...["github", "gitlab", "codex", "claude", "cursor", "opencode", "grok", "openhands", "agy", "vibe", "auto"] as const),
-  instanceId: S.String,
-  status: S.Literal(...["idle", "starting", "running", "stopping", "stopped", "error"] as const),
-  startedAt: S.optional(S.String),
-  endedAt: S.optional(S.String),
-  error: S.optional(S.String),
-  repo: S.optional(S.String),
-  branch: S.optional(S.String),
-  target: S.optional(S.String),
-  mode: S.optional(S.String),
-  backend: S.optional(S.String),
-  model: S.optional(S.String),
-  budget: S.optional(S.Number),
-});
-
-export type Session = S.Schema.To<typeof SessionSchema>;
+// Session type - manually defined instead of using Effect Schema
+// to avoid version compatibility issues
+export interface Session {
+  id: SessionId;
+  providerKind: ProviderKind;
+  instanceId: ProviderInstanceId;
+  status: SessionStatus;
+  startedAt?: string;
+  endedAt?: string;
+  error?: string;
+  repo?: string;
+  branch?: string;
+  target?: string;
+  mode?: string;
+  backend?: string;
+  model?: string;
+  budget?: number;
+}
 
 // WebSocket message types
 export type ServerMessage = 
