@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
-import { tauri } from '@tauri-apps/vite-plugin-tauri';
+import tauri from 'vite-plugin-tauri';
 import path from 'path';
 
 export default defineConfig({
