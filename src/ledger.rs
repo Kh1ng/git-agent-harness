@@ -349,6 +349,52 @@ pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
     Ok(entries)
 }
 
+/// TICKET-125: review mode's own ledger entry records the reviewer's
+/// backend/model, not the implementation's -- grouping/cost-vs-quality
+/// reporting needs the verdict attributed back to whichever backend
+/// actually wrote the code being reviewed. Finds the most recent fix/improve
+/// entry for `branch` that doesn't already have a verdict and updates it
+/// in place (the ledger has no other mutation path today; this is the one
+/// exception, and it's rare enough -- once per review completion -- not to
+/// need more than a full read-modify-write of the file).
+pub fn backfill_review_verdict(
+    cfg: &GahConfig,
+    branch: &str,
+    verdict: &str,
+    confidence: &str,
+    reviewer_backend: &str,
+    reviewer_model: Option<&str>,
+) -> Result<bool> {
+    let mut entries = read_entries(cfg)?;
+    let target_idx = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            e.branch.as_deref() == Some(branch)
+                && matches!(e.mode.as_str(), "fix" | "improve")
+                && e.review_verdict.is_none()
+        })
+        .max_by_key(|(_, e)| e.timestamp.clone())
+        .map(|(idx, _)| idx);
+
+    let Some(idx) = target_idx else {
+        return Ok(false);
+    };
+    entries[idx].review_verdict = Some(verdict.to_string());
+    entries[idx].review_confidence = Some(confidence.to_string());
+    entries[idx].reviewer_backend = Some(reviewer_backend.to_string());
+    entries[idx].reviewer_model = reviewer_model.map(|m| m.to_string());
+
+    let path = cfg.defaults.ledger_path();
+    let mut out = String::new();
+    for entry in &entries {
+        out.push_str(&serde_json::to_string(entry).context("serializing ledger entry")?);
+        out.push('\n');
+    }
+    fs::write(&path, out).with_context(|| format!("rewriting ledger {}", path.display()))?;
+    Ok(true)
+}
+
 /// TICKET-096: the query sync/reconciliation needs to associate a
 /// `SyncMr.work_id` (extracted from a PR/MR title) back to the ledger
 /// entries that dispatched it. No new sync-side structure required.
@@ -937,27 +983,6 @@ pub mod summary {
                     }
                 }
 
-                // If there's no review_verdict but validation_result contains review-like values
-                if entry.review_verdict.is_none() {
-                    if let Some(val_result) = &entry.validation_result {
-                        if matches!(
-                            val_result.as_str(),
-                            "APPROVE_STRONG"
-                                | "APPROVE_WEAK"
-                                | "NEEDS_FIX"
-                                | "REJECT"
-                                | "HUMAN_REVIEW"
-                        ) {
-                            *review_verdict_distribution
-                                .entry(val_result.clone())
-                                .or_default() += 1;
-                            if val_result == "APPROVE_STRONG" {
-                                approve_strong_count += 1;
-                            }
-                        }
-                    }
-                }
-
                 // Sum up costs
                 if let Some(cost) = entry.usage.actual_cost_usd {
                     total_cost_usd += cost;
@@ -1107,9 +1132,9 @@ pub fn usage_summary_for_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        append, entries_for_work_id, index_entries_by_work_id, is_strong_model, reconcile,
-        usage_summary_for_backend, FailureClass, FailureStage, GroupBy, LedgerEntry,
-        RoutingCandidateDiagnostic, RoutingDiagnostics,
+        append, backfill_review_verdict, entries_for_work_id, index_entries_by_work_id,
+        is_strong_model, read_entries, reconcile, usage_summary_for_backend, FailureClass,
+        FailureStage, GroupBy, LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
@@ -1702,6 +1727,68 @@ mod tests {
     // TICKET-125: Tests for the new grouping functionality
 
     #[test]
+    fn backfill_review_verdict_attributes_to_implementation_entry_not_reviewer() {
+        let (_tmp, cfg) = test_config();
+        let mut impl_entry =
+            LedgerEntry::new("test", &profile(), "vibe", "improve", "test1", None, None);
+        impl_entry.effective_backend = "vibe".to_string();
+        impl_entry.branch = Some("gah/gah-123".to_string());
+        append(&cfg, &impl_entry).unwrap();
+
+        // The review dispatch's own entry -- a different backend (the
+        // reviewer), must not be the one that ends up carrying the verdict.
+        let mut review_entry =
+            LedgerEntry::new("test", &profile(), "claude", "review", "test1", None, None);
+        review_entry.effective_backend = "claude".to_string();
+        review_entry.branch = Some("gah/gah-123".to_string());
+        append(&cfg, &review_entry).unwrap();
+
+        let found = backfill_review_verdict(
+            &cfg,
+            "gah/gah-123",
+            "NEEDS_FIX",
+            "high",
+            "claude",
+            Some("claude-sonnet-4"),
+        )
+        .unwrap();
+        assert!(found);
+
+        let entries = read_entries(&cfg).unwrap();
+        let updated_impl = entries
+            .iter()
+            .find(|e| e.mode == "improve")
+            .expect("implementation entry still present");
+        assert_eq!(updated_impl.effective_backend, "vibe");
+        assert_eq!(updated_impl.review_verdict.as_deref(), Some("NEEDS_FIX"));
+        assert_eq!(updated_impl.reviewer_backend.as_deref(), Some("claude"));
+
+        let review_entry_after = entries
+            .iter()
+            .find(|e| e.mode == "review")
+            .expect("review entry still present");
+        assert_eq!(
+            review_entry_after.review_verdict, None,
+            "the reviewer's own entry must not be the one carrying the verdict"
+        );
+    }
+
+    #[test]
+    fn backfill_review_verdict_returns_false_when_no_matching_branch() {
+        let (_tmp, cfg) = test_config();
+        let found = backfill_review_verdict(
+            &cfg,
+            "gah/no-such-branch",
+            "APPROVE_STRONG",
+            "high",
+            "codex",
+            None,
+        )
+        .unwrap();
+        assert!(!found);
+    }
+
+    #[test]
     fn group_by_enum_parsing() {
         assert_eq!("backend".parse::<GroupBy>().unwrap(), GroupBy::Backend);
         assert_eq!("model".parse::<GroupBy>().unwrap(), GroupBy::Model);
@@ -1839,31 +1926,4 @@ mod tests {
         assert!(grouped.is_none());
     }
 
-    #[test]
-    fn build_grouped_summary_with_fallback_to_validation_result() {
-        let (_tmp, _cfg) = test_config();
-        let mut entry1 =
-            LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
-        entry1.effective_backend = "codex".to_string();
-        entry1.effective_model = Some("gpt-4".to_string());
-        entry1.review_verdict = None; // No review_verdict
-        entry1.validation_result = Some("APPROVE_STRONG".to_string()); // But has validation_result
-
-        let entries = vec![entry1];
-        let grouped = super::summary::build_grouped_summary(&entries, |entry| {
-            entry.effective_backend.clone()
-        });
-
-        assert!(grouped.is_some());
-        let grouped = grouped.unwrap();
-        assert_eq!(grouped.len(), 1);
-
-        let codex_group = &grouped[0];
-        assert_eq!(
-            codex_group
-                .review_verdict_distribution
-                .get("APPROVE_STRONG"),
-            Some(&1)
-        );
-    }
 }
