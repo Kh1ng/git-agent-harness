@@ -1965,31 +1965,6 @@ fn review(
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
     let repo = Path::new(&profile.local_path);
-    let route = decide_route(
-        cfg,
-        profile,
-        RouteRequest {
-            last_failure_class: None,
-            mode: "review",
-            requested_backend: &args.backend,
-            requested_model: args.model.as_deref(),
-            recommended_backend: None,
-            recommended_model: None,
-            session_id: session_dir.file_name().and_then(|s| s.to_str()),
-            usage_summary: None,
-        },
-        ledger,
-    )?;
-    apply_route_to_ledger(ledger, &route);
-    let required_capabilities = review_preflight(cfg, profile, &route.effective_backend)?;
-    let mut capability_prefix = String::new();
-    let mut applied_capabilities = vec![];
-    for capability in &required_capabilities {
-        let prefix = crate::capability::activation_prefix(capability)
-            .expect("review_preflight already validated an activation mapping exists");
-        capability_prefix.push_str(prefix);
-        applied_capabilities.push(capability.clone());
-    }
     let mut target = resolve_review_target(cfg, profile, args)?;
     if target.prior_state.is_none() {
         target.prior_state =
@@ -2021,8 +1996,10 @@ fn review(
         diff_bundle.files.lines().count()
     );
 
-    let prompt = format!(
-        "{}Review this diff for correctness, test coverage, and safety. \
+    // Everything except the capability-activation prefix is identical
+    // regardless of which backend ends up running the review.
+    let prompt_suffix = format!(
+        "Review this diff for correctness, test coverage, and safety. \
          Return two sections:\n\
          1. Markdown review notes.\n\
          2. A JSON object with fields: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes.\n\
@@ -2036,7 +2013,6 @@ fn review(
          Repo: {}. MR: {}. Source: {}. Target: {}. CI status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
          Prior run state:\n{}\n\nDiff:\n```\n{}\n```\nChanged files:\n{}",
-        capability_prefix,
         profile.repo,
         target.mr_id.as_deref().unwrap_or("n/a"),
         target.source_branch,
@@ -2059,15 +2035,98 @@ fn review(
     } else {
         runner::load_env_file(resolved_env)
     };
-    let result = runner::run_review_backend(
+
+    let mut route = decide_route(
+        cfg,
         profile,
-        &route.effective_backend,
-        repo,
-        &prompt,
-        session_dir,
-        route.effective_model.as_deref(),
-        &env_vars,
-    );
+        RouteRequest {
+            last_failure_class: None,
+            mode: "review",
+            requested_backend: &args.backend,
+            requested_model: args.model.as_deref(),
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: session_dir.file_name().and_then(|s| s.to_str()),
+            usage_summary: None,
+        },
+        ledger,
+    )?;
+
+    // Bounded retry across review_candidates: an empty/unavailable-backend
+    // outcome (e.g. AGY quota exhaustion -- see agy_empty_output_diagnosis)
+    // used to fail the whole review outright even though review_candidates
+    // often lists real fallbacks (agy-second, claude) that just sat unused.
+    const MAX_REVIEW_ATTEMPTS: usize = 3;
+    let mut applied_capabilities = vec![];
+    let mut result = None;
+    for attempt_number in 0..MAX_REVIEW_ATTEMPTS {
+        apply_route_to_ledger(ledger, &route);
+        let required_capabilities = review_preflight(cfg, profile, &route.effective_backend)?;
+        let mut capability_prefix = String::new();
+        applied_capabilities.clear();
+        for capability in &required_capabilities {
+            let prefix = crate::capability::activation_prefix(capability)
+                .expect("review_preflight already validated an activation mapping exists");
+            capability_prefix.push_str(prefix);
+            applied_capabilities.push(capability.clone());
+        }
+        let prompt = format!("{capability_prefix}{prompt_suffix}");
+
+        let attempt = runner::run_review_backend(
+            profile,
+            &route.effective_backend,
+            repo,
+            &prompt,
+            session_dir,
+            route.effective_model.as_deref(),
+            &env_vars,
+        );
+        let is_last_attempt = attempt_number + 1 == MAX_REVIEW_ATTEMPTS;
+        if !is_last_attempt {
+            if let runner::ReviewProcessOutcome::NonZeroExit(_) = attempt.outcome {
+                if let Some(parsed) = mark_backend_unavailable_from_output(
+                    &route.effective_backend,
+                    route.effective_model.as_deref(),
+                    None,
+                    &attempt.stdout,
+                    &session_dir.join("review-stdout.log").display().to_string(),
+                )? {
+                    let rerouted = decide_route(
+                        cfg,
+                        profile,
+                        RouteRequest {
+                            last_failure_class: None,
+                            mode: "review",
+                            requested_backend: &args.backend,
+                            requested_model: args.model.as_deref(),
+                            recommended_backend: None,
+                            recommended_model: None,
+                            session_id: session_dir.file_name().and_then(|s| s.to_str()),
+                            usage_summary: None,
+                        },
+                        ledger,
+                    )?;
+                    let current_identity =
+                        route_identity(&route.effective_backend, route.effective_model.as_deref());
+                    let rerouted_identity = route_identity(
+                        &rerouted.effective_backend,
+                        rerouted.effective_model.as_deref(),
+                    );
+                    if rerouted_identity != current_identity {
+                        println!(
+                            "Backend unavailable; retrying review with {} instead of {} ({:?})",
+                            rerouted.effective_backend, route.effective_backend, parsed.kind
+                        );
+                        route = rerouted;
+                        continue;
+                    }
+                }
+            }
+        }
+        result = Some(attempt);
+        break;
+    }
+    let result = result.expect("loop always runs at least one attempt (MAX_REVIEW_ATTEMPTS > 0)");
     println!("Review backend duration: {:.1}s", result.duration_secs);
     let report_path = session_dir.join("review-report.md");
     let verdict_path = session_dir.join("review-verdict.json");

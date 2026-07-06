@@ -1706,6 +1706,83 @@ fn review_routes_to_agy_candidate_and_writes_verdict() {
     assert!(prompt.contains("Claude Sonnet 4.6 (Thinking)"));
 }
 
+/// Regression: review mode used to fail the whole dispatch outright on an
+/// empty-output AGY failure (quota exhaustion, exit=0) even when
+/// review_candidates listed a real fallback -- the candidate list was
+/// consulted once for the initial route, then never touched again. Fakes
+/// AGY returning empty stdout with a RESOURCE_EXHAUSTED cli.log (the exact
+/// live failure signature) and confirms review actually falls through to
+/// the next candidate instead of erroring.
+#[test]
+fn review_falls_back_to_next_candidate_on_agy_empty_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
+
+    let fake_home = tmp.path().join("fake-home");
+    fs::create_dir_all(fake_home.join(".gemini/antigravity-cli")).unwrap();
+    fs::write(
+        fake_home.join(".gemini/antigravity-cli/cli.log"),
+        "E0000 00:00:00.000000 1 log.go:398] RESOURCE_EXHAUSTED (code 429): \
+         Individual quota reached. Resets in 114h2m37s.\n",
+    )
+    .unwrap();
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    // Exit 0, empty stdout -- the real live failure mode, not a nonzero exit.
+    make_fake_bin_with_body(&fake_bin, "agy", "#!/bin/sh\nexit 0\n");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}\nEOF\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
+    );
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_candidates = [{ backend = \"agy\", model = \"Claude Sonnet 4.6 (Thinking)\" }, { backend = \"claude\" }]\n",
+        "",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &fake_home)
+        .env(
+            "GAH_AVAILABILITY_PATH",
+            tmp.path().join("availability.json"),
+        )
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Backend unavailable; retrying review",
+        ));
+
+    let sessions = tmp.path().join("artifacts/real/sessions");
+    let session = latest_child_dir(&sessions);
+    let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
+    assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
+}
+
 #[test]
 fn review_uses_explicit_claude_path() {
     let tmp = tempfile::tempdir().unwrap();

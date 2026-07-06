@@ -426,6 +426,49 @@ pub fn run_agy(
     )
 }
 
+/// AGY sometimes exits 0 with empty stdout on a provider-side failure
+/// (quota exhaustion, expired auth) instead of a non-zero exit -- shared
+/// by the worker path (run_agy_with_executable) and the review path
+/// (run_review_backend), both of which treat that as a failure needing a
+/// real diagnosis, not a silently-empty "success".
+fn agy_empty_output_diagnosis(env_vars: &[(String, String)], executable: &Path) -> String {
+    let agy_home = env_vars
+        .iter()
+        .find(|(k, _)| k == "HOME")
+        .map(|(_, v)| v.as_str())
+        .map(|h| h.to_string())
+        .or_else(|| std::env::var("HOME").ok());
+    let Some(home) = agy_home else {
+        return "AGY produced no output (exit=0) and HOME is unset — cannot inspect cli.log."
+            .to_string();
+    };
+    let agy_log = PathBuf::from(home).join(".gemini/antigravity-cli/cli.log");
+    let Ok(contents) = fs::read_to_string(&agy_log) else {
+        return format!(
+            "AGY produced no output (exit=0).  Check {} for details.",
+            agy_log.display(),
+        );
+    };
+    if contents.contains("RESOURCE_EXHAUSTED") || contents.contains("429") {
+        format!(
+            "AGY quota exhausted (exit=0 empty output).  See {}.  Resets ~{}.",
+            agy_log.display(),
+            extract_reset_time(&contents).unwrap_or_else(|| "unknown".into()),
+        )
+    } else if contents.contains("not logged into Antigravity") || contents.contains("not logged in")
+    {
+        format!(
+            "AGY not authenticated.  Run `{}` interactively to log in.",
+            executable.display(),
+        )
+    } else {
+        format!(
+            "AGY produced no output (exit=0).  Check {} for details.",
+            agy_log.display(),
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_agy_with_executable(
     executable: &Path,
@@ -548,46 +591,7 @@ pub fn run_agy_with_executable(
     // auth has expired.  Treat empty output at exit 0 as a failure and
     // try to classify the real cause from AGY's own log.
     if trimmed.is_empty() && exit_code == 0 {
-        let err_msg = {
-            let agy_home = env_vars
-                .iter()
-                .find(|(k, _)| k == "HOME")
-                .map(|(_, v)| v.as_str())
-                .map(|h| h.to_string())
-                .or_else(|| std::env::var("HOME").ok());
-            if let Some(ref home) = agy_home {
-                let agy_log = PathBuf::from(home).join(".gemini/antigravity-cli/cli.log");
-                if let Ok(contents) = fs::read_to_string(&agy_log) {
-                    if contents.contains("RESOURCE_EXHAUSTED") || contents.contains("429") {
-                        format!(
-                            "AGY quota exhausted (exit=0 empty output).  See {}.  Resets ~{}.",
-                            agy_log.display(),
-                            extract_reset_time(&contents).unwrap_or_else(|| "unknown".into()),
-                        )
-                    } else if contents.contains("not logged into Antigravity")
-                        || contents.contains("not logged in")
-                    {
-                        format!(
-                            "AGY not authenticated.  Run `{}` interactively to log in.",
-                            executable.display(),
-                        )
-                    } else {
-                        format!(
-                            "AGY produced no output (exit=0).  Check {} for details.",
-                            agy_log.display(),
-                        )
-                    }
-                } else {
-                    format!(
-                        "AGY produced no output (exit=0).  Check {} for details.",
-                        agy_log.display(),
-                    )
-                }
-            } else {
-                "AGY produced no output (exit=0) and HOME is unset — cannot inspect cli.log."
-                    .to_string()
-            }
-        };
+        let err_msg = agy_empty_output_diagnosis(env_vars, executable);
 
         if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
             use std::io::Write;
@@ -833,10 +837,30 @@ pub fn run_review_backend(
         let _ = handle.join();
     }
 
+    let mut stdout = read_text_file(&stdout_path);
+    // AGY sometimes exits 0 with empty stdout on a provider-side failure
+    // (quota exhaustion, expired auth) -- the same silent-success failure
+    // mode already handled for the worker path in run_agy_with_executable.
+    // Left as Success here, parse_review_verdict would just fail with an
+    // opaque "reviewer did not return verdict JSON" and never give the
+    // caller (dispatch::review) a chance to recognize the real cause and
+    // reroute to the next review_candidates entry -- so diagnose it the
+    // same way the worker path does, and put the diagnosis in stdout
+    // where mark_backend_unavailable_from_output can actually see it.
+    let outcome = if matches!(backend, "agy" | "agy-main" | "agy-second")
+        && matches!(outcome, ReviewProcessOutcome::Success)
+        && stdout.trim().is_empty()
+    {
+        stdout = agy_empty_output_diagnosis(env_vars, &executable);
+        ReviewProcessOutcome::NonZeroExit(-1)
+    } else {
+        outcome
+    };
+
     ReviewRunResult {
         outcome,
         duration_secs: start.elapsed().as_secs_f64(),
-        stdout: read_text_file(&stdout_path),
+        stdout,
         stderr: read_text_file(&stderr_path),
     }
 }
