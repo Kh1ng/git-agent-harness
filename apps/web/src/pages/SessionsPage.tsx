@@ -22,6 +22,7 @@ export function SessionsPage({
     sendMessage({
       type: 'session.start',
       requestId: `req_${Date.now()}`,
+      profile: 'gah',
       providerKind: 'github',
       instanceId: 'github_instance_0',
       repo: 'owner/repo',

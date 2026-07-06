@@ -60,6 +60,7 @@ class GitHubDriverImpl implements ProviderDriverInstance<GitHubDriverEnv> {
   }
   
   async startSession(options: {
+    profile: string;
     repo: string;
     branch?: string;
     target?: string;
