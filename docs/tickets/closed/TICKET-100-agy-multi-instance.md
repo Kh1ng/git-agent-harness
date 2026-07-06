@@ -1,5 +1,9 @@
 # TICKET-100: Add isolated multiple AGY backend instances
 
+Status: [MERGED] — already implemented (agy_second_home, backend_command_name
+agy-main/agy-second variants, wrapper scripts). Re-confirmed 2026-07-05: vibe
+investigated fresh, all acceptance criteria met, no changes needed.
+
 Goal: Support two independently authenticated AGY instances (agy-main, agy-second) as distinct GAH backend resources with separate availability and ledger identity.
 
 Difficulty: medium
