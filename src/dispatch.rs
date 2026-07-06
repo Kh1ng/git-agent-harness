@@ -1339,8 +1339,6 @@ fn improve(
     // real changes are still uncommitted working-tree modifications) always
     // reported "0 file(s) changed, +0, -0" in the MR body.
     apply_diff_stats(ledger, &wt, &profile.default_target_branch);
-    let changed_files =
-        worktree::changed_files(&wt, &profile.default_target_branch).unwrap_or_default();
     ledger.push_attempted = true;
     worktree::push_branch(&wt, &branch, &push_url, &push_pat)?;
     ledger.push_succeeded = true;
@@ -1357,7 +1355,6 @@ fn improve(
         branch: &branch,
         target_branch: &profile.default_target_branch,
         validation_commands: &profile.validation_commands,
-        changed_files: &changed_files,
         ledger,
         backend_summary: &backend_summary,
     };
@@ -1564,8 +1561,6 @@ fn experiment(
     }
     // Must run after the commit above -- see the fix mode call site for why.
     apply_diff_stats(ledger, &wt, &profile.default_target_branch);
-    let changed_files =
-        worktree::changed_files(&wt, &profile.default_target_branch).unwrap_or_default();
     ledger.push_attempted = true;
     worktree::push_branch(&wt, &branch, &push_url, &push_pat)?;
     ledger.push_succeeded = true;
@@ -1573,12 +1568,8 @@ fn experiment(
     let mr_ctx = ExperimentMrRenderContext {
         backend: &route.effective_backend,
         model: &llm.model,
-        branch: &branch,
-        target_branch: &profile.default_target_branch,
         artifact_count,
         answered,
-        changed_files: &changed_files,
-        ledger,
         backend_summary: &backend_summary,
     };
     let mr_body = build_experiment_mr_body(&mr_ctx);
@@ -4293,7 +4284,6 @@ The parser should retain structured sections.\n\n\
         ledger.fallback_used = true;
 
         let validation_commands = vec!["cargo test".into(), "cargo fmt --check".into()];
-        let changed_files = vec!["src/dispatch.rs".into(), "tests/gah_cli.rs".into()];
         let backend_summary = "Fixed the PR description to include reasoning.";
         let ctx = MrRenderContext {
             backend: "codex",
@@ -4301,7 +4291,6 @@ The parser should retain structured sections.\n\n\
             branch: "gah/repo-123",
             target_branch: "main",
             validation_commands: &validation_commands,
-            changed_files: &changed_files,
             ledger: &ledger,
             backend_summary,
         };
@@ -4345,7 +4334,6 @@ The parser should retain structured sections.\n\n\
         );
 
         let validation_commands = Vec::new();
-        let changed_files = Vec::new();
         let backend_summary = "Fixed the issue.";
         let ctx = MrRenderContext {
             backend: "codex",
@@ -4353,7 +4341,6 @@ The parser should retain structured sections.\n\n\
             branch: "gah/repo-123",
             target_branch: "main",
             validation_commands: &validation_commands,
-            changed_files: &changed_files,
             ledger: &ledger,
             backend_summary,
         };
@@ -4381,17 +4368,12 @@ The parser should retain structured sections.\n\n\
         ledger.insertions = Some(8);
         ledger.deletions = Some(0);
 
-        let changed_files = vec!["reports/findings.md".into()];
         let backend_summary = "Generated research findings report.";
         let ctx = ExperimentMrRenderContext {
             backend: "codex",
             model: "gpt-5.4",
-            branch: "gah/exp-repo-123",
-            target_branch: "main",
             artifact_count: 3,
             answered: false,
-            changed_files: &changed_files,
-            ledger: &ledger,
             backend_summary,
         };
         let body = build_experiment_mr_body(&ctx);
@@ -5536,32 +5518,6 @@ fn format_failure_state(ledger: &LedgerEntry) -> Option<String> {
     None
 }
 
-#[allow(dead_code)]
-fn render_changed_files(changed_files: &[String], ledger: &LedgerEntry) -> Option<String> {
-    if changed_files.is_empty() && ledger.files_changed.is_none() {
-        return None;
-    }
-    let mut lines = Vec::new();
-    if let Some(count) = ledger.files_changed {
-        let insertions = ledger.insertions.unwrap_or(0);
-        let deletions = ledger.deletions.unwrap_or(0);
-        lines.push(format!(
-            "Summary: {} file(s) changed, +{}, -{}",
-            count, insertions, deletions
-        ));
-    }
-    for path in changed_files.iter().take(12) {
-        lines.push(format!("- `{path}`"));
-    }
-    if changed_files.len() > 12 {
-        lines.push(format!(
-            "- ... and {} more file(s)",
-            changed_files.len() - 12
-        ));
-    }
-    Some(lines.join("\n"))
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_standard_mr_body(
     mode: &str,
@@ -5596,8 +5552,6 @@ struct MrRenderContext<'a> {
     branch: &'a str,
     target_branch: &'a str,
     validation_commands: &'a [String],
-    #[allow(dead_code)]
-    changed_files: &'a [String],
     ledger: &'a LedgerEntry,
     backend_summary: &'a str,
 }
@@ -5716,16 +5670,8 @@ fn build_fix_or_improve_mr_body(
 struct ExperimentMrRenderContext<'a> {
     backend: &'a str,
     model: &'a str,
-    #[allow(dead_code)]
-    branch: &'a str,
-    #[allow(dead_code)]
-    target_branch: &'a str,
     artifact_count: usize,
     answered: bool,
-    #[allow(dead_code)]
-    changed_files: &'a [String],
-    #[allow(dead_code)]
-    ledger: &'a LedgerEntry,
     backend_summary: &'a str,
 }
 
