@@ -269,6 +269,8 @@ enum LedgerCommands {
         config_path: Option<String>,
         #[arg(long)]
         json: bool,
+        #[arg(long, value_enum, default_value = "none")]
+        group_by: ledger::GroupBy,
     },
     /// Backfill dispatched work with later provider outcomes (MR merged/closed)
     Reconcile {
@@ -350,11 +352,13 @@ fn main() -> Result<()> {
                 profile,
                 config_path,
                 json,
+                group_by,
             } => ledger::summary::run_with_json(
                 &since,
                 profile.as_deref(),
                 config_path.as_deref(),
                 json,
+                group_by,
             )?,
             LedgerCommands::Reconcile {
                 profile,
