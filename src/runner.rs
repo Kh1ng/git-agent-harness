@@ -342,6 +342,68 @@ pub fn run_claude_with_executable(
     })
 }
 
+/// Run Mistral's Vibe CLI non-interactively via `vibe -p`.
+/// Worker/fix backend only -- not wired into review (see runner::run_review_backend).
+/// extra_args come from profile.vibe_args (e.g. `--max-turns 40 --max-price 2`).
+/// No --model flag exists on this CLI; model selection is config/env-var
+/// driven on vibe's own side (VIBE_ACTIVE_MODEL / ~/.vibe/config.toml),
+/// not a per-invocation argument GAH can pass.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn run_vibe(
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    extra_args: &[String],
+    env_vars: &[(String, String)],
+) -> Result<RunResult> {
+    run_vibe_with_executable(
+        Path::new("vibe"),
+        worktree,
+        task,
+        session_dir,
+        extra_args,
+        env_vars,
+    )
+}
+
+pub fn run_vibe_with_executable(
+    executable: &Path,
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    extra_args: &[String],
+    env_vars: &[(String, String)],
+) -> Result<RunResult> {
+    let log_path = session_dir.join("backend-output.log");
+    fs::write(session_dir.join("task.md"), task)?;
+
+    let log_file = fs::File::create(&log_path).context("creating log file")?;
+    let log_err = log_file.try_clone()?;
+
+    let start = Instant::now();
+    let mut cmd = Command::new(executable);
+    // --trust: automation-only, not persisted to trusted_folders.toml --
+    // skips the interactive trust prompt without touching global config.
+    // --auto-approve: same automation need as agy's --dangerously-skip-permissions.
+    cmd.args(["-p", task, "--trust", "--auto-approve"])
+        .args(extra_args)
+        .current_dir(worktree)
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err));
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let status = cmd
+        .status()
+        .context("launching vibe; is it installed and on PATH?")?;
+
+    Ok(RunResult {
+        exit_code: status.code().unwrap_or(-1),
+        duration_secs: start.elapsed().as_secs_f64(),
+        log_path: log_path.to_string_lossy().into_owned(),
+    })
+}
+
 /// Run Antigravity CLI non-interactively via `agy --print`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn run_agy(
@@ -787,6 +849,7 @@ fn backend_command_name(name: &str) -> Option<&'static str> {
         "agy" => Some("agy"),
         "agy-main" => Some("agy-main"),
         "agy-second" => Some("agy-second"),
+        "vibe" => Some("vibe"),
         _ => None,
     }
 }
@@ -925,6 +988,8 @@ mod tests {
             claude_args: vec![],
             claude_path: None,
             agy_path: None,
+            vibe_args: vec![],
+            vibe_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
@@ -1264,6 +1329,82 @@ mod tests {
         assert!(err
             .to_string()
             .contains("launching claude; is it installed"));
+    }
+
+    // ── run_vibe ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_vibe_success_writes_stdout_and_stderr_to_log() {
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        let result = run_vibe(&f.worktree, "vibe task", &f.session_dir, &[], &envs).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("stdout-marker-vibe"));
+        assert!(log.contains("stderr-marker-vibe"));
+    }
+
+    #[test]
+    fn run_vibe_nonzero_exit_preserved() {
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 1);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap();
+
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn run_vibe_core_argv_always_includes_trust_and_auto_approve() {
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_vibe(
+            &f.worktree,
+            "the vibe task",
+            &f.session_dir,
+            &["--max-turns".to_string(), "40".to_string()],
+            &envs,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "-p");
+        assert!(argv.contains(&"the vibe task".to_string()));
+        assert!(argv.contains(&"--trust".to_string()));
+        assert!(argv.contains(&"--auto-approve".to_string()));
+        assert!(argv.contains(&"--max-turns".to_string()));
+        assert!(argv.contains(&"40".to_string()));
+    }
+
+    #[test]
+    fn run_vibe_propagates_env_file_vars() {
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            ("FROM_ENV_FILE".to_string(), "vibe-env-value".to_string()),
+        ];
+
+        run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap();
+
+        let env = recorded_env(&f.record_dir);
+        assert!(env.contains("FROM_ENV_FILE=vibe-env-value"));
+    }
+
+    #[test]
+    fn run_vibe_missing_binary_produces_useful_error() {
+        let f = fixture();
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        let err = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap_err();
+
+        assert!(err.to_string().contains("launching vibe; is it installed"));
     }
 
     // ── run_agy ─────────────────────────────────────────────────────────

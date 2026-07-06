@@ -532,6 +532,14 @@ fn run_backend(
                 .copied(),
             profile.agy_idle_timeout_seconds(),
         ),
+        "vibe" => runner::run_vibe_with_executable(
+            &runner::require_backend_executable(profile, backend)?,
+            wt,
+            task,
+            session_dir,
+            &profile.vibe_args,
+            &env_vars,
+        ),
         _ => runner::run_openhands(
             wt,
             task,
@@ -2467,6 +2475,8 @@ mod tests {
             claude_args: vec![],
             claude_path: None,
             agy_path: None,
+            vibe_args: vec![],
+            vibe_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
@@ -3271,6 +3281,66 @@ mod tests {
 
         let captured = fs::read_to_string(&argv_capture).unwrap();
         assert!(!captured.contains("--print-timeout"), "got: {captured}");
+    }
+
+    #[test]
+    fn run_backend_routes_vibe_to_run_vibe_not_the_openhands_fallthrough() {
+        // Regression: run_backend's match had a catch-all `_ => run_openhands(...)`.
+        // An unrecognized backend name silently ran openhands instead of
+        // erroring -- adding "vibe" without an explicit match arm would have
+        // silently spent real OpenHands API $ on every "vibe" dispatch instead
+        // of running vibe at all.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let marker = tmp.path().join("which-backend-ran.txt");
+
+        let fake_vibe = bin_dir.join("vibe");
+        fs::write(
+            &fake_vibe,
+            format!("#!/bin/sh\necho vibe > {}\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        fs::write(
+            bin_dir.join("openhands"),
+            format!("#!/bin/sh\necho openhands > {}\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for bin in ["vibe", "openhands"] {
+                let path = bin_dir.join(bin);
+                let mut perms = fs::metadata(&path).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&path, perms).unwrap();
+            }
+        }
+
+        let mut prof = profile(tmp.path());
+        prof.vibe_path = Some(fake_vibe.display().to_string());
+
+        let session_dir = tmp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let llm = crate::runner::LlmConfig {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "unused-for-vibe".to_string(),
+        };
+
+        run_backend(
+            "vibe",
+            &prof,
+            tmp.path(),
+            "do the thing",
+            &session_dir,
+            &llm,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&marker).unwrap().trim(), "vibe");
     }
 
     #[test]

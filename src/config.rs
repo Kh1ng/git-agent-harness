@@ -115,6 +115,13 @@ pub struct Profile {
     /// Optional absolute/relative path to the Antigravity CLI executable.
     #[serde(default)]
     pub agy_path: Option<String>,
+    /// Extra CLI args appended to `vibe -p` (e.g. `--max-turns 40 --max-price 2`).
+    /// Worker/fix backend only -- not wired into review.
+    #[serde(default)]
+    pub vibe_args: Vec<String>,
+    /// Optional absolute/relative path to the Mistral Vibe CLI executable.
+    #[serde(default)]
+    pub vibe_path: Option<String>,
     /// HOME override for the `agy-second` backend name only -- a distinct
     /// authenticated Antigravity account/quota pool from the default `agy`
     /// backend, which otherwise runs under the process's real $HOME. Same
@@ -381,6 +388,7 @@ impl Profile {
             "codex" => self.codex_path.as_deref(),
             "claude" => self.claude_path.as_deref(),
             "agy" | "agy-main" | "agy-second" => self.agy_path.as_deref(),
+            "vibe" => self.vibe_path.as_deref(),
             _ => None,
         }
     }
@@ -630,6 +638,8 @@ mod tests {
             claude_args: vec![],
             claude_path: None,
             agy_path: None,
+            vibe_args: vec![],
+            vibe_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,

@@ -172,7 +172,7 @@ enum Commands {
         profile: String,
         #[arg(long)]
         mode: String,
-        /// Backend: openhands, cloud-coder, codex, claude, agy, auto
+        /// Backend: openhands, cloud-coder, codex, claude, agy, vibe, auto
         #[arg(long, default_value = "auto")]
         backend: String,
         #[arg(long, default_value = "")]
