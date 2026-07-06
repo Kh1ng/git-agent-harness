@@ -919,6 +919,7 @@ fn improve(
     let max_attempts = args.retries + 1;
     let mut validation_failed = false;
     let mut prev_failure: Option<String> = None;
+    let mut backend_summary = String::new();
     for attempt in 0..max_attempts {
         println!(
             "\nAttempt {}/{}: running {} backend...",
@@ -982,6 +983,9 @@ fn improve(
             result.exit_code, result.duration_secs, result.log_path
         );
         ledger.backend_exit_code = Some(result.exit_code);
+
+        // Extract backend summary from the tail of the log
+        backend_summary = extract_backend_summary(&result.log_path);
 
         if result.exit_code != 0 {
             // The backend launched but exited nonzero — the backend itself
@@ -1302,7 +1306,7 @@ fn improve(
         worktree::cleanup(&wt, repo);
         return Ok(());
     }
-    let commit_msg = if validation_failed {
+    let commit_title = if validation_failed {
         format!(
             "gah: {} changes for {} [validation-failing draft]",
             args.mode, profile.repo_id
@@ -1310,6 +1314,11 @@ fn improve(
     } else {
         format!("gah: {} changes for {}", args.mode, profile.repo_id)
     };
+    let mut commit_msg = commit_title;
+    if !backend_summary.is_empty() {
+        commit_msg.push_str("\n\n");
+        commit_msg.push_str(&backend_summary);
+    }
 
     println!("Changes detected. Committing and pushing...");
     let push_url = profile.push_url()?;
@@ -1330,8 +1339,6 @@ fn improve(
     // real changes are still uncommitted working-tree modifications) always
     // reported "0 file(s) changed, +0, -0" in the MR body.
     apply_diff_stats(ledger, &wt, &profile.default_target_branch);
-    let changed_files =
-        worktree::changed_files(&wt, &profile.default_target_branch).unwrap_or_default();
     ledger.push_attempted = true;
     worktree::push_branch(&wt, &branch, &push_url, &push_pat)?;
     ledger.push_succeeded = true;
@@ -1348,8 +1355,8 @@ fn improve(
         branch: &branch,
         target_branch: &profile.default_target_branch,
         validation_commands: &profile.validation_commands,
-        changed_files: &changed_files,
         ledger,
+        backend_summary: &backend_summary,
     };
     let mr_body = build_fix_or_improve_mr_body(
         &args.mode,
@@ -1488,6 +1495,9 @@ fn experiment(
     );
     ledger.backend_exit_code = Some(result.exit_code);
 
+    // Extract backend summary from the tail of the log
+    let backend_summary = extract_backend_summary(&result.log_path);
+
     // Collect research artifacts (notebooks, plots, CSVs, reports)
     let artifacts_dir = session_dir.join("artifacts");
     fs::create_dir_all(&artifacts_dir)?;
@@ -1531,7 +1541,11 @@ fn experiment(
         "partial".into()
     });
     println!("Changes detected. Committing and pushing...");
-    let commit_msg = format!("gah: experiment for {}", profile.repo_id);
+    let mut commit_msg = format!("gah: experiment for {}", profile.repo_id);
+    if !backend_summary.is_empty() {
+        commit_msg.push_str("\n\n");
+        commit_msg.push_str(&backend_summary);
+    }
     let push_url = profile.push_url()?;
     let push_pat = profile.pat();
     if worktree::has_uncommitted_changes(&wt)? {
@@ -1547,8 +1561,6 @@ fn experiment(
     }
     // Must run after the commit above -- see the fix mode call site for why.
     apply_diff_stats(ledger, &wt, &profile.default_target_branch);
-    let changed_files =
-        worktree::changed_files(&wt, &profile.default_target_branch).unwrap_or_default();
     ledger.push_attempted = true;
     worktree::push_branch(&wt, &branch, &push_url, &push_pat)?;
     ledger.push_succeeded = true;
@@ -1556,12 +1568,9 @@ fn experiment(
     let mr_ctx = ExperimentMrRenderContext {
         backend: &route.effective_backend,
         model: &llm.model,
-        branch: &branch,
-        target_branch: &profile.default_target_branch,
         artifact_count,
         answered,
-        changed_files: &changed_files,
-        ledger,
+        backend_summary: &backend_summary,
     };
     let mr_body = build_experiment_mr_body(&mr_ctx);
     ledger.mr_attempted = true;
@@ -4281,15 +4290,15 @@ The parser should retain structured sections.\n\n\
         ledger.fallback_used = true;
 
         let validation_commands = vec!["cargo test".into(), "cargo fmt --check".into()];
-        let changed_files = vec!["src/dispatch.rs".into(), "tests/gah_cli.rs".into()];
+        let backend_summary = "Fixed the PR description to include reasoning.";
         let ctx = MrRenderContext {
             backend: "codex",
             model: "gpt-5.4",
             branch: "gah/repo-123",
             target_branch: "main",
             validation_commands: &validation_commands,
-            changed_files: &changed_files,
             ledger: &ledger,
+            backend_summary,
         };
         let body = build_fix_or_improve_mr_body("fix", Some(&ticket), &ctx, true);
 
@@ -4302,18 +4311,18 @@ The parser should retain structured sections.\n\n\
         assert!(body.contains("- Description includes structured sections"));
         assert!(body.contains("## Constraints"));
         assert!(body.contains("- Do not dump raw prompts"));
-        assert!(body.contains("## Changes"));
-        assert!(body.contains("Summary: 2 file(s) changed, +14, -3"));
-        assert!(body.contains("- `src/dispatch.rs`"));
+        assert!(body.contains("## What changed and why"));
+        assert!(body.contains("Fixed the PR description to include reasoning."));
         assert!(body.contains("## Validation"));
         assert!(body.contains("Outcome: passed"));
         assert!(body.contains("- `cargo test`"));
         assert!(body.contains("## Backend / Model"));
         assert!(body.contains("## Attempts"));
         assert!(body.contains("Fallback used: yes"));
-        assert!(body.contains("## Branch"));
         assert!(body.contains("## Source"));
         assert!(body.contains("docs/tickets/TICKET-094-authoritative-pr-description.md"));
+        assert!(!body.contains("## Changes"));
+        assert!(!body.contains("## Branch"));
         assert!(!body.contains("## Failure / Stop State"));
     }
 
@@ -4331,15 +4340,15 @@ The parser should retain structured sections.\n\n\
         );
 
         let validation_commands = Vec::new();
-        let changed_files = Vec::new();
+        let backend_summary = "Fixed the issue.";
         let ctx = MrRenderContext {
             backend: "codex",
             model: "gpt-5.4",
             branch: "gah/repo-123",
             target_branch: "main",
             validation_commands: &validation_commands,
-            changed_files: &changed_files,
             ledger: &ledger,
+            backend_summary,
         };
         let body = build_fix_or_improve_mr_body("fix", None, &ctx, true);
 
@@ -4365,25 +4374,23 @@ The parser should retain structured sections.\n\n\
         ledger.insertions = Some(8);
         ledger.deletions = Some(0);
 
-        let changed_files = vec!["reports/findings.md".into()];
+        let backend_summary = "Generated research findings report.";
         let ctx = ExperimentMrRenderContext {
             backend: "codex",
             model: "gpt-5.4",
-            branch: "gah/exp-repo-123",
-            target_branch: "main",
             artifact_count: 3,
             answered: false,
-            changed_files: &changed_files,
-            ledger: &ledger,
+            backend_summary,
         };
         let body = build_experiment_mr_body(&ctx);
 
         assert!(body.contains("## Experiment Result"));
         assert!(body.contains("Judge verdict: partial"));
         assert!(body.contains("Artifacts: 3"));
-        assert!(body.contains("## Changes"));
-        assert!(body.contains("- `reports/findings.md`"));
-        assert!(body.contains("## Branch"));
+        assert!(body.contains("## What changed and why"));
+        assert!(body.contains("Generated research findings report."));
+        assert!(!body.contains("## Changes"));
+        assert!(!body.contains("## Branch"));
     }
 
     #[test]
@@ -5472,6 +5479,21 @@ fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
     }
 }
 
+/// Extract the backend summary from the tail of the backend output log.
+/// This captures the backend's own final summary/reasoning.
+fn extract_backend_summary(log_path: &str) -> String {
+    let log_text = fs::read_to_string(log_path).unwrap_or_default();
+    // Take the last ~2000 characters to get the backend's final summary
+    let tail_size = log_text.len().min(2000);
+    if log_text.is_empty() {
+        String::new()
+    } else {
+        // Use byte indexing for the tail, then trim to ensure we don't cut in the middle of a character
+        let byte_start = log_text.len().saturating_sub(tail_size);
+        log_text[byte_start..].to_string()
+    }
+}
+
 fn format_validation_outcome(result: Option<&str>) -> &'static str {
     match result {
         Some("passed") => "passed",
@@ -5503,50 +5525,32 @@ fn format_failure_state(ledger: &LedgerEntry) -> Option<String> {
     None
 }
 
-fn render_changed_files(changed_files: &[String], ledger: &LedgerEntry) -> Option<String> {
-    if changed_files.is_empty() && ledger.files_changed.is_none() {
-        return None;
-    }
-    let mut lines = Vec::new();
-    if let Some(count) = ledger.files_changed {
-        let insertions = ledger.insertions.unwrap_or(0);
-        let deletions = ledger.deletions.unwrap_or(0);
-        lines.push(format!(
-            "Summary: {} file(s) changed, +{}, -{}",
-            count, insertions, deletions
-        ));
-    }
-    for path in changed_files.iter().take(12) {
-        lines.push(format!("- `{path}`"));
-    }
-    if changed_files.len() > 12 {
-        lines.push(format!(
-            "- ... and {} more file(s)",
-            changed_files.len() - 12
-        ));
-    }
-    Some(lines.join("\n"))
-}
-
+#[allow(clippy::too_many_arguments)]
 fn build_standard_mr_body(
     mode: &str,
     ticket: Option<&TicketMetadata>,
     backend: &str,
     model: &str,
-    branch: &str,
-    target_branch: &str,
+    _branch: &str,
+    _target_branch: &str,
     validation_passed: bool,
+    backend_summary: &str,
 ) -> String {
-    format!(
-        "## GAH {} mode\n\nTicket: {}\nBackend/model: `{}` / `{}`\nBranch: `{}`\nTarget: `{}`\nValidation passed: {}\n\nGenerated by `gah dispatch`.",
+    let mut sections = vec![format!(
+        "## GAH {} mode\n\nTicket: {}\nBackend/model: `{}` / `{}",
         mode,
         render_ticket_label(ticket),
         backend,
         model,
-        branch,
-        target_branch,
+    )];
+    if !backend_summary.is_empty() {
+        sections.push(format!("## What changed and why\n\n{}", backend_summary));
+    }
+    sections.push(format!(
+        "Validation passed: {}\n\nGenerated by `gah dispatch`.",
         validation_passed,
-    )
+    ));
+    sections.join("\n\n")
 }
 
 struct MrRenderContext<'a> {
@@ -5555,8 +5559,8 @@ struct MrRenderContext<'a> {
     branch: &'a str,
     target_branch: &'a str,
     validation_commands: &'a [String],
-    changed_files: &'a [String],
     ledger: &'a LedgerEntry,
+    backend_summary: &'a str,
 }
 
 fn build_metadata_rich_mr_body(
@@ -5605,8 +5609,11 @@ fn build_metadata_rich_mr_body(
             .join("\n");
         sections.push(format!("## Constraints\n\n{lines}"));
     }
-    if let Some(changes) = render_changed_files(ctx.changed_files, ctx.ledger) {
-        sections.push(format!("## Changes\n\n{changes}"));
+    if !ctx.backend_summary.is_empty() {
+        sections.push(format!(
+            "## What changed and why\n\n{}",
+            ctx.backend_summary
+        ));
     }
     if !ctx.validation_commands.is_empty() || ctx.ledger.validation_result.is_some() {
         let mut lines = vec![format!(
@@ -5638,10 +5645,6 @@ fn build_metadata_rich_mr_body(
         sections.push(format!("## Failure / Stop State\n\n{state}"));
     }
 
-    sections.push(format!(
-        "## Branch\n\nSource: `{}`\nTarget: `{}`",
-        ctx.branch, ctx.target_branch
-    ));
     if let Some(source) = ticket.source.as_deref() {
         sections.push(format!("## Source\n\n{}", source.trim()));
     }
@@ -5666,6 +5669,7 @@ fn build_fix_or_improve_mr_body(
             ctx.branch,
             ctx.target_branch,
             validation_passed,
+            ctx.backend_summary,
         ),
     }
 }
@@ -5673,12 +5677,9 @@ fn build_fix_or_improve_mr_body(
 struct ExperimentMrRenderContext<'a> {
     backend: &'a str,
     model: &'a str,
-    branch: &'a str,
-    target_branch: &'a str,
     artifact_count: usize,
     answered: bool,
-    changed_files: &'a [String],
-    ledger: &'a LedgerEntry,
+    backend_summary: &'a str,
 }
 
 fn build_experiment_mr_body(ctx: &ExperimentMrRenderContext<'_>) -> String {
@@ -5692,13 +5693,12 @@ fn build_experiment_mr_body(ctx: &ExperimentMrRenderContext<'_>) -> String {
             model = ctx.model
         ),
     ];
-    if let Some(changes) = render_changed_files(ctx.changed_files, ctx.ledger) {
-        sections.push(format!("## Changes\n\n{changes}"));
+    if !ctx.backend_summary.is_empty() {
+        sections.push(format!(
+            "## What changed and why\n\n{}",
+            ctx.backend_summary
+        ));
     }
-    sections.push(format!(
-        "## Branch\n\nSource: `{}`\nTarget: `{}`",
-        ctx.branch, ctx.target_branch
-    ));
     sections.push("Generated by `gah dispatch --mode experiment`.".into());
     sections.join("\n\n")
 }
