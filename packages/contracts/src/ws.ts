@@ -130,7 +130,6 @@ export type ClientMessage =
       backend?: string;
       model?: string;
       budget?: number;
-      profile?: string; // TICKET-113: profile for real GAH CLI integration
     }
   | {
       type: "session.stop";

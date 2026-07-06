@@ -374,3 +374,17 @@ Output: ${stdout}`));
 export function getGahBinaryPath(): string {
   return GAH_BINARY;
 }
+
+/**
+ * Whether the resolved gah binary actually runs. `findGahBinary()` always
+ * returns a path (falling back to the bare `'gah'` string on PATH even if
+ * nothing resolves), so checking `GAH_BINARY` alone can't tell availability
+ * -- this has to actually try spawning it.
+ */
+export function isGahCliAvailable(): Promise<boolean> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(GAH_BINARY, ['--help'], { stdio: 'ignore' });
+    child.on('error', () => resolvePromise(false));
+    child.on('close', (code) => resolvePromise(code === 0));
+  });
+}

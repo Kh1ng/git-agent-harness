@@ -8,6 +8,7 @@ import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { getSessionManager } from './sessions/SessionManager.js';
+import * as gahCli from './gahCli.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage, 
@@ -152,9 +153,6 @@ async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage,
   const sessionManager = getSessionManager();
   
   try {
-    // If profile is provided, use it for real GAH CLI integration
-    const profile = message.profile || 'gah'; // Default to 'gah' profile
-    
     const session = await sessionManager.startSession({
       profile: message.profile,
       providerKind: message.providerKind,
@@ -165,8 +163,7 @@ async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage,
       mode: message.mode,
       backend: message.backend,
       model: message.model,
-      budget: message.budget,
-      profile // Pass profile for real CLI integration
+      budget: message.budget
     });
     
     // Notify all clients about new session
@@ -262,28 +259,41 @@ async function handleProviderList(ws: WebSocket, message: Extract<ClientMessage,
   }
 }
 
-function sendWelcomeMessage(ws: WebSocket) {
+async function sendWelcomeMessage(ws: WebSocket) {
   try {
     const providerRegistry = getProviderRegistry();
     const sessionManager = getSessionManager();
-    
+
     const serverProviderCatalog = {
       providers: providerRegistry.getProviderInstances()
     };
-    
+
     const sessions = sessionManager.getAllSessions();
     const providers = providerRegistry.getAllProviderStatuses();
-    
-    // Try to include real data from GAH CLI if available
+
+    // Include real GAH data (TICKET-114) via the same gahCli.runStatus()
+    // path TICKET-113 already wired up -- there's no separate
+    // per-field ProviderRegistry accessor, `gah status --json` returns
+    // all of this in one call.
     const defaultProfile = 'gah';
-    const mergeRequests = providerRegistry.getMergeRequests(defaultProfile);
-    const availability = providerRegistry.getAvailability(defaultProfile);
-    const blockers = providerRegistry.getBlockers(defaultProfile);
-    const constraints = providerRegistry.getConstraints(defaultProfile);
-    const errors = providerRegistry.getErrors(defaultProfile);
-    const recentLedger = providerRegistry.getRecentLedger(defaultProfile);
-    
-    // Create extended welcome message with real data
+    let mergeRequests: unknown[] = [];
+    let availability: unknown[] = [];
+    let blockers: unknown[] = [];
+    let constraints: unknown[] = [];
+    let errors: unknown[] = [];
+    let recentLedger: unknown[] = [];
+    try {
+      const status = await gahCli.runStatus(defaultProfile);
+      mergeRequests = status.merge_requests;
+      availability = status.availability;
+      blockers = status.blockers;
+      constraints = status.constraints;
+      errors = status.errors;
+      recentLedger = status.recent_ledger;
+    } catch (statusError) {
+      console.error('Failed to load gah status for welcome message:', statusError);
+    }
+
     const welcomeMessage: ServerMessage & {
       profile?: string;
       mergeRequests?: unknown;
@@ -298,7 +308,6 @@ function sendWelcomeMessage(ws: WebSocket) {
       serverProviderCatalog,
       sessions,
       providers,
-      // Include real GAH data for TICKET-114
       profile: defaultProfile,
       mergeRequests,
       availability,
@@ -307,9 +316,9 @@ function sendWelcomeMessage(ws: WebSocket) {
       errors,
       recentLedger
     };
-    
+
     ws.send(JSON.stringify(welcomeMessage));
-    
+
   } catch (error) {
     console.error('Failed to send welcome message:', error);
     ws.send(JSON.stringify({
