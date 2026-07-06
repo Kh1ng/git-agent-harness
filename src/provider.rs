@@ -435,6 +435,7 @@ fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
 mod tests {
     use super::{create_draft_mr, find_review_target_by_mr, TEST_PATH_OVERRIDE};
     use crate::config::{Profile, RoutingPolicy};
+    use crate::test_support::ExecGuard;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -463,6 +464,7 @@ mod tests {
     }
 
     fn make_fake_bin(dir: &Path, name: &str, body: &str) {
+        let _guard = ExecGuard::new();
         let path = dir.join(name);
         fs::write(&path, body).unwrap();
         let mut perms = fs::metadata(&path).unwrap().permissions();

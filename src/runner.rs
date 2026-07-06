@@ -917,11 +917,12 @@ fn read_text_file(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::config::{Profile, RoutingPolicy};
-    use crate::test_support::PathGuard;
+    use crate::test_support::{ExecGuard, PathGuard};
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     fn make_fake_bin(dir: &Path, name: &str, body: &str) {
+        let _guard = ExecGuard::new();
         let path = dir.join(name);
         fs::write(&path, body).unwrap();
         let mut perms = fs::metadata(&path).unwrap().permissions();

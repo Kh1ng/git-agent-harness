@@ -2524,7 +2524,7 @@ mod tests {
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
     use crate::models::PmPlan;
-    use crate::test_support::PathGuard;
+    use crate::test_support::{ExecGuard, PathGuard};
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -3178,6 +3178,7 @@ mod tests {
     }
 
     fn make_fake_bin(dir: &Path, name: &str) -> std::path::PathBuf {
+        let _guard = ExecGuard::new();
         let path = dir.join(name);
         fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
