@@ -14,7 +14,7 @@ thread_local! {
 /// Construct a Command for an external provider CLI (`gh`, `curl`). In test
 /// builds, honors a thread-local PATH override so tests can hide/replace
 /// these binaries without touching the process-wide PATH.
-fn provider_command(name: &str) -> Command {
+pub fn provider_command(name: &str) -> Command {
     // `mut` is only needed under #[cfg(test)] below; clippy flags it as
     // unused in non-test builds where that block is compiled out.
     #[allow(unused_mut)]
