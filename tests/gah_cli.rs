@@ -2033,6 +2033,81 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
 }
 
 #[test]
+fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
+    // Regression: profile.pat() reads GITLAB_PAT/GITLAB_PAT2 via std::env::var
+    // directly. Loading the profile's env_file into a Vec<(String,String)>
+    // for the *backend subprocess*'s environment (done later, per mode)
+    // never reached provider.rs's own curl calls (MR lookup, review-target
+    // resolution) -- those ran before any backend spawned, with an empty
+    // PRIVATE-TOKEN, and a live dispatch failed 3 layers downstream with a
+    // git refspec error as a result. dispatch::run now exports env_file into
+    // the real process env immediately after resolving the profile, before
+    // any provider call. This test deliberately does NOT set GITLAB_PAT via
+    // `.env(...)` on the test harness itself -- only via a profile env_file
+    // -- to prove the token actually comes from that config-driven path.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
+
+    let env_file = tmp.path().join("real.env");
+    fs::write(&env_file, "GITLAB_PAT=from-env-file-secret\n").unwrap();
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "gitlab",
+        &format!(
+            "env_file = \"{}\"\n[profiles.real.routing]\nreview_backend = \"claude\"\n",
+            env_file.display()
+        ),
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    let curl_log = tmp.path().join("curl.log");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}\nEOF\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "curl",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *\"merge_requests?state=opened&source_branch=feature/review\"*)\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}]'\n    ;;\n  *\"/merge_requests/7/notes\"*)\n    printf '%s\\n' '{{\"id\":1}}'\n    ;;\n  *\"/merge_requests/7\"*)\n    printf '%s\\n' '{{\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}'\n    ;;\n  *)\n    printf '%s\\n' '{{}}'\n    ;;\n esac\n",
+            curl_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env_remove("GITLAB_PAT")
+        .env_remove("GITLAB_PAT2")
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Resolved MR: https://gitlab.example.com/owner/real/-/merge_requests/7",
+        ));
+
+    let curl_log = fs::read_to_string(curl_log).unwrap();
+    assert!(curl_log.contains("PRIVATE-TOKEN: from-env-file-secret"));
+}
+
+#[test]
 fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
