@@ -12,7 +12,7 @@
     "composite": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "dist-electron"],
+  "exclude": ["node_modules", "dist"],
   "references": [
     { "path": "../../packages/contracts" },
     { "path": "../../packages/shared" }
