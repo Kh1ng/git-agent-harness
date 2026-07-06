@@ -6,11 +6,11 @@ import { ProviderKind, SessionId, ProviderInstanceId } from "@git-agent-harness/
 
 // Generate unique IDs
 export function generateSessionId(): SessionId {
-  return `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  return `session_${Date.now()}_${crypto.randomUUID()}`;
 }
 
 export function generateRequestId(): string {
-  return `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  return `req_${Date.now()}_${crypto.randomUUID()}`;
 }
 
 export function generateProviderInstanceId(kind: ProviderKind, index: number = 0): ProviderInstanceId {

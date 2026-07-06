@@ -4,7 +4,8 @@ import { createServer as createExpressServer } from './server.js';
 import { createServer as createHttpServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
-import { startRustBackendProxy } from './rustBackend.js';
+import { isGahCliAvailable } from './gahCli.js';
+import { getProviderRegistry } from './provider/ProviderRegistry.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 
@@ -20,8 +21,19 @@ async function main() {
   // Create WebSocket server
   const wss = new WebSocketServer({ server });
   
-  // Start Rust backend proxy
-  await startRustBackendProxy();
+  // Check GAH CLI availability (real status/dispatch data is loaded
+  // on-demand per WebSocket connection in wsServer.ts's sendWelcomeMessage,
+  // not cached at startup).
+  const cliAvailable = await isGahCliAvailable();
+  if (cliAvailable) {
+    console.log('GAH CLI is available - using real CLI integration');
+  } else {
+    console.log('GAH CLI not found - running in limited mode');
+  }
+
+  // Initialize provider registry with default profile
+  const providerRegistry = getProviderRegistry();
+  providerRegistry.setDefaultProfile('gah');
   
   // Set up WebSocket handler
   createWebSocketHandler(wss);

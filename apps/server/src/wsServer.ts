@@ -8,6 +8,7 @@ import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { getSessionManager } from './sessions/SessionManager.js';
+import * as gahCli from './gahCli.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage, 
@@ -258,28 +259,66 @@ async function handleProviderList(ws: WebSocket, message: Extract<ClientMessage,
   }
 }
 
-function sendWelcomeMessage(ws: WebSocket) {
+async function sendWelcomeMessage(ws: WebSocket) {
   try {
     const providerRegistry = getProviderRegistry();
     const sessionManager = getSessionManager();
-    
+
     const serverProviderCatalog = {
       providers: providerRegistry.getProviderInstances()
     };
-    
+
     const sessions = sessionManager.getAllSessions();
     const providers = providerRegistry.getAllProviderStatuses();
-    
-    const welcomeMessage: ServerMessage = {
+
+    // Include real GAH data (TICKET-114) via the same gahCli.runStatus()
+    // path TICKET-113 already wired up -- there's no separate
+    // per-field ProviderRegistry accessor, `gah status --json` returns
+    // all of this in one call.
+    const defaultProfile = 'gah';
+    let mergeRequests: unknown[] = [];
+    let availability: unknown[] = [];
+    let blockers: unknown[] = [];
+    let constraints: unknown[] = [];
+    let errors: unknown[] = [];
+    let recentLedger: unknown[] = [];
+    try {
+      const status = await gahCli.runStatus(defaultProfile);
+      mergeRequests = status.merge_requests;
+      availability = status.availability;
+      blockers = status.blockers;
+      constraints = status.constraints;
+      errors = status.errors;
+      recentLedger = status.recent_ledger;
+    } catch (statusError) {
+      console.error('Failed to load gah status for welcome message:', statusError);
+    }
+
+    const welcomeMessage: ServerMessage & {
+      profile?: string;
+      mergeRequests?: unknown;
+      availability?: unknown;
+      blockers?: unknown;
+      constraints?: unknown;
+      errors?: unknown;
+      recentLedger?: unknown;
+    } = {
       type: 'server.welcome',
       serverVersion: SERVER_VERSION,
       serverProviderCatalog,
       sessions,
-      providers
+      providers,
+      profile: defaultProfile,
+      mergeRequests,
+      availability,
+      blockers,
+      constraints,
+      errors,
+      recentLedger
     };
-    
+
     ws.send(JSON.stringify(welcomeMessage));
-    
+
   } catch (error) {
     console.error('Failed to send welcome message:', error);
     ws.send(JSON.stringify({
