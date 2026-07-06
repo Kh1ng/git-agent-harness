@@ -342,6 +342,28 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
         .collect())
 }
 
+/// Used to implement the retry cap for FixMr actions on existing branches.
+pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashMap<String, usize> {
+    use std::collections::HashMap;
+
+    let entries = match crate::ledger::read_entries(cfg) {
+        Ok(entries) => entries,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut counts = HashMap::new();
+
+    for entry in entries {
+        if entry.mode == "fix" && entry.attempts_started > 0 {
+            if let Some(branch) = &entry.branch {
+                *counts.entry(branch.clone()).or_insert(0) += entry.attempts_started as usize;
+            }
+        }
+    }
+
+    counts
+}
+
 #[cfg(test)]
 mod tests {
     use super::{classify, extract_work_id_from_title, recommended_action, SyncMr};

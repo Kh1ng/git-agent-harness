@@ -65,6 +65,7 @@ fn is_dispatchable(action: &NextAction) -> bool {
     matches!(
         action,
         NextAction::ReviewMr { .. }
+            | NextAction::FixMr { .. }
             | NextAction::DispatchTicket { .. }
             | NextAction::Retry { .. }
             | NextAction::Escalate { .. }
@@ -210,6 +211,7 @@ mod tests {
             blockers: vec![],
             errors: vec![],
             available_tickets: vec![],
+            fix_attempt_counts: std::collections::HashMap::new(),
         }
     }
 
@@ -336,10 +338,10 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_a_does_not_open_confirm_for_fix_mr_action() {
+    fn dashboard_a_opens_confirm_for_fix_mr_action() {
         let mut state = dashboard_state_with_action(vec![mr("gah/x", "CI_FAILED")]);
         handle_key(&mut state, key(KeyCode::Char('a')));
-        assert!(!state.confirm_open);
+        assert!(state.confirm_open);
     }
 
     #[test]

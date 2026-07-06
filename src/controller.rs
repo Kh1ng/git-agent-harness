@@ -129,18 +129,18 @@ impl NextAction {
 /// 1. incomplete critical observation -> stop safely (NoOp)
 /// 2. a recorded blocker (today: ledger human_required) -> HumanRequired
 /// 3. an MR classified NEEDS_REVIEW -> ReviewMr
-/// 4. an MR classified CI_FAILED/NEEDS_FIX -> HumanRequired (until
-///    existing-branch continuation exists)
-/// 5. an MR classified READY_FOR_HUMAN -> HumanRequired
-/// 6. a ticket with failed history, no active MR, capability failure,
+/// 4. an MR classified CI_FAILED/NEEDS_FIX -> FixMr (if retry cap not exceeded)
+/// 5. an MR classified CI_FAILED/NEEDS_FIX -> HumanRequired (if retry cap exceeded)
+/// 6. an MR classified READY_FOR_HUMAN -> HumanRequired
+/// 7. a ticket with failed history, no active MR, capability failure,
 ///    under the retry cap -> Escalate
-/// 7. a ticket with failed history, no active MR, infra failure, some
+/// 8. a ticket with failed history, no active MR, infra failure, some
 ///    backend eligible again, under the retry cap -> Retry
-/// 8. a ticket with failed history, no active MR, retry cap exceeded ->
+/// 9. a ticket with failed history, no active MR, retry cap exceeded ->
 ///    HumanRequired
-/// 9. an eligible never-dispatched ticket -> DispatchTicket
-/// 10. all remaining backends unavailable but with a known reset -> WaitUntil
-/// 11. otherwise -> NoOp
+/// 10. an eligible never-dispatched ticket -> DispatchTicket
+/// 11. all remaining backends unavailable but with a known reset -> WaitUntil
+/// 12. otherwise -> NoOp
 ///
 /// Ties within a tier (multiple matching MRs) are broken by branch name,
 /// lexicographically -- `SyncMrJson` doesn't carry `updated_at`, so this is
@@ -180,15 +180,31 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         .iter()
         .find(|mr| matches!(mr.classification.as_str(), "CI_FAILED" | "NEEDS_FIX"))
     {
-        return NextAction::HumanRequired {
+        let fix_attempts = snapshot
+            .fix_attempt_counts
+            .get(&mr.branch)
+            .copied()
+            .unwrap_or(0);
+        if fix_attempts >= AUTO_RETRY_CAP {
+            return NextAction::HumanRequired {
+                reason: format!(
+                    "MR on branch '{}' classified {} but fix retry cap ({}) exceeded",
+                    mr.branch, mr.classification, AUTO_RETRY_CAP
+                ),
+                reference: mr
+                    .url
+                    .clone()
+                    .or_else(|| Some(format!("branch {}", mr.branch))),
+            };
+        }
+        return NextAction::FixMr {
+            work_id: mr.work_id.clone(),
+            branch: mr.branch.clone(),
+            mr_url: mr.url.clone(),
             reason: format!(
-                "MR on branch '{}' classified {} but existing-branch continuation is unsupported",
+                "MR on branch '{}' classified {} - reusing existing branch",
                 mr.branch, mr.classification
             ),
-            reference: mr
-                .url
-                .clone()
-                .or_else(|| Some(format!("branch {}", mr.branch))),
         };
     }
     if let Some(mr) = mrs.iter().find(|mr| mr.classification == "READY_FOR_HUMAN") {
@@ -426,10 +442,8 @@ pub fn run_once(cfg: &crate::config::GahConfig, profile_name: &str, json: bool) 
     Ok(())
 }
 
-/// Executes at most one action. `FixMr` remains a compatibility variant,
-/// but autonomous controller decisions should not emit it until
-/// existing-branch continuation exists. If one does arrive here anyway,
-/// keep the current honest no-op rather than pretending the fix happened.
+/// Executes at most one action. `FixMr` dispatches a fix operation
+/// reusing an existing branch (TICKET-118).
 pub(crate) fn execute_action(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
@@ -453,6 +467,7 @@ pub(crate) fn execute_action(
         prod: false,
         allow_unknown_red_baseline: false,
         escalate: false,
+        existing_branch: None,
     };
 
     match action {
@@ -465,11 +480,15 @@ pub(crate) fn execute_action(
             run_dispatch_and_record(cfg, action, &args, "review")?;
             Ok(format!("Dispatched review for branch '{branch}'"))
         }
-        NextAction::FixMr { branch, mr_url, .. } => Ok(format!(
-            "FixMr decided for branch '{branch}' ({}), but fix mode does not yet support \
-             continuing an existing branch -- no action taken.",
-            mr_url.as_deref().unwrap_or("no MR URL")
-        )),
+        NextAction::FixMr { branch, .. } => {
+            let args = crate::dispatch::DispatchArgs {
+                target: branch.clone(),
+                existing_branch: Some(branch.clone()),
+                ..base_args()
+            };
+            run_dispatch_and_record(cfg, action, &args, "fix_existing")?;
+            Ok(format!("Dispatched fix for existing branch '{branch}'"))
+        }
         NextAction::DispatchTicket { ticket_path, .. } => {
             let args = crate::dispatch::DispatchArgs {
                 target: ticket_path.clone(),
@@ -647,6 +666,7 @@ mod tests {
             blockers: vec![],
             errors: vec![],
             available_tickets: vec![],
+            fix_attempt_counts: std::collections::HashMap::new(),
         }
     }
 
@@ -729,25 +749,44 @@ mod tests {
     }
 
     #[test]
-    fn ci_failed_mr_requires_human_until_fix_mr_is_supported() {
+    fn ci_failed_mr_trigger_fix_action() {
         let mut snapshot = empty_snapshot();
         snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
         let action = decide_next_action(&snapshot);
         match action {
-            NextAction::HumanRequired { reason, reference } => {
-                assert!(reason.contains("existing-branch continuation is unsupported"));
-                assert_eq!(reference.as_deref(), Some("https://example/gah/real-1"));
+            NextAction::FixMr { branch, reason, .. } => {
+                assert_eq!(branch, "gah/real-1");
+                assert!(reason.contains("reusing existing branch"));
             }
-            other => panic!("expected HumanRequired, got {other:?}"),
+            other => panic!("expected FixMr, got {other:?}"),
         }
     }
 
     #[test]
-    fn needs_fix_mr_requires_human_until_fix_mr_is_supported() {
+    fn needs_fix_mr_trigger_fix_action() {
         let mut snapshot = empty_snapshot();
         snapshot.merge_requests.push(mr("gah/real-1", "NEEDS_FIX"));
         let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::FixMr { branch, reason, .. } => {
+                assert_eq!(branch, "gah/real-1");
+                assert!(reason.contains("reusing existing branch"));
+            }
+            other => panic!("expected FixMr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ci_failed_mr_retries_until_cap() {
+        let mut snapshot = empty_snapshot();
+        // Simulate 2 prior fix attempts (at the cap)
+        let mut fix_attempts = std::collections::HashMap::new();
+        fix_attempts.insert("gah/real-1".to_string(), 2); // AUTO_RETRY_CAP = 2
+        snapshot.fix_attempt_counts = fix_attempts;
+        snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
+        let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
+        assert!(action.reason().contains("fix retry cap"));
     }
 
     #[test]

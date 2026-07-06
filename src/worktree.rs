@@ -65,6 +65,42 @@ pub fn create(
     Ok(worktree_path)
 }
 
+pub fn create_existing(
+    repo: &Path,
+    existing_branch: &str,
+    worktree_base: &Path,
+) -> Result<PathBuf> {
+    git(&["fetch", "-q", "origin", "--prune"], repo)?;
+
+    let origin_ref = format!("origin/{}", existing_branch);
+    let worktree_path = worktree_base.join(existing_branch.replace('/', "-"));
+    fs::create_dir_all(worktree_path.parent().unwrap_or(worktree_base))?;
+
+    // `-B existing_branch` creates/resets a real local branch tracking
+    // origin_ref instead of leaving the worktree in detached HEAD.
+    // Without this, `git push origin <existing_branch>` from the worktree
+    // silently exits 0 while pushing nothing -- there's no local ref by
+    // that name to serve as the push source, since detached HEAD isn't
+    // one. Confirmed by reproduction: a commit made on a detached-HEAD
+    // worktree checkout of `origin/<branch>` never reached the remote
+    // branch even though `git push` reported success.
+    git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-B",
+            existing_branch,
+            worktree_path.to_str().unwrap(),
+            &origin_ref,
+        ],
+        repo,
+    )
+    .with_context(|| format!("creating worktree from existing branch {}", origin_ref))?;
+
+    Ok(worktree_path)
+}
+
 pub fn has_changes(worktree: &Path, target_branch: &str) -> Result<bool> {
     if has_uncommitted_changes(worktree)? {
         return Ok(true);
@@ -406,5 +442,115 @@ mod tests {
         let err = push_branch(&repo, "main", bogus_remote.to_str().unwrap(), "").unwrap_err();
 
         assert!(format!("{:#}", err).contains("push failed"));
+    }
+
+    // ── create_existing() ─────────────────────────────────────────────────────
+
+    #[test]
+    fn create_existing_succeeds_for_real_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        // First create a branch on the origin
+        StdCommand::new("git")
+            .args(["checkout", "-b", "test-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["push", "origin", "test-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        // Go back to main
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        // Now try to create worktree from existing branch
+        let wt = create_existing(&repo, "test-branch", &worktree_base).unwrap();
+
+        assert!(wt.join("f.txt").exists());
+    }
+
+    #[test]
+    fn create_existing_checks_out_a_real_local_branch_not_detached_head() {
+        // Regression: `git worktree add <path> origin/<branch>` (no -B)
+        // leaves the worktree in detached HEAD -- there's no local ref
+        // named <branch> to serve as a push source, so a later
+        // `git push origin <branch>` from that worktree silently exits 0
+        // while pushing nothing at all. `-B <branch>` must be present so
+        // the worktree is actually checked out onto a real local branch.
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        let bare_origin = add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        StdCommand::new("git")
+            .args(["checkout", "-q", "-b", "test-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["push", "-q", "origin", "test-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let wt = create_existing(&repo, "test-branch", &worktree_base).unwrap();
+
+        let symbolic_ref = StdCommand::new("git")
+            .args(["symbolic-ref", "HEAD"])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        assert!(
+            symbolic_ref.status.success(),
+            "worktree must be on a real branch, not detached HEAD"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&symbolic_ref.stdout).trim(),
+            "refs/heads/test-branch"
+        );
+
+        // Commit a change and push it back -- this is the actual
+        // regression: confirm the commit reaches the remote branch, not
+        // just that `git push` reports success.
+        fs::write(wt.join("f.txt"), "modified by fix\n").unwrap();
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-q", "-m", "a fix"])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        push_branch(&wt, "test-branch", bare_origin.to_str().unwrap(), "").unwrap();
+
+        let log = StdCommand::new("git")
+            .args(["log", "--oneline", "refs/heads/test-branch"])
+            .current_dir(&bare_origin)
+            .output()
+            .unwrap();
+        let log_text = String::from_utf8_lossy(&log.stdout);
+        assert!(
+            log_text.contains("a fix"),
+            "the commit must actually reach the remote branch, got: {log_text}"
+        );
     }
 }
