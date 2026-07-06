@@ -2631,6 +2631,49 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_tier_strong_for_any_review_candidates_entry_not_just_the_exact_strong_config() {
+        // Regression: found live -- strong_review_backend/model is a single
+        // hardcoded pair that must be manually kept in sync with
+        // review_candidates. Falling back from agy to agy-second (or
+        // claude) for the exact same Sonnet-class reviewer silently
+        // downgraded reviewer_tier to "standard", even though
+        // review_candidates explicitly lists all three as the operator's
+        // own declared strong-reviewer pool.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        prof.routing.strong_review_backend = Some("agy".into());
+        prof.routing.strong_review_model = Some("Claude Sonnet 4.6 (Thinking)".into());
+        let candidate = |backend: &str, model: &str| crate::config::CandidateConfig {
+            backend: backend.into(),
+            model: Some(model.into()),
+            quota_pool: None,
+            priority: 0,
+            included_in_quota: false,
+            marginal_cost_usd: None,
+            quota_usage_percent: None,
+            quota_days_remaining: None,
+        };
+        prof.routing.review_candidates = Some(vec![
+            candidate("agy", "Claude Sonnet 4.6 (Thinking)"),
+            candidate("agy-second", "Claude Sonnet 4.6 (Thinking)"),
+            candidate("claude", "claude-sonnet-4"),
+        ]);
+        let cfg = gah_config(RoutingPolicy::default());
+
+        let via_agy_second =
+            route_decision("agy-second", Some("Claude Sonnet 4.6 (Thinking)"), true);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &via_agy_second),
+            ReviewerTier::Strong
+        );
+        let via_claude = route_decision("claude", Some("claude-sonnet-4"), true);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &via_claude),
+            ReviewerTier::Strong
+        );
+    }
+
+    #[test]
     fn reviewer_tier_falls_back_to_defaults_routing_when_profile_unset() {
         let tmp = tempfile::tempdir().unwrap();
         let prof = profile(tmp.path());
@@ -5755,13 +5798,37 @@ fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecisio
         .weak_review_model
         .as_deref());
 
-    if selected(strong_backend, strong_model) {
-        ReviewerTier::Strong
-    } else if selected(weak_backend, weak_model) {
-        ReviewerTier::Weak
-    } else {
-        ReviewerTier::Standard
+    if selected(weak_backend, weak_model) {
+        return ReviewerTier::Weak;
     }
+    if selected(strong_backend, strong_model) {
+        return ReviewerTier::Strong;
+    }
+    // review_candidates is the operator's actual declared pool of reviewers
+    // they consider trustworthy (agy/agy-second/claude serving the same
+    // Sonnet-class model are routinely interchangeable fallbacks for each
+    // other, not different capability tiers). Requiring strong_review_backend/
+    // model to be manually kept in sync with every review_candidates entry
+    // is exactly the kind of drift that already produced two real bugs
+    // tonight (gah's own strong_review_backend pointed at codex-mini; here,
+    // falling back from agy to agy-second/claude silently downgraded a
+    // Sonnet reviewer to "standard" tier). Any candidate not already
+    // classified weak above is strong.
+    let candidates = profile.routing.review_candidates.as_ref().or(cfg
+        .defaults
+        .routing
+        .review_candidates
+        .as_ref());
+    if let Some(candidates) = candidates {
+        let in_candidates = candidates.iter().any(|c| {
+            c.backend == route.effective_backend
+                && (c.model.is_none() || c.model.as_deref() == effective_model)
+        });
+        if in_candidates {
+            return ReviewerTier::Strong;
+        }
+    }
+    ReviewerTier::Standard
 }
 
 fn parse_review_verdict(
