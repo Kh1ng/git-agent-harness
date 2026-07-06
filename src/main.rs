@@ -506,7 +506,7 @@ fn main() -> Result<()> {
                 }
             }
         },
-        
+
         Commands::Server { port, host } => {
             println!("Starting WebSocket server on {}:{}", host, port);
             server::run_blocking(&host, port)?;
