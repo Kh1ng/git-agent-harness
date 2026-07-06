@@ -772,10 +772,12 @@ fn improve(
         args.target.clone()
     };
 
-    // Try to resolve target as an issue number
-    let issue_details = resolve_target_to_issue_or_string(profile, &target)
-        .ok()
-        .flatten();
+    // Try to resolve target as an issue number. Propagate a real fetch
+    // error (bad issue number, auth, rate limit) instead of silently
+    // swallowing it and dispatching an agent against garbage content --
+    // `resolve_target_to_issue_or_string` already returns `Ok(None)`
+    // cleanly for a target that isn't an issue reference at all.
+    let issue_details = resolve_target_to_issue_or_string(profile, &target)?;
     let ticket_meta = if let Some(ref issue) = issue_details {
         Some(parse_ticket_metadata_from_issue(issue))
     } else {
@@ -854,7 +856,7 @@ fn improve(
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
-    let mut base_task = build_task(profile, &wt, &args.mode, &target);
+    let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
 
     // Baseline: run validation once on the pristine worktree BEFORE spending
     // tokens. A failure here is a config error or a pre-existing red repo —
@@ -1468,7 +1470,14 @@ fn experiment(
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
-    let task = build_task(profile, &wt, "experiment", &args.target);
+    let issue_details = resolve_target_to_issue_or_string(profile, &args.target)?;
+    let task = build_task(
+        profile,
+        &wt,
+        "experiment",
+        &args.target,
+        issue_details.as_ref(),
+    );
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
 
@@ -2379,12 +2388,19 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
 /// Build the task prompt for the agent.
 /// If `target` is a path to a candidates.json file, build a structured packet from the first candidate.
 /// Otherwise build a mode-appropriate prompt with target as the task body.
-fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String {
-    // Try to resolve target as an issue number and format it for the focus section
-    if is_issue_number_reference(target) {
-        if let Ok(Some(issue)) = resolve_target_to_issue_or_string(profile, target) {
-            return build_task_with_issue(profile, wt, mode, &issue);
-        }
+/// `issue_details` must be resolved once by the caller (see
+/// `resolve_target_to_issue_or_string`) -- resolving it again in here would
+/// mean a second live gh/glab fetch per dispatch for the same target, with
+/// no guarantee the two fetches agree.
+fn build_task(
+    profile: &Profile,
+    wt: &Path,
+    mode: &str,
+    target: &str,
+    issue_details: Option<&IssueDetails>,
+) -> String {
+    if let Some(issue) = issue_details {
+        return build_task_with_issue(profile, wt, mode, issue);
     }
     // Try to load as candidate artifact
     if !target.is_empty() {
@@ -3574,7 +3590,7 @@ mod tests {
         let wt = tmp.path().join("worktree");
         fs::create_dir_all(&wt).unwrap();
 
-        let task = build_task(&prof, &wt, "improve", "some ticket text");
+        let task = build_task(&prof, &wt, "improve", "some ticket text", None);
 
         assert!(task.contains("Manager Memory"));
         assert!(task.contains("Use .venv/bin/python, do not pip install from scratch."));
@@ -3595,7 +3611,7 @@ mod tests {
         // Empty target -- the "implement ONLY..." instruction (which itself
         // mentions "Manager Memory" by name) only applies when a target is
         // given, so this isolates the file-injection behavior specifically.
-        let task = build_task(&prof, &wt, "improve", "");
+        let task = build_task(&prof, &wt, "improve", "", None);
 
         assert!(!task.contains("## Manager Memory"));
     }
@@ -3607,7 +3623,7 @@ mod tests {
         fs::create_dir_all(&wt).unwrap();
         let prof = profile(tmp.path());
 
-        let task = build_task(&prof, &wt, "improve", "TICKET-014: boost shots ROI");
+        let task = build_task(&prof, &wt, "improve", "TICKET-014: boost shots ROI", None);
 
         assert!(task.contains("Implement ONLY the specific ticket"));
         assert!(!task.contains("Select and implement the highest-priority"));
@@ -3620,7 +3636,7 @@ mod tests {
         fs::create_dir_all(&wt).unwrap();
         let prof = profile(tmp.path());
 
-        let task = build_task(&prof, &wt, "improve", "");
+        let task = build_task(&prof, &wt, "improve", "", None);
 
         assert!(task.contains("Select and implement the highest-priority"));
     }
@@ -6317,12 +6333,11 @@ fn fetch_gitlab_issue(profile: &Profile, issue_number: &str) -> Result<IssueDeta
         .unwrap_or_default();
 
     let labels = resp["labels"]
-        .as_str()
-        .map(|s| {
-            s.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label.as_str().map(|s| s.to_string()))
                 .collect()
         })
         .unwrap_or_default();
