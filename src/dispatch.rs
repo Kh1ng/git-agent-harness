@@ -2027,7 +2027,12 @@ fn review(
          1. Markdown review notes.\n\
          2. A JSON object with fields: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes.\n\
          blocking_findings, non_blocking_findings, and risk_notes must be JSON arrays of strings, even when empty or when only one item exists.\n\
-         Verdict must be one of APPROVE_STRONG, APPROVE_WEAK, NEEDS_FIX, REJECT, HUMAN_REVIEW.\n\
+         Verdict must be one of APPROVE_STRONG, APPROVE_WEAK, NEEDS_FIX, REJECT, HUMAN_REVIEW, defined as:\n\
+         - APPROVE_STRONG: you have high confidence this change is correct, safe, and complete. No unresolved concern is worth surfacing as something that should change before merge.\n\
+         - APPROVE_WEAK: you believe the change is likely fine, but YOUR OWN review confidence is low -- insufficient context, a domain you couldn't fully verify, or a partial review. This is not a substitute for NEEDS_FIX.\n\
+         - NEEDS_FIX: you found a concrete, real problem that should be fixed before merge. Put it in blocking_findings, even if it isn't an immediate crash -- e.g. silent data loss, a hidden failure mode, or anything that would take real effort to diagnose later if left in. Do not downgrade a genuine risk into non_blocking_findings/risk_notes just because it wouldn't break the build today.\n\
+         - REJECT: the change is fundamentally wrong and should not be merged as-is.\n\
+         - HUMAN_REVIEW: you cannot make a confident recommendation at all.\n\
          Repo: {}. MR: {}. Source: {}. Target: {}. CI status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
          Prior run state:\n{}\n\nDiff:\n```\n{}\n```\nChanged files:\n{}",
