@@ -1,5 +1,9 @@
 # TICKET-059: Fix strong-run counting to key on model strength, not mode
 
+Status: [MERGED] — via commit 2823623 (2026-07-02). Re-confirmed 2026-07-05:
+agy investigated fresh, all acceptance-criteria tests already exist and pass
+(406 passed), no changes needed.
+
 Goal: Change strong-run counting in usage_summary_for_backend so routing caps are based on model strength, not command mode.
 
 Difficulty: easy
