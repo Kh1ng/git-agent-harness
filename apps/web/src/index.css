@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+  
+  body {
+    @apply bg-gray-50 text-gray-900;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply px-4 py-2 rounded-md text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2;
+  }
+  
+  .btn-primary {
+    @apply bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500;
+  }
+  
+  .btn-secondary {
+    @apply bg-gray-100 text-gray-700 hover:bg-gray-200 focus:ring-gray-500;
+  }
+  
+  .btn-danger {
+    @apply bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+  }
+  
+  .card {
+    @apply bg-white rounded-lg shadow-md p-6;
+  }
+  
+  .badge {
+    @apply px-2 py-1 rounded-full text-xs font-medium;
+  }
+  
+  .badge-success {
+    @apply bg-green-100 text-green-800;
+  }
+  
+  .badge-warning {
+    @apply bg-yellow-100 text-yellow-800;
+  }
+  
+  .badge-error {
+    @apply bg-red-100 text-red-800;
+  }
+  
+  .badge-info {
+    @apply bg-blue-100 text-blue-800;
+  }
+}
+
+/* Custom styles */
+#root {
+  min-height: 100vh;
+}
+
+/* Terminal styles */
+.terminal {
+  background-color: #1e1e1e;
+  color: #cccccc;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow: auto;
+}
+
+.terminal .prompt {
+  color: #4fc1ff;
+}
+
+.terminal .output {
+  color: #cccccc;
+}
+
+.terminal .error {
+  color: #f14c4c;
+}
+
+/* Status indicator animation */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse {
+  animation: pulse 2s infinite;
+}
+
+/* Session card styles */
+.session-card {
+  transition: all 0.2s ease;
+}
+
+.session-card:hover {
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+}
+
+/* Provider icon styles */
+.provider-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.provider-icon.github { background-color: #24292f; }
+.provider-icon.gitlab { background-color: #fc6d26; }
+.provider-icon.codex { background-color: #2563eb; }
+.provider-icon.claude { background-color: #8b5cf6; }
+.provider-icon.cursor { background-color: #3b82f6; }
+.provider-icon.opencode { background-color: #10b981; }
+.provider-icon.grok { background-color: #ec4899; }
+.provider-icon.openhands { background-color: #7c3aed; }
+.provider-icon.agy { background-color: #1f2937; }
+.provider-icon.vibe { background-color: #06b6d4; }

@@ -1,11 +1,52 @@
+# Rust
 /target
-OPENHANDS_TASK.md
-.DS_Store
-._*
-.idea/
+**/*.rs.bk
+
+# TypeScript/JavaScript
+/node_modules
+/pnpm-lock.yaml
+
+# Build outputs
+/dist
+/dist-electron
+/dist-electron-packages
+/**.output
+
+# TypeScript cache
+/.cache
+/tsconfig.*.tsbuildinfo
+
+# IDE
+.idea
 .vscode/
 *.swp
 *.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Package manager locks (except pnpm-lock.yaml)
+/package-lock.json
+/yarn.lock
+
+# Electron builder
+/electron-builder.env
+
+# Server and desktop temp files
+*.tmp
+*.temp
+
+# Existing ignores
+OPENHANDS_TASK.md
 TODO.md
 docs/MANAGER_MEMORY.md
-.DS_Store
