@@ -2,6 +2,7 @@ use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
 use crate::models::{AvailableTicket, PmPlan, WorkMetadata};
+use crate::provider::provider_command;
 use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
@@ -770,7 +771,18 @@ fn improve(
     } else {
         args.target.clone()
     };
-    let ticket_meta = parse_ticket_metadata(Path::new(&target)).ok().flatten();
+
+    // Try to resolve target as an issue number. Propagate a real fetch
+    // error (bad issue number, auth, rate limit) instead of silently
+    // swallowing it and dispatching an agent against garbage content --
+    // `resolve_target_to_issue_or_string` already returns `Ok(None)`
+    // cleanly for a target that isn't an issue reference at all.
+    let issue_details = resolve_target_to_issue_or_string(profile, &target)?;
+    let ticket_meta = if let Some(ref issue) = issue_details {
+        Some(parse_ticket_metadata_from_issue(issue))
+    } else {
+        parse_ticket_metadata(Path::new(&target)).ok().flatten()
+    };
     let usage_summary = ledger::usage_summary_for_backend(
         cfg,
         args.backend.as_str(),
@@ -844,7 +856,7 @@ fn improve(
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
-    let mut base_task = build_task(profile, &wt, &args.mode, &target);
+    let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
 
     // Baseline: run validation once on the pristine worktree BEFORE spending
     // tokens. A failure here is a config error or a pre-existing red repo —
@@ -1458,7 +1470,14 @@ fn experiment(
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
-    let task = build_task(profile, &wt, "experiment", &args.target);
+    let issue_details = resolve_target_to_issue_or_string(profile, &args.target)?;
+    let task = build_task(
+        profile,
+        &wt,
+        "experiment",
+        &args.target,
+        issue_details.as_ref(),
+    );
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
 
@@ -2369,7 +2388,20 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
 /// Build the task prompt for the agent.
 /// If `target` is a path to a candidates.json file, build a structured packet from the first candidate.
 /// Otherwise build a mode-appropriate prompt with target as the task body.
-fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String {
+/// `issue_details` must be resolved once by the caller (see
+/// `resolve_target_to_issue_or_string`) -- resolving it again in here would
+/// mean a second live gh/glab fetch per dispatch for the same target, with
+/// no guarantee the two fetches agree.
+fn build_task(
+    profile: &Profile,
+    wt: &Path,
+    mode: &str,
+    target: &str,
+    issue_details: Option<&IssueDetails>,
+) -> String {
+    if let Some(issue) = issue_details {
+        return build_task_with_issue(profile, wt, mode, issue);
+    }
     // Try to load as candidate artifact
     if !target.is_empty() {
         let p = Path::new(target);
@@ -2443,6 +2475,70 @@ fn build_task(profile: &Profile, wt: &Path, mode: &str, target: &str) -> String 
     if !target.is_empty() {
         task.push_str(&format!("\n## Focus\n\n{}\n", target));
     }
+    task
+}
+
+/// Build task with issue details for the Focus section
+fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &IssueDetails) -> String {
+    let instruction = match mode {
+        "fix" => {
+            "Fix the specific issue described in the Focus section below.\n\
+             Run the relevant tests to confirm the fix. All tests in the test suite must pass.\n\
+             Do not push or create MRs."
+        }
+        "experiment" => {
+            "This is a research/experiment task. Write scripts, generate Jupyter notebooks, \
+\
+             CSV exports, plots, or markdown reports directly in the working directory.\n\
+             Do not worry about breaking unrelated tests. Prioritize producing observable \
+\
+             output files (*.ipynb, *.html, *.csv, *.png, *.md) over clean commits.\n\
+             Do not push or create MRs."
+        }
+        _ => {
+            "Implement ONLY the specific ticket described in the Focus section below. \
+\
+             Ignore any other backlog items, priorities, or tickets mentioned in Manager \
+\
+             Memory above -- those are background context, not additional work to pick up.\n\
+             Run tests if a test command is available and ensure they pass.\n\
+             Do not push or create MRs."
+        }
+    };
+
+    let mut task = format!(
+        "Repository: {} ({})\nWorking directory: {}\nTarget branch: {}\n\n{}\n",
+        profile.display_name,
+        profile.repo,
+        wt.display(),
+        profile.default_target_branch,
+        instruction,
+    );
+
+    // Read from the main checkout (profile.local_path), not the worktree --
+    // same source `collect_pm_preflight` already reads for PM mode. Manager
+    // memory is live operational state, not something that should need a
+    // commit+push round-trip through a target-branch worktree to reach a
+    // dispatched agent. Optional here (unlike PM mode, which requires it)
+    // since not every repo has this file.
+    if let Ok(memory) =
+        fs::read_to_string(Path::new(&profile.local_path).join("docs/MANAGER_MEMORY.md"))
+    {
+        task.push_str(
+            "\n## Manager Memory (read this before exploring -- documents known \
+\
+             environment setup, conventions, and known issues)\n\n",
+        );
+        task.push_str(&memory);
+        if !memory.ends_with('\n') {
+            task.push('\n');
+        }
+    }
+
+    task.push_str(&format!(
+        "\n## Focus\n\n{}\n",
+        format_issue_for_focus(issue)
+    ));
     task
 }
 
@@ -2522,12 +2618,14 @@ mod tests {
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
         attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title,
         build_pm_plan_task, build_task, classify_validation_failure_progress, collect_pm_preflight,
-        collect_ticket_summaries, derive_reviewer_tier, first_markdown_heading,
+        collect_ticket_summaries, derive_reviewer_tier, extract_issue_number,
+        first_markdown_heading, format_issue_for_focus, is_issue_number_reference,
         mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
-        parse_review_verdict, parse_ticket_metadata, render_review_comment, review_labels,
-        review_preflight, run_backend, scan_available_tickets,
-        validation_failure_no_progress_reason, ExperimentMrRenderContext, MrRenderContext,
-        ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
+        parse_review_verdict, parse_ticket_metadata, parse_ticket_metadata_from_issue,
+        render_review_comment, review_labels, review_preflight, run_backend,
+        scan_available_tickets, validation_failure_no_progress_reason, ExperimentMrRenderContext,
+        IssueDetails, MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata,
+        ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
@@ -3492,7 +3590,7 @@ mod tests {
         let wt = tmp.path().join("worktree");
         fs::create_dir_all(&wt).unwrap();
 
-        let task = build_task(&prof, &wt, "improve", "some ticket text");
+        let task = build_task(&prof, &wt, "improve", "some ticket text", None);
 
         assert!(task.contains("Manager Memory"));
         assert!(task.contains("Use .venv/bin/python, do not pip install from scratch."));
@@ -3513,7 +3611,7 @@ mod tests {
         // Empty target -- the "implement ONLY..." instruction (which itself
         // mentions "Manager Memory" by name) only applies when a target is
         // given, so this isolates the file-injection behavior specifically.
-        let task = build_task(&prof, &wt, "improve", "");
+        let task = build_task(&prof, &wt, "improve", "", None);
 
         assert!(!task.contains("## Manager Memory"));
     }
@@ -3525,7 +3623,7 @@ mod tests {
         fs::create_dir_all(&wt).unwrap();
         let prof = profile(tmp.path());
 
-        let task = build_task(&prof, &wt, "improve", "TICKET-014: boost shots ROI");
+        let task = build_task(&prof, &wt, "improve", "TICKET-014: boost shots ROI", None);
 
         assert!(task.contains("Implement ONLY the specific ticket"));
         assert!(!task.contains("Select and implement the highest-priority"));
@@ -3538,7 +3636,7 @@ mod tests {
         fs::create_dir_all(&wt).unwrap();
         let prof = profile(tmp.path());
 
-        let task = build_task(&prof, &wt, "improve", "");
+        let task = build_task(&prof, &wt, "improve", "", None);
 
         assert!(task.contains("Select and implement the highest-priority"));
     }
@@ -4047,6 +4145,94 @@ The parser should retain structured sections.\n\n\
         assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-114"));
         assert_eq!(meta.work_id.as_deref(), Some("TICKET-114"));
         assert!(meta.is_authoritative);
+    }
+
+    #[test]
+    fn is_issue_number_reference_recognizes_plain_numbers() {
+        assert!(is_issue_number_reference("42"));
+        assert!(is_issue_number_reference("123"));
+        assert!(!is_issue_number_reference("abc"));
+        assert!(!is_issue_number_reference(""));
+        assert!(!is_issue_number_reference("42abc"));
+    }
+
+    #[test]
+    fn is_issue_number_reference_recognizes_hash_numbers() {
+        assert!(is_issue_number_reference("#42"));
+        assert!(is_issue_number_reference("#123"));
+        assert!(!is_issue_number_reference("#"));
+        assert!(!is_issue_number_reference("#abc"));
+        // Spaces are trimmed, so this should be recognized
+        assert!(is_issue_number_reference(" #42 "));
+    }
+
+    #[test]
+    fn extract_issue_number_from_plain_number() {
+        assert_eq!(extract_issue_number("42"), Some("42".to_string()));
+        assert_eq!(extract_issue_number("123"), Some("123".to_string()));
+        assert_eq!(extract_issue_number("abc"), None);
+        assert_eq!(extract_issue_number(""), None);
+    }
+
+    #[test]
+    fn extract_issue_number_from_hash_number() {
+        assert_eq!(extract_issue_number("#42"), Some("42".to_string()));
+        assert_eq!(extract_issue_number("#123"), Some("123".to_string()));
+        assert_eq!(extract_issue_number("#"), None);
+        assert_eq!(extract_issue_number("#abc"), None);
+    }
+
+    #[test]
+    fn format_issue_for_focus_formats_correctly() {
+        let issue = IssueDetails {
+            number: "42".to_string(),
+            title: "Test Issue".to_string(),
+            body: "This is the issue body".to_string(),
+            labels: vec!["bug".to_string(), "enhancement".to_string()],
+        };
+
+        let result = format_issue_for_focus(&issue);
+        assert!(result.contains("# Issue #42: Test Issue"));
+        assert!(result.contains("This is the issue body"));
+        assert!(result.contains("Labels: bug, enhancement"));
+    }
+
+    #[test]
+    fn parse_ticket_metadata_from_issue_extracts_basic_fields() {
+        let issue = IssueDetails {
+            number: "42".to_string(),
+            title: "TICKET-42: Fix the bug".to_string(),
+            body:
+                "## Problem\n\nSomething is broken\n\n## Acceptance Criteria\n\n- Fix the issue\n- Add tests"
+                    .to_string(),
+            labels: vec!["bug".to_string()],
+        };
+
+        let meta = parse_ticket_metadata_from_issue(&issue);
+        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-42"));
+        assert_eq!(meta.work_id.as_deref(), Some("TICKET-42"));
+        assert!(meta.is_authoritative);
+        assert!(meta
+            .acceptance_criteria
+            .contains(&"Fix the issue".to_string()));
+        assert!(meta.acceptance_criteria.contains(&"Add tests".to_string()));
+    }
+
+    #[test]
+    fn parse_ticket_metadata_from_issue_handles_metadata_fields() {
+        let issue = IssueDetails {
+            number: "42".to_string(),
+            title: "Test Issue".to_string(),
+            body: "Difficulty: High\nRisk: Medium\nRecommended backend: agy\nGoal: Fix everything"
+                .to_string(),
+            labels: vec![],
+        };
+
+        let meta = parse_ticket_metadata_from_issue(&issue);
+        assert_eq!(meta.difficulty.as_deref(), Some("High"));
+        assert_eq!(meta.risk.as_deref(), Some("Medium"));
+        assert_eq!(meta.recommended_backend.as_deref(), Some("agy"));
+        assert_eq!(meta.goal.as_deref(), Some("Fix everything"));
     }
 
     #[test]
@@ -6002,6 +6188,306 @@ fn which(cmd: &str) -> Option<String> {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Details about an issue fetched from GitHub/GitLab
+#[derive(Debug, Clone)]
+struct IssueDetails {
+    number: String,
+    title: String,
+    body: String,
+    labels: Vec<String>,
+}
+
+/// Check if a string looks like an issue number (e.g., "42" or "#42")
+fn is_issue_number_reference(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Check for "#42" format
+    if let Some(number_part) = trimmed.strip_prefix('#') {
+        return !number_part.is_empty() && number_part.chars().all(|c| c.is_ascii_digit());
+    }
+
+    // Check for plain number format
+    trimmed.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Extract issue number from a string that could be "42" or "#42"
+fn extract_issue_number(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let number_str = if let Some(number_part) = trimmed.strip_prefix('#') {
+        if number_part.is_empty() {
+            return None;
+        }
+        number_part
+    } else {
+        trimmed
+    };
+
+    if number_str.chars().all(|c| c.is_ascii_digit()) {
+        Some(number_str.to_string())
+    } else {
+        None
+    }
+}
+
+/// Fetch issue details from GitHub using gh CLI
+fn fetch_github_issue(profile: &Profile, issue_number: &str) -> Result<IssueDetails> {
+    let out = provider_command("gh")
+        .arg("issue")
+        .arg("view")
+        .arg(issue_number)
+        .arg("--repo")
+        .arg(&profile.repo)
+        .arg("--json")
+        .arg("title,body,labels")
+        .output()
+        .context("gh issue view")?;
+
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh issue view failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    let resp: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("parsing GitHub issue response")?;
+
+    let number = resp["number"]
+        .as_i64()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| issue_number.to_string());
+
+    let title = resp["title"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("Issue #{}", issue_number));
+
+    let body = resp["body"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    let labels = resp["labels"]
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label["name"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(IssueDetails {
+        number,
+        title,
+        body,
+        labels,
+    })
+}
+
+/// Fetch issue details from GitLab using glab CLI
+fn fetch_gitlab_issue(profile: &Profile, issue_number: &str) -> Result<IssueDetails> {
+    let out = provider_command("glab")
+        .arg("issue")
+        .arg("view")
+        .arg(issue_number)
+        .arg("--repo")
+        .arg(&profile.repo)
+        .arg("-F")
+        .arg("json")
+        .output()
+        .context("glab issue view")?;
+
+    if !out.status.success() {
+        anyhow::bail!(
+            "glab issue view failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    let resp: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("parsing GitLab issue response")?;
+
+    let number = resp["iid"]
+        .as_i64()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| issue_number.to_string());
+
+    let title = resp["title"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("Issue #{}", issue_number));
+
+    let body = resp["description"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    let labels = resp["labels"]
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(IssueDetails {
+        number,
+        title,
+        body,
+        labels,
+    })
+}
+
+/// Fetch issue details from the profile's provider
+fn fetch_issue_details(profile: &Profile, issue_number: &str) -> Result<IssueDetails> {
+    let cli = profile.provider_cli().ok_or_else(|| {
+        anyhow::anyhow!(
+            "provider '{}' does not support issue fetching",
+            profile.provider
+        )
+    })?;
+
+    let result = match cli {
+        "gh" => fetch_github_issue(profile, issue_number),
+        "glab" => fetch_gitlab_issue(profile, issue_number),
+        other => anyhow::bail!("unsupported provider CLI: {}", other),
+    };
+
+    result
+}
+
+/// This extracts metadata from the issue title and body instead of from a markdown file.
+fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMetadata {
+    let mut meta = TicketMetadata::default();
+
+    // Extract ticket ID from title if it follows the TICKET-N pattern
+    let title = issue.title.trim();
+    if title.starts_with("TICKET-") {
+        if let Some((id, _)) = title.split_once(':').or_else(|| title.split_once(" — ")) {
+            meta.ticket_id = Some(id.trim().to_string());
+            meta.work_id = Some(id.trim().to_string());
+        }
+    }
+
+    // Use the issue number as a fallback work_id
+    if meta.work_id.is_none() {
+        meta.work_id = Some(format!("TICKET-{}", issue.number));
+    }
+
+    // Parse the issue body for metadata fields
+    // This mimics the existing markdown parsing but works on plain text
+    for line in issue.body.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("Difficulty:") {
+            meta.difficulty = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Risk:") {
+            meta.risk = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Recommended backend:") {
+            let value = value.trim();
+            if !value.is_empty() && value != "unspecified" {
+                meta.recommended_backend = Some(value.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("Recommended model:") {
+            let value = value.trim();
+            if !value.is_empty() && value != "unspecified" {
+                meta.recommended_model = Some(value.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("Goal:") {
+            let value = value.trim();
+            if !value.is_empty() {
+                meta.goal = Some(value.to_string());
+            }
+            if meta.title.is_none() && !value.is_empty() {
+                meta.title = Some(value.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("Suggested MR Title:") {
+            meta.suggested_mr_title = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Work ID:") {
+            meta.work_id = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Source:") {
+            meta.source = Some(value.trim().to_string());
+        }
+    }
+
+    // Set is_authoritative based on whether we have a proper ticket ID
+    meta.is_authoritative = meta.ticket_id.is_some() || meta.work_id.is_some();
+
+    // Extract problem from issue body
+    meta.problem = extract_markdown_section(&issue.body, "Problem")
+        .or_else(|| extract_markdown_section(&issue.body, "Background"))
+        .or_else(|| extract_markdown_section(&issue.body, "Description"));
+
+    // Extract acceptance criteria from issue body
+    meta.acceptance_criteria = extract_markdown_list_section(&issue.body, "Acceptance Criteria");
+    meta.constraints = extract_markdown_list_section(&issue.body, "Constraints");
+    meta.verification_commands =
+        extract_markdown_code_list_section(&issue.body, "Verification Commands");
+    meta.affected_files = extract_markdown_list_section(&issue.body, "Affected Files");
+
+    // Add labels as constraints or affected files if they look like file paths
+    if !issue.labels.is_empty() {
+        for label in &issue.labels {
+            if label.contains('/') || label.contains('.') {
+                if !meta.affected_files.contains(label) {
+                    meta.affected_files.push(label.clone());
+                }
+            } else if !meta.constraints.contains(label) {
+                meta.constraints.push(label.clone());
+            }
+        }
+    }
+
+    // Set title from the issue title if not already set
+    if meta.title.is_none() {
+        meta.title = Some(issue.title.trim().to_string());
+    }
+    meta.summary = meta.title.clone();
+
+    meta
+}
+
+/// Format issue details for the Focus section in a task
+fn format_issue_for_focus(issue: &IssueDetails) -> String {
+    let mut content = format!("# Issue #{}: {}\n\n", issue.number, issue.title);
+
+    if !issue.body.is_empty() {
+        content.push_str(&issue.body);
+        if !issue.body.ends_with('\n') {
+            content.push('\n');
+        }
+    }
+
+    if !issue.labels.is_empty() {
+        content.push_str("\nLabels: ");
+        content.push_str(&issue.labels.join(", "));
+        content.push('\n');
+    }
+
+    content
+}
+
+/// Resolve a target string to either issue details or return the original target
+fn resolve_target_to_issue_or_string(
+    profile: &Profile,
+    target: &str,
+) -> Result<Option<IssueDetails>> {
+    if is_issue_number_reference(target) {
+        if let Some(issue_number) = extract_issue_number(target) {
+            return Ok(Some(fetch_issue_details(profile, &issue_number)?));
+        }
+    }
+    Ok(None)
 }
 
 fn timestamp() -> String {
