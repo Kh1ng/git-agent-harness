@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json.schemastore.org/tauri.conf.json",
+  "productName": "Git Agent Harness Desktop",
+  "version": "0.1.0",
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "shell": {
+        "all": false,
+        "execute": true,
+        "open": true,
+        "sidecar": true
+      },
+      "fs": {
+        "all": false,
+        "readFile": true,
+        "readDir": true,
+        "exists": true
+      },
+      "path": {
+        "all": true
+      },
+      "window": {
+        "all": true
+      },
+      "dialog": {
+        "all": false,
+        "open": true,
+        "save": true
+      },
+      "notification": {
+        "all": false
+      },
+      "clipboard": {
+        "all": false,
+        "writeText": true,
+        "readText": true
+      }
+    },
+    "bundle": {
+      "activeWebviewDebugging": false,
+      "windows": [
+        {
+          "title": "Git Agent Harness Desktop",
+          "width": 1200,
+          "height": 800,
+          "minWidth": 800,
+          "minHeight": 600,
+          "resizable": true,
+          "center": true,
+          "decorations": true
+        }
+      ],
+      "externalBinaries": [
+        {
+          "name": "node",
+          "i18n": {}
+        }
+      ]
+    },
+    "updater": {
+      "active": false
+    }
+  },
+  "build": {
+    "distDir": "dist",
+    "frontendDist": "../web/dist",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devUrl": "http://localhost:3000",
+    "withGlobalTauri": true
+  }
+}

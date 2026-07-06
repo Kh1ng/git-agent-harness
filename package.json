@@ -9,7 +9,7 @@
     "dev:web": "node scripts/dev-runner.js dev:web",
     "dev:desktop": "node scripts/dev-runner.js dev:desktop",
     "start": "node apps/server/dist/bin.js",
-    "start:desktop": "node apps/desktop/scripts/start-electron.js",
+    "start:desktop": "cd apps/desktop && npm run start",
     "build": "npm run build:rust && npm run --workspace=apps/server build && npm run --workspace=apps/web build && npm run --workspace=apps/desktop build",
     "build:rust": "cargo build --release",
     "build:server": "npm run --workspace=apps/server build",
@@ -17,7 +17,7 @@
     "build:desktop": "npm run --workspace=apps/desktop build",
     "typecheck": "npm run --workspace=apps/server typecheck && npm run --workspace=apps/web typecheck && npm run --workspace=apps/desktop typecheck",
     "lint": "npm run --workspace=apps/server lint && npm run --workspace=apps/web lint && npm run --workspace=apps/desktop lint",
-    "clean": "rm -rf apps/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist"
+    "clean": "rm -rf apps/*/node_modules apps/*/dist packages/*/dist"
   },
   "devDependencies": {
     "typescript": "^5.0.0",
