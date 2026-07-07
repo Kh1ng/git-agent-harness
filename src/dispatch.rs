@@ -2729,9 +2729,9 @@ mod tests {
         mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
         parse_review_verdict, parse_ticket_metadata, parse_ticket_metadata_from_issue,
         render_review_comment, review_labels, review_preflight, run_backend,
-        scan_available_tickets, validation_failure_no_progress_reason, ExperimentMrRenderContext,
-        IssueDetails, MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata,
-        ValidationFailureProgress,
+        scan_available_tickets, strip_terminal_noise, validation_failure_no_progress_reason,
+        ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewerTier, RouteDecision,
+        TicketMetadata, ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
@@ -2745,6 +2745,28 @@ mod tests {
 
     const CODEX_FULL_RESET: &str =
         include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
+
+    #[test]
+    fn strip_terminal_noise_removes_ansi_codes_and_openhands_exit_banner() {
+        // Reproduces the exact garbage confirmed live in worldcup-props MR
+        // !243's "What changed and why" section: ANSI color codes, box-
+        // drawing panel borders, and openhands' unconditional exit banner,
+        // all landing verbatim in a PR/MR body.
+        let raw = "\u{1b}[36m\u{2502}\u{1b}[0m Fixed the eligibility gate.        \u{1b}[36m\u{2502}\u{1b}[0m\n\
+                   \u{1b}[92m\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{1b}[0m\n\
+                   Goodbye! \u{1f44b}\n\
+                   Conversation ID: 4fae58dacf204cff9f92fbb7fbed8229\n\
+                   Hint: run openhands --resume 4fae58da-cf20-4cff-9f92-fbb7fbed8229 to resume this\n\
+                   conversation.\n";
+        let cleaned = strip_terminal_noise(raw);
+        assert_eq!(cleaned, "Fixed the eligibility gate.");
+    }
+
+    #[test]
+    fn strip_terminal_noise_leaves_plain_text_untouched() {
+        let plain = "Implemented the fix.\nAll tests pass.";
+        assert_eq!(strip_terminal_noise(plain), plain);
+    }
 
     fn profile(local_path: &Path) -> Profile {
         Profile {
@@ -5991,6 +6013,37 @@ fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
 
 /// Extract the backend summary from the tail of the backend output log.
 /// This captures the backend's own final summary/reasoning.
+/// Strips terminal rendering noise from a backend's raw log tail before it
+/// goes into a PR/MR body. Confirmed live (MR !243, worldcup-props): the
+/// openhands CLI's Rich-rendered final message panel (ANSI color codes,
+/// box-drawing borders) and its unconditional exit banner ("Goodbye! 👋" /
+/// "Conversation ID: ..." / "Hint: run openhands --resume ...") land in
+/// backend-output.log outside the `--json` event stream and get grabbed
+/// verbatim by the raw-tail extraction below -- landing in the PR body
+/// looking like the model itself produced garbled text, when it's actually
+/// terminal styling the extraction never stripped.
+fn strip_terminal_noise(text: &str) -> String {
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
+    let without_ansi = ansi.replace_all(text, "");
+
+    without_ansi
+        .lines()
+        .map(|line| line.trim_matches(['│', '╭', '╮', '╰', '╯', '─', ' ']))
+        .filter(|line| {
+            !(line.is_empty()
+                || *line == "Goodbye! 👋"
+                || line.starts_with("Conversation ID:")
+                // Terminal line-wrapping can split this hint across two
+                // physical lines at an arbitrary column, so match on
+                // substrings rather than a single fixed prefix.
+                || line.contains("openhands --resume")
+                || line.contains("resume this")
+                || *line == "conversation.")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn extract_backend_summary(log_path: &str) -> String {
     let log_text = fs::read_to_string(log_path).unwrap_or_default();
     // Take the last ~2000 characters to get the backend's final summary
@@ -6000,7 +6053,7 @@ fn extract_backend_summary(log_path: &str) -> String {
     } else {
         // Use byte indexing for the tail, then trim to ensure we don't cut in the middle of a character
         let byte_start = log_text.len().saturating_sub(tail_size);
-        log_text[byte_start..].to_string()
+        strip_terminal_noise(&log_text[byte_start..])
     }
 }
 
