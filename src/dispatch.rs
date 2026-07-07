@@ -2,6 +2,7 @@ use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
 use crate::models::{AvailableTicket, PmPlan, WorkMetadata};
+use crate::notifications::{notify_event, NotifyEvent};
 use crate::provider::provider_command;
 use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
 use crate::{provider, runner, usage, worktree};
@@ -467,6 +468,15 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     }
     if let Err(err) = crate::ledger::append(cfg, &ledger) {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
+    }
+    if result.is_err() {
+        notify_event(
+            profile,
+            NotifyEvent::DispatchFailed {
+                failure_class: ledger.failure_class.as_deref().unwrap_or("unknown"),
+                work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
+            },
+        );
     }
     result
 }
@@ -1470,6 +1480,15 @@ fn improve(
     ledger.mr_created = true;
     ledger.mr_url = Some(mr.url.clone());
     println!("Draft MR: {}", mr.url);
+    notify_event(
+        profile,
+        NotifyEvent::MrCreated {
+            url: &mr.url,
+            work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
+            backend: &route.effective_backend,
+            model: route.effective_model.as_deref().unwrap_or("unknown"),
+        },
+    );
 
     worktree::cleanup(&wt, repo);
     Ok(())
@@ -1691,6 +1710,15 @@ fn experiment(
     ledger.mr_created = true;
     ledger.mr_url = Some(mr.url.clone());
     println!("Draft MR: {}", mr.url);
+    notify_event(
+        profile,
+        NotifyEvent::MrCreated {
+            url: &mr.url,
+            work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
+            backend: &route.effective_backend,
+            model: &llm.model,
+        },
+    );
 
     worktree::cleanup(&wt, repo);
     Ok(())
@@ -2309,6 +2337,25 @@ fn review(
                     err
                 );
             }
+            // Resolve the MR/PR URL this verdict applies to so notifications
+            // can reference it. Failure to resolve is non-fatal here.
+            let mr_url = provider::mr_url_for_branch(profile, &target.source_branch);
+            notify_event(
+                profile,
+                NotifyEvent::ReviewVerdict {
+                    verdict: &verdict.verdict,
+                    mr_url: mr_url.as_deref().unwrap_or("unknown"),
+                },
+            );
+            if verdict.human_required {
+                notify_event(
+                    profile,
+                    NotifyEvent::HumanRequired {
+                        reason: "review verdict requires human attention",
+                        reference: mr_url.as_deref(),
+                    },
+                );
+            }
             let mr_body = render_review_comment(&verdict, session_dir);
             let labels = review_labels(&verdict);
             if profile.provider == "gitlab" {
@@ -2801,6 +2848,7 @@ mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            notify_command: None,
             routing: RoutingPolicy::default(),
             pacing: Default::default(),
         }
