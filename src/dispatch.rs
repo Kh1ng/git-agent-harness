@@ -262,79 +262,149 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
 /// already-fetched `all_mrs`, MERGED/CLOSED_UNMERGED/STALE = not active)
 /// so the duplicate guard and the controller's view of "is this ticket
 /// available" can never diverge into two different answers.
+/// Looks up a ticket's ledger history by work_id. Returns `None` when the
+/// ticket should be dropped from the candidate list entirely (a merged MR
+/// anywhere in its history means it's done -- prior failed attempts before
+/// that merge shouldn't count toward AUTO_RETRY_CAP and trigger
+/// HumanRequired on a completed ticket).
+fn ledger_lookup_for_ticket(
+    work_id: Option<&str>,
+    profile: &Profile,
+    all_mrs: &[crate::sync::SyncMr],
+    ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
+) -> Option<(usize, Option<String>, bool)> {
+    let Some(wid) = work_id else {
+        return Some((0, None, false));
+    };
+    let entries = ledger_entries_by_work_id.get(wid);
+    let mut count = 0usize;
+    let mut last_failure_class = None;
+    let mut has_active_mr = false;
+    let mut has_merged_mr = false;
+    for e in entries.into_iter().flatten() {
+        // The ledger is a single global file shared by every profile
+        // (Defaults::ledger_path, not per-profile), and work_id is
+        // just a heading-derived string like "TICKET-090" with no
+        // repo namespace -- two unrelated repos (or even two ticket
+        // files in the same repo) can legitimately share that exact
+        // string. Scope to this profile's own repo so another
+        // repo's history can't poison this one's retry count.
+        if e.repo_id != profile.repo_id {
+            continue;
+        }
+        if is_ledger_entry_stale(e) {
+            continue;
+        }
+        count += 1;
+        last_failure_class = e.failure_class.clone().or(last_failure_class);
+        let matching_mr = all_mrs.iter().find(|mr| {
+            e.branch.as_deref().is_some_and(|b| b == mr.branch)
+                || (e.mr_url.is_some() && e.mr_url.as_deref() == mr.url.as_deref())
+        });
+        if let Some(mr) = matching_mr {
+            let class = crate::sync::classify(mr);
+            if class == "MERGED" {
+                has_merged_mr = true;
+            } else if !matches!(class, "CLOSED_UNMERGED" | "STALE") {
+                has_active_mr = true;
+            }
+        }
+    }
+    if has_merged_mr {
+        return None;
+    }
+    Some((count, last_failure_class, has_active_mr))
+}
+
 pub fn scan_available_tickets(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
 ) -> Vec<AvailableTicket> {
-    let tickets_dir = Path::new(&profile.local_path).join("docs/tickets");
-    let Ok(read_dir) = fs::read_dir(&tickets_dir) else {
-        return vec![];
-    };
-
     let mut candidates = vec![];
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+
+    let tickets_dir = Path::new(&profile.local_path).join("docs/tickets");
+    if let Ok(read_dir) = fs::read_dir(&tickets_dir) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(Some(meta)) = parse_ticket_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_authoritative {
+                continue;
+            }
+            let work_id = meta.work_id.clone().or_else(|| meta.ticket_id.clone());
+            let Some((prior_attempt_count, last_failure_class, has_active_mr)) =
+                ledger_lookup_for_ticket(
+                    work_id.as_deref(),
+                    profile,
+                    all_mrs,
+                    ledger_entries_by_work_id,
+                )
+            else {
+                continue;
+            };
+
+            candidates.push(AvailableTicket {
+                ticket_path: path.display().to_string(),
+                work_id,
+                title: meta.title.clone(),
+                recommended_backend: meta.recommended_backend.clone(),
+                recommended_model: meta.recommended_model.clone(),
+                prior_attempt_count,
+                last_failure_class,
+                has_active_mr,
+            });
+        }
+    }
+
+    // Native issue tracker (GitHub/GitLab): the migration from docs/tickets
+    // to real issues (TICKET-116/#46) only wired up manual `--target
+    // <issue-number>` dispatch -- `gah loop`'s own automatic ticket
+    // discovery never learned to look here, so a fully-migrated profile's
+    // backlog was invisible to `decide_next_action` (it saw 0-1 leftover
+    // docs/tickets files instead of the real 100+ open issues). ticket_path
+    // is the bare issue number string -- DispatchTicket/Retry/Escalate pass
+    // it straight through as `--target`, and `resolve_target_to_issue_or_string`
+    // already treats a numeric target as an issue reference.
+    for issue in list_open_issues(profile) {
+        // Every issue gets a synthesized work_id (TICKET-<number>) even
+        // without a TICKET- prefixed title, so is_authoritative is always
+        // true here -- unlike docs/tickets files, there's no way for an
+        // issue to opt out just by lacking metadata. A "blocked" or
+        // "planning" label is the generic signal for "don't auto-dispatch
+        // this" (an owner-blocked infra issue with no code fix available,
+        // or a planning-only issue with no acceptance criteria yet) --
+        // without it, gah loop would burn real dispatch cycles on issues
+        // no agent can meaningfully act on before HumanRequired kicks in.
+        if issue
+            .labels
+            .iter()
+            .any(|l| matches!(l.to_lowercase().as_str(), "blocked" | "planning"))
+        {
             continue;
         }
-        let Ok(Some(meta)) = parse_ticket_metadata(&path) else {
-            continue;
-        };
+        let meta = parse_ticket_metadata_from_issue(&issue);
         if !meta.is_authoritative {
             continue;
         }
-        let work_id = meta.work_id.clone().or_else(|| meta.ticket_id.clone());
-
-        let (prior_attempt_count, last_failure_class, has_active_mr) = match &work_id {
-            None => (0, None, false),
-            Some(wid) => {
-                let entries = ledger_entries_by_work_id.get(wid);
-                let mut count = 0usize;
-                let mut last_failure_class = None;
-                let mut has_active_mr = false;
-                let mut has_merged_mr = false;
-                for e in entries.into_iter().flatten() {
-                    // The ledger is a single global file shared by every profile
-                    // (Defaults::ledger_path, not per-profile), and work_id is
-                    // just a heading-derived string like "TICKET-090" with no
-                    // repo namespace -- two unrelated repos (or even two ticket
-                    // files in the same repo) can legitimately share that exact
-                    // string. Scope to this profile's own repo so another
-                    // repo's history can't poison this one's retry count.
-                    if e.repo_id != profile.repo_id {
-                        continue;
-                    }
-                    if is_ledger_entry_stale(e) {
-                        continue;
-                    }
-                    count += 1;
-                    last_failure_class = e.failure_class.clone().or(last_failure_class);
-                    let matching_mr = all_mrs.iter().find(|mr| {
-                        e.branch.as_deref().is_some_and(|b| b == mr.branch)
-                            || (e.mr_url.is_some() && e.mr_url.as_deref() == mr.url.as_deref())
-                    });
-                    if let Some(mr) = matching_mr {
-                        let class = crate::sync::classify(mr);
-                        if class == "MERGED" {
-                            has_merged_mr = true;
-                        } else if !matches!(class, "CLOSED_UNMERGED" | "STALE") {
-                            has_active_mr = true;
-                        }
-                    }
-                }
-                // A ticket with any merged MR in its history is done -- prior
-                // failed attempts before that merge shouldn't count toward
-                // AUTO_RETRY_CAP and trigger HumanRequired on a completed ticket.
-                if has_merged_mr {
-                    continue;
-                }
-                (count, last_failure_class, has_active_mr)
-            }
+        let work_id = meta.work_id.clone();
+        let Some((prior_attempt_count, last_failure_class, has_active_mr)) =
+            ledger_lookup_for_ticket(
+                work_id.as_deref(),
+                profile,
+                all_mrs,
+                ledger_entries_by_work_id,
+            )
+        else {
+            continue;
         };
 
         candidates.push(AvailableTicket {
-            ticket_path: path.display().to_string(),
+            ticket_path: issue.number.clone(),
             work_id,
             title: meta.title.clone(),
             recommended_backend: meta.recommended_backend.clone(),
@@ -344,6 +414,7 @@ pub fn scan_available_tickets(
             has_active_mr,
         });
     }
+
     candidates
 }
 
@@ -2967,6 +3038,10 @@ mod tests {
         };
         let mut prof = profile(tmp.path());
         prof.local_path = tmp.path().display().to_string();
+        // Not testing issue-tracker scanning here -- an unmapped provider
+        // keeps scan_available_tickets from shelling out to a real `gh`/`glab`
+        // on whatever happens to be on PATH during this test.
+        prof.provider = String::new();
 
         let candidates = scan_available_tickets(
             &prof,
@@ -2979,6 +3054,70 @@ mod tests {
         assert_eq!(candidates[0].last_failure_class, None);
         assert!(!candidates[0].has_active_mr);
         assert_eq!(candidates[0].recommended_backend.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn scan_available_tickets_includes_open_github_issues() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\nRecommended model: Gemini 3.5 Flash (Medium)\n","labels":[]}]"#;
+        let gh_path = bin_dir.join("gh");
+        // Uses `printf '%s\n'` rather than `echo` -- dash's `echo` builtin
+        // (the usual `/bin/sh` on Debian/Ubuntu) interprets `\n` inside a
+        // single-quoted argument as an actual newline by default, which
+        // corrupts the embedded JSON string content (a raw control
+        // character where a `\n` escape sequence should stay literal).
+        // `printf '%s'` never reinterprets escapes inside its argument.
+        fs::write(
+            &gh_path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                issue_json.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&gh_path, perms).unwrap();
+        }
+        let _guard = PathGuard::set(&bin_dir);
+
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = "github".to_string();
+        prof.repo = "owner/repo".to_string();
+
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].ticket_path, "118");
+        assert_eq!(
+            candidates[0].work_id.as_deref(),
+            Some("TICKET-101-fail-closed-version-drift")
+        );
+        assert_eq!(candidates[0].recommended_backend.as_deref(), Some("agy"));
+        assert_eq!(candidates[0].prior_attempt_count, 0);
+        assert!(!candidates[0].has_active_mr);
     }
 
     #[test]
@@ -3004,6 +3143,7 @@ mod tests {
         };
         let mut prof = profile(tmp.path());
         prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
 
         let mut entry = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
         entry.work_id = Some("TICKET-201".into());
@@ -3050,6 +3190,7 @@ mod tests {
         };
         let mut prof = profile(tmp.path());
         prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
 
         let mut entry = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
         entry.work_id = Some("TICKET-202".into());
@@ -3105,6 +3246,7 @@ mod tests {
         };
         let mut prof = profile(tmp.path());
         prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
 
         let mut failed_entry = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
         failed_entry.work_id = Some("TICKET-090".into());
@@ -3174,9 +3316,11 @@ mod tests {
         let mut prof = profile(tmp.path());
         prof.repo_id = "worldcup-props".into();
         prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
 
         let mut other_repo_prof = profile(tmp.path());
         other_repo_prof.repo_id = "gah".into();
+        other_repo_prof.provider = String::new();
 
         let mut failed_entry =
             LedgerEntry::new("test", &other_repo_prof, "codex", "fix", "x", None, None);
@@ -3223,6 +3367,7 @@ mod tests {
 
         let mut prof = profile(tmp.path());
         prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
 
         let mut first = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
         first.work_id = Some("TICKET-210".into());
@@ -6540,6 +6685,141 @@ fn fetch_gitlab_issue(profile: &Profile, issue_number: &str) -> Result<IssueDeta
         title,
         body,
         labels,
+    })
+}
+
+/// List open issues from GitHub using gh CLI.
+fn list_open_github_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
+    let out = provider_command("gh")
+        .arg("issue")
+        .arg("list")
+        .arg("--repo")
+        .arg(&profile.repo)
+        .arg("--state")
+        .arg("open")
+        .arg("--json")
+        .arg("number,title,body,labels")
+        .arg("--limit")
+        .arg("1000")
+        .output()
+        .context("gh issue list")?;
+
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh issue list failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    let items: Vec<serde_json::Value> =
+        serde_json::from_slice(&out.stdout).context("parsing GitHub issue list response")?;
+
+    Ok(items
+        .into_iter()
+        .map(|resp| {
+            let number = resp["number"]
+                .as_i64()
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let title = resp["title"].as_str().unwrap_or_default().to_string();
+            let body = resp["body"].as_str().unwrap_or_default().to_string();
+            let labels = resp["labels"]
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|label| label["name"].as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            IssueDetails {
+                number,
+                title,
+                body,
+                labels,
+            }
+        })
+        .collect())
+}
+
+/// List open issues from GitLab using glab CLI. Paginates until a
+/// short page confirms there's nothing left -- a single 100-item page
+/// on a backlog this large would silently truncate the scan.
+fn list_open_gitlab_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
+    const PAGE_SIZE: usize = 100;
+    let mut all = Vec::new();
+    let mut page = 1;
+    loop {
+        let out = provider_command("glab")
+            .arg("issue")
+            .arg("list")
+            .arg("--repo")
+            .arg(&profile.repo)
+            .arg("--per-page")
+            .arg(PAGE_SIZE.to_string())
+            .arg("--page")
+            .arg(page.to_string())
+            .arg("-O")
+            .arg("json")
+            .output()
+            .context("glab issue list")?;
+
+        if !out.status.success() {
+            anyhow::bail!(
+                "glab issue list failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+
+        let items: Vec<serde_json::Value> =
+            serde_json::from_slice(&out.stdout).context("parsing GitLab issue list response")?;
+        let count = items.len();
+
+        for resp in items {
+            let number = resp["iid"]
+                .as_i64()
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let title = resp["title"].as_str().unwrap_or_default().to_string();
+            let body = resp["description"].as_str().unwrap_or_default().to_string();
+            let labels = resp["labels"]
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|label| label.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            all.push(IssueDetails {
+                number,
+                title,
+                body,
+                labels,
+            });
+        }
+
+        if count < PAGE_SIZE {
+            break;
+        }
+        page += 1;
+    }
+    Ok(all)
+}
+
+/// List every open issue for the profile's provider. Returns an empty
+/// list (not an error) for a provider that doesn't support issue tracking,
+/// mirroring `scan_available_tickets`'s existing soft-fail-empty behavior
+/// for a missing docs/tickets directory.
+fn list_open_issues(profile: &Profile) -> Vec<IssueDetails> {
+    let result = match profile.provider_cli() {
+        Some("gh") => list_open_github_issues(profile),
+        Some("glab") => list_open_gitlab_issues(profile),
+        _ => return vec![],
+    };
+    result.unwrap_or_else(|e| {
+        eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
+        vec![]
     })
 }
 
