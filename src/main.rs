@@ -10,6 +10,7 @@ mod events;
 mod init;
 mod ledger;
 mod models;
+mod notifications;
 mod policy;
 mod price_guard;
 mod provider;

@@ -268,6 +268,24 @@ pub fn gitlab_find_mr_by_branch(profile: &Profile, branch: &str) -> Result<MrRes
     })
 }
 
+/// Best-effort resolution of the MR/PR URL for a given source branch,
+/// across both GitLab and GitHub providers. Returns `None` when no open
+/// MR/PR can be resolved (e.g. the branch has no MR yet, or the provider
+/// CLI/API is unavailable). Intended for non-fatal enrichment like
+/// notifications -- callers must not depend on this succeeding.
+pub fn mr_url_for_branch(profile: &Profile, branch: &str) -> Option<String> {
+    match profile.provider.as_str() {
+        "gitlab" => gitlab_find_mr_by_branch(profile, branch)
+            .ok()
+            .map(|mr| mr.url),
+        _ => github_find_pr_number_by_branch(profile, branch)
+            .ok()
+            .and_then(|number| {
+                format!("https://github.com/{}/pull/{}", profile.repo, number).into()
+            }),
+    }
+}
+
 fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<ReviewTarget> {
     let api_base = profile
         .provider_api_base
@@ -503,6 +521,7 @@ mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            notify_command: None,
             routing: RoutingPolicy::default(),
             pacing: Default::default(),
         }

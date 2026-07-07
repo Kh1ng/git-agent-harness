@@ -147,6 +147,13 @@ pub struct Profile {
     /// when unset (see `Profile::agy_idle_timeout_seconds`).
     #[serde(default)]
     pub agy_idle_timeout_seconds: Option<u64>,
+    /// Optional shell command that GAH pipes a one-line notification message to
+    /// (via stdin) on key controller/dispatch events (MR created, human required,
+    /// review verdict, terminal dispatch failure). When unset GAH produces no
+    /// notification output at all. Notification failures are always swallowed and
+    /// logged to stderr -- they never fail the operation.
+    #[serde(default)]
+    pub notify_command: Option<String>,
     /// Path to a policy TOML file (see gah policy-check). When set, dispatch
     /// enforces permissions before provisioning any worktree.
     #[serde(default)]
@@ -607,12 +614,56 @@ pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile>
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::{
         load, load_canonical_routing, merge_routing_policy, CandidateConfig, GahConfig, Profile,
         RoutingPolicy,
     };
     use std::sync::Mutex;
+
+    /// Build a structurally complete `Profile` for unit tests in other modules
+    /// (e.g. `notifications`). Mirrors the shape of `dispatch::tests::profile`
+    /// so notification formatting tests can construct a real `Profile` without
+    /// duplicating every field.
+    #[cfg(test)]
+    pub fn test_profile_for_notifications() -> Profile {
+        Profile {
+            display_name: "Repo".into(),
+            repo_id: "repo".into(),
+            provider: "github".into(),
+            repo: "owner/repo".into(),
+            local_path: "/tmp/repo".into(),
+            artifact_root: "/tmp/artifacts".into(),
+            default_target_branch: "main".into(),
+            provider_api_base: None,
+            provider_project_id: None,
+            oh_profile: None,
+            openhands_args: vec![],
+            codex_args: vec![],
+            codex_path: None,
+            claude_args: vec![],
+            claude_path: None,
+            agy_path: None,
+            vibe_args: vec![],
+            vibe_path: None,
+            agy_second_home: None,
+            agy_print_timeout_seconds: std::collections::HashMap::new(),
+            agy_idle_timeout_seconds: None,
+            notify_command: None,
+            policy_path: None,
+            env_file: None,
+            env_file_prod: None,
+            validation_commands: vec![],
+            test_file_patterns: vec![],
+            known_baseline_failure_markers: vec![],
+            model_improve: None,
+            model_pm: None,
+            model_review: None,
+            review_timeout_seconds: None,
+            routing: RoutingPolicy::default(),
+            pacing: Default::default(),
+        }
+    }
 
     // TICKET-106: GAH_CANONICAL_CONFIG is a process-global env var; every
     // test that touches it must go through this lock (same reasoning as
@@ -643,6 +694,7 @@ mod tests {
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
+            notify_command: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
