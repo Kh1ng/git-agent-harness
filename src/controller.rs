@@ -442,6 +442,7 @@ pub fn run_once(
     profile_name: &str,
     json: bool,
     parallel: usize,
+    skip_validation_gate: bool,
 ) -> Result<()> {
     let now = time::OffsetDateTime::now_utc();
     let snapshot = crate::status::build_snapshot(cfg, profile_name, now)?;
@@ -455,7 +456,14 @@ pub fn run_once(
 
     // For parallel > 1, we need to decide multiple actions
     if parallel > 1 {
-        run_parallel_once(cfg, profile_name, &snapshot, json, parallel)?;
+        run_parallel_once(
+            cfg,
+            profile_name,
+            &snapshot,
+            json,
+            parallel,
+            skip_validation_gate,
+        )?;
     } else {
         // Original single action behavior
         let original_action = decide_next_action(&snapshot);
@@ -469,7 +477,7 @@ pub fn run_once(
         }
         record_action_events(cfg, profile_name, &original_action, &action)?;
 
-        let outcome = execute_action(cfg, profile_name, &action)?;
+        let outcome = execute_action(cfg, profile_name, &action, skip_validation_gate)?;
 
         let stop_event_type = match &action {
             NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
@@ -504,6 +512,7 @@ fn run_parallel_once(
     snapshot: &crate::status::StatusSnapshot,
     json: bool,
     max_parallel: usize,
+    skip_validation_gate: bool,
 ) -> Result<()> {
     use std::collections::HashSet;
 
@@ -559,7 +568,7 @@ fn run_parallel_once(
             | NextAction::NoOp { .. } => {
                 // Execute this single terminal action and stop
                 record_action_events(cfg, profile_name, &original_action, &action)?;
-                let outcome = execute_action(cfg, profile_name, &action)?;
+                let outcome = execute_action(cfg, profile_name, &action, skip_validation_gate)?;
 
                 let stop_event_type = match &action {
                     NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
@@ -588,7 +597,7 @@ fn run_parallel_once(
                     executed_work_ids.insert(work_id.to_string());
                 }
 
-                match execute_action(cfg, profile_name, &action) {
+                match execute_action(cfg, profile_name, &action, skip_validation_gate) {
                     Ok(outcome) => {
                         let stop_event_type = crate::events::EventType::LoopStopped;
                         crate::events::record(
@@ -661,6 +670,7 @@ pub(crate) fn execute_action(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
     action: &NextAction,
+    skip_validation_gate: bool,
 ) -> Result<String> {
     let base_args = || crate::dispatch::DispatchArgs {
         profile: profile_name.to_string(),
@@ -681,6 +691,7 @@ pub(crate) fn execute_action(
         allow_unknown_red_baseline: false,
         escalate: false,
         existing_branch: None,
+        skip_validation_gate,
     };
 
     match action {

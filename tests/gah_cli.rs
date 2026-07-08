@@ -2566,6 +2566,7 @@ fn dispatch_fix_validation_never_passes_records_no_push_no_mr() {
             "fix",
             "--config-path",
             cfg.to_str().unwrap(),
+            "--skip-validation-gate",
             "--target",
             "fix the thing",
             "--retries",
@@ -2657,6 +2658,175 @@ fn dispatch_fix_one_shot_success_records_one_attempt() {
     assert_eq!(attempts[0]["attempt_number"], 1);
     assert_eq!(attempts[0]["validation_result"], "passed");
     assert_eq!(attempts[0]["failure_class"], Value::Null);
+}
+
+/// TICKET-073: a config change (here, the very first run, since nothing is
+/// recorded yet) must trigger exactly one fresh-worktree self-check, record
+/// the new hash + last_verified_ok=true, and a *second* dispatch with an
+/// unchanged validation_commands list must take the fast path (hash compare
+/// only) — no "[validation-gate] commands changed" message, no second worktree
+/// spin-up.
+#[test]
+fn dispatch_runs_validation_gate_once_per_config_change_then_skips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let state_path = tmp.path().join("validation_check.json");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\nexit 0\n");
+
+    let run = || -> assert_cmd::assert::Assert {
+        bin()
+            .args([
+                "dispatch",
+                "--profile",
+                "real",
+                "--mode",
+                "fix",
+                "--config-path",
+                cfg.to_str().unwrap(),
+                "--target",
+                "noop",
+                "--retries",
+                "0",
+            ])
+            .env("PATH", prepend_path(&fake_bin))
+            .env("HOME", &home)
+            .env("GITHUB_TOKEN", "token")
+            .env("GAH_VALIDATION_CHECK_PATH", &state_path)
+            .assert()
+    };
+
+    // First dispatch: nothing recorded yet → gate runs, passes, records.
+    // The gate logs to stdout.
+    let first = run();
+    first.success().stdout(predicate::str::contains(
+        "[validation-gate] commands changed",
+    ));
+
+    // State now records last_verified_ok = true for profile "real".
+    let state_text = fs::read_to_string(&state_path).unwrap();
+    assert!(
+        state_text.contains("\"last_verified_ok\": true") && state_text.contains("\"real\""),
+        "gate should have recorded a passing check: {}",
+        state_text
+    );
+
+    // Second dispatch: config unchanged → fast path, no gate re-run message.
+    // Sleep 1s so the dispatch worktree branch timestamp differs from the
+    // first run (the previous worktree is cleaned up but its branch ref
+    // lingers until pruned) and the two runs don't collide.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let second = run();
+    second
+        .success()
+        .stdout(predicate::str::contains("[validation-gate] commands changed").not());
+}
+
+/// TICKET-073: a broken validation_commands entry is caught as a distinct,
+/// clear VALIDATION GATE FAILED failure — not conflated with the dispatched
+/// ticket's own outcome — and dispatch refuses to proceed (no backend run).
+#[test]
+fn dispatch_refuses_on_broken_validation_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    // validation_commands here is the deliberately-broken gate config.
+    let (_repo, home, cfg) =
+        setup_fix_dispatch_repo(&tmp, "validation_commands = [\"sh -c 'exit 1'\"]\n");
+    let state_path = tmp.path().join("validation_check.json");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    // If the gate were bypassed, codex would run — make it record so we can
+    // prove it never did.
+    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\ntouch codex_ran\n");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "noop",
+            "--retries",
+            "0",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_VALIDATION_CHECK_PATH", &state_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("VALIDATION GATE FAILED"));
+
+    // The broken gate must be persisted as last_verified_ok = false.
+    let state_text = fs::read_to_string(&state_path).unwrap();
+    assert!(
+        state_text.contains("\"last_verified_ok\": false"),
+        "broken gate must be recorded as not-ok: {}",
+        state_text
+    );
+
+    // The backend must never have run — the gate short-circuited dispatch.
+    assert!(
+        !tmp.path().join("codex_ran").exists(),
+        "backend must not run when the validation gate fails"
+    );
+}
+
+/// TICKET-073: --skip-validation-gate deliberately bypasses the gate even when
+/// validation_commands is broken, recording nothing new and letting dispatch
+/// proceed (so an operator who has acknowledged a known-broken gate can still
+/// dispatch real work).
+#[test]
+fn dispatch_skip_validation_gate_bypasses_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    // validation_commands passes baseline; we are only testing that the
+    // --skip-validation-gate opt-out suppresses the gate self-check entirely.
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let state_path = tmp.path().join("validation_check.json");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\nexit 0\n");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "noop",
+            "--retries",
+            "0",
+            "--skip-validation-gate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_VALIDATION_CHECK_PATH", &state_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "[validation-gate] skipped by explicit --skip-validation-gate",
+        ));
+
+    // Bypass means no check was recorded for this profile.
+    assert!(
+        !state_path.exists()
+            || !fs::read_to_string(&state_path)
+                .unwrap()
+                .contains("\"real\""),
+        "skipping the gate must not record a check for the profile"
+    );
 }
 
 /// TICKET-101: usage the backend reports on stdout for a given attempt is
@@ -2816,6 +2986,7 @@ fn dispatch_fix_fail_then_success_records_two_attempts() {
             "fix",
             "--config-path",
             cfg.to_str().unwrap(),
+            "--skip-validation-gate",
             "--target",
             "fix the marker file",
             "--retries",
@@ -2875,6 +3046,7 @@ fn dispatch_fix_no_progress_abort_records_exact_consumed_attempts() {
             "fix",
             "--config-path",
             cfg.to_str().unwrap(),
+            "--skip-validation-gate",
             "--target",
             "fix the thing",
             "--retries",
@@ -2929,6 +3101,7 @@ fn dispatch_fix_aborts_on_first_attempt_when_failure_matches_baseline() {
             "fix",
             "--config-path",
             cfg.to_str().unwrap(),
+            "--skip-validation-gate",
             "--target",
             "fix the thing",
             "--retries",
@@ -3013,6 +3186,7 @@ fn dispatch_fix_expected_red_baseline_can_still_succeed() {
             "fix",
             "--config-path",
             cfg.to_str().unwrap(),
+            "--skip-validation-gate",
             "--target",
             "fix the marker file",
             "--retries",
@@ -3067,6 +3241,7 @@ fn dispatch_fix_harness_error_baseline_always_stops() {
             "fix",
             "--config-path",
             cfg.to_str().unwrap(),
+            "--skip-validation-gate",
             "--target",
             "fix the thing",
             "--retries",
@@ -3120,6 +3295,7 @@ fn dispatch_fix_environment_error_baseline_stops() {
             "fix",
             "--config-path",
             cfg.to_str().unwrap(),
+            "--skip-validation-gate",
             "--target",
             "fix the thing",
             "--retries",
@@ -3168,6 +3344,7 @@ fn dispatch_fix_unknown_red_baseline_stops_without_override() {
             "fix",
             "--config-path",
             cfg.to_str().unwrap(),
+            "--skip-validation-gate",
             "--target",
             "fix the thing",
             "--retries",

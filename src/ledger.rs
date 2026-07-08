@@ -24,6 +24,12 @@ pub enum FailureClass {
     AgentNoProgress,
     AgentFailure,
     ValidationFailure,
+    /// TICKET-073: the dispatch *gate* itself (a profile's
+    /// `validation_commands`) failed self-verification against a fresh
+    /// worktree. Deliberately distinct from `ValidationFailure`, which means
+    /// the *dispatched ticket's* work failed the gate -- conflating the two
+    /// would make a broken config look like the ticket's fault.
+    ValidationGate,
     HumanBlocked,
     Unknown,
 }
@@ -37,6 +43,7 @@ impl FailureClass {
             Self::AgentNoProgress => "agent_no_progress",
             Self::AgentFailure => "agent_failure",
             Self::ValidationFailure => "validation_failure",
+            Self::ValidationGate => "validation_gate",
             Self::HumanBlocked => "human_blocked",
             Self::Unknown => "unknown",
         }
