@@ -404,6 +404,78 @@ pub fn run_vibe_with_executable(
     })
 }
 
+/// Run OpenCode CLI non-interactively via `opencode run --model <model> --dir <path> --auto `<prompt>`.
+/// Worker/fix backend only -- not wired into review.
+/// extra_args come from profile.opencode_args (e.g. `--format json`).
+/// Unlike vibe, opencode DOES take --model, so we pass effective_model through.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn run_opencode(
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    model: Option<&str>,
+    extra_args: &[String],
+    env_vars: &[(String, String)],
+) -> Result<RunResult> {
+    run_opencode_with_executable(
+        Path::new("opencode"),
+        worktree,
+        task,
+        session_dir,
+        model,
+        extra_args,
+        env_vars,
+    )
+}
+
+pub fn run_opencode_with_executable(
+    executable: &Path,
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    model: Option<&str>,
+    extra_args: &[String],
+    env_vars: &[(String, String)],
+) -> Result<RunResult> {
+    let log_path = session_dir.join("backend-output.log");
+    fs::write(session_dir.join("task.md"), task)?;
+
+    let log_file = fs::File::create(&log_path).context("creating log file")?;
+    let log_err = log_file.try_clone()?;
+
+    let start = Instant::now();
+    let mut cmd = Command::new(executable);
+    // opencode run --model <model> --dir <path> --auto "<prompt>"
+    cmd.arg("run").arg("--dir").arg(worktree).arg("--auto");
+
+    // Add model if specified
+    if let Some(model) = model {
+        cmd.arg("--model").arg(model);
+    }
+
+    // Add task as the last argument (prompt)
+    cmd.arg(task);
+
+    // Add extra args from profile
+    cmd.args(extra_args);
+
+    cmd.current_dir(worktree)
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err));
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let status = cmd
+        .status()
+        .context("launching opencode; is it installed and on PATH?")?;
+
+    Ok(RunResult {
+        exit_code: status.code().unwrap_or(-1),
+        duration_secs: start.elapsed().as_secs_f64(),
+        log_path: log_path.to_string_lossy().into_owned(),
+    })
+}
+
 /// Run Antigravity CLI non-interactively via `agy --print`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn run_agy(
@@ -874,6 +946,7 @@ fn backend_command_name(name: &str) -> Option<&'static str> {
         "agy-main" => Some("agy-main"),
         "agy-second" => Some("agy-second"),
         "vibe" => Some("vibe"),
+        "opencode" => Some("opencode"),
         _ => None,
     }
 }
@@ -1014,6 +1087,8 @@ mod tests {
             agy_path: None,
             vibe_args: vec![],
             vibe_path: None,
+            opencode_args: vec![],
+            opencode_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
@@ -1448,6 +1523,95 @@ mod tests {
         let err = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap_err();
 
         assert!(err.to_string().contains("launching vibe; is it installed"));
+    }
+
+    // ── run_opencode ─────────────────────────────────────────────────────
+
+    #[test]
+    fn run_opencode_core_argv_includes_run_dir_auto_and_model() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_opencode(
+            &f.worktree,
+            "the opencode task",
+            &f.session_dir,
+            Some("provider/test-model"),
+            &["--format".to_string(), "json".to_string()],
+            &envs,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "run");
+        assert!(argv.contains(&"--dir".to_string()));
+        assert!(argv.contains(&f.worktree.to_string_lossy().to_string()));
+        assert!(argv.contains(&"--auto".to_string()));
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"provider/test-model".to_string()));
+        assert!(argv.contains(&"--format".to_string()));
+        assert!(argv.contains(&"json".to_string()));
+        assert!(argv.contains(&"the opencode task".to_string()));
+    }
+
+    #[test]
+    fn run_opencode_without_model_still_includes_run_dir_auto() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_opencode(
+            &f.worktree,
+            "the opencode task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "run");
+        assert!(argv.contains(&"--dir".to_string()));
+        assert!(argv.contains(&f.worktree.to_string_lossy().to_string()));
+        assert!(argv.contains(&"--auto".to_string()));
+        assert!(argv.contains(&"the opencode task".to_string()));
+        // No --model flag should be present when model is None
+        assert!(!argv.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn run_opencode_propagates_env_file_vars() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            (
+                "FROM_ENV_FILE".to_string(),
+                "opencode-env-value".to_string(),
+            ),
+        ];
+
+        run_opencode(&f.worktree, "task", &f.session_dir, None, &[], &envs).unwrap();
+
+        let env = recorded_env(&f.record_dir);
+        assert!(env.contains("FROM_ENV_FILE=opencode-env-value"));
+    }
+
+    #[test]
+    fn run_opencode_missing_binary_produces_useful_error() {
+        let f = fixture();
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        let err = run_opencode(&f.worktree, "task", &f.session_dir, None, &[], &envs).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("launching opencode; is it installed"));
     }
 
     // ── run_agy ─────────────────────────────────────────────────────────
