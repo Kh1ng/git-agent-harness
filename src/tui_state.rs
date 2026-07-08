@@ -212,6 +212,7 @@ mod tests {
             errors: vec![],
             available_tickets: vec![],
             fix_attempt_counts: std::collections::HashMap::new(),
+            merge_attempt_counts: std::collections::HashMap::new(),
         }
     }
 
@@ -226,6 +227,7 @@ mod tests {
             draft: false,
             merge_status: None,
             merged: classification == "MERGED",
+            ci_passed: false,
             classification: classification.into(),
             recommended_action: RecommendedAction::from_class(classification),
         }

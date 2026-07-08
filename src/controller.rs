@@ -44,6 +44,14 @@ pub enum NextAction {
         mr_url: Option<String>,
         reason: String,
     },
+    /// TICKET-127: auto-merge -- a strong-reviewer APPROVE_STRONG plus
+    /// conclusively-green CI, gated by the same retry cap as FixMr.
+    MergeMr {
+        work_id: Option<String>,
+        branch: String,
+        mr_url: Option<String>,
+        reason: String,
+    },
     DispatchTicket {
         ticket_path: String,
         work_id: Option<String>,
@@ -88,6 +96,7 @@ impl NextAction {
         match self {
             Self::ReviewMr { .. } => "review_mr",
             Self::FixMr { .. } => "fix_mr",
+            Self::MergeMr { .. } => "merge_mr",
             Self::DispatchTicket { .. } => "dispatch_ticket",
             Self::Retry { .. } => "retry",
             Self::Escalate { .. } => "escalate",
@@ -101,6 +110,7 @@ impl NextAction {
         match self {
             Self::ReviewMr { reason, .. }
             | Self::FixMr { reason, .. }
+            | Self::MergeMr { reason, .. }
             | Self::DispatchTicket { reason, .. }
             | Self::Retry { reason, .. }
             | Self::Escalate { reason, .. }
@@ -114,7 +124,9 @@ impl NextAction {
     /// fingerprinting (TICKET-081) and event logging (TICKET-083).
     pub fn work_id(&self) -> Option<&str> {
         match self {
-            Self::ReviewMr { work_id, .. } | Self::FixMr { work_id, .. } => work_id.as_deref(),
+            Self::ReviewMr { work_id, .. }
+            | Self::FixMr { work_id, .. }
+            | Self::MergeMr { work_id, .. } => work_id.as_deref(),
             Self::DispatchTicket { work_id, .. } => work_id.as_deref(),
             Self::Retry { work_id, .. } | Self::Escalate { work_id, .. } => Some(work_id),
             Self::WaitUntil { .. } | Self::HumanRequired { .. } | Self::NoOp { .. } => None,
@@ -208,6 +220,38 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         };
     }
     if let Some(mr) = mrs.iter().find(|mr| mr.classification == "READY_FOR_HUMAN") {
+        // TICKET-127: auto-merge when a strong reviewer approved (the only
+        // path that sets the bare `gah-ready-for-human` label without also
+        // setting `gah-human-review` -- see `review_labels`) AND CI
+        // conclusively passed (`ci_passed`, not merely `!ci_failed`, which
+        // is also true mid-pipeline). A merge that keeps failing (conflict,
+        // unresolved discussion, external check) falls back to a human
+        // after the same retry cap FixMr uses, rather than retrying forever.
+        if mr.ci_passed {
+            let merge_attempts = snapshot
+                .merge_attempt_counts
+                .get(&mr.branch)
+                .copied()
+                .unwrap_or(0);
+            if merge_attempts < AUTO_RETRY_CAP {
+                return NextAction::MergeMr {
+                    work_id: mr.work_id.clone(),
+                    branch: mr.branch.clone(),
+                    mr_url: mr.url.clone(),
+                    reason: format!(
+                        "MR on branch '{}' approved by a strong reviewer with CI passing",
+                        mr.branch
+                    ),
+                };
+            }
+            return NextAction::HumanRequired {
+                reason: format!(
+                    "MR on branch '{}' auto-merge failed {} time(s); stopping automatic retries",
+                    mr.branch, merge_attempts
+                ),
+                reference: mr.url.clone(),
+            };
+        }
         return NextAction::HumanRequired {
             reason: format!(
                 "MR on branch '{}' ready for human merge decision",
@@ -489,6 +533,34 @@ pub(crate) fn execute_action(
             run_dispatch_and_record(cfg, action, &args, "fix_existing")?;
             Ok(format!("Dispatched fix for existing branch '{branch}'"))
         }
+        NextAction::MergeMr {
+            branch,
+            work_id,
+            mr_url,
+            ..
+        } => {
+            let profile = crate::config::get_profile(cfg, profile_name)?;
+            crate::events::record(
+                cfg,
+                crate::events::EventType::DispatchStarted,
+                Some(profile_name),
+                action.work_id(),
+                "merge",
+            )?;
+            let result = crate::dispatch::merge_branch(cfg, profile, branch, work_id, mr_url);
+            let outcome = match &result {
+                Ok(()) => format!("Merged MR on branch '{branch}'"),
+                Err(e) => format!("Merge failed for branch '{branch}': {e:#}"),
+            };
+            crate::events::record(
+                cfg,
+                crate::events::EventType::DispatchFinished,
+                Some(profile_name),
+                action.work_id(),
+                format!("merge: {outcome}"),
+            )?;
+            Ok(outcome)
+        }
         NextAction::DispatchTicket { ticket_path, .. } => {
             let args = crate::dispatch::DispatchArgs {
                 target: ticket_path.clone(),
@@ -667,10 +739,15 @@ mod tests {
             errors: vec![],
             available_tickets: vec![],
             fix_attempt_counts: std::collections::HashMap::new(),
+            merge_attempt_counts: std::collections::HashMap::new(),
         }
     }
 
     fn mr(branch: &str, classification: &str) -> SyncMrJson {
+        mr_with_ci(branch, classification, false)
+    }
+
+    fn mr_with_ci(branch: &str, classification: &str, ci_passed: bool) -> SyncMrJson {
         SyncMrJson {
             profile: None,
             branch: branch.into(),
@@ -681,6 +758,7 @@ mod tests {
             draft: false,
             merge_status: None,
             merged: classification == "MERGED",
+            ci_passed,
             classification: classification.into(),
             recommended_action: RecommendedAction::from_class(classification),
         }
@@ -795,6 +873,37 @@ mod tests {
         snapshot
             .merge_requests
             .push(mr("gah/real-1", "READY_FOR_HUMAN"));
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
+    }
+
+    #[test]
+    fn ready_for_human_mr_with_ci_passed_becomes_merge_mr() {
+        // TICKET-127: strong-reviewer approval (the only path onto
+        // READY_FOR_HUMAN via the bare `gah-ready-for-human` label) plus
+        // conclusively-green CI should auto-merge instead of waiting on a
+        // human.
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "merge_mr");
+        match action {
+            NextAction::MergeMr { branch, .. } => assert_eq!(branch, "gah/real-1"),
+            other => panic!("expected MergeMr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ready_for_human_mr_ci_passed_but_merge_retry_cap_exceeded_becomes_human_required() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot
+            .merge_attempt_counts
+            .insert("gah/real-1".to_string(), 2); // == AUTO_RETRY_CAP
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
     }

@@ -26,6 +26,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
                 draft: mr.draft,
                 merge_status: mr.merge_status.clone(),
                 merged: mr.merged,
+                ci_passed: mr.ci_passed,
                 classification: classify(mr).to_string(),
                 recommended_action: RecommendedAction::from_class(classify(mr)),
             })
@@ -89,6 +90,7 @@ pub struct SyncMrJson {
     pub draft: bool,
     pub merge_status: Option<String>,
     pub merged: bool,
+    pub ci_passed: bool,
     pub classification: String,
     pub recommended_action: RecommendedAction,
 }
@@ -106,6 +108,12 @@ pub struct SyncMr {
     pub merged: bool,
     pub updated_at: Option<String>,
     pub ci_failed: bool,
+    /// True only when CI has *conclusively* passed (every check/pipeline
+    /// terminal and green) -- distinct from `!ci_failed`, which is also
+    /// true while CI is still pending/running or absent entirely. Gates
+    /// auto-merge (TICKET-127): merging on "not failed yet" would merge
+    /// mid-pipeline.
+    pub ci_passed: bool,
     /// TICKET-096: populated from an authoritative `TICKET-NNN` token in
     /// the PR/MR title (see `build_mr_title` in dispatch.rs), not from a
     /// separate reconciliation structure.
@@ -270,12 +278,29 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             merge_status: pr.merge_state_status,
             merged: pr.merged_at.is_some(),
             updated_at: pr.updated_at,
-            ci_failed: pr
-                .status_check_rollup
-                .iter()
-                .any(|check| check.conclusion.as_deref() == Some("FAILURE")),
+            ci_failed: github_ci_failed(&pr.status_check_rollup),
+            ci_passed: github_ci_passed(&pr.status_check_rollup),
         })
         .collect())
+}
+
+fn github_ci_failed(checks: &[GithubCheck]) -> bool {
+    checks
+        .iter()
+        .any(|check| check.conclusion.as_deref() == Some("FAILURE"))
+}
+
+/// Every check present, all terminal, none failed -- as opposed to
+/// `!github_ci_failed`, which is also true while checks are still pending
+/// (`conclusion == None`) or absent altogether.
+fn github_ci_passed(checks: &[GithubCheck]) -> bool {
+    !checks.is_empty()
+        && checks.iter().all(|check| {
+            matches!(
+                check.conclusion.as_deref(),
+                Some("SUCCESS") | Some("NEUTRAL") | Some("SKIPPED")
+            )
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,6 +325,14 @@ struct GitlabMr {
     merged_at: Option<String>,
     #[serde(default)]
     updated_at: Option<String>,
+    #[serde(default)]
+    head_pipeline: Option<GitlabPipeline>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitlabPipeline {
+    #[serde(default)]
+    status: Option<String>,
 }
 
 fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
@@ -325,21 +358,38 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
     Ok(mrs
         .into_iter()
         .filter(|mr| mr.source_branch.starts_with("gah/"))
-        .map(|mr| SyncMr {
-            work_id: extract_work_id_from_title(&mr.title),
-            title: mr.title,
-            branch: mr.source_branch,
-            labels: mr.labels,
-            url: mr.web_url,
-            id: mr.iid.map(|v| v.to_string().trim_matches('"').to_string()),
-            state: mr.state,
-            draft: mr.draft,
-            merge_status: mr.detailed_merge_status.or(mr.merge_status),
-            merged: mr.merged_at.is_some(),
-            updated_at: mr.updated_at,
-            ci_failed: false,
+        .map(|mr| {
+            // Previously always `false` -- GitLab CI failures were
+            // invisible to classify()/decide_next_action, so a red
+            // pipeline never triggered an automatic FixMr. `head_pipeline`
+            // is GitLab's own terminal-status field for the MR's latest
+            // pipeline (success/failed/canceled/running/pending/...).
+            let pipeline_status = mr.head_pipeline.as_ref().and_then(|p| p.status.as_deref());
+            SyncMr {
+                work_id: extract_work_id_from_title(&mr.title),
+                title: mr.title,
+                branch: mr.source_branch,
+                labels: mr.labels,
+                url: mr.web_url,
+                id: mr.iid.map(|v| v.to_string().trim_matches('"').to_string()),
+                state: mr.state,
+                draft: mr.draft,
+                merge_status: mr.detailed_merge_status.or(mr.merge_status),
+                merged: mr.merged_at.is_some(),
+                updated_at: mr.updated_at,
+                ci_failed: gitlab_ci_failed(pipeline_status),
+                ci_passed: gitlab_ci_passed(pipeline_status),
+            }
         })
         .collect())
+}
+
+fn gitlab_ci_failed(pipeline_status: Option<&str>) -> bool {
+    matches!(pipeline_status, Some("failed") | Some("canceled"))
+}
+
+fn gitlab_ci_passed(pipeline_status: Option<&str>) -> bool {
+    pipeline_status == Some("success")
 }
 
 /// Used to implement the retry cap for FixMr actions on existing branches.
@@ -364,9 +414,81 @@ pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashM
     counts
 }
 
+/// Used to cap auto-merge retries (TICKET-127): a merge that fails
+/// (conflicts, unresolved discussions, external checks) would otherwise be
+/// re-attempted every loop iteration forever. Mirrors
+/// `count_fix_attempts_per_branch` exactly, filtered to `mode == "merge"`.
+pub fn count_merge_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashMap<String, usize> {
+    use std::collections::HashMap;
+
+    let entries = match crate::ledger::read_entries(cfg) {
+        Ok(entries) => entries,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut counts = HashMap::new();
+
+    for entry in entries {
+        if entry.mode == "merge" && entry.attempts_started > 0 {
+            if let Some(branch) = &entry.branch {
+                *counts.entry(branch.clone()).or_insert(0) += entry.attempts_started as usize;
+            }
+        }
+    }
+
+    counts
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{classify, extract_work_id_from_title, recommended_action, SyncMr};
+    use super::{
+        classify, extract_work_id_from_title, github_ci_failed, github_ci_passed,
+        gitlab_ci_failed, gitlab_ci_passed, recommended_action, GithubCheck, SyncMr,
+    };
+
+    #[test]
+    fn gitlab_ci_status_only_passed_on_explicit_success() {
+        assert!(gitlab_ci_passed(Some("success")));
+        assert!(!gitlab_ci_passed(Some("running")));
+        assert!(!gitlab_ci_passed(Some("pending")));
+        assert!(!gitlab_ci_passed(None));
+    }
+
+    #[test]
+    fn gitlab_ci_status_failed_on_failed_or_canceled() {
+        assert!(gitlab_ci_failed(Some("failed")));
+        assert!(gitlab_ci_failed(Some("canceled")));
+        assert!(!gitlab_ci_failed(Some("success")));
+        assert!(!gitlab_ci_failed(Some("running")));
+        // Absent pipeline is "unknown", not "failed" -- matches the
+        // pre-existing (if previously hardcoded) semantics.
+        assert!(!gitlab_ci_failed(None));
+    }
+
+    fn check(conclusion: Option<&str>) -> GithubCheck {
+        GithubCheck {
+            conclusion: conclusion.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn github_ci_passed_requires_at_least_one_check_all_terminal_and_green() {
+        assert!(github_ci_passed(&[check(Some("SUCCESS"))]));
+        assert!(github_ci_passed(&[check(Some("SUCCESS")), check(Some("SKIPPED"))]));
+        // No checks at all must not read as "passed" -- a repo with no CI
+        // configured shouldn't silently qualify for auto-merge.
+        assert!(!github_ci_passed(&[]));
+        // Still running (conclusion not yet set) is not passed.
+        assert!(!github_ci_passed(&[check(Some("SUCCESS")), check(None)]));
+        assert!(!github_ci_passed(&[check(Some("FAILURE"))]));
+    }
+
+    #[test]
+    fn github_ci_failed_on_any_failure_conclusion() {
+        assert!(github_ci_failed(&[check(Some("SUCCESS")), check(Some("FAILURE"))]));
+        assert!(!github_ci_failed(&[check(Some("SUCCESS"))]));
+        assert!(!github_ci_failed(&[check(None)]));
+    }
 
     fn base_mr() -> SyncMr {
         SyncMr {
@@ -381,6 +503,7 @@ mod tests {
             merged: false,
             updated_at: None,
             ci_failed: false,
+            ci_passed: false,
             work_id: None,
         }
     }

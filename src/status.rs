@@ -24,6 +24,9 @@ pub struct StatusSnapshot {
     pub available_tickets: Vec<crate::models::AvailableTicket>,
     /// TICKET-118: fix attempt counts per branch for retry cap.
     pub fix_attempt_counts: std::collections::HashMap<String, usize>,
+    /// TICKET-127: merge attempt counts per branch for the auto-merge
+    /// retry cap.
+    pub merge_attempt_counts: std::collections::HashMap<String, usize>,
 }
 
 #[derive(Serialize)]
@@ -127,6 +130,8 @@ pub fn build_snapshot(
 
     // TICKET-118: Count fix attempts per branch from ledger entries
     let fix_attempt_counts = sync::count_fix_attempts_per_branch(cfg);
+    // TICKET-127: Count merge attempts per branch for the auto-merge retry cap
+    let merge_attempt_counts = sync::count_merge_attempts_per_branch(cfg);
 
     // 1. Sync State
     let mut merge_requests = Vec::new();
@@ -149,6 +154,7 @@ pub fn build_snapshot(
                         draft: mr.draft,
                         merge_status: mr.merge_status.clone(),
                         merged: mr.merged,
+                        ci_passed: mr.ci_passed,
                         classification: class.to_string(),
                         recommended_action: action,
                     }
@@ -318,6 +324,7 @@ pub fn build_snapshot(
         errors,
         available_tickets,
         fix_attempt_counts,
+        merge_attempt_counts,
     };
 
     Ok(snapshot)
@@ -750,6 +757,7 @@ default_target_branch = "main"
             merged: false,
             updated_at: None,
             ci_failed: false,
+            ci_passed: false,
             work_id: None,
         };
         let class = sync::classify(&mr);
@@ -772,6 +780,7 @@ default_target_branch = "main"
             merged: false,
             updated_at: None,
             ci_failed: true,
+            ci_passed: false,
             work_id: None,
         };
         let class = sync::classify(&mr);

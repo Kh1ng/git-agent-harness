@@ -467,6 +467,47 @@ pub fn scan_available_tickets(
     candidates
 }
 
+/// TICKET-127: execute an auto-merge decided by `controller::decide_next_action`.
+/// No LLM backend involved -- just the provider merge call, a ledger entry
+/// (so `count_merge_attempts_per_branch` can cap retries), and a
+/// notification. Merge failures are returned as `Err` for the caller to
+/// report as a soft outcome, not a hard loop error.
+pub fn merge_branch(
+    cfg: &GahConfig,
+    profile: &Profile,
+    branch: &str,
+    work_id: &Option<String>,
+    mr_url: &Option<String>,
+) -> Result<()> {
+    let mut entry = LedgerEntry::new(&profile.repo_id, profile, "none", "merge", branch, None, None);
+    entry.branch = Some(branch.to_string());
+    entry.work_id = work_id.clone();
+    entry.mr_url = mr_url.clone();
+    entry.attempts_started = 1;
+
+    let result = provider::merge_mr(profile, branch);
+    match &result {
+        Ok(()) => {
+            entry.attempts_completed = 1;
+            notify_event(
+                profile,
+                NotifyEvent::MrMerged {
+                    url: mr_url.as_deref().unwrap_or("unknown"),
+                    work_id: work_id.as_deref().unwrap_or("unknown"),
+                },
+            );
+        }
+        Err(e) => {
+            entry.failure_class = Some("merge_failed".to_string());
+            entry.error_summary = Some(format!("{:#}", e));
+        }
+    }
+    if let Err(ledger_err) = ledger::append(cfg, &entry) {
+        eprintln!("warning: failed to append merge ledger entry: {ledger_err:#}");
+    }
+    result
+}
+
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     let profile = config::get_profile(cfg, &args.profile)?;
     export_profile_env(profile, args.prod);
@@ -3392,6 +3433,7 @@ mod tests {
             merged: false,
             updated_at: None,
             ci_failed: false,
+            ci_passed: false,
             work_id: Some("TICKET-202".into()),
         }];
 
@@ -3457,6 +3499,7 @@ mod tests {
             merged: true,
             updated_at: None,
             ci_failed: false,
+            ci_passed: false,
             work_id: Some("TICKET-090".into()),
         }];
 
@@ -3576,6 +3619,7 @@ mod tests {
             merged: false,
             updated_at: None,
             ci_failed: false,
+            ci_passed: false,
             work_id: Some("TICKET-211".into()),
         }];
 

@@ -37,6 +37,8 @@ pub enum NotifyEvent<'a> {
     },
     /// A review verdict was recorded.
     ReviewVerdict { verdict: &'a str, mr_url: &'a str },
+    /// TICKET-127: an MR/PR was auto-merged.
+    MrMerged { url: &'a str, work_id: &'a str },
     /// A dispatch failed terminally (retries exhausted).
     DispatchFailed {
         failure_class: &'a str,
@@ -62,6 +64,9 @@ pub fn format_message(event: &NotifyEvent) -> String {
         }
         NotifyEvent::ReviewVerdict { verdict, mr_url } => {
             format!("[gah] review {verdict} on {mr_url}")
+        }
+        NotifyEvent::MrMerged { url, work_id } => {
+            format!("[gah] auto-merged {url} (work_id={work_id})")
         }
         NotifyEvent::DispatchFailed {
             failure_class,

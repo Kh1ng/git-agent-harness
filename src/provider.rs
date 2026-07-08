@@ -260,6 +260,86 @@ fn github_post_review_comment(
     Ok(())
 }
 
+/// TICKET-127: un-draft then merge the MR/PR for `branch`. gah always
+/// creates MRs as drafts, so both providers require an explicit
+/// "ready"/un-draft step before their merge endpoint will accept the MR --
+/// shelling out to the same `glab`/`gh` CLIs already used elsewhere here
+/// rather than reimplementing GitLab's title-based draft toggle over raw
+/// REST.
+pub fn merge_mr(profile: &Profile, branch: &str) -> Result<()> {
+    let target = find_review_target_by_branch(profile, branch)?;
+    match profile.provider.as_str() {
+        "gitlab" => gitlab_merge_mr(profile, &target.id),
+        "github" => github_merge_mr(profile, &target.id),
+        other => anyhow::bail!("unsupported provider: {}", other),
+    }
+}
+
+fn gitlab_merge_mr(profile: &Profile, iid: &str) -> Result<()> {
+    let ready = provider_command("glab")
+        .args(["mr", "update", iid, "--ready", "--repo", &profile.repo])
+        .output()
+        .context("glab mr update --ready")?;
+    if !ready.status.success() {
+        anyhow::bail!(
+            "glab mr update --ready failed: {}",
+            String::from_utf8_lossy(&ready.stderr).trim()
+        );
+    }
+    let merge = provider_command("glab")
+        .args([
+            "mr",
+            "merge",
+            iid,
+            "--squash",
+            "--remove-source-branch",
+            "--yes",
+            "--repo",
+            &profile.repo,
+        ])
+        .output()
+        .context("glab mr merge")?;
+    if !merge.status.success() {
+        anyhow::bail!(
+            "glab mr merge failed: {}",
+            String::from_utf8_lossy(&merge.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn github_merge_mr(profile: &Profile, number: &str) -> Result<()> {
+    let ready = provider_command("gh")
+        .args(["pr", "ready", number, "--repo", &profile.repo])
+        .output()
+        .context("gh pr ready")?;
+    if !ready.status.success() {
+        anyhow::bail!(
+            "gh pr ready failed: {}",
+            String::from_utf8_lossy(&ready.stderr).trim()
+        );
+    }
+    let merge = provider_command("gh")
+        .args([
+            "pr",
+            "merge",
+            number,
+            "--squash",
+            "--delete-branch",
+            "--repo",
+            &profile.repo,
+        ])
+        .output()
+        .context("gh pr merge")?;
+    if !merge.status.success() {
+        anyhow::bail!(
+            "gh pr merge failed: {}",
+            String::from_utf8_lossy(&merge.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 pub fn gitlab_find_mr_by_branch(profile: &Profile, branch: &str) -> Result<MrResult> {
     let target = gitlab_review_target_by_branch(profile, branch)?;
     Ok(MrResult {
@@ -451,7 +531,7 @@ fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_draft_mr, find_review_target_by_mr, TEST_PATH_OVERRIDE};
+    use super::{create_draft_mr, find_review_target_by_mr, merge_mr, TEST_PATH_OVERRIDE};
     use crate::config::{Profile, RoutingPolicy};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -622,5 +702,99 @@ mod tests {
         let err = find_review_target_by_mr(&gitlab_profile(), "235").unwrap_err();
 
         assert!(format!("{:#}", err).contains("did not return a merge request"));
+    }
+
+    #[test]
+    fn merge_mr_github_un_drafts_then_merges() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        // Handles the 3 subcommand shapes merge_mr's call chain hits, in
+        // order: `pr list` (resolve branch -> number), `pr view` (resolve
+        // full ReviewTarget), `pr ready` (un-draft), `pr merge`. Fails
+        // loudly (unrecognized args) instead of a lenient default if a
+        // future edit changes the call sequence without updating this test.
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            r#"#!/bin/sh
+case "$1 $2" in
+  "pr list") printf '[{"number":42}]\n' ;;
+  "pr view") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
+  "pr ready") exit 0 ;;
+  "pr merge") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        merge_mr(&github_profile(), "gah/test").unwrap();
+
+        let call = fs::read_to_string(bin_dir.join("merge_call.txt")).unwrap();
+        assert!(call.contains("42"));
+        assert!(call.contains("--squash"));
+        assert!(call.contains("--delete-branch"));
+    }
+
+    #[test]
+    fn merge_mr_github_fails_loudly_when_merge_rejected() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            r#"#!/bin/sh
+case "$1 $2" in
+  "pr list") printf '[{"number":42}]\n' ;;
+  "pr view") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
+  "pr ready") exit 0 ;;
+  "pr merge") echo "not mergeable: review required" >&2; exit 1 ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        let err = merge_mr(&github_profile(), "gah/test").unwrap_err();
+
+        assert!(format!("{:#}", err).contains("not mergeable"));
+    }
+
+    #[test]
+    fn merge_mr_gitlab_un_drafts_then_merges() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "curl",
+            r#"#!/bin/sh
+printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main"}]\n'
+"#,
+        );
+        make_fake_bin(
+            &bin_dir,
+            "glab",
+            r#"#!/bin/sh
+case "$1 $2" in
+  "mr update") exit 0 ;;
+  "mr merge") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
+  *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        merge_mr(&gitlab_profile(), "gah/test").unwrap();
+
+        let call = fs::read_to_string(bin_dir.join("merge_call.txt")).unwrap();
+        assert!(call.contains(" 7 "));
+        assert!(call.contains("--squash"));
+        assert!(call.contains("--remove-source-branch"));
     }
 }
