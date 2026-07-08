@@ -28,6 +28,7 @@ mod test_support;
 mod tui;
 mod tui_state;
 mod usage;
+mod validation_check;
 mod work_claim;
 mod worktree;
 
@@ -143,6 +144,11 @@ enum Commands {
         /// TICKET-096: Run up to N tickets concurrently instead of one at a time
         #[arg(long, default_value = "1")]
         parallel: usize,
+        /// TICKET-073: skip the fresh-worktree self-verification of this
+        /// profile's `validation_commands`. Only use after acknowledging a
+        /// genuine `VALIDATION GATE FAILED` error.
+        #[arg(long, default_value_t = false)]
+        skip_validation_gate: bool,
     },
     /// Inspect the controller event stream (TICKET-083)
     Events {
@@ -226,6 +232,11 @@ enum Commands {
         /// TICKET-118: reuse an existing branch for fix operations
         #[arg(long)]
         existing_branch: Option<String>,
+        /// TICKET-073: skip the fresh-worktree self-verification of this
+        /// profile's `validation_commands`. Only use after acknowledging a
+        /// genuine `VALIDATION GATE FAILED` error.
+        #[arg(long, default_value_t = false)]
+        skip_validation_gate: bool,
     },
     /// Interactive terminal UI: observe state, confirm and run the one
     /// already-decided next action. Does not let you pick an arbitrary
@@ -398,6 +409,7 @@ fn main() -> Result<()> {
             json,
             once,
             parallel,
+            skip_validation_gate,
         } => {
             if !once {
                 anyhow::bail!(
@@ -406,7 +418,7 @@ fn main() -> Result<()> {
                 );
             }
             let cfg = config::load(config_path.as_deref())?;
-            controller::run_once(&cfg, &profile, json, parallel)?;
+            controller::run_once(&cfg, &profile, json, parallel, skip_validation_gate)?;
         }
 
         Commands::Events {
@@ -456,6 +468,7 @@ fn main() -> Result<()> {
             allow_unknown_red_baseline,
             escalate,
             existing_branch,
+            skip_validation_gate,
         } => {
             let cfg = config::load(config_path.as_deref())?;
             dispatch::run(
@@ -479,6 +492,7 @@ fn main() -> Result<()> {
                     allow_unknown_red_baseline,
                     escalate,
                     existing_branch,
+                    skip_validation_gate,
                 },
             )?;
         }

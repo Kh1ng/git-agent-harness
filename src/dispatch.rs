@@ -53,6 +53,10 @@ pub struct DispatchArgs {
     /// TICKET-118: for FixMr action, reuse an existing branch instead of creating a new one.
     #[allow(dead_code)]
     pub existing_branch: Option<String>,
+    /// TICKET-073: deliberately bypass the fresh-worktree self-verification of
+    /// a profile's `validation_commands`. Intended only for recovering from a
+    /// known-broken config after the operator has acknowledged the failure.
+    pub skip_validation_gate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +438,14 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         return dry_run(cfg, profile, args);
     }
 
+    // TICKET-073: verify the dispatch gate itself (validation_commands) against
+    // a fresh worktree before spending any backend budget. Skips entirely when
+    // the commands are unchanged since the last successful self-check (fast
+    // path, hash compare only); otherwise spins up one fresh worktree and runs
+    // the commands once. A failed self-check bails with a distinct error and is
+    // NOT conflated with the dispatched ticket's own outcome.
+    self_check_validation_gate(profile, cfg, args.skip_validation_gate)?;
+
     if args.mode == "improve" || args.mode == "fix" || args.mode == "experiment" {
         check_duplicate_work(cfg, profile, args)?;
     }
@@ -698,6 +710,112 @@ fn validate_with_exit_code(commands: &[String], wt: &Path) -> Result<(), (String
             ));
         }
     }
+    Ok(())
+}
+
+/// TICKET-073: verify a profile's `validation_commands` against a genuinely
+/// fresh worktree before trusting the dispatch gate.
+///
+/// This is the "verify the gate itself works before trusting it" check. The
+/// common case (commands unchanged since the last successful self-check) is a
+/// pure hash compare against durable state and costs essentially nothing. Only
+/// on a hash change (or no prior record, or a previously-failed check) does
+/// this spin up a real isolated worktree from `default_target_branch`, run the
+/// commands once, record pass/fail + the new hash, and clean the worktree up.
+///
+/// On success this returns `Ok(())` and may have written a new state record.
+/// On a failed self-check it bails with a distinct, loud error — the failure
+/// class is `FailureClass::ValidationGate`, deliberately *not*
+/// `FailureClass::ValidationFailure`, so a broken config is never conflated
+/// with the dispatched ticket's own outcome.
+///
+/// `skip` honours an explicit operator bypass (passed through
+/// `--skip-validation-gate`); everything else is fail-closed.
+pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool) -> Result<()> {
+    use crate::validation_check as vc;
+
+    if skip {
+        println!("[validation-gate] skipped by explicit --skip-validation-gate");
+        return Ok(());
+    }
+
+    // Nothing to verify when the profile has no validation commands at all.
+    if profile.validation_commands.is_empty() {
+        return Ok(());
+    }
+
+    let hash = vc::hash_validation_commands(&profile.validation_commands);
+    let state_path = vc::resolve_state_path();
+
+    let state = vc::load_state(&state_path)
+        .with_context(|| format!("loading validation-check state {}", state_path.display()))?;
+
+    if !vc::should_recheck(&state, &profile.repo_id, &hash) {
+        println!(
+            "[validation-gate] commands unchanged (hash {}) — skipping fresh-worktree self-check",
+            &hash[..hash.len().min(8)]
+        );
+        return Ok(());
+    }
+
+    println!(
+        "[validation-gate] commands changed (hash {}) — verifying against a fresh worktree from '{}'...",
+        &hash[..hash.len().min(8)],
+        profile.default_target_branch
+    );
+
+    let repo = Path::new(&profile.local_path);
+    let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
+
+    // `worktree::create` errors out if the branch already exists. Make the
+    // gate branch unique per dispatch so a prior gate run (same hash) never
+    // blocks a later one — the worktree is cleaned up regardless.
+    let unique = vc::now_rfc3339(OffsetDateTime::now_utc())
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>();
+    let branch = format!(
+        "gah/validation-gate-{}-{}",
+        &hash[..hash.len().min(8)],
+        &unique[..unique.len().min(8)]
+    );
+
+    let wt = worktree::create(
+        repo,
+        &profile.default_target_branch,
+        &branch,
+        &worktree_base,
+    )?;
+    let verified_at = vc::now_rfc3339(OffsetDateTime::now_utc());
+    let result = validate(&profile.validation_commands, &wt);
+    let ok = result.is_ok();
+
+    // Always clean up, regardless of pass/fail — a leftover validation-gate
+    // worktree is just state noise that the next dispatch would trip over.
+    worktree::cleanup(&wt, repo);
+
+    vc::record_check(&state_path, &profile.repo_id, &hash, ok, &verified_at)
+        .with_context(|| format!("recording validation-check result {}", state_path.display()))?;
+
+    if let Err(text) = result {
+        anyhow::bail!(
+            "VALIDATION GATE FAILED — profile '{}' validation_commands did not pass on a \
+             fresh worktree from '{}'. This is a broken gate config, NOT the dispatched \
+             ticket's fault. Fix validation_commands (or run with --skip-validation-gate to \
+             proceed anyway once you've acknowledged it).\n\n\
+             Self-check recorded last_verified_ok=false (hash {}).\n\n\
+             Failure output:\n{}",
+            profile.repo_id,
+            profile.default_target_branch,
+            &hash[..hash.len().min(8)],
+            text,
+        );
+    }
+
+    println!(
+        "[validation-gate] passed on fresh worktree — self-check recorded (hash {})",
+        &hash[..hash.len().min(8)]
+    );
     Ok(())
 }
 
@@ -4936,6 +5054,7 @@ The parser should retain structured sections.\n\n\
             allow_unknown_red_baseline: false,
             escalate: false,
             existing_branch: None,
+            skip_validation_gate: false,
         };
 
         // No ledger exists yet.
