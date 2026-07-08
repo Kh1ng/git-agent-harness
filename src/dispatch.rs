@@ -273,15 +273,21 @@ fn ledger_lookup_for_ticket(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
-) -> Option<(usize, Option<String>, bool)> {
+) -> Option<(usize, Option<String>, bool, bool)> {
     let Some(wid) = work_id else {
-        return Some((0, None, false));
+        return Some((0, None, false, false));
     };
     let entries = ledger_entries_by_work_id.get(wid);
     let mut count = 0usize;
     let mut last_failure_class = None;
     let mut has_active_mr = false;
     let mut has_merged_mr = false;
+    // TICKET-human-required-scoping: effective human_required for this work
+    // item is the most recent of its own (non-stale, repo-scoped) ledger
+    // entries that carry a `human_required` flag. This is the canonical,
+    // work-item-scoped derivation -- it must NOT read the single most-recent
+    // profile-wide entry, which is what previously froze the whole profile.
+    let mut human_required = false;
     for e in entries.into_iter().flatten() {
         // The ledger is a single global file shared by every profile
         // (Defaults::ledger_path, not per-profile), and work_id is
@@ -298,6 +304,9 @@ fn ledger_lookup_for_ticket(
         }
         count += 1;
         last_failure_class = e.failure_class.clone().or(last_failure_class);
+        if e.human_required {
+            human_required = true;
+        }
         let matching_mr = all_mrs.iter().find(|mr| {
             e.branch.as_deref().is_some_and(|b| b == mr.branch)
                 || (e.mr_url.is_some() && e.mr_url.as_deref() == mr.url.as_deref())
@@ -314,7 +323,7 @@ fn ledger_lookup_for_ticket(
     if has_merged_mr {
         return None;
     }
-    Some((count, last_failure_class, has_active_mr))
+    Some((count, last_failure_class, has_active_mr, human_required))
 }
 
 /// Leading `TICKET-<digits>` numeric id out of a work_id string, e.g.
@@ -379,7 +388,7 @@ pub fn scan_available_tickets(
                 continue;
             }
             let work_id = meta.work_id.clone().or_else(|| meta.ticket_id.clone());
-            let Some((prior_attempt_count, last_failure_class, has_active_mr)) =
+            let Some((prior_attempt_count, last_failure_class, has_active_mr, human_required)) =
                 ledger_lookup_for_ticket(
                     work_id.as_deref(),
                     profile,
@@ -399,6 +408,7 @@ pub fn scan_available_tickets(
                 prior_attempt_count,
                 last_failure_class,
                 has_active_mr,
+                human_required,
             });
         }
     }
@@ -441,7 +451,7 @@ pub fn scan_available_tickets(
         {
             continue;
         }
-        let Some((prior_attempt_count, last_failure_class, has_active_mr)) =
+        let Some((prior_attempt_count, last_failure_class, has_active_mr, human_required)) =
             ledger_lookup_for_ticket(
                 work_id.as_deref(),
                 profile,
@@ -461,6 +471,7 @@ pub fn scan_available_tickets(
             prior_attempt_count,
             last_failure_class,
             has_active_mr,
+            human_required,
         });
     }
 

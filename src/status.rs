@@ -17,7 +17,17 @@ pub struct StatusSnapshot {
     pub availability: Vec<ScopeStatusJson>,
     pub recent_ledger: Option<RecentLedgerSummary>,
     pub constraints: Vec<Blocker>,
+    /// Genuine profile-wide blockers (sync failure, infra unavailable, auth
+    /// failure with no viable route, etc.) that halt ALL work. A
+    /// ticket-scoped `human_required` ledger entry must NOT appear here --
+    /// it is tracked per work item in `blocked_work_items` instead.
     pub blockers: Vec<Blocker>,
+    /// Work items awaiting human action (e.g. a ticket/MR review verdict
+    /// with `human_required`). Scoped to the work item(s) it affects; other
+    /// eligible work remains dispatchable. Separated from `blockers` so
+    /// `gah status` and the controller can distinguish a global freeze from
+    /// a single blocked ticket.
+    pub blocked_work_items: Vec<Blocker>,
     pub errors: Vec<StatusError>,
     /// TICKET-078: dispatch candidates from `docs/tickets/`, feeding
     /// `decide_next_action`'s DispatchTicket/Retry/Escalate rules.
@@ -269,7 +279,7 @@ pub fn build_snapshot(
 
     // 4. Blockers and Constraints
     let mut constraints = Vec::new();
-    let mut blockers = Vec::new();
+    let blockers = Vec::new();
 
     for avail in &availability_list {
         if !avail.eligible_now {
@@ -288,9 +298,23 @@ pub fn build_snapshot(
     // Removed all_backends_unavailable blocker check. Status has no routing context (mode),
     // so it correctly falls back to emitting individual availability constraints only.
 
+    // TICKET-human-required-scoping: a ticket/MR review verdict with
+    // `human_required = true` is WORK-ITEM SCOPED, never profile-wide. A
+    // single blocked ticket must not freeze unrelated work. Derive the
+    // effective `human_required` for each available ticket from its own
+    // ledger history (canonical helper `ledger_lookup_for_ticket`) and
+    // record it against that work item only. The newest ledger entry no
+    // longer implicitly defines a profile-wide `human_required` blocker.
+    // Genuine profile-wide blockers (sync failure, infra unavailable, auth
+    // failure with no viable route) are still emitted above via
+    // `availability`-derived constraints, NOT here.
+    let mut blocked_work_items: Vec<Blocker> = Vec::new();
     if let Some(ref rl) = recent_ledger {
         if rl.human_required {
-            blockers.push(Blocker {
+            // Surface the most-recent human_required entry as a work-item
+            // blocker so it stays visible in status output, but scoped to
+            // its work_id/branch rather than freezing the whole profile.
+            blocked_work_items.push(Blocker {
                 kind: "human_required".into(),
                 reason: Some("ledger_human_required".into()),
                 message: Some("Ledger indicates human intervention required".into()),
@@ -307,6 +331,25 @@ pub fn build_snapshot(
     let available_tickets =
         crate::dispatch::scan_available_tickets(profile, &raw_mrs, &ledger_entries_by_work_id);
 
+    // TICKET-human-required-scoping: after the per-ticket human_required is
+    // derived (in scan_available_tickets via ledger_lookup_for_ticket), record
+    // each blocked work item in `blocked_work_items` so it stays visible in
+    // status output without freezing the whole profile. Tickets whose
+    // human_required state has since cleared are no longer shown as blocked.
+    for ticket in &available_tickets {
+        if ticket.human_required {
+            blocked_work_items.push(Blocker {
+                kind: "human_required".into(),
+                reason: Some("ledger_human_required".into()),
+                message: Some("Ledger indicates human intervention required".into()),
+                backend: None,
+                model: None,
+                until: None,
+                source_reference: ticket.work_id.clone(),
+            });
+        }
+    }
+
     let snapshot = StatusSnapshot {
         schema_version: 1,
         generated_at,
@@ -321,6 +364,7 @@ pub fn build_snapshot(
         recent_ledger,
         constraints,
         blockers,
+        blocked_work_items,
         errors,
         available_tickets,
         fix_attempt_counts,
@@ -595,8 +639,11 @@ default_target_branch = "main"
         let snap = build_snapshot(&cfg, "test", now).unwrap();
 
         assert!(snap.recent_ledger.unwrap().human_required);
-        assert_eq!(snap.blockers.len(), 1);
-        assert_eq!(snap.blockers[0].kind, "human_required");
+        // TICKET-human-required-scoping: a ticket-scoped human_required is
+        // reported per work item, NOT as a profile-wide blocker.
+        assert!(snap.blockers.is_empty());
+        assert_eq!(snap.blocked_work_items.len(), 1);
+        assert_eq!(snap.blocked_work_items[0].kind, "human_required");
     }
 
     #[test]

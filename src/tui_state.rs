@@ -209,6 +209,7 @@ mod tests {
             recent_ledger: None,
             constraints: vec![],
             blockers: vec![],
+            blocked_work_items: vec![],
             errors: vec![],
             available_tickets: vec![],
             fix_attempt_counts: std::collections::HashMap::new(),
@@ -243,6 +244,7 @@ mod tests {
             prior_attempt_count,
             last_failure_class: None,
             has_active_mr: false,
+            human_required: false,
         }
     }
 
