@@ -629,7 +629,7 @@ pub mod summary {
     /// drift apart -- no speculative economics logic, just the counts the
     /// human view already computed.
     /// TICKET-125: Grouped summary data for a specific backend or model
-    #[derive(Debug, Serialize)]
+    #[derive(Debug, Serialize, Clone)]
     pub struct GroupSummary {
         pub group_key: String,
         pub entries: usize,
@@ -638,10 +638,11 @@ pub mod summary {
         pub review_verdict_distribution: BTreeMap<String, usize>,
         pub total_cost_usd: Option<f64>,
         pub average_cost_usd: Option<f64>,
+        pub average_duration_seconds: Option<f64>,
         pub cost_per_approve_strong: Option<f64>,
     }
 
-    #[derive(Debug, Serialize)]
+    #[derive(Debug, Serialize, Clone)]
     pub struct SummaryData {
         pub ledger_path: String,
         pub entries: usize,
@@ -789,7 +790,7 @@ pub mod summary {
         Ok(())
     }
 
-    fn build_summary(
+    pub fn build_summary(
         cfg: &config::GahConfig,
         since: &str,
         profile: Option<&str>,
@@ -960,6 +961,8 @@ pub mod summary {
             let mut total_cost_usd = 0.0f64;
             let mut cost_seen = false;
             let mut approve_strong_count = 0usize;
+            let mut total_duration = 0.0f64;
+            let mut duration_count = 0usize;
 
             for entry in &group_entries {
                 // Count attempts from the attempts vector
@@ -991,6 +994,12 @@ pub mod summary {
                     total_cost_usd += cost;
                     cost_seen = true;
                 }
+
+                // Sum up durations
+                if let Some(duration) = entry.duration_seconds {
+                    total_duration += duration;
+                    duration_count += 1;
+                }
             }
 
             let average_cost_usd = if cost_seen && group_entry_count > 0 {
@@ -1006,6 +1015,13 @@ pub mod summary {
                 None
             };
 
+            // Calculate average duration
+            let average_duration_seconds = if duration_count > 0 {
+                Some(total_duration / duration_count as f64)
+            } else {
+                None
+            };
+
             summaries.push(GroupSummary {
                 group_key,
                 entries: group_entry_count,
@@ -1014,6 +1030,7 @@ pub mod summary {
                 review_verdict_distribution,
                 total_cost_usd: cost_seen.then_some(total_cost_usd),
                 average_cost_usd,
+                average_duration_seconds,
                 cost_per_approve_strong,
             });
         }
