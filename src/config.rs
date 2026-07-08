@@ -170,6 +170,15 @@ pub struct Profile {
     /// Example: ["cargo test --quiet", "cargo clippy -- -D warnings"]
     #[serde(default)]
     pub validation_commands: Vec<String>,
+    /// Mechanical formatting fixups run (best-effort, failures ignored) in
+    /// the worktree immediately before `validation_commands`, on every
+    /// attempt. Example: ["cargo fmt"]. Backends routinely write correct
+    /// but unformatted code and burn a full retry (LLM call + review) on
+    /// a `cargo fmt --check`/`black --check`-style failure that a
+    /// deterministic formatter would have fixed in milliseconds -- this
+    /// runs the formatter instead of retrying for it.
+    #[serde(default)]
+    pub auto_fix_commands: Vec<String>,
     #[serde(default)]
     pub test_file_patterns: Vec<String>,
     /// TICKET-110/111: substrings that explicitly mark a baseline validation
@@ -654,6 +663,7 @@ pub mod tests {
             env_file: None,
             env_file_prod: None,
             validation_commands: vec![],
+            auto_fix_commands: vec![],
             test_file_patterns: vec![],
             known_baseline_failure_markers: vec![],
             model_improve: None,
@@ -699,6 +709,7 @@ pub mod tests {
             env_file: None,
             env_file_prod: None,
             validation_commands: vec![],
+            auto_fix_commands: vec![],
             test_file_patterns: vec![],
             known_baseline_failure_markers: vec![],
             model_improve: None,

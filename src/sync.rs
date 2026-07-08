@@ -418,7 +418,9 @@ pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashM
 /// (conflicts, unresolved discussions, external checks) would otherwise be
 /// re-attempted every loop iteration forever. Mirrors
 /// `count_fix_attempts_per_branch` exactly, filtered to `mode == "merge"`.
-pub fn count_merge_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashMap<String, usize> {
+pub fn count_merge_attempts_per_branch(
+    cfg: &GahConfig,
+) -> std::collections::HashMap<String, usize> {
     use std::collections::HashMap;
 
     let entries = match crate::ledger::read_entries(cfg) {
@@ -442,8 +444,8 @@ pub fn count_merge_attempts_per_branch(cfg: &GahConfig) -> std::collections::Has
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, extract_work_id_from_title, github_ci_failed, github_ci_passed,
-        gitlab_ci_failed, gitlab_ci_passed, recommended_action, GithubCheck, SyncMr,
+        classify, extract_work_id_from_title, github_ci_failed, github_ci_passed, gitlab_ci_failed,
+        gitlab_ci_passed, recommended_action, GithubCheck, SyncMr,
     };
 
     #[test]
@@ -474,7 +476,10 @@ mod tests {
     #[test]
     fn github_ci_passed_requires_at_least_one_check_all_terminal_and_green() {
         assert!(github_ci_passed(&[check(Some("SUCCESS"))]));
-        assert!(github_ci_passed(&[check(Some("SUCCESS")), check(Some("SKIPPED"))]));
+        assert!(github_ci_passed(&[
+            check(Some("SUCCESS")),
+            check(Some("SKIPPED"))
+        ]));
         // No checks at all must not read as "passed" -- a repo with no CI
         // configured shouldn't silently qualify for auto-merge.
         assert!(!github_ci_passed(&[]));
@@ -485,7 +490,10 @@ mod tests {
 
     #[test]
     fn github_ci_failed_on_any_failure_conclusion() {
-        assert!(github_ci_failed(&[check(Some("SUCCESS")), check(Some("FAILURE"))]));
+        assert!(github_ci_failed(&[
+            check(Some("SUCCESS")),
+            check(Some("FAILURE"))
+        ]));
         assert!(!github_ci_failed(&[check(Some("SUCCESS"))]));
         assert!(!github_ci_failed(&[check(None)]));
     }

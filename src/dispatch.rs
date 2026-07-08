@@ -479,7 +479,15 @@ pub fn merge_branch(
     work_id: &Option<String>,
     mr_url: &Option<String>,
 ) -> Result<()> {
-    let mut entry = LedgerEntry::new(&profile.repo_id, profile, "none", "merge", branch, None, None);
+    let mut entry = LedgerEntry::new(
+        &profile.repo_id,
+        profile,
+        "none",
+        "merge",
+        branch,
+        None,
+        None,
+    );
     entry.branch = Some(branch.to_string());
     entry.work_id = work_id.clone();
     entry.mr_url = mr_url.clone();
@@ -722,6 +730,35 @@ fn run_backend(
             &profile.openhands_args,
             &env_vars,
         ),
+    }
+}
+
+/// Run `auto_fix_commands` in the worktree, best-effort, right before
+/// `validate()`. A formatter failing to run (missing binary, whatever) must
+/// never block the dispatch -- it's a convenience, not a gate -- so every
+/// failure is logged and swallowed rather than propagated.
+fn run_auto_fix_commands(commands: &[String], wt: &Path) {
+    for cmd_str in commands {
+        if cmd_str.trim().is_empty() {
+            continue;
+        }
+        match Command::new("sh")
+            .args(["-c", cmd_str])
+            .current_dir(wt)
+            .output()
+        {
+            Ok(out) if !out.status.success() => {
+                eprintln!(
+                    "warning: auto_fix command '{cmd_str}' exited {}: {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Err(e) => {
+                eprintln!("warning: auto_fix command '{cmd_str}' failed to run: {e:#}");
+            }
+            Ok(_) => {}
+        }
     }
 }
 
@@ -1263,6 +1300,8 @@ fn improve(
             });
             break;
         }
+
+        run_auto_fix_commands(&profile.auto_fix_commands, &wt);
 
         println!(
             "Running validation ({} commands)...",
@@ -2854,6 +2893,7 @@ fn format_candidate_task(
 #[cfg(test)]
 mod tests {
     use super::preflight;
+    use super::run_auto_fix_commands;
     use super::validate;
     use super::{
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
@@ -2931,6 +2971,7 @@ mod tests {
             env_file: None,
             env_file_prod: None,
             validation_commands: vec![],
+            auto_fix_commands: vec![],
             test_file_patterns: vec![],
             known_baseline_failure_markers: vec![],
             model_improve: None,
@@ -5002,6 +5043,31 @@ The parser should retain structured sections.\n\n\
         let cmds = vec!["echo oops >&2 && false".to_string()];
         let err = validate(&cmds, tmp.path()).unwrap_err();
         assert!(format!("{:#}", err).contains("oops"));
+    }
+
+    #[test]
+    fn run_auto_fix_commands_actually_fixes_the_worktree() {
+        // The whole point: a formatter run here should mean a subsequent
+        // validate() with a --check-style command passes, instead of
+        // burning an LLM retry on pure whitespace.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "unformatted\n").unwrap();
+        let fix_cmds = vec!["printf 'fixed\\n' > f.txt".to_string()];
+        run_auto_fix_commands(&fix_cmds, tmp.path());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("f.txt")).unwrap(),
+            "fixed\n"
+        );
+    }
+
+    #[test]
+    fn run_auto_fix_commands_swallows_a_failing_command() {
+        // A formatter that isn't installed, or that errors on this
+        // particular tree, must never abort the dispatch -- it's a
+        // best-effort convenience, not a validation gate.
+        let tmp = tempfile::tempdir().unwrap();
+        let cmds = vec!["exit 1".to_string()];
+        run_auto_fix_commands(&cmds, tmp.path()); // must not panic
     }
 
     fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
