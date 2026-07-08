@@ -198,8 +198,7 @@ fn independent_state_per_instance_of_the_same_backend_name() {
 }
 
 /// TICKET request: the harness must support OpenHands, OpenCode, Claude,
-/// Codex, and Agy by name. (OpenCode is not a real `gah` runner backend today —
-/// the harness is name-agnostic and supports faking it regardless.)
+/// Codex, and Agy by name.
 #[test]
 fn supports_all_five_named_backends() {
     let _lock = TEST_MUTEX.lock().unwrap();

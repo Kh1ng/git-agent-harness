@@ -8,10 +8,8 @@
 //! whatever `name` you pass `FakeBackend::new`, so it works for any
 //! executable GAH shells out to. It is explicitly exercised in
 //! `tests/fake_backend_harness.rs` for the five backends GAH cares about
-//! today and may care about soon: `openhands`, `opencode`, `claude`,
-//! `codex`, `agy`. (OpenCode is not currently a real `gah` runner backend — this
-//! harness supports faking it anyway, ahead of any production integration,
-//! because the instruction was to build the harness for it now.)
+//! today: `openhands`, `opencode`, `claude`,
+//! `codex`, `agy`.
 //!
 //! Every `FakeBackend` is an independently configured *instance*, not a
 //! global fake keyed by executable name. Future availability/quota routing

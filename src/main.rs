@@ -17,6 +17,7 @@ mod provider;
 mod prune;
 mod quota;
 mod quota_parser;
+mod report;
 mod routing;
 mod runner;
 mod server;
@@ -27,6 +28,7 @@ mod test_support;
 mod tui;
 mod tui_state;
 mod usage;
+mod work_claim;
 mod worktree;
 
 use anyhow::Result;
@@ -138,6 +140,9 @@ enum Commands {
         /// so a future recurring mode can't be silently assumed.
         #[arg(long, default_value_t = false)]
         once: bool,
+        /// TICKET-096: Run up to N tickets concurrently instead of one at a time
+        #[arg(long, default_value = "1")]
+        parallel: usize,
     },
     /// Inspect the controller event stream (TICKET-083)
     Events {
@@ -174,7 +179,7 @@ enum Commands {
         profile: String,
         #[arg(long)]
         mode: String,
-        /// Backend: openhands, cloud-coder, codex, claude, agy, vibe, auto
+        /// Backend: openhands, cloud-coder, codex, claude, agy, vibe, opencode, auto
         #[arg(long, default_value = "auto")]
         backend: String,
         #[arg(long, default_value = "")]
@@ -236,6 +241,19 @@ enum Commands {
     Profile {
         #[command(subcommand)]
         command: ProfileCommands,
+    },
+    /// Generate backend/model comparison report (TICKET-098)
+    Report {
+        #[arg(long, default_value = "7d")]
+        since: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, value_enum, default_value = "backend")]
+        group_by: ledger::GroupBy,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Start the WebSocket server for desktop/web interface
     Server {
@@ -379,6 +397,7 @@ fn main() -> Result<()> {
             config_path,
             json,
             once,
+            parallel,
         } => {
             if !once {
                 anyhow::bail!(
@@ -387,7 +406,7 @@ fn main() -> Result<()> {
                 );
             }
             let cfg = config::load(config_path.as_deref())?;
-            controller::run_once(&cfg, &profile, json)?;
+            controller::run_once(&cfg, &profile, json, parallel)?;
         }
 
         Commands::Events {
@@ -516,6 +535,22 @@ fn main() -> Result<()> {
                 }
             }
         },
+
+        Commands::Report {
+            since,
+            profile,
+            config_path,
+            group_by,
+            json,
+        } => {
+            report::run(report::ReportArgs {
+                since,
+                profile,
+                config_path,
+                group_by,
+                json,
+            })?;
+        }
 
         Commands::Server { port, host } => {
             println!("Starting WebSocket server on {}:{}", host, port);

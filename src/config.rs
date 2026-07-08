@@ -122,6 +122,13 @@ pub struct Profile {
     /// Optional absolute/relative path to the Mistral Vibe CLI executable.
     #[serde(default)]
     pub vibe_path: Option<String>,
+    /// Extra CLI args appended to `opencode run` (e.g. `--format json`).
+    /// Worker/fix backend only -- not wired into review.
+    #[serde(default)]
+    pub opencode_args: Vec<String>,
+    /// Optional absolute/relative path to the OpenCode CLI executable.
+    #[serde(default)]
+    pub opencode_path: Option<String>,
     /// HOME override for the `agy-second` backend name only -- a distinct
     /// authenticated Antigravity account/quota pool from the default `agy`
     /// backend, which otherwise runs under the process's real $HOME. Same
@@ -405,6 +412,7 @@ impl Profile {
             "claude" => self.claude_path.as_deref(),
             "agy" | "agy-main" | "agy-second" => self.agy_path.as_deref(),
             "vibe" => self.vibe_path.as_deref(),
+            "opencode" => self.opencode_path.as_deref(),
             _ => None,
         }
     }
@@ -655,6 +663,8 @@ pub mod tests {
             agy_path: None,
             vibe_args: vec![],
             vibe_path: None,
+            opencode_args: vec![],
+            opencode_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
@@ -701,6 +711,8 @@ pub mod tests {
             agy_path: None,
             vibe_args: vec![],
             vibe_path: None,
+            opencode_args: vec![],
+            opencode_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
