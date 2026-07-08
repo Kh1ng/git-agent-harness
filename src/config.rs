@@ -257,6 +257,17 @@ pub struct RoutingPolicy {
     pub weak_review_backend: Option<String>,
     #[serde(default)]
     pub weak_review_model: Option<String>,
+    /// TICKET-123: first-line STRONG reviewer (single). Replaces the
+    /// `strong_review_*` single-pair fields with the full CandidateConfig
+    /// shape so the routine reviewer can carry model/quota/priority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_reviewer: Option<CandidateConfig>,
+    /// TICKET-123: ordered list of advanced reviewers used when routine
+    /// review escalates. This is a LIST, not a single backend -- it
+    /// expresses the ESCALATORY_REVIEW tier (Sonnet/Kimi/GLM/...) that the
+    /// legacy `weak_review_*` field could never hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalatory_reviewers: Option<Vec<CandidateConfig>>,
     /// TICKET-109: capabilities required for review, keyed by backend name
     /// (e.g. `{"claude": ["ponytail"]}`). Checked at preflight (TICKET-105)
     /// and activated in the review prompt -- missing a required capability
@@ -335,6 +346,16 @@ impl RoutingPolicy {
                 .weak_review_model
                 .clone()
                 .or_else(|| defaults.weak_review_model.clone()),
+            routine_reviewer: self
+                .routine_reviewer
+                .clone()
+                .or_else(|| defaults.routine_reviewer.clone())
+                .or_else(|| RoutingPolicy::legacy_strong_to_routine(self, defaults)),
+            escalatory_reviewers: self
+                .escalatory_reviewers
+                .clone()
+                .or_else(|| defaults.escalatory_reviewers.clone())
+                .or_else(|| RoutingPolicy::legacy_weak_to_escalatory(self, defaults)),
             pm_candidates: self
                 .pm_candidates
                 .clone()
@@ -376,6 +397,61 @@ impl RoutingPolicy {
                 .max_known_actual_cost_per_week
                 .or(defaults.max_known_actual_cost_per_week),
         }
+    }
+
+    /// TICKET-123 backward-compat shim: if `routine_reviewer` is unset but a
+    /// legacy `strong_review_backend` is configured (on either `self` or
+    /// `defaults`), map it onto a `CandidateConfig`. Returns `None` when no
+    /// legacy strong reviewer exists, so the new field keeps its higher
+    /// precedence.
+    fn legacy_strong_to_routine(
+        policy: &RoutingPolicy,
+        defaults: &RoutingPolicy,
+    ) -> Option<CandidateConfig> {
+        let backend = policy
+            .strong_review_backend
+            .as_ref()
+            .or(defaults.strong_review_backend.as_ref())?;
+        Some(CandidateConfig {
+            backend: backend.clone(),
+            model: policy
+                .strong_review_model
+                .clone()
+                .or_else(|| defaults.strong_review_model.clone()),
+            quota_pool: None,
+            priority: 0,
+            included_in_quota: false,
+            marginal_cost_usd: None,
+            quota_usage_percent: None,
+            quota_days_remaining: None,
+        })
+    }
+
+    /// TICKET-123 backward-compat shim: if `escalatory_reviewers` is unset
+    /// but a legacy `weak_review_backend` is configured (on either `self` or
+    /// `defaults`), map it onto a single-entry escalatory list. Returns
+    /// `None` when no legacy weak reviewer exists.
+    fn legacy_weak_to_escalatory(
+        policy: &RoutingPolicy,
+        defaults: &RoutingPolicy,
+    ) -> Option<Vec<CandidateConfig>> {
+        let backend = policy
+            .weak_review_backend
+            .as_ref()
+            .or(defaults.weak_review_backend.as_ref())?;
+        Some(vec![CandidateConfig {
+            backend: backend.clone(),
+            model: policy
+                .weak_review_model
+                .clone()
+                .or_else(|| defaults.weak_review_model.clone()),
+            quota_pool: None,
+            priority: 0,
+            included_in_quota: false,
+            marginal_cost_usd: None,
+            quota_usage_percent: None,
+            quota_days_remaining: None,
+        }])
     }
 
     pub fn find_quota_pool(
@@ -554,24 +630,47 @@ fn load_canonical_routing() -> Result<Option<RoutingPolicy>> {
 /// the repo sets them (not concatenate); the capability map merges by key
 /// so a repo declaring one backend's capabilities doesn't erase another
 /// backend's canonical-declared ones.
-fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> RoutingPolicy {
-    repo.default_backend = repo.default_backend.or(canonical.default_backend);
-    repo.default_model = repo.default_model.or(canonical.default_model);
-    repo.pm_backend = repo.pm_backend.or(canonical.pm_backend);
-    repo.pm_model = repo.pm_model.or(canonical.pm_model);
-    repo.improve_backend = repo.improve_backend.or(canonical.improve_backend);
-    repo.improve_model = repo.improve_model.or(canonical.improve_model);
-    repo.review_backend = repo.review_backend.or(canonical.review_backend);
-    repo.review_model = repo.review_model.or(canonical.review_model);
+fn merge_routing_policy(canonical: &RoutingPolicy, mut repo: RoutingPolicy) -> RoutingPolicy {
+    repo.default_backend = repo.default_backend.or(canonical.default_backend.clone());
+    repo.default_model = repo.default_model.or(canonical.default_model.clone());
+    repo.pm_backend = repo.pm_backend.or(canonical.pm_backend.clone());
+    repo.pm_model = repo.pm_model.or(canonical.pm_model.clone());
+    repo.improve_backend = repo.improve_backend.or(canonical.improve_backend.clone());
+    repo.improve_model = repo.improve_model.or(canonical.improve_model.clone());
+    repo.review_backend = repo.review_backend.or(canonical.review_backend.clone());
+    repo.review_model = repo.review_model.or(canonical.review_model.clone());
     repo.strong_review_backend = repo
         .strong_review_backend
-        .or(canonical.strong_review_backend);
-    repo.strong_review_model = repo.strong_review_model.or(canonical.strong_review_model);
-    repo.weak_review_backend = repo.weak_review_backend.or(canonical.weak_review_backend);
-    repo.weak_review_model = repo.weak_review_model.or(canonical.weak_review_model);
-    repo.pm_candidates = repo.pm_candidates.or(canonical.pm_candidates);
-    repo.improve_candidates = repo.improve_candidates.or(canonical.improve_candidates);
-    repo.review_candidates = repo.review_candidates.or(canonical.review_candidates);
+        .or(canonical.strong_review_backend.clone());
+    repo.strong_review_model = repo
+        .strong_review_model
+        .or(canonical.strong_review_model.clone());
+    repo.weak_review_backend = repo
+        .weak_review_backend
+        .or(canonical.weak_review_backend.clone());
+    repo.weak_review_model = repo
+        .weak_review_model
+        .or(canonical.weak_review_model.clone());
+    // TICKET-123: new two-tier reviewer fields. If the repo/config didn't
+    // set the new shape but did set the legacy strong/weak single-pair
+    // fields, promote them via the same shim as `merged_with_defaults`.
+    let legacy_routine = RoutingPolicy::legacy_strong_to_routine(&repo, canonical);
+    let legacy_escalatory = RoutingPolicy::legacy_weak_to_escalatory(&repo, canonical);
+    repo.routine_reviewer = repo
+        .routine_reviewer
+        .or(canonical.routine_reviewer.clone())
+        .or(legacy_routine);
+    repo.escalatory_reviewers = repo
+        .escalatory_reviewers
+        .or(canonical.escalatory_reviewers.clone())
+        .or(legacy_escalatory);
+    repo.pm_candidates = repo.pm_candidates.or(canonical.pm_candidates.clone());
+    repo.improve_candidates = repo
+        .improve_candidates
+        .or(canonical.improve_candidates.clone());
+    repo.review_candidates = repo
+        .review_candidates
+        .or(canonical.review_candidates.clone());
     repo.allow_review_fallback = repo.allow_review_fallback || canonical.allow_review_fallback;
     repo.allow_implementation_fallback =
         repo.allow_implementation_fallback || canonical.allow_implementation_fallback;
@@ -593,7 +692,7 @@ fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> Ro
     repo.max_known_actual_cost_per_week = repo
         .max_known_actual_cost_per_week
         .or(canonical.max_known_actual_cost_per_week);
-    let mut capabilities = canonical.review_required_capabilities;
+    let mut capabilities = canonical.review_required_capabilities.clone();
     capabilities.extend(repo.review_required_capabilities);
     repo.review_required_capabilities = capabilities;
     repo
@@ -613,7 +712,7 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
     let mut cfg: GahConfig =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     if let Some(canonical_routing) = load_canonical_routing()? {
-        cfg.defaults.routing = merge_routing_policy(canonical_routing, cfg.defaults.routing);
+        cfg.defaults.routing = merge_routing_policy(&canonical_routing, cfg.defaults.routing);
     }
     Ok(cfg)
 }
@@ -767,7 +866,7 @@ pub mod tests {
             default_backend: Some("claude".into()),
             ..Default::default()
         };
-        let merged = merge_routing_policy(canonical, repo);
+        let merged = merge_routing_policy(&canonical, repo);
         assert_eq!(merged.default_backend.as_deref(), Some("claude"));
     }
 
@@ -779,7 +878,7 @@ pub mod tests {
             ..Default::default()
         };
         let repo = RoutingPolicy::default();
-        let merged = merge_routing_policy(canonical, repo);
+        let merged = merge_routing_policy(&canonical, repo);
         assert_eq!(merged.default_backend.as_deref(), Some("codex"));
         assert_eq!(merged.review_backend.as_deref(), Some("claude"));
     }
@@ -798,7 +897,7 @@ pub mod tests {
             default_backend: Some("agy".into()),
             ..Default::default()
         };
-        let merged = merge_routing_policy(canonical, repo);
+        let merged = merge_routing_policy(&canonical, repo);
         assert_eq!(merged.default_backend.as_deref(), Some("agy"));
         assert_eq!(merged.review_backend.as_deref(), Some("claude"));
     }
@@ -831,7 +930,7 @@ pub mod tests {
             }]),
             ..Default::default()
         };
-        let merged = merge_routing_policy(canonical, repo);
+        let merged = merge_routing_policy(&canonical, repo);
         let candidates = merged.improve_candidates.unwrap();
         assert_eq!(candidates.len(), 1, "replace, not concatenate");
         assert_eq!(candidates[0].backend, "claude");
@@ -852,7 +951,7 @@ pub mod tests {
             review_required_capabilities: repo_caps,
             ..Default::default()
         };
-        let merged = merge_routing_policy(canonical, repo);
+        let merged = merge_routing_policy(&canonical, repo);
         assert_eq!(
             merged.review_required_capabilities.get("claude"),
             Some(&vec!["ponytail".to_string()])
@@ -878,7 +977,7 @@ pub mod tests {
             review_required_capabilities: repo_caps,
             ..Default::default()
         };
-        let merged = merge_routing_policy(canonical, repo);
+        let merged = merge_routing_policy(&canonical, repo);
         assert_eq!(
             merged.review_required_capabilities.get("claude"),
             Some(&vec![])
@@ -895,7 +994,7 @@ pub mod tests {
             allow_review_fallback: true,
             ..Default::default()
         };
-        let merged = merge_routing_policy(RoutingPolicy::default(), repo.clone());
+        let merged = merge_routing_policy(&RoutingPolicy::default(), repo.clone());
         assert_eq!(merged.default_backend, repo.default_backend);
         assert_eq!(merged.allow_review_fallback, repo.allow_review_fallback);
     }

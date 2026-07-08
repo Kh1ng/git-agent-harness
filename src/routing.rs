@@ -1,5 +1,5 @@
 use crate::availability::{self, AvailabilityDecision, BlockScope};
-use crate::config::{Defaults, Profile, RoutingPolicy};
+use crate::config::{CandidateConfig, Defaults, Profile, RoutingPolicy};
 use crate::ledger::{BackendUsageSummary, RoutingCandidateDiagnostic, RoutingDiagnostics};
 use crate::quota::{self, PaceBand};
 use crate::runner;
@@ -611,6 +611,44 @@ fn earliest_reset(skipped: &[SkippedBackend]) -> Option<String> {
         .map(|(_, ts)| ts.to_string())
 }
 
+/// TICKET-123: ordered list of review-fallback candidates (the ESCALATORY
+/// tier). Uses every `escalatory_reviewers` entry when configured, falling
+/// back to the legacy single `weak_review_*` pair for backward compat. Each
+/// entry becomes a candidate appended after the primary reviewer.
+fn review_fallback_candidates(routing: &RoutingPolicy) -> Vec<CandidateConfig> {
+    if let Some(list) = &routing.escalatory_reviewers {
+        if !list.is_empty() {
+            return list.clone();
+        }
+    }
+    if let (Some(backend), Some(model)) = (&routing.weak_review_backend, &routing.weak_review_model)
+    {
+        return vec![CandidateConfig {
+            backend: backend.clone(),
+            model: Some(model.clone()),
+            quota_pool: None,
+            priority: 0,
+            included_in_quota: false,
+            marginal_cost_usd: None,
+            quota_usage_percent: None,
+            quota_days_remaining: None,
+        }];
+    }
+    if let Some(backend) = &routing.weak_review_backend {
+        return vec![CandidateConfig {
+            backend: backend.clone(),
+            model: None,
+            quota_pool: None,
+            priority: 0,
+            included_in_quota: false,
+            marginal_cost_usd: None,
+            quota_usage_percent: None,
+            quota_days_remaining: None,
+        }];
+    }
+    vec![]
+}
+
 fn auto_candidates(
     routing: &RoutingPolicy,
     mode: &str,
@@ -618,14 +656,12 @@ fn auto_candidates(
 ) -> Vec<RouteCandidate> {
     let mut candidates = vec![primary.clone()];
     if mode == "review" {
-        if let Some(weak_backend) = review_fallback_backend_name(routing) {
-            let weak_model = review_fallback_model(routing)
-                .map(str::to_string)
-                .or_else(|| primary.model.clone());
-            let quota_pool = routing.find_quota_pool(mode, weak_backend, weak_model.as_deref());
+        for fallback in review_fallback_candidates(routing) {
+            let model = fallback.model.clone().or_else(|| primary.model.clone());
+            let quota_pool = routing.find_quota_pool(mode, &fallback.backend, model.as_deref());
             candidates.push(RouteCandidate {
-                backend: weak_backend.to_string(),
-                model: weak_model,
+                backend: fallback.backend,
+                model,
                 quota_pool,
                 priority: 0,
                 included_in_quota: false,
@@ -650,7 +686,17 @@ fn explicit_candidates(
 ) -> Vec<RouteCandidate> {
     let mut candidates = vec![primary.clone()];
     if mode == "review" && allow_review_fallback {
-        if let Some(weak_backend) = review_fallback_backend {
+        // TICKET-123: prefer the full ordered escalatory list; otherwise fall
+        // back to the single `review_fallback_backend` (legacy path).
+        let fallbacks: Vec<String> = if !review_fallback_candidates(routing).is_empty() {
+            review_fallback_candidates(routing)
+                .into_iter()
+                .map(|c| c.backend.clone())
+                .collect()
+        } else {
+            review_fallback_backend.into_iter().collect()
+        };
+        for weak_backend in fallbacks {
             let weak_model = review_fallback_model(routing)
                 .map(str::to_string)
                 .or_else(|| primary.model.clone());
@@ -1051,8 +1097,17 @@ impl RouteCandidate {
     }
 }
 
+/// TICKET-123: the review fallback backend is now the *first* entry of the
+/// ordered `escalatory_reviewers` list (the primary escalation reviewer).
+/// Legacy `weak_review_*` is still honored when the new list is empty so
+/// older configs keep working.
 fn review_fallback_backend_name(routing: &RoutingPolicy) -> Option<&str> {
-    routing.weak_review_backend.as_deref()
+    routing
+        .escalatory_reviewers
+        .as_ref()
+        .and_then(|list| list.first())
+        .map(|c| c.backend.as_str())
+        .or(routing.weak_review_backend.as_deref())
 }
 
 fn review_fallback_backend<F>(
@@ -1069,7 +1124,12 @@ where
 }
 
 fn review_fallback_model(routing: &RoutingPolicy) -> Option<&str> {
-    routing.weak_review_model.as_deref()
+    routing
+        .escalatory_reviewers
+        .as_ref()
+        .and_then(|list| list.first())
+        .and_then(|c| c.model.as_deref())
+        .or(routing.weak_review_model.as_deref())
 }
 
 fn builtin_backend<F>(mode: &str, backend_available: F) -> String

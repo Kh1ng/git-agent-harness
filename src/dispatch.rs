@@ -3158,7 +3158,10 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_tier_weak_when_backend_matches_weak_config() {
+    fn reviewer_tier_escalatory_when_backend_matches_weak_config() {
+        // TICKET-123: the legacy `weak_review_*` field is promoted into the
+        // `escalatory_reviewers` list, so a route that matches it resolves to
+        // the Escalatory tier (not the old Weak tier, which no longer exists).
         let tmp = tempfile::tempdir().unwrap();
         let mut prof = profile(tmp.path());
         prof.routing.weak_review_backend = Some("codex".into());
@@ -3167,7 +3170,7 @@ mod tests {
         let route = route_decision("codex", None, true);
         assert_eq!(
             derive_reviewer_tier(&cfg, &prof, &route),
-            ReviewerTier::Weak
+            ReviewerTier::Escalatory
         );
     }
 
@@ -3245,25 +3248,78 @@ mod tests {
     }
 
     #[test]
-    fn approve_strong_from_weak_tier_still_forces_human_review_and_label() {
-        // TICKET-108: this is the case the old fallback_used-based rewrite
-        // used to handle by corrupting the verdict string. Now the verdict
-        // text is untouched and reviewer_tier carries the distrust signal.
+    fn approve_strong_from_escalatory_tier_does_not_force_human_review() {
+        // TICKET-123: the Escalatory (formerly "weak") tier is the "escalate
+        // to a more capable model and continue" path. An APPROVE_STRONG verdict
+        // from an escalatory reviewer must NOT force human_required -- the
+        // verdict text itself remains the only thing that can gate the merge.
         let json = r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
         let usage = crate::ledger::LedgerUsage::default();
         let route = route_decision("codex", None, true);
-        let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Weak).unwrap();
+        let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Escalatory).unwrap();
 
         assert_eq!(
             verdict.verdict, "APPROVE_STRONG",
             "verdict text is never rewritten"
         );
-        assert_eq!(verdict.reviewer_tier.as_deref(), Some("weak"));
-        assert!(verdict.human_required);
-        assert_eq!(verdict.confidence, "medium");
+        assert_eq!(verdict.reviewer_tier.as_deref(), Some("escalatory"));
+        assert!(!verdict.human_required);
+        assert_eq!(verdict.confidence, "high");
+        assert_eq!(review_labels(&verdict), vec!["gah-ready-for-human"]);
+    }
+
+    #[test]
+    fn routine_reviewer_resolves_to_strong_tier() {
+        // TICKET-123: the new `routine_reviewer` (single STRONG first-line
+        // reviewer) must map to the Strong tier via derive_reviewer_tier.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        prof.routing.routine_reviewer = Some(crate::config::CandidateConfig {
+            backend: "vibe".into(),
+            model: Some("mistral-medium".into()),
+            quota_pool: None,
+            priority: 0,
+            included_in_quota: false,
+            marginal_cost_usd: None,
+            quota_usage_percent: None,
+            quota_days_remaining: None,
+        });
+        let cfg = gah_config(RoutingPolicy::default());
+
+        let route = route_decision("vibe", Some("mistral-medium"), true);
         assert_eq!(
-            review_labels(&verdict),
-            vec!["gah-review-weak", "gah-human-review"]
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Strong
+        );
+    }
+
+    #[test]
+    fn escalatory_reviewers_list_resolves_to_escalatory_tier() {
+        // TICKET-123: any entry in the ordered `escalatory_reviewers` list
+        // must map to the Escalatory tier.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        let candidate = |backend: &str, model: &str| crate::config::CandidateConfig {
+            backend: backend.into(),
+            model: Some(model.into()),
+            quota_pool: None,
+            priority: 0,
+            included_in_quota: false,
+            marginal_cost_usd: None,
+            quota_usage_percent: None,
+            quota_days_remaining: None,
+        };
+        prof.routing.escalatory_reviewers = Some(vec![
+            candidate("claude", "sonnet"),
+            candidate("opencode", "glm"),
+            candidate("opencode", "kimi"),
+        ]);
+        let cfg = gah_config(RoutingPolicy::default());
+
+        let route = route_decision("opencode", Some("kimi"), true);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Escalatory
         );
     }
 
@@ -6840,9 +6896,16 @@ fn build_mr_title(
 /// separate from review outcome (verdict/confidence, what they said).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReviewerTier {
+    /// ROUTINE_REVIEWER -- first-line STRONG reviewer.
     Strong,
+    /// Unlisted / ordinary reviewer.
     Standard,
-    Weak,
+    /// Any ESCALATORY_REVIEW entry -- a more capable reviewer used when
+    /// routine review escalates. This is a LIST, not a single backend, so it
+    /// generalizes the old single `weak_review_*` stopgap (TICKET-123). An
+    /// escalatory reviewer does NOT force `human_required`: it is the
+    /// "escalate to a more capable model and continue" path.
+    Escalatory,
 }
 
 impl ReviewerTier {
@@ -6850,64 +6913,68 @@ impl ReviewerTier {
         match self {
             Self::Strong => "strong",
             Self::Standard => "standard",
-            Self::Weak => "weak",
+            Self::Escalatory => "escalatory",
         }
     }
 }
 
 /// Derived from which configured routing field actually selected this
 /// backend/model, not from anything the reviewer says about itself -- a
-/// weak reviewer cannot self-promote by returning confident-sounding text
+/// reviewer cannot self-promote by returning confident-sounding text
 /// (TICKET-108's core requirement).
+///
+/// TICKET-123 resolution:
+/// - `routine_reviewer` match -> Strong (first-line routine reviewer)
+/// - any `escalatory_reviewers` entry -> Escalatory (advanced escalation)
+/// - any `review_candidates` entry -> Strong (declared trustworthy pool)
+/// - otherwise -> Standard
+///
+/// Legacy `strong_review_*`/`weak_review_*` fields are already promoted into
+/// `routine_reviewer`/`escalatory_reviewers` by `merged_with_defaults`, so
+/// they resolve through the same new logic.
 fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecision) -> ReviewerTier {
     let effective_model = route.effective_model.as_deref();
     let selected = |backend_cfg: Option<&str>, model_cfg: Option<&str>| -> bool {
         backend_cfg.is_some_and(|b| b == route.effective_backend)
             && (model_cfg.is_none() || model_cfg == effective_model)
     };
-    let strong_backend = profile.routing.strong_review_backend.as_deref().or(cfg
-        .defaults
-        .routing
-        .strong_review_backend
-        .as_deref());
-    let strong_model = profile.routing.strong_review_model.as_deref().or(cfg
-        .defaults
-        .routing
-        .strong_review_model
-        .as_deref());
-    let weak_backend = profile.routing.weak_review_backend.as_deref().or(cfg
-        .defaults
-        .routing
-        .weak_review_backend
-        .as_deref());
-    let weak_model = profile.routing.weak_review_model.as_deref().or(cfg
-        .defaults
-        .routing
-        .weak_review_model
-        .as_deref());
+    // TICKET-106: merge profile routing over global defaults so both the new
+    // two-tier fields and the legacy single-pair fields are visible at their
+    // effective (precedence-resolved) values.
+    let routing = profile.routing.merged_with_defaults(&cfg.defaults.routing);
 
-    if selected(weak_backend, weak_model) {
-        return ReviewerTier::Weak;
+    // ESCALATORY_REVIEW (ordered list) -> Escalatory. Checked before the
+    // strong/review_candidates paths because an escalatory entry is a more
+    // specific, intentional selection than "any candidate".
+    if let Some(escalatory) = &routing.escalatory_reviewers {
+        for c in escalatory {
+            if selected(Some(c.backend.as_str()), c.model.as_deref()) {
+                return ReviewerTier::Escalatory;
+            }
+        }
     }
-    if selected(strong_backend, strong_model) {
+
+    // ROUTINE_REVIEWER -> Strong.
+    if let Some(routine) = &routing.routine_reviewer {
+        if selected(Some(routine.backend.as_str()), routine.model.as_deref()) {
+            return ReviewerTier::Strong;
+        }
+    }
+
+    // Legacy strong pair -> Strong.
+    if selected(
+        routing.strong_review_backend.as_deref(),
+        routing.strong_review_model.as_deref(),
+    ) {
         return ReviewerTier::Strong;
     }
+
     // review_candidates is the operator's actual declared pool of reviewers
     // they consider trustworthy (agy/agy-second/claude serving the same
     // Sonnet-class model are routinely interchangeable fallbacks for each
-    // other, not different capability tiers). Requiring strong_review_backend/
-    // model to be manually kept in sync with every review_candidates entry
-    // is exactly the kind of drift that already produced two real bugs
-    // tonight (gah's own strong_review_backend pointed at codex-mini; here,
-    // falling back from agy to agy-second/claude silently downgraded a
-    // Sonnet reviewer to "standard" tier). Any candidate not already
-    // classified weak above is strong.
-    let candidates = profile.routing.review_candidates.as_ref().or(cfg
-        .defaults
-        .routing
-        .review_candidates
-        .as_ref());
-    if let Some(candidates) = candidates {
+    // other, not different capability tiers). Any candidate not already
+    // classified escalatory above is strong.
+    if let Some(candidates) = &routing.review_candidates {
         let in_candidates = candidates.iter().any(|c| {
             c.backend == route.effective_backend
                 && (c.model.is_none() || c.model.as_deref() == effective_model)
@@ -6931,13 +6998,9 @@ fn parse_review_verdict(
     // Reviewer identity (tier) and review outcome (verdict text/confidence)
     // are separate dimensions -- the verdict text itself is never rewritten
     // based on who reviewed it (see review_labels for how tier affects
-    // labeling instead).
-    if tier == ReviewerTier::Weak {
-        verdict.human_required = true;
-        if verdict.confidence == "high" {
-            verdict.confidence = "medium".into();
-        }
-    }
+    // labeling instead). TICKET-123: the Escalatory (formerly "weak") tier is
+    // the "escalate to a more capable model and continue" path, so it does
+    // NOT force human_required -- only the verdict text itself can do that.
     if matches!(verdict.verdict.as_str(), "APPROVE_WEAK" | "HUMAN_REVIEW") {
         verdict.human_required = true;
     }
@@ -6993,12 +7056,12 @@ fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &P
 }
 
 fn review_labels(verdict: &crate::models::ReviewVerdict) -> Vec<&'static str> {
-    // TICKET-108: an APPROVE_STRONG verdict from a weak-tier reviewer still
-    // needs human eyes -- reviewer identity and verdict text are combined
-    // here, not conflated into a single rewritten string.
-    let is_weak_tier = verdict.reviewer_tier.as_deref() == Some("weak");
+    // TICKET-123: reviewer identity and verdict text are combined here, never
+    // conflated into a single rewritten string. A Strong or Escalatory
+    // (escalated-capable) reviewer returning APPROVE_STRONG is ready for
+    // human merge review without a forced re-review gate -- the escalatory
+    // tier is the "escalate to a more capable model and continue" path.
     match verdict.verdict.as_str() {
-        "APPROVE_STRONG" if is_weak_tier => vec!["gah-review-weak", "gah-human-review"],
         "APPROVE_STRONG" => vec!["gah-ready-for-human"],
         "APPROVE_WEAK" => vec!["gah-review-weak", "gah-human-review"],
         "NEEDS_FIX" | "REJECT" => vec!["gah-needs-fix"],
