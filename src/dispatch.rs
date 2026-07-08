@@ -317,12 +317,53 @@ fn ledger_lookup_for_ticket(
     Some((count, last_failure_class, has_active_mr))
 }
 
+/// Leading `TICKET-<digits>` numeric id out of a work_id string, e.g.
+/// `"TICKET-101-fail-closed-version-drift"` -> `"101"`. Issue-derived
+/// work_ids carry the rest of the title, not just the bare number, so
+/// comparisons against `docs/tickets/closed/` filenames must key on this
+/// numeric prefix rather than exact string equality.
+fn ticket_number_prefix(work_id: &str) -> Option<&str> {
+    let rest = work_id.strip_prefix("TICKET-")?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    (end > 0).then(|| &rest[..end])
+}
+
+/// Ticket numbers (e.g. `"115"`) for ticket files archived to
+/// `docs/tickets/closed/`. A ticket migrated to a native issue (#46) can be
+/// resolved and archived locally while its corresponding issue stays open on
+/// the tracker (closing the file doesn't close the issue) -- without this,
+/// `scan_available_tickets` re-surfaces already-done work from the issue
+/// side forever.
+fn closed_ticket_numbers(profile: &Profile) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    let closed_dir = Path::new(&profile.local_path).join("docs/tickets/closed");
+    if let Ok(read_dir) = fs::read_dir(&closed_dir) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(number) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(ticket_number_prefix)
+            {
+                ids.insert(number.to_string());
+            }
+        }
+    }
+    ids
+}
+
 pub fn scan_available_tickets(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
 ) -> Vec<AvailableTicket> {
     let mut candidates = vec![];
+    let closed_ids = closed_ticket_numbers(profile);
 
     let tickets_dir = Path::new(&profile.local_path).join("docs/tickets");
     if let Ok(read_dir) = fs::read_dir(&tickets_dir) {
@@ -393,6 +434,13 @@ pub fn scan_available_tickets(
             continue;
         }
         let work_id = meta.work_id.clone();
+        if work_id
+            .as_deref()
+            .and_then(ticket_number_prefix)
+            .is_some_and(|n| closed_ids.contains(n))
+        {
+            continue;
+        }
         let Some((prior_attempt_count, last_failure_class, has_active_mr)) =
             ledger_lookup_for_ticket(
                 work_id.as_deref(),
@@ -3188,6 +3236,71 @@ mod tests {
         assert_eq!(candidates[0].recommended_backend.as_deref(), Some("agy"));
         assert_eq!(candidates[0].prior_attempt_count, 0);
         assert!(!candidates[0].has_active_mr);
+    }
+
+    #[test]
+    fn scan_available_tickets_excludes_issue_already_archived_locally() {
+        // Regression: migrating docs/tickets/*.md to native issues (#46)
+        // doesn't close the issue when the local file is later archived to
+        // docs/tickets/closed/ -- the open issue must not resurrect as
+        // available work just because its markdown twin is done.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\n","labels":[]}]"#;
+        let gh_path = bin_dir.join("gh");
+        fs::write(
+            &gh_path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                issue_json.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&gh_path, perms).unwrap();
+        }
+        let _guard = PathGuard::set(&bin_dir);
+
+        let closed_dir = tmp.path().join("docs/tickets/closed");
+        fs::create_dir_all(&closed_dir).unwrap();
+        fs::write(
+            closed_dir.join("TICKET-101-fail-closed-version-drift.md"),
+            "# TICKET-101: Fail closed\n\nGoal: test\n",
+        )
+        .unwrap();
+
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = "github".to_string();
+        prof.repo = "owner/repo".to_string();
+
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
+        assert!(
+            candidates.is_empty(),
+            "expected locally-archived TICKET-101 issue to be excluded, got {candidates:?}"
+        );
     }
 
     #[test]
