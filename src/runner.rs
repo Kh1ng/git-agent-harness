@@ -822,10 +822,13 @@ pub fn run_review_backend(
             cmd.arg("--dangerously-skip-permissions");
         }
         "vibe" => {
-            cmd.arg("review").arg(prompt);
-            if let Some(model) = effective_model {
-                cmd.args(["--model", model]);
-            }
+            cmd.arg("-p").arg(prompt);
+            cmd.arg("--output").arg("text");
+            cmd.arg("--trust");
+            cmd.arg("--auto-approve");
+            // Vibe does not accept --model flag; model selection is via
+            // environment/config. We record the effective model separately
+            // in ledger metadata but do not pass it to Vibe CLI.
         }
         "opencode" => {
             cmd.arg("review").arg(prompt);
@@ -1969,6 +1972,76 @@ mod tests {
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=agy-review-env"));
+    }
+
+    #[test]
+    fn run_review_backend_supports_vibe_without_model_flag() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
+        let profile = test_profile();
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let result = run_review_backend(
+            &profile,
+            "vibe",
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            Some("mistral-medium-3.5"),
+            &[("FROM_ENV_FILE".into(), "vibe-review-env".into())],
+        );
+
+        assert_eq!(result.outcome, ReviewProcessOutcome::Success);
+        assert!(result.stdout.contains("stdout-marker-vibe"));
+        assert!(result.stderr.contains("stderr-marker-vibe"));
+
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "-p");
+        assert!(argv.contains(&"task".to_string()));
+        assert!(argv.contains(&"--output".to_string()));
+        assert!(argv.contains(&"text".to_string()));
+        assert!(argv.contains(&"--trust".to_string()));
+        assert!(argv.contains(&"--auto-approve".to_string()));
+        // Vibe does NOT accept --model flag
+        assert!(!argv.contains(&"--model".to_string()));
+        assert!(!argv.contains(&"mistral-medium-3.5".to_string()));
+
+        let env = recorded_env(&f.record_dir);
+        assert!(env.contains("FROM_ENV_FILE=vibe-review-env"));
+    }
+
+    #[test]
+    fn run_review_backend_vibe_command_construction() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
+        let profile = test_profile();
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let result = run_review_backend(
+            &profile,
+            "vibe",
+            &f.worktree,
+            "Review this code: int main() { return 0; }",
+            &f.session_dir,
+            None,
+            &[],
+        );
+
+        assert_eq!(result.outcome, ReviewProcessOutcome::Success);
+
+        let argv = recorded_argv(&f.record_dir);
+        // Verify correct command construction: vibe -p <prompt> --output text --trust --auto-approve
+        assert_eq!(argv[0], "-p");
+        assert!(argv.contains(&"--output".to_string()));
+        assert!(argv.contains(&"text".to_string()));
+        assert!(argv.contains(&"--trust".to_string()));
+        assert!(argv.contains(&"--auto-approve".to_string()));
+        // Should NOT contain the invalid "review" subcommand
+        assert!(!argv.contains(&"review".to_string()));
+        // Should NOT contain --model flag
+        assert!(!argv.contains(&"--model".to_string()));
     }
 
     // ── backend_available ────────────────────────────────────────────────

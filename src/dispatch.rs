@@ -3181,6 +3181,97 @@ mod tests {
     }
 
     #[test]
+    fn parse_review_verdict_handles_vibe_json_output() {
+        // Test parsing of actual Vibe CLI output format
+        // Vibe with --output text returns just the content, which should be a ReviewVerdict JSON object
+        let vibe_json_output = r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+
+        let route = crate::routing::RouteDecision {
+            requested_backend: "vibe".to_string(),
+            effective_backend: "vibe".to_string(),
+            requested_model: Some("mistral-medium-3.5".to_string()),
+            effective_model: Some("mistral-medium-3.5".to_string()),
+            effective_quota_pool: None,
+            routing_reason: "test".to_string(),
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
+            routing_diagnostics: None,
+        };
+        let usage = crate::ledger::LedgerUsage::default();
+
+        let verdict =
+            parse_review_verdict(vibe_json_output, &route, &usage, ReviewerTier::Standard).unwrap();
+
+        assert_eq!(verdict.verdict, "APPROVE_STRONG");
+        assert_eq!(verdict.confidence, "high");
+        assert!(!verdict.human_required);
+        assert_eq!(verdict.blocking_findings, Vec::<String>::new());
+        assert_eq!(verdict.non_blocking_findings, Vec::<String>::new());
+        assert_eq!(verdict.risk_notes, Vec::<String>::new());
+        assert_eq!(verdict.reviewer_backend.as_deref(), Some("vibe"));
+        assert_eq!(verdict.effective_backend.as_deref(), Some("vibe"));
+        assert_eq!(
+            verdict.effective_model.as_deref(),
+            Some("mistral-medium-3.5")
+        );
+    }
+
+    #[test]
+    fn parse_review_verdict_fails_on_vibe_malformed_json() {
+        // Test that malformed JSON from Vibe fails gracefully
+        let malformed_output = r#"This is not valid JSON from Vibe"#;
+
+        let route = crate::routing::RouteDecision {
+            requested_backend: "vibe".to_string(),
+            effective_backend: "vibe".to_string(),
+            requested_model: None,
+            effective_model: None,
+            effective_quota_pool: None,
+            routing_reason: "test".to_string(),
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
+            routing_diagnostics: None,
+        };
+        let usage = crate::ledger::LedgerUsage::default();
+
+        let result = parse_review_verdict(malformed_output, &route, &usage, ReviewerTier::Standard);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("reviewer did not return verdict JSON"));
+    }
+
+    #[test]
+    fn parse_review_verdict_fails_on_vibe_empty_output() {
+        // Test that empty output from Vibe fails gracefully
+        let empty_output = "";
+
+        let route = crate::routing::RouteDecision {
+            requested_backend: "vibe".to_string(),
+            effective_backend: "vibe".to_string(),
+            requested_model: None,
+            effective_model: None,
+            effective_quota_pool: None,
+            routing_reason: "test".to_string(),
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
+            routing_diagnostics: None,
+        };
+        let usage = crate::ledger::LedgerUsage::default();
+
+        let result = parse_review_verdict(empty_output, &route, &usage, ReviewerTier::Standard);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("reviewer did not return verdict JSON"));
+    }
+
+    #[test]
     fn review_preflight_fails_with_backend_unavailable_when_executable_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let mut prof = profile(tmp.path());
