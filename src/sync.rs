@@ -486,7 +486,10 @@ mod tests {
         // configured shouldn't silently qualify for auto-merge.
         assert!(!github_ci_passed(Some(&[])));
         // Still running (conclusion not yet set) is not passed.
-        assert!(!github_ci_passed(Some(&[check(Some("SUCCESS")), check(None)])));
+        assert!(!github_ci_passed(Some(&[
+            check(Some("SUCCESS")),
+            check(None)
+        ])));
         assert!(!github_ci_passed(Some(&[check(Some("FAILURE"))])));
     }
 
@@ -503,21 +506,22 @@ mod tests {
     #[test]
     fn github_status_check_rollup_handles_null_explicitly() {
         // Test that explicit null deserializes correctly
-        let json_with_null = r#"{"title":"Test","headRefName":"gah/test","statusCheckRollup":null}"#;
+        let json_with_null =
+            r#"{"title":"Test","headRefName":"gah/test","statusCheckRollup":null}"#;
         let pr: GithubPr = serde_json::from_str(json_with_null).unwrap();
         assert_eq!(pr.status_check_rollup, None);
-        
+
         // Test that missing field deserializes correctly
         let json_without_field = r#"{"title":"Test","headRefName":"gah/test"}"#;
         let pr: GithubPr = serde_json::from_str(json_without_field).unwrap();
         assert_eq!(pr.status_check_rollup, None);
-        
+
         // Test that populated array deserializes correctly
         let json_with_checks = r#"{"title":"Test","headRefName":"gah/test","statusCheckRollup":[{"conclusion":"SUCCESS"}]}"#;
         let pr: GithubPr = serde_json::from_str(json_with_checks).unwrap();
         assert!(pr.status_check_rollup.is_some());
         assert_eq!(pr.status_check_rollup.as_ref().unwrap().len(), 1);
-        
+
         // Test that empty array deserializes correctly
         let json_with_empty = r#"{"title":"Test","headRefName":"gah/test","statusCheckRollup":[]}"#;
         let pr: GithubPr = serde_json::from_str(json_with_empty).unwrap();

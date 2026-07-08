@@ -5,6 +5,7 @@
 # TypeScript/JavaScript
 /node_modules
 /pnpm-lock.yaml
+/apps/web/node_modules/
 
 # Build outputs
 /dist
@@ -42,6 +43,11 @@ Thumbs.db
 
 # Electron builder
 /electron-builder.env
+
+# Web app build outputs
+/apps/web/dist/
+/apps/web/build/
+/apps/web/.next/
 
 # Server and desktop temp files
 *.tmp
