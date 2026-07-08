@@ -17,6 +17,7 @@ mod provider;
 mod prune;
 mod quota;
 mod quota_parser;
+mod report;
 mod routing;
 mod runner;
 mod server;
@@ -240,6 +241,19 @@ enum Commands {
     Profile {
         #[command(subcommand)]
         command: ProfileCommands,
+    },
+    /// Generate backend/model comparison report (TICKET-098)
+    Report {
+        #[arg(long, default_value = "7d")]
+        since: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, value_enum, default_value = "backend")]
+        group_by: ledger::GroupBy,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Start the WebSocket server for desktop/web interface
     Server {
@@ -521,6 +535,22 @@ fn main() -> Result<()> {
                 }
             }
         },
+
+        Commands::Report {
+            since,
+            profile,
+            config_path,
+            group_by,
+            json,
+        } => {
+            report::run(report::ReportArgs {
+                since,
+                profile,
+                config_path,
+                group_by,
+                json,
+            })?;
+        }
 
         Commands::Server { port, host } => {
             println!("Starting WebSocket server on {}:{}", host, port);
