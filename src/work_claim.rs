@@ -25,7 +25,7 @@ impl WorkClaimState {
     pub fn claim(&mut self, profile: &str, work_id: &str) {
         self.claims
             .entry(profile.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(work_id.to_string());
     }
 
@@ -137,6 +137,14 @@ pub fn claim_work(profile: &str, work_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Release all claims for a profile (useful for cleanup)
+pub fn release_all_for_profile(profile: &str) -> Result<()> {
+    let mut state = get_state()?;
+    state.claims.remove(profile);
+    save_state(&state)?;
+    Ok(())
+}
+
 /// Release a work_id for a profile and persist to file  
 pub fn release_work(profile: &str, work_id: &str) -> Result<()> {
     let mut state = get_state()?;
@@ -157,10 +165,71 @@ pub fn is_claimed(profile: &str, work_id: &str) -> Result<bool> {
     Ok(state.is_claimed(profile, work_id))
 }
 
-/// Release all claims for a profile (useful for cleanup)
-pub fn release_all_for_profile(profile: &str) -> Result<()> {
-    let mut state = get_state()?;
-    state.claims.remove(profile);
-    save_state(&state)?;
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_work_claim_state_claim_and_release() {
+        let mut state = WorkClaimState::new();
+
+        // Test initial state
+        assert!(!state.is_claimed("test_profile", "work_1"));
+        assert!(state.get_claimed("test_profile").is_empty());
+
+        // Test claiming work
+        state.claim("test_profile", "work_1");
+        assert!(state.is_claimed("test_profile", "work_1"));
+        assert_eq!(state.get_claimed("test_profile"), vec!["work_1"]);
+
+        // Test claiming another work
+        state.claim("test_profile", "work_2");
+        assert!(state.is_claimed("test_profile", "work_2"));
+        assert_eq!(state.get_claimed("test_profile"), vec!["work_1", "work_2"]);
+
+        // Test releasing work
+        state.release("test_profile", "work_1");
+        assert!(!state.is_claimed("test_profile", "work_1"));
+        assert!(state.is_claimed("test_profile", "work_2"));
+        assert_eq!(state.get_claimed("test_profile"), vec!["work_2"]);
+
+        // Test releasing non-existent work (should be no-op)
+        state.release("test_profile", "nonexistent");
+        assert_eq!(state.get_claimed("test_profile"), vec!["work_2"]);
+    }
+
+    #[test]
+    fn test_work_claim_state_multiple_profiles() {
+        let mut state = WorkClaimState::new();
+
+        state.claim("profile1", "work_1");
+        state.claim("profile2", "work_1"); // Same work_id, different profile
+
+        assert!(state.is_claimed("profile1", "work_1"));
+        assert!(state.is_claimed("profile2", "work_1"));
+
+        assert_eq!(state.get_claimed("profile1"), vec!["work_1"]);
+        assert_eq!(state.get_claimed("profile2"), vec!["work_1"]);
+
+        // Releasing from one profile shouldn't affect the other
+        state.release("profile1", "work_1");
+        assert!(!state.is_claimed("profile1", "work_1"));
+        assert!(state.is_claimed("profile2", "work_1"));
+    }
+
+    #[test]
+    fn test_work_claim_state_clear_profile() {
+        let mut state = WorkClaimState::new();
+
+        state.claim("test_profile", "work_1");
+        state.claim("test_profile", "work_2");
+        state.claim("other_profile", "work_3");
+
+        // Clear all claims for test_profile
+        state.claims.remove("test_profile");
+
+        assert!(!state.is_claimed("test_profile", "work_1"));
+        assert!(!state.is_claimed("test_profile", "work_2"));
+        assert!(state.is_claimed("other_profile", "work_3"));
+    }
 }

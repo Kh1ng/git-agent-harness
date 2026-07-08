@@ -463,8 +463,6 @@ fn run_parallel_once(
 ) -> Result<()> {
     use std::collections::HashSet;
 
-    // Get currently claimed/in-flight work_ids for this profile
-    let claimed_work_ids = crate::work_claim::get_claimed_work_ids(profile_name)?;
     let mut executed_work_ids = HashSet::new();
 
     // TICKET-096: Respect backend availability - limit parallelism to number of eligible backends
@@ -480,6 +478,9 @@ fn run_parallel_once(
     let mut results = Vec::new();
 
     for _ in 0..effective_parallel_limit {
+        // Re-fetch claimed work IDs to get fresh state (other processes might have claimed work)
+        let claimed_work_ids = crate::work_claim::get_claimed_work_ids(profile_name)?;
+
         // Re-build snapshot to get fresh state (this is conservative but safe)
         let fresh_snapshot =
             crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
@@ -499,6 +500,7 @@ fn run_parallel_once(
         let action_work_id = action.work_id();
         if let Some(work_id) = action_work_id {
             if claimed_work_ids.contains(&work_id.to_string())
+                || crate::work_claim::is_claimed(profile_name, work_id)?
                 || executed_work_ids.contains(work_id)
             {
                 // Skip this action as it's already in flight or claimed
@@ -535,25 +537,47 @@ fn run_parallel_once(
             _ => {
                 // For dispatch actions, record and execute
                 record_action_events(cfg, profile_name, &original_action, &action)?;
-                let outcome = execute_action(cfg, profile_name, &action)?;
 
-                // Mark this work_id as executed in this batch
+                // Claim this work_id before execution to prevent duplicate dispatch
                 if let Some(work_id) = action_work_id {
-                    executed_work_ids.insert(work_id.to_string());
-                    // Claim this work_id to prevent duplicate dispatch
                     crate::work_claim::claim_work(profile_name, work_id)?;
+                    executed_work_ids.insert(work_id.to_string());
                 }
 
-                let stop_event_type = crate::events::EventType::LoopStopped;
-                crate::events::record(
-                    cfg,
-                    stop_event_type,
-                    Some(profile_name),
-                    action.work_id(),
-                    outcome.clone(),
-                )?;
-
-                results.push(LoopOnceResult { action, outcome });
+                match execute_action(cfg, profile_name, &action) {
+                    Ok(outcome) => {
+                        let stop_event_type = crate::events::EventType::LoopStopped;
+                        crate::events::record(
+                            cfg,
+                            stop_event_type,
+                            Some(profile_name),
+                            action.work_id(),
+                            outcome.clone(),
+                        )?;
+                        results.push(LoopOnceResult { action, outcome });
+                    }
+                    Err(e) => {
+                        // Release the claim if execution failed
+                        if let Some(work_id) = action_work_id {
+                            crate::work_claim::release_work(profile_name, work_id)?;
+                            executed_work_ids.remove(work_id);
+                        }
+                        // Re-record the action with error info for consistency
+                        let stop_event_type = crate::events::EventType::LoopStopped;
+                        crate::events::record(
+                            cfg,
+                            stop_event_type,
+                            Some(profile_name),
+                            action.work_id(),
+                            format!("Error: {}", e),
+                        )?;
+                        results.push(LoopOnceResult {
+                            action,
+                            outcome: format!("Error: {}", e),
+                        });
+                        // Continue to try other actions even if this one failed
+                    }
+                }
             }
         }
     }
@@ -576,6 +600,12 @@ fn run_parallel_once(
         if results.is_empty() {
             println!("No actions executed (parallel limit reached or no eligible work)");
         }
+    }
+
+    // Clean up any stale claims if we encountered errors
+    // (This is a safety net - normally individual claims should be released)
+    if results.iter().any(|r| r.outcome.starts_with("Error:")) {
+        crate::work_claim::release_all_for_profile(profile_name)?;
     }
 
     Ok(())
