@@ -412,7 +412,14 @@ pub fn run_once(
 
     // For parallel > 1, we need to decide multiple actions
     if parallel > 1 {
-        run_parallel_once(cfg, profile_name, &snapshot, json, parallel, skip_validation_gate)?;
+        run_parallel_once(
+            cfg,
+            profile_name,
+            &snapshot,
+            json,
+            parallel,
+            skip_validation_gate,
+        )?;
     } else {
         // Original single action behavior
         let original_action = decide_next_action(&snapshot);
