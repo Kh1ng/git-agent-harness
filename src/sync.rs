@@ -201,7 +201,7 @@ fn is_stale(updated_at: Option<&str>) -> bool {
     updated_at < cutoff.as_str()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 struct GithubPr {
     title: String,
     #[serde(rename = "headRefName")]
@@ -228,15 +228,15 @@ struct GithubPr {
     updated_at: Option<String>,
     #[serde(default)]
     #[serde(rename = "statusCheckRollup")]
-    status_check_rollup: Vec<GithubCheck>,
+    status_check_rollup: Option<Vec<GithubCheck>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 struct GithubLabel {
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 struct GithubCheck {
     #[serde(default)]
     conclusion: Option<String>,
@@ -278,13 +278,14 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             merge_status: pr.merge_state_status,
             merged: pr.merged_at.is_some(),
             updated_at: pr.updated_at,
-            ci_failed: github_ci_failed(&pr.status_check_rollup),
-            ci_passed: github_ci_passed(&pr.status_check_rollup),
+            ci_failed: github_ci_failed(pr.status_check_rollup.as_deref()),
+            ci_passed: github_ci_passed(pr.status_check_rollup.as_deref()),
         })
         .collect())
 }
 
-fn github_ci_failed(checks: &[GithubCheck]) -> bool {
+fn github_ci_failed(checks: Option<&[GithubCheck]>) -> bool {
+    let checks = checks.unwrap_or_default();
     checks
         .iter()
         .any(|check| check.conclusion.as_deref() == Some("FAILURE"))
@@ -293,7 +294,8 @@ fn github_ci_failed(checks: &[GithubCheck]) -> bool {
 /// Every check present, all terminal, none failed -- as opposed to
 /// `!github_ci_failed`, which is also true while checks are still pending
 /// (`conclusion == None`) or absent altogether.
-fn github_ci_passed(checks: &[GithubCheck]) -> bool {
+fn github_ci_passed(checks: Option<&[GithubCheck]>) -> bool {
+    let checks = checks.unwrap_or_default();
     !checks.is_empty()
         && checks.iter().all(|check| {
             matches!(
@@ -445,7 +447,7 @@ pub fn count_merge_attempts_per_branch(
 mod tests {
     use super::{
         classify, extract_work_id_from_title, github_ci_failed, github_ci_passed, gitlab_ci_failed,
-        gitlab_ci_passed, recommended_action, GithubCheck, SyncMr,
+        gitlab_ci_passed, recommended_action, GithubCheck, GithubPr, SyncMr,
     };
 
     #[test]
@@ -475,27 +477,59 @@ mod tests {
 
     #[test]
     fn github_ci_passed_requires_at_least_one_check_all_terminal_and_green() {
-        assert!(github_ci_passed(&[check(Some("SUCCESS"))]));
-        assert!(github_ci_passed(&[
+        assert!(github_ci_passed(Some(&[check(Some("SUCCESS"))])));
+        assert!(github_ci_passed(Some(&[
             check(Some("SUCCESS")),
             check(Some("SKIPPED"))
-        ]));
+        ])));
         // No checks at all must not read as "passed" -- a repo with no CI
         // configured shouldn't silently qualify for auto-merge.
-        assert!(!github_ci_passed(&[]));
+        assert!(!github_ci_passed(Some(&[])));
         // Still running (conclusion not yet set) is not passed.
-        assert!(!github_ci_passed(&[check(Some("SUCCESS")), check(None)]));
-        assert!(!github_ci_passed(&[check(Some("FAILURE"))]));
+        assert!(!github_ci_passed(Some(&[check(Some("SUCCESS")), check(None)])));
+        assert!(!github_ci_passed(Some(&[check(Some("FAILURE"))])));
     }
 
     #[test]
     fn github_ci_failed_on_any_failure_conclusion() {
-        assert!(github_ci_failed(&[
+        assert!(github_ci_failed(Some(&[
             check(Some("SUCCESS")),
             check(Some("FAILURE"))
-        ]));
-        assert!(!github_ci_failed(&[check(Some("SUCCESS"))]));
-        assert!(!github_ci_failed(&[check(None)]));
+        ])));
+        assert!(!github_ci_failed(Some(&[check(Some("SUCCESS"))])));
+        assert!(!github_ci_failed(Some(&[check(None)])));
+    }
+
+    #[test]
+    fn github_status_check_rollup_handles_null_explicitly() {
+        // Test that explicit null deserializes correctly
+        let json_with_null = r#"{"title":"Test","headRefName":"gah/test","statusCheckRollup":null}"#;
+        let pr: GithubPr = serde_json::from_str(json_with_null).unwrap();
+        assert_eq!(pr.status_check_rollup, None);
+        
+        // Test that missing field deserializes correctly
+        let json_without_field = r#"{"title":"Test","headRefName":"gah/test"}"#;
+        let pr: GithubPr = serde_json::from_str(json_without_field).unwrap();
+        assert_eq!(pr.status_check_rollup, None);
+        
+        // Test that populated array deserializes correctly
+        let json_with_checks = r#"{"title":"Test","headRefName":"gah/test","statusCheckRollup":[{"conclusion":"SUCCESS"}]}"#;
+        let pr: GithubPr = serde_json::from_str(json_with_checks).unwrap();
+        assert!(pr.status_check_rollup.is_some());
+        assert_eq!(pr.status_check_rollup.as_ref().unwrap().len(), 1);
+        
+        // Test that empty array deserializes correctly
+        let json_with_empty = r#"{"title":"Test","headRefName":"gah/test","statusCheckRollup":[]}"#;
+        let pr: GithubPr = serde_json::from_str(json_with_empty).unwrap();
+        assert!(pr.status_check_rollup.is_some());
+        assert_eq!(pr.status_check_rollup.as_ref().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn github_ci_functions_handle_none() {
+        // Test that None (null or missing) is treated as empty for CI functions
+        assert!(!github_ci_failed(None));
+        assert!(!github_ci_passed(None));
     }
 
     fn base_mr() -> SyncMr {
