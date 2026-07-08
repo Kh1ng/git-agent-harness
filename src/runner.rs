@@ -821,6 +821,18 @@ pub fn run_review_backend(
             }
             cmd.arg("--dangerously-skip-permissions");
         }
+        "vibe" => {
+            cmd.arg("review").arg(prompt);
+            if let Some(model) = effective_model {
+                cmd.args(["--model", model]);
+            }
+        }
+        "opencode" => {
+            cmd.arg("review").arg(prompt);
+            if let Some(model) = effective_model {
+                cmd.args(["--model", model]);
+            }
+        }
         _ => {
             return ReviewRunResult {
                 outcome: ReviewProcessOutcome::SpawnFailure,
