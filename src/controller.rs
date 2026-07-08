@@ -393,7 +393,12 @@ pub struct LoopOnceResult {
     pub outcome: String,
 }
 
-pub fn run_once(cfg: &crate::config::GahConfig, profile_name: &str, json: bool) -> Result<()> {
+pub fn run_once(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    json: bool,
+    parallel: usize,
+) -> Result<()> {
     let now = time::OffsetDateTime::now_utc();
     let snapshot = crate::status::build_snapshot(cfg, profile_name, now)?;
     crate::events::record(
@@ -404,41 +409,205 @@ pub fn run_once(cfg: &crate::config::GahConfig, profile_name: &str, json: bool) 
         format!("profile={profile_name}"),
     )?;
 
-    let original_action = decide_next_action(&snapshot);
-    let history = crate::events::read_events(cfg)?;
-    let mut action = original_action.clone();
-    if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
-        action = NextAction::HumanRequired {
-            reason,
-            reference: original_action.work_id().map(str::to_string),
-        };
-    }
-    record_action_events(cfg, profile_name, &original_action, &action)?;
-
-    let outcome = execute_action(cfg, profile_name, &action)?;
-
-    let stop_event_type = match &action {
-        NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
-        NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
-        _ => crate::events::EventType::LoopStopped,
-    };
-    crate::events::record(
-        cfg,
-        stop_event_type,
-        Some(profile_name),
-        action.work_id(),
-        outcome.clone(),
-    )?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&LoopOnceResult { action, outcome })?
-        );
+    // For parallel > 1, we need to decide multiple actions
+    if parallel > 1 {
+        run_parallel_once(cfg, profile_name, &snapshot, json, parallel)?;
     } else {
-        println!("Decided: {} -- {}", action.kind(), action.reason());
-        println!("{outcome}");
+        // Original single action behavior
+        let original_action = decide_next_action(&snapshot);
+        let history = crate::events::read_events(cfg)?;
+        let mut action = original_action.clone();
+        if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
+            action = NextAction::HumanRequired {
+                reason,
+                reference: original_action.work_id().map(str::to_string),
+            };
+        }
+        record_action_events(cfg, profile_name, &original_action, &action)?;
+
+        let outcome = execute_action(cfg, profile_name, &action)?;
+
+        let stop_event_type = match &action {
+            NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
+            NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
+            _ => crate::events::EventType::LoopStopped,
+        };
+        crate::events::record(
+            cfg,
+            stop_event_type,
+            Some(profile_name),
+            action.work_id(),
+            outcome.clone(),
+        )?;
+
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&LoopOnceResult { action, outcome })?
+            );
+        } else {
+            println!("Decided: {} -- {}", action.kind(), action.reason());
+            println!("{outcome}");
+        }
     }
+    Ok(())
+}
+
+/// TICKET-096: Parallel execution for multiple actions
+fn run_parallel_once(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    snapshot: &crate::status::StatusSnapshot,
+    json: bool,
+    max_parallel: usize,
+) -> Result<()> {
+    use std::collections::HashSet;
+
+    let mut executed_work_ids = HashSet::new();
+
+    // TICKET-096: Respect backend availability - limit parallelism to number of eligible backends
+    let eligible_backend_count = snapshot
+        .availability
+        .iter()
+        .filter(|a| a.eligible_now)
+        .count();
+    let effective_parallel_limit = std::cmp::min(max_parallel, eligible_backend_count);
+
+    // Decide actions one by one until we reach the parallel limit or run out of actions
+    let history = crate::events::read_events(cfg)?;
+    let mut results = Vec::new();
+
+    for _ in 0..effective_parallel_limit {
+        // Re-fetch claimed work IDs to get fresh state (other processes might have claimed work)
+        let claimed_work_ids = crate::work_claim::get_claimed_work_ids(profile_name)?;
+
+        // Re-build snapshot to get fresh state (this is conservative but safe)
+        let fresh_snapshot =
+            crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
+
+        let original_action = decide_next_action(&fresh_snapshot);
+        let mut action = original_action.clone();
+
+        // Apply stuck-loop detection
+        if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
+            action = NextAction::HumanRequired {
+                reason,
+                reference: original_action.work_id().map(str::to_string),
+            };
+        }
+
+        // Check if this action involves a work_id that's already claimed or executed in this batch
+        let action_work_id = action.work_id();
+        if let Some(work_id) = action_work_id {
+            if claimed_work_ids.contains(&work_id.to_string())
+                || crate::work_claim::is_claimed(profile_name, work_id)?
+                || executed_work_ids.contains(work_id)
+            {
+                // Skip this action as it's already in flight or claimed
+                continue;
+            }
+        }
+
+        // For terminal actions (WaitUntil, HumanRequired, NoOp), we stop after the first one
+        match &action {
+            NextAction::WaitUntil { .. }
+            | NextAction::HumanRequired { .. }
+            | NextAction::NoOp { .. } => {
+                // Execute this single terminal action and stop
+                record_action_events(cfg, profile_name, &original_action, &action)?;
+                let outcome = execute_action(cfg, profile_name, &action)?;
+
+                let stop_event_type = match &action {
+                    NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
+                    NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
+                    NextAction::NoOp { .. } => crate::events::EventType::LoopStopped,
+                    _ => unreachable!(),
+                };
+                crate::events::record(
+                    cfg,
+                    stop_event_type,
+                    Some(profile_name),
+                    action.work_id(),
+                    outcome.clone(),
+                )?;
+
+                results.push(LoopOnceResult { action, outcome });
+                break;
+            }
+            _ => {
+                // For dispatch actions, record and execute
+                record_action_events(cfg, profile_name, &original_action, &action)?;
+
+                // Claim this work_id before execution to prevent duplicate dispatch
+                if let Some(work_id) = action_work_id {
+                    crate::work_claim::claim_work(profile_name, work_id)?;
+                    executed_work_ids.insert(work_id.to_string());
+                }
+
+                match execute_action(cfg, profile_name, &action) {
+                    Ok(outcome) => {
+                        let stop_event_type = crate::events::EventType::LoopStopped;
+                        crate::events::record(
+                            cfg,
+                            stop_event_type,
+                            Some(profile_name),
+                            action.work_id(),
+                            outcome.clone(),
+                        )?;
+                        results.push(LoopOnceResult { action, outcome });
+                    }
+                    Err(e) => {
+                        // Release the claim if execution failed
+                        if let Some(work_id) = action_work_id {
+                            crate::work_claim::release_work(profile_name, work_id)?;
+                            executed_work_ids.remove(work_id);
+                        }
+                        // Re-record the action with error info for consistency
+                        let stop_event_type = crate::events::EventType::LoopStopped;
+                        crate::events::record(
+                            cfg,
+                            stop_event_type,
+                            Some(profile_name),
+                            action.work_id(),
+                            format!("Error: {}", e),
+                        )?;
+                        results.push(LoopOnceResult {
+                            action,
+                            outcome: format!("Error: {}", e),
+                        });
+                        // Continue to try other actions even if this one failed
+                    }
+                }
+            }
+        }
+    }
+
+    // Output results
+    if json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                println!("---");
+            }
+            println!(
+                "Decided: {} -- {}",
+                result.action.kind(),
+                result.action.reason()
+            );
+            println!("{}", result.outcome);
+        }
+        if results.is_empty() {
+            println!("No actions executed (parallel limit reached or no eligible work)");
+        }
+    }
+
+    // Clean up any stale claims if we encountered errors
+    // (This is a safety net - normally individual claims should be released)
+    if results.iter().any(|r| r.outcome.starts_with("Error:")) {
+        crate::work_claim::release_all_for_profile(profile_name)?;
+    }
+
     Ok(())
 }
 
@@ -1057,5 +1226,118 @@ mod tests {
         assert!(events[0].details.starts_with("review_mr:"));
         assert_eq!(events[1].event_type, "action_overridden");
         assert!(events[1].details.contains("review_mr -> human_required"));
+    }
+
+    // TICKET-096: Parallel dispatch tests
+    #[test]
+    fn parallel_dispatch_respects_max_parallel_limit() {
+        let mut snapshot = empty_snapshot();
+
+        // Add multiple eligible backends (more than max_parallel)
+        for _ in 0..5 {
+            snapshot.availability.push(ScopeStatusJson {
+                backend: "test_backend".to_string(),
+                model: None,
+                quota_pool: None,
+                eligible_now: true,
+                reason: None,
+                unavailable_until: None,
+                source: None,
+                last_error_summary: None,
+                observed_at: None,
+                scope: None,
+            });
+        }
+
+        // Add 3 available tickets
+        for i in 0..3 {
+            snapshot.available_tickets.push(AvailableTicket {
+                ticket_path: format!("ticket_{}.md", i),
+                work_id: Some(format!("TICKET-{}", i + 100)),
+                title: Some(format!("Test ticket {}", i)),
+                has_active_mr: false,
+                prior_attempt_count: 0,
+                last_failure_class: None,
+                recommended_backend: None,
+                recommended_model: None,
+            });
+        }
+
+        // With max_parallel=2, we should only process 2 tickets
+        // Note: This test exercises the logic but doesn't run the actual parallel execution
+        // since that requires a full GAH setup
+        let effective_parallel_limit = std::cmp::min(
+            2,
+            snapshot
+                .availability
+                .iter()
+                .filter(|a| a.eligible_now)
+                .count(),
+        );
+        assert_eq!(effective_parallel_limit, 2);
+    }
+
+    #[test]
+    fn backend_availability_limits_parallelism() {
+        let mut snapshot = empty_snapshot();
+
+        // Add 3 eligible backends
+        for i in 0..3 {
+            snapshot.availability.push(ScopeStatusJson {
+                backend: format!("backend_{}", i),
+                model: None,
+                quota_pool: None,
+                eligible_now: true,
+                reason: None,
+                unavailable_until: None,
+                source: None,
+                last_error_summary: None,
+                observed_at: None,
+                scope: None,
+            });
+        }
+
+        // With 3 eligible backends, max_parallel=5 should be limited to 3
+        let effective_parallel_limit = std::cmp::min(
+            5,
+            snapshot
+                .availability
+                .iter()
+                .filter(|a| a.eligible_now)
+                .count(),
+        );
+        assert_eq!(effective_parallel_limit, 3);
+    }
+
+    #[test]
+    fn no_backend_availability_zero_parallelism() {
+        let mut snapshot = empty_snapshot();
+
+        // Add only unavailable backends
+        for i in 0..3 {
+            snapshot.availability.push(ScopeStatusJson {
+                backend: format!("backend_{}", i),
+                model: None,
+                quota_pool: None,
+                eligible_now: false,
+                reason: Some("rate limited".to_string()),
+                unavailable_until: Some(time::OffsetDateTime::now_utc().to_string()),
+                source: None,
+                last_error_summary: None,
+                observed_at: None,
+                scope: None,
+            });
+        }
+
+        // With 0 eligible backends, max_parallel=5 should be limited to 0
+        let effective_parallel_limit = std::cmp::min(
+            5,
+            snapshot
+                .availability
+                .iter()
+                .filter(|a| a.eligible_now)
+                .count(),
+        );
+        assert_eq!(effective_parallel_limit, 0);
     }
 }

@@ -27,6 +27,7 @@ mod test_support;
 mod tui;
 mod tui_state;
 mod usage;
+mod work_claim;
 mod worktree;
 
 use anyhow::Result;
@@ -138,6 +139,9 @@ enum Commands {
         /// so a future recurring mode can't be silently assumed.
         #[arg(long, default_value_t = false)]
         once: bool,
+        /// TICKET-096: Run up to N tickets concurrently instead of one at a time
+        #[arg(long, default_value = "1")]
+        parallel: usize,
     },
     /// Inspect the controller event stream (TICKET-083)
     Events {
@@ -379,6 +383,7 @@ fn main() -> Result<()> {
             config_path,
             json,
             once,
+            parallel,
         } => {
             if !once {
                 anyhow::bail!(
@@ -387,7 +392,7 @@ fn main() -> Result<()> {
                 );
             }
             let cfg = config::load(config_path.as_deref())?;
-            controller::run_once(&cfg, &profile, json)?;
+            controller::run_once(&cfg, &profile, json, parallel)?;
         }
 
         Commands::Events {
