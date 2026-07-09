@@ -11,6 +11,21 @@ thread_local! {
     static TEST_PATH_OVERRIDE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
+/// Integration tests that use `provider_command` can set a thread-local PATH
+/// override so fake provider scripts (`gh`, `glab`) resolve from a temp
+/// directory without mutating the process-global PATH.
+pub fn set_test_provider_path(path: &str) {
+    TEST_PATH_OVERRIDE.with(|p| *p.borrow_mut() = Some(path.to_string()));
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub fn clear_test_provider_path() {
+    TEST_PATH_OVERRIDE.with(|p| *p.borrow_mut() = None);
+}
+
 /// Construct a Command for an external provider CLI (`gh`, `curl`). In test
 /// builds, honors a thread-local PATH override so tests can hide/replace
 /// these binaries without touching the process-wide PATH.

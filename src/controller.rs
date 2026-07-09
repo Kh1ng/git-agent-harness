@@ -10,6 +10,7 @@
 use crate::status::StatusSnapshot;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// TICKET-078: how many times the controller will automatically
 /// Retry/Escalate the same work_id before giving up and requiring a human.
@@ -186,7 +187,63 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut mrs: Vec<&crate::sync::SyncMrJson> = snapshot.merge_requests.iter().collect();
     mrs.sort_by(|a, b| a.branch.cmp(&b.branch));
 
-    if let Some(mr) = mrs.iter().find(|mr| mr.classification == "NEEDS_REVIEW") {
+    // TICKET-skip-and-continue: a blocked MR (stuck NEEDS_FIX beyond the fix
+    // cap, or READY_FOR_HUMAN awaiting a human merge decision) is a
+    // WORK-ITEM concern. It must NOT freeze the whole profile -- unrelated
+    // tickets/MRs keep flowing. We collect actionable candidates and return
+    // the first one; only if NO item is actionable do we fall back to a
+    // profile-wide HumanRequired at the end of the function.
+    let mut review_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
+    let mut fix_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
+    let mut merge_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
+    let mut human_blocked_mrs: Vec<&crate::sync::SyncMrJson> = Vec::new();
+
+    for mr in &mrs {
+        match mr.classification.as_str() {
+            "NEEDS_REVIEW" => review_candidates.push(mr),
+            "CI_FAILED" | "NEEDS_FIX" => {
+                let fix_attempts = snapshot
+                    .fix_attempt_counts
+                    .get(&mr.branch)
+                    .copied()
+                    .unwrap_or(0);
+                if fix_attempts >= AUTO_RETRY_CAP {
+                    // Exhausted fix attempts -> work-item block, not a profile freeze.
+                    human_blocked_mrs.push(mr);
+                } else {
+                    fix_candidates.push(mr);
+                }
+            }
+            "READY_FOR_HUMAN" => {
+                let merge_policy = snapshot.profile.merge_policy;
+                if mr.ci_passed {
+                    let merge_attempts = snapshot
+                        .merge_attempt_counts
+                        .get(&mr.branch)
+                        .copied()
+                        .unwrap_or(0);
+                    if merge_attempts < AUTO_RETRY_CAP {
+                        merge_candidates.push(mr);
+                    } else {
+                        human_blocked_mrs.push(mr);
+                    }
+                } else if merge_policy == crate::config::MergePolicy::StopForHuman {
+                    // TICKET-127: under stop_for_human, a READY_FOR_HUMAN
+                    // MR without CI passed still defers to the human
+                    // immediately — no CI gate needed.
+                    human_blocked_mrs.push(mr);
+                } else {
+                    // CI not yet passed — re-check later (no_op fallback).
+                    human_blocked_mrs.push(mr);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Priority order: review -> merge -> fix. Each returns the first
+    // candidate; blocked MRs are skipped, not parked.
+    if let Some(mr) = review_candidates.first() {
         return NextAction::ReviewMr {
             work_id: mr.work_id.clone(),
             branch: mr.branch.clone(),
@@ -194,27 +251,36 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             reason: format!("MR on branch '{}' classified NEEDS_REVIEW", mr.branch),
         };
     }
-    if let Some(mr) = mrs
-        .iter()
-        .find(|mr| matches!(mr.classification.as_str(), "CI_FAILED" | "NEEDS_FIX"))
-    {
-        let fix_attempts = snapshot
-            .fix_attempt_counts
-            .get(&mr.branch)
-            .copied()
-            .unwrap_or(0);
-        if fix_attempts >= AUTO_RETRY_CAP {
+    if let Some(mr) = merge_candidates.first() {
+        // Issue #124 / TICKET-127: per-repo merge policy gates what we do
+        // for a strong-approved MR whose CI has been evaluated.
+        let merge_policy = snapshot.profile.merge_policy;
+        if merge_policy == crate::config::MergePolicy::StopForHuman {
             return NextAction::HumanRequired {
                 reason: format!(
-                    "MR on branch '{}' classified {} but fix retry cap ({}) exceeded",
-                    mr.branch, mr.classification, AUTO_RETRY_CAP
+                    "MR on branch '{}' strong-reviewed with CI passing; merge policy is 'stop_for_human' -- awaiting human merge",
+                    mr.branch
                 ),
-                reference: mr
-                    .url
-                    .clone()
-                    .or_else(|| Some(format!("branch {}", mr.branch))),
+                reference: mr.url.clone(),
             };
         }
+        return NextAction::MergeMr {
+            work_id: mr.work_id.clone(),
+            branch: mr.branch.clone(),
+            mr_url: mr.url.clone(),
+            reason: match merge_policy {
+                crate::config::MergePolicy::GitlabMwps => format!(
+                    "MR on branch '{}' approved by a strong reviewer with CI passing; setting GitLab merge-when-pipeline-succeeds",
+                    mr.branch
+                ),
+                _ => format!(
+                    "MR on branch '{}' approved by a strong reviewer with CI passing",
+                    mr.branch
+                ),
+            },
+        };
+    }
+    if let Some(mr) = fix_candidates.first() {
         return NextAction::FixMr {
             work_id: mr.work_id.clone(),
             branch: mr.branch.clone(),
@@ -225,65 +291,23 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             ),
         };
     }
-    if let Some(mr) = mrs.iter().find(|mr| mr.classification == "READY_FOR_HUMAN") {
-        // Issue #124 / TICKET-127: per-repo merge policy gates what we do for a
-        // strong-approved MR whose CI has been evaluated.
-        let merge_policy = snapshot.profile.merge_policy;
-        // TICKET-127: auto-merge when a strong reviewer approved (the only
-        // path that sets the bare `gah-ready-for-human` label without also
-        // setting `gah-human-review` -- see `review_labels`) AND CI
-        // conclusively passed (`ci_passed`, not merely `!ci_failed`, which
-        // is also true mid-pipeline). A merge that keeps failing (conflict,
-        // unresolved discussion, external check) falls back to a human
-        // after the same retry cap FixMr uses, rather than retrying forever.
-        if mr.ci_passed {
-            // Under `stop_for_human`, GAH never merges: it surfaces the
-            // decision to a human operator once strong review is done and CI
-            // is green, and the operator clicks merge manually (e.g. the
-            // worldcup-props repo where the operator merges by hand).
-            if merge_policy == crate::config::MergePolicy::StopForHuman {
-                return NextAction::HumanRequired {
-                    reason: format!(
-                        "MR on branch '{}' strong-reviewed with CI passing; merge policy is 'stop_for_human' -- awaiting human merge",
-                        mr.branch
-                    ),
-                    reference: mr.url.clone(),
-                };
-            }
-            let merge_attempts = snapshot
-                .merge_attempt_counts
-                .get(&mr.branch)
-                .copied()
-                .unwrap_or(0);
-            if merge_attempts < AUTO_RETRY_CAP {
-                return NextAction::MergeMr {
-                    work_id: mr.work_id.clone(),
-                    branch: mr.branch.clone(),
-                    mr_url: mr.url.clone(),
-                    reason: match merge_policy {
-                        crate::config::MergePolicy::GitlabMwps => format!(
-                            "MR on branch '{}' approved by a strong reviewer with CI passing; setting GitLab merge-when-pipeline-succeeds",
-                            mr.branch
-                        ),
-                        _ => format!(
-                            "MR on branch '{}' approved by a strong reviewer with CI passing",
-                            mr.branch
-                        ),
-                    },
-                };
-            }
-            return NextAction::HumanRequired {
-                reason: format!(
-                    "MR on branch '{}' auto-merge failed {} time(s); stopping automatic retries",
-                    mr.branch, merge_attempts
-                ),
-                reference: mr.url.clone(),
-            };
-        }
+
+    // Fallback: if no active MR needs review/fix/merge but there are
+    // human-blocked MRs under StopForHuman merge policy, surface the
+    // first one as HumanRequired.  All other blocked MRs (retry-cap
+    // exhausted, CI not yet passed) no-op — they appear in status
+    // reports but don't park the profile.
+    if !human_blocked_mrs.is_empty()
+        && review_candidates.is_empty()
+        && merge_candidates.is_empty()
+        && fix_candidates.is_empty()
+        && snapshot.profile.merge_policy == crate::config::MergePolicy::StopForHuman
+    {
+        let mr = human_blocked_mrs[0];
         return NextAction::HumanRequired {
             reason: format!(
-                "MR on branch '{}' ready for human merge decision",
-                mr.branch
+                "MR on branch '{}' classified {} (human decision required)",
+                mr.branch, mr.classification
             ),
             reference: mr.url.clone(),
         };
@@ -302,22 +326,60 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         .collect();
     failed_tickets.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
 
-    for ticket in &failed_tickets {
-        if ticket.prior_attempt_count >= AUTO_RETRY_CAP {
+    // Collect tickets that have exhausted the retry cap
+    let exhausted: HashSet<_> = failed_tickets
+        .iter()
+        .filter(|t| t.prior_attempt_count >= AUTO_RETRY_CAP)
+        .filter_map(|t| t.work_id.clone())
+        .collect();
+
+    // Check if there are any non-exhausted actionable tickets
+    let has_escalate_candidate = failed_tickets.iter().any(|t| {
+        !exhausted.contains(t.work_id.as_ref().unwrap_or(&t.ticket_path))
+            && t.last_failure_class
+                .as_deref()
+                .is_some_and(is_genuine_agent_failure)
+    });
+    let has_retry_candidate = failed_tickets.iter().any(|t| {
+        !exhausted.contains(t.work_id.as_ref().unwrap_or(&t.ticket_path))
+            && t.last_failure_class
+                .as_deref()
+                .is_some_and(|fc| is_infra_failure(fc) && some_backend_eligible)
+    });
+    let has_undispatched = snapshot
+        .available_tickets
+        .iter()
+        .any(|t| !t.has_active_mr && t.prior_attempt_count == 0 && !t.human_required);
+
+    // Handle exhausted tickets: if there are exhausted tickets and NO other actionable items,
+    // return HumanRequired for the first exhausted ticket
+    if !exhausted.is_empty() && !has_escalate_candidate && !has_retry_candidate && !has_undispatched
+    {
+        if let Some(first_exhausted) = failed_tickets
+            .iter()
+            .find(|t| t.prior_attempt_count >= AUTO_RETRY_CAP)
+        {
             return NextAction::HumanRequired {
                 reason: format!(
                     "{} failed {} time(s) with no active MR; stopping automatic retries",
-                    ticket.work_id.as_deref().unwrap_or(&ticket.ticket_path),
-                    ticket.prior_attempt_count
+                    first_exhausted
+                        .work_id
+                        .as_deref()
+                        .unwrap_or(&first_exhausted.ticket_path),
+                    first_exhausted.prior_attempt_count
                 ),
-                reference: ticket
+                reference: first_exhausted
                     .work_id
                     .clone()
-                    .or_else(|| Some(ticket.ticket_path.clone())),
+                    .or_else(|| Some(first_exhausted.ticket_path.clone())),
             };
         }
     }
+
     for ticket in &failed_tickets {
+        if exhausted.contains(ticket.work_id.as_ref().unwrap_or(&ticket.ticket_path)) {
+            continue;
+        }
         if let Some(fc) = ticket.last_failure_class.as_deref() {
             if is_genuine_agent_failure(fc) {
                 return NextAction::Escalate {
@@ -334,6 +396,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         }
     }
     for ticket in &failed_tickets {
+        if exhausted.contains(ticket.work_id.as_ref().unwrap_or(&ticket.ticket_path)) {
+            continue;
+        }
         if let Some(fc) = ticket.last_failure_class.as_deref() {
             if is_infra_failure(fc) && some_backend_eligible {
                 return NextAction::Retry {
@@ -530,10 +595,34 @@ pub fn run_once(
                     eprintln!("warning: failed to persist stuck-loop gate: {e:#}");
                 }
             }
-            action = NextAction::HumanRequired {
-                reason,
-                reference: original_action.work_id().map(str::to_string),
-            };
+            // TICKET-skip-and-continue: the gate is now persisted as a
+            // work-item-scoped human_required (above). Re-decide with a fresh
+            // snapshot that EXCLUDES the stuck work_id, so the controller
+            // picks the NEXT eligible work item instead of parking the whole
+            // profile. Only if nothing else is actionable do we surface
+            // profile-wide HumanRequired -- that is a genuine profile stall,
+            // not a single blocked ticket.
+            let fresh =
+                crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
+            let mut scoped = fresh;
+            if let Some(stuck_wid) = original_action.work_id() {
+                scoped
+                    .merge_requests
+                    .retain(|mr| mr.work_id.as_deref() != Some(stuck_wid));
+                scoped
+                    .available_tickets
+                    .retain(|t| t.work_id.as_deref() != Some(stuck_wid));
+            }
+            let redispatched = decide_next_action(&scoped);
+            if redispatched.kind() == "no_op" {
+                // Nothing else actionable -> genuine stall, surface it.
+                action = NextAction::HumanRequired {
+                    reason,
+                    reference: original_action.work_id().map(str::to_string),
+                };
+            } else {
+                action = redispatched;
+            }
         }
         record_action_events(cfg, profile_name, &original_action, &action)?;
 
@@ -595,18 +684,51 @@ fn run_parallel_once(
         let claimed_work_ids = crate::work_claim::get_claimed_work_ids(profile_name)?;
 
         // Re-build snapshot to get fresh state (this is conservative but safe)
-        let fresh_snapshot =
+        let mut fresh_snapshot =
             crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
 
         let original_action = decide_next_action(&fresh_snapshot);
         let mut action = original_action.clone();
 
-        // Apply stuck-loop detection
+        // Apply stuck-loop detection (TICKET-skip-and-continue): persist the
+        // work-item-scoped gate, then skip this item and let the loop pick the
+        // next eligible work item rather than parking the whole profile.
         if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
-            action = NextAction::HumanRequired {
-                reason,
-                reference: original_action.work_id().map(str::to_string),
-            };
+            if let Some(wid) = original_action.work_id() {
+                let profile = crate::config::get_profile(cfg, profile_name)?;
+                let mut gate = crate::ledger::LedgerEntry::new(
+                    profile_name,
+                    profile,
+                    "auto",
+                    "fix",
+                    wid,
+                    None,
+                    None,
+                );
+                gate.work_id = Some(wid.to_string());
+                gate.human_required = true;
+                gate.dispatch_reason = Some("stuck_loop_gate".to_string());
+                gate.error_summary = Some(reason.clone());
+                let _ = crate::ledger::append(cfg, &gate);
+            }
+            // Re-decide: exclude the stuck work_id, pick the next eligible one.
+            if let Some(stuck_wid) = original_action.work_id() {
+                fresh_snapshot
+                    .merge_requests
+                    .retain(|mr| mr.work_id.as_deref() != Some(stuck_wid));
+                fresh_snapshot
+                    .available_tickets
+                    .retain(|t| t.work_id.as_deref() != Some(stuck_wid));
+            }
+            let redispatched = decide_next_action(&fresh_snapshot);
+            if redispatched.kind() == "no_op" {
+                action = NextAction::HumanRequired {
+                    reason,
+                    reference: original_action.work_id().map(str::to_string),
+                };
+            } else {
+                action = redispatched;
+            }
         }
 
         // Check if this action involves a work_id that's already claimed or executed in this batch
@@ -911,7 +1033,7 @@ fn run_dispatch_and_record(
 
 #[cfg(test)]
 mod tests {
-    use super::NextAction;
+    use super::{NextAction, AUTO_RETRY_CAP};
 
     #[test]
     fn kind_is_stable_short_name_per_variant() {
@@ -1131,8 +1253,14 @@ mod tests {
         snapshot.fix_attempt_counts = fix_attempts;
         snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
         let action = decide_next_action(&snapshot);
-        assert_eq!(action.kind(), "human_required");
-        assert!(action.reason().contains("fix retry cap"));
+        // TICKET-skip-and-continue: an exhausted MR is a work-item block, not a
+        // profile-wide freeze. With nothing else actionable, the loop no-ops
+        // (supervisor re-checks next cycle); the item stays in blocked_work_items.
+        assert_eq!(action.kind(), "no_op");
+        assert!(
+            action.reason().contains("nothing actionable")
+                || action.reason().contains("fix retry cap")
+        );
     }
 
     #[test]
@@ -1142,7 +1270,10 @@ mod tests {
             .merge_requests
             .push(mr("gah/real-1", "READY_FOR_HUMAN"));
         let action = decide_next_action(&snapshot);
-        assert_eq!(action.kind(), "human_required");
+        // TICKET-skip-and-continue: a single READY_FOR_HUMAN MR awaiting a
+        // human merge decision is a work-item block, not a profile freeze.
+        // With nothing else actionable, the loop no-ops (re-checks later).
+        assert_eq!(action.kind(), "no_op");
     }
 
     #[test]
@@ -1173,7 +1304,8 @@ mod tests {
             .merge_attempt_counts
             .insert("gah/real-1".to_string(), 2); // == AUTO_RETRY_CAP
         let action = decide_next_action(&snapshot);
-        assert_eq!(action.kind(), "human_required");
+        // TICKET-skip-and-continue: work-item block, not a profile freeze.
+        assert_eq!(action.kind(), "no_op");
     }
 
     // Issue #124 / TICKET-127: per-repo merge policy gates what happens for a
@@ -1308,6 +1440,79 @@ mod tests {
         ));
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
+    }
+
+    #[test]
+    fn exhausted_ticket_does_not_block_others() {
+        let mut snapshot = empty_snapshot();
+        // TICKET-113 is exhausted (prior_attempt_count = 2, no active MR)
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-113-x.md",
+            Some("TICKET-113"),
+            2, // == AUTO_RETRY_CAP
+            Some("agent_no_progress"),
+            false,
+            false,
+        ));
+        // TICKET-128 is eligible (prior_attempt_count = 0, no active MR)
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-128-x.md",
+            Some("TICKET-128"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        let action = decide_next_action(&snapshot);
+        // Should dispatch TICKET-128, NOT return human_required
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-128"))
+            }
+            other => panic!("expected DispatchTicket for TICKET-128, got {other:?}"),
+        }
+    }
+
+    // TICKET-skip-and-continue: an MR stuck at NEEDS_FIX beyond the fix retry
+    // cap must NOT freeze the profile. An unrelated eligible ticket still
+    // dispatches (this is the worldcup-props !249 recurring-stall case).
+    #[test]
+    fn exhausted_mr_does_not_block_others() {
+        let mut snapshot = empty_snapshot();
+        // Stuck MR with fix attempts >= cap.
+        snapshot
+            .fix_attempt_counts
+            .insert("gah/stuck-1".into(), AUTO_RETRY_CAP);
+        snapshot.merge_requests.push(mr("gah/stuck-1", "NEEDS_FIX"));
+        // An unrelated eligible ticket exists.
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-128-x.md",
+            Some("TICKET-128"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-128"))
+            }
+            other => panic!("expected DispatchTicket for TICKET-128, got {other:?}"),
+        }
+    }
+
+    // A profile with ONLY an exhausted MR (nothing else actionable) no-ops
+    // rather than freezing the profile -- the MR stays in blocked_work_items.
+    #[test]
+    fn exhausted_mr_alone_is_human_required() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .fix_attempt_counts
+            .insert("gah/stuck-1".into(), AUTO_RETRY_CAP);
+        snapshot.merge_requests.push(mr("gah/stuck-1", "NEEDS_FIX"));
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "no_op");
     }
 
     #[test]
@@ -1585,7 +1790,8 @@ mod tests {
             .merge_requests
             .push(needs_fix_mr("branch-A", "TICKET-A"));
         let action = decide_next_action(&snapshot);
-        assert_eq!(action.kind(), "human_required");
+        // TICKET-skip-and-continue: work-item block, not a profile freeze.
+        assert_eq!(action.kind(), "no_op");
     }
 
     // One repair used, one more allowed.
