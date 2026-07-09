@@ -98,6 +98,7 @@ pub struct SyncMrJson {
 #[derive(Debug, Clone)]
 pub struct SyncMr {
     pub title: String,
+    pub body: Option<String>,
     pub branch: String,
     pub labels: Vec<String>,
     pub url: Option<String>,
@@ -204,6 +205,8 @@ fn is_stale(updated_at: Option<&str>) -> bool {
 #[derive(Debug, Deserialize, PartialEq)]
 struct GithubPr {
     title: String,
+    #[serde(default)]
+    body: Option<String>,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
     #[serde(default)]
@@ -252,7 +255,7 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             "--state",
             "all",
             "--json",
-            "title,headRefName,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
+            "title,body,headRefName,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
         ])
         .output()
         .context("gh pr list")?;
@@ -269,6 +272,7 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
         .map(|pr| SyncMr {
             work_id: extract_work_id_from_title(&pr.title),
             title: pr.title,
+            body: pr.body,
             branch: pr.head_ref_name,
             labels: pr.labels.into_iter().map(|l| l.name).collect(),
             url: pr.url,
@@ -308,6 +312,8 @@ fn github_ci_passed(checks: Option<&[GithubCheck]>) -> bool {
 #[derive(Debug, Deserialize)]
 struct GitlabMr {
     title: String,
+    #[serde(default)]
+    description: Option<String>,
     source_branch: String,
     #[serde(default)]
     web_url: Option<String>,
@@ -370,6 +376,7 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             SyncMr {
                 work_id: extract_work_id_from_title(&mr.title),
                 title: mr.title,
+                body: mr.description,
                 branch: mr.source_branch,
                 labels: mr.labels,
                 url: mr.web_url,
@@ -549,6 +556,7 @@ mod tests {
     fn base_mr() -> SyncMr {
         SyncMr {
             title: "x".into(),
+            body: None,
             branch: "gah/test".into(),
             labels: vec![],
             url: None,

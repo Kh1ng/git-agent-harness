@@ -313,6 +313,8 @@ enum LedgerCommands {
         config_path: Option<String>,
         #[arg(long)]
         json: bool,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 }
 
@@ -397,9 +399,10 @@ fn main() -> Result<()> {
                 profile,
                 config_path,
                 json,
+                dry_run,
             } => {
                 let cfg = config::load(config_path.as_deref())?;
-                ledger::reconcile::run(&cfg, &profile, json)?;
+                ledger::reconcile::run(&cfg, &profile, json, dry_run)?;
             }
         },
 

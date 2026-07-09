@@ -31,6 +31,13 @@ pub struct LoopResult {
     pub events: Vec<serde_json::Value>,
 }
 
+#[derive(Debug)]
+pub struct CommandResult {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Deterministic test harness.
 pub struct ScenarioHarness {
     _temp: TempDir,
@@ -48,6 +55,7 @@ pub struct ScenarioHarness {
     fake_workers: HashMap<String, FakeBackend>,
     ledger: TestLedger,
     gah_bin: PathBuf,
+    config_append: String,
     // Environment capture/restore
     saved_path: Option<String>,
     saved_gah_config: Option<String>,
@@ -152,6 +160,7 @@ impl ScenarioHarness {
             fake_workers: HashMap::new(),
             ledger: TestLedger::new(),
             gah_bin,
+            config_append: String::new(),
             saved_path,
             saved_gah_config,
             saved_gah_ledger,
@@ -189,6 +198,14 @@ impl ScenarioHarness {
         self
     }
 
+    pub fn with_config_append(mut self, extra_toml: &str) -> Self {
+        self.config_append.push_str(extra_toml);
+        if !extra_toml.ends_with('\n') {
+            self.config_append.push('\n');
+        }
+        self
+    }
+
     /// Install a custom FakeBackend for `gh` (bypassing the named fixture
     /// loader).  Used by tests that need sequence-based behavior (e.g.
     /// fail → fail → succeed).
@@ -212,6 +229,44 @@ impl ScenarioHarness {
             }
         }
         self.fake_gh = Some(new_fb);
+    }
+
+    pub fn install_custom_glab(&mut self, fb: &FakeBackend) {
+        let new_fb = FakeBackend::new(self._temp.path(), "glab");
+        let src = fb.bin_dir().join("glab");
+        if src.exists() {
+            let dst = new_fb.bin_dir().join("glab");
+            let _ = std::fs::copy(&src, &dst);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&dst) {
+                    let mut p = meta.permissions();
+                    p.set_mode(0o755);
+                    let _ = std::fs::set_permissions(&dst, p);
+                }
+            }
+        }
+        self.fake_glab = Some(new_fb);
+    }
+
+    pub fn install_custom_worker(&mut self, name: &str, fb: &FakeBackend) {
+        let new_fb = FakeBackend::new(self._temp.path(), name);
+        let src = fb.bin_dir().join(name);
+        if src.exists() {
+            let dst = new_fb.bin_dir().join(name);
+            let _ = std::fs::copy(&src, &dst);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&dst) {
+                    let mut p = meta.permissions();
+                    p.set_mode(0o755);
+                    let _ = std::fs::set_permissions(&dst, p);
+                }
+            }
+        }
+        self.fake_workers.insert(name.to_string(), new_fb);
     }
 
     /// Create a branch in the local repo and push it to the bare
@@ -397,6 +452,109 @@ impl ScenarioHarness {
         serde_json::from_str(&stdout[start..]).map_err(|e| format!("parse status json: {e}"))
     }
 
+    pub fn run_dispatch(&mut self, args: &[&str]) -> Result<CommandResult, String> {
+        self.setup_env();
+        self.install_fakes();
+        let mut cmd = Command::new(&self.gah_bin);
+        cmd.args(["dispatch", "--profile", &self.profile_name]);
+        cmd.args(args);
+        let out = cmd
+            .env("GAH_CONFIG", self.config_path.to_str().unwrap())
+            .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
+            .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin_dir.display(),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .map_err(|e| format!("dispatch spawn failed: {e}"))?;
+        Ok(CommandResult {
+            exit_code: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    pub fn run_ledger_reconcile_json(
+        &mut self,
+        dry_run: bool,
+    ) -> Result<serde_json::Value, String> {
+        self.setup_env();
+        self.install_fakes();
+        let mut cmd = Command::new(&self.gah_bin);
+        cmd.args([
+            "ledger",
+            "reconcile",
+            "--profile",
+            &self.profile_name,
+            "--json",
+        ]);
+        if dry_run {
+            cmd.arg("--dry-run");
+        }
+        let out = cmd
+            .env("GAH_CONFIG", self.config_path.to_str().unwrap())
+            .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
+            .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin_dir.display(),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .map_err(|e| format!("reconcile spawn failed: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "reconcile exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse reconcile json: {e}"))
+    }
+
+    pub fn run_report_json(&mut self, group_by: &str) -> Result<serde_json::Value, String> {
+        self.setup_env();
+        self.install_fakes();
+        let out = Command::new(&self.gah_bin)
+            .args([
+                "report",
+                "--json",
+                "--group-by",
+                group_by,
+                "--since",
+                "365d",
+            ])
+            .env("GAH_CONFIG", self.config_path.to_str().unwrap())
+            .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
+            .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin_dir.display(),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .map_err(|e| format!("report spawn failed: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "report exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse report json: {e}"))
+    }
+
     fn install_fakes(&self) {
         // gh/glab scripts need to be in the bin_dir since the gah
         // subprocess resolves them from PATH, not from the thread-local
@@ -426,6 +584,7 @@ repo = "{repo}"
 local_path = "{local}"
 artifact_root = "{artifacts}"
 default_target_branch = "main"
+{extra}
 "#,
             artifacts = self.artifacts_dir.display(),
             worktree = self._temp.path().join("worktrees").display(),
@@ -437,6 +596,7 @@ default_target_branch = "main"
                 "group/repo"
             },
             local = self.local_repo_dir.display(),
+            extra = self.config_append,
         );
         fs::write(&self.config_path, toml).unwrap();
     }

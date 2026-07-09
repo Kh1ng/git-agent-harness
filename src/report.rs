@@ -42,8 +42,17 @@ struct BackendModelComparison {
     validation_pass: usize,
     success_rate: f64,
     total_cost_usd: Option<f64>,
+    actual_cost_usd: Option<f64>,
+    estimated_cost_usd: Option<f64>,
     average_cost_usd: Option<f64>,
     average_duration_seconds: Option<f64>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    requests_count: Option<u64>,
+    quota_observations: Vec<crate::ledger::summary::GroupQuotaObservation>,
     review_verdict_distribution: Vec<(String, usize)>,
 }
 
@@ -114,8 +123,17 @@ fn transform_to_report_format(
                 validation_pass: group.validation_pass,
                 success_rate,
                 total_cost_usd: group.total_cost_usd,
+                actual_cost_usd: group.actual_cost_usd,
+                estimated_cost_usd: group.estimated_cost_usd,
                 average_cost_usd: group.average_cost_usd,
                 average_duration_seconds: group.average_duration_seconds,
+                input_tokens: group.input_tokens,
+                output_tokens: group.output_tokens,
+                cache_read_tokens: group.cache_read_tokens,
+                cache_write_tokens: group.cache_write_tokens,
+                total_tokens: group.total_tokens,
+                requests_count: group.requests_count,
+                quota_observations: group.quota_observations.clone(),
                 review_verdict_distribution: review_verdicts,
             });
         }
@@ -193,11 +211,44 @@ fn display_report(
                     println!("  Total cost: ${:.4}", total_cost);
                 }
             }
+            if let Some(actual_cost) = group.actual_cost_usd {
+                println!("  Actual cost: ${:.4}", actual_cost);
+            }
+            if let Some(estimated_cost) = group.estimated_cost_usd {
+                println!("  Estimated cost: ${:.4}", estimated_cost);
+            }
 
             // Show duration
             if let Some(avg_duration) = group.average_duration_seconds {
                 println!("  Avg duration: {:.1}s", avg_duration);
             }
+            println!(
+                "  Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
+                group
+                    .input_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .output_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .cache_read_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .cache_write_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .total_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .requests_count
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            );
 
             // Show review verdict distribution (compact)
             if !group.review_verdict_distribution.is_empty() {
@@ -207,6 +258,29 @@ fn display_report(
                     .map(|(v, c)| format!("{} {} ", v, c))
                     .collect();
                 println!("  Review verdicts: {}", verdicts.join(", "));
+            }
+            if !group.quota_observations.is_empty() {
+                for quota in &group.quota_observations {
+                    println!(
+                        "  Quota [{}{}]: used={} remaining={} reset={} observed={}",
+                        quota.backend,
+                        quota
+                            .quota_window
+                            .as_deref()
+                            .map(|w| format!(":{w}"))
+                            .unwrap_or_default(),
+                        quota
+                            .quota_used_percent
+                            .map(|n| format!("{n:.1}%"))
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        quota
+                            .quota_remaining_percent
+                            .map(|n| format!("{n:.1}%"))
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        quota.quota_reset_at.as_deref().unwrap_or("unknown"),
+                        quota.observed_at.as_deref().unwrap_or("unknown"),
+                    );
+                }
             }
         }
     } else {
@@ -233,9 +307,18 @@ mod tests {
             validation_pass: 8,
             review_verdict_distribution: BTreeMap::from([("APPROVE_STRONG".to_string(), 2)]),
             total_cost_usd: Some(1.50),
+            actual_cost_usd: Some(1.50),
+            estimated_cost_usd: None,
             average_cost_usd: Some(0.15),
             average_duration_seconds: Some(120.5),
             cost_per_approve_strong: Some(0.75),
+            input_tokens: Some(700),
+            output_tokens: Some(300),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: Some(1000),
+            requests_count: Some(10),
+            quota_observations: vec![],
         });
         grouped_by_backend.push(GroupSummary {
             group_key: "codex".to_string(),
@@ -244,9 +327,18 @@ mod tests {
             validation_pass: 4,
             review_verdict_distribution: BTreeMap::new(),
             total_cost_usd: Some(2.00),
+            actual_cost_usd: Some(2.00),
+            estimated_cost_usd: None,
             average_cost_usd: Some(0.40),
             average_duration_seconds: Some(180.0),
             cost_per_approve_strong: None,
+            input_tokens: Some(300),
+            output_tokens: Some(200),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: Some(500),
+            requests_count: Some(10),
+            quota_observations: vec![],
         });
 
         SummaryData {
@@ -265,10 +357,12 @@ mod tests {
             mr_count: 5,
             human_required_count: 1,
             average_duration_seconds: Some(150.0),
-            usage_input_tokens: 1000,
-            usage_output_tokens: 500,
-            usage_total_tokens: 1500,
-            usage_requests_count: 20,
+            usage_input_tokens: Some(1000),
+            usage_output_tokens: Some(500),
+            usage_cache_read_tokens: None,
+            usage_cache_write_tokens: None,
+            usage_total_tokens: Some(1500),
+            usage_requests_count: Some(20),
             estimated_cost_usd: Some(3.50),
             actual_cost_usd: Some(3.50),
             last_run: Some("2026-07-07 10:00:00 UTC agy improve".to_string()),
@@ -345,9 +439,18 @@ mod tests {
             validation_pass: 2,
             review_verdict_distribution: BTreeMap::new(),
             total_cost_usd: None,
+            actual_cost_usd: None,
+            estimated_cost_usd: None,
             average_cost_usd: None,
             average_duration_seconds: None,
             cost_per_approve_strong: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            requests_count: None,
+            quota_observations: vec![],
         }];
 
         let mut data = mock_summary_data();
@@ -367,9 +470,18 @@ mod tests {
             validation_pass: 0,
             review_verdict_distribution: BTreeMap::new(),
             total_cost_usd: None,
+            actual_cost_usd: None,
+            estimated_cost_usd: None,
             average_cost_usd: None,
             average_duration_seconds: None,
             cost_per_approve_strong: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            requests_count: None,
+            quota_observations: vec![],
         }];
 
         let mut data = mock_summary_data();

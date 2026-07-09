@@ -72,6 +72,7 @@ pub fn ledger_entry_full(
         serde_json::Value::String(branch.into()),
     );
     m.insert("work_id".into(), serde_json::Value::String(work_id.into()));
+    m.insert("source_issue_number".into(), serde_json::Value::Null);
     m.insert("work_title".into(), serde_json::Value::Null);
     m.insert("branch".into(), serde_json::Value::String(branch.into()));
     m.insert("session_dir".into(), serde_json::Value::Null);
@@ -128,6 +129,46 @@ impl TestLedger {
 
     pub fn with_entry(mut self, entry: LedgerEntry) -> Self {
         self.entries.push(entry);
+        self
+    }
+
+    /// Convenience: add an entry for a dispatch attempt.
+    pub fn add_entry(
+        mut self,
+        _profile: &str,
+        mode: &str,
+        branch: &str,
+        work_id: Option<&str>,
+    ) -> Self {
+        let ts = chrono::Utc::now().to_rfc3339().to_string();
+        let work_id_str = work_id.unwrap_or("TICKET-001");
+        let entry = ledger_entry_full(mode, branch, None, work_id_str, &ts);
+        self.entries.push(entry);
+        self
+    }
+
+    /// Mark the latest entry as having created an MR.
+    pub fn with_mr_created(mut self, url: Option<&str>) -> Self {
+        if let Some(entry) = self.entries.last_mut() {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("mr_created".into(), serde_json::Value::Bool(true));
+                if let Some(u) = url {
+                    obj.insert("mr_url".into(), serde_json::Value::String(u.into()));
+                }
+            }
+        }
+        self
+    }
+
+    pub fn with_source_issue_number(mut self, issue_number: &str) -> Self {
+        if let Some(entry) = self.entries.last_mut() {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "source_issue_number".into(),
+                    serde_json::Value::String(issue_number.into()),
+                );
+            }
+        }
         self
     }
 

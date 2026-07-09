@@ -4335,7 +4335,7 @@ fn ledger_reconcile_appends_entry_when_mr_state_changed() {
 
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
     let parsed: Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
-    let entries = parsed.as_array().unwrap();
+    let entries = parsed["new_entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["work_id"], "TICKET-072");
     assert_eq!(entries[0]["new_state"], "MERGED");
@@ -4363,7 +4363,7 @@ fn ledger_reconcile_appends_entry_when_mr_state_changed() {
         .env("GAH_RECONCILIATION_PATH", &reconciliation_path)
         .assert()
         .success()
-        .stdout("[]\n");
+        .stdout("{\"new_entries\":[],\"issue_closure\":{\"already_closed\":[],\"would_close\":[],\"closed\":[],\"ambiguous\":[],\"unmapped\":[\"unknown\"],\"leave_open\":[],\"observation_failed\":[],\"policy_blocked\":[]}}\n");
 
     let reconciliation_text = fs::read_to_string(&reconciliation_path).unwrap();
     assert_eq!(reconciliation_text.lines().count(), 1);

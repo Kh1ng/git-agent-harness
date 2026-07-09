@@ -138,6 +138,11 @@ pub struct PublishingPolicy {
     /// completion messages, or other agent-generated prose to issue trackers.
     #[serde(default = "default_true")]
     pub allow_issue_comments: bool,
+    /// When false, reconciliation must never close a source issue after a
+    /// merged PR/MR, even when authoritative closure evidence exists.
+    /// Defaults to false so this new remote-write path is opt-in.
+    #[serde(default)]
+    pub allow_source_issue_closure: bool,
 }
 
 impl Default for PublishingPolicy {
@@ -146,6 +151,7 @@ impl Default for PublishingPolicy {
             allow_pull_request_creation: true,
             allow_commit_message_generation: true,
             allow_issue_comments: true,
+            allow_source_issue_closure: false,
         }
     }
 }

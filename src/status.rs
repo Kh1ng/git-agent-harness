@@ -831,6 +831,7 @@ default_target_branch = "main"
     fn mr_classification_and_recommended_action_stable() {
         let mr = sync::SyncMr {
             title: "Test PR".into(),
+            body: None,
             branch: "gah/test-branch".into(),
             labels: vec!["gah-ready-for-human".into()],
             url: Some("https://github.com/owner/repo/pull/1".into()),
@@ -854,6 +855,7 @@ default_target_branch = "main"
     fn mr_closed_unmerged_is_terminal_in_snapshot() {
         let mr = sync::SyncMr {
             title: "Closed PR".into(),
+            body: None,
             branch: "gah/closed-branch".into(),
             labels: vec!["gah-human-review".into()],
             url: Some("https://github.com/owner/repo/pull/2".into()),

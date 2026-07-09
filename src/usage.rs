@@ -58,6 +58,13 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
         || usage.total_tokens.is_some()
         || usage.estimated_cost_usd.is_some()
         || usage.actual_cost_usd.is_some()
+        || usage.cache_read_tokens.is_some()
+        || usage.cache_write_tokens.is_some()
+        || usage.requests_count.is_some()
+        || usage.quota_used_percent.is_some()
+        || usage.quota_remaining_percent.is_some()
+        || usage.quota_window.is_some()
+        || usage.quota_reset_at.is_some()
     {
         usage.usage_source = Some(source_hint.to_string());
     }

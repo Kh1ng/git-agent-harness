@@ -361,6 +361,106 @@ pub fn gitlab_set_mwps(profile: &Profile, iid: &str) -> Result<()> {
     Ok(())
 }
 
+/// Close a GitHub issue by number.
+pub fn github_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
+    let out = provider_command("gh")
+        .args(["issue", "close", issue_number, "--repo", &profile.repo])
+        .output()
+        .context("gh issue close")?;
+
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh issue close failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Close a GitLab issue by number.
+pub fn gitlab_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
+    let api_base = profile
+        .provider_api_base
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let pat = profile.pat();
+    let url = format!(
+        "{}/projects/{}/issues/{}",
+        api_base, project_id, issue_number
+    );
+    let payload = serde_json::json!({ "state_event": "close" });
+
+    run_curl_json(&[
+        "-s",
+        "-X",
+        "PUT",
+        "-H",
+        &format!("PRIVATE-TOKEN: {}", pat),
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        &payload.to_string(),
+        &url,
+    ])?;
+
+    Ok(())
+}
+
+/// Get the state of a GitHub issue.
+pub fn github_get_issue_state(profile: &Profile, issue_number: &str) -> Result<Option<String>> {
+    let out = provider_command("gh")
+        .args([
+            "api",
+            &format!("repos/{}/issues/{}", profile.repo, issue_number),
+            "--jq",
+            ".state",
+        ])
+        .output()
+        .context("gh api get issue state")?;
+
+    if !out.status.success() {
+        return Ok(None);
+    }
+
+    let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(if state.is_empty() { None } else { Some(state) })
+}
+
+/// Get the state of a GitLab issue.
+pub fn gitlab_get_issue_state(profile: &Profile, issue_number: &str) -> Result<Option<String>> {
+    let api_base = profile
+        .provider_api_base
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let pat = profile.pat();
+    let url = format!(
+        "{}/projects/{}/issues/{}",
+        api_base, project_id, issue_number
+    );
+
+    let out = provider_command("curl")
+        .args(["-s", "-H", &format!("PRIVATE-TOKEN: {}", pat), &url])
+        .output()
+        .context("curl get gitlab issue")?;
+
+    if !out.status.success() {
+        return Ok(None);
+    }
+
+    let resp: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("parsing gitlab issue response")?;
+    let state = resp["state"].as_str().map(|s| s.to_string());
+    Ok(state)
+}
+
 fn github_merge_mr(profile: &Profile, number: &str) -> Result<()> {
     let ready = provider_command("gh")
         .args(["pr", "ready", number, "--repo", &profile.repo])

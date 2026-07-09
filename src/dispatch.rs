@@ -636,6 +636,9 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         other => anyhow::bail!("unknown mode: {}", other),
     };
     ledger.duration_seconds = Some(started.elapsed().as_secs_f64());
+    if !usage_has_observation(&ledger.usage) {
+        ledger.usage = aggregate_attempt_usage(&ledger.attempts);
+    }
     if let Err(err) = &result {
         ledger.error_summary = Some(summarize_error(err));
     }
@@ -1019,9 +1022,136 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
 /// attempt's own log from disk. A read or parse failure yields an empty
 /// (all-`None`) `LedgerUsage`, never a fabricated zero.
 fn attempt_usage(log_path: &str) -> crate::ledger::LedgerUsage {
-    fs::read_to_string(log_path)
+    let mut usage = fs::read_to_string(log_path)
         .map(|text| usage::parse_generic_usage(&text, "attempt_output_log"))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if usage.usage_source.is_some() {
+        usage.observed_at = Some(
+            time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        );
+    }
+    usage
+}
+
+fn usage_has_observation(usage: &crate::ledger::LedgerUsage) -> bool {
+    usage.usage_source.is_some()
+        || usage.input_tokens.is_some()
+        || usage.output_tokens.is_some()
+        || usage.cache_read_tokens.is_some()
+        || usage.cache_write_tokens.is_some()
+        || usage.total_tokens.is_some()
+        || usage.requests_count.is_some()
+        || usage.estimated_cost_usd.is_some()
+        || usage.actual_cost_usd.is_some()
+        || usage.quota_window.is_some()
+        || usage.quota_used_percent.is_some()
+        || usage.quota_remaining_percent.is_some()
+        || usage.quota_reset_at.is_some()
+}
+
+fn aggregate_attempt_usage(
+    attempts: &[crate::ledger::AttemptRecord],
+) -> crate::ledger::LedgerUsage {
+    let mut aggregated = crate::ledger::LedgerUsage::default();
+    let mut seen = false;
+    for attempt in attempts {
+        let usage = &attempt.usage;
+        if !usage_has_observation(usage) {
+            continue;
+        }
+        seen = true;
+        aggregated.input_tokens =
+            Some(aggregated.input_tokens.unwrap_or(0) + usage.input_tokens.unwrap_or(0));
+        aggregated.output_tokens =
+            Some(aggregated.output_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0));
+        aggregated.cache_read_tokens =
+            Some(aggregated.cache_read_tokens.unwrap_or(0) + usage.cache_read_tokens.unwrap_or(0));
+        aggregated.cache_write_tokens = Some(
+            aggregated.cache_write_tokens.unwrap_or(0) + usage.cache_write_tokens.unwrap_or(0),
+        );
+        aggregated.total_tokens =
+            Some(aggregated.total_tokens.unwrap_or(0) + usage.total_tokens.unwrap_or(0));
+        aggregated.requests_count =
+            Some(aggregated.requests_count.unwrap_or(0) + usage.requests_count.unwrap_or(0));
+        aggregated.estimated_cost_usd = Some(
+            aggregated.estimated_cost_usd.unwrap_or(0.0) + usage.estimated_cost_usd.unwrap_or(0.0),
+        );
+        aggregated.actual_cost_usd =
+            Some(aggregated.actual_cost_usd.unwrap_or(0.0) + usage.actual_cost_usd.unwrap_or(0.0));
+
+        if aggregated.observed_at.as_deref() < usage.observed_at.as_deref() {
+            aggregated.observed_at = usage.observed_at.clone();
+            aggregated.quota_window = usage.quota_window.clone();
+            aggregated.quota_used_percent = usage.quota_used_percent;
+            aggregated.quota_remaining_percent = usage.quota_remaining_percent;
+            aggregated.quota_reset_at = usage.quota_reset_at.clone();
+        }
+    }
+
+    if !seen {
+        return crate::ledger::LedgerUsage::default();
+    }
+
+    if aggregated.input_tokens == Some(0)
+        && !attempts
+            .iter()
+            .any(|attempt| attempt.usage.input_tokens.is_some())
+    {
+        aggregated.input_tokens = None;
+    }
+    if aggregated.output_tokens == Some(0)
+        && !attempts
+            .iter()
+            .any(|attempt| attempt.usage.output_tokens.is_some())
+    {
+        aggregated.output_tokens = None;
+    }
+    if aggregated.cache_read_tokens == Some(0)
+        && !attempts
+            .iter()
+            .any(|attempt| attempt.usage.cache_read_tokens.is_some())
+    {
+        aggregated.cache_read_tokens = None;
+    }
+    if aggregated.cache_write_tokens == Some(0)
+        && !attempts
+            .iter()
+            .any(|attempt| attempt.usage.cache_write_tokens.is_some())
+    {
+        aggregated.cache_write_tokens = None;
+    }
+    if aggregated.total_tokens == Some(0)
+        && !attempts
+            .iter()
+            .any(|attempt| attempt.usage.total_tokens.is_some())
+    {
+        aggregated.total_tokens = None;
+    }
+    if aggregated.requests_count == Some(0)
+        && !attempts
+            .iter()
+            .any(|attempt| attempt.usage.requests_count.is_some())
+    {
+        aggregated.requests_count = None;
+    }
+    if aggregated.estimated_cost_usd == Some(0.0)
+        && !attempts
+            .iter()
+            .any(|attempt| attempt.usage.estimated_cost_usd.is_some())
+    {
+        aggregated.estimated_cost_usd = None;
+    }
+    if aggregated.actual_cost_usd == Some(0.0)
+        && !attempts
+            .iter()
+            .any(|attempt| attempt.usage.actual_cost_usd.is_some())
+    {
+        aggregated.actual_cost_usd = None;
+    }
+    aggregated.usage_source = Some("attempt_aggregate".to_string());
+    aggregated
 }
 
 fn preflight(profile: &Profile, backend: &str) -> Result<()> {
@@ -1861,6 +1991,7 @@ fn apply_authoritative_work_identity(
     match ticket {
         Some(ticket) if ticket.is_authoritative => {
             ledger.work_id = ticket.work_id.clone().or_else(|| ticket.ticket_id.clone());
+            ledger.source_issue_number = ticket.issue_number.clone();
             ledger.work_title = ticket.title.clone();
         }
         _ => {
@@ -2675,7 +2806,14 @@ fn review(
 
     match result.outcome {
         runner::ReviewProcessOutcome::Success => {
-            let review_usage = usage::parse_generic_usage(&result.stdout, "review_output_log");
+            let mut review_usage = usage::parse_generic_usage(&result.stdout, "review_output_log");
+            if review_usage.usage_source.is_some() {
+                review_usage.observed_at = Some(
+                    time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                );
+            }
             let reviewer_tier = derive_reviewer_tier(cfg, profile, &route);
             let verdict =
                 match parse_review_verdict(&result.stdout, &route, &review_usage, reviewer_tier) {
@@ -3821,6 +3959,7 @@ mod tests {
 
         let mrs = vec![crate::sync::SyncMr {
             title: "[GAH] Fix: TICKET-202".into(),
+            body: None,
             branch: "gah/repo-1".into(),
             labels: vec![],
             url: Some("https://example/pull/1".into()),
@@ -3887,6 +4026,7 @@ mod tests {
 
         let mrs = vec![crate::sync::SyncMr {
             title: "[GAH] Fix: TICKET-090".into(),
+            body: None,
             branch: "gah/repo-2".into(),
             labels: vec![],
             url: Some("https://example/pull/45".into()),
@@ -4007,6 +4147,7 @@ mod tests {
         let index = crate::ledger::index_entries_by_work_id(&[first, second]);
         let mrs = vec![crate::sync::SyncMr {
             title: "[GAH] Fix: TICKET-211".into(),
+            body: None,
             branch: "gah/repo-211".into(),
             labels: vec![],
             url: Some("https://example/pull/211".into()),

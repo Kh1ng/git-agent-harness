@@ -117,6 +117,8 @@ pub struct AttemptRecord {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
+    #[serde(default)]
+    pub observed_at: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
@@ -199,6 +201,8 @@ pub struct LedgerEntry {
     pub target_summary: Option<String>,
     #[serde(default)]
     pub work_id: Option<String>,
+    #[serde(default)]
+    pub source_issue_number: Option<String>,
     #[serde(default)]
     pub work_title: Option<String>,
     pub branch: Option<String>,
@@ -291,6 +295,7 @@ impl LedgerEntry {
             mode: mode.to_string(),
             target_summary: summarize_target(target),
             work_id: None,
+            source_issue_number: None,
             work_title: None,
             branch: None,
             session_dir: session_dir.map(|p| p.display().to_string()),
@@ -445,25 +450,90 @@ pub fn index_entries_by_work_id(entries: &[LedgerEntry]) -> LedgerEntriesByWorkI
 pub mod reconcile {
     use super::{read_entries, LedgerEntry};
     use crate::config::{self, GahConfig};
+    use crate::models::PolicyConfig;
     use crate::sync;
     use anyhow::{Context, Result};
+    use regex::Regex;
     use serde::{Deserialize, Serialize};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
 
+    fn default_record_type() -> String {
+        "mr_state".to_string()
+    }
+
     #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
     pub struct ReconciliationEntry {
         pub timestamp: String,
+        #[serde(default = "default_record_type")]
+        pub record_type: String,
         pub work_id: String,
         pub branch: Option<String>,
         pub mr_url: Option<String>,
         pub previous_state: Option<String>,
         pub new_state: String,
         pub source: String,
+        #[serde(default)]
+        pub mr_id: Option<String>,
+        #[serde(default)]
+        pub source_issue_number: Option<String>,
+        #[serde(default)]
+        pub previous_issue_state: Option<String>,
+        #[serde(default)]
+        pub resulting_issue_state: Option<String>,
+        #[serde(default)]
+        pub issue_closure_mode: Option<String>,
+        #[serde(default)]
+        pub issue_closure_classification: Option<String>,
+        #[serde(default)]
+        pub issue_closure_reason: Option<String>,
     }
+
+    #[derive(Debug, Serialize, Default)]
+    struct ReconciliationIssueClosureReport {
+        already_closed: Vec<String>,
+        would_close: Vec<String>,
+        closed: Vec<String>,
+        ambiguous: Vec<String>,
+        unmapped: Vec<String>,
+        leave_open: Vec<String>,
+        observation_failed: Vec<String>,
+        policy_blocked: Vec<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ReconciliationReport {
+        new_entries: Vec<ReconciliationEntry>,
+        issue_closure: ReconciliationIssueClosureReport,
+    }
+
+    #[derive(Debug)]
+    enum MappingResolution {
+        Proven {
+            issue_number: String,
+            reason: String,
+        },
+        Ambiguous {
+            reason: String,
+        },
+        Unmapped,
+    }
+
+    #[derive(Debug)]
+    struct IssueClosureDecision {
+        issue_number: Option<String>,
+        mode: &'static str,
+        classification: &'static str,
+        reason: Option<String>,
+        previous_issue_state: Option<String>,
+        resulting_issue_state: Option<String>,
+    }
+
+    type IssueClosureKey = (String, String);
+    type IssueClosureSnapshot = (Option<String>, Option<String>, Option<String>);
 
     pub fn read_reconciliation_entries(cfg: &GahConfig) -> Result<Vec<ReconciliationEntry>> {
         let path = cfg.defaults.reconciliation_path();
@@ -512,7 +582,33 @@ pub mod reconcile {
     fn last_known_states(entries: &[ReconciliationEntry]) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
         for entry in entries {
+            if entry.record_type != "mr_state" {
+                continue;
+            }
             map.insert(entry.work_id.clone(), entry.new_state.clone());
+        }
+        map
+    }
+
+    fn last_known_issue_closure(
+        entries: &[ReconciliationEntry],
+    ) -> BTreeMap<IssueClosureKey, IssueClosureSnapshot> {
+        let mut map = BTreeMap::new();
+        for entry in entries {
+            if entry.record_type != "issue_closure" {
+                continue;
+            }
+            let Some(issue_number) = entry.source_issue_number.clone() else {
+                continue;
+            };
+            map.insert(
+                (entry.work_id.clone(), issue_number),
+                (
+                    entry.issue_closure_mode.clone(),
+                    entry.resulting_issue_state.clone(),
+                    entry.issue_closure_classification.clone(),
+                ),
+            );
         }
         map
     }
@@ -535,16 +631,19 @@ pub mod reconcile {
         map
     }
 
-    pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
+    pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Result<()> {
         let profile = config::get_profile(cfg, profile_name)?;
         let ledger_entries = read_entries(cfg)?;
         let history = read_reconciliation_entries(cfg)?;
         let mut last_known = last_known_states(&history);
+        let mut last_issue_closure = last_known_issue_closure(&history);
         let dispatch_identity = latest_dispatch_identity(&ledger_entries);
+        let entries_by_work_id = crate::ledger::index_entries_by_work_id(&ledger_entries);
 
         let mrs = sync::fetch_mrs(profile)?;
 
         let mut new_entries = vec![];
+        let mut issue_closure = ReconciliationIssueClosureReport::default();
         for (work_id, (branch, mr_url)) in &dispatch_identity {
             let matching_mr = mrs.iter().find(|mr| {
                 branch.as_deref() == Some(mr.branch.as_str())
@@ -553,27 +652,100 @@ pub mod reconcile {
             let Some(mr) = matching_mr else { continue };
             let new_state = sync::classify(mr).to_string();
             let previous = last_known.get(work_id).cloned();
-            if previous.as_deref() == Some(new_state.as_str()) {
-                continue;
+            if previous.as_deref() != Some(new_state.as_str()) {
+                let entry = ReconciliationEntry {
+                    timestamp: OffsetDateTime::now_utc()
+                        .format(&Rfc3339)
+                        .unwrap_or_default(),
+                    record_type: "mr_state".to_string(),
+                    work_id: work_id.clone(),
+                    branch: branch.clone(),
+                    mr_url: mr.url.clone(),
+                    previous_state: previous,
+                    new_state: new_state.clone(),
+                    source: "sync".to_string(),
+                    mr_id: mr.id.clone(),
+                    source_issue_number: None,
+                    previous_issue_state: None,
+                    resulting_issue_state: None,
+                    issue_closure_mode: None,
+                    issue_closure_classification: None,
+                    issue_closure_reason: None,
+                };
+                if !dry_run {
+                    append_reconciliation_entry(cfg, &entry)?;
+                }
+                last_known.insert(work_id.clone(), new_state.clone());
+                new_entries.push(entry);
             }
-            let entry = ReconciliationEntry {
-                timestamp: OffsetDateTime::now_utc()
-                    .format(&Rfc3339)
-                    .unwrap_or_default(),
-                work_id: work_id.clone(),
-                branch: branch.clone(),
-                mr_url: mr.url.clone(),
-                previous_state: previous,
-                new_state: new_state.clone(),
-                source: "sync".to_string(),
-            };
-            append_reconciliation_entry(cfg, &entry)?;
-            last_known.insert(work_id.clone(), new_state);
-            new_entries.push(entry);
+
+            if new_state.as_str() == "MERGED" {
+                let dispatch_entries = entries_by_work_id
+                    .get(work_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let decision = reconcile_source_issue_closure(
+                    cfg,
+                    profile,
+                    work_id,
+                    branch.clone(),
+                    mr,
+                    dispatch_entries,
+                    dry_run,
+                )?;
+                record_issue_closure_report(&mut issue_closure, &decision);
+                if let Some(issue_number) = decision.issue_number.clone() {
+                    let prior = last_issue_closure
+                        .get(&(work_id.clone(), issue_number.clone()))
+                        .cloned();
+                    let current = (
+                        Some(decision.mode.to_string()),
+                        decision.resulting_issue_state.clone(),
+                        Some(decision.classification.to_string()),
+                    );
+                    if prior != Some(current.clone())
+                        && matches!(
+                            decision.mode,
+                            "provider_already_closed" | "gah_reconciliation_write"
+                        )
+                    {
+                        let entry = ReconciliationEntry {
+                            timestamp: OffsetDateTime::now_utc()
+                                .format(&Rfc3339)
+                                .unwrap_or_default(),
+                            record_type: "issue_closure".to_string(),
+                            work_id: work_id.clone(),
+                            branch: branch.clone(),
+                            mr_url: mr.url.clone(),
+                            previous_state: Some(new_state.clone()),
+                            new_state: new_state.clone(),
+                            source: "issue_closure".to_string(),
+                            mr_id: mr.id.clone(),
+                            source_issue_number: Some(issue_number.clone()),
+                            previous_issue_state: decision.previous_issue_state.clone(),
+                            resulting_issue_state: decision.resulting_issue_state.clone(),
+                            issue_closure_mode: Some(decision.mode.to_string()),
+                            issue_closure_classification: Some(decision.classification.to_string()),
+                            issue_closure_reason: decision.reason.clone(),
+                        };
+                        if !dry_run {
+                            append_reconciliation_entry(cfg, &entry)?;
+                        }
+                        new_entries.push(entry);
+                        last_issue_closure.insert((work_id.clone(), issue_number), current);
+                    }
+                }
+            }
         }
 
         if json {
-            println!("{}", serde_json::to_string(&new_entries)?);
+            println!(
+                "{}",
+                serde_json::to_string(&ReconciliationReport {
+                    new_entries,
+                    issue_closure,
+                })?
+            );
         } else {
             println!(
                 "Reconciliation log: {}",
@@ -589,8 +761,256 @@ pub mod reconcile {
                     entry.branch.as_deref().unwrap_or("")
                 );
             }
+            println!(
+                "Issue closure: already_closed={} would_close={} closed={} ambiguous={} unmapped={} leave_open={} observation_failed={} policy_blocked={}",
+                issue_closure.already_closed.len(),
+                issue_closure.would_close.len(),
+                issue_closure.closed.len(),
+                issue_closure.ambiguous.len(),
+                issue_closure.unmapped.len(),
+                issue_closure.leave_open.len(),
+                issue_closure.observation_failed.len(),
+                issue_closure.policy_blocked.len(),
+            );
         }
         Ok(())
+    }
+
+    fn reconcile_source_issue_closure(
+        cfg: &GahConfig,
+        profile: &crate::config::Profile,
+        work_id: &str,
+        branch: Option<String>,
+        mr: &sync::SyncMr,
+        dispatch_entries: &[LedgerEntry],
+        dry_run: bool,
+    ) -> Result<IssueClosureDecision> {
+        if !mr.merged {
+            return Ok(IssueClosureDecision {
+                issue_number: None,
+                mode: "leave_open",
+                classification: "UNMAPPED",
+                reason: Some("mr_not_merged".to_string()),
+                previous_issue_state: None,
+                resulting_issue_state: None,
+            });
+        }
+
+        let mapping = resolve_source_issue_mapping(mr.body.as_deref(), dispatch_entries);
+        let (issue_number, classification, reason) = match mapping {
+            MappingResolution::Proven {
+                issue_number,
+                reason,
+            } => (Some(issue_number), "RESOLVED_BY_MERGE", Some(reason)),
+            MappingResolution::Ambiguous { reason } => {
+                return Ok(IssueClosureDecision {
+                    issue_number: None,
+                    mode: "ambiguous",
+                    classification: "AMBIGUOUS",
+                    reason: Some(reason),
+                    previous_issue_state: None,
+                    resulting_issue_state: None,
+                });
+            }
+            MappingResolution::Unmapped => {
+                return Ok(IssueClosureDecision {
+                    issue_number: None,
+                    mode: "unmapped",
+                    classification: "UNMAPPED",
+                    reason: None,
+                    previous_issue_state: None,
+                    resulting_issue_state: None,
+                });
+            }
+        };
+        let issue_number = issue_number.expect("proven mapping must include issue_number");
+
+        let state = match profile.provider.as_str() {
+            "github" => crate::provider::github_get_issue_state(profile, &issue_number)?,
+            "gitlab" => crate::provider::gitlab_get_issue_state(profile, &issue_number)?,
+            _ => {
+                return Ok(IssueClosureDecision {
+                    issue_number: Some(issue_number),
+                    mode: "leave_open",
+                    classification,
+                    reason,
+                    previous_issue_state: None,
+                    resulting_issue_state: None,
+                });
+            }
+        };
+
+        let Some(previous_issue_state) = state else {
+            return Ok(IssueClosureDecision {
+                issue_number: Some(issue_number),
+                mode: "observation_failed",
+                classification,
+                reason,
+                previous_issue_state: None,
+                resulting_issue_state: None,
+            });
+        };
+
+        if !matches!(previous_issue_state.as_str(), "open" | "opened") {
+            return Ok(IssueClosureDecision {
+                issue_number: Some(issue_number),
+                mode: "provider_already_closed",
+                classification,
+                reason,
+                previous_issue_state: Some(previous_issue_state.clone()),
+                resulting_issue_state: Some(previous_issue_state),
+            });
+        }
+
+        if dry_run {
+            return Ok(IssueClosureDecision {
+                issue_number: Some(issue_number),
+                mode: "dry_run",
+                classification,
+                reason,
+                previous_issue_state: Some(previous_issue_state),
+                resulting_issue_state: Some("closed".to_string()),
+            });
+        }
+
+        if !source_issue_closure_allowed(profile)? {
+            return Ok(IssueClosureDecision {
+                issue_number: Some(issue_number),
+                mode: "policy_blocked",
+                classification,
+                reason,
+                previous_issue_state: Some(previous_issue_state),
+                resulting_issue_state: Some("open".to_string()),
+            });
+        }
+
+        match profile.provider.as_str() {
+            "github" => crate::provider::github_close_issue(profile, &issue_number)?,
+            "gitlab" => crate::provider::gitlab_close_issue(profile, &issue_number)?,
+            _ => {}
+        }
+
+        let _ = (cfg, work_id, branch);
+        Ok(IssueClosureDecision {
+            issue_number: Some(issue_number),
+            mode: "gah_reconciliation_write",
+            classification,
+            reason,
+            previous_issue_state: Some(previous_issue_state),
+            resulting_issue_state: Some("closed".to_string()),
+        })
+    }
+
+    fn source_issue_closure_allowed(profile: &crate::config::Profile) -> Result<bool> {
+        if !profile.publishing.allow_source_issue_closure {
+            return Ok(false);
+        }
+        let Some(policy_path) = &profile.policy_path else {
+            return Ok(true);
+        };
+        let text = fs::read_to_string(policy_path)
+            .with_context(|| format!("reading policy file: {}", policy_path))?;
+        let cfg: PolicyConfig = toml::from_str(&text)
+            .with_context(|| format!("parsing policy file: {}", policy_path))?;
+        let repo = cfg.repo;
+        let allowed = match repo.trust_mode.as_str() {
+            "read_only" => false,
+            "draft_pr_allowed" => repo.allow_issue_write,
+            _ => false,
+        };
+        Ok(allowed)
+    }
+
+    fn resolve_source_issue_mapping(
+        mr_body: Option<&str>,
+        dispatch_entries: &[LedgerEntry],
+    ) -> MappingResolution {
+        let explicit = extract_closing_references(mr_body.unwrap_or_default());
+        let structured: BTreeSet<String> = dispatch_entries
+            .iter()
+            .filter_map(|entry| entry.source_issue_number.clone())
+            .collect();
+
+        if explicit.len() > 1 {
+            return MappingResolution::Ambiguous {
+                reason: "multiple_explicit_closing_references".to_string(),
+            };
+        }
+        if structured.len() > 1 {
+            return MappingResolution::Ambiguous {
+                reason: "conflicting_structured_source_identity".to_string(),
+            };
+        }
+
+        match (explicit.iter().next(), structured.iter().next()) {
+            (Some(explicit_issue), Some(structured_issue))
+                if explicit_issue != structured_issue =>
+            {
+                MappingResolution::Ambiguous {
+                    reason: "explicit_and_structured_issue_conflict".to_string(),
+                }
+            }
+            (Some(explicit_issue), Some(_)) => MappingResolution::Proven {
+                issue_number: explicit_issue.clone(),
+                reason: "explicit_closing_reference+structured_source_identity".to_string(),
+            },
+            (Some(explicit_issue), None) => MappingResolution::Proven {
+                issue_number: explicit_issue.clone(),
+                reason: "explicit_closing_reference".to_string(),
+            },
+            (None, Some(structured_issue)) => MappingResolution::Proven {
+                issue_number: structured_issue.clone(),
+                reason: "structured_source_identity".to_string(),
+            },
+            (None, None) => MappingResolution::Unmapped,
+        }
+    }
+
+    fn extract_closing_references(text: &str) -> BTreeSet<String> {
+        let reference_re = Regex::new(
+            r"(?i)\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\b\s+#([0-9]+)\b",
+        )
+        .expect("closing reference regex must compile");
+        let mut found = BTreeSet::new();
+        for line in text.lines() {
+            for caps in reference_re.captures_iter(line) {
+                let Some(matched) = caps.get(0) else { continue };
+                let prefix = line[..matched.start()].trim_end();
+                let prev_token = prefix
+                    .rsplit(|c: char| c.is_whitespace() || matches!(c, '(' | '[' | ':' | ';' | ','))
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
+                    .to_ascii_lowercase();
+                if prev_token == "not" || prev_token == "doesn't" || prev_token == "doesnt" {
+                    continue;
+                }
+                if let Some(issue_number) = caps.get(2) {
+                    found.insert(issue_number.as_str().to_string());
+                }
+            }
+        }
+        found
+    }
+
+    fn record_issue_closure_report(
+        report: &mut ReconciliationIssueClosureReport,
+        decision: &IssueClosureDecision,
+    ) {
+        let issue = decision
+            .issue_number
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        match decision.mode {
+            "provider_already_closed" => report.already_closed.push(issue),
+            "dry_run" => report.would_close.push(issue),
+            "gah_reconciliation_write" => report.closed.push(issue),
+            "ambiguous" => report.ambiguous.push(issue),
+            "unmapped" => report.unmapped.push(issue),
+            "observation_failed" => report.observation_failed.push(issue),
+            "policy_blocked" => report.policy_blocked.push(issue),
+            _ => report.leave_open.push(issue),
+        }
     }
 }
 
@@ -634,7 +1054,7 @@ impl std::str::FromStr for GroupBy {
 }
 
 pub mod summary {
-    use super::{read_entries, GroupBy};
+    use super::{read_entries, GroupBy, LedgerEntry, LedgerUsage};
     use crate::config;
     use anyhow::Result;
     use serde::Serialize;
@@ -654,9 +1074,38 @@ pub mod summary {
         pub validation_pass: usize,
         pub review_verdict_distribution: BTreeMap<String, usize>,
         pub total_cost_usd: Option<f64>,
+        pub actual_cost_usd: Option<f64>,
+        pub estimated_cost_usd: Option<f64>,
         pub average_cost_usd: Option<f64>,
         pub average_duration_seconds: Option<f64>,
         pub cost_per_approve_strong: Option<f64>,
+        pub input_tokens: Option<u64>,
+        pub output_tokens: Option<u64>,
+        pub cache_read_tokens: Option<u64>,
+        pub cache_write_tokens: Option<u64>,
+        pub total_tokens: Option<u64>,
+        pub requests_count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub quota_observations: Vec<GroupQuotaObservation>,
+    }
+
+    #[derive(Debug, Serialize, Clone, PartialEq)]
+    pub struct GroupQuotaObservation {
+        pub backend: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub quota_window: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub quota_used_percent: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub quota_remaining_percent: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub quota_reset_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub observed_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub usage_source: Option<String>,
     }
 
     #[derive(Debug, Serialize, Clone)]
@@ -676,10 +1125,12 @@ pub mod summary {
         pub mr_count: usize,
         pub human_required_count: usize,
         pub average_duration_seconds: Option<f64>,
-        pub usage_input_tokens: u64,
-        pub usage_output_tokens: u64,
-        pub usage_total_tokens: u64,
-        pub usage_requests_count: u64,
+        pub usage_input_tokens: Option<u64>,
+        pub usage_output_tokens: Option<u64>,
+        pub usage_cache_read_tokens: Option<u64>,
+        pub usage_cache_write_tokens: Option<u64>,
+        pub usage_total_tokens: Option<u64>,
+        pub usage_requests_count: Option<u64>,
         pub estimated_cost_usd: Option<f64>,
         pub actual_cost_usd: Option<f64>,
         pub last_run: Option<String>,
@@ -735,11 +1186,25 @@ pub mod summary {
             println!("Average duration: {:.1}s", avg);
         }
         println!(
-            "Usage totals: input={} output={} total={} requests={}",
-            data.usage_input_tokens,
-            data.usage_output_tokens,
-            data.usage_total_tokens,
+            "Usage totals: input={} output={} cache_read={} cache_write={} total={} requests={}",
+            data.usage_input_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            data.usage_output_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            data.usage_cache_read_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            data.usage_cache_write_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            data.usage_total_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
             data.usage_requests_count
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
         );
         if let Some(cost) = data.estimated_cost_usd {
             println!("Estimated cost total: ${:.4}", cost);
@@ -769,12 +1234,45 @@ pub mod summary {
                 if let Some(cost) = group.total_cost_usd {
                     println!("    Total cost: ${:.4}", cost);
                 }
+                if let Some(cost) = group.actual_cost_usd {
+                    println!("    Actual cost: ${:.4}", cost);
+                }
+                if let Some(cost) = group.estimated_cost_usd {
+                    println!("    Estimated cost: ${:.4}", cost);
+                }
                 if let Some(cost) = group.average_cost_usd {
                     println!("    Average cost: ${:.4}", cost);
                 }
                 if let Some(cost) = group.cost_per_approve_strong {
                     println!("    Cost per APPROVE_STRONG: ${:.4}", cost);
                 }
+                println!(
+                    "    Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
+                    group
+                        .input_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .output_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .cache_read_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .cache_write_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .total_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .requests_count
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                );
             }
         }
 
@@ -795,12 +1293,45 @@ pub mod summary {
                 if let Some(cost) = group.total_cost_usd {
                     println!("    Total cost: ${:.4}", cost);
                 }
+                if let Some(cost) = group.actual_cost_usd {
+                    println!("    Actual cost: ${:.4}", cost);
+                }
+                if let Some(cost) = group.estimated_cost_usd {
+                    println!("    Estimated cost: ${:.4}", cost);
+                }
                 if let Some(cost) = group.average_cost_usd {
                     println!("    Average cost: ${:.4}", cost);
                 }
                 if let Some(cost) = group.cost_per_approve_strong {
                     println!("    Cost per APPROVE_STRONG: ${:.4}", cost);
                 }
+                println!(
+                    "    Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
+                    group
+                        .input_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .output_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .cache_read_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .cache_write_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .total_tokens
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .requests_count
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                );
             }
         }
 
@@ -836,10 +1367,19 @@ pub mod summary {
         let mut duration_count = 0usize;
         let mut input_tokens = 0u64;
         let mut output_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_write_tokens = 0u64;
         let mut total_tokens = 0u64;
         let mut requests_count = 0u64;
         let mut estimated_cost = 0.0f64;
         let mut actual_cost = 0.0f64;
+        // Track whether we've actually observed each metric (None != 0)
+        let mut input_tokens_seen = false;
+        let mut output_tokens_seen = false;
+        let mut cache_read_tokens_seen = false;
+        let mut cache_write_tokens_seen = false;
+        let mut total_tokens_seen = false;
+        let mut requests_count_seen = false;
         let mut estimated_cost_seen = false;
         let mut actual_cost_seen = false;
         for entry in &entries {
@@ -883,17 +1423,39 @@ pub mod summary {
                 duration_total += duration;
                 duration_count += 1;
             }
-            input_tokens += entry.usage.input_tokens.unwrap_or(0);
-            output_tokens += entry.usage.output_tokens.unwrap_or(0);
-            total_tokens += entry.usage.total_tokens.unwrap_or(0);
-            requests_count += entry.usage.requests_count.unwrap_or(0);
-            if let Some(cost) = entry.usage.estimated_cost_usd {
-                estimated_cost += cost;
-                estimated_cost_seen = true;
-            }
-            if let Some(cost) = entry.usage.actual_cost_usd {
-                actual_cost += cost;
-                actual_cost_seen = true;
+            for observed in canonical_usage_observations(entry) {
+                if let Some(tokens) = observed.usage.input_tokens {
+                    input_tokens += tokens;
+                    input_tokens_seen = true;
+                }
+                if let Some(tokens) = observed.usage.output_tokens {
+                    output_tokens += tokens;
+                    output_tokens_seen = true;
+                }
+                if let Some(tokens) = observed.usage.cache_read_tokens {
+                    cache_read_tokens += tokens;
+                    cache_read_tokens_seen = true;
+                }
+                if let Some(tokens) = observed.usage.cache_write_tokens {
+                    cache_write_tokens += tokens;
+                    cache_write_tokens_seen = true;
+                }
+                if let Some(tokens) = observed.usage.total_tokens {
+                    total_tokens += tokens;
+                    total_tokens_seen = true;
+                }
+                if let Some(count) = observed.usage.requests_count {
+                    requests_count += count;
+                    requests_count_seen = true;
+                }
+                if let Some(cost) = observed.usage.estimated_cost_usd {
+                    estimated_cost += cost;
+                    estimated_cost_seen = true;
+                }
+                if let Some(cost) = observed.usage.actual_cost_usd {
+                    actual_cost += cost;
+                    actual_cost_seen = true;
+                }
             }
         }
 
@@ -906,15 +1468,23 @@ pub mod summary {
 
         // TICKET-125: Build grouped data if requested
         let grouped_by_backend = if group_by == GroupBy::Backend {
-            build_grouped_summary(&entries, |entry| entry.effective_backend.clone())
+            build_grouped_summary(
+                &entries,
+                |entry| entry.effective_backend.clone(),
+                |observed| observed.backend.to_string(),
+                |backend, _model| backend.to_string(),
+            )
         } else {
             None
         };
 
         let grouped_by_model = if group_by == GroupBy::Model {
-            build_grouped_summary(&entries, |entry| {
-                entry.effective_model.clone().unwrap_or_default()
-            })
+            build_grouped_summary(
+                &entries,
+                |entry| entry.effective_model.clone().unwrap_or_default(),
+                |observed| observed.model.unwrap_or_default().to_string(),
+                |_backend, model| model.unwrap_or_default().to_string(),
+            )
         } else {
             None
         };
@@ -936,10 +1506,12 @@ pub mod summary {
             human_required_count,
             average_duration_seconds: (duration_count > 0)
                 .then_some(duration_total / duration_count as f64),
-            usage_input_tokens: input_tokens,
-            usage_output_tokens: output_tokens,
-            usage_total_tokens: total_tokens,
-            usage_requests_count: requests_count,
+            usage_input_tokens: input_tokens_seen.then_some(input_tokens),
+            usage_output_tokens: output_tokens_seen.then_some(output_tokens),
+            usage_cache_read_tokens: cache_read_tokens_seen.then_some(cache_read_tokens),
+            usage_cache_write_tokens: cache_write_tokens_seen.then_some(cache_write_tokens),
+            usage_total_tokens: total_tokens_seen.then_some(total_tokens),
+            usage_requests_count: requests_count_seen.then_some(requests_count),
             estimated_cost_usd: estimated_cost_seen.then_some(estimated_cost),
             actual_cost_usd: actual_cost_seen.then_some(actual_cost),
             last_run,
@@ -949,42 +1521,81 @@ pub mod summary {
     }
 
     /// TICKET-125: Build grouped summary data for a specific grouping key
-    pub fn build_grouped_summary<F>(
+    pub fn build_grouped_summary<F, U, A>(
         entries: &[super::LedgerEntry],
-        group_key_fn: F,
+        entry_group_key_fn: F,
+        usage_group_key_fn: U,
+        attempt_group_key_fn: A,
     ) -> Option<Vec<GroupSummary>>
     where
         F: Fn(&super::LedgerEntry) -> String,
+        U: Fn(UsageObservation<'_>) -> String,
+        A: Fn(&str, Option<&str>) -> String,
     {
         if entries.is_empty() {
             return None;
         }
 
-        use std::collections::BTreeMap;
-
-        // Group entries by the grouping key
         let mut groups: BTreeMap<String, Vec<&super::LedgerEntry>> = BTreeMap::new();
+        let mut usage_groups: BTreeMap<String, Vec<UsageObservation<'_>>> = BTreeMap::new();
+        let mut attempt_counts: BTreeMap<String, usize> = BTreeMap::new();
         for entry in entries {
-            let key = group_key_fn(entry);
+            let key = entry_group_key_fn(entry);
             groups.entry(key).or_default().push(entry);
+            for observed in canonical_usage_observations(entry) {
+                usage_groups
+                    .entry(usage_group_key_fn(observed))
+                    .or_default()
+                    .push(observed);
+            }
+            for (backend, model) in execution_identities(entry) {
+                *attempt_counts
+                    .entry(attempt_group_key_fn(backend.as_str(), model.as_deref()))
+                    .or_default() += 1;
+            }
         }
 
         let mut summaries = Vec::new();
-        for (group_key, group_entries) in groups {
+        let all_group_keys: std::collections::BTreeSet<String> = groups
+            .keys()
+            .chain(usage_groups.keys())
+            .chain(attempt_counts.keys())
+            .cloned()
+            .collect();
+        for group_key in all_group_keys {
+            let group_entries = groups.remove(&group_key).unwrap_or_default();
+            let group_usage = usage_groups.remove(&group_key).unwrap_or_default();
             let group_entry_count = group_entries.len();
-            let mut attempts = 0usize;
+            let attempts = attempt_counts.remove(&group_key).unwrap_or(0);
             let mut validation_pass = 0usize;
             let mut review_verdict_distribution: BTreeMap<String, usize> = BTreeMap::new();
             let mut total_cost_usd = 0.0f64;
             let mut cost_seen = false;
+            let mut actual_cost_total = 0.0f64;
+            let mut estimated_cost_total = 0.0f64;
+            let mut actual_cost_seen = false;
+            let mut estimated_cost_seen = false;
             let mut approve_strong_count = 0usize;
             let mut total_duration = 0.0f64;
             let mut duration_count = 0usize;
+            let mut input_tokens = 0u64;
+            let mut output_tokens = 0u64;
+            let mut cache_read_tokens = 0u64;
+            let mut cache_write_tokens = 0u64;
+            let mut total_tokens = 0u64;
+            let mut requests_count = 0u64;
+            let mut input_tokens_seen = false;
+            let mut output_tokens_seen = false;
+            let mut cache_read_tokens_seen = false;
+            let mut cache_write_tokens_seen = false;
+            let mut total_tokens_seen = false;
+            let mut requests_count_seen = false;
+            let mut quota_observations: BTreeMap<
+                (String, Option<String>, Option<String>),
+                GroupQuotaObservation,
+            > = BTreeMap::new();
 
             for entry in &group_entries {
-                // Count attempts from the attempts vector
-                attempts += entry.attempts.len();
-
                 // Count validation passes
                 if matches!(
                     entry.validation_result.as_deref(),
@@ -1003,19 +1614,79 @@ pub mod summary {
                     }
                 }
 
-                // Sum up costs
-                if let Some(cost) = entry.usage.actual_cost_usd {
-                    total_cost_usd += cost;
-                    cost_seen = true;
-                } else if let Some(cost) = entry.usage.estimated_cost_usd {
-                    total_cost_usd += cost;
-                    cost_seen = true;
-                }
-
                 // Sum up durations
                 if let Some(duration) = entry.duration_seconds {
                     total_duration += duration;
                     duration_count += 1;
+                }
+            }
+
+            for observed in group_usage {
+                if let Some(tokens) = observed.usage.input_tokens {
+                    input_tokens += tokens;
+                    input_tokens_seen = true;
+                }
+                if let Some(tokens) = observed.usage.output_tokens {
+                    output_tokens += tokens;
+                    output_tokens_seen = true;
+                }
+                if let Some(tokens) = observed.usage.cache_read_tokens {
+                    cache_read_tokens += tokens;
+                    cache_read_tokens_seen = true;
+                }
+                if let Some(tokens) = observed.usage.cache_write_tokens {
+                    cache_write_tokens += tokens;
+                    cache_write_tokens_seen = true;
+                }
+                if let Some(tokens) = observed.usage.total_tokens {
+                    total_tokens += tokens;
+                    total_tokens_seen = true;
+                }
+                if let Some(count) = observed.usage.requests_count {
+                    requests_count += count;
+                    requests_count_seen = true;
+                }
+                if let Some(cost) = observed.usage.actual_cost_usd {
+                    actual_cost_total += cost;
+                    total_cost_usd += cost;
+                    actual_cost_seen = true;
+                    cost_seen = true;
+                }
+                if let Some(cost) = observed.usage.estimated_cost_usd {
+                    estimated_cost_total += cost;
+                    if observed.usage.actual_cost_usd.is_none() {
+                        total_cost_usd += cost;
+                        cost_seen = true;
+                    }
+                    estimated_cost_seen = true;
+                }
+                if observed.usage.quota_window.is_some()
+                    || observed.usage.quota_used_percent.is_some()
+                    || observed.usage.quota_remaining_percent.is_some()
+                    || observed.usage.quota_reset_at.is_some()
+                {
+                    let key = (
+                        observed.backend.to_string(),
+                        observed.model.map(str::to_string),
+                        observed.usage.quota_window.clone(),
+                    );
+                    let candidate = GroupQuotaObservation {
+                        backend: observed.backend.to_string(),
+                        model: observed.model.map(str::to_string),
+                        quota_window: observed.usage.quota_window.clone(),
+                        quota_used_percent: observed.usage.quota_used_percent,
+                        quota_remaining_percent: observed.usage.quota_remaining_percent,
+                        quota_reset_at: observed.usage.quota_reset_at.clone(),
+                        observed_at: observed.usage.observed_at.clone(),
+                        usage_source: observed.usage.usage_source.clone(),
+                    };
+                    let replace = quota_observations
+                        .get(&key)
+                        .and_then(|existing| existing.observed_at.as_deref())
+                        < candidate.observed_at.as_deref();
+                    if replace || !quota_observations.contains_key(&key) {
+                        quota_observations.insert(key, candidate);
+                    }
                 }
             }
 
@@ -1046,13 +1717,83 @@ pub mod summary {
                 validation_pass,
                 review_verdict_distribution,
                 total_cost_usd: cost_seen.then_some(total_cost_usd),
+                actual_cost_usd: actual_cost_seen.then_some(actual_cost_total),
+                estimated_cost_usd: estimated_cost_seen.then_some(estimated_cost_total),
                 average_cost_usd,
                 average_duration_seconds,
                 cost_per_approve_strong,
+                input_tokens: input_tokens_seen.then_some(input_tokens),
+                output_tokens: output_tokens_seen.then_some(output_tokens),
+                cache_read_tokens: cache_read_tokens_seen.then_some(cache_read_tokens),
+                cache_write_tokens: cache_write_tokens_seen.then_some(cache_write_tokens),
+                total_tokens: total_tokens_seen.then_some(total_tokens),
+                requests_count: requests_count_seen.then_some(requests_count),
+                quota_observations: quota_observations.into_values().collect(),
             });
         }
 
         Some(summaries)
+    }
+
+    #[derive(Clone, Copy)]
+    pub(crate) struct UsageObservation<'a> {
+        pub(crate) backend: &'a str,
+        pub(crate) model: Option<&'a str>,
+        pub(crate) usage: &'a LedgerUsage,
+    }
+
+    fn usage_has_observation(usage: &LedgerUsage) -> bool {
+        usage.usage_source.is_some()
+            || usage.input_tokens.is_some()
+            || usage.output_tokens.is_some()
+            || usage.cache_read_tokens.is_some()
+            || usage.cache_write_tokens.is_some()
+            || usage.total_tokens.is_some()
+            || usage.requests_count.is_some()
+            || usage.estimated_cost_usd.is_some()
+            || usage.actual_cost_usd.is_some()
+            || usage.quota_window.is_some()
+            || usage.quota_used_percent.is_some()
+            || usage.quota_remaining_percent.is_some()
+            || usage.quota_reset_at.is_some()
+    }
+
+    fn canonical_usage_observations(entry: &LedgerEntry) -> Vec<UsageObservation<'_>> {
+        let attempt_usage: Vec<_> = entry
+            .attempts
+            .iter()
+            .filter(|attempt| usage_has_observation(&attempt.usage))
+            .map(|attempt| UsageObservation {
+                backend: attempt.backend.as_str(),
+                model: attempt.effective_model.as_deref(),
+                usage: &attempt.usage,
+            })
+            .collect();
+        if !attempt_usage.is_empty() {
+            return attempt_usage;
+        }
+        if usage_has_observation(&entry.usage) {
+            return vec![UsageObservation {
+                backend: entry.effective_backend.as_str(),
+                model: entry.effective_model.as_deref(),
+                usage: &entry.usage,
+            }];
+        }
+        Vec::new()
+    }
+
+    fn execution_identities(entry: &LedgerEntry) -> Vec<(String, Option<String>)> {
+        if !entry.attempts.is_empty() {
+            return entry
+                .attempts
+                .iter()
+                .map(|attempt| (attempt.backend.clone(), attempt.effective_model.clone()))
+                .collect();
+        }
+        vec![(
+            entry.effective_backend.clone(),
+            entry.effective_model.clone(),
+        )]
     }
 
     fn print_counts(counts: &BTreeMap<String, usize>) {
@@ -1315,12 +2056,20 @@ mod tests {
 
         let entry = ReconciliationEntry {
             timestamp: "2026-07-05T00:00:00Z".into(),
+            record_type: "mr_state".into(),
             work_id: "TICKET-072".into(),
             branch: Some("gah/real-1".into()),
             mr_url: Some("https://github.com/owner/repo/pull/1".into()),
             previous_state: None,
             new_state: "NEEDS_REVIEW".into(),
             source: "sync".into(),
+            mr_id: None,
+            source_issue_number: None,
+            previous_issue_state: None,
+            resulting_issue_state: None,
+            issue_closure_mode: None,
+            issue_closure_classification: None,
+            issue_closure_reason: None,
         };
         fs::write(
             &path,
@@ -1863,9 +2612,12 @@ mod tests {
         entry2.usage.actual_cost_usd = Some(0.3);
 
         let entries = vec![entry1, entry2];
-        let grouped = super::summary::build_grouped_summary(&entries, |entry| {
-            entry.effective_backend.clone()
-        });
+        let grouped = super::summary::build_grouped_summary(
+            &entries,
+            |entry| entry.effective_backend.clone(),
+            |observed| observed.backend.to_string(),
+            |backend, _model| backend.to_string(),
+        );
 
         assert!(grouped.is_some());
         let grouped = grouped.unwrap();
@@ -1922,9 +2674,12 @@ mod tests {
         entry3.usage.actual_cost_usd = Some(0.5);
 
         let entries = vec![entry1, entry2, entry3];
-        let grouped = super::summary::build_grouped_summary(&entries, |entry| {
-            entry.effective_model.clone().unwrap_or_default()
-        });
+        let grouped = super::summary::build_grouped_summary(
+            &entries,
+            |entry| entry.effective_model.clone().unwrap_or_default(),
+            |observed| observed.model.unwrap_or_default().to_string(),
+            |_backend, model| model.unwrap_or_default().to_string(),
+        );
 
         assert!(grouped.is_some());
         let grouped = grouped.unwrap();
@@ -1959,9 +2714,12 @@ mod tests {
     #[test]
     fn build_grouped_summary_empty_entries() {
         let entries: Vec<LedgerEntry> = vec![];
-        let grouped = super::summary::build_grouped_summary(&entries, |entry| {
-            entry.effective_backend.clone()
-        });
+        let grouped = super::summary::build_grouped_summary(
+            &entries,
+            |entry| entry.effective_backend.clone(),
+            |observed| observed.backend.to_string(),
+            |backend, _model| backend.to_string(),
+        );
         assert!(grouped.is_none());
     }
 }
