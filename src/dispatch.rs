@@ -17,6 +17,53 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+/// UTF-8 safe suffix: returns the last up to `max_bytes` of `s`,
+/// adjusting the start index forward to a valid character boundary.
+/// Result length is guaranteed <= max_bytes.
+/// Never panics on valid UTF-8 input.
+fn utf8_safe_suffix(s: &str, max_bytes: usize) -> &str {
+    if s.is_empty() || max_bytes == 0 {
+        return "";
+    }
+    let byte_start = s.len().saturating_sub(max_bytes);
+    // Ensure we start at a valid character boundary
+    // If byte_start is not a boundary, find the next boundary after it
+    // This guarantees result.len() <= max_bytes
+    let safe_start = if !s.is_char_boundary(byte_start) {
+        s.char_indices()
+            .find(|(i, _)| *i >= byte_start)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len())
+    } else {
+        byte_start
+    };
+    &s[safe_start..]
+}
+
+/// UTF-8 safe prefix: returns the first up to `max_bytes` of `s`,
+/// adjusting the end index backward to a valid character boundary.
+/// Result length is guaranteed <= max_bytes.
+/// Never panics on valid UTF-8 input.
+fn utf8_safe_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.is_empty() || max_bytes == 0 {
+        return "";
+    }
+    let byte_end = s.len().min(max_bytes);
+    // Ensure we end at a valid character boundary
+    // If byte_end is not a boundary, find the previous boundary before it
+    // This guarantees result.len() <= max_bytes
+    let safe_end = if !s.is_char_boundary(byte_end) {
+        s.char_indices()
+            .take_while(|(i, _)| *i < byte_end)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    } else {
+        byte_end
+    };
+    &s[..safe_end]
+}
+
 pub struct DispatchArgs {
     pub profile: String,
     pub mode: String,
@@ -1277,7 +1324,7 @@ fn improve(
                 anyhow::bail!(
                     "baseline validation stopped ({}): {}",
                     baseline_disposition.as_str(),
-                    &b[..b.len().min(4_000)],
+                    utf8_safe_prefix(b, 4_000),
                 );
             }
             BD::UnknownRed if !args.allow_unknown_red_baseline => {
@@ -1288,13 +1335,13 @@ fn improve(
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!(
                     "baseline validation stopped (unknown_red): {}\n\nUse --allow-unknown-red-baseline to proceed anyway.",
-                    &b[..b.len().min(4_000)],
+                    utf8_safe_prefix(b, 4_000),
                 );
             }
             BD::UnknownRed | BD::ExpectedRed => {
                 base_task.push_str(&format!(
                     "\n\n## Warning: validation already fails on the untouched branch\n\n```\n{}\n```\n\nIf this ticket is about fixing that failure, fix it. Otherwise it is pre-existing — your changes must not add new failures.\n",
-                    &b[..b.len().min(4_000)],
+                    utf8_safe_prefix(b, 4_000),
                 ));
             }
         }
@@ -1535,7 +1582,7 @@ fn improve(
                         base_task,
                         attempt + 1,
                         max_attempts,
-                        &failure_output[..failure_output.len().min(8_000)],
+                        utf8_safe_prefix(&failure_output, 8_000),
                     );
                     // TICKET-089 AC7: made real (if imperfect) progress and
                     // failed validation again -- a genuine agent-capability
@@ -1581,7 +1628,7 @@ fn improve(
                         anyhow::bail!(
                             "validation failed after {} attempt(s). Use --allow-draft-fail to push anyway.\n\n{}",
                             max_attempts,
-                            &failure_output[..failure_output.len().min(4_000)],
+                            utf8_safe_prefix(&failure_output, 4_000),
                         );
                     };
                     // Identical to baseline and/or the previous attempt: the
@@ -1612,7 +1659,7 @@ fn improve(
                         "{} Aborting early after attempt {}.\n\n{}",
                         reason,
                         attempt + 1,
-                        &failure_output[..failure_output.len().min(4_000)],
+                        utf8_safe_prefix(&failure_output, 4_000),
                     );
                 } else if args.allow_draft_fail {
                     println!(
@@ -1655,7 +1702,7 @@ fn improve(
                     anyhow::bail!(
                         "validation failed after {} attempt(s). Use --allow-draft-fail to push anyway.\n\n{}",
                         max_attempts,
-                        &failure_output[..failure_output.len().min(4_000)],
+                        utf8_safe_prefix(&failure_output, 4_000),
                     );
                 }
             }
@@ -2108,8 +2155,8 @@ fn judge_experiment(task: &str, log: &str, artifact_count: usize) -> bool {
          Did the agent produce a substantive, non-trivial answer to the task? \
          An empty file, a stub, or a generic error message does not count. \
          Reply with only YES or NO.",
-        &task[..task.len().min(500)],
-        &log[log.len().saturating_sub(3000)..],
+        utf8_safe_prefix(task, 500),
+        utf8_safe_suffix(log, 3000),
         artifact_note,
     );
     Command::new("claude")
@@ -2145,7 +2192,7 @@ fn pm(
         let readme = repo.join("README.md");
         let readme_text = if readme.exists() {
             let s = fs::read_to_string(&readme).unwrap_or_default();
-            s[..s.len().min(2000)].to_string()
+            utf8_safe_prefix(&s, 2000).to_string()
         } else {
             String::from("(no README)")
         };
@@ -2512,7 +2559,7 @@ fn review(
         target.mr_title.as_deref().unwrap_or("n/a"),
         target.mr_body.as_deref().unwrap_or("n/a"),
         target.prior_state.as_deref().unwrap_or("not found"),
-        &diff_bundle.diff[..diff_bundle.diff.len().min(60_000)],
+        utf8_safe_prefix(&diff_bundle.diff, 60_000),
         diff_bundle.files,
     );
 
@@ -2677,7 +2724,7 @@ fn review(
             notify_event(
                 profile,
                 NotifyEvent::ReviewVerdict {
-                    verdict: &verdict.verdict,
+                    verdict: published_review_verdict(&verdict.verdict).leak(),
                     mr_url: mr_url.as_deref().unwrap_or("unknown"),
                 },
             );
@@ -3120,10 +3167,10 @@ mod tests {
         first_markdown_heading, format_issue_for_focus, is_issue_number_reference,
         mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
         parse_review_verdict, parse_ticket_metadata, parse_ticket_metadata_from_issue,
-        render_review_comment, review_labels, review_preflight, run_backend,
-        scan_available_tickets, strip_terminal_noise, validation_failure_no_progress_reason,
-        ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewerTier, RouteDecision,
-        TicketMetadata, ValidationFailureProgress,
+        published_review_verdict, render_review_comment, review_labels, review_preflight,
+        run_backend, scan_available_tickets, strip_terminal_noise,
+        validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
+        MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
@@ -5015,6 +5062,43 @@ The parser should retain structured sections.\n\n\
     }
 
     #[test]
+    fn published_review_verdict_strips_internal_tier() {
+        // Issue #129 Bug B: the reviewer may return APPROVE_STRONG /
+        // APPROVE_WEAK as an internal routing tier. That tier must NOT leak
+        // into the human-facing review status -- humans see a strict
+        // APPROVE / REJECT. The STRONG/WEAK strength stays internal and only
+        // drives auto-merge eligibility.
+        assert_eq!(published_review_verdict("APPROVE_STRONG"), "APPROVE");
+        assert_eq!(published_review_verdict("APPROVE_WEAK"), "APPROVE");
+        assert_eq!(published_review_verdict("REJECT"), "REJECT");
+        // NEEDS_FIX / HUMAN_REVIEW carry no tier, published as-is.
+        assert_eq!(published_review_verdict("NEEDS_FIX"), "NEEDS_FIX");
+        assert_eq!(published_review_verdict("HUMAN_REVIEW"), "HUMAN_REVIEW");
+    }
+
+    #[test]
+    fn render_review_comment_publishes_approve_not_internal_tier() {
+        // Issue #129 Bug B: the posted MR body must show APPROVE, never the
+        // internal APPROVE_STRONG / APPROVE_WEAK routing tier.
+        let strong: crate::models::ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,
+                "blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
+        )
+        .unwrap();
+        let weak: crate::models::ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_WEAK","confidence":"medium","human_required":true,
+                "blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
+        )
+        .unwrap();
+        let s = render_review_comment(&strong, Path::new("/tmp/session"));
+        let w = render_review_comment(&weak, Path::new("/tmp/session"));
+        assert!(s.contains("GAH review verdict: `APPROVE`"));
+        assert!(!s.contains("APPROVE_STRONG"));
+        assert!(w.contains("GAH review verdict: `APPROVE`"));
+        assert!(!w.contains("APPROVE_WEAK"));
+    }
+
+    #[test]
     fn apply_diff_stats_reports_zero_before_commit_but_correct_after() {
         // Regression: diff_stats compares origin/<target> against HEAD, so
         // calling apply_diff_stats while real changes are still uncommitted
@@ -5739,12 +5823,13 @@ fn publishing_allows_publish(profile: &Profile) -> bool {
 }
 
 fn summarize_error(err: &anyhow::Error) -> String {
-    let mut text = format!("{:#}", err).replace('\n', " ");
+    let text = format!("{:#}", err).replace('\n', " ");
     if text.len() > 500 {
-        text.truncate(500);
-        text.push_str("...");
+        let safe_text = utf8_safe_prefix(&text, 497).to_string();
+        format!("{safe_text}...")
+    } else {
+        text
     }
-    text
 }
 
 fn dry_run_route(
@@ -6596,12 +6681,19 @@ fn normalize_ticket_title(title: String) -> String {
         return title;
     };
 
-    let digit_count = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-    if digit_count == 0 {
+    let digit_byte_count = rest
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .last()
+        .map(|(i, _)| i + 1) // +1 to include the last digit character
+        .unwrap_or(0);
+    if digit_byte_count == 0 {
         return title;
     }
 
-    let remainder = rest[digit_count..].trim_start();
+    // ASCII digits are 1 byte each, so digit_byte_count should be a valid boundary
+    // But use UTF-8 safe suffix to be extra safe
+    let remainder = utf8_safe_suffix(rest, rest.len() - digit_byte_count).trim_start();
     let normalized = remainder
         .trim_start_matches([':', '-'])
         .trim_start()
@@ -6662,13 +6754,12 @@ fn strip_terminal_noise(text: &str) -> String {
 fn extract_backend_summary(log_path: &str) -> String {
     let log_text = fs::read_to_string(log_path).unwrap_or_default();
     // Take the last ~2000 characters to get the backend's final summary
-    let tail_size = log_text.len().min(2000);
     if log_text.is_empty() {
         String::new()
     } else {
-        // Use byte indexing for the tail, then trim to ensure we don't cut in the middle of a character
-        let byte_start = log_text.len().saturating_sub(tail_size);
-        strip_terminal_noise(&log_text[byte_start..])
+        // Use UTF-8 safe suffix to avoid cutting in the middle of a character
+        let tail = utf8_safe_suffix(&log_text, 2000);
+        strip_terminal_noise(tail)
     }
 }
 
@@ -7081,10 +7172,27 @@ fn parse_review_verdict(
     Ok(verdict)
 }
 
+/// Issue #129 / #128: the reviewer's own verdict vocabulary includes an
+/// internal routing tier (`APPROVE_STRONG` / `APPROVE_WEAK`) that must never
+/// be published verbatim to the repository. Humans and the issue tracker see
+/// a strict `APPROVE` / `REJECT` status; the STRONG/WEAK strength stays
+/// internal and only drives merge-policy / auto-merge eligibility in the
+/// controller (see `review_labels` and `decide_next_action`).
+pub(crate) fn published_review_verdict(verdict: &str) -> String {
+    match verdict {
+        "APPROVE_STRONG" | "APPROVE_WEAK" => "APPROVE".to_string(),
+        "REJECT" => "REJECT".to_string(),
+        // NEEDS_FIX / HUMAN_REVIEW carry no strength tier, so they are
+        // published as-is.
+        other => other.to_string(),
+    }
+}
+
 fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &Path) -> String {
+    let published = published_review_verdict(&verdict.verdict);
     let mut out = format!(
         "GAH review verdict: `{}`\n\nConfidence: `{}`\nHuman required: `{}`\nReviewer: `{}` / `{}`\nArtifacts: `{}`\n",
-        verdict.verdict,
+        published,
         verdict.confidence,
         verdict.human_required,
         verdict.effective_backend.as_deref().unwrap_or("unknown"),

@@ -144,7 +144,11 @@ impl NextAction {
 /// 3. an MR classified NEEDS_REVIEW -> ReviewMr
 /// 4. an MR classified CI_FAILED/NEEDS_FIX -> FixMr (if retry cap not exceeded)
 /// 5. an MR classified CI_FAILED/NEEDS_FIX -> HumanRequired (if retry cap exceeded)
-/// 6. an MR classified READY_FOR_HUMAN -> HumanRequired
+/// 6. an MR classified READY_FOR_HUMAN -> HumanRequired ONLY when the merge
+///    policy forbids auto-merge (StopForHuman) or CI isn't conclusively green
+///    (see the READY_FOR_HUMAN arm below). With green CI and an auto-merge
+///    policy, it instead becomes MergeMr. READY_FOR_HUMAN therefore has exactly
+///    ONE defined next-action per policy, not two divergent outcomes.
 /// 7. a ticket with failed history, no active MR, capability failure,
 ///    under the retry cap -> Escalate
 /// 8. a ticket with failed history, no active MR, infra failure, some
@@ -1374,6 +1378,39 @@ mod tests {
         snapshot.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
+    }
+
+    // Issue #129 Bug A: `READY_FOR_HUMAN` must have exactly ONE defined
+    // behavior per policy. Under the default `auto` merge policy with green
+    // CI, it auto-merges (MergeMr); it never parks. This pins that the
+    // READY_FOR_HUMAN classification does not also map to HumanRequired in a
+    // separate code path for the same green-CI/auto-merge inputs.
+    #[test]
+    fn ready_for_human_green_ci_auto_policy_never_human_required() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::Auto;
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "merge_mr");
+        assert_ne!(action.kind(), "human_required");
+    }
+
+    // Issue #129 Bug A: the complement -- the only case READY_FOR_HUMAN parks
+    // is when the merge policy forbids auto-merge (StopForHuman) with green CI
+    // (or any policy without green CI). Confirm the human-park path is the
+    // explicit policy decision, not a stray rule-6 mapping.
+    #[test]
+    fn ready_for_human_stop_for_human_is_explicit_human_required() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
+        assert!(action.reason().contains("stop_for_human"));
     }
 
     #[test]
