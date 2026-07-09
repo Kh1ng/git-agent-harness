@@ -1,5 +1,0 @@
-[33m8b9aa1f[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mgah/gah-1783600532[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmain[m[33m, [m[1;32mgah/gah-1783600241[m[33m, [m[1;32mgah/gah-1783600142[m[33m, [m[1;32mgah/gah-1783577548[m[33m, [m[1;32mgah/gah-1783577495[m[33m)[m Fix validation-gate branch collision and stale worktree blocking FixMr (Bugs 4+6) (#132)
-[33m8a932fc[m Fix retry-cap miscount, stuck-loop latch, and status projection (Bugs 1-3) (#131)
-[33m60d0595[m Fix ticket-scoped human_required freezing the whole profile (TICKET-human-required-scoping) (#130)
-[33md67f872[m[33m ([m[1;32mgah/gah-1783551991[m[33m, [m[1;32mgah/gah-1783550372[m[33m)[m Draft: [GAH] Fix: TICKET-73 Self-verify validation_commands against a fresh worktree when they change (#106)
-[33m29cee81[m fix: repair Vibe review backend CLI invocation

@@ -328,7 +328,7 @@ pub fn gitlab_set_mwps(profile: &Profile, iid: &str) -> Result<()> {
             "mr",
             "merge",
             iid,
-            "--when-pipeline-succeeds",
+            "--auto-merge",
             "--squash",
             "--remove-source-branch",
             "--yes",
@@ -336,10 +336,10 @@ pub fn gitlab_set_mwps(profile: &Profile, iid: &str) -> Result<()> {
             &profile.repo,
         ])
         .output()
-        .context("glab mr merge --when-pipeline-succeeds")?;
+        .context("glab mr merge --auto-merge")?;
     if !mwps.status.success() {
         anyhow::bail!(
-            "glab mr merge --when-pipeline-succeeds failed: {}",
+            "glab mr merge --auto-merge failed: {}",
             String::from_utf8_lossy(&mwps.stderr).trim()
         );
     }
