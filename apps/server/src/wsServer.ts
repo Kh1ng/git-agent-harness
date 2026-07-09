@@ -11,13 +11,18 @@ import { getSessionManager } from './sessions/SessionManager.js';
 import * as gahCli from './gahCli.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
-  ServerMessage, 
-  ClientMessage, 
+  ServerMessage,
+  ClientMessage,
   ClientCapabilities,
   Session,
   ProviderStatus,
   ProviderInstanceId,
-  ProviderKind
+  ProviderKind,
+  MergeRequest,
+  AvailabilityScope,
+  Blocker,
+  StatusError,
+  RecentLedgerSummary
 } from '@git-agent-harness/contracts';
 
 // Session store for tracking active WebSocket connections
@@ -276,12 +281,16 @@ async function sendWelcomeMessage(ws: WebSocket) {
     // per-field ProviderRegistry accessor, `gah status --json` returns
     // all of this in one call.
     const defaultProfile = 'gah';
-    let mergeRequests: unknown[] = [];
-    let availability: unknown[] = [];
-    let blockers: unknown[] = [];
-    let constraints: unknown[] = [];
-    let errors: unknown[] = [];
-    let recentLedger: unknown[] = [];
+    let mergeRequests: MergeRequest[] = [];
+    let availability: AvailabilityScope[] = [];
+    let blockers: Blocker[] = [];
+    let constraints: Blocker[] = [];
+    let errors: StatusError[] = [];
+    // recent_ledger is a single nullable summary, not an array -- it was
+    // previously mistyped as unknown[] here (silently accepted at runtime
+    // by JS, but wrong; DashboardPage already correctly treats it as an
+    // object via `{recentLedger && ...}`).
+    let recentLedger: RecentLedgerSummary | null = null;
     try {
       const status = await gahCli.runStatus(defaultProfile);
       mergeRequests = status.merge_requests;
@@ -296,12 +305,12 @@ async function sendWelcomeMessage(ws: WebSocket) {
 
     const welcomeMessage: ServerMessage & {
       profile?: string;
-      mergeRequests?: unknown;
-      availability?: unknown;
-      blockers?: unknown;
-      constraints?: unknown;
-      errors?: unknown;
-      recentLedger?: unknown;
+      mergeRequests?: MergeRequest[];
+      availability?: AvailabilityScope[];
+      blockers?: Blocker[];
+      constraints?: Blocker[];
+      errors?: StatusError[];
+      recentLedger?: RecentLedgerSummary | null;
     } = {
       type: 'server.welcome',
       serverVersion: SERVER_VERSION,

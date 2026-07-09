@@ -1,0 +1,292 @@
+import { useEffect } from 'react';
+import {
+  ListChecks,
+  CheckCircle2,
+  Coins,
+  Timer,
+  GitMerge,
+  AlertTriangle,
+  ShieldAlert
+} from 'lucide-react';
+import type { Page } from '../App.js';
+import type { Session } from '@git-agent-harness/contracts';
+import { useWebSocket } from '../ws/WebSocketContext.js';
+import { useUiStore } from '../store/uiStore.js';
+import { useGahStore } from '../store/gahStore.js';
+import { StatTile } from '../components/ui/StatTile.js';
+import { StatusBadge, classificationTone } from '../components/ui/StatusBadge.js';
+import { PageHeader } from '../components/ui/PageHeader.js';
+import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
+import { SessionCard } from '../components/SessionCard.js';
+import { formatCost, formatPercent, formatAge, isStale } from '../lib/format.js';
+
+type OverviewPageProps = {
+  sessions: Session[];
+  onSelectSession: (session: Session) => void;
+  onNavigate: (page: Page) => void;
+};
+
+export function OverviewPage({ sessions, onSelectSession, onNavigate }: OverviewPageProps) {
+  const { status, report } = useGahStore();
+  const wsProfile = useWebSocket().profile;
+  const profileOverride = useUiStore((s) => s.profileOverride);
+  const profile = profileOverride ?? wsProfile;
+  const fetchStatus = useGahStore((s) => s.fetchStatus);
+  const fetchReport = useGahStore((s) => s.fetchReport);
+
+  useEffect(() => {
+    fetchStatus(profile ?? undefined);
+    fetchReport({ profile: profile ?? undefined, since: '7d' });
+  }, [profile, fetchStatus, fetchReport]);
+
+  const activeSessions = sessions.filter((s) => ['starting', 'running'].includes(s.status));
+
+  const refresh = () => {
+    fetchStatus(profile ?? undefined, { force: true });
+    fetchReport({ profile: profile ?? undefined, since: '7d' }, { force: true });
+  };
+
+  // The page's own title/refresh control renders unconditionally below --
+  // only the content area swaps to loading/error, so a total data-fetch
+  // failure never leaves the user looking at a page with no identity and
+  // no way to retry.
+  if (status.loading && !status.data) {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="Overview" onRefresh={refresh} refreshing />
+        <LoadingState label="Loading status…" />
+      </div>
+    );
+  }
+  if (status.error && !status.data) {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="Overview" onRefresh={refresh} />
+        <ErrorState message={status.error} endpoint="/api/status" onRetry={refresh} />
+      </div>
+    );
+  }
+
+  const snapshot = status.data;
+  // Genuine profile-wide blockers (sync down, no viable route) vs.
+  // work-item-scoped blockers (a ticket/MR needs a human) are two
+  // different fields -- a ticket being blocked does NOT freeze the whole
+  // profile, so `blockers` is often empty even when `blocked_work_items`
+  // has entries. See status.rs's own doc comments on StatusSnapshot.
+  const blockers = snapshot?.blockers ?? [];
+  const blockedWorkItems = snapshot?.blocked_work_items ?? [];
+  const needsReviewMrs = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'NEEDS_REVIEW');
+  const recentMerges = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'MERGED').slice(0, 5);
+  const unavailableBackends = (snapshot?.availability ?? []).filter((a) => !a.eligible_now);
+
+  // Success rate + cost roll-up across all report comparisons (whichever
+  // grouping the report defaults to). Unknown stays unknown -- see
+  // lib/format.ts.
+  const comparisons = report.data?.comparisons ?? [];
+  const totalEntries = comparisons.reduce((sum, c) => sum + c.entries, 0);
+  const totalPass = comparisons.reduce((sum, c) => sum + c.validation_pass, 0);
+  const successRate = totalEntries > 0 ? totalPass / totalEntries : null;
+  const hasCost = comparisons.some((c) => c.actual_cost_usd !== null || c.estimated_cost_usd !== null);
+  const totalActualCost = hasCost
+    ? comparisons.reduce((sum, c) => sum + (c.actual_cost_usd ?? 0), 0)
+    : null;
+  const totalEstimatedCost = hasCost
+    ? comparisons.reduce((sum, c) => sum + (c.estimated_cost_usd ?? 0), 0)
+    : null;
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title="Overview"
+        description={snapshot ? `Profile: ${snapshot.profile.display_name}` : undefined}
+        onRefresh={refresh}
+        refreshing={status.loading}
+      />
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <StatTile label="Tasks (7d)" value={totalEntries > 0 ? String(totalEntries) : 'No data'} icon={ListChecks} />
+        <StatTile
+          label="Success rate"
+          value={formatPercent(successRate)}
+          icon={CheckCircle2}
+          hint={totalEntries > 0 ? `${totalPass}/${totalEntries} validated` : undefined}
+        />
+        <StatTile
+          label="Cost (7d)"
+          value={formatCost(totalActualCost ?? totalEstimatedCost)}
+          icon={Coins}
+          hint={totalActualCost === null && totalEstimatedCost !== null ? 'estimated' : undefined}
+        />
+        <StatTile label="Active sessions" value={String(activeSessions.length)} icon={Timer} />
+      </div>
+
+      {(blockers.length > 0 || blockedWorkItems.length > 0) && (
+        <div className="card-padded border-warning/30">
+          <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
+            <ShieldAlert size={16} className="text-warning" aria-hidden="true" />
+            Needs attention
+          </h3>
+          <ul className="space-y-2">
+            {blockers.map((b, i) => (
+              <li key={`blocker-${i}`} className="flex items-start gap-2 text-sm">
+                <StatusBadge tone="critical" label={b.kind.replace(/_/g, ' ')} />
+                <span className="text-secondary">{b.message || b.reason || 'Unknown'} — blocks all work</span>
+              </li>
+            ))}
+            {blockedWorkItems.map((b, i) => (
+              <li key={`work-${i}`} className="flex items-start gap-2 text-sm">
+                <StatusBadge tone="warning" label="Human required" />
+                <span className="text-secondary">
+                  {b.source_reference ?? 'Unknown work item'}
+                  {b.message ? ` — ${b.message}` : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <section>
+          <h3 className="text-sm font-semibold text-primary mb-3">What's running now</h3>
+          {activeSessions.length === 0 ? (
+            <EmptyState icon={Timer} title="No active sessions" description="Dispatched work will appear here while it runs." />
+          ) : (
+            <div className="space-y-3">
+              {activeSessions.slice(0, 4).map((session) => (
+                <SessionCard key={session.id} session={session} onClick={() => onSelectSession(session)} />
+              ))}
+            </div>
+          )}
+          <button onClick={() => onNavigate('work')} className="text-xs text-accent hover:underline mt-2">
+            View all work →
+          </button>
+        </section>
+
+        <section>
+          <h3 className="text-sm font-semibold text-primary mb-3">Backend availability</h3>
+          {unavailableBackends.length === 0 && (snapshot?.availability.length ?? 0) === 0 ? (
+            <EmptyState icon={CheckCircle2} title="No availability state recorded" description="Everything is eligible by default." />
+          ) : unavailableBackends.length === 0 ? (
+            <div className="card-padded flex items-center gap-2 text-sm text-good">
+              <CheckCircle2 size={16} aria-hidden="true" />
+              All known backends eligible
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {unavailableBackends.map((a, i) => (
+                <div key={i} className="card-padded flex items-center justify-between text-sm">
+                  <span className="text-primary">{a.model ? `${a.backend}/${a.model}` : a.backend}</span>
+                  <StatusBadge tone="critical" label={a.reason ?? 'unavailable'} />
+                </div>
+              ))}
+            </div>
+          )}
+          <button onClick={() => onNavigate('quota')} className="text-xs text-accent hover:underline mt-2">
+            View quota detail →
+          </button>
+        </section>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <section>
+          <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
+            <AlertTriangle size={15} className="text-warning" aria-hidden="true" />
+            Needs review ({needsReviewMrs.length})
+          </h3>
+          {needsReviewMrs.length === 0 ? (
+            <EmptyState icon={CheckCircle2} title="Nothing awaiting review" />
+          ) : (
+            <div className="card overflow-hidden">
+              <table className="table-base">
+                <tbody>
+                  {needsReviewMrs.map((mr) => {
+                    const { tone, label } = classificationTone(mr.classification);
+                    return (
+                      <tr key={mr.branch}>
+                        <td className="font-mono text-xs">{mr.branch}</td>
+                        <td>
+                          <StatusBadge tone={tone} label={label} />
+                        </td>
+                        <td>
+                          {mr.url && (
+                            <a href={mr.url} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline text-xs">
+                              View MR
+                            </a>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <section>
+          <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
+            <GitMerge size={15} className="text-good" aria-hidden="true" />
+            Recently merged
+          </h3>
+          {recentMerges.length === 0 ? (
+            <EmptyState icon={GitMerge} title="No recent merges" />
+          ) : (
+            <div className="card overflow-hidden">
+              <table className="table-base">
+                <tbody>
+                  {recentMerges.map((mr) => (
+                    <tr key={mr.branch}>
+                      <td className="font-mono text-xs">{mr.branch}</td>
+                      <td>
+                        {mr.url && (
+                          <a href={mr.url} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline text-xs">
+                            View MR
+                          </a>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {snapshot?.recent_ledger && (
+        <section className="card-padded">
+          <h3 className="text-sm font-semibold text-primary mb-3">Most recent dispatch</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+            <div>
+              <p className="text-xs text-muted uppercase tracking-wide mb-1">Mode</p>
+              <p className="text-primary">{snapshot.recent_ledger.most_recent_mode}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted uppercase tracking-wide mb-1">Backend</p>
+              <p className="text-primary">
+                {snapshot.recent_ledger.most_recent_effective_backend}
+                {snapshot.recent_ledger.most_recent_effective_model
+                  ? `/${snapshot.recent_ledger.most_recent_effective_model}`
+                  : ''}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-muted uppercase tracking-wide mb-1">Validation</p>
+              <p className="text-primary">{snapshot.recent_ledger.most_recent_validation_result ?? 'Unknown'}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted uppercase tracking-wide mb-1">When</p>
+              <p className="text-primary">
+                {formatAge(snapshot.recent_ledger.most_recent_dispatch_timestamp) ?? 'Unknown'}
+                {isStale(snapshot.recent_ledger.most_recent_dispatch_timestamp) && (
+                  <span className="ml-1 text-muted">(stale)</span>
+                )}
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}

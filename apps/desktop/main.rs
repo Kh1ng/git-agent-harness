@@ -107,7 +107,7 @@ fn start_server(server_state: &Arc<ServerState>, server_path: &PathBuf) {
     let server_path_str = server_path.to_string_lossy();
     
     match Command::new("node")
-        .arg(&server_path_str)
+        .arg(&*server_path_str)
         .spawn() {
         Ok(child) => {
             *state = Some(child);
@@ -119,17 +119,19 @@ fn start_server(server_state: &Arc<ServerState>, server_path: &PathBuf) {
     }
 }
 
+#[tauri::command]
 fn start_server_command(state: tauri::State<'_, Arc<ServerState>>) -> Result<bool, String> {
     let server_path = get_server_path()
         .ok_or("Could not find server executable")?;
-    
+
     start_server(&state, &server_path);
     Ok(true)
 }
 
+#[tauri::command]
 fn stop_server_command(state: tauri::State<'_, Arc<ServerState>>) -> Result<bool, String> {
     let mut server_guard = state.server_process.lock().unwrap();
-    
+
     if let Some(child) = server_guard.as_mut() {
         child.kill().map_err(|e| e.to_string())?;
         *server_guard = None;
@@ -139,9 +141,10 @@ fn stop_server_command(state: tauri::State<'_, Arc<ServerState>>) -> Result<bool
     }
 }
 
+#[tauri::command]
 fn is_server_running_command(state: tauri::State<'_, Arc<ServerState>>) -> Result<bool, String> {
-    let server_guard = state.server_process.lock().unwrap();
-    Ok(server_guard.as_ref().map_or(false, |child| {
+    let mut server_guard = state.server_process.lock().unwrap();
+    Ok(server_guard.as_mut().map_or(false, |child| {
         child.try_wait().map_or(true, |result| result.is_none())
     }))
 }

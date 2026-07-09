@@ -8,68 +8,22 @@ import { spawn, SpawnOptions } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accessSync, constants } from 'node:fs';
+import type {
+  StatusSnapshot,
+  ControllerEvent,
+  ReportData,
+  ReportGroupBy,
+  LedgerEntry,
+} from '@git-agent-harness/contracts';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
-/**
- * Interface for the status snapshot returned by `gah status --json`
- * This is a subset of the full JSON output that we need for the server
- */
-export interface StatusSnapshot {
-  schema_version: number;
-  generated_at: string;
-  profile: {
-    profile: string;
-    display_name: string;
-    repo_id: string;
-    provider: string;
-    local_path: string;
-    default_target_branch: string;
-  };
-  observations: {
-    sync: { status: string };
-    availability: { status: string };
-    ledger: { status: string };
-  };
-  availability: Array<{
-    backend: string;
-    model?: string;
-    eligible_now: boolean;
-    reason?: string;
-    unavailable_until?: string;
-    source?: string;
-    last_error_summary?: string;
-    observed_at: string;
-    scope: string;
-  }>;
-  merge_requests: Array<{
-    branch: string;
-    work_id?: string;
-    id: string;
-    url: string;
-    state: string;
-    draft: boolean;
-    merge_status: string;
-    merged: boolean;
-    classification: string;
-    recommended_action: string;
-  }>;
-  recent_ledger: any[];
-  constraints: any[];
-  blockers: any[];
-  errors: any[];
-  available_tickets: any[];
-}
-
-/**
- * Interface for controller events returned by `gah events --json`
- */
-export interface ControllerEvent {
-  timestamp: string;
-  event_type: string;
-  profile?: string;
-  details?: Record<string, unknown>;
-}
+// StatusSnapshot / ControllerEvent are now the real, field-accurate types
+// from @git-agent-harness/contracts (packages/contracts/src/gah.ts) --
+// mirrored 1:1 from src/status.rs and src/events.rs -- instead of a
+// locally hand-rolled (and previously inaccurate: recent_ledger is a
+// single nullable object, not an array) subset.
+export type { StatusSnapshot, ControllerEvent };
 
 /**
  * Find the GAH binary path
@@ -192,6 +146,80 @@ Output: ${stdout}`));
       reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
     });
   });
+}
+
+/**
+ * Shared plumbing for the read-only `--json` subcommands added alongside
+ * runReport/runLedgerWork below -- same spawn/parse/error shape as
+ * runStatus above, factored out so those two don't duplicate it.
+ */
+function runJsonCommand<T>(args: string[], config?: string): Promise<T> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(GAH_BINARY, args, getSpawnOptions(config));
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout?.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`gah ${args[0]} failed with exit code ${code}: ${stderr || stdout}`));
+        return;
+      }
+      try {
+        resolvePromise(JSON.parse(stdout) as T);
+      } catch (parseError) {
+        reject(new Error(`Failed to parse gah ${args[0]} output: ${parseError instanceof Error ? parseError.message : String(parseError)}
+Output: ${stdout}`));
+      }
+    });
+
+    child.on('error', (error) => {
+      reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
+    });
+  });
+}
+
+/**
+ * Run `gah report --since <since> --group-by <groupBy> --json` and parse
+ * the output. Backend/model performance comparison (tokens, cost,
+ * success rate, quota observations) -- the data source for the Telemetry
+ * page. Previously implemented in the Rust CLI (TICKET-098) but never
+ * wired to the server.
+ */
+export async function runReport(
+  options: { since?: string; profile?: string; groupBy?: ReportGroupBy; config?: string } = {}
+): Promise<ReportData> {
+  const args = ['report', '--json'];
+  args.push('--since', options.since ?? '7d');
+  args.push('--group-by', options.groupBy ?? 'backend');
+  if (options.profile) {
+    args.push('--profile', options.profile);
+  }
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runJsonCommand<ReportData>(args, options.config);
+}
+
+/**
+ * Run `gah ledger work <workId> --json` and parse the output: full ledger
+ * history for one work item, chronological. The data source for the Work
+ * detail/attempt-timeline view.
+ */
+export async function runLedgerWork(workId: string, config?: string): Promise<LedgerEntry[]> {
+  const args = ['ledger', 'work', workId, '--json'];
+  if (config) {
+    args.push('--config-path', config);
+  }
+  return runJsonCommand<LedgerEntry[]>(args, config);
 }
 
 /**

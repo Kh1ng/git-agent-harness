@@ -316,6 +316,17 @@ enum LedgerCommands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Full ledger history (dispatch/attempt/retry/review entries) for one
+    /// work item, in chronological order -- the data source for a frontend
+    /// attempt-timeline view. Thin CLI wrapper around the existing
+    /// `ledger::entries_for_work_id`; no new ledger logic.
+    Work {
+        work_id: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -403,6 +414,43 @@ fn main() -> Result<()> {
             } => {
                 let cfg = config::load(config_path.as_deref())?;
                 ledger::reconcile::run(&cfg, &profile, json, dry_run)?;
+            }
+            LedgerCommands::Work {
+                work_id,
+                config_path,
+                json,
+            } => {
+                let cfg = config::load(config_path.as_deref())?;
+                let mut entries = ledger::entries_for_work_id(&cfg, &work_id)?;
+                entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                if json {
+                    println!("{}", serde_json::to_string(&entries)?);
+                } else if entries.is_empty() {
+                    println!("No ledger entries found for work item '{}'.", work_id);
+                } else {
+                    println!("Work item: {} ({} entries)", work_id, entries.len());
+                    for e in &entries {
+                        let cost = e
+                            .usage
+                            .actual_cost_usd
+                            .or(e.usage.estimated_cost_usd)
+                            .map(|c| format!("${c:.4}"))
+                            .unwrap_or_else(|| "unknown cost".into());
+                        println!(
+                            "  {}  {}  {}/{}  validation={} failure={} duration={} {}",
+                            e.timestamp,
+                            e.mode,
+                            e.effective_backend,
+                            e.effective_model.as_deref().unwrap_or("?"),
+                            e.validation_result.as_deref().unwrap_or("-"),
+                            e.failure_class.as_deref().unwrap_or("-"),
+                            e.duration_seconds
+                                .map(|d| format!("{d:.0}s"))
+                                .unwrap_or_else(|| "unknown".into()),
+                            cost,
+                        );
+                    }
+                }
             }
         },
 
