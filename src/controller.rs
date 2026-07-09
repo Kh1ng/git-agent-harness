@@ -10,6 +10,7 @@
 use crate::status::StatusSnapshot;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// TICKET-078: how many times the controller will automatically
 /// Retry/Escalate the same work_id before giving up and requiring a human.
@@ -280,22 +281,60 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         .collect();
     failed_tickets.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
 
-    for ticket in &failed_tickets {
-        if ticket.prior_attempt_count >= AUTO_RETRY_CAP {
+    // Collect tickets that have exhausted the retry cap
+    let exhausted: HashSet<_> = failed_tickets
+        .iter()
+        .filter(|t| t.prior_attempt_count >= AUTO_RETRY_CAP)
+        .filter_map(|t| t.work_id.clone())
+        .collect();
+
+    // Check if there are any non-exhausted actionable tickets
+    let has_escalate_candidate = failed_tickets.iter().any(|t| {
+        !exhausted.contains(t.work_id.as_ref().unwrap_or(&t.ticket_path))
+            && t.last_failure_class
+                .as_deref()
+                .is_some_and(is_genuine_agent_failure)
+    });
+    let has_retry_candidate = failed_tickets.iter().any(|t| {
+        !exhausted.contains(t.work_id.as_ref().unwrap_or(&t.ticket_path))
+            && t.last_failure_class
+                .as_deref()
+                .is_some_and(|fc| is_infra_failure(fc) && some_backend_eligible)
+    });
+    let has_undispatched = snapshot
+        .available_tickets
+        .iter()
+        .any(|t| !t.has_active_mr && t.prior_attempt_count == 0 && !t.human_required);
+
+    // Handle exhausted tickets: if there are exhausted tickets and NO other actionable items,
+    // return HumanRequired for the first exhausted ticket
+    if !exhausted.is_empty() && !has_escalate_candidate && !has_retry_candidate && !has_undispatched
+    {
+        if let Some(first_exhausted) = failed_tickets
+            .iter()
+            .find(|t| t.prior_attempt_count >= AUTO_RETRY_CAP)
+        {
             return NextAction::HumanRequired {
                 reason: format!(
                     "{} failed {} time(s) with no active MR; stopping automatic retries",
-                    ticket.work_id.as_deref().unwrap_or(&ticket.ticket_path),
-                    ticket.prior_attempt_count
+                    first_exhausted
+                        .work_id
+                        .as_deref()
+                        .unwrap_or(&first_exhausted.ticket_path),
+                    first_exhausted.prior_attempt_count
                 ),
-                reference: ticket
+                reference: first_exhausted
                     .work_id
                     .clone()
-                    .or_else(|| Some(ticket.ticket_path.clone())),
+                    .or_else(|| Some(first_exhausted.ticket_path.clone())),
             };
         }
     }
+
     for ticket in &failed_tickets {
+        if exhausted.contains(ticket.work_id.as_ref().unwrap_or(&ticket.ticket_path)) {
+            continue;
+        }
         if let Some(fc) = ticket.last_failure_class.as_deref() {
             if is_genuine_agent_failure(fc) {
                 return NextAction::Escalate {
@@ -312,6 +351,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         }
     }
     for ticket in &failed_tickets {
+        if exhausted.contains(ticket.work_id.as_ref().unwrap_or(&ticket.ticket_path)) {
+            continue;
+        }
         if let Some(fc) = ticket.last_failure_class.as_deref() {
             if is_infra_failure(fc) && some_backend_eligible {
                 return NextAction::Retry {
@@ -1213,6 +1255,37 @@ mod tests {
         ));
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
+    }
+
+    #[test]
+    fn exhausted_ticket_does_not_block_others() {
+        let mut snapshot = empty_snapshot();
+        // TICKET-113 is exhausted (prior_attempt_count = 2, no active MR)
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-113-x.md",
+            Some("TICKET-113"),
+            2, // == AUTO_RETRY_CAP
+            Some("agent_no_progress"),
+            false,
+            false,
+        ));
+        // TICKET-128 is eligible (prior_attempt_count = 0, no active MR)
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-128-x.md",
+            Some("TICKET-128"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        let action = decide_next_action(&snapshot);
+        // Should dispatch TICKET-128, NOT return human_required
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-128"))
+            }
+            other => panic!("expected DispatchTicket for TICKET-128, got {other:?}"),
+        }
     }
 
     #[test]
