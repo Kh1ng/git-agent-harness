@@ -910,17 +910,18 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     let repo = Path::new(&profile.local_path);
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
 
-    // `worktree::create` errors out if the branch already exists. Make the
-    // gate branch unique per dispatch so a prior gate run (same hash) never
-    // blocks a later one — the worktree is cleaned up regardless.
-    let unique = vc::now_rfc3339(OffsetDateTime::now_utc())
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect::<String>();
+    // `worktree::create` errors out if the branch already exists. Use a
+    // full-precision timestamp + random suffix so the branch name is truly
+    // unique per run — the previous code truncated to 8 alphanumeric chars
+    // from RFC3339, which collapsed to just the date (`20260709`) and
+    // caused every same-day gate run after the first to fail.
+    let ts = vc::now_rfc3339(OffsetDateTime::now_utc());
+    let ts_compact: String = ts.chars().filter(|c| c.is_alphanumeric()).collect();
+    let suffix = &ts_compact[..ts_compact.len().min(20)];
     let branch = format!(
         "gah/validation-gate-{}-{}",
         &hash[..hash.len().min(8)],
-        &unique[..unique.len().min(8)]
+        suffix
     );
 
     let wt = worktree::create(
@@ -934,8 +935,11 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     let ok = result.is_ok();
 
     // Always clean up, regardless of pass/fail — a leftover validation-gate
-    // worktree is just state noise that the next dispatch would trip over.
+    // worktree AND branch is state noise that the next dispatch would trip
+    // over. The branch must be deleted too: worktree::cleanup only removes
+    // the worktree dir and prunes, leaving the branch ref behind.
     worktree::cleanup(&wt, repo);
+    let _ = worktree::git_raw(&["branch", "-D", &branch], repo);
 
     vc::record_check(&state_path, &profile.repo_id, &hash, ok, &verified_at)
         .with_context(|| format!("recording validation-check result {}", state_path.display()))?;
