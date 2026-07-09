@@ -17,6 +17,53 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+/// UTF-8 safe suffix: returns the last up to `max_bytes` of `s`,
+/// adjusting the start index forward to a valid character boundary.
+/// Result length is guaranteed <= max_bytes.
+/// Never panics on valid UTF-8 input.
+fn utf8_safe_suffix(s: &str, max_bytes: usize) -> &str {
+    if s.is_empty() || max_bytes == 0 {
+        return "";
+    }
+    let byte_start = s.len().saturating_sub(max_bytes);
+    // Ensure we start at a valid character boundary
+    // If byte_start is not a boundary, find the next boundary after it
+    // This guarantees result.len() <= max_bytes
+    let safe_start = if !s.is_char_boundary(byte_start) {
+        s.char_indices()
+            .find(|(i, _)| *i >= byte_start)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len())
+    } else {
+        byte_start
+    };
+    &s[safe_start..]
+}
+
+/// UTF-8 safe prefix: returns the first up to `max_bytes` of `s`,
+/// adjusting the end index backward to a valid character boundary.
+/// Result length is guaranteed <= max_bytes.
+/// Never panics on valid UTF-8 input.
+fn utf8_safe_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.is_empty() || max_bytes == 0 {
+        return "";
+    }
+    let byte_end = s.len().min(max_bytes);
+    // Ensure we end at a valid character boundary
+    // If byte_end is not a boundary, find the previous boundary before it
+    // This guarantees result.len() <= max_bytes
+    let safe_end = if !s.is_char_boundary(byte_end) {
+        s.char_indices()
+            .take_while(|(i, _)| *i < byte_end)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    } else {
+        byte_end
+    };
+    &s[..safe_end]
+}
+
 pub struct DispatchArgs {
     pub profile: String,
     pub mode: String,
@@ -1277,7 +1324,7 @@ fn improve(
                 anyhow::bail!(
                     "baseline validation stopped ({}): {}",
                     baseline_disposition.as_str(),
-                    &b[..b.len().min(4_000)],
+                    utf8_safe_prefix(b, 4_000),
                 );
             }
             BD::UnknownRed if !args.allow_unknown_red_baseline => {
@@ -1288,13 +1335,13 @@ fn improve(
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!(
                     "baseline validation stopped (unknown_red): {}\n\nUse --allow-unknown-red-baseline to proceed anyway.",
-                    &b[..b.len().min(4_000)],
+                    utf8_safe_prefix(b, 4_000),
                 );
             }
             BD::UnknownRed | BD::ExpectedRed => {
                 base_task.push_str(&format!(
                     "\n\n## Warning: validation already fails on the untouched branch\n\n```\n{}\n```\n\nIf this ticket is about fixing that failure, fix it. Otherwise it is pre-existing — your changes must not add new failures.\n",
-                    &b[..b.len().min(4_000)],
+                    utf8_safe_prefix(b, 4_000),
                 ));
             }
         }
@@ -1535,7 +1582,7 @@ fn improve(
                         base_task,
                         attempt + 1,
                         max_attempts,
-                        &failure_output[..failure_output.len().min(8_000)],
+                        utf8_safe_prefix(&failure_output, 8_000),
                     );
                     // TICKET-089 AC7: made real (if imperfect) progress and
                     // failed validation again -- a genuine agent-capability
@@ -1581,7 +1628,7 @@ fn improve(
                         anyhow::bail!(
                             "validation failed after {} attempt(s). Use --allow-draft-fail to push anyway.\n\n{}",
                             max_attempts,
-                            &failure_output[..failure_output.len().min(4_000)],
+                            utf8_safe_prefix(&failure_output, 4_000),
                         );
                     };
                     // Identical to baseline and/or the previous attempt: the
@@ -1612,7 +1659,7 @@ fn improve(
                         "{} Aborting early after attempt {}.\n\n{}",
                         reason,
                         attempt + 1,
-                        &failure_output[..failure_output.len().min(4_000)],
+                        utf8_safe_prefix(&failure_output, 4_000),
                     );
                 } else if args.allow_draft_fail {
                     println!(
@@ -1655,7 +1702,7 @@ fn improve(
                     anyhow::bail!(
                         "validation failed after {} attempt(s). Use --allow-draft-fail to push anyway.\n\n{}",
                         max_attempts,
-                        &failure_output[..failure_output.len().min(4_000)],
+                        utf8_safe_prefix(&failure_output, 4_000),
                     );
                 }
             }
@@ -2108,8 +2155,8 @@ fn judge_experiment(task: &str, log: &str, artifact_count: usize) -> bool {
          Did the agent produce a substantive, non-trivial answer to the task? \
          An empty file, a stub, or a generic error message does not count. \
          Reply with only YES or NO.",
-        &task[..task.len().min(500)],
-        &log[log.len().saturating_sub(3000)..],
+        utf8_safe_prefix(task, 500),
+        utf8_safe_suffix(log, 3000),
         artifact_note,
     );
     Command::new("claude")
@@ -2145,7 +2192,7 @@ fn pm(
         let readme = repo.join("README.md");
         let readme_text = if readme.exists() {
             let s = fs::read_to_string(&readme).unwrap_or_default();
-            s[..s.len().min(2000)].to_string()
+            utf8_safe_prefix(&s, 2000).to_string()
         } else {
             String::from("(no README)")
         };
@@ -2512,7 +2559,7 @@ fn review(
         target.mr_title.as_deref().unwrap_or("n/a"),
         target.mr_body.as_deref().unwrap_or("n/a"),
         target.prior_state.as_deref().unwrap_or("not found"),
-        &diff_bundle.diff[..diff_bundle.diff.len().min(60_000)],
+        utf8_safe_prefix(&diff_bundle.diff, 60_000),
         diff_bundle.files,
     );
 
@@ -5776,12 +5823,13 @@ fn publishing_allows_publish(profile: &Profile) -> bool {
 }
 
 fn summarize_error(err: &anyhow::Error) -> String {
-    let mut text = format!("{:#}", err).replace('\n', " ");
+    let text = format!("{:#}", err).replace('\n', " ");
     if text.len() > 500 {
-        text.truncate(500);
-        text.push_str("...");
+        let safe_text = utf8_safe_prefix(&text, 497).to_string();
+        format!("{safe_text}...")
+    } else {
+        text
     }
-    text
 }
 
 fn dry_run_route(
@@ -6633,12 +6681,19 @@ fn normalize_ticket_title(title: String) -> String {
         return title;
     };
 
-    let digit_count = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-    if digit_count == 0 {
+    let digit_byte_count = rest
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .last()
+        .map(|(i, _)| i + 1) // +1 to include the last digit character
+        .unwrap_or(0);
+    if digit_byte_count == 0 {
         return title;
     }
 
-    let remainder = rest[digit_count..].trim_start();
+    // ASCII digits are 1 byte each, so digit_byte_count should be a valid boundary
+    // But use UTF-8 safe suffix to be extra safe
+    let remainder = utf8_safe_suffix(rest, rest.len() - digit_byte_count).trim_start();
     let normalized = remainder
         .trim_start_matches([':', '-'])
         .trim_start()
@@ -6699,13 +6754,12 @@ fn strip_terminal_noise(text: &str) -> String {
 fn extract_backend_summary(log_path: &str) -> String {
     let log_text = fs::read_to_string(log_path).unwrap_or_default();
     // Take the last ~2000 characters to get the backend's final summary
-    let tail_size = log_text.len().min(2000);
     if log_text.is_empty() {
         String::new()
     } else {
-        // Use byte indexing for the tail, then trim to ensure we don't cut in the middle of a character
-        let byte_start = log_text.len().saturating_sub(tail_size);
-        strip_terminal_noise(&log_text[byte_start..])
+        // Use UTF-8 safe suffix to avoid cutting in the middle of a character
+        let tail = utf8_safe_suffix(&log_text, 2000);
+        strip_terminal_noise(tail)
     }
 }
 
