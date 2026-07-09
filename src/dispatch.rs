@@ -1707,6 +1707,37 @@ fn improve(
         commit_msg.push_str(&backend_summary);
     }
 
+    // TICKET-128: honor the per-profile publishing policy. A restricted profile
+    // forbids PR/MR creation and/or LLM-generated commit messages, so we stop
+    // at a deterministic human handoff after code generation + validation
+    // instead of publishing the work. This is independent of reviewer routing
+    // and merge policy: review still runs, the worktree is still cleaned up,
+    // only the autonomous publish step is suppressed.
+    if !publishing_allows_publish(profile) {
+        // Commit only if the policy still permits agent-authored commit text;
+        // otherwise leave the worktree uncommitted for human completion.
+        if profile.publishing.allow_commit_message_generation {
+            if worktree::has_uncommitted_changes(&wt)? {
+                ledger.commit_attempted = true;
+                worktree::stage_all(&wt)?;
+                worktree::ensure_staged(&wt)?;
+                worktree::commit_msg(&wt, &commit_msg)?;
+                ledger.commit_created = true;
+            } else {
+                ledger.commit_created = true;
+            }
+        }
+        apply_diff_stats(ledger, &wt, &profile.default_target_branch);
+        emit_human_handoff(
+            profile,
+            ledger,
+            &branch,
+            "PR/MR creation or commit-message generation disabled by publishing policy",
+        );
+        worktree::cleanup(&wt, repo);
+        return Ok(());
+    }
+
     println!("Changes detected. Committing and pushing...");
     let push_url = profile.push_url()?;
     let push_pat = profile.pat();
@@ -1943,6 +1974,33 @@ fn experiment(
     } else {
         "partial".into()
     });
+    // TICKET-128: honor the per-profile publishing policy (see fix/improve
+    // mode for the full rationale). Experiments may still generate code and
+    // artifacts; they just must not be published as an agent-authored MR.
+    if !publishing_allows_publish(profile) {
+        if profile.publishing.allow_commit_message_generation {
+            if worktree::has_uncommitted_changes(&wt)? {
+                ledger.commit_attempted = true;
+                worktree::stage_all(&wt)?;
+                worktree::ensure_staged(&wt)?;
+                let commit_msg = format!("gah: experiment for {}", profile.repo_id);
+                worktree::commit_msg(&wt, &commit_msg)?;
+                ledger.commit_created = true;
+            } else {
+                ledger.commit_created = true;
+            }
+        }
+        apply_diff_stats(ledger, &wt, &profile.default_target_branch);
+        emit_human_handoff(
+            profile,
+            ledger,
+            &branch,
+            "PR/MR creation or commit-message generation disabled by publishing policy",
+        );
+        worktree::cleanup(&wt, repo);
+        return Ok(());
+    }
+
     println!("Changes detected. Committing and pushing...");
     let mut commit_msg = format!("gah: experiment for {}", profile.repo_id);
     if !backend_summary.is_empty() {
@@ -2642,7 +2700,17 @@ fn review(
                     }
                 }
             }
-            if let Err(err) =
+            // TICKET-128: a restricted profile forbids agent-authored issue/MR
+            // comments. The reviewer still ran and produced a deterministic
+            // verdict (APPROVE/REJECT) retained locally; we simply do not
+            // publish it to the tracker. This is independent of reviewer
+            // routing and merge policy.
+            if !profile.publishing.allow_issue_comments {
+                println!(
+                    "Publishing policy forbids agent-authored issue/MR comments; review verdict ({} confidence={}) written locally only.",
+                    verdict.verdict, verdict.confidence
+                );
+            } else if let Err(err) =
                 provider::post_review_comment(profile, &target.source_branch, &mr_body, &labels)
             {
                 eprintln!("warning: failed to post MR review comment: {:#}", err);
@@ -3131,6 +3199,7 @@ mod tests {
             notify_command: None,
             routing: RoutingPolicy::default(),
             pacing: Default::default(),
+            publishing: Default::default(),
         }
     }
 
@@ -5635,6 +5704,38 @@ fn apply_diff_stats(ledger: &mut LedgerEntry, wt: &Path, target_branch: &str) {
         ledger.insertions = Some(stats.insertions);
         ledger.deletions = Some(stats.deletions);
     }
+}
+
+/// TICKET-128: emit deterministic, machine-readable human-handoff metadata when
+/// a profile's publishing policy forbids agent-authored repository messaging
+/// (PR/MR creation or LLM-generated commit text). No PR/MR is created and no
+/// tracker comment is posted; the worktree/branch is left for a human to
+/// complete. The output is intentionally free of any LLM-generated prose.
+fn emit_human_handoff(profile: &Profile, ledger: &LedgerEntry, branch: &str, reason: &str) {
+    println!("=== GAH human handoff (publishing policy) ===");
+    println!("reason: {}", reason);
+    println!("profile: {}", profile.display_name);
+    println!("branch: {}", branch);
+    println!(
+        "validation_status: {}",
+        ledger.validation_result.as_deref().unwrap_or("unknown")
+    );
+    println!("changed_files: {}", ledger.files_changed.unwrap_or(0));
+    if let Some(verdict) = &ledger.review_verdict {
+        println!("review_verdict: {}", verdict);
+    }
+    println!("=== end GAH human handoff ===");
+}
+
+/// TICKET-128: whether the profile may publish the work autonomously. A
+/// restricted profile that forbids PR/MR creation OR LLM-generated commit
+/// messages must stop at a deterministic human handoff instead of publishing:
+/// there is nothing to push without a commit, and an empty/uncommitted branch
+/// cannot seed a PR. Each flag is an independent policy axis; neither is
+/// overloaded onto `human_required`.
+fn publishing_allows_publish(profile: &Profile) -> bool {
+    profile.publishing.allow_pull_request_creation
+        && profile.publishing.allow_commit_message_generation
 }
 
 fn summarize_error(err: &anyhow::Error) -> String {

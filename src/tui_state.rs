@@ -215,6 +215,7 @@ mod tests {
             available_tickets: vec![],
             fix_attempt_counts: std::collections::HashMap::new(),
             merge_attempt_counts: std::collections::HashMap::new(),
+            publishing_allow_pr: true,
         }
     }
 

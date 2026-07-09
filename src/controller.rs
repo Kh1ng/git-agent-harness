@@ -264,6 +264,20 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 reference: mr.url.clone(),
             };
         }
+        // TICKET-128: a restricted profile (allow_pull_request_creation
+        // == false) must never enter the auto-merge path. The reviewer
+        // verdict and CI status remain authoritative; the work simply
+        // stays at a human handoff instead of auto-merging. This is an
+        // independent axis from reviewer routing and merge policy.
+        if !snapshot.publishing_allow_pr {
+            return NextAction::HumanRequired {
+                reason: format!(
+                    "MR on branch '{}' approved with CI passing, but profile publishing policy forbids PR/MR creation (human handoff)",
+                    mr.branch
+                ),
+                reference: mr.url.clone(),
+            };
+        }
         return NextAction::MergeMr {
             work_id: mr.work_id.clone(),
             branch: mr.branch.clone(),
@@ -291,7 +305,6 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             ),
         };
     }
-
     // Fallback: if no active MR needs review/fix/merge but there are
     // human-blocked MRs under StopForHuman merge policy, surface the
     // first one as HumanRequired.  All other blocked MRs (retry-cap
@@ -1128,6 +1141,7 @@ mod tests {
             available_tickets: vec![],
             fix_attempt_counts: std::collections::HashMap::new(),
             merge_attempt_counts: std::collections::HashMap::new(),
+            publishing_allow_pr: true,
         }
     }
 

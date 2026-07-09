@@ -687,6 +687,7 @@ mod tests {
             review_timeout_seconds: None,
             routing: crate::config::RoutingPolicy::default(),
             pacing: crate::quota::PacingConfig::default(),
+            publishing: Default::default(),
         };
         let mut entry =
             crate::ledger::LedgerEntry::new("test", &prof, "codex", mode, "x", None, None);

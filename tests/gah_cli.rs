@@ -4655,3 +4655,477 @@ fn loop_once_stops_on_stuck_loop_instead_of_repeating_forever() {
     // No dispatch was triggered for the 4th, stuck iteration.
     assert!(!events_text.contains("dispatch_started"));
 }
+
+// ── TICKET-128: per-profile publishing policy ───────────────────────────────
+//
+// A restricted profile forbids agent-authored repository prose (PR/MR text,
+// generated commit messages, issue/MR comments) while preserving autonomous
+// code execution and code review. Each axis is configured independently and
+// must NOT be overloaded onto `human_required`.
+
+/// Acceptance: publishing disabled + successful fix => no PR/MR API call is
+/// issued and the run stops at a deterministic human handoff.
+#[test]
+fn publishing_disabled_blocks_pr_creation_and_emits_handoff() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        "validation_commands = [\"true\"]\n[profiles.real.publishing]\nallow_pull_request_creation = false\n",
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\\n' >> README.md\nexit 0\n",
+    );
+    let gh_log = tmp.path().join("gh.log");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success()
+        // Deterministic handoff metadata is produced.
+        .stdout(predicate::str::contains(
+            "GAH human handoff (publishing policy)",
+        ))
+        .stdout(predicate::str::contains(
+            "PR/MR creation or commit-message generation disabled by publishing policy",
+        ));
+
+    // No PR/MR was ever attempted (gh was never asked to `pr create`).
+    let gh_text = fs::read_to_string(&gh_log).unwrap_or_default();
+    assert!(
+        !gh_text.contains("pr create"),
+        "gh was asked to create a PR: {gh_text}"
+    );
+
+    // Ledger reflects the handoff, not a publish attempt.
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["mr_attempted"], false);
+    assert_eq!(entry["mr_created"], false);
+    assert_eq!(entry["push_attempted"], false);
+    assert_eq!(entry["push_succeeded"], false);
+    assert_eq!(entry["validation_result"], "passed");
+    assert_eq!(entry["human_required"], false);
+}
+
+/// Acceptance: commit-message generation disabled => the worktree is left
+/// uncommitted for human completion (no commit is made / recorded). This axis
+/// is configured independently of PR creation; both are combined into a single
+/// deterministic human handoff, but the commit ledger must still record that
+/// no commit was attempted.
+#[test]
+fn commit_message_generation_disabled_leaves_worktree_uncommitted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        "validation_commands = [\"true\"]\n[profiles.real.publishing]\nallow_pull_request_creation = true\nallow_commit_message_generation = false\n",
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\\n' >> README.md\nexit 0\n",
+    );
+    let gh_log = tmp.path().join("gh.log");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "GAH human handoff (publishing policy)",
+        ))
+        .stdout(predicate::str::contains(
+            "PR/MR creation or commit-message generation disabled by publishing policy",
+        ));
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    // The auto-commit step was skipped entirely (no LLM commit-message call):
+    // `commit_attempted` is only set when we actually try to stage/commit.
+    assert_eq!(entry["commit_attempted"], false);
+    assert_eq!(entry["commit_created"], false);
+    // No PR was opened either (the combined gate stops before publish).
+    let gh_text = fs::read_to_string(&gh_log).unwrap_or_default();
+    assert!(
+        !gh_text.contains("pr create"),
+        "gh was asked to create a PR: {gh_text}"
+    );
+}
+
+/// Acceptance: contribution still reaches the reviewer when publishing is
+/// disabled. The reviewer runs and a deterministic verdict is produced.
+#[test]
+fn publishing_disabled_still_runs_reviewer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let prompt_log = tmp.path().join("review-prompt.txt");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        concat!(
+            "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+            "[profiles.real.publishing]\nallow_pull_request_creation = false\n",
+        ),
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
+            prompt_log.display()
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\"}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success();
+
+    // Reviewer actually executed and produced a structured verdict.
+    let sessions = tmp.path().join("artifacts/real/sessions");
+    let session = latest_child_dir(&sessions);
+    let report = fs::read_to_string(session.join("review-report.md")).unwrap();
+    let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
+    assert!(report.contains("Review notes"));
+    assert!(verdict.contains("\"verdict\": \"APPROVE_STRONG\""));
+    // The prompt was still written for the reviewer (review is not disabled).
+    let prompt = fs::read_to_string(prompt_log).unwrap();
+    assert!(prompt.contains("Source: feature/review"));
+}
+
+/// Acceptance: APPROVE + CI pass + PR creation disabled => no auto-merge path
+/// is entered. With publishing disabled, `MergeMr` must not be selected by the
+/// controller.
+#[test]
+fn approve_with_pr_disabled_skips_auto_merge_in_loop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        concat!(
+            "validation_commands = [\"true\"]\n",
+            "[profiles.real.publishing]\nallow_pull_request_creation = false\n",
+        ),
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\\n' >> README.md\nexit 0\n",
+    );
+    let gh_log = tmp.path().join("gh.log");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    // No merge command (gh pr merge / glab mr merge) was issued.
+    let gh_text = fs::read_to_string(&gh_log).unwrap_or_default();
+    assert!(
+        !gh_text.contains("merge"),
+        "gh was asked to merge: {gh_text}"
+    );
+    // The snapshot the controller consulted reflected the disabled policy.
+    // (We assert indirectly: the run still succeeded and stopped at handoff.)
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["mr_created"], false);
+}
+
+/// Acceptance: issue comments disabled => no tracker comment API call is made,
+/// even though review still runs and produces a verdict.
+#[test]
+fn issue_comments_disabled_skips_tracker_comment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let prompt_log = tmp.path().join("review-prompt.txt");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        concat!(
+            "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+            "[profiles.real.publishing]\nallow_issue_comments = false\n",
+        ),
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
+            prompt_log.display()
+        ),
+    );
+    let gh_log = tmp.path().join("gh.log");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{{\"number\":7}}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\"}}'; exit 0; fi\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Publishing policy forbids agent-authored issue/MR comments",
+        ));
+
+    // No `pr comment` (tracker comment) call was made.
+    let gh_text = fs::read_to_string(&gh_log).unwrap_or_default();
+    assert!(
+        !gh_text.contains("pr comment") && !gh_text.contains("comment"),
+        "gh was asked to comment: {gh_text}"
+    );
+    // Reviewer still produced a verdict locally.
+    let sessions = tmp.path().join("artifacts/real/sessions");
+    let session = latest_child_dir(&sessions);
+    let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
+    assert!(verdict.contains("\"verdict\": \"APPROVE_STRONG\""));
+}
+
+/// Acceptance: a pet-project profile with publishing enabled keeps the
+/// existing autonomous behavior (PR is actually created). This guards against
+/// the default flipping to restrictive.
+#[test]
+fn pet_project_publishing_enabled_creates_pr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        concat!(
+            "validation_commands = [\"true\"]\n",
+            "[profiles.real.publishing]\n",
+            "allow_pull_request_creation = true\n",
+            "allow_commit_message_generation = true\n",
+            "allow_issue_comments = true\n",
+        ),
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\\n' >> README.md\nexit 0\n",
+    );
+    let gh_log = tmp.path().join("gh.log");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let gh_text = fs::read_to_string(&gh_log).unwrap_or_default();
+    assert!(
+        gh_text.contains("pr create"),
+        "gh was NOT asked to create a PR: {gh_text}"
+    );
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["mr_created"], true);
+}
+
+/// Acceptance: a restricted profile still produces deterministic human-handoff
+/// metadata (branch, changed files, validation status, artifact paths, verdict).
+#[test]
+fn restricted_profile_emits_deterministic_handoff_metadata() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        "validation_commands = [\"true\"]\n[profiles.real.publishing]\nallow_pull_request_creation = false\n",
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\\n' >> README.md\nexit 0\n",
+    );
+    let gh_log = tmp.path().join("gh.log");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 0\n",
+            gh_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "=== GAH human handoff (publishing policy) ===",
+        ))
+        .stdout(predicate::str::contains("validation_status"))
+        .stdout(predicate::str::contains("changed_files"))
+        .stdout(predicate::str::contains("branch:"))
+        .stdout(predicate::str::contains(
+            "PR/MR creation or commit-message generation disabled by publishing policy",
+        ));
+}

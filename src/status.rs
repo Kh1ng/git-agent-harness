@@ -37,6 +37,11 @@ pub struct StatusSnapshot {
     /// TICKET-127: merge attempt counts per branch for the auto-merge
     /// retry cap.
     pub merge_attempt_counts: std::collections::HashMap<String, usize>,
+    /// TICKET-128: per-profile publishing policy. When PR/MR creation is
+    /// disabled, the controller must never enter the auto-merge path even
+    /// when a strong reviewer has approved and CI is green. This is an
+    /// independent axis from reviewer routing and merge policy.
+    pub publishing_allow_pr: bool,
 }
 
 #[derive(Serialize)]
@@ -403,6 +408,7 @@ pub fn build_snapshot(
         available_tickets,
         fix_attempt_counts,
         merge_attempt_counts,
+        publishing_allow_pr: profile.publishing.allow_pull_request_creation,
     };
 
     Ok(snapshot)
