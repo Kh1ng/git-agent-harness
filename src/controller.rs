@@ -215,6 +215,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 }
             }
             "READY_FOR_HUMAN" => {
+                let merge_policy = snapshot.profile.merge_policy;
                 if mr.ci_passed {
                     let merge_attempts = snapshot
                         .merge_attempt_counts
@@ -226,7 +227,13 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     } else {
                         human_blocked_mrs.push(mr);
                     }
+                } else if merge_policy == crate::config::MergePolicy::StopForHuman {
+                    // TICKET-127: under stop_for_human, a READY_FOR_HUMAN
+                    // MR without CI passed still defers to the human
+                    // immediately — no CI gate needed.
+                    human_blocked_mrs.push(mr);
                 } else {
+                    // CI not yet passed — re-check later (no_op fallback).
                     human_blocked_mrs.push(mr);
                 }
             }
@@ -242,17 +249,6 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             branch: mr.branch.clone(),
             mr_url: mr.url.clone(),
             reason: format!("MR on branch '{}' classified NEEDS_REVIEW", mr.branch),
-        };
-    }
-    if let Some(mr) = merge_candidates.first() {
-        return NextAction::MergeMr {
-            work_id: mr.work_id.clone(),
-            branch: mr.branch.clone(),
-            mr_url: mr.url.clone(),
-            reason: format!(
-                "MR on branch '{}' approved by a strong reviewer with CI passing",
-                mr.branch
-            ),
         };
     }
     if let Some(mr) = merge_candidates.first() {
@@ -293,6 +289,27 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 "MR on branch '{}' classified {} - reusing existing branch",
                 mr.branch, mr.classification
             ),
+        };
+    }
+
+    // Fallback: if no active MR needs review/fix/merge but there are
+    // human-blocked MRs under StopForHuman merge policy, surface the
+    // first one as HumanRequired.  All other blocked MRs (retry-cap
+    // exhausted, CI not yet passed) no-op — they appear in status
+    // reports but don't park the profile.
+    if !human_blocked_mrs.is_empty()
+        && review_candidates.is_empty()
+        && merge_candidates.is_empty()
+        && fix_candidates.is_empty()
+        && snapshot.profile.merge_policy == crate::config::MergePolicy::StopForHuman
+    {
+        let mr = human_blocked_mrs[0];
+        return NextAction::HumanRequired {
+            reason: format!(
+                "MR on branch '{}' classified {} (human decision required)",
+                mr.branch, mr.classification
+            ),
+            reference: mr.url.clone(),
         };
     }
 
