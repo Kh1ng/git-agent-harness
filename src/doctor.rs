@@ -275,7 +275,7 @@ fn check_backend_executables(defaults: &Defaults, profile: &Profile) -> bool {
 /// internally consistent with the provider. `gitlab_mwps` only makes sense
 /// for a GitLab-backed profile; flag it on any other provider so the operator
 /// discovers the misconfiguration in `doctor` rather than at merge time.
-fn check_merge_policy(profile: &Profile) -> bool {
+pub(crate) fn check_merge_policy(profile: &Profile) -> bool {
     let policy = match &profile.routing.merge_policy {
         None => {
             // No profile-level override: the default (`auto`) always applies.
@@ -452,5 +452,29 @@ mod tests {
         assert!(check_push_url(&gitlab_profile(Some(
             "https://gitlab.example.internal/api/v4"
         ))));
+    }
+
+    // Issue #124 / TICKET-127: `gitlab_mwps` is only valid on GitLab providers.
+    // On a GitHub profile it must be reported as a hard doctor failure.
+    #[test]
+    fn doctor_rejects_gitlab_mwps_on_non_gitlab_provider() {
+        let mut profile = github_profile();
+        profile.routing.merge_policy = Some(crate::config::MergePolicy::GitlabMwps);
+        assert!(!crate::doctor::check_merge_policy(&profile));
+
+        let mut gitlab = gitlab_profile(None);
+        gitlab.routing.merge_policy = Some(crate::config::MergePolicy::GitlabMwps);
+        assert!(crate::doctor::check_merge_policy(&gitlab));
+
+        // Non-MWPS policies are valid on every provider.
+        let mut github = github_profile();
+        github.routing.merge_policy = Some(crate::config::MergePolicy::StopForHuman);
+        assert!(crate::doctor::check_merge_policy(&github));
+    }
+
+    fn github_profile() -> Profile {
+        let mut p = gitlab_profile(None);
+        p.provider = "github".into();
+        p
     }
 }

@@ -1176,6 +1176,60 @@ mod tests {
         assert_eq!(action.kind(), "human_required");
     }
 
+    // Issue #124 / TICKET-127: per-repo merge policy gates what happens for a
+    // strong-approved MR whose CI has passed. Default (`auto`) merges.
+    #[test]
+    fn merge_policy_auto_merges_approved_mr_with_ci_passed() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::Auto;
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "merge_mr");
+    }
+
+    // `stop_for_human` must never auto-merge: it surfaces the decision to a
+    // human operator once strong review is done and CI is green.
+    #[test]
+    fn merge_policy_stop_for_human_awaits_human_with_ci_passed() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
+        assert!(action.reason().contains("stop_for_human"));
+    }
+
+    // `gitlab_mwps` still decides `MergeMr` (the MWPS flag is set at execution
+    // time in `execute_action`); it must not fall back to `human_required`.
+    #[test]
+    fn merge_policy_gitlab_mwps_decides_merge_mr_with_ci_passed() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::GitlabMwps;
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "merge_mr");
+        assert!(action.reason().contains("merge-when-pipeline-succeeds"));
+    }
+
+    // `stop_for_human` only changes behavior when CI has passed. A non-green
+    // `READY_FOR_HUMAN` MR still defers to a human (no merge attempted).
+    #[test]
+    fn merge_policy_stop_for_human_without_ci_passed_is_human_required() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", false));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
+    }
+
     #[test]
     fn merged_and_closed_mrs_are_not_actionable() {
         let mut snapshot = empty_snapshot();
