@@ -2677,7 +2677,7 @@ fn review(
             notify_event(
                 profile,
                 NotifyEvent::ReviewVerdict {
-                    verdict: &verdict.verdict,
+                    verdict: published_review_verdict(&verdict.verdict).leak(),
                     mr_url: mr_url.as_deref().unwrap_or("unknown"),
                 },
             );
@@ -3120,10 +3120,10 @@ mod tests {
         first_markdown_heading, format_issue_for_focus, is_issue_number_reference,
         mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
         parse_review_verdict, parse_ticket_metadata, parse_ticket_metadata_from_issue,
-        render_review_comment, review_labels, review_preflight, run_backend,
-        scan_available_tickets, strip_terminal_noise, validation_failure_no_progress_reason,
-        ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewerTier, RouteDecision,
-        TicketMetadata, ValidationFailureProgress,
+        published_review_verdict, render_review_comment, review_labels, review_preflight,
+        run_backend, scan_available_tickets, strip_terminal_noise,
+        validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
+        MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
@@ -5012,6 +5012,43 @@ The parser should retain structured sections.\n\n\
         assert!(comment.contains("missing test coverage on one path"));
         assert!(comment.contains("Risk notes:"));
         assert!(comment.contains("new module coupling"));
+    }
+
+    #[test]
+    fn published_review_verdict_strips_internal_tier() {
+        // Issue #129 Bug B: the reviewer may return APPROVE_STRONG /
+        // APPROVE_WEAK as an internal routing tier. That tier must NOT leak
+        // into the human-facing review status -- humans see a strict
+        // APPROVE / REJECT. The STRONG/WEAK strength stays internal and only
+        // drives auto-merge eligibility.
+        assert_eq!(published_review_verdict("APPROVE_STRONG"), "APPROVE");
+        assert_eq!(published_review_verdict("APPROVE_WEAK"), "APPROVE");
+        assert_eq!(published_review_verdict("REJECT"), "REJECT");
+        // NEEDS_FIX / HUMAN_REVIEW carry no tier, published as-is.
+        assert_eq!(published_review_verdict("NEEDS_FIX"), "NEEDS_FIX");
+        assert_eq!(published_review_verdict("HUMAN_REVIEW"), "HUMAN_REVIEW");
+    }
+
+    #[test]
+    fn render_review_comment_publishes_approve_not_internal_tier() {
+        // Issue #129 Bug B: the posted MR body must show APPROVE, never the
+        // internal APPROVE_STRONG / APPROVE_WEAK routing tier.
+        let strong: crate::models::ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,
+                "blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
+        )
+        .unwrap();
+        let weak: crate::models::ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE_WEAK","confidence":"medium","human_required":true,
+                "blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
+        )
+        .unwrap();
+        let s = render_review_comment(&strong, Path::new("/tmp/session"));
+        let w = render_review_comment(&weak, Path::new("/tmp/session"));
+        assert!(s.contains("GAH review verdict: `APPROVE`"));
+        assert!(!s.contains("APPROVE_STRONG"));
+        assert!(w.contains("GAH review verdict: `APPROVE`"));
+        assert!(!w.contains("APPROVE_WEAK"));
     }
 
     #[test]
@@ -7081,10 +7118,27 @@ fn parse_review_verdict(
     Ok(verdict)
 }
 
+/// Issue #129 / #128: the reviewer's own verdict vocabulary includes an
+/// internal routing tier (`APPROVE_STRONG` / `APPROVE_WEAK`) that must never
+/// be published verbatim to the repository. Humans and the issue tracker see
+/// a strict `APPROVE` / `REJECT` status; the STRONG/WEAK strength stays
+/// internal and only drives merge-policy / auto-merge eligibility in the
+/// controller (see `review_labels` and `decide_next_action`).
+pub(crate) fn published_review_verdict(verdict: &str) -> String {
+    match verdict {
+        "APPROVE_STRONG" | "APPROVE_WEAK" => "APPROVE".to_string(),
+        "REJECT" => "REJECT".to_string(),
+        // NEEDS_FIX / HUMAN_REVIEW carry no strength tier, so they are
+        // published as-is.
+        other => other.to_string(),
+    }
+}
+
 fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &Path) -> String {
+    let published = published_review_verdict(&verdict.verdict);
     let mut out = format!(
         "GAH review verdict: `{}`\n\nConfidence: `{}`\nHuman required: `{}`\nReviewer: `{}` / `{}`\nArtifacts: `{}`\n",
-        verdict.verdict,
+        published,
         verdict.confidence,
         verdict.human_required,
         verdict.effective_backend.as_deref().unwrap_or("unknown"),
