@@ -25,6 +25,7 @@ pub fn run_with_validate(
             failed |= !check_env_files(profile);
             failed |= !check_backend_executables(&cfg.defaults, profile);
             failed |= !check_review_capabilities(&cfg, profile);
+            failed |= !check_merge_policy(profile);
         }
     }
 
@@ -270,6 +271,35 @@ fn check_backend_executables(defaults: &Defaults, profile: &Profile) -> bool {
     !failed
 }
 
+/// Issue #124 / TICKET-127: validates that the resolved merge policy is
+/// internally consistent with the provider. `gitlab_mwps` only makes sense
+/// for a GitLab-backed profile; flag it on any other provider so the operator
+/// discovers the misconfiguration in `doctor` rather than at merge time.
+pub(crate) fn check_merge_policy(profile: &Profile) -> bool {
+    let policy = match &profile.routing.merge_policy {
+        None => {
+            // No profile-level override: the default (`auto`) always applies.
+            print_check(CheckStatus::Pass, "merge policy", "default (auto)");
+            return true;
+        }
+        Some(p) => p,
+    };
+    let label = policy.as_str();
+    if *policy == config::MergePolicy::GitlabMwps && profile.provider != "gitlab" {
+        print_check(
+            CheckStatus::Fail,
+            "merge policy",
+            &format!(
+                "merge_policy '{}' requires provider 'gitlab' but profile uses '{}'",
+                label, profile.provider
+            ),
+        );
+        return false;
+    }
+    print_check(CheckStatus::Pass, "merge policy", label);
+    true
+}
+
 /// TICKET-105: reuses `dispatch::review_preflight` -- the exact same check
 /// the real review invocation runs -- so preflight and actual invocation
 /// can never drift into inconsistent configuration.
@@ -423,5 +453,29 @@ mod tests {
         assert!(check_push_url(&gitlab_profile(Some(
             "https://gitlab.example.internal/api/v4"
         ))));
+    }
+
+    // Issue #124 / TICKET-127: `gitlab_mwps` is only valid on GitLab providers.
+    // On a GitHub profile it must be reported as a hard doctor failure.
+    #[test]
+    fn doctor_rejects_gitlab_mwps_on_non_gitlab_provider() {
+        let mut profile = github_profile();
+        profile.routing.merge_policy = Some(crate::config::MergePolicy::GitlabMwps);
+        assert!(!crate::doctor::check_merge_policy(&profile));
+
+        let mut gitlab = gitlab_profile(None);
+        gitlab.routing.merge_policy = Some(crate::config::MergePolicy::GitlabMwps);
+        assert!(crate::doctor::check_merge_policy(&gitlab));
+
+        // Non-MWPS policies are valid on every provider.
+        let mut github = github_profile();
+        github.routing.merge_policy = Some(crate::config::MergePolicy::StopForHuman);
+        assert!(crate::doctor::check_merge_policy(&github));
+    }
+
+    fn github_profile() -> Profile {
+        let mut p = gitlab_profile(None);
+        p.provider = "github".into();
+        p
     }
 }

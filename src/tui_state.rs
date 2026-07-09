@@ -198,6 +198,7 @@ mod tests {
                 provider: "github".into(),
                 local_path: "/tmp/repo".into(),
                 default_target_branch: "main".into(),
+                merge_policy: crate::config::MergePolicy::default(),
             },
             observations: Observations {
                 sync: ObservationStatus { status: "ok" },

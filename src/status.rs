@@ -52,6 +52,9 @@ pub struct ProfileIdentity {
     pub provider: String,
     pub local_path: String,
     pub default_target_branch: String,
+    /// Resolved per-repo merge policy (Issue #124 / TICKET-127). Inherits the
+    /// canonical/defaults policy when the profile doesn't set its own.
+    pub merge_policy: crate::config::MergePolicy,
 }
 
 #[derive(Serialize)]
@@ -132,6 +135,10 @@ pub fn build_snapshot(
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let generated_at = now.format(&Rfc3339).unwrap_or_default();
 
+    let resolved_merge_policy = profile
+        .effective_routing(&cfg.defaults)
+        .merge_policy
+        .unwrap_or_default();
     let profile_identity = ProfileIdentity {
         profile: profile_name.to_string(),
         display_name: profile.display_name.clone(),
@@ -139,6 +146,7 @@ pub fn build_snapshot(
         provider: profile.provider.clone(),
         local_path: profile.local_path.clone(),
         default_target_branch: profile.default_target_branch.clone(),
+        merge_policy: resolved_merge_policy,
     };
 
     let mut errors = Vec::new();

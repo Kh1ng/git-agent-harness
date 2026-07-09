@@ -1,7 +1,38 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// TICKET-127/Issue #124: per-repo merge policy controlling what the
+/// controller does once an MR is `READY_FOR_HUMAN` (strong reviewer approved)
+/// and CI has been evaluated.
+///
+/// * `Auto` (default): current behavior -- strong review + green CI triggers
+///   `MergeMr` (GAH merges itself).
+/// * `StopForHuman`: strong review done + CI evaluated -> `HumanRequired`; GAH
+///   never auto-merges, an operator clicks merge manually.
+/// * `GitlabMwps`: after strong approval GAH sets GitLab's "merge when pipeline
+///   succeeds" flag and does NOT merge itself; GitLab enforces the CI gate
+///   natively. Only meaningful for GitLab; other providers fall back to `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MergePolicy {
+    #[default]
+    Auto,
+    StopForHuman,
+    GitlabMwps,
+}
+
+impl MergePolicy {
+    /// Canonical config string for a merge policy (Issue #124 / TICKET-127).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MergePolicy::Auto => "auto",
+            MergePolicy::StopForHuman => "stop_for_human",
+            MergePolicy::GitlabMwps => "gitlab_mwps",
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct GahConfig {
@@ -334,6 +365,11 @@ pub struct RoutingPolicy {
     pub max_known_estimated_cost_per_week: Option<f64>,
     #[serde(default)]
     pub max_known_actual_cost_per_week: Option<f64>,
+    /// TICKET-127/Issue #124: per-repo merge policy gating what the
+    /// controller does for a `READY_FOR_HUMAN` MR whose CI has been evaluated.
+    /// `None` inherits the canonical/defaults policy (resolved to `Auto`).
+    #[serde(default)]
+    pub merge_policy: Option<MergePolicy>,
 }
 
 impl RoutingPolicy {
@@ -424,6 +460,7 @@ impl RoutingPolicy {
             max_known_actual_cost_per_week: self
                 .max_known_actual_cost_per_week
                 .or(defaults.max_known_actual_cost_per_week),
+            merge_policy: self.merge_policy.or(defaults.merge_policy),
         }
     }
 
@@ -645,6 +682,7 @@ fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> Ro
     let mut capabilities = canonical.review_required_capabilities;
     capabilities.extend(repo.review_required_capabilities);
     repo.review_required_capabilities = capabilities;
+    repo.merge_policy = repo.merge_policy.or(canonical.merge_policy);
     repo
 }
 
