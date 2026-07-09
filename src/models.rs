@@ -18,6 +18,11 @@ pub struct AvailableTicket {
     pub prior_attempt_count: usize,
     pub last_failure_class: Option<String>,
     pub has_active_mr: bool,
+    /// TICKET-human-required-scoping: effective `human_required` for this
+    /// work item, derived from its own ledger history (a review verdict with
+    /// `human_required`). Scoped to this ticket only; it does NOT block the
+    /// profile. `None` work items (no work_id) are treated as not blocked.
+    pub human_required: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

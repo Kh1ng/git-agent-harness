@@ -168,6 +168,12 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     }
 
     if let Some(blocker) = snapshot.blockers.first() {
+        // Rule 2 fires only on GENUINE profile-wide blockers (sync failure,
+        // invalid config, required infra unavailable, auth failure with no
+        // viable route, explicit profile-level human gate). A ticket-scoped
+        // `human_required` no longer lands here -- it is reported per work
+        // item in `snapshot.blocked_work_items` and must NOT freeze the
+        // whole profile (TICKET-human-required-scoping).
         return NextAction::HumanRequired {
             reason: blocker
                 .message
@@ -266,6 +272,11 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         .available_tickets
         .iter()
         .filter(|t| !t.has_active_mr && t.prior_attempt_count > 0)
+        // TICKET-human-required-scoping: a work-item-scoped human_required
+        // ticket is blocked at the item level. Skip it so it is neither
+        // retried, escalated, nor redispatched -- but unrelated eligible
+        // tickets keep flowing.
+        .filter(|t| !t.human_required)
         .collect();
     failed_tickets.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
 
@@ -321,6 +332,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         .available_tickets
         .iter()
         .filter(|t| !t.has_active_mr && t.prior_attempt_count == 0)
+        // TICKET-human-required-scoping: skip work-item-scoped
+        // human_required tickets; they await human action, not dispatch.
+        .filter(|t| !t.human_required)
         .collect();
     undispatched.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
     if let Some(ticket) = undispatched.first() {
@@ -916,6 +930,7 @@ mod tests {
             recent_ledger: None,
             constraints: vec![],
             blockers: vec![],
+            blocked_work_items: vec![],
             errors: vec![],
             available_tickets: vec![],
             fix_attempt_counts: std::collections::HashMap::new(),
@@ -950,6 +965,7 @@ mod tests {
         prior_attempt_count: usize,
         last_failure_class: Option<&str>,
         has_active_mr: bool,
+        human_required: bool,
     ) -> AvailableTicket {
         AvailableTicket {
             ticket_path: path.into(),
@@ -960,6 +976,7 @@ mod tests {
             prior_attempt_count,
             last_failure_class: last_failure_class.map(str::to_string),
             has_active_mr,
+            human_required,
         }
     }
 
@@ -1108,6 +1125,7 @@ mod tests {
             1,
             Some("agent_no_progress"),
             false,
+            false,
         ));
         let action = decide_next_action(&snapshot);
         match action {
@@ -1124,6 +1142,7 @@ mod tests {
             Some("TICKET-002"),
             1,
             Some("harness_error"),
+            false,
             false,
         ));
 
@@ -1160,6 +1179,7 @@ mod tests {
             2, // == AUTO_RETRY_CAP
             Some("agent_no_progress"),
             false,
+            false,
         ));
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
@@ -1173,6 +1193,7 @@ mod tests {
             Some("TICKET-004"),
             0,
             None,
+            false,
             false,
         ));
         let action = decide_next_action(&snapshot);
@@ -1193,9 +1214,191 @@ mod tests {
             1,
             Some("agent_no_progress"),
             true, // has_active_mr
+            false,
         ));
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "no_op");
+    }
+
+    // TICKET-human-required-scoping regression tests.
+    // A ticket-scoped human_required must NOT freeze the profile: the blocked
+    // ticket is skipped, and an unrelated eligible ticket still dispatches.
+    #[test]
+    fn ticket_scoped_human_block_does_not_freeze_profile() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-A-x.md",
+            Some("TICKET-A"),
+            1,
+            None,
+            false,
+            true,
+        ));
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-B-x.md",
+            Some("TICKET-B"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        // profile-wide blockers must stay empty
+        assert!(snapshot.blockers.is_empty());
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-B"))
+            }
+            other => panic!("expected DispatchTicket for TICKET-B, got {other:?}"),
+        }
+    }
+
+    // Most-recent ledger entry belongs to another blocked ticket: the eligible
+    // one (written earlier) must remain dispatchable. Directly reproduces the
+    // observed incident (a newer NEEDS_FIX verdict froze the whole profile).
+    #[test]
+    fn most_recent_ledger_entry_belongs_to_other_blocked_ticket() {
+        let mut snapshot = empty_snapshot();
+        // B is eligible (written earlier, human_required false)
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-B-x.md",
+            Some("TICKET-B"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        // A is human-blocked (the newer ledger entry)
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-A-x.md",
+            Some("TICKET-A"),
+            1,
+            None,
+            false,
+            true,
+        ));
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-B"))
+            }
+            other => panic!("expected DispatchTicket for TICKET-B, got {other:?}"),
+        }
+    }
+
+    // Human-blocked ticket remains blocked (not redispatched, not escalated).
+    #[test]
+    fn human_blocked_ticket_remains_blocked() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-A-x.md",
+            Some("TICKET-A"),
+            1,
+            None,
+            false,
+            true,
+        ));
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "no_op");
+    }
+
+    // Multiple blocked and eligible tickets coexist: only eligible ones dispatch.
+    #[test]
+    fn multiple_blocked_and_eligible_coexist() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-A-x.md",
+            Some("TICKET-A"),
+            1,
+            None,
+            false,
+            true,
+        ));
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-B-x.md",
+            Some("TICKET-B"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-C-x.md",
+            Some("TICKET-C"),
+            1,
+            None,
+            false,
+            true,
+        ));
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-D-x.md",
+            Some("TICKET-D"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        assert!(snapshot.blockers.is_empty());
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-B"))
+            }
+            other => panic!("expected DispatchTicket for TICKET-B, got {other:?}"),
+        }
+    }
+
+    // Genuine profile-wide blocker (sync failure observation) still halts the
+    // profile. It is reported via `errors` (-> decide_next_action Rule 1 =>
+    // NoOp), NOT via a ticket-scoped human_required `blockers` entry. The fix
+    // must preserve this path while no longer freezing on ticket-scoped HR.
+    #[test]
+    fn genuine_profile_wide_blocker_still_stops_dispatch() {
+        let mut snapshot = empty_snapshot();
+        snapshot.errors.push(StatusError {
+            subsystem: "sync".into(),
+            message: "gh not found".into(),
+            incomplete_snapshot: true,
+        });
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-B-x.md",
+            Some("TICKET-B"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "no_op");
+        // ticket-scoped human_required must NOT create a profile-wide blocker
+        assert!(snapshot.blockers.is_empty());
+        // the genuine profile-wide failure is recorded in errors
+        assert!(!snapshot.errors.is_empty());
+    }
+
+    // A ticket whose human_required has since cleared must no longer be blocked.
+    // (build_snapshot re-derives per-work-item human_required from current
+    // ledger history; here we model the cleared state directly.)
+    #[test]
+    fn later_state_clears_prior_human_requirement() {
+        let mut snapshot = empty_snapshot();
+        // No human_required flag + fresh (prior_attempt_count 0) -> eligible, dispatches.
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-A-x.md",
+            Some("TICKET-A"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-A"))
+            }
+            other => panic!("expected DispatchTicket for cleared TICKET-A, got {other:?}"),
+        }
+        assert!(snapshot.blocked_work_items.is_empty());
     }
 
     #[test]
@@ -1380,6 +1583,7 @@ mod tests {
                 last_failure_class: None,
                 recommended_backend: None,
                 recommended_model: None,
+                human_required: false,
             });
         }
 
