@@ -1198,7 +1198,7 @@ fn improve(
     let branch = if let Some(ref existing_branch) = args.existing_branch {
         existing_branch.clone()
     } else {
-        format!("gah/{}-{}", profile.repo_id, &ts)
+        format!("gah/{}-{}", profile.repo_id, ts)
     };
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
     let repo = Path::new(&profile.local_path);
@@ -1867,7 +1867,7 @@ fn experiment(
     }
 
     let ts = timestamp();
-    let branch = format!("gah/exp-{}-{}", profile.repo_id, &ts);
+    let branch = format!("gah/exp-{}-{}", profile.repo_id, ts);
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
     let repo = Path::new(&profile.local_path);
 
@@ -2777,7 +2777,7 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
     println!("DRY RUN — no mutations will be performed\n");
     println!("## What would happen\n");
     let ts = timestamp();
-    let branch = format!("gah/{}-{}", profile.repo_id, &ts);
+    let branch = format!("gah/{}-{}", profile.repo_id, ts);
     let session_dir = PathBuf::from(&profile.artifact_root)
         .join("sessions")
         .join(&ts);
