@@ -234,6 +234,20 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // unresolved discussion, external check) falls back to a human
         // after the same retry cap FixMr uses, rather than retrying forever.
         if mr.ci_passed {
+            // TICKET-128: a restricted profile (allow_pull_request_creation
+            // == false) must never enter the auto-merge path. The reviewer
+            // verdict and CI status remain authoritative; the work simply
+            // stays at a human handoff instead of auto-merging. This is an
+            // independent axis from reviewer routing and merge policy.
+            if !snapshot.publishing_allow_pr {
+                return NextAction::HumanRequired {
+                    reason: format!(
+                        "MR on branch '{}' approved with CI passing, but profile publishing policy forbids PR/MR creation (human handoff)",
+                        mr.branch
+                    ),
+                    reference: mr.url.clone(),
+                };
+            }
             let merge_attempts = snapshot
                 .merge_attempt_counts
                 .get(&mr.branch)
@@ -965,6 +979,7 @@ mod tests {
             available_tickets: vec![],
             fix_attempt_counts: std::collections::HashMap::new(),
             merge_attempt_counts: std::collections::HashMap::new(),
+            publishing_allow_pr: true,
         }
     }
 

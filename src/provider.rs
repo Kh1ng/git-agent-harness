@@ -607,6 +607,7 @@ mod tests {
             notify_command: None,
             routing: RoutingPolicy::default(),
             pacing: Default::default(),
+             publishing: Default::default(),
         }
     }
 

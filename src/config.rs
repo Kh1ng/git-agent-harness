@@ -81,6 +81,48 @@ impl Defaults {
     }
 }
 
+/// TICKET-128: per-profile policy for human-facing repository messaging.
+///
+/// This is an independent policy axis from reviewer routing and merge
+/// authorization. It lets a profile (e.g. a workplace repo) keep full
+/// autonomous code-execution + code-review capability while forbidding the
+/// agent from authoring or publishing coworker-facing prose: PR/MR text,
+/// generated commit messages, and issue-tracker comments.
+///
+/// All flags default to `true` so existing profiles keep their current
+/// behavior unless they opt into a restricted profile explicitly.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct PublishingPolicy {
+    /// When false, GAH must not create a PR/MR, and must not generate a
+    /// PR/MR title or body as a fallback side effect. The run stops at a
+    /// deterministic human handoff after code generation + validation.
+    #[serde(default = "default_true")]
+    pub allow_pull_request_creation: bool,
+    /// When false, GAH must not ask an LLM to generate commit text nor
+    /// synthesize prose commit messages from task context. The worktree is
+    /// left uncommitted for human completion.
+    #[serde(default = "default_true")]
+    pub allow_commit_message_generation: bool,
+    /// When false, GAH must not post status summaries, review findings,
+    /// completion messages, or other agent-generated prose to issue trackers.
+    #[serde(default = "default_true")]
+    pub allow_issue_comments: bool,
+}
+
+impl Default for PublishingPolicy {
+    fn default() -> Self {
+        Self {
+            allow_pull_request_creation: true,
+            allow_commit_message_generation: true,
+            allow_issue_comments: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Profile {
     pub display_name: String,
@@ -207,6 +249,13 @@ pub struct Profile {
     pub review_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub routing: RoutingPolicy,
+    /// TICKET-128: per-profile policy for human-facing repository messaging.
+    /// Independence axis from reviewer routing and merge authorization: a
+    /// restricted profile can keep full code-execution + review capability
+    /// while forbidding agent-authored PR/MR text, commit messages, and
+    /// issue-tracker comments. Defaults to everything allowed.
+    #[serde(default)]
+    pub publishing: PublishingPolicy,
     #[serde(default)]
     #[allow(dead_code)]
     pub pacing: crate::quota::PacingConfig,
@@ -681,6 +730,7 @@ pub mod tests {
             model_review: None,
             review_timeout_seconds: None,
             routing: RoutingPolicy::default(),
+            publishing: Default::default(),
             pacing: Default::default(),
         }
     }
@@ -729,6 +779,7 @@ pub mod tests {
             model_review: None,
             review_timeout_seconds: None,
             routing: RoutingPolicy::default(),
+            publishing: Default::default(),
             pacing: Default::default(),
         }
     }
