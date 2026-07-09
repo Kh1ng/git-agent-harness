@@ -226,6 +226,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         };
     }
     if let Some(mr) = mrs.iter().find(|mr| mr.classification == "READY_FOR_HUMAN") {
+        // Issue #124 / TICKET-127: per-repo merge policy gates what we do for a
+        // strong-approved MR whose CI has been evaluated.
+        let merge_policy = snapshot.profile.merge_policy;
         // TICKET-127: auto-merge when a strong reviewer approved (the only
         // path that sets the bare `gah-ready-for-human` label without also
         // setting `gah-human-review` -- see `review_labels`) AND CI
@@ -234,6 +237,19 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // unresolved discussion, external check) falls back to a human
         // after the same retry cap FixMr uses, rather than retrying forever.
         if mr.ci_passed {
+            // Under `stop_for_human`, GAH never merges: it surfaces the
+            // decision to a human operator once strong review is done and CI
+            // is green, and the operator clicks merge manually (e.g. the
+            // worldcup-props repo where the operator merges by hand).
+            if merge_policy == crate::config::MergePolicy::StopForHuman {
+                return NextAction::HumanRequired {
+                    reason: format!(
+                        "MR on branch '{}' strong-reviewed with CI passing; merge policy is 'stop_for_human' -- awaiting human merge",
+                        mr.branch
+                    ),
+                    reference: mr.url.clone(),
+                };
+            }
             let merge_attempts = snapshot
                 .merge_attempt_counts
                 .get(&mr.branch)
@@ -244,10 +260,16 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     work_id: mr.work_id.clone(),
                     branch: mr.branch.clone(),
                     mr_url: mr.url.clone(),
-                    reason: format!(
-                        "MR on branch '{}' approved by a strong reviewer with CI passing",
-                        mr.branch
-                    ),
+                    reason: match merge_policy {
+                        crate::config::MergePolicy::GitlabMwps => format!(
+                            "MR on branch '{}' approved by a strong reviewer with CI passing; setting GitLab merge-when-pipeline-succeeds",
+                            mr.branch
+                        ),
+                        _ => format!(
+                            "MR on branch '{}' approved by a strong reviewer with CI passing",
+                            mr.branch
+                        ),
+                    },
                 };
             }
             return NextAction::HumanRequired {
@@ -761,6 +783,10 @@ pub(crate) fn execute_action(
             ..
         } => {
             let profile = crate::config::get_profile(cfg, profile_name)?;
+            let merge_policy = profile
+                .effective_routing(&cfg.defaults)
+                .merge_policy
+                .unwrap_or_default();
             crate::events::record(
                 cfg,
                 crate::events::EventType::DispatchStarted,
@@ -768,8 +794,22 @@ pub(crate) fn execute_action(
                 action.work_id(),
                 "merge",
             )?;
-            let result = crate::dispatch::merge_branch(cfg, profile, branch, work_id, mr_url);
+            let gitlab_mwps = merge_policy == crate::config::MergePolicy::GitlabMwps
+                && profile.provider == "gitlab";
+            let result = if gitlab_mwps {
+                // Issue #124 / TICKET-127: set GitLab's merge-when-pipeline
+                // succeeds flag and return; GitLab enforces the CI gate
+                // natively. We never merge the MR ourselves in this mode.
+                let target = crate::provider::find_review_target_by_branch(profile, branch)
+                    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                crate::provider::gitlab_set_mwps(profile, &target.id)
+            } else {
+                crate::dispatch::merge_branch(cfg, profile, branch, work_id, mr_url)
+            };
             let outcome = match &result {
+                Ok(()) if gitlab_mwps => {
+                    format!("Set GitLab merge-when-pipeline-succeeds on branch '{branch}'")
+                }
                 Ok(()) => format!("Merged MR on branch '{branch}'"),
                 Err(e) => format!("Merge failed for branch '{branch}': {e:#}"),
             };
@@ -949,6 +989,7 @@ mod tests {
                 provider: "github".into(),
                 local_path: "/tmp/repo".into(),
                 default_target_branch: "main".into(),
+                merge_policy: crate::config::MergePolicy::default(),
             },
             observations: Observations {
                 sync: ObservationStatus { status: "ok" },
@@ -1131,6 +1172,60 @@ mod tests {
         snapshot
             .merge_attempt_counts
             .insert("gah/real-1".to_string(), 2); // == AUTO_RETRY_CAP
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
+    }
+
+    // Issue #124 / TICKET-127: per-repo merge policy gates what happens for a
+    // strong-approved MR whose CI has passed. Default (`auto`) merges.
+    #[test]
+    fn merge_policy_auto_merges_approved_mr_with_ci_passed() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::Auto;
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "merge_mr");
+    }
+
+    // `stop_for_human` must never auto-merge: it surfaces the decision to a
+    // human operator once strong review is done and CI is green.
+    #[test]
+    fn merge_policy_stop_for_human_awaits_human_with_ci_passed() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
+        assert!(action.reason().contains("stop_for_human"));
+    }
+
+    // `gitlab_mwps` still decides `MergeMr` (the MWPS flag is set at execution
+    // time in `execute_action`); it must not fall back to `human_required`.
+    #[test]
+    fn merge_policy_gitlab_mwps_decides_merge_mr_with_ci_passed() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::GitlabMwps;
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "merge_mr");
+        assert!(action.reason().contains("merge-when-pipeline-succeeds"));
+    }
+
+    // `stop_for_human` only changes behavior when CI has passed. A non-green
+    // `READY_FOR_HUMAN` MR still defers to a human (no merge attempted).
+    #[test]
+    fn merge_policy_stop_for_human_without_ci_passed_is_human_required() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", false));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
     }

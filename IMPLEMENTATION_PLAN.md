@@ -676,4 +676,57 @@ max_wall_time_seconds = 3600  # 1 hour
 - **Classification:** task_class, difficulty
 - **Behavior:** tool_calls_count, shell_calls_count, file_edits_count, test_runs_count
 - **Outcomes:** tests_passed, reviewer_approved, human_accepted
-- **Resources:** max_rss_mb, cpu_seconds
+
+---
+
+## 5. Per-Repo Merge Policy (Issue #124 / TICKET-127)
+
+### Problem Statement
+Merge behavior in `controller.rs::decide_next_action` (around line 228) was
+hardcoded: a `READY_FOR_HUMAN` MR whose CI had passed was always auto-merged
+(`MergeMr`). Some repos want GAH to stop at "strong review done + CI evaluated"
+and let a human click merge (e.g. `worldcup-props`, where the operator manually
+merged `!247`); GitLab can also enforce the CI gate natively via
+"merge when pipeline succeeds" (MWPS).
+
+### New Config
+`merge_policy` is an optional field on `RoutingPolicy` (per-profile), so it
+inherits the same default-resolution machinery as the rest of routing
+(`Profile::effective_routing(&cfg.defaults)`):
+
+```toml
+[profiles.worldcup-props.routing]
+merge_policy = "stop_for_human"   # or "auto" (default) | "gitlab_mwps"
+```
+
+The field is `Option<MergePolicy>` with `MergePolicy` (`Auto` default,
+`StopForHuman`, `GitlabMwps`) in `config.rs`, `#[serde(rename_all = "snake_case")]`.
+`RoutingPolicy::default()` leaves it `None`, so the resolved policy falls back to
+`Auto` -- exactly preserving prior behavior and keeping every existing
+`Profile`-struct test fixture compiling without edits.
+
+### Resolution
+`status.rs::build_snapshot` populates a new `ProfileIdentity.merge_policy` field
+via `profile.effective_routing(&cfg.defaults).merge_policy.unwrap_or_default()`.
+`decide_next_action` reads `snapshot.profile.merge_policy` directly.
+
+### Gating (decide_next_action)
+For a `READY_FOR_HUMAN` MR with `ci_passed`:
+- `StopForHuman` -> `HumanRequired` (operator merges manually).
+- `Auto` / `GitlabMwps` -> `MergeMr` (subject to the same `AUTO_RETRY_CAP`
+  fallback to `HumanRequired` on repeated merge failure).
+
+### Execution (execute_action, MergeMr arm)
+- `GitlabMwps` (+ provider `gitlab`): call `provider::gitlab_set_mwps(profile,
+  &target.id)` to set the MWPS flag and return; GAH never merges. GitLab
+  enforces the CI gate natively.
+- Otherwise: existing `dispatch::merge_branch` path.
+
+### Validation (doctor.rs)
+`check_merge_policy(profile)` (added to the `validate` set) fails when
+`merge_policy = "gitlab_mwps"` is set on a non-GitLab provider, surfacing the
+misconfiguration in `doctor` rather than at merge time.
+
+### Backward Compatibility
+Default `None`/`Auto` preserves existing behavior. No call sites of
+`decide_next_action` changed (it still takes only `&StatusSnapshot`).
