@@ -76,6 +76,23 @@ pub fn create_existing(
     let worktree_path = worktree_base.join(existing_branch.replace('/', "-"));
     fs::create_dir_all(worktree_path.parent().unwrap_or(worktree_base))?;
 
+    // If a worktree already exists at this path (from a prior dispatch that
+    // left it behind), remove it first — `git worktree add -B` fails with
+    // "'<branch>' is already used by worktree at '<path>'" if the path is
+    // already a registered worktree.
+    if worktree_path.exists() {
+        let _ = git_raw(
+            &[
+                "worktree",
+                "remove",
+                "-f",
+                worktree_path.to_str().unwrap_or(""),
+            ],
+            repo,
+        );
+        let _ = git_raw(&["worktree", "prune"], repo);
+    }
+
     // `-B existing_branch` creates/resets a real local branch tracking
     // origin_ref instead of leaving the worktree in detached HEAD.
     // Without this, `git push origin <existing_branch>` from the worktree
