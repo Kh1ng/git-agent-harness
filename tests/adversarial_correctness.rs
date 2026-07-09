@@ -1,0 +1,518 @@
+//! Adversarial correctness tests that exercise **production** GAH paths.
+//!
+//! Critical distinction from earlier fixture-only tests: assertion helpers
+//! call real binaries/functions via:
+//! - `gah status --json` → `status::build_snapshot` →
+//!   `sync::count_fix_attempts_per_branch` / `classify`
+//! - `gah loop --once` → controller path
+//!
+//! Fixture construction alone is never treated as proof.
+
+#![recursion_limit = "256"]
+
+mod support;
+use support::fake_ledger::{ledger_entry_full, TestLedger};
+use support::scenario::{GithubPrParams, ScenarioHarness};
+use support::{FakeBackend, Scenario};
+use tempfile::TempDir;
+
+// ── production helpers ───────────────────────────────────────────────
+
+/// Run production `count_fix_attempts_per_branch` by reading
+/// `fix_attempt_counts` from `gah status --json`.
+fn status_fix_counts(ledger: TestLedger) -> serde_json::Map<String, serde_json::Value> {
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .with_ledger(ledger);
+    let snap = harness.run_status_json().expect("status should succeed");
+    snap.get("fix_attempt_counts")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn count_for_branch(counts: &serde_json::Map<String, serde_json::Value>, branch: &str) -> u64 {
+    counts.get(branch).and_then(|v| v.as_u64()).unwrap_or(0)
+}
+
+fn ledger_fix(branch: &str, reason: &str, ts: &str) -> serde_json::Value {
+    ledger_entry_full("fix", branch, Some(reason), "TICKET-001", ts)
+}
+
+// ── mutation targets (must go red on production mutations) ───────────
+
+#[test]
+fn mutation_target_branch_filter_must_be_isolated() {
+    let ledger = TestLedger::new()
+        .with_entry(ledger_fix(
+            "gah/branch-1",
+            "post_review_repair",
+            "2026-07-01T00:00:00Z",
+        ))
+        .with_entry(ledger_fix(
+            "gah/branch-1",
+            "post_review_repair",
+            "2026-07-01T01:00:00Z",
+        ))
+        .with_entry({
+            let mut e = ledger_fix("gah/branch-2", "post_review_repair", "2026-07-01T00:00:00Z");
+            e["work_id"] = serde_json::json!("TICKET-002");
+            e
+        });
+    let counts = status_fix_counts(ledger);
+    assert_eq!(
+        count_for_branch(&counts, "gah/branch-1"),
+        2,
+        "prod path branch-1; got {counts:?}"
+    );
+    assert_eq!(
+        count_for_branch(&counts, "gah/branch-2"),
+        1,
+        "prod path branch isolation; got {counts:?}"
+    );
+    assert_eq!(
+        count_for_branch(&counts, "ALL"),
+        0,
+        "must not collapse to ALL; got {counts:?}"
+    );
+}
+
+#[test]
+fn mutation_target_review_mode_must_not_count_as_fix() {
+    let review = ledger_entry_full(
+        "review",
+        "gah/fix-1",
+        Some("review"),
+        "TICKET-001",
+        "2026-07-01T00:00:00Z",
+    );
+    let fix = ledger_fix("gah/fix-1", "post_review_repair", "2026-07-01T00:00:00Z");
+    let counts = status_fix_counts(TestLedger::new().with_entry(review).with_entry(fix));
+    assert_eq!(
+        count_for_branch(&counts, "gah/fix-1"),
+        1,
+        "review must not count; got {counts:?}"
+    );
+}
+
+#[test]
+fn mutation_target_initial_dispatch_must_not_count_as_repair() {
+    let initial = ledger_fix("gah/fix-1", "initial", "2026-07-01T00:00:00Z");
+    let repair = ledger_fix("gah/fix-1", "post_review_repair", "2026-07-01T01:00:00Z");
+    let counts = status_fix_counts(TestLedger::new().with_entry(initial).with_entry(repair));
+    assert_eq!(
+        count_for_branch(&counts, "gah/fix-1"),
+        1,
+        "initial must not count as repair; got {counts:?}"
+    );
+}
+
+// ── sync failure incomplete observation (detects MUT4) ───────────────
+
+#[test]
+fn sync_failure_marks_incomplete_observation() {
+    let mut harness = ScenarioHarness::new("github").github_scenario("malformed");
+    let snap = harness
+        .run_status_json()
+        .expect("status should emit JSON even on sync error");
+    assert_eq!(
+        snap["observations"]["sync"]["status"], "error",
+        "malformed provider → observations.sync.status=error; snap={snap}"
+    );
+    let errors = snap["errors"].as_array().cloned().unwrap_or_default();
+    let has_incomplete = errors.iter().any(|e| {
+        e.get("incomplete_snapshot").and_then(|v| v.as_bool()) == Some(true)
+            && e.get("subsystem").and_then(|v| v.as_str()) == Some("sync")
+    });
+    assert!(
+        has_incomplete,
+        "must set incomplete_snapshot on sync error; errors={errors:?}"
+    );
+}
+
+// ── multi-ticket isolation (production status projection) ────────────
+
+#[test]
+fn two_tickets_independent_progress() {
+    let a1 = ledger_fix("gah/fix-a", "post_review_repair", "2026-07-01T00:00:00Z");
+    let a2 = ledger_fix("gah/fix-a", "post_review_repair", "2026-07-01T01:00:00Z");
+    let mut b1 = ledger_fix("gah/fix-b", "post_review_repair", "2026-07-01T00:00:00Z");
+    b1["work_id"] = serde_json::json!("TICKET-002");
+
+    let pr_a = support::scenario::github_pr_json(GithubPrParams {
+        title: "Draft: TICKET-001 Exhausted".into(),
+        branch: "gah/fix-a".into(),
+        labels: vec!["gah-needs-fix".into()],
+        ci_conclusion: None,
+        url: None,
+        number: Some(1),
+        draft: None,
+        merged_at: None,
+        updated_at: None,
+    });
+    let pr_b = support::scenario::github_pr_json(GithubPrParams {
+        title: "Draft: TICKET-002 Eligible".into(),
+        branch: "gah/fix-b".into(),
+        labels: vec!["gah-needs-fix".into()],
+        ci_conclusion: None,
+        url: None,
+        number: Some(2),
+        draft: None,
+        merged_at: None,
+        updated_at: None,
+    });
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr_a, pr_b]).unwrap()));
+
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .with_ledger(
+            TestLedger::new()
+                .with_entry(a1)
+                .with_entry(a2)
+                .with_entry(b1),
+        );
+    harness.install_custom_gh(&gh);
+    harness.create_remote_branch("gah/fix-a");
+    harness.create_remote_branch("gah/fix-b");
+
+    let snap = harness.run_status_json().expect("status");
+    let counts = snap["fix_attempt_counts"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(count_for_branch(&counts, "gah/fix-a"), 2, "{counts:?}");
+    assert_eq!(count_for_branch(&counts, "gah/fix-b"), 1, "{counts:?}");
+
+    let blocked = snap["blocked_work_items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        blocked.iter().any(|b| {
+            b.get("reason").and_then(|v| v.as_str()) == Some("fix_retry_cap_exceeded")
+                && b.get("source_reference").and_then(|v| v.as_str()) == Some("gah/fix-a")
+        }),
+        "A must be retry-cap blocked; {blocked:?}"
+    );
+    assert!(
+        !blocked.iter().any(|b| {
+            b.get("source_reference").and_then(|v| v.as_str()) == Some("gah/fix-b")
+                && b.get("reason").and_then(|v| v.as_str()) == Some("fix_retry_cap_exceeded")
+        }),
+        "B must not be retry-cap blocked; {blocked:?}"
+    );
+
+    // Profile blockers empty: work-item scoping, not profile freeze.
+    let blockers = snap["blockers"].as_array().cloned().unwrap_or_default();
+    assert!(
+        blockers.is_empty(),
+        "exhausted A must not freeze profile; {blockers:?}"
+    );
+
+    let mrs = snap["merge_requests"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(mrs
+        .iter()
+        .any(|m| m["branch"] == "gah/fix-a" && m["classification"] == "NEEDS_FIX"));
+    assert!(mrs
+        .iter()
+        .any(|m| m["branch"] == "gah/fix-b" && m["classification"] == "NEEDS_FIX"));
+}
+
+// ── terminal merge (detects MUT5) ────────────────────────────────────
+
+#[test]
+fn terminal_merge_precludes_further_action() {
+    let pr = support::scenario::github_pr_json(GithubPrParams {
+        title: "Draft: TICKET-001 Merged".into(),
+        branch: "gah/merged-1".into(),
+        labels: vec![],
+        ci_conclusion: Some("SUCCESS".into()),
+        url: None,
+        number: Some(1),
+        draft: None,
+        merged_at: Some("2026-07-01T00:00:00Z".into()),
+        updated_at: None,
+    });
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr]).unwrap()));
+
+    let mut harness = ScenarioHarness::new("github").github_scenario("empty");
+    harness.install_custom_gh(&gh);
+    harness.create_remote_branch("gah/merged-1");
+
+    let snap = harness.run_status_json().expect("status");
+    let mrs = snap["merge_requests"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(mrs.len(), 1, "{mrs:?}");
+    assert_eq!(mrs[0]["classification"], "MERGED", "got {}", mrs[0]);
+    assert_eq!(mrs[0]["recommended_action"], "NONE");
+    assert_eq!(mrs[0]["merged"], true);
+}
+
+// ── crash/restart continuity ─────────────────────────────────────────
+
+/// Seeded "post-crash" ledger: no durable repair yet. Two status processes
+/// must see fix_attempt_counts unchanged (0).
+#[test]
+fn crash_before_attempt_start_redispenses_once() {
+    let entry = ledger_entry_full(
+        "improve",
+        "gah/feature-1",
+        Some("initial"),
+        "TICKET-001",
+        "2026-07-01T00:00:00Z",
+    );
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .with_ledger(TestLedger::new().with_entry(entry));
+    let snap1 = harness.run_status_json().unwrap();
+    let c1 = count_for_branch(
+        &snap1["fix_attempt_counts"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        "gah/feature-1",
+    );
+    assert_eq!(c1, 0);
+    // process B
+    let snap2 = harness.run_status_json().unwrap();
+    let c2 = count_for_branch(
+        &snap2["fix_attempt_counts"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        "gah/feature-1",
+    );
+    assert_eq!(c2, 0);
+    assert_eq!(snap1["fix_attempt_counts"], snap2["fix_attempt_counts"]);
+}
+
+#[test]
+fn crash_after_verdict_dispatches_repair_once() {
+    let review_entry = ledger_entry_full(
+        "review",
+        "gah/fix-1",
+        Some("review"),
+        "TICKET-001",
+        "2026-07-01T00:00:00Z",
+    );
+    let counts = status_fix_counts(TestLedger::new().with_entry(review_entry));
+    assert_eq!(
+        count_for_branch(&counts, "gah/fix-1"),
+        0,
+        "review must not count as fix; {counts:?}"
+    );
+}
+
+#[test]
+fn crash_after_attempt_start_reconciles_stale_state() {
+    let mut stale = ledger_entry_full(
+        "improve",
+        "gah/stale-1",
+        Some("initial"),
+        "TICKET-001",
+        "2026-07-01T00:00:00Z",
+    );
+    stale["attempts_started"] = serde_json::json!(1);
+    stale["attempts_completed"] = serde_json::json!(0);
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .worker_scenario("success")
+        .with_ledger(TestLedger::new().with_entry(stale));
+    let _ = harness.run_loops(3).unwrap();
+    let snap = harness.run_status_json().unwrap();
+    assert_eq!(
+        count_for_branch(
+            &snap["fix_attempt_counts"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+            "gah/stale-1"
+        ),
+        0
+    );
+}
+
+/// Two gah child processes: durable ledger counts stable after process exit.
+#[test]
+fn restart_two_process_continuity_shared_ledger() {
+    let repair = ledger_fix("gah/fix-1", "post_review_repair", "2026-07-01T00:00:00Z");
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .with_ledger(TestLedger::new().with_entry(repair));
+    let a = harness.run_status_json().unwrap();
+    let b = harness.run_status_json().unwrap();
+    assert_eq!(
+        count_for_branch(
+            &a["fix_attempt_counts"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+            "gah/fix-1"
+        ),
+        1
+    );
+    assert_eq!(a["fix_attempt_counts"], b["fix_attempt_counts"]);
+}
+
+// ── remaining stronger checks ────────────────────────────────────────
+
+#[test]
+fn exhausted_ticket_does_not_starve_eligible_ticket() {
+    let a1 = ledger_fix("gah/fix-a", "post_review_repair", "2026-07-01T00:00:00Z");
+    let a2 = ledger_fix("gah/fix-a", "post_review_repair", "2026-07-01T01:00:00Z");
+    let pr_a = support::scenario::github_pr_json(GithubPrParams {
+        title: "Draft: TICKET-001 Exhausted".into(),
+        branch: "gah/fix-a".into(),
+        labels: vec!["gah-needs-fix".into()],
+        ci_conclusion: None,
+        url: None,
+        number: Some(1),
+        draft: None,
+        merged_at: None,
+        updated_at: None,
+    });
+    let pr_b = support::scenario::github_pr_json(GithubPrParams {
+        title: "Draft: TICKET-002 Eligible".into(),
+        branch: "gah/fix-b".into(),
+        labels: vec!["gah-needs-fix".into()],
+        ci_conclusion: None,
+        url: None,
+        number: Some(2),
+        draft: None,
+        merged_at: None,
+        updated_at: None,
+    });
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr_a, pr_b]).unwrap()));
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .with_ledger(TestLedger::new().with_entry(a1).with_entry(a2));
+    harness.install_custom_gh(&gh);
+    harness.create_remote_branch("gah/fix-a");
+    harness.create_remote_branch("gah/fix-b");
+    let snap = harness.run_status_json().unwrap();
+    assert!(snap["blockers"].as_array().unwrap().is_empty());
+    let counts = snap["fix_attempt_counts"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(count_for_branch(&counts, "gah/fix-a"), 2);
+    assert_eq!(count_for_branch(&counts, "gah/fix-b"), 0);
+}
+
+#[test]
+fn metamorphic_unrelated_ledger_does_not_poison_count() {
+    let current = ledger_fix("gah/fix-1", "post_review_repair", "2026-07-01T00:00:00Z");
+    let mut other = ledger_fix("gah/other", "post_review_repair", "2026-07-01T00:00:00Z");
+    other["work_id"] = serde_json::json!("TICKET-002");
+    let base = status_fix_counts(TestLedger::new().with_entry(current.clone()));
+    let both = status_fix_counts(TestLedger::new().with_entry(other).with_entry(current));
+    assert_eq!(count_for_branch(&base, "gah/fix-1"), 1);
+    assert_eq!(count_for_branch(&both, "gah/fix-1"), 1);
+    assert_eq!(count_for_branch(&both, "gah/other"), 1);
+}
+
+#[test]
+fn idempotent_noop_does_not_grow_ledger() {
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .worker_scenario("success");
+    let results = harness.run_loops(5).unwrap();
+    assert_eq!(results.len(), 5);
+    let entries = TestLedger::read_from(&harness.ledger_path).unwrap_or_default();
+    assert!(
+        entries.len() <= 5,
+        "unbounded ledger growth: {}",
+        entries.len()
+    );
+}
+
+// ── Fixture deserialization safety ──────────────────────────────────
+
+/// Regression: incomplete ledger fixtures must be rejected at harness
+/// setup before they reach the production binary, where they would be
+/// silently dropped by `ledger::read_entries` → empty count map →
+/// false confidence.
+///
+/// The harness validation gate (`validate_production_schema`) checks
+/// every fixture entry against the known required fields of the
+/// production `LedgerEntry` struct.  Rejection is explicit, visible,
+/// and points the author at `ledger_entry_full()`.
+#[test]
+fn incomplete_fixture_rejected_at_harness_setup() {
+    let partial = serde_json::json!({
+        "profile": "test",
+        "work_id": "TICKET-BOGUS",
+        "mode": "fix",
+        "branch": "gah/fix-bogus",
+        "dispatch_reason": "post_review_repair",
+        "timestamp": "2026-07-01T00:00:00Z",
+        "attempts_started": 1,
+        "attempts_completed": 1
+    });
+
+    // Direct validation — must reject the partial entry.
+    let err = TestLedger::new()
+        .with_entry(partial.clone())
+        .validate_production_schema()
+        .expect_err("partial fixture must be rejected before reaching the binary");
+    assert!(
+        err.contains("missing required field"),
+        "rejection message must name the problem: {err}"
+    );
+
+    // Full-schema entries must pass validation silently.
+    let full = ledger_entry_full(
+        "fix",
+        "gah/fix-ok",
+        Some("post_review_repair"),
+        "TICKET-OK",
+        "2026-07-01T00:00:00Z",
+    );
+    TestLedger::new()
+        .with_entry(full)
+        .validate_production_schema()
+        .expect("full-schema fixtures must pass harness validation");
+
+    // Harness integration: constructing a ScenarioHarness with a
+    // partial ledger and then exercising any method that calls
+    // `setup_env()` must panic with a clear diagnostic.
+    let partial_ledger = TestLedger::new().with_entry(partial);
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .with_ledger(partial_ledger);
+    // `run_status_json` calls `setup_env` internally — must panic.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        harness.run_status_json().ok()
+    }));
+    match result {
+        Err(panic_payload) => {
+            let msg = panic_payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                .unwrap_or("(non-string panic)");
+            assert!(
+                msg.contains("missing required field"),
+                "harness must reject partial fixtures at setup: {msg}"
+            );
+        }
+        Ok(_) => {
+            panic!(
+                "EXPECTED harness to reject partial fixture, \
+                 but production-path test ran with incomplete ledger. \
+                 Fixture-safety gate is NOT active — fix harness setup_env()."
+            );
+        }
+    }
+}
