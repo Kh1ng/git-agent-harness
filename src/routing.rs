@@ -1279,7 +1279,7 @@ mod tests {
                 ..RoutingPolicy::default()
             },
             pacing: Default::default(),
-             publishing: Default::default(),
+            publishing: Default::default(),
         }
     }
 

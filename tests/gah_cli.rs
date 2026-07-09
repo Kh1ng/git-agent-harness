@@ -4710,7 +4710,9 @@ fn publishing_disabled_blocks_pr_creation_and_emits_handoff() {
         .assert()
         .success()
         // Deterministic handoff metadata is produced.
-        .stdout(predicate::str::contains("GAH human handoff (publishing policy)"))
+        .stdout(predicate::str::contains(
+            "GAH human handoff (publishing policy)",
+        ))
         .stdout(predicate::str::contains(
             "PR/MR creation or commit-message generation disabled by publishing policy",
         ));
@@ -4782,7 +4784,9 @@ fn commit_message_generation_disabled_leaves_worktree_uncommitted() {
         .env("GAH_LEDGER_PATH", &ledger_path)
         .assert()
         .success()
-        .stdout(predicate::str::contains("GAH human handoff (publishing policy)"))
+        .stdout(predicate::str::contains(
+            "GAH human handoff (publishing policy)",
+        ))
         .stdout(predicate::str::contains(
             "PR/MR creation or commit-message generation disabled by publishing policy",
         ));
@@ -4795,7 +4799,10 @@ fn commit_message_generation_disabled_leaves_worktree_uncommitted() {
     assert_eq!(entry["commit_created"], false);
     // No PR was opened either (the combined gate stops before publish).
     let gh_text = fs::read_to_string(&gh_log).unwrap_or_default();
-    assert!(!gh_text.contains("pr create"), "gh was asked to create a PR: {gh_text}");
+    assert!(
+        !gh_text.contains("pr create"),
+        "gh was asked to create a PR: {gh_text}"
+    );
 }
 
 /// Acceptance: contribution still reaches the reviewer when publishing is
@@ -5112,7 +5119,9 @@ fn restricted_profile_emits_deterministic_handoff_metadata() {
         .env("GAH_LEDGER_PATH", &ledger_path)
         .assert()
         .success()
-        .stdout(predicate::str::contains("=== GAH human handoff (publishing policy) ==="))
+        .stdout(predicate::str::contains(
+            "=== GAH human handoff (publishing policy) ===",
+        ))
         .stdout(predicate::str::contains("validation_status"))
         .stdout(predicate::str::contains("changed_files"))
         .stdout(predicate::str::contains("branch:"))
@@ -5120,5 +5129,3 @@ fn restricted_profile_emits_deterministic_handoff_metadata() {
             "PR/MR creation or commit-message generation disabled by publishing policy",
         ));
 }
-
-

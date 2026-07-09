@@ -3199,7 +3199,7 @@ mod tests {
             notify_command: None,
             routing: RoutingPolicy::default(),
             pacing: Default::default(),
-             publishing: Default::default(),
+            publishing: Default::default(),
         }
     }
 
@@ -5711,12 +5711,7 @@ fn apply_diff_stats(ledger: &mut LedgerEntry, wt: &Path, target_branch: &str) {
 /// (PR/MR creation or LLM-generated commit text). No PR/MR is created and no
 /// tracker comment is posted; the worktree/branch is left for a human to
 /// complete. The output is intentionally free of any LLM-generated prose.
-fn emit_human_handoff(
-    profile: &Profile,
-    ledger: &LedgerEntry,
-    branch: &str,
-    reason: &str,
-) {
+fn emit_human_handoff(profile: &Profile, ledger: &LedgerEntry, branch: &str, reason: &str) {
     println!("=== GAH human handoff (publishing policy) ===");
     println!("reason: {}", reason);
     println!("profile: {}", profile.display_name);
