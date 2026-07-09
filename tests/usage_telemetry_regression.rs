@@ -249,3 +249,81 @@ fn report_preserves_unknown_and_exposes_quota_observations() {
     assert_eq!(quota["observed_at"], "2026-01-02T03:04:05Z");
     assert_eq!(quota["usage_source"], "subscription_status");
 }
+
+#[test]
+fn parse_generic_usage_rejects_partial_word_matches() {
+    use git_agent_harness::usage::parse_generic_usage;
+
+    // Test that partial word matches are not accepted
+    let usage = parse_generic_usage(
+        "my_input_tokens_value: 100\noutput_tokens: 200",
+        "adversarial",
+    );
+    assert_eq!(usage.input_tokens, None); // Should not match my_input_tokens_value
+    assert_eq!(usage.output_tokens, Some(200));
+
+    // Test that exact matches work
+    let usage = parse_generic_usage("input_tokens: 100\noutput_tokens: 200", "exact");
+    assert_eq!(usage.input_tokens, Some(100));
+    assert_eq!(usage.output_tokens, Some(200));
+
+    // Test that spaced variants work
+    let usage = parse_generic_usage("input tokens: 100\noutput tokens: 200", "spaced");
+    assert_eq!(usage.input_tokens, Some(100));
+    assert_eq!(usage.output_tokens, Some(200));
+}
+
+#[test]
+fn quota_observations_select_latest_timestamp_with_timezone_offsets() {
+    // Test that RFC3339 timestamps with different timezone offsets are compared correctly
+    // This is an adversarial test for the timestamp comparison logic
+    let attempts = vec![
+        attempt_usage(
+            1,
+            "claude",
+            Some("claude-sonnet"),
+            serde_json::json!({
+                "usage_source": "subscription_status",
+                "observed_at": "2026-01-01T12:00:00+05:00", // Later in UTC than the next one
+                "quota_window": "weekly",
+                "quota_remaining_percent": 40.0,
+                "quota_reset_at": "2026-01-12T00:00:00Z"
+            }),
+        ),
+        attempt_usage(
+            2,
+            "claude",
+            Some("claude-sonnet"),
+            serde_json::json!({
+                "usage_source": "subscription_status",
+                "observed_at": "2026-01-01T10:00:00Z", // Earlier in UTC than the first one
+                "quota_window": "weekly",
+                "quota_remaining_percent": 45.0,
+                "quota_reset_at": "2026-01-12T00:00:00Z"
+            }),
+        ),
+    ];
+    let ledger = TestLedger::new().with_entry(usage_entry(
+        "claude",
+        Some("claude-sonnet"),
+        serde_json::json!({}),
+        attempts,
+    ));
+
+    let mut harness = ScenarioHarness::new("github").with_ledger(ledger);
+    let report = harness.run_report_json("backend").unwrap();
+    let claude = report["comparisons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["backend_or_model"] == "claude")
+        .unwrap();
+
+    let quota_observations = claude["quota_observations"].as_array().unwrap();
+    assert_eq!(quota_observations.len(), 1); // Only one quota observation should be kept
+
+    // The latest timestamp should be 2026-01-01T10:00:00Z (which is 15:00:00+05:00)
+    // over 2026-01-01T12:00:00+05:00 (which is 07:00:00Z), so we should see the 45.0 value
+    assert_eq!(quota_observations[0]["quota_remaining_percent"], 45.0);
+    assert_eq!(quota_observations[0]["observed_at"], "2026-01-01T10:00:00Z");
+}

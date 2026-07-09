@@ -31,6 +31,7 @@ mod usage;
 mod validation_check;
 mod work_claim;
 mod worktree;
+mod telemetry;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -273,6 +274,11 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
+    /// Export telemetry data to versioned repository (TICKET-130)
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -315,6 +321,36 @@ enum LedgerCommands {
         json: bool,
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelemetryCommands {
+    /// Export telemetry data to versioned repository
+    Export {
+        #[arg(long)]
+        telemetry_repo_path: Option<String>,
+        #[arg(long, default_value = "jsonl")]
+        format: String,
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long, default_value = "7d")]
+        since: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, value_enum, default_value = "none")]
+        group_by: telemetry::GroupBy,
+        #[arg(long, default_value_t = true)]
+        generate_manifests: bool,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
+    /// Show telemetry repository status
+    Status {
+        #[arg(long)]
+        telemetry_repo_path: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
     },
 }
 
@@ -576,6 +612,40 @@ fn main() -> Result<()> {
             // This will run forever, so we don't need to return
             std::thread::park();
         }
+        Commands::Telemetry { command } => match command {
+            TelemetryCommands::Export {
+                telemetry_repo_path,
+                format,
+                output,
+                since,
+                profile,
+                group_by,
+                generate_manifests,
+                config_path,
+            } => {
+                let format_enum = format.parse::<telemetry::exporter::ExportFormat>()
+                    .map_err(|e| anyhow::anyhow!("Invalid format: {}", e))?;
+                telemetry::cli::run_export(
+                    telemetry_repo_path.as_deref(),
+                    Some(format_enum),
+                    output.as_deref(),
+                    Some(&since),
+                    profile.as_deref(),
+                    Some(group_by),
+                    generate_manifests,
+                    config_path.as_deref(),
+                )?;
+            }
+            TelemetryCommands::Status {
+                telemetry_repo_path,
+                config_path,
+            } => {
+                telemetry::cli::run_status(
+                    telemetry_repo_path.as_deref(),
+                    config_path.as_deref(),
+                )?;
+            }
+        },
     }
     Ok(())
 }

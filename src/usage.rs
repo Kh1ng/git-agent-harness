@@ -1,6 +1,8 @@
 use crate::ledger::LedgerUsage;
 use regex::Regex;
 
+/// Parse generic usage text from backend output logs.
+/// Uses word boundaries to prevent matching partial words like "my_input_tokens_value".
 pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
     let input_tokens = find_u64(text, &["input_tokens", "input tokens", "prompt_tokens"]);
     let output_tokens = find_u64(
@@ -73,7 +75,12 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
 
 fn find_u64(text: &str, keys: &[&str]) -> Option<u64> {
     keys.iter().find_map(|key| {
-        let re = Regex::new(&format!(r"(?i){}\s*[:=]\s*([0-9]+)", regex::escape(key))).ok()?;
+        // Use word boundaries to prevent matching partial words like "my_input_tokens_value"
+        let re = Regex::new(&format!(
+            r"(?i)\b{}\b\s*[:=]\s*([0-9]+)",
+            regex::escape(key)
+        ))
+        .ok()?;
         re.captures(text)
             .and_then(|caps| caps.get(1))
             .and_then(|m| m.as_str().parse::<u64>().ok())
@@ -82,8 +89,9 @@ fn find_u64(text: &str, keys: &[&str]) -> Option<u64> {
 
 fn find_f64(text: &str, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|key| {
+        // Use word boundaries to prevent matching partial words
         let re = Regex::new(&format!(
-            r"(?i){}\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
+            r"(?i)\b{}\b\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
             regex::escape(key)
         ))
         .ok()?;
@@ -95,7 +103,12 @@ fn find_f64(text: &str, keys: &[&str]) -> Option<f64> {
 
 fn find_string_after(text: &str, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
-        let re = Regex::new(&format!(r"(?i){}\s*[:=]\s*([^\n\r]+)", regex::escape(key))).ok()?;
+        // Use word boundaries to prevent matching partial words
+        let re = Regex::new(&format!(
+            r"(?i)\b{}\b\s*[:=]\s*([^\n\r]+)",
+            regex::escape(key)
+        ))
+        .ok()?;
         re.captures(text)
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().trim().trim_matches('"').to_string())

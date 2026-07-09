@@ -185,3 +185,67 @@ fn gitlab_dry_run_observes_open_issue_without_writing() {
     );
     assert_eq!(curl.call_count(), 1);
 }
+
+#[test]
+fn multiple_explicit_references_with_matching_structured_source_closes_target() {
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install_sequence(vec![
+        Scenario::success().with_stdout(merged_github_pr_json("Closes #42, fixes #43")),
+        Scenario::success().with_stdout("open\n"),
+        Scenario::success(),
+    ]);
+
+    let mut harness = ScenarioHarness::new("github")
+        .with_config_append(closure_enabled_toml())
+        .with_ledger(support::fake_ledger::TestLedger::new().with_entry(ledger_entry(Some("42"))));
+    harness.install_custom_gh(&gh);
+
+    let report = harness.run_ledger_reconcile_json(false).unwrap();
+    // Should close issue #42 because it matches the structured source, despite multiple explicit references
+    assert_eq!(report["issue_closure"]["closed"], serde_json::json!(["42"]));
+    assert_eq!(gh.call_count(), 3);
+    assert_eq!(gh.argv_for_call(3)[..3], ["issue", "close", "42"]);
+}
+
+#[test]
+fn multiple_explicit_references_without_matching_structured_source_ambiguous() {
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install_sequence(vec![
+        Scenario::success().with_stdout(merged_github_pr_json("Closes #42, fixes #43"))
+    ]);
+
+    let mut harness = ScenarioHarness::new("github")
+        .with_config_append(closure_enabled_toml())
+        .with_ledger(support::fake_ledger::TestLedger::new().with_entry(ledger_entry(Some("99"))));
+    harness.install_custom_gh(&gh);
+
+    let report = harness.run_ledger_reconcile_json(false).unwrap();
+    // Should be ambiguous because multiple explicit references don't match structured source
+    assert_eq!(
+        report["issue_closure"]["ambiguous"],
+        serde_json::json!(["unknown"])
+    );
+    assert_eq!(gh.call_count(), 1); // Only the PR list call, no issue closure
+}
+
+#[test]
+fn explicit_reference_matching_structured_source_takes_precedence() {
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install_sequence(vec![
+        Scenario::success().with_stdout(merged_github_pr_json("Closes #42")),
+        Scenario::success().with_stdout("open\n"),
+        Scenario::success(),
+    ]);
+
+    let mut harness = ScenarioHarness::new("github")
+        .with_config_append(closure_enabled_toml())
+        .with_ledger(support::fake_ledger::TestLedger::new().with_entry(ledger_entry(Some("42"))));
+    harness.install_custom_gh(&gh);
+
+    let report = harness.run_ledger_reconcile_json(false).unwrap();
+    assert_eq!(report["issue_closure"]["closed"], serde_json::json!(["42"]));
+    assert_eq!(gh.argv_for_call(3)[..3], ["issue", "close", "42"]);
+}
