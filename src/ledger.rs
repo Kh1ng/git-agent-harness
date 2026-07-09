@@ -245,6 +245,15 @@ pub struct LedgerEntry {
     pub attempts_completed: u32,
     #[serde(default)]
     pub attempts: Vec<AttemptRecord>,
+    /// Distinguishes the *kind* of dispatch that produced this ledger entry:
+    /// `initial` (first DispatchTicket), `post_review_repair` (FixMr after a
+    /// NEEDS_FIX review), `review` (ReviewMr), or `stuck_loop_gate` (a
+    /// synthetic human-required gate written by the stuck-loop detector).
+    /// The retry cap (`count_fix_attempts_per_branch`) counts ONLY
+    /// `post_review_repair` entries — internal OpenHands retries within a
+    /// single dispatch (attempts_started) do NOT consume retry budget.
+    #[serde(default)]
+    pub dispatch_reason: Option<String>,
     pub usage: LedgerUsage,
 }
 
@@ -308,6 +317,7 @@ impl LedgerEntry {
             attempts_started: 0,
             attempts_completed: 0,
             attempts: Vec::new(),
+            dispatch_reason: None,
             usage: LedgerUsage::default(),
         }
     }

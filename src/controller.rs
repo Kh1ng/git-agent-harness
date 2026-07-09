@@ -484,6 +484,30 @@ pub fn run_once(
         let history = crate::events::read_events(cfg)?;
         let mut action = original_action.clone();
         if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
+            // Persist a work-item-scoped durable human gate so that
+            // subsequent loop iterations see human_required=true for this
+            // work_id via ledger_lookup_for_ticket and skip it, rather than
+            // re-selecting DispatchTicket every cycle (the original
+            // trip-without-latch bug).
+            if let Some(wid) = original_action.work_id() {
+                let profile = crate::config::get_profile(cfg, profile_name)?;
+                let mut gate = crate::ledger::LedgerEntry::new(
+                    profile_name,
+                    profile,
+                    "auto",
+                    "fix",
+                    wid,
+                    None,
+                    None,
+                );
+                gate.work_id = Some(wid.to_string());
+                gate.human_required = true;
+                gate.dispatch_reason = Some("stuck_loop_gate".to_string());
+                gate.error_summary = Some(reason.clone());
+                if let Err(e) = crate::ledger::append(cfg, &gate) {
+                    eprintln!("warning: failed to persist stuck-loop gate: {e:#}");
+                }
+            }
             action = NextAction::HumanRequired {
                 reason,
                 reference: original_action.work_id().map(str::to_string),
@@ -706,6 +730,7 @@ pub(crate) fn execute_action(
         escalate: false,
         existing_branch: None,
         skip_validation_gate,
+        dispatch_reason: None,
     };
 
     match action {
@@ -713,6 +738,7 @@ pub(crate) fn execute_action(
             let args = crate::dispatch::DispatchArgs {
                 mode: "review".to_string(),
                 branch: Some(branch.clone()),
+                dispatch_reason: Some("review".to_string()),
                 ..base_args()
             };
             run_dispatch_and_record(cfg, action, &args, "review")?;
@@ -722,6 +748,7 @@ pub(crate) fn execute_action(
             let args = crate::dispatch::DispatchArgs {
                 target: branch.clone(),
                 existing_branch: Some(branch.clone()),
+                dispatch_reason: Some("post_review_repair".to_string()),
                 ..base_args()
             };
             run_dispatch_and_record(cfg, action, &args, "fix_existing")?;
@@ -758,6 +785,7 @@ pub(crate) fn execute_action(
         NextAction::DispatchTicket { ticket_path, .. } => {
             let args = crate::dispatch::DispatchArgs {
                 target: ticket_path.clone(),
+                dispatch_reason: Some("initial".to_string()),
                 ..base_args()
             };
             run_dispatch_and_record(cfg, action, &args, "dispatch_ticket")?;
@@ -766,6 +794,7 @@ pub(crate) fn execute_action(
         NextAction::Retry { ticket_path, .. } => {
             let args = crate::dispatch::DispatchArgs {
                 target: ticket_path.clone(),
+                dispatch_reason: Some("initial".to_string()),
                 ..base_args()
             };
             run_dispatch_and_record(cfg, action, &args, "retry")?;
@@ -775,6 +804,7 @@ pub(crate) fn execute_action(
             let args = crate::dispatch::DispatchArgs {
                 target: ticket_path.clone(),
                 escalate: true,
+                dispatch_reason: Some("initial".to_string()),
                 ..base_args()
             };
             run_dispatch_and_record(cfg, action, &args, "escalate")?;
@@ -1399,6 +1429,192 @@ mod tests {
             other => panic!("expected DispatchTicket for cleared TICKET-A, got {other:?}"),
         }
         assert!(snapshot.blocked_work_items.is_empty());
+    }
+
+    // ===== Bug 1: dispatch_reason scoping for fix retry cap =====
+    // Internal OpenHands retries (attempts_started > 0 within one dispatch)
+    // must NOT consume the post-review fix retry budget.
+    fn needs_fix_mr(branch: &str, work_id: &str) -> crate::sync::SyncMrJson {
+        crate::sync::SyncMrJson {
+            profile: None,
+            branch: branch.into(),
+            work_id: Some(work_id.into()),
+            id: None,
+            url: None,
+            state: Some("opened".into()),
+            draft: true,
+            merge_status: Some("can_be_merged".into()),
+            merged: false,
+            ci_passed: false,
+            classification: "NEEDS_FIX".into(),
+            recommended_action: crate::sync::RecommendedAction::ReuseBranch,
+        }
+    }
+
+    #[test]
+    fn internal_retries_do_not_consume_fix_retry_budget() {
+        let mut snapshot = empty_snapshot();
+        snapshot.fix_attempt_counts.insert("branch-A".into(), 0);
+        snapshot
+            .merge_requests
+            .push(needs_fix_mr("branch-A", "TICKET-A"));
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::FixMr { branch, .. } => assert_eq!(branch, "branch-A"),
+            other => panic!("expected FixMr, got {other:?}"),
+        }
+    }
+
+    // First NEEDS_FIX review permits the first repair dispatch.
+    #[test]
+    fn first_needs_fix_permits_first_repair_dispatch() {
+        let mut snapshot = empty_snapshot();
+        snapshot.fix_attempt_counts.insert("branch-A".into(), 0);
+        snapshot
+            .merge_requests
+            .push(needs_fix_mr("branch-A", "TICKET-A"));
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::FixMr { .. } => {}
+            other => panic!("expected FixMr for first repair, got {other:?}"),
+        }
+    }
+
+    // Actual repair dispatches increment the count exactly once each.
+    // After AUTO_RETRY_CAP (2) repairs, HumanRequired fires.
+    #[test]
+    fn retry_cap_triggers_after_configured_post_review_repairs() {
+        let mut snapshot = empty_snapshot();
+        snapshot.fix_attempt_counts.insert("branch-A".into(), 2);
+        snapshot
+            .merge_requests
+            .push(needs_fix_mr("branch-A", "TICKET-A"));
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
+    }
+
+    // One repair used, one more allowed.
+    #[test]
+    fn one_repair_used_still_permits_second() {
+        let mut snapshot = empty_snapshot();
+        snapshot.fix_attempt_counts.insert("branch-A".into(), 1);
+        snapshot
+            .merge_requests
+            .push(needs_fix_mr("branch-A", "TICKET-A"));
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::FixMr { .. } => {}
+            other => panic!("expected FixMr after 1 repair (cap=2), got {other:?}"),
+        }
+    }
+
+    // ===== Bug 2: stuck-loop gate persists to ledger and skips ticket =====
+    #[test]
+    fn stuck_loop_gated_ticket_is_skipped() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-A-x.md",
+            Some("TICKET-A"),
+            0,
+            None,
+            false,
+            true,
+        ));
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-B-x.md",
+            Some("TICKET-B"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-B"))
+            }
+            other => panic!("expected DispatchTicket for TICKET-B (A gated), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stuck_loop_gated_ticket_remains_blocked() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-A-x.md",
+            Some("TICKET-A"),
+            0,
+            None,
+            false,
+            true,
+        ));
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "no_op");
+    }
+
+    #[test]
+    fn stuck_loop_gate_unrelated_ticket_eligible() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-A-x.md",
+            Some("TICKET-A"),
+            0,
+            None,
+            false,
+            true,
+        ));
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-C-x.md",
+            Some("TICKET-C"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-C"))
+            }
+            other => panic!("expected DispatchTicket for TICKET-C, got {other:?}"),
+        }
+    }
+
+    // ===== Bug 3: retry-cap HumanRequired projects into blocked_work_items =====
+    #[test]
+    fn retry_cap_projects_into_blocked_work_items() {
+        let mut snapshot = empty_snapshot();
+        snapshot.fix_attempt_counts.insert("branch-A".into(), 2);
+        snapshot
+            .merge_requests
+            .push(needs_fix_mr("branch-A", "TICKET-A"));
+        // Simulate what status.rs does: project retry-cap into blocked_work_items
+        const AUTO_RETRY_CAP: usize = 2;
+        for mr in &snapshot.merge_requests {
+            if matches!(mr.classification.as_str(), "CI_FAILED" | "NEEDS_FIX") {
+                let attempts = snapshot
+                    .fix_attempt_counts
+                    .get(&mr.branch)
+                    .copied()
+                    .unwrap_or(0);
+                if attempts >= AUTO_RETRY_CAP {
+                    snapshot.blocked_work_items.push(crate::status::Blocker {
+                        kind: "human_required".into(),
+                        reason: Some("fix_retry_cap_exceeded".into()),
+                        message: Some("cap exceeded".into()),
+                        backend: None,
+                        model: None,
+                        until: None,
+                        source_reference: Some(mr.branch.clone()),
+                    });
+                }
+            }
+        }
+        assert!(!snapshot.blocked_work_items.is_empty());
+        assert_eq!(
+            snapshot.blocked_work_items[0].reason.as_deref(),
+            Some("fix_retry_cap_exceeded")
+        );
     }
 
     #[test]

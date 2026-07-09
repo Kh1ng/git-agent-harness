@@ -493,6 +493,7 @@ fn main() -> Result<()> {
                     escalate,
                     existing_branch,
                     skip_validation_gate,
+                    dispatch_reason: None,
                 },
             )?;
         }
