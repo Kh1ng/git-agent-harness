@@ -350,6 +350,32 @@ pub fn build_snapshot(
         }
     }
 
+    // Project retry-cap-blocked MRs into blocked_work_items. An MR classified
+    // NEEDS_FIX whose fix_attempt_counts >= AUTO_RETRY_CAP will be returned as
+    // HumanRequired by decide_next_action, but this is a controller decision
+    // not a ledger human_required flag — without this projection, gah status
+    // shows no blockers while the supervisor pings human_required every cycle.
+    const AUTO_RETRY_CAP: usize = 2;
+    for mr in &merge_requests {
+        if matches!(mr.classification.as_str(), "CI_FAILED" | "NEEDS_FIX") {
+            let attempts = fix_attempt_counts.get(&mr.branch).copied().unwrap_or(0);
+            if attempts >= AUTO_RETRY_CAP {
+                blocked_work_items.push(Blocker {
+                    kind: "human_required".into(),
+                    reason: Some("fix_retry_cap_exceeded".into()),
+                    message: Some(format!(
+                        "MR on branch '{}' classified {} but fix retry cap ({}) exceeded",
+                        mr.branch, mr.classification, AUTO_RETRY_CAP
+                    )),
+                    backend: None,
+                    model: None,
+                    until: None,
+                    source_reference: Some(mr.branch.clone()),
+                });
+            }
+        }
+    }
+
     let snapshot = StatusSnapshot {
         schema_version: 1,
         generated_at,
@@ -463,10 +489,7 @@ mod tests {
     use crate::availability::{AvailabilityRecord, AvailabilityState, Reason, Source, Status};
     use crate::ledger::{LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics};
     use std::fs;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     fn make_test_cfg(tmp: &TempDir) -> GahConfig {
         let path = tmp.path().join("cfg.toml");
@@ -489,7 +512,7 @@ default_target_branch = "main"
 
     #[test]
     fn empty_clean_profile_snapshot() {
-        let _lock = TEST_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         // Force availability and ledger to be read from temp
@@ -512,7 +535,7 @@ default_target_branch = "main"
 
     #[test]
     fn active_backend_wide_block() {
-        let _lock = TEST_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let avail_path = tmp.path().join("avail.json");
@@ -549,7 +572,7 @@ default_target_branch = "main"
 
     #[test]
     fn model_specific_availability_block_preserves_scope() {
-        let _lock = TEST_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let avail_path = tmp.path().join("avail.json");
@@ -584,7 +607,7 @@ default_target_branch = "main"
 
     #[test]
     fn expired_availability_record_skipped() {
-        let _lock = TEST_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let avail_path = tmp.path().join("avail.json");
@@ -616,7 +639,7 @@ default_target_branch = "main"
 
     #[test]
     fn human_required_state_becomes_blocker() {
-        let _lock = TEST_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let ledger_path = tmp.path().join("ledger.jsonl");
@@ -648,7 +671,7 @@ default_target_branch = "main"
 
     #[test]
     fn partial_subsystem_error_is_in_errors() {
-        let _lock = TEST_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let avail_path = tmp.path().join("avail.json");
@@ -672,7 +695,7 @@ default_target_branch = "main"
 
     #[test]
     fn ledger_failure_and_attempt_fields_are_populated() {
-        let _lock = TEST_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let ledger_path = tmp.path().join("ledger.jsonl");
@@ -712,7 +735,7 @@ default_target_branch = "main"
 
     #[test]
     fn recent_ledger_exposes_work_id() {
-        let _lock = TEST_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let ledger_path = tmp.path().join("ledger.jsonl");
@@ -742,7 +765,7 @@ default_target_branch = "main"
 
     #[test]
     fn recent_ledger_exposes_routing_diagnostics() {
-        let _lock = TEST_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let ledger_path = tmp.path().join("ledger.jsonl");

@@ -57,6 +57,11 @@ pub struct DispatchArgs {
     /// a profile's `validation_commands`. Intended only for recovering from a
     /// known-broken config after the operator has acknowledged the failure.
     pub skip_validation_gate: bool,
+    /// Distinguishes dispatch purpose for ledger persistence: `initial`,
+    /// `post_review_repair`, `review`, or `stuck_loop_gate`.  The retry cap
+    /// counts only `post_review_repair` entries.
+    #[allow(dead_code)]
+    pub dispatch_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,6 +576,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         Some(ts.clone()),
         Some(&session_dir),
     );
+    ledger.dispatch_reason = args.dispatch_reason.clone();
     let started = Instant::now();
     fs::create_dir_all(&session_dir)?;
     println!("Session: {}", session_dir.display());
@@ -5380,6 +5386,7 @@ The parser should retain structured sections.\n\n\
             escalate: false,
             existing_branch: None,
             skip_validation_gate: false,
+            dispatch_reason: None,
         };
 
         // No ledger exists yet.

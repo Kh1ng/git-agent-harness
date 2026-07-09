@@ -20,6 +20,30 @@ use std::sync::{Mutex, MutexGuard};
 
 static PATH_LOCK: Mutex<()> = Mutex::new(());
 static EXEC_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static LEDGER_LOCK: Mutex<()> = Mutex::new(());
+
+pub struct LedgerEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl LedgerEnvGuard {
+    /// Sets `GAH_LEDGER_PATH` to `path` for the duration of the guard.
+    /// Process-wide lock because `GAH_LEDGER_PATH` is a global env var —
+    /// without this lock, parallel tests that derive the ledger path from
+    /// `artifact_root` silently read/write the wrong file when a status
+    /// test momentarily sets the env var.
+    pub fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
+        let lock = LEDGER_LOCK.lock().unwrap();
+        std::env::set_var("GAH_LEDGER_PATH", path);
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for LedgerEnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("GAH_LEDGER_PATH");
+    }
+}
 
 pub struct ExecGuard {
     _lock: MutexGuard<'static, ()>,

@@ -395,6 +395,11 @@ fn gitlab_ci_passed(pipeline_status: Option<&str>) -> bool {
 }
 
 /// Used to implement the retry cap for FixMr actions on existing branches.
+/// Counts ONLY ledger entries with `dispatch_reason == "post_review_repair"`
+/// — internal OpenHands retries within a single dispatch (attempts_started)
+/// do NOT consume retry budget.  This prevents a ticket that needed 2
+/// internal attempts to pass validation from being blocked from its first
+/// post-review fix before the review even happens.
 pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashMap<String, usize> {
     use std::collections::HashMap;
 
@@ -406,9 +411,14 @@ pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashM
     let mut counts = HashMap::new();
 
     for entry in entries {
-        if entry.mode == "fix" && entry.attempts_started > 0 {
+        if entry.mode == "fix"
+            && entry
+                .dispatch_reason
+                .as_deref()
+                .is_some_and(|r| r == "post_review_repair")
+        {
             if let Some(branch) = &entry.branch {
-                *counts.entry(branch.clone()).or_insert(0) += entry.attempts_started as usize;
+                *counts.entry(branch.clone()).or_insert(0) += 1;
             }
         }
     }
@@ -594,5 +604,187 @@ mod tests {
         mr.merged = true;
 
         assert_eq!(classify(&mr), "MERGED");
+    }
+
+    // ===== Bug 1: count_fix_attempts_per_branch counting semantics =====
+    // These tests prove the retry cap counts ONLY actual post-review repair
+    // dispatches, not internal OpenHands retries or initial dispatches.
+
+    fn test_cfg_with_ledger(
+        entries: &[crate::ledger::LedgerEntry],
+    ) -> (
+        crate::config::GahConfig,
+        tempfile::TempDir,
+        crate::test_support::LedgerEnvGuard,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        // GAH_LEDGER_PATH is a process-global env var that status tests set
+        // during `cargo test`. Without this guard, parallel status tests can
+        // redirect our ledger reads/writes to their tempdir. The guard sets
+        // the env var to our tempdir's ledger file and restores it on drop.
+        // Must be held for the entire test (including the read in
+        // count_fix_attempts_per_branch), so it's returned to the caller.
+        let guard = crate::test_support::LedgerEnvGuard::set(tmp.path().join("ledger.jsonl"));
+        for entry in entries {
+            crate::ledger::append(&cfg, entry).unwrap();
+        }
+        (cfg, tmp, guard)
+    }
+
+    fn ledger_entry(
+        mode: &str,
+        branch: &str,
+        dispatch_reason: Option<&str>,
+        attempts_started: u32,
+    ) -> crate::ledger::LedgerEntry {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = crate::config::Profile {
+            display_name: "test".into(),
+            repo_id: "test".into(),
+            repo: "test".into(),
+            provider: String::new(),
+            local_path: tmp.path().display().to_string(),
+            artifact_root: tmp.path().display().to_string(),
+            default_target_branch: "main".into(),
+            provider_api_base: None,
+            provider_project_id: None,
+            oh_profile: None,
+            openhands_args: vec![],
+            codex_args: vec![],
+            codex_path: None,
+            claude_args: vec![],
+            claude_path: None,
+            agy_path: None,
+            vibe_args: vec![],
+            vibe_path: None,
+            opencode_args: vec![],
+            opencode_path: None,
+            agy_second_home: None,
+            agy_print_timeout_seconds: std::collections::HashMap::new(),
+            agy_idle_timeout_seconds: None,
+            notify_command: None,
+            policy_path: None,
+            env_file: None,
+            env_file_prod: None,
+            validation_commands: vec![],
+            auto_fix_commands: vec![],
+            test_file_patterns: vec![],
+            known_baseline_failure_markers: vec![],
+            model_improve: None,
+            model_pm: None,
+            model_review: None,
+            review_timeout_seconds: None,
+            routing: crate::config::RoutingPolicy::default(),
+            pacing: crate::quota::PacingConfig::default(),
+        };
+        let mut entry =
+            crate::ledger::LedgerEntry::new("test", &prof, "codex", mode, "x", None, None);
+        entry.branch = Some(branch.into());
+        entry.attempts_started = attempts_started;
+        entry.dispatch_reason = dispatch_reason.map(|s| s.into());
+        entry
+    }
+
+    /// Two internal OpenHands attempts inside one initial dispatch consume
+    /// zero post-review repair retries.
+    #[test]
+    fn internal_retries_in_initial_dispatch_count_zero() {
+        let (cfg, _tmp, _guard) =
+            test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", Some("initial"), 2)]);
+        let counts = super::count_fix_attempts_per_branch(&cfg);
+        assert_eq!(
+            counts.get("branch-A").copied().unwrap_or(0),
+            0,
+            "internal retries in an initial dispatch must not consume repair budget"
+        );
+    }
+
+    /// One actual post-review repair dispatch increments the count by exactly 1,
+    /// regardless of how many internal attempts it used.
+    #[test]
+    fn one_repair_dispatch_counts_one() {
+        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[
+            ledger_entry("fix", "branch-A", Some("initial"), 2),
+            ledger_entry("fix", "branch-A", Some("post_review_repair"), 3),
+        ]);
+        let counts = super::count_fix_attempts_per_branch(&cfg);
+        assert_eq!(
+            counts.get("branch-A").copied().unwrap_or(0),
+            1,
+            "one post_review_repair entry = count 1, not attempts_started"
+        );
+    }
+
+    /// Internal retries within a FixMr (post_review_repair) dispatch do not
+    /// inflate the repair-cycle count — it increments exactly once per entry.
+    #[test]
+    fn internal_retries_in_repair_dispatch_do_not_inflate() {
+        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[ledger_entry(
+            "fix",
+            "branch-A",
+            Some("post_review_repair"),
+            5,
+        )]);
+        let counts = super::count_fix_attempts_per_branch(&cfg);
+        assert_eq!(
+            counts.get("branch-A").copied().unwrap_or(0),
+            1,
+            "attempts_started=5 within one repair dispatch must count as 1 repair cycle"
+        );
+    }
+
+    /// Retry cap triggers only after the configured number of actual
+    /// post-review repair cycles (AUTO_RETRY_CAP=2).
+    #[test]
+    fn two_repair_dispatches_hit_cap() {
+        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[
+            ledger_entry("fix", "branch-A", Some("initial"), 2),
+            ledger_entry("fix", "branch-A", Some("post_review_repair"), 1),
+            ledger_entry("fix", "branch-A", Some("post_review_repair"), 1),
+        ]);
+        let counts = super::count_fix_attempts_per_branch(&cfg);
+        assert_eq!(
+            counts.get("branch-A").copied().unwrap_or(0),
+            2,
+            "two post_review_repair entries = count 2 = AUTO_RETRY_CAP"
+        );
+    }
+
+    /// Entries with mode != "fix" (review, merge) never count.
+    #[test]
+    fn review_and_merge_entries_never_count() {
+        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[
+            ledger_entry("review", "branch-A", Some("review"), 1),
+            ledger_entry("merge", "branch-A", None, 1),
+        ]);
+        let counts = super::count_fix_attempts_per_branch(&cfg);
+        assert!(
+            counts.is_empty(),
+            "review/merge entries must not count toward fix retry cap"
+        );
+    }
+
+    /// Pre-existing ledger entries without dispatch_reason (legacy) must not
+    /// count — they cannot be proven to be post-review repairs.
+    #[test]
+    fn legacy_entries_without_dispatch_reason_do_not_count() {
+        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", None, 2)]);
+        let counts = super::count_fix_attempts_per_branch(&cfg);
+        assert_eq!(
+            counts.get("branch-A").copied().unwrap_or(0),
+            0,
+            "legacy entries without dispatch_reason must not count (unprovable)"
+        );
     }
 }
