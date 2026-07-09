@@ -223,3 +223,55 @@ fn supports_all_five_named_backends() {
         );
     }
 }
+
+/// Different named backends under the same root must NOT share counters.
+/// Before the harness fix (record_dir was `root/record` for ALL instances),
+/// calling `gh` once would also increment `glab.call_count()`.
+#[test]
+fn different_names_under_same_root_have_isolated_counters() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    let glab = FakeBackend::new(tmp.path(), "glab");
+    gh.install(Scenario::success().with_stdout("gh output"));
+    glab.install(Scenario::success().with_stdout("glab output"));
+
+    let gh_out = run(gh.bin_dir(), "gh", &["pr", "list"]);
+    assert_eq!(gh_out.status.code(), Some(0));
+    assert_eq!(gh.call_count(), 1);
+    assert_eq!(
+        glab.call_count(),
+        0,
+        "glab must not be affected by gh invocation"
+    );
+
+    let glab_out = run(glab.bin_dir(), "glab", &["mr", "list"]);
+    assert_eq!(glab_out.status.code(), Some(0));
+    assert_eq!(glab.call_count(), 1);
+    assert_eq!(
+        gh.call_count(),
+        1,
+        "gh must not be affected by glab invocation"
+    );
+
+    assert_eq!(gh.argv_for_call(1), vec!["pr", "list"]);
+    assert_eq!(glab.argv_for_call(1), vec!["mr", "list"]);
+}
+
+/// Worker call must not increment provider count, and vice versa.
+#[test]
+fn worker_call_does_not_increment_provider_counter() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    let worker = FakeBackend::new(tmp.path(), "openhands");
+    gh.install(Scenario::success());
+    worker.install(Scenario::success());
+
+    run(gh.bin_dir(), "gh", &["pr", "list"]);
+    run(worker.bin_dir(), "openhands", &["--headless"]);
+
+    assert_eq!(gh.call_count(), 1);
+    assert_eq!(worker.call_count(), 1);
+    assert!(gh.call_count() == 1 && worker.call_count() == 1);
+}

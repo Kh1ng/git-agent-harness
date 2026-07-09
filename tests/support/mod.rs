@@ -82,7 +82,10 @@ impl FakeBackend {
     /// instances of the same backend name just pass N different roots.
     pub fn new(root: &Path, name: &str) -> Self {
         let bin_dir = root.join("bin");
-        let record_dir = root.join("record");
+        // Isolate each backend's record state under its own name prefix
+        // so different backends (gh, glab, openhands, ...) don't share
+        // call counters, sequence positions, or argv logs.
+        let record_dir = root.join("record").join(name);
         fs::create_dir_all(&bin_dir).unwrap();
         fs::create_dir_all(&record_dir).unwrap();
         FakeBackend {
