@@ -12,7 +12,7 @@
 
 mod support;
 use support::fake_ledger::{ledger_entry_full, TestLedger};
-use support::scenario::{GithubPrParams, ScenarioHarness};
+use support::scenario::{gitlab_mr_json, GithubPrParams, GitlabMrParams, ScenarioHarness};
 use support::{FakeBackend, Scenario};
 use tempfile::TempDir;
 
@@ -515,4 +515,94 @@ fn incomplete_fixture_rejected_at_harness_setup() {
             );
         }
     }
+}
+
+#[test]
+fn gitlab_status_reports_only_open_merge_requests() {
+    let tmp = TempDir::new().unwrap();
+    let glab = FakeBackend::new(tmp.path(), "glab");
+    let mut mrs = Vec::new();
+
+    for iid in 1..=2 {
+        mrs.push(gitlab_mr_json(GitlabMrParams {
+            title: format!("Draft: TICKET-{iid} open"),
+            branch: format!("gah/open-{iid}"),
+            labels: vec![],
+            pipeline_status: None,
+            url: None,
+            iid: Some(iid),
+            draft: Some(true),
+            merged_at: None,
+            updated_at: None,
+        }));
+    }
+    for iid in 3..=30 {
+        let mut mr = gitlab_mr_json(GitlabMrParams {
+            title: format!("Draft: TICKET-{iid} historical"),
+            branch: format!("gah/historical-{iid}"),
+            labels: vec![],
+            pipeline_status: None,
+            url: None,
+            iid: Some(iid),
+            draft: Some(true),
+            merged_at: None,
+            updated_at: None,
+        });
+        mr["state"] = serde_json::json!("closed");
+        mrs.push(mr);
+    }
+    glab.install(Scenario::success().with_stdout(serde_json::to_string(&mrs).unwrap()));
+
+    let mut harness = ScenarioHarness::new("gitlab")
+        .gitlab_scenario("empty")
+        .with_ledger(TestLedger::new());
+    harness.install_custom_glab(&glab);
+
+    let snap = harness.run_status_json().expect("status should succeed");
+    let merge_requests = snap["merge_requests"].as_array().unwrap();
+    assert_eq!(
+        merge_requests.len(),
+        2,
+        "status must exclude closed/merged GitLab MRs; got {merge_requests:?}"
+    );
+}
+
+#[test]
+fn stale_human_required_ledger_entry_does_not_block_unrelated_status() {
+    let mut entry = ledger_entry_full(
+        "review",
+        "gah/stale-human-required",
+        Some("review"),
+        "TICKET-STALE",
+        "2026-07-01T00:00:00Z",
+    );
+    entry["human_required"] = serde_json::json!(true);
+
+    let pr = support::scenario::github_pr_json(GithubPrParams {
+        title: "Draft: TICKET-UNRELATED healthy work".into(),
+        branch: "gah/unrelated-healthy-work".into(),
+        labels: vec![],
+        ci_conclusion: Some("SUCCESS".into()),
+        url: None,
+        number: Some(99),
+        draft: Some(true),
+        merged_at: None,
+        updated_at: None,
+    });
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr]).unwrap()));
+
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .with_ledger(TestLedger::new().with_entry(entry));
+    harness.install_custom_gh(&gh);
+
+    let snap = harness.run_status_json().expect("status should succeed");
+    assert_eq!(snap["merge_requests"].as_array().unwrap().len(), 1);
+    let blocked = snap["blocked_work_items"].as_array().unwrap();
+    assert!(
+        blocked.is_empty(),
+        "stale ledger work must not block unrelated status: {blocked:?}"
+    );
 }
