@@ -25,6 +25,7 @@ pub fn run_with_validate(
             failed |= !check_env_files(profile);
             failed |= !check_backend_executables(&cfg.defaults, profile);
             failed |= !check_review_capabilities(&cfg, profile);
+            failed |= !check_merge_policy(profile);
         }
     }
 
@@ -268,6 +269,35 @@ fn check_backend_executables(defaults: &Defaults, profile: &Profile) -> bool {
         }
     }
     !failed
+}
+
+/// Issue #124 / TICKET-127: validates that the resolved merge policy is
+/// internally consistent with the provider. `gitlab_mwps` only makes sense
+/// for a GitLab-backed profile; flag it on any other provider so the operator
+/// discovers the misconfiguration in `doctor` rather than at merge time.
+fn check_merge_policy(profile: &Profile) -> bool {
+    let policy = match &profile.routing.merge_policy {
+        None => {
+            // No profile-level override: the default (`auto`) always applies.
+            print_check(CheckStatus::Pass, "merge policy", "default (auto)");
+            return true;
+        }
+        Some(p) => p,
+    };
+    let label = policy.as_str();
+    if *policy == config::MergePolicy::GitlabMwps && profile.provider != "gitlab" {
+        print_check(
+            CheckStatus::Fail,
+            "merge policy",
+            &format!(
+                "merge_policy '{}' requires provider 'gitlab' but profile uses '{}'",
+                label, profile.provider
+            ),
+        );
+        return false;
+    }
+    print_check(CheckStatus::Pass, "merge policy", label);
+    true
 }
 
 /// TICKET-105: reuses `dispatch::review_preflight` -- the exact same check

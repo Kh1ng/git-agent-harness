@@ -308,6 +308,44 @@ fn gitlab_merge_mr(profile: &Profile, iid: &str) -> Result<()> {
     Ok(())
 }
 
+/// Issue #124 / TICKET-127: set GitLab's "merge when pipeline succeeds" (MWPS)
+/// flag on the MR and return without merging. GitLab then enforces the CI gate
+/// natively: the MR only merges once its pipeline turns green. Used by the
+/// `gitlab_mwps` merge policy so GAH does not merge the MR itself.
+pub fn gitlab_set_mwps(profile: &Profile, iid: &str) -> Result<()> {
+    let ready = provider_command("glab")
+        .args(["mr", "update", iid, "--ready", "--repo", &profile.repo])
+        .output()
+        .context("glab mr update --ready")?;
+    if !ready.status.success() {
+        anyhow::bail!(
+            "glab mr update --ready failed: {}",
+            String::from_utf8_lossy(&ready.stderr).trim()
+        );
+    }
+    let mwps = provider_command("glab")
+        .args([
+            "mr",
+            "merge",
+            iid,
+            "--when-pipeline-succeeds",
+            "--squash",
+            "--remove-source-branch",
+            "--yes",
+            "--repo",
+            &profile.repo,
+        ])
+        .output()
+        .context("glab mr merge --when-pipeline-succeeds")?;
+    if !mwps.status.success() {
+        anyhow::bail!(
+            "glab mr merge --when-pipeline-succeeds failed: {}",
+            String::from_utf8_lossy(&mwps.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 fn github_merge_mr(profile: &Profile, number: &str) -> Result<()> {
     let ready = provider_command("gh")
         .args(["pr", "ready", number, "--repo", &profile.repo])
