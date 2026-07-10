@@ -32,6 +32,14 @@ pub struct RunResult {
     pub exit_code: i32,
     pub duration_secs: f64,
     pub log_path: String,
+    /// TICKET-066/#155: for AGY backends, the bytes appended to AGY's
+    /// `cli.log` during this specific run, scoped to the pre-run byte
+    /// offset (so concurrent appends from other AGY instances/log sources
+    /// are excluded). `None` for non-AGY backends and for runs where the
+    /// cli.log could not be read. This delta — not a fresh read of the
+    /// whole log — is what usage/quota parsing consumes, so a single
+    /// attempt's usage is never polluted by prior runs.
+    pub agy_cli_log_delta: Option<String>,
 }
 
 pub struct LlmConfig {
@@ -177,6 +185,7 @@ pub fn run_openhands(
         exit_code: status.code().unwrap_or(-1),
         duration_secs: start.elapsed().as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
+        agy_cli_log_delta: None,
     })
 }
 
@@ -241,6 +250,7 @@ pub fn run_codex_with_executable(
         exit_code: status.code().unwrap_or(-1),
         duration_secs: start.elapsed().as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
+        agy_cli_log_delta: None,
     })
 }
 
@@ -342,6 +352,7 @@ pub fn run_claude_with_executable(
         exit_code: status.code().unwrap_or(-1),
         duration_secs: start.elapsed().as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
+        agy_cli_log_delta: None,
     })
 }
 
@@ -404,6 +415,7 @@ pub fn run_vibe_with_executable(
         exit_code: status.code().unwrap_or(-1),
         duration_secs: start.elapsed().as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
+        agy_cli_log_delta: None,
     })
 }
 
@@ -476,6 +488,7 @@ pub fn run_opencode_with_executable(
         exit_code: status.code().unwrap_or(-1),
         duration_secs: start.elapsed().as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
+        agy_cli_log_delta: None,
     })
 }
 
@@ -544,6 +557,33 @@ fn agy_empty_output_diagnosis(env_vars: &[(String, String)], executable: &Path) 
     }
 }
 
+/// Resolve AGY's cli.log path from the HOME that the run actually uses
+/// (the per-call `env_vars` win over process `HOME`, matching how the run's
+/// effective HOME is resolved elsewhere). Returns `None` only when no HOME
+/// is discoverable -- in which case there is no cli.log to delta against.
+fn agy_cli_log_path(env_vars: &[(String, String)], _executable: &Path) -> Option<PathBuf> {
+    let home = env_vars
+        .iter()
+        .find(|(k, _)| k == "HOME")
+        .map(|(_, v)| v.clone())
+        .or_else(|| std::env::var("HOME").ok())?;
+    Some(PathBuf::from(home).join(".gemini/antigravity-cli/cli.log"))
+}
+
+/// #155: read only the bytes appended to AGY's cli.log after `pre_offset`,
+/// i.e. the delta this run produced. Returns `None` if the log can't be
+/// read (never fabricates data -- an unreadable log means "unknown", not
+/// "empty").
+fn agy_cli_log_delta(cli_log: &Option<PathBuf>, pre_offset: u64) -> Option<String> {
+    let path = cli_log.as_ref()?;
+    let contents = fs::read_to_string(path).ok()?;
+    let bytes = contents.as_bytes();
+    if (pre_offset as usize) >= bytes.len() {
+        return None;
+    }
+    Some(contents[pre_offset as usize..].to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_agy_with_executable(
     executable: &Path,
@@ -566,6 +606,18 @@ pub fn run_agy_with_executable(
     if let Some(secs) = print_timeout_seconds {
         cmd.args(["--print-timeout", &format!("{secs}s")]);
     }
+
+    // #155: scope AGY's cli.log to just the bytes this run appends. Capture
+    // the pre-run byte offset up front so that, after the run, we read the
+    // new tail only (not the whole log, which may contain unrelated
+    // history or concurrent appends from other AGY instances). `None` when
+    // the cli.log isn't readable yet is fine -- the delta stays `None` and
+    // usage/quota parsing simply has nothing to draw from for this attempt.
+    let agy_cli_log = agy_cli_log_path(env_vars, executable);
+    let agy_cli_log_pre_offset = agy_cli_log
+        .as_ref()
+        .and_then(|p| fs::metadata(p).ok().map(|m| m.len()))
+        .unwrap_or(0);
     cmd.arg("--dangerously-skip-permissions")
         .current_dir(worktree)
         .stdout(Stdio::piped())
@@ -655,6 +707,7 @@ pub fn run_agy_with_executable(
             exit_code: -1,
             duration_secs: duration.as_secs_f64(),
             log_path: log_path.to_string_lossy().into_owned(),
+            agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
         });
     }
 
@@ -677,6 +730,7 @@ pub fn run_agy_with_executable(
             exit_code: -1,
             duration_secs: duration.as_secs_f64(),
             log_path: log_path.to_string_lossy().into_owned(),
+            agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
         });
     }
 
@@ -684,6 +738,7 @@ pub fn run_agy_with_executable(
         exit_code,
         duration_secs: duration.as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
+        agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
     })
 }
 
