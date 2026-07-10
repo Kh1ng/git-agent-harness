@@ -550,6 +550,8 @@ mod telemetry_tests {
             work_id: Some("work-123".to_string()),
             source_issue_number: None,
             work_title: None,
+            task_class: None,
+            difficulty: None,
             branch: Some("main".to_string()),
             session_dir: None,
             duration_seconds: Some(100.0),

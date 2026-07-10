@@ -207,6 +207,16 @@ pub struct LedgerEntry {
     #[serde(default)]
     pub work_title: Option<String>,
     pub branch: Option<String>,
+    /// TICKET-118 (classification): task class parsed from ticket metadata,
+    /// e.g. `improve`, `fix`, `pm`, `review`, `experiment`. `#[serde(default)]`
+    /// so pre-existing JSONL ledger lines without this key still deserialize.
+    #[serde(default)]
+    pub task_class: Option<String>,
+    /// TICKET-118 (classification): difficulty parsed from ticket metadata,
+    /// e.g. `easy`, `medium`, `hard`. `#[serde(default)]` for pre-existing
+    /// JSONL ledger lines.
+    #[serde(default)]
+    pub difficulty: Option<String>,
     pub session_dir: Option<String>,
     pub duration_seconds: Option<f64>,
     pub backend_exit_code: Option<i32>,
@@ -298,6 +308,8 @@ impl LedgerEntry {
             work_id: None,
             source_issue_number: None,
             work_title: None,
+            task_class: None,
+            difficulty: None,
             branch: None,
             session_dir: session_dir.map(|p| p.display().to_string()),
             duration_seconds: None,
@@ -369,6 +381,8 @@ impl LedgerEntry {
             work_id: Some(work_id.to_string()),
             source_issue_number: None,
             work_title: None,
+            task_class: None,
+            difficulty: None,
             branch: None,
             session_dir: None,
             duration_seconds: None,
