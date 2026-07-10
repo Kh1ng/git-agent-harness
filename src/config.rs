@@ -142,6 +142,18 @@ impl Defaults {
         }
         default_config_dir().join("events.jsonl")
     }
+
+    /// Directory `manager_wake_autonomy` audit logs are written under, same
+    /// override convention as `GAH_LEDGER_PATH`/`GAH_EVENTS_PATH`.
+    pub fn manager_wake_log_dir(&self) -> PathBuf {
+        if let Ok(path) = std::env::var("GAH_MANAGER_WAKE_LOG_DIR") {
+            return PathBuf::from(path);
+        }
+        if !self.artifact_root.trim().is_empty() {
+            return PathBuf::from(self.artifact_root.trim()).join("manager-wake-logs");
+        }
+        default_config_dir().join("manager-wake-logs")
+    }
 }
 
 /// TICKET-128: per-profile policy for human-facing repository messaging.

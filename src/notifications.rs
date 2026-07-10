@@ -179,10 +179,18 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
 
 /// Spawn the configured manager CLI headlessly (fire-and-forget, background)
 /// with `instruction` passed as a single argv argument -- never shell-
-/// interpolated, so there is no quoting/injection concern. Any failure to
-/// spawn is logged to stderr and swallowed, exactly like
+/// interpolated, so there is no quoting/injection concern. stdout/stderr are
+/// captured to a timestamped audit log under `log_dir` (see
+/// `Defaults::manager_wake_log_dir`), not discarded, so a wake is always
+/// inspectable after the fact. Live-hit: the first real wake (autonomy Full)
+/// ran completely unobserved -- stdout/stderr both went to `/dev/null`, so
+/// there was no way to see what an unsupervised headless agent instance
+/// actually did or why it might be making network connections, right when
+/// an operator was specifically asking about unexpected outbound traffic.
+/// Any failure to spawn is logged to stderr and swallowed, exactly like
 /// `run_notify_command`: this must never fail the caller's dispatch/loop.
-fn spawn_manager_wake(manager: &str, instruction: &str) {
+fn spawn_manager_wake(manager: &str, instruction: &str, log_dir: &std::path::Path) {
+    use std::io::Write;
     use std::process::{Command, Stdio};
 
     let mut cmd = match manager {
@@ -214,9 +222,33 @@ fn spawn_manager_wake(manager: &str, instruction: &str) {
             return;
         }
     };
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+
+    if let Err(err) = std::fs::create_dir_all(log_dir) {
+        eprintln!("[gah] manager_wake: failed to create log dir (swallowed): {err:#}");
+    }
+    let ts = time::OffsetDateTime::now_utc().unix_timestamp();
+    let log_path = log_dir.join(format!("{ts}-{}-{manager}.log", std::process::id()));
+
+    cmd.stdin(Stdio::null());
+    match std::fs::File::create(&log_path) {
+        Ok(mut log_file) => {
+            let _ = writeln!(log_file, "instruction: {instruction}\n---");
+            let log_err = log_file.try_clone().ok();
+            cmd.stdout(Stdio::from(log_file));
+            if let Some(log_err) = log_err {
+                cmd.stderr(Stdio::from(log_err));
+            } else {
+                cmd.stderr(Stdio::null());
+            }
+        }
+        Err(err) => {
+            eprintln!(
+                "[gah] manager_wake: failed to open log file {} (swallowed, output will be discarded): {err:#}",
+                log_path.display()
+            );
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
 
     // Deliberately fire-and-forget: this must not block the dispatch/loop
     // that triggered it. The spawned process becomes independent; if this
@@ -246,7 +278,7 @@ pub fn notify_event(cfg: &GahConfig, profile: &Profile, event: NotifyEvent) {
 
     if let Some(instruction) = format_wake_instruction(&event, profile.manager_wake_autonomy) {
         if let Some(manager) = cfg.defaults.current_manager.as_deref() {
-            spawn_manager_wake(manager, &instruction);
+            spawn_manager_wake(manager, &instruction, &cfg.defaults.manager_wake_log_dir());
         }
     }
 }
@@ -505,7 +537,8 @@ mod tests {
 
         let mut profile = crate::config::tests::test_profile_for_notifications();
         profile.manager_wake_autonomy = WakeAutonomy::Full;
-        let cfg = test_gah_config(Some("claude"));
+        let mut cfg = test_gah_config(Some("claude"));
+        cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
 
         notify_event(
             &cfg,
@@ -529,6 +562,24 @@ mod tests {
         assert!(
             got.contains("https://example.com/mr/9"),
             "expected woken claude to receive the instruction, got: {got:?}"
+        );
+
+        // The audit log (this fix's whole point) must exist and contain the
+        // instruction -- a wake must never again be unobservable.
+        let log_dir = cfg.defaults.manager_wake_log_dir();
+        let log_entries: Vec<_> = std::fs::read_dir(&log_dir)
+            .unwrap_or_else(|err| panic!("expected log dir {log_dir:?} to exist: {err:#}"))
+            .collect();
+        assert_eq!(
+            log_entries.len(),
+            1,
+            "expected exactly one wake log file in {log_dir:?}"
+        );
+        let log_contents = std::fs::read_to_string(log_entries[0].as_ref().unwrap().path())
+            .expect("read wake log file");
+        assert!(
+            log_contents.contains("https://example.com/mr/9"),
+            "expected wake log to record the instruction, got: {log_contents:?}"
         );
     }
 
