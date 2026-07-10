@@ -208,6 +208,16 @@ pub struct Profile {
     /// Optional absolute/relative path to the OpenCode CLI executable.
     #[serde(default)]
     pub opencode_path: Option<String>,
+    /// How long OpenCode's own log output can go quiet before GAH considers
+    /// it stalled and kills it, in seconds. Same rationale as
+    /// `agy_idle_timeout_seconds` (opencode's own multi-step sub-agent
+    /// orchestration can legitimately pause longer between visible output
+    /// than a single-shot backend, hence the more generous default) --
+    /// added after a live dispatch hung for 3+ hours with zero output and
+    /// no supervision at all (opencode had no timeout of any kind before
+    /// this). Defaults to 300s when unset.
+    #[serde(default)]
+    pub opencode_idle_timeout_seconds: Option<u64>,
     /// HOME override for the `agy-second` backend name only -- a distinct
     /// authenticated Antigravity account/quota pool from the default `agy`
     /// backend, which otherwise runs under the process's real $HOME. Same
@@ -558,6 +568,10 @@ impl Profile {
         self.agy_idle_timeout_seconds.unwrap_or(120).max(1)
     }
 
+    pub fn opencode_idle_timeout_seconds(&self) -> u64 {
+        self.opencode_idle_timeout_seconds.unwrap_or(300).max(1)
+    }
+
     pub fn pat(&self) -> String {
         match self.provider.as_str() {
             "gitlab" => std::env::var("GITLAB_PAT2")
@@ -866,6 +880,7 @@ pub mod tests {
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds: None,
             notify_command: None,
             policy_path: None,
             env_file: None,
@@ -916,6 +931,7 @@ pub mod tests {
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds: None,
             notify_command: None,
             policy_path: None,
             env_file: None,

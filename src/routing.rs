@@ -1263,6 +1263,7 @@ mod tests {
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
