@@ -512,6 +512,13 @@ impl Profile {
         self.routing.merged_with_defaults(&defaults.routing)
     }
 
+    /// An explicit executable path override for `backend`, if this profile
+    /// sets one. `resolve_backend_executable` (runner.rs) treats a `Some`
+    /// return as a literal file path to check with `is_executable_path` --
+    /// this must ONLY ever return a real path override, never a marker
+    /// string, or backend launch silently breaks (see `is_backend_configured`
+    /// below for the "is this set up at all" signal, which is a different
+    /// question with a different answer for openhands).
     pub fn configured_backend_path(&self, backend: &str) -> Option<&str> {
         match backend {
             "codex" => self.codex_path.as_deref(),
@@ -519,17 +526,28 @@ impl Profile {
             "agy" | "agy-main" | "agy-second" => self.agy_path.as_deref(),
             "vibe" => self.vibe_path.as_deref(),
             "opencode" => self.opencode_path.as_deref(),
-            // OpenHands is a real, fully wired backend (run_opencode /
-            // run_opencode_with_executable in runner.rs). Its "configured for
-            // this profile" signal is the presence of an oh_profile; there is
-            // no optional explicit executable path (the openhands CLI is
-            // resolved on PATH), so we surface the profile name as the
-            // configured marker. Prior to this it was absent from the match
-            // arm, so Settings could not distinguish "implemented but not set
-            // up for this profile" from "implemented and ready".
-            "openhands" => self.oh_profile.as_deref(),
             _ => None,
         }
+    }
+
+    /// Whether `backend` is set up for this profile at all -- distinct from
+    /// `configured_backend_path`, which only reports an *explicit path
+    /// override* and is consumed by `resolve_backend_executable` to find the
+    /// literal binary to run. OpenHands has no such override (its CLI is
+    /// always resolved on PATH); its "configured" signal is instead whether
+    /// this profile sets an `oh_profile`. Settings' "configured for this
+    /// profile" display (issue #157) should call this, not
+    /// `configured_backend_path`, for exactly this reason -- an earlier
+    /// version conflated the two and made openhands's `oh_profile` name
+    /// (e.g. "nous-hy3") look like an executable path to
+    /// `resolve_backend_executable`, which then failed `is_executable_path`
+    /// and made routing treat openhands as unavailable for every explicit
+    /// `--backend openhands` dispatch.
+    pub fn is_backend_configured(&self, backend: &str) -> bool {
+        if backend == "openhands" {
+            return self.oh_profile.is_some();
+        }
+        self.configured_backend_path(backend).is_some()
     }
 
     pub fn review_timeout_seconds(&self) -> u64 {
@@ -987,6 +1005,43 @@ pub mod tests {
         let profile = reloaded.profiles.get("test").unwrap();
         assert_eq!(profile.display_name, "Repo");
         assert_eq!(profile.repo, "owner/repo");
+    }
+
+    // Regression: configured_backend_path("openhands") used to return
+    // oh_profile (e.g. "nous-hy3"), which resolve_backend_executable
+    // (runner.rs) then treated as a literal executable file path -- that
+    // string is never a real file, so every explicit `--backend openhands`
+    // dispatch on a profile with oh_profile set silently routed away from
+    // openhands as if it were unavailable. configured_backend_path must
+    // never return anything for openhands; is_backend_configured is the
+    // right function for "is this set up" instead.
+    #[test]
+    fn configured_backend_path_never_returns_a_value_for_openhands() {
+        let mut profile = test_profile_for_notifications();
+        profile.oh_profile = Some("nous-hy3".to_string());
+        assert_eq!(profile.configured_backend_path("openhands"), None);
+    }
+
+    #[test]
+    fn is_backend_configured_true_for_openhands_with_oh_profile_set() {
+        let mut profile = test_profile_for_notifications();
+        profile.oh_profile = Some("nous-hy3".to_string());
+        assert!(profile.is_backend_configured("openhands"));
+    }
+
+    #[test]
+    fn is_backend_configured_false_for_openhands_without_oh_profile() {
+        let profile = test_profile_for_notifications();
+        assert_eq!(profile.oh_profile, None);
+        assert!(!profile.is_backend_configured("openhands"));
+    }
+
+    #[test]
+    fn is_backend_configured_delegates_to_path_for_other_backends() {
+        let mut profile = test_profile_for_notifications();
+        assert!(!profile.is_backend_configured("codex"));
+        profile.codex_path = Some("/usr/local/bin/codex".to_string());
+        assert!(profile.is_backend_configured("codex"));
     }
 
     #[test]

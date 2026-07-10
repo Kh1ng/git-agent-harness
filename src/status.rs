@@ -415,7 +415,7 @@ pub fn build_snapshot(
     let mut backend_configured: std::collections::HashMap<String, bool> =
         std::collections::HashMap::new();
     for backend in implemented_backends {
-        let configured = profile.configured_backend_path(backend).is_some();
+        let configured = profile.is_backend_configured(backend);
         backend_configured.insert(backend.to_string(), configured);
     }
 
