@@ -818,6 +818,7 @@ fn run_backend(
             llm,
             &profile.openhands_args,
             &env_vars,
+            profile.openhands_idle_timeout_seconds(),
         ),
     }
 }
@@ -3398,6 +3399,7 @@ mod tests {
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
+            openhands_idle_timeout_seconds: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
