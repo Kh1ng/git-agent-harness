@@ -771,6 +771,7 @@ fn run_backend(
             effective_model,
             &profile.codex_args,
             &env_vars,
+            profile.codex_idle_timeout_seconds(),
         ),
         "claude" => runner::run_claude_with_executable(
             &runner::require_backend_executable(profile, backend)?,
@@ -779,6 +780,7 @@ fn run_backend(
             session_dir,
             &profile.claude_args,
             &env_vars,
+            profile.claude_idle_timeout_seconds(),
         ),
         "agy" | "agy-main" | "agy-second" => runner::run_agy_with_executable(
             &runner::require_backend_executable(profile, backend)?,
@@ -800,6 +802,7 @@ fn run_backend(
             session_dir,
             &profile.vibe_args,
             &env_vars,
+            profile.vibe_idle_timeout_seconds(),
         ),
         "opencode" => runner::run_opencode_with_executable(
             &runner::require_backend_executable(profile, backend)?,
@@ -3506,6 +3509,9 @@ mod tests {
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
             openhands_idle_timeout_seconds: None,
+            vibe_idle_timeout_seconds: None,
+            codex_idle_timeout_seconds: None,
+            claude_idle_timeout_seconds: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,

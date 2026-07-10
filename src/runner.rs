@@ -106,6 +106,99 @@ fn copy_stream_to_file<R: Read + Send + 'static>(
     })
 }
 
+/// Spawn `cmd` (stdout/stderr are set to piped by this helper) and drive it
+/// to completion, killing it once its log has gone genuinely quiet for
+/// `idle_timeout_seconds` -- never on a flat wall-clock budget, since a
+/// backend that's slow but still producing output is still working, not
+/// hung. Shared by every backend invocation that needs hang protection
+/// (agy, opencode, openhands, vibe, codex, claude) -- extracted after the
+/// third copy-paste of this exact loop (issues #170/#87) made the
+/// duplication no longer defensible.
+///
+/// `spawn_context` labels a spawn failure (e.g. "launching vibe; is it
+/// installed and on PATH?"). Returns `(exit_code, duration_secs)`; on an
+/// idle kill, exit_code is -1 and a trailing note is appended to the log.
+fn spawn_with_idle_watch(
+    mut cmd: Command,
+    log_path: &Path,
+    idle_timeout_seconds: u64,
+    spawn_context: &str,
+) -> Result<(i32, f64)> {
+    let start = Instant::now();
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().with_context(|| spawn_context.to_string())?;
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let stdout_thread = child.stdout.take().map(|stdout| {
+        copy_stream_to_file(stdout, log_path.to_path_buf(), Some(progress_tx.clone()))
+    });
+    let stderr_thread = child
+        .stderr
+        .take()
+        .map(|stderr| copy_stream_to_file(stderr, log_path.to_path_buf(), Some(progress_tx)));
+
+    let idle_timeout = Duration::from_secs(idle_timeout_seconds);
+    let startup_grace = idle_timeout + idle_timeout;
+    let poll_interval = Duration::from_millis(500);
+    let mut last_seen_len = fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
+    let mut last_progress_at = Instant::now();
+    let mut saw_progress = false;
+    let mut killed_for_idle = false;
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(-1),
+            Ok(None) => {
+                while progress_rx.try_recv().is_ok() {
+                    last_seen_len = fs::metadata(log_path)
+                        .map(|m| m.len())
+                        .unwrap_or(last_seen_len);
+                    last_progress_at = Instant::now();
+                    saw_progress = true;
+                }
+                let current_len = fs::metadata(log_path)
+                    .map(|m| m.len())
+                    .unwrap_or(last_seen_len);
+                if current_len != last_seen_len {
+                    last_seen_len = current_len;
+                    last_progress_at = Instant::now();
+                    saw_progress = true;
+                }
+                let stalled = if saw_progress {
+                    last_progress_at.elapsed() >= idle_timeout
+                } else {
+                    start.elapsed() >= startup_grace
+                };
+                if stalled {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    killed_for_idle = true;
+                    break -1;
+                }
+                thread::sleep(poll_interval);
+            }
+            Err(_) => break -1,
+        }
+    };
+    let duration = start.elapsed();
+    if let Some(handle) = stdout_thread {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_thread {
+        let _ = handle.join();
+    }
+
+    if killed_for_idle {
+        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(log_path) {
+            let _ = writeln!(
+                file,
+                "GAH: killed after {idle_timeout_seconds}s with no new output (stalled, not just slow)."
+            );
+        }
+    }
+
+    Ok((exit_code, duration.as_secs_f64()))
+}
+
 /// Load LLM config from an OpenHands named profile (~/.openhands/profiles/<name>.json).
 pub fn load_oh_profile(name: &str) -> Result<LlmConfig> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
@@ -165,7 +258,6 @@ pub fn run_openhands(
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
 
-    let start = Instant::now();
     let mut cmd = Command::new("openhands");
     cmd.args([
         "--headless",
@@ -181,89 +273,21 @@ pub fn run_openhands(
     .env("LLM_BASE_URL", &llm.base_url)
     .env("LLM_API_KEY", &llm.api_key)
     .env("LLM_MODEL", &llm.model)
-    .current_dir(worktree)
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    .current_dir(worktree);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
 
-    let mut child = cmd
-        .spawn()
-        .context("launching openhands; is it installed and on PATH?")?;
-    let (progress_tx, progress_rx) = mpsc::channel();
-    let stdout_thread = child
-        .stdout
-        .take()
-        .map(|stdout| copy_stream_to_file(stdout, log_path.clone(), Some(progress_tx.clone())));
-    let stderr_thread = child
-        .stderr
-        .take()
-        .map(|stderr| copy_stream_to_file(stderr, log_path.clone(), Some(progress_tx)));
-
-    let idle_timeout = Duration::from_secs(idle_timeout_seconds);
-    let startup_grace = idle_timeout + idle_timeout;
-    let poll_interval = Duration::from_millis(500);
-    let mut last_seen_len = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
-    let mut last_progress_at = Instant::now();
-    let mut saw_progress = false;
-    let mut killed_for_idle = false;
-    let exit_code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code().unwrap_or(-1),
-            Ok(None) => {
-                while progress_rx.try_recv().is_ok() {
-                    last_seen_len = fs::metadata(&log_path)
-                        .map(|m| m.len())
-                        .unwrap_or(last_seen_len);
-                    last_progress_at = Instant::now();
-                    saw_progress = true;
-                }
-                let current_len = fs::metadata(&log_path)
-                    .map(|m| m.len())
-                    .unwrap_or(last_seen_len);
-                if current_len != last_seen_len {
-                    last_seen_len = current_len;
-                    last_progress_at = Instant::now();
-                    saw_progress = true;
-                }
-                let stalled = if saw_progress {
-                    last_progress_at.elapsed() >= idle_timeout
-                } else {
-                    start.elapsed() >= startup_grace
-                };
-                if stalled {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    killed_for_idle = true;
-                    break -1;
-                }
-                thread::sleep(poll_interval);
-            }
-            Err(_) => break -1,
-        }
-    };
-    let duration = start.elapsed();
-    if let Some(handle) = stdout_thread {
-        let _ = handle.join();
-    }
-    if let Some(handle) = stderr_thread {
-        let _ = handle.join();
-    }
-
-    if killed_for_idle {
-        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
-            use std::io::Write;
-            let _ = writeln!(
-                file,
-                "GAH: killed after {idle_timeout_seconds}s with no new output (stalled, not just slow)."
-            );
-        }
-    }
+    let (exit_code, duration_secs) = spawn_with_idle_watch(
+        cmd,
+        &log_path,
+        idle_timeout_seconds,
+        "launching openhands; is it installed and on PATH?",
+    )?;
 
     Ok(RunResult {
         exit_code,
-        duration_secs: duration.as_secs_f64(),
+        duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
         transcript_path: None,
@@ -281,6 +305,7 @@ pub fn run_codex(
     model: Option<&str>,
     extra_args: &[String],
     env_vars: &[(String, String)],
+    idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     run_codex_with_executable(
         Path::new("codex"),
@@ -290,9 +315,11 @@ pub fn run_codex(
         model,
         extra_args,
         env_vars,
+        idle_timeout_seconds,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_codex_with_executable(
     executable: &Path,
     worktree: &Path,
@@ -301,14 +328,11 @@ pub fn run_codex_with_executable(
     model: Option<&str>,
     extra_args: &[String],
     env_vars: &[(String, String)],
+    idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
 
-    let log_file = fs::File::create(&log_path).context("creating log file")?;
-    let log_err = log_file.try_clone()?;
-
-    let start = Instant::now();
     let mut cmd = Command::new(executable);
     // Issue #152: --json produces structured JSONL output for programmatic
     // usage extraction in parse_codex_exec_json (usage.rs).
@@ -317,19 +341,21 @@ pub fn run_codex_with_executable(
         .arg(task)
         .args(filtered_codex_args(extra_args))
         .args(codex_model_args(model))
-        .current_dir(worktree)
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err));
+        .current_dir(worktree);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
-    let status = cmd
-        .status()
-        .context("launching codex; is it installed and on PATH?")?;
+
+    let (exit_code, duration_secs) = spawn_with_idle_watch(
+        cmd,
+        &log_path,
+        idle_timeout_seconds,
+        "launching codex; is it installed and on PATH?",
+    )?;
 
     Ok(RunResult {
-        exit_code: status.code().unwrap_or(-1),
-        duration_secs: start.elapsed().as_secs_f64(),
+        exit_code,
+        duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
         transcript_path: None,
@@ -391,6 +417,7 @@ pub fn run_claude(
     session_dir: &Path,
     extra_args: &[String],
     env_vars: &[(String, String)],
+    idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     run_claude_with_executable(
         Path::new("claude"),
@@ -399,9 +426,11 @@ pub fn run_claude(
         session_dir,
         extra_args,
         env_vars,
+        idle_timeout_seconds,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_claude_with_executable(
     executable: &Path,
     worktree: &Path,
@@ -409,12 +438,10 @@ pub fn run_claude_with_executable(
     session_dir: &Path,
     extra_args: &[String],
     env_vars: &[(String, String)],
+    idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
-
-    let log_file = fs::File::create(&log_path).context("creating log file")?;
-    let log_err = log_file.try_clone()?;
 
     // Issue #153: pin a stable session id so we can locate the exact
     // transcript `.jsonl` Claude Code writes afterwards (the source of real
@@ -427,7 +454,6 @@ pub fn run_claude_with_executable(
         .find_map(|(k, v)| (k == "HOME").then_some(PathBuf::from(v)))
         .or_else(|| env::var("HOME").ok().map(PathBuf::from));
 
-    let start = Instant::now();
     let mut cmd = Command::new(executable);
     cmd.args([
         "-p",
@@ -439,15 +465,17 @@ pub fn run_claude_with_executable(
         &session_id,
     ])
     .args(extra_args)
-    .current_dir(worktree)
-    .stdout(Stdio::from(log_file))
-    .stderr(Stdio::from(log_err));
+    .current_dir(worktree);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
-    let status = cmd
-        .status()
-        .context("launching claude; is it installed and on PATH?")?;
+
+    let (exit_code, duration_secs) = spawn_with_idle_watch(
+        cmd,
+        &log_path,
+        idle_timeout_seconds,
+        "launching claude; is it installed and on PATH?",
+    )?;
 
     // Locate the transcript for the pinned session id so per-attempt usage
     // parsing can consume it.
@@ -457,8 +485,8 @@ pub fn run_claude_with_executable(
         .map(|p| p.to_string_lossy().into_owned());
 
     Ok(RunResult {
-        exit_code: status.code().unwrap_or(-1),
-        duration_secs: start.elapsed().as_secs_f64(),
+        exit_code,
+        duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
         transcript_path,
@@ -478,6 +506,7 @@ pub fn run_vibe(
     session_dir: &Path,
     extra_args: &[String],
     env_vars: &[(String, String)],
+    idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     run_vibe_with_executable(
         Path::new("vibe"),
@@ -486,9 +515,11 @@ pub fn run_vibe(
         session_dir,
         extra_args,
         env_vars,
+        idle_timeout_seconds,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_vibe_with_executable(
     executable: &Path,
     worktree: &Path,
@@ -496,33 +527,32 @@ pub fn run_vibe_with_executable(
     session_dir: &Path,
     extra_args: &[String],
     env_vars: &[(String, String)],
+    idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
 
-    let log_file = fs::File::create(&log_path).context("creating log file")?;
-    let log_err = log_file.try_clone()?;
-
-    let start = Instant::now();
     let mut cmd = Command::new(executable);
     // --trust: automation-only, not persisted to trusted_folders.toml --
     // skips the interactive trust prompt without touching global config.
     // --auto-approve: same automation need as agy's --dangerously-skip-permissions.
     cmd.args(["-p", task, "--trust", "--auto-approve"])
         .args(extra_args)
-        .current_dir(worktree)
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err));
+        .current_dir(worktree);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
-    let status = cmd
-        .status()
-        .context("launching vibe; is it installed and on PATH?")?;
+
+    let (exit_code, duration_secs) = spawn_with_idle_watch(
+        cmd,
+        &log_path,
+        idle_timeout_seconds,
+        "launching vibe; is it installed and on PATH?",
+    )?;
 
     Ok(RunResult {
-        exit_code: status.code().unwrap_or(-1),
-        duration_secs: start.elapsed().as_secs_f64(),
+        exit_code,
+        duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
         transcript_path: None,
@@ -576,7 +606,6 @@ pub fn run_opencode_with_executable(
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
 
-    let start = Instant::now();
     let mut cmd = Command::new(executable);
     // opencode run --model <model> --dir <path> --auto "<prompt>"
     cmd.arg("run").arg("--dir").arg(worktree).arg("--auto");
@@ -592,89 +621,21 @@ pub fn run_opencode_with_executable(
     // Add extra args from profile
     cmd.args(extra_args);
 
-    cmd.current_dir(worktree)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.current_dir(worktree);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
 
-    let mut child = cmd
-        .spawn()
-        .context("launching opencode; is it installed and on PATH?")?;
-    let (progress_tx, progress_rx) = mpsc::channel();
-    let stdout_thread = child
-        .stdout
-        .take()
-        .map(|stdout| copy_stream_to_file(stdout, log_path.clone(), Some(progress_tx.clone())));
-    let stderr_thread = child
-        .stderr
-        .take()
-        .map(|stderr| copy_stream_to_file(stderr, log_path.clone(), Some(progress_tx)));
-
-    let idle_timeout = Duration::from_secs(idle_timeout_seconds);
-    let startup_grace = idle_timeout + idle_timeout;
-    let poll_interval = Duration::from_millis(500);
-    let mut last_seen_len = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
-    let mut last_progress_at = Instant::now();
-    let mut saw_progress = false;
-    let mut killed_for_idle = false;
-    let exit_code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code().unwrap_or(-1),
-            Ok(None) => {
-                while progress_rx.try_recv().is_ok() {
-                    last_seen_len = fs::metadata(&log_path)
-                        .map(|m| m.len())
-                        .unwrap_or(last_seen_len);
-                    last_progress_at = Instant::now();
-                    saw_progress = true;
-                }
-                let current_len = fs::metadata(&log_path)
-                    .map(|m| m.len())
-                    .unwrap_or(last_seen_len);
-                if current_len != last_seen_len {
-                    last_seen_len = current_len;
-                    last_progress_at = Instant::now();
-                    saw_progress = true;
-                }
-                let stalled = if saw_progress {
-                    last_progress_at.elapsed() >= idle_timeout
-                } else {
-                    start.elapsed() >= startup_grace
-                };
-                if stalled {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    killed_for_idle = true;
-                    break -1;
-                }
-                thread::sleep(poll_interval);
-            }
-            Err(_) => break -1,
-        }
-    };
-    let duration = start.elapsed();
-    if let Some(handle) = stdout_thread {
-        let _ = handle.join();
-    }
-    if let Some(handle) = stderr_thread {
-        let _ = handle.join();
-    }
-
-    if killed_for_idle {
-        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
-            use std::io::Write;
-            let _ = writeln!(
-                file,
-                "GAH: killed after {idle_timeout_seconds}s with no new output (stalled, not just slow)."
-            );
-        }
-    }
+    let (exit_code, duration_secs) = spawn_with_idle_watch(
+        cmd,
+        &log_path,
+        idle_timeout_seconds,
+        "launching opencode; is it installed and on PATH?",
+    )?;
 
     Ok(RunResult {
         exit_code,
-        duration_secs: duration.as_secs_f64(),
+        duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
         transcript_path: None,
@@ -787,7 +748,6 @@ pub fn run_agy_with_executable(
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
 
-    let start = Instant::now();
     let mut cmd = Command::new(executable);
     cmd.arg("--print");
     cmd.arg(task);
@@ -808,100 +768,29 @@ pub fn run_agy_with_executable(
         .and_then(|p| fs::metadata(p).ok().map(|m| m.len()))
         .unwrap_or(0);
     cmd.arg("--dangerously-skip-permissions")
-        .current_dir(worktree)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .current_dir(worktree);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
-
-    let mut child = cmd.spawn().context(format!(
-        "launching {}; is it installed and on PATH?",
-        executable.display()
-    ))?;
-    let (progress_tx, progress_rx) = mpsc::channel();
-    let stdout_thread = child
-        .stdout
-        .take()
-        .map(|stdout| copy_stream_to_file(stdout, log_path.clone(), Some(progress_tx.clone())));
-    let stderr_thread = child
-        .stderr
-        .take()
-        .map(|stderr| copy_stream_to_file(stderr, log_path.clone(), Some(progress_tx)));
 
     // GAH-side supervision: kill only when the log has genuinely gone quiet
     // for idle_timeout_seconds, not on a flat wall-clock budget. A model
     // that's slow but still producing output (still working) is never
     // killed for being slow; --print-timeout above stays as an outer
     // safety backstop for a truly hung process.
-    let idle_timeout = Duration::from_secs(idle_timeout_seconds);
-    let startup_grace = idle_timeout + idle_timeout;
-    let poll_interval = Duration::from_millis(500);
-    let mut last_seen_len = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
-    let mut last_progress_at = Instant::now();
-    let mut saw_progress = false;
-    let mut killed_for_idle = false;
-    let exit_code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code().unwrap_or(-1),
-            Ok(None) => {
-                while progress_rx.try_recv().is_ok() {
-                    last_seen_len = fs::metadata(&log_path)
-                        .map(|m| m.len())
-                        .unwrap_or(last_seen_len);
-                    last_progress_at = Instant::now();
-                    saw_progress = true;
-                }
-                let current_len = fs::metadata(&log_path)
-                    .map(|m| m.len())
-                    .unwrap_or(last_seen_len);
-                if current_len != last_seen_len {
-                    last_seen_len = current_len;
-                    last_progress_at = Instant::now();
-                    saw_progress = true;
-                }
-                let stalled = if saw_progress {
-                    last_progress_at.elapsed() >= idle_timeout
-                } else {
-                    start.elapsed() >= startup_grace
-                };
-                if stalled {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    killed_for_idle = true;
-                    break -1;
-                }
-                thread::sleep(poll_interval);
-            }
-            Err(_) => break -1,
-        }
-    };
-    let duration = start.elapsed();
-    if let Some(handle) = stdout_thread {
-        let _ = handle.join();
-    }
-    if let Some(handle) = stderr_thread {
-        let _ = handle.join();
-    }
+    let (exit_code, duration_secs) = spawn_with_idle_watch(
+        cmd,
+        &log_path,
+        idle_timeout_seconds,
+        &format!(
+            "launching {}; is it installed and on PATH?",
+            executable.display()
+        ),
+    )?;
 
-    if killed_for_idle {
-        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
-            use std::io::Write;
-            let _ = writeln!(
-                file,
-                "GAH: killed after {idle_timeout_seconds}s with no new output (stalled, not just slow)."
-            );
-        }
-        return Ok(RunResult {
-            exit_code: -1,
-            duration_secs: duration.as_secs_f64(),
-            log_path: log_path.to_string_lossy().into_owned(),
-            agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
-            transcript_path: None,
-        });
-    }
-
-    // Read captured stdout to detect silent failures.
+    // Read captured stdout to detect silent failures. (A kill-for-idle
+    // already leaves exit_code at -1, so the exit_code == 0 guard below
+    // naturally skips this diagnosis for that case.)
     let output = fs::read_to_string(&log_path).unwrap_or_default();
     let trimmed = output.trim();
 
@@ -912,13 +801,12 @@ pub fn run_agy_with_executable(
         let err_msg = agy_empty_output_diagnosis(env_vars, executable);
 
         if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
-            use std::io::Write;
             let _ = writeln!(file, "{}", err_msg);
         }
 
         return Ok(RunResult {
             exit_code: -1,
-            duration_secs: duration.as_secs_f64(),
+            duration_secs,
             log_path: log_path.to_string_lossy().into_owned(),
             agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
             transcript_path: None,
@@ -927,7 +815,7 @@ pub fn run_agy_with_executable(
 
     Ok(RunResult {
         exit_code,
-        duration_secs: duration.as_secs_f64(),
+        duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
         transcript_path: None,
@@ -1361,6 +1249,9 @@ mod tests {
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
             openhands_idle_timeout_seconds: None,
+            vibe_idle_timeout_seconds: None,
+            codex_idle_timeout_seconds: None,
+            claude_idle_timeout_seconds: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -1578,8 +1469,16 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result =
-            run_codex(&f.worktree, "codex task", &f.session_dir, None, &[], &envs).unwrap();
+        let result = run_codex(
+            &f.worktree,
+            "codex task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, 0);
         let log = fs::read_to_string(&result.log_path).unwrap();
@@ -1594,7 +1493,7 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 7);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs).unwrap();
+        let result = run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
 
         assert_eq!(result.exit_code, 7);
     }
@@ -1613,6 +1512,7 @@ mod tests {
             None,
             &["-c".to_string(), "model=gpt".to_string()],
             &envs,
+            300,
         )
         .unwrap();
 
@@ -1634,7 +1534,7 @@ mod tests {
             ("FROM_ENV_FILE".to_string(), "codex-env-value".to_string()),
         ];
 
-        run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs).unwrap();
+        run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=codex-env-value"));
@@ -1645,9 +1545,43 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err = run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs).unwrap_err();
+        let err =
+            run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap_err();
 
         assert!(err.to_string().contains("launching codex; is it installed"));
+    }
+
+    #[test]
+    fn run_codex_kills_process_after_idle_timeout_with_no_new_output() {
+        // codex used a plain blocking cmd.status() with zero supervision,
+        // same class of bug as issues #87/#170. Pins the shared
+        // spawn_with_idle_watch fix for this backend.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "codex",
+            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+        );
+        let envs = vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )];
+
+        let result = run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 1).unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("step1"));
+        assert!(!log.contains("step2"));
+        assert!(
+            log.contains("killed after 1s with no new output"),
+            "got log: {log}"
+        );
     }
 
     #[test]
@@ -1692,6 +1626,7 @@ mod tests {
                 "--trace".to_string(),
             ],
             &envs,
+            300,
         )
         .unwrap();
 
@@ -1717,7 +1652,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_claude(&f.worktree, "claude task", &f.session_dir, &[], &envs).unwrap();
+        let result =
+            run_claude(&f.worktree, "claude task", &f.session_dir, &[], &envs, 300).unwrap();
 
         assert_eq!(result.exit_code, 0);
         let log = fs::read_to_string(&result.log_path).unwrap();
@@ -1732,7 +1668,7 @@ mod tests {
         make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 1);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_claude(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap();
+        let result = run_claude(&f.worktree, "task", &f.session_dir, &[], &envs, 300).unwrap();
 
         assert_eq!(result.exit_code, 1);
     }
@@ -1750,6 +1686,7 @@ mod tests {
             &f.session_dir,
             &["--allowedTools".to_string(), "Edit,Bash".to_string()],
             &envs,
+            300,
         )
         .unwrap();
 
@@ -1770,7 +1707,7 @@ mod tests {
             ("FROM_ENV_FILE".to_string(), "claude-env-value".to_string()),
         ];
 
-        run_claude(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap();
+        run_claude(&f.worktree, "task", &f.session_dir, &[], &envs, 300).unwrap();
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=claude-env-value"));
@@ -1781,11 +1718,44 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err = run_claude(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap_err();
+        let err = run_claude(&f.worktree, "task", &f.session_dir, &[], &envs, 300).unwrap_err();
 
         assert!(err
             .to_string()
             .contains("launching claude; is it installed"));
+    }
+
+    #[test]
+    fn run_claude_kills_process_after_idle_timeout_with_no_new_output() {
+        // claude used a plain blocking cmd.status() with zero supervision,
+        // same class of bug as issues #87/#170. Pins the shared
+        // spawn_with_idle_watch fix for this backend.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "claude",
+            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+        );
+        let envs = vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )];
+
+        let result = run_claude(&f.worktree, "task", &f.session_dir, &[], &envs, 1).unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("step1"));
+        assert!(!log.contains("step2"));
+        assert!(
+            log.contains("killed after 1s with no new output"),
+            "got log: {log}"
+        );
     }
 
     // ── run_vibe ─────────────────────────────────────────────────────────
@@ -1797,7 +1767,7 @@ mod tests {
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_vibe(&f.worktree, "vibe task", &f.session_dir, &[], &envs).unwrap();
+        let result = run_vibe(&f.worktree, "vibe task", &f.session_dir, &[], &envs, 300).unwrap();
 
         assert_eq!(result.exit_code, 0);
         let log = fs::read_to_string(&result.log_path).unwrap();
@@ -1812,7 +1782,7 @@ mod tests {
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 1);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap();
+        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 300).unwrap();
 
         assert_eq!(result.exit_code, 1);
     }
@@ -1830,6 +1800,7 @@ mod tests {
             &f.session_dir,
             &["--max-turns".to_string(), "40".to_string()],
             &envs,
+            300,
         )
         .unwrap();
 
@@ -1852,7 +1823,7 @@ mod tests {
             ("FROM_ENV_FILE".to_string(), "vibe-env-value".to_string()),
         ];
 
-        run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap();
+        run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 300).unwrap();
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=vibe-env-value"));
@@ -1863,9 +1834,43 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs).unwrap_err();
+        let err = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 300).unwrap_err();
 
         assert!(err.to_string().contains("launching vibe; is it installed"));
+    }
+
+    #[test]
+    fn run_vibe_kills_process_after_idle_timeout_with_no_new_output() {
+        // Live-observed (issue #154 dispatch, TICKET-154): a vibe attempt
+        // hung for 15+ minutes with zero output and was only stopped by an
+        // external watchdog script, not by gah itself -- same class of bug
+        // as issues #87/#170. Pins the shared spawn_with_idle_watch fix.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "vibe",
+            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+        );
+        let envs = vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )];
+
+        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 1).unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("step1"));
+        assert!(!log.contains("step2"));
+        assert!(
+            log.contains("killed after 1s with no new output"),
+            "got log: {log}"
+        );
     }
 
     // ── run_opencode ─────────────────────────────────────────────────────

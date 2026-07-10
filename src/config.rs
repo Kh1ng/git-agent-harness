@@ -226,6 +226,24 @@ pub struct Profile {
     /// Defaults to 300s when unset.
     #[serde(default)]
     pub openhands_idle_timeout_seconds: Option<u64>,
+    /// How long Vibe's own log output can go quiet before GAH considers it
+    /// stalled and kills it, in seconds. Same rationale and mechanism as
+    /// `opencode_idle_timeout_seconds` -- added after a live dispatch hung
+    /// for 15+ minutes with vibe as the backend and `run_vibe_with_executable`
+    /// had zero supervision of any kind. Defaults to 300s when unset.
+    #[serde(default)]
+    pub vibe_idle_timeout_seconds: Option<u64>,
+    /// How long Codex's own log output can go quiet before GAH considers it
+    /// stalled and kills it, in seconds. Same rationale and mechanism as
+    /// `opencode_idle_timeout_seconds`. Defaults to 300s when unset.
+    #[serde(default)]
+    pub codex_idle_timeout_seconds: Option<u64>,
+    /// How long Claude Code's own log output can go quiet before GAH
+    /// considers it stalled and kills it, in seconds. Same rationale and
+    /// mechanism as `opencode_idle_timeout_seconds`. Defaults to 300s when
+    /// unset.
+    #[serde(default)]
+    pub claude_idle_timeout_seconds: Option<u64>,
     /// HOME override for the `agy-second` backend name only -- a distinct
     /// authenticated Antigravity account/quota pool from the default `agy`
     /// backend, which otherwise runs under the process's real $HOME. Same
@@ -584,6 +602,18 @@ impl Profile {
         self.openhands_idle_timeout_seconds.unwrap_or(300).max(1)
     }
 
+    pub fn vibe_idle_timeout_seconds(&self) -> u64 {
+        self.vibe_idle_timeout_seconds.unwrap_or(300).max(1)
+    }
+
+    pub fn codex_idle_timeout_seconds(&self) -> u64 {
+        self.codex_idle_timeout_seconds.unwrap_or(300).max(1)
+    }
+
+    pub fn claude_idle_timeout_seconds(&self) -> u64 {
+        self.claude_idle_timeout_seconds.unwrap_or(300).max(1)
+    }
+
     pub fn pat(&self) -> String {
         match self.provider.as_str() {
             "gitlab" => std::env::var("GITLAB_PAT2")
@@ -894,6 +924,9 @@ pub mod tests {
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
             openhands_idle_timeout_seconds: None,
+            vibe_idle_timeout_seconds: None,
+            codex_idle_timeout_seconds: None,
+            claude_idle_timeout_seconds: None,
             notify_command: None,
             policy_path: None,
             env_file: None,
@@ -946,6 +979,9 @@ pub mod tests {
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
             openhands_idle_timeout_seconds: None,
+            vibe_idle_timeout_seconds: None,
+            codex_idle_timeout_seconds: None,
+            claude_idle_timeout_seconds: None,
             notify_command: None,
             policy_path: None,
             env_file: None,
