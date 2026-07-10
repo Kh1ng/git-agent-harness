@@ -19,6 +19,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { SessionCard } from '../components/SessionCard.js';
 import { formatCost, formatPercent, formatAge, isStale } from '../lib/format.js';
+import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
 
 type OverviewPageProps = {
   sessions: Session[];
@@ -28,7 +29,7 @@ type OverviewPageProps = {
 
 export function OverviewPage({ sessions, onSelectSession, onNavigate }: OverviewPageProps) {
   const { status, report } = useGahStore();
-  const wsProfile = useWebSocket().profile;
+  const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
   const profile = profileOverride ?? wsProfile;
   const fetchStatus = useGahStore((s) => s.fetchStatus);
@@ -40,6 +41,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
   }, [profile, fetchStatus, fetchReport]);
 
   const activeSessions = sessions.filter((s) => ['starting', 'running'].includes(s.status));
+  const activeControllerRuns = controllerActivity.filter((run) => run.status === 'running');
 
   const refresh = () => {
     fetchStatus(profile ?? undefined, { force: true });
@@ -117,7 +119,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
           icon={Coins}
           hint={totalActualCost === null && totalEstimatedCost !== null ? 'estimated' : undefined}
         />
-        <StatTile label="Active sessions" value={String(activeSessions.length)} icon={Timer} />
+        <StatTile label="Active sessions" value={String(activeSessions.length + activeControllerRuns.length)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
       </div>
 
       {(blockers.length > 0 || blockedWorkItems.length > 0) && (
@@ -145,6 +147,10 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
           </ul>
         </div>
       )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <ControllerActivityCard activity={controllerActivity} />
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section>

@@ -23,6 +23,7 @@ import type {
   ReportGroupBy,
   LedgerEntry,
   ControllerEvent,
+  ControllerActivity,
   ProfileSummary
 } from '@git-agent-harness/contracts';
 
@@ -141,6 +142,7 @@ export interface GahDataSource {
   getReportSeries(params?: { profile?: string; since?: string; bucket?: string }): Promise<ReportSeriesData>;
   getWorkTimeline(workId: string): Promise<LedgerEntry[]>;
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
+  getControllerActivity(params?: { profile?: string; since?: string }): Promise<ControllerActivity[]>;
   getProfiles(): Promise<ProfileSummary[]>;
   addProfile(data: ProfileAddData): Promise<{ success: boolean; message: string }>;
   updateProfile(name: string, data: ProfileUpdateData): Promise<{ success: boolean; message: string }>;
@@ -231,6 +233,12 @@ export const gahApi: GahDataSource = {
   },
   getEvents(params = {}) {
     return getJson<ControllerEvent[]>('/api/events', {
+      profile: params.profile,
+      since: params.since
+    });
+  },
+  getControllerActivity(params = {}) {
+    return getJson<ControllerActivity[]>('/api/controller-activity', {
       profile: params.profile,
       since: params.since
     });

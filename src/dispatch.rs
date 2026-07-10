@@ -109,6 +109,12 @@ pub struct DispatchArgs {
     /// counts only `post_review_repair` entries.
     #[allow(dead_code)]
     pub dispatch_reason: Option<String>,
+    /// Controller-provided work identity, especially important for reviews
+    /// that do not resolve a ticket file during dispatch.
+    pub work_id: Option<String>,
+    /// Controller-assigned identity shared by start/finish events and the
+    /// resulting ledger entry. Direct CLI dispatches generate one in `run`.
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -671,6 +677,7 @@ pub fn merge_branch(
     branch: &str,
     work_id: &Option<String>,
     mr_url: &Option<String>,
+    run_id: Option<&str>,
 ) -> Result<()> {
     let mut entry = LedgerEntry::new(
         &profile.repo_id,
@@ -678,7 +685,7 @@ pub fn merge_branch(
         "none",
         "merge",
         branch,
-        None,
+        run_id.map(str::to_string),
         None,
     );
     entry.branch = Some(branch.to_string());
@@ -746,7 +753,10 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         }
     }
 
-    let ts = timestamp();
+    let ts = args
+        .run_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let session_dir = PathBuf::from(&profile.artifact_root)
         .join("sessions")
         .join(&ts);
@@ -759,6 +769,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         Some(ts.clone()),
         Some(&session_dir),
     );
+    ledger.work_id = args.work_id.clone();
     ledger.dispatch_reason = args.dispatch_reason.clone();
     let started = Instant::now();
     fs::create_dir_all(&session_dir)?;
@@ -6248,6 +6259,8 @@ The parser should retain structured sections.\n\n\
             existing_branch: None,
             skip_validation_gate: false,
             dispatch_reason: None,
+            work_id: None,
+            run_id: None,
         };
 
         // No ledger exists yet.
@@ -6405,6 +6418,8 @@ The parser should retain structured sections.\n\n\
             existing_branch: None,
             skip_validation_gate: false,
             dispatch_reason: None,
+            work_id: None,
+            run_id: None,
         };
 
         // Fresh claim -> blocked.

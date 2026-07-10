@@ -60,6 +60,10 @@ pub struct ControllerEvent {
     pub profile: Option<String>,
     #[serde(default)]
     pub work_id: Option<String>,
+    /// Stable identity for one controller-launched dispatch. Older events
+    /// omit this field and remain readable.
+    #[serde(default)]
+    pub run_id: Option<String>,
     #[serde(default)]
     pub details: String,
 }
@@ -89,6 +93,17 @@ pub fn record(
     work_id: Option<&str>,
     details: impl Into<String>,
 ) -> Result<()> {
+    record_with_run_id(cfg, event_type, profile, work_id, None, details)
+}
+
+pub fn record_with_run_id(
+    cfg: &GahConfig,
+    event_type: EventType,
+    profile: Option<&str>,
+    work_id: Option<&str>,
+    run_id: Option<&str>,
+    details: impl Into<String>,
+) -> Result<()> {
     append(
         cfg,
         &ControllerEvent {
@@ -98,6 +113,7 @@ pub fn record(
             event_type: event_type.as_str().to_string(),
             profile: profile.map(str::to_string),
             work_id: work_id.map(str::to_string),
+            run_id: run_id.map(str::to_string),
             details: details.into(),
         },
     )
@@ -158,7 +174,7 @@ pub fn run(cfg: &GahConfig, since: &str, profile: Option<&str>, json: bool) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{append, read_events, ControllerEvent, EventType};
+    use super::{append, read_events, record_with_run_id, ControllerEvent, EventType};
     use crate::config::{Defaults, GahConfig, RoutingPolicy};
     use std::collections::HashMap;
 
@@ -251,6 +267,7 @@ mod tests {
             event_type: "action_decided".into(),
             profile: None,
             work_id: None,
+            run_id: None,
             details: String::new(),
         };
         append(&cfg, &event).unwrap();
@@ -258,5 +275,23 @@ mod tests {
         let text = std::fs::read_to_string(cfg.defaults.events_path()).unwrap();
         assert_eq!(text.lines().count(), 2);
         assert_eq!(text.lines().next(), text.lines().nth(1));
+    }
+
+    #[test]
+    fn run_id_round_trips_for_correlated_dispatch_events() {
+        let (_tmp, cfg) = test_config();
+        record_with_run_id(
+            &cfg,
+            EventType::DispatchStarted,
+            Some("gah"),
+            Some("TICKET-140"),
+            Some("run-123"),
+            "review",
+        )
+        .unwrap();
+
+        let events = read_events(&cfg).unwrap();
+        assert_eq!(events[0].run_id.as_deref(), Some("run-123"));
+        assert_eq!(events[0].work_id.as_deref(), Some("TICKET-140"));
     }
 }

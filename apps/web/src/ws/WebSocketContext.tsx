@@ -13,8 +13,10 @@ import type {
   AvailabilityScope,
   Blocker,
   StatusError,
-  RecentLedgerSummary
+  RecentLedgerSummary,
+  ControllerActivity
 } from '@git-agent-harness/contracts';
+import { gahApi } from '../api/client.js';
 
 export interface SessionOutput {
   stdout: string;
@@ -45,6 +47,7 @@ type WebSocketContextType = {
   constraints: Blocker[];
   errors: StatusError[];
   recentLedger: RecentLedgerSummary | null;
+  controllerActivity: ControllerActivity[];
   sendMessage: (message: ClientMessage) => void;
   reconnect: () => void;
   disconnect: () => void;
@@ -87,7 +90,27 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [constraints, setConstraints] = useState<Blocker[]>([]);
   const [errors, setErrors] = useState<StatusError[]>([]);
   const [recentLedger, setRecentLedger] = useState<RecentLedgerSummary | null>(null);
+  const [controllerActivity, setControllerActivity] = useState<ControllerActivity[]>([]);
   const socketRef = useRef<WebSocket | null>(null);
+
+  const activityProfile = profileOverride ?? profile ?? 'gah';
+  useEffect(() => {
+    let cancelled = false;
+    const refreshActivity = async () => {
+      try {
+        const activity = await gahApi.getControllerActivity({ profile: activityProfile, since: '24h' });
+        if (!cancelled) setControllerActivity(activity);
+      } catch {
+        // Status/event fetches remain available; activity is supplementary.
+      }
+    };
+    refreshActivity();
+    const timer = window.setInterval(refreshActivity, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activityProfile]);
 
   const connect = useCallback(() => {
     setIsConnecting(true);
@@ -306,6 +329,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     constraints,
     errors,
     recentLedger,
+    controllerActivity,
     sendMessage,
     reconnect,
     disconnect

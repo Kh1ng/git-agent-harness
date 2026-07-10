@@ -936,6 +936,8 @@ pub(crate) fn execute_action(
         existing_branch: None,
         skip_validation_gate,
         dispatch_reason: None,
+        work_id: action.work_id().map(str::to_string),
+        run_id: Some(uuid::Uuid::new_v4().to_string()),
     };
 
     match action {
@@ -970,11 +972,13 @@ pub(crate) fn execute_action(
                 .effective_routing(&cfg.defaults)
                 .merge_policy
                 .unwrap_or_default();
-            crate::events::record(
+            let run_id = uuid::Uuid::new_v4().to_string();
+            crate::events::record_with_run_id(
                 cfg,
                 crate::events::EventType::DispatchStarted,
                 Some(profile_name),
                 action.work_id(),
+                Some(&run_id),
                 "merge",
             )?;
             let gitlab_mwps = merge_policy == crate::config::MergePolicy::GitlabMwps
@@ -987,7 +991,7 @@ pub(crate) fn execute_action(
                     .map_err(|e| anyhow::anyhow!("{e:#}"))?;
                 crate::provider::gitlab_set_mwps(profile, &target.id)
             } else {
-                crate::dispatch::merge_branch(cfg, profile, branch, work_id, mr_url)
+                crate::dispatch::merge_branch(cfg, profile, branch, work_id, mr_url, Some(&run_id))
             };
             let outcome = match &result {
                 Ok(()) if gitlab_mwps => {
@@ -996,11 +1000,12 @@ pub(crate) fn execute_action(
                 Ok(()) => format!("Merged MR on branch '{branch}'"),
                 Err(e) => format!("Merge failed for branch '{branch}': {e:#}"),
             };
-            crate::events::record(
+            crate::events::record_with_run_id(
                 cfg,
                 crate::events::EventType::DispatchFinished,
                 Some(profile_name),
                 action.work_id(),
+                Some(&run_id),
                 format!("merge: {outcome}"),
             )?;
             Ok(outcome)
@@ -1056,20 +1061,29 @@ fn run_dispatch_and_record(
     args: &crate::dispatch::DispatchArgs,
     label: &str,
 ) -> Result<()> {
-    crate::events::record(
+    let target_context = args
+        .branch
+        .as_deref()
+        .or_else(|| (!args.target.is_empty()).then_some(args.target.as_str()));
+    let start_detail = target_context
+        .map(|target| format!("{label}: {target}"))
+        .unwrap_or_else(|| label.to_string());
+    crate::events::record_with_run_id(
         cfg,
         crate::events::EventType::DispatchStarted,
         Some(args.profile.as_str()),
         action.work_id(),
-        label,
+        args.run_id.as_deref(),
+        start_detail,
     )?;
     match crate::dispatch::run(cfg, args) {
         Ok(()) => {
-            crate::events::record(
+            crate::events::record_with_run_id(
                 cfg,
                 crate::events::EventType::DispatchFinished,
                 Some(args.profile.as_str()),
                 action.work_id(),
+                args.run_id.as_deref(),
                 format!("{label}: success"),
             )?;
             Ok(())
@@ -1080,11 +1094,12 @@ fn run_dispatch_and_record(
             } else {
                 crate::events::EventType::DispatchFinished
             };
-            crate::events::record(
+            crate::events::record_with_run_id(
                 cfg,
                 event_type,
                 Some(args.profile.as_str()),
                 action.work_id(),
+                args.run_id.as_deref(),
                 format!("{label}: {e:#}"),
             )?;
             Err(e)
@@ -2262,6 +2277,7 @@ mod tests {
             event_type: "action_decided".into(),
             profile: Some(profile.into()),
             work_id: Some(work_id.into()),
+            run_id: None,
             details: format!("{kind}: some reason"),
         }
     }

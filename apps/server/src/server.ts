@@ -3,6 +3,7 @@ import cors from 'cors';
 import { getServerReadiness } from './serverReadiness.js';
 import { runStatus, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
 import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
+import { deriveControllerActivity } from './controllerActivity.js';
 
 const SERVER_VERSION = '0.1.0';
 
@@ -43,6 +44,7 @@ export function createServer() {
         report: '/api/report',
         work: '/api/work/:workId',
         events: '/api/events',
+        controllerActivity: '/api/controller-activity',
         profiles: '/api/profiles',
         websocket: '/ws'
       },
@@ -197,6 +199,20 @@ export function createServer() {
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah events',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/controller-activity', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const since = typeof req.query.since === 'string' ? req.query.since : '24h';
+    try {
+      const events = await runEvents(profile, since);
+      res.json(deriveControllerActivity(events));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load controller activity',
         message: error instanceof Error ? error.message : String(error)
       });
     }
