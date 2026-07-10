@@ -691,6 +691,7 @@ pub fn merge_branch(
         Ok(()) => {
             entry.attempts_completed = 1;
             notify_event(
+                cfg,
                 profile,
                 NotifyEvent::MrMerged {
                     url: mr_url.as_deref().unwrap_or("unknown"),
@@ -782,6 +783,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     }
     if result.is_err() {
         notify_event(
+            cfg,
             profile,
             NotifyEvent::DispatchFailed {
                 failure_class: ledger.failure_class.as_deref().unwrap_or("unknown"),
@@ -2257,6 +2259,7 @@ fn improve(
     ledger.mr_url = Some(mr.url.clone());
     println!("Draft MR: {}", mr.url);
     notify_event(
+        cfg,
         profile,
         NotifyEvent::MrCreated {
             url: &mr.url,
@@ -2517,6 +2520,7 @@ fn experiment(
     ledger.mr_url = Some(mr.url.clone());
     println!("Draft MR: {}", mr.url);
     notify_event(
+        cfg,
         profile,
         NotifyEvent::MrCreated {
             url: &mr.url,
@@ -3154,6 +3158,7 @@ fn review(
             // can reference it. Failure to resolve is non-fatal here.
             let mr_url = provider::mr_url_for_branch(profile, &target.source_branch);
             notify_event(
+                cfg,
                 profile,
                 NotifyEvent::ReviewVerdict {
                     verdict: published_review_verdict(&verdict.verdict).leak(),
@@ -3162,6 +3167,7 @@ fn review(
             );
             if verdict.human_required {
                 notify_event(
+                    cfg,
                     profile,
                     NotifyEvent::HumanRequired {
                         reason: "review verdict requires human attention",
@@ -3641,6 +3647,7 @@ mod tests {
 
     fn profile(local_path: &Path) -> Profile {
         Profile {
+            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),
@@ -3692,6 +3699,7 @@ mod tests {
     fn gah_config(routing: RoutingPolicy) -> GahConfig {
         GahConfig {
             defaults: Defaults {
+                current_manager: None,
                 artifact_root: String::new(),
                 worktree_base: String::new(),
                 llm_base_url: String::new(),
@@ -4029,6 +4037,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),
@@ -4092,6 +4101,7 @@ mod tests {
 
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),
@@ -4162,6 +4172,7 @@ mod tests {
 
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),
@@ -4199,6 +4210,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),
@@ -4246,6 +4258,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),
@@ -4305,6 +4318,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),
@@ -4377,6 +4391,7 @@ mod tests {
         .unwrap();
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),
@@ -6176,6 +6191,7 @@ The parser should retain structured sections.\n\n\
         // 2. Setup config & profile
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),
@@ -6328,6 +6344,7 @@ The parser should retain structured sections.\n\n\
 
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),

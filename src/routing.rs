@@ -1223,6 +1223,7 @@ mod tests {
 
     fn defaults() -> Defaults {
         Defaults {
+            current_manager: None,
             artifact_root: String::new(),
             worktree_base: String::new(),
             llm_base_url: String::new(),
@@ -1239,6 +1240,7 @@ mod tests {
 
     fn profile() -> Profile {
         Profile {
+            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),

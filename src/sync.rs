@@ -680,6 +680,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: tmp.path().to_string_lossy().into_owned(),
                 llm_base_url: String::new(),
@@ -710,6 +711,7 @@ mod tests {
     ) -> crate::ledger::LedgerEntry {
         let tmp = tempfile::tempdir().unwrap();
         let prof = crate::config::Profile {
+            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "test".into(),
             repo_id: "test".into(),

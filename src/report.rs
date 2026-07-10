@@ -832,6 +832,7 @@ mod tests {
         std::fs::write(&ledger_path, text).unwrap();
         let cfg = crate::config::GahConfig {
             defaults: crate::config::Defaults {
+                current_manager: None,
                 artifact_root,
                 worktree_base: String::new(),
                 llm_base_url: String::new(),

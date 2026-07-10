@@ -1223,6 +1223,7 @@ mod tests {
 
     fn test_profile() -> Profile {
         Profile {
+            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),

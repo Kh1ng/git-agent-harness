@@ -34,6 +34,29 @@ impl MergePolicy {
     }
 }
 
+/// How much a woken manager agent (see `Defaults::current_manager`) is
+/// allowed to do on its own when a notify-worthy event fires (MR ready,
+/// human required, review verdict, terminal dispatch failure).
+/// Deliberately per-profile, not global -- an operator sprinting on one
+/// project may want full autonomy while another project's operator wants
+/// to decide every merge themselves.
+///
+/// * `Off` (default): no wake, `notify_command` behavior is unchanged.
+/// * `ReviewOnly`: the woken agent reviews and posts findings, but must not
+///   merge or take any other write action.
+/// * `Full`: the woken agent may act on its own judgment (review and merge
+///   if CI is green and review passed, investigate and fix a failure,
+///   etc.) under the same standing authorization a human operator would
+///   otherwise apply manually.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeAutonomy {
+    #[default]
+    Off,
+    ReviewOnly,
+    Full,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GahConfig {
     #[serde(default)]
@@ -56,6 +79,15 @@ pub struct Defaults {
     pub llm_model_cloud: String,
     #[serde(default)]
     pub routing: RoutingPolicy,
+    /// Which agent CLI ("claude" | "codex" | "hermes") is currently acting
+    /// as the operator's manager across all profiles/projects. Read by the
+    /// manager-wake feature (`Profile::manager_wake_autonomy`) to decide
+    /// who to invoke when a notify-worthy event fires. Global, not
+    /// per-profile -- "who's on call" is a cross-project fact, unlike
+    /// autonomy bounds. `None`/unrecognized values mean no wake happens
+    /// even if a profile has autonomy enabled.
+    #[serde(default)]
+    pub current_manager: Option<String>,
 }
 
 impl Defaults {
@@ -287,6 +319,12 @@ pub struct Profile {
     /// logged to stderr -- they never fail the operation.
     #[serde(default)]
     pub notify_command: Option<String>,
+    /// How much a woken manager agent is allowed to do on its own for this
+    /// profile, when a notify-worthy event fires. See `WakeAutonomy` and
+    /// `Defaults::current_manager`. Defaults to `Off` -- an operator opts a
+    /// specific profile into this.
+    #[serde(default)]
+    pub manager_wake_autonomy: WakeAutonomy,
     /// Path to a policy TOML file (see gah policy-check). When set, dispatch
     /// enforces permissions before provisioning any worktree.
     #[serde(default)]
@@ -935,6 +973,7 @@ pub mod tests {
     #[cfg(test)]
     pub fn test_profile_for_notifications() -> Profile {
         Profile {
+            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),
@@ -991,6 +1030,7 @@ pub mod tests {
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
+            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "Test".into(),
             repo_id: "test".into(),
