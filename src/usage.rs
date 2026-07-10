@@ -487,8 +487,7 @@ mod tests {
 
     #[test]
     fn agy_delta_parses_explicit_reset_timestamp() {
-        let delta =
-            "Your quota resets at 2026-07-10 12:34:56 UTC. Please try again after that.";
+        let delta = "Your quota resets at 2026-07-10 12:34:56 UTC. Please try again after that.";
         let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
         assert_eq!(
             usage.quota_reset_at.as_deref(),

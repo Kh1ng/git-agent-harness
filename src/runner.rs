@@ -561,10 +561,7 @@ fn agy_empty_output_diagnosis(env_vars: &[(String, String)], executable: &Path) 
 /// (the per-call `env_vars` win over process `HOME`, matching how the run's
 /// effective HOME is resolved elsewhere). Returns `None` only when no HOME
 /// is discoverable -- in which case there is no cli.log to delta against.
-fn agy_cli_log_path(
-    env_vars: &[(String, String)],
-    _executable: &Path,
-) -> Option<PathBuf> {
+fn agy_cli_log_path(env_vars: &[(String, String)], _executable: &Path) -> Option<PathBuf> {
     let home = env_vars
         .iter()
         .find(|(k, _)| k == "HOME")
