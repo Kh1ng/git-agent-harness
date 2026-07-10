@@ -783,6 +783,30 @@ fn run_parallel_once(
             let mut fresh_snapshot =
                 crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
 
+            // Do not let the next slot re-select a ticket claimed by an
+            // earlier slot in this batch or by another controller process.
+            // The decision function operates on snapshots, so claims must be
+            // projected out before deciding the next action.
+            fresh_snapshot.available_tickets.retain(|ticket| {
+                ticket
+                    .work_id
+                    .as_deref()
+                    .map(|id| {
+                        !claimed_work_ids.iter().any(|claimed| claimed == id)
+                            && !executed_work_ids.contains(id)
+                    })
+                    .unwrap_or(true)
+            });
+            fresh_snapshot.merge_requests.retain(|mr| {
+                mr.work_id
+                    .as_deref()
+                    .map(|id| {
+                        !claimed_work_ids.iter().any(|claimed| claimed == id)
+                            && !executed_work_ids.contains(id)
+                    })
+                    .unwrap_or(true)
+            });
+
             let original_action = decide_next_action(&fresh_snapshot);
             let mut action = original_action.clone();
 
