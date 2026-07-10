@@ -73,6 +73,110 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
     usage
 }
 
+/// #155 (TICKET-066 / #151): parse AGY's own quota/reset messages from a
+/// **run-scoped cli.log delta** (the bytes `runner` captured between the
+/// pre-run byte offset and the post-run position -- never a fresh read of
+/// the whole log).
+///
+/// AGY emits real lines such as:
+///   "RESOURCE_EXHAUSTED: ... Individual quota reached ..."
+///   "Quota exceeded. Resets in 16m44s."
+///   "Your quota resets at 2026-07-10 12:34:56 UTC."
+///   "Daily limit reached. Resets in 3h12m."
+///
+/// We extract the human-facing reset description only. We deliberately do
+/// **not** invent `quota_used_percent`: per the owner's explicit spec it
+/// stays `None` unless a real AGY endpoint exposes an exact percentage
+/// (none has been discovered). Fabricating a percentage would be a worse
+/// bug than leaving it unknown.
+///
+/// An empty/absent delta yields an all-`None` `LedgerUsage` (unknown,
+/// never fabricated zero) so the caller can merge it safely.
+pub fn parse_agy_cli_log_delta(delta: &str, source_hint: &str) -> LedgerUsage {
+    let mut usage = LedgerUsage::default();
+
+    // AGY-wide exhaustion / quota-exceeded signals.
+    let quota_exhausted = delta.contains("RESOURCE_EXHAUSTED")
+        || delta.contains("Individual quota reached")
+        || delta.contains("Quota exceeded")
+        || delta.contains("quota has been reached")
+        || delta.contains("quota reached");
+    usage.quota_window = if quota_exhausted {
+        Some("AGY individual quota".to_string())
+    } else {
+        None
+    };
+
+    // Reset description. Prefer an explicit timestamp; otherwise capture the
+    // "Resets in <dur>" relative form. Real AGY lines ("Resets in 16m44s.",
+    // "Your quota resets at 2026-07-10 12:34:56 UTC.") do NOT use a `:`
+    // separator, so we use a tolerant finder that accepts an optional `:`/`:`
+    // and bounds the capture. Never synthesize a percentage.
+    if let Some(ts) = agy_find_after(delta, &["resets at", "resets:"]) {
+        usage.quota_reset_at = Some(ts);
+    } else if let Some(dur) = agy_find_after(delta, &["resets in", "reset in"]) {
+        usage.quota_reset_at = Some(format!("in {dur}"));
+    }
+
+    if usage.quota_window.is_some() || usage.quota_reset_at.is_some() {
+        usage.usage_source = Some(source_hint.to_string());
+    }
+    usage
+}
+
+/// Like `find_string_after`, but tolerant of AGY's separator-less style
+/// ("Resets in 16m44s" / "quota resets at 2026-...") where the value follows
+/// the keyword with only optional whitespace (an optional `:`/`=` is allowed).
+/// Reuses the same length/shape guards as the generic version.
+fn agy_find_after(text: &str, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        // Stop at the first period (a reset description "...resets at X." is
+        // one sentence) so we don't swallow the rest of the log line. The
+        // generic `find_string_after`'s `[^\n\r]+` would grab everything to
+        // end-of-line, which is too greedy for AGY's prose-style messages.
+        let re = Regex::new(&format!(
+            r"(?i)\b{}\b\s*:?\s*([^.\n\r]{{1,{}}})",
+            regex::escape(key),
+            MAX_QUOTA_CAPTURE_LEN
+        ))
+        .ok()?;
+        re.captures(text)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().trim().trim_matches('"').to_string())
+            .filter(|value| looks_like_quota_value(value))
+    })
+}
+
+/// Merge `other` into `base`, keeping the first `Some` value for each field
+/// (so the generic stdout parse wins over the cli.log delta when both
+/// report the same field, and the delta fills in quota/reset info the
+/// stdout parse doesn't have). Returns a new `LedgerUsage`.
+pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
+    LedgerUsage {
+        input_tokens: base.input_tokens.or(other.input_tokens),
+        output_tokens: base.output_tokens.or(other.output_tokens),
+        cache_read_tokens: base.cache_read_tokens.or(other.cache_read_tokens),
+        cache_write_tokens: base.cache_write_tokens.or(other.cache_write_tokens),
+        total_tokens: base.total_tokens.or(other.total_tokens),
+        requests_count: base.requests_count.or(other.requests_count),
+        estimated_cost_usd: base.estimated_cost_usd.or(other.estimated_cost_usd),
+        actual_cost_usd: base.actual_cost_usd.or(other.actual_cost_usd),
+        quota_used_percent: base.quota_used_percent.or(other.quota_used_percent),
+        quota_remaining_percent: base
+            .quota_remaining_percent
+            .or(other.quota_remaining_percent),
+        quota_window: base.quota_window.or(other.quota_window),
+        quota_reset_at: base.quota_reset_at.or(other.quota_reset_at),
+        usage_source: match (base.usage_source, other.usage_source) {
+            (Some(a), Some(b)) => Some(format!("{a}+{b}")),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        },
+        observed_at: base.observed_at.or(other.observed_at),
+    }
+}
+
 fn find_u64(text: &str, keys: &[&str]) -> Option<u64> {
     keys.iter().find_map(|key| {
         // Use word boundaries to prevent matching partial words like "my_input_tokens_value"
@@ -265,6 +369,7 @@ fn find_string_after(text: &str, keys: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_agy_cli_log_delta;
     use super::parse_codex_exec_json;
     use super::parse_codex_status_json;
     use super::parse_generic_usage;
@@ -364,5 +469,65 @@ mod tests {
         let text = format!("quota_reset_at: {}", long_value);
         let usage = parse_generic_usage(&text, "generic");
         assert_eq!(usage.quota_reset_at, None);
+    }
+
+    // --- #155: AGY cli.log delta parsing (TICKET-066 / #151) -----------------
+
+    #[test]
+    fn agy_delta_parses_relative_reset_when_quota_exhausted() {
+        // Real AGY lines do NOT use a `:` separator ("Resets in 16m44s.").
+        let delta = "ERROR: RESOURCE_EXHAUSTED: Individual quota reached for this account.\nQuota exceeded. Resets in 16m44s.";
+        let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
+        assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
+        assert_eq!(usage.quota_reset_at.as_deref(), Some("in 16m44s"));
+        // Critical spec point: percentage is never fabricated.
+        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.usage_source.as_deref(), Some("agy_cli_log_delta"));
+    }
+
+    #[test]
+    fn agy_delta_parses_explicit_reset_timestamp() {
+        let delta =
+            "Your quota resets at 2026-07-10 12:34:56 UTC. Please try again after that.";
+        let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
+        assert_eq!(
+            usage.quota_reset_at.as_deref(),
+            Some("2026-07-10 12:34:56 UTC")
+        );
+        assert_eq!(usage.quota_used_percent, None);
+    }
+
+    #[test]
+    fn agy_delta_leaves_percentage_unknown_when_absent() {
+        // Even when other quota signals are present, percentage stays None.
+        let delta = "Quota exceeded. Daily limit reached. Resets in 3h12m. You have used 80% of your quota.";
+        let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
+        assert!(usage.quota_window.is_some());
+        assert!(usage.quota_reset_at.is_some());
+        // The free-text "80%" is NOT a structured percentage source; we must
+        // not guess/estimate a number from prose.
+        assert_eq!(usage.quota_used_percent, None);
+    }
+
+    #[test]
+    fn agy_delta_is_empty_not_zero_for_non_quota_runs() {
+        // A successful AGY run with no quota signal must report unknown,
+        // never a fabricated zero.
+        let delta = "agent started\nmade some edits\nagent finished";
+        let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
+        assert_eq!(usage.quota_window, None);
+        assert_eq!(usage.quota_reset_at, None);
+        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.usage_source, None);
+    }
+
+    #[test]
+    fn agy_delta_empty_string_yields_all_unknown() {
+        let usage = parse_agy_cli_log_delta("", "agy_cli_log_delta");
+        assert_eq!(usage.quota_window, None);
+        assert_eq!(usage.quota_reset_at, None);
+        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.usage_source, None);
     }
 }

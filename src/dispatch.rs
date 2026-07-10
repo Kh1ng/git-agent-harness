@@ -1025,7 +1025,11 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
 /// Issue #152: tries the codex exec --json parser first (JSONL event stream
 /// produced when `--json` is passed to codex exec). Falls back to the
 /// generic regex-based parser for non-JSONL output from other backends.
-fn attempt_usage(log_path: &str) -> crate::ledger::LedgerUsage {
+/// Issue #155: for AGY, also merges in the run-scoped cli.log delta
+/// (quota/reset messages) -- the offset-scoped tail captured by runner,
+/// NOT a fresh read of the whole cli.log, so a single attempt's usage is
+/// never polluted by prior runs or concurrent appends.
+fn attempt_usage(log_path: &str, agy_cli_log_delta: Option<&str>) -> crate::ledger::LedgerUsage {
     let text = match fs::read_to_string(log_path) {
         Ok(t) => t,
         Err(_) => return crate::ledger::LedgerUsage::default(),
@@ -1034,18 +1038,17 @@ fn attempt_usage(log_path: &str) -> crate::ledger::LedgerUsage {
     // Try codex exec --json parser first — handles JSONL output from
     // codex exec --json where the generic regex parser would find nothing.
     let mut usage = usage::parse_codex_exec_json(&text);
-    if usage.usage_source.is_some() {
-        usage.observed_at = Some(
-            time::OffsetDateTime::now_utc()
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default(),
-        );
-        return usage;
+    if usage.usage_source.is_none() {
+        // Fall back to the generic regex-based parser for other backends (or
+        // for codex running in non-JSON mode).
+        usage = usage::parse_generic_usage(&text, "attempt_output_log");
     }
 
-    // Fall back to the generic regex-based parser for other backends (or
-    // for codex running in non-JSON mode).
-    let mut usage = usage::parse_generic_usage(&text, "attempt_output_log");
+    if let Some(delta) = agy_cli_log_delta {
+        let agy = usage::parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
+        usage = usage::merge_usage(usage, agy);
+    }
+
     if usage.usage_source.is_some() {
         usage.observed_at = Some(
             time::OffsetDateTime::now_utc()
@@ -1587,7 +1590,7 @@ fn improve(
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
-                usage: attempt_usage(&result.log_path),
+                usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
             });
             let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
             if attempt + 1 < max_attempts {
@@ -1642,7 +1645,7 @@ fn improve(
                 failure_stage: None,
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
-                usage: attempt_usage(&result.log_path),
+                usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
             });
             break;
         }
@@ -1668,7 +1671,7 @@ fn improve(
                     failure_stage: None,
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
-                    usage: attempt_usage(&result.log_path),
+                    usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
                 });
                 break;
             }
@@ -1724,7 +1727,7 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path,
-                        usage: attempt_usage(&result.log_path),
+                        usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
                     });
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
@@ -1803,7 +1806,7 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
-                        usage: attempt_usage(&result.log_path),
+                        usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
                     });
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
@@ -1827,7 +1830,7 @@ fn improve(
                         failure_stage: None,
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
-                        usage: attempt_usage(&result.log_path),
+                        usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
                     });
                     break;
                 } else {
@@ -1847,7 +1850,7 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
-                        usage: attempt_usage(&result.log_path),
+                        usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
                     });
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
@@ -2119,6 +2122,7 @@ fn experiment(
                 exit_code: -1,
                 duration_secs: 0.0,
                 log_path: log_path.to_string_lossy().into_owned(),
+                agy_cli_log_delta: None,
             }
         }
     };
@@ -3707,7 +3711,7 @@ mod tests {
         )
         .unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap());
+        let usage = attempt_usage(path.to_str().unwrap(), None);
         assert_eq!(usage.input_tokens, Some(500));
         assert_eq!(usage.output_tokens, Some(120));
         assert_eq!(usage.total_tokens, Some(620));
@@ -3716,7 +3720,7 @@ mod tests {
     #[test]
     fn attempt_usage_is_empty_not_zero_when_log_missing() {
         // TICKET-101: unknown must remain unknown, never a fabricated zero.
-        let usage = attempt_usage("/definitely/does/not/exist/backend-output.log");
+        let usage = attempt_usage("/definitely/does/not/exist/backend-output.log", None);
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.usage_source, None);
     }
@@ -3727,7 +3731,7 @@ mod tests {
         let path = tmp.path().join("backend-output.log");
         fs::write(&path, "agent made some edits, no usage reported\n").unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap());
+        let usage = attempt_usage(path.to_str().unwrap(), None);
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.usage_source, None);
     }
