@@ -54,6 +54,18 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Issue #179: clear a stale availability/quota-exhaustion record once
+    /// the backend is confirmed actually healthy again -- goes through the
+    /// same locked read-modify-write as every other availability write, so
+    /// it's safe against concurrent parallel workers (unlike hand-editing
+    /// availability.json directly). Omit --model to clear every record for
+    /// the backend regardless of model.
+    AvailabilityClear {
+        #[arg(long)]
+        backend: String,
+        #[arg(long)]
+        model: Option<String>,
+    },
     /// Convert gate findings into backlog candidates
     Candidates {
         #[arg(long)]
@@ -612,6 +624,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Availability { json } => availability::cli::run(json)?,
+        Commands::AvailabilityClear { backend, model } => {
+            let removed = availability::cli::clear(
+                &availability::resolve_state_path(),
+                &backend,
+                model.as_deref(),
+            )?;
+            println!(
+                "Cleared {removed} availability record(s) for backend '{backend}'{}",
+                model
+                    .as_deref()
+                    .map(|m| format!(" / model '{m}'"))
+                    .unwrap_or_default()
+            );
+        }
 
         Commands::Candidates {
             gate_artifact,
