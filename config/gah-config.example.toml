@@ -8,7 +8,12 @@ llm_model_cloud = "your/cloud-model"
 [defaults.routing]
 default_backend = "openhands"
 review_backend = "claude"
-weak_review_backend = "codex"
+# Issue #123: new two-tier reviewer model (preferred over the deprecated
+# strong_review_*/weak_review_* single-pair fields).
+routine_reviewer = { backend = "claude", model = "sonnet" }
+escalatory_reviewers = [
+    { backend = "codex", model = "default" },
+]
 allow_review_fallback = true
 
 [profiles.my-repo]

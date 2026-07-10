@@ -253,10 +253,10 @@ pub struct ReviewVerdict {
     pub reviewer_backend: Option<String>,
     #[serde(default)]
     pub reviewer_model: Option<String>,
-    /// TICKET-108: reviewer authority tier ("strong"/"standard"/"weak"),
-    /// derived from routing (which config field selected this backend), not
-    /// from anything the LLM reports. Populated by us, never parsed from
-    /// the model's JSON response.
+    /// TICKET-108 / Issue #123: reviewer authority tier
+    /// ("strong"/"escalatory"/"standard"/"weak"), derived from routing (which
+    /// config field selected this backend), not from anything the LLM reports.
+    /// Populated by us, never parsed from the model's JSON response.
     #[serde(default)]
     pub reviewer_tier: Option<String>,
     /// TICKET-109: capabilities actually activated for this review turn

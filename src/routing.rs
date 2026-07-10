@@ -1052,7 +1052,13 @@ impl RouteCandidate {
 }
 
 fn review_fallback_backend_name(routing: &RoutingPolicy) -> Option<&str> {
-    routing.weak_review_backend.as_deref()
+    // Issue #123: prefer the new ESCALATORY_REVIEW list; fall back to the
+    // deprecated single `weak_review_backend` so legacy configs keep working.
+    routing
+        .escalatory_reviewers
+        .first()
+        .map(|c| c.backend.as_str())
+        .or(routing.weak_review_backend.as_deref())
 }
 
 fn review_fallback_backend<F>(
@@ -1069,7 +1075,11 @@ where
 }
 
 fn review_fallback_model(routing: &RoutingPolicy) -> Option<&str> {
-    routing.weak_review_model.as_deref()
+    routing
+        .escalatory_reviewers
+        .first()
+        .and_then(|c| c.model.as_deref())
+        .or(routing.weak_review_model.as_deref())
 }
 
 fn builtin_backend<F>(mode: &str, backend_available: F) -> String

@@ -409,7 +409,7 @@ impl Profile {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct CandidateConfig {
     pub backend: String,
     #[serde(default)]
@@ -454,6 +454,20 @@ pub struct RoutingPolicy {
     pub weak_review_backend: Option<String>,
     #[serde(default)]
     pub weak_review_model: Option<String>,
+    /// Issue #123 / TICKET-118-stabilization: ROUTINE_REVIEWER -- the single
+    /// STRONG first-line reviewer (e.g. Mistral-Medium via vibe). Replaces the
+    /// deprecated `strong_review_backend`/`strong_review_model` pair; when set
+    /// it is the authority used for ordinary review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_reviewer: Option<CandidateConfig>,
+    /// Issue #123: ESCALATORY_REVIEW -- an ORDERED LIST of advanced reviewers
+    /// (Sonnet, Kimi, GLM, ...) used when routine review escalates. This is a
+    /// list, not a single backend, which the old `weak_review_*` fields could
+    /// not express. An escalatory reviewer is a more-capable model the pipeline
+    /// escalates to and continues with (auto-merge eligible), distinct from the
+    /// legacy `weak_review_*` safety-net that forced `human_required`.
+    #[serde(default)]
+    pub escalatory_reviewers: Vec<CandidateConfig>,
     /// TICKET-109: capabilities required for review, keyed by backend name
     /// (e.g. `{"claude": ["ponytail"]}`). Checked at preflight (TICKET-105)
     /// and activated in the review prompt -- missing a required capability
@@ -537,6 +551,15 @@ impl RoutingPolicy {
                 .weak_review_model
                 .clone()
                 .or_else(|| defaults.weak_review_model.clone()),
+            routine_reviewer: self
+                .routine_reviewer
+                .clone()
+                .or_else(|| defaults.routine_reviewer.clone()),
+            escalatory_reviewers: if !self.escalatory_reviewers.is_empty() {
+                self.escalatory_reviewers.clone()
+            } else {
+                defaults.escalatory_reviewers.clone()
+            },
             pm_candidates: self
                 .pm_candidates
                 .clone()
@@ -578,6 +601,46 @@ impl RoutingPolicy {
                 .max_known_actual_cost_per_week
                 .or(defaults.max_known_actual_cost_per_week),
             merge_policy: self.merge_policy.or(defaults.merge_policy),
+        }
+    }
+
+    /// Issue #123: resolve the effective ROUTINE_REVIEWER (STRONG tier).
+    ///
+    /// Prefers the new `routine_reviewer` field; falls back to the deprecated
+    /// `strong_review_backend`/`strong_review_model` pair so existing configs
+    /// keep working unchanged. Returns `None` when no routine reviewer is
+    /// declared (caller decides whether that is a hard error or a warning).
+    pub fn effective_routine_reviewer(&self) -> Option<CandidateConfig> {
+        if let Some(r) = &self.routine_reviewer {
+            return Some(r.clone());
+        }
+        match (&self.strong_review_backend, &self.strong_review_model) {
+            (Some(b), m) => Some(CandidateConfig {
+                backend: b.clone(),
+                model: m.clone(),
+                ..CandidateConfig::default()
+            }),
+            _ => None,
+        }
+    }
+
+    /// Issue #123: resolve the effective ESCALATORY_REVIEW list (ordered).
+    ///
+    /// Prefers the new `escalatory_reviewers` list; falls back to the
+    /// deprecated single `weak_review_backend`/`weak_review_model` entry so
+    /// existing configs (which used the weak tier as a one-entry escalatory
+    /// cascade) keep working. Returns an empty list when nothing is declared.
+    pub fn effective_escalatory_reviewers(&self) -> Vec<CandidateConfig> {
+        if !self.escalatory_reviewers.is_empty() {
+            return self.escalatory_reviewers.clone();
+        }
+        match (&self.weak_review_backend, &self.weak_review_model) {
+            (Some(b), m) => vec![CandidateConfig {
+                backend: b.clone(),
+                model: m.clone(),
+                ..CandidateConfig::default()
+            }],
+            _ => vec![],
         }
     }
 
@@ -862,6 +925,10 @@ fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> Ro
     repo.strong_review_model = repo.strong_review_model.or(canonical.strong_review_model);
     repo.weak_review_backend = repo.weak_review_backend.or(canonical.weak_review_backend);
     repo.weak_review_model = repo.weak_review_model.or(canonical.weak_review_model);
+    repo.routine_reviewer = repo.routine_reviewer.or(canonical.routine_reviewer);
+    if repo.escalatory_reviewers.is_empty() {
+        repo.escalatory_reviewers = canonical.escalatory_reviewers.clone();
+    }
     repo.pm_candidates = repo.pm_candidates.or(canonical.pm_candidates);
     repo.improve_candidates = repo.improve_candidates.or(canonical.improve_candidates);
     repo.review_candidates = repo.review_candidates.or(canonical.review_candidates);
@@ -1548,10 +1615,14 @@ pub mod tests {
         ))
         .unwrap();
         let canonical: super::CanonicalConfig = toml::from_str(&text).unwrap();
-        assert_eq!(
-            canonical.routing.strong_review_backend.as_deref(),
-            Some("claude")
-        );
+        // Issue #123: the shipped canonical example uses the new two-tier
+        // reviewer scheme (routine_reviewer + escalatory_reviewers list).
+        let routine = canonical.routing.effective_routine_reviewer().unwrap();
+        assert_eq!(routine.backend, "claude");
+        assert_eq!(routine.model.as_deref(), Some("sonnet"));
+        let escalatory = canonical.routing.effective_escalatory_reviewers();
+        assert_eq!(escalatory.len(), 1);
+        assert_eq!(escalatory[0].backend, "codex");
         assert_eq!(
             canonical.routing.review_required_capabilities.get("claude"),
             Some(&vec!["ponytail".to_string()])
