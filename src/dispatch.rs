@@ -3035,14 +3035,47 @@ fn review(
         runner::load_env_file(resolved_env)
     };
 
+    // Escalate to the weak/escalatory reviewer for THIS review call only,
+    // before routing sees the request -- a genuinely stuck or low-confidence
+    // routine review shouldn't get another rubber stamp from the same tier.
+    // Fails open (falls through to the normal requested backend/model) if
+    // no weak reviewer is configured, matching `derive_reviewer_tier`'s
+    // fallback-chain lookup (~line 7918).
+    let escalation_reason = review_escalation_reason(cfg, &args.profile, &target.source_branch);
+    let weak_review_backend = profile.routing.weak_review_backend.as_deref().or(cfg
+        .defaults
+        .routing
+        .weak_review_backend
+        .as_deref());
+    let weak_review_model = profile.routing.weak_review_model.as_deref().or(cfg
+        .defaults
+        .routing
+        .weak_review_model
+        .as_deref());
+    let (requested_backend, requested_model) = match (escalation_reason, weak_review_backend) {
+        (Some(reason), Some(backend)) => {
+            println!(
+                "Escalating review to {}/{} ({reason}) for branch {}",
+                backend,
+                weak_review_model.unwrap_or("default"),
+                target.source_branch
+            );
+            (backend, weak_review_model)
+        }
+        _ => (
+            config::canonical_backend_name(&args.backend),
+            args.model.as_deref(),
+        ),
+    };
+
     let mut route = decide_route(
         cfg,
         profile,
         RouteRequest {
             last_failure_class: None,
             mode: "review",
-            requested_backend: config::canonical_backend_name(&args.backend),
-            requested_model: args.model.as_deref(),
+            requested_backend,
+            requested_model,
             recommended_backend: None,
             recommended_model: None,
             session_id: session_dir.file_name().and_then(|s| s.to_str()),
@@ -3637,8 +3670,8 @@ mod tests {
         first_markdown_heading, format_issue_for_focus, is_issue_number_reference,
         mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
         parse_review_verdict, parse_ticket_metadata, parse_ticket_metadata_from_issue,
-        published_review_verdict, render_review_comment, review_labels, review_preflight,
-        run_backend, scan_available_tickets, strip_terminal_noise,
+        published_review_verdict, render_review_comment, review_escalation_reason, review_labels,
+        review_preflight, run_backend, scan_available_tickets, strip_terminal_noise,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
     };
@@ -3741,6 +3774,158 @@ mod tests {
             },
             profiles: std::collections::HashMap::new(),
         }
+    }
+
+    // Like `gah_config`, but with `artifact_root` pointed at a real tempdir
+    // so `ledger::append`/`read_entries` have somewhere to write.
+    fn gah_config_with_ledger(tmp: &Path, routing: RoutingPolicy) -> GahConfig {
+        GahConfig {
+            defaults: Defaults {
+                current_manager: None,
+                artifact_root: tmp.display().to_string(),
+                worktree_base: String::new(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing,
+            },
+            profiles: std::collections::HashMap::new(),
+        }
+    }
+
+    fn review_ledger_entry(
+        profile_name: &str,
+        prof: &Profile,
+        branch: &str,
+        verdict: &str,
+        confidence: &str,
+    ) -> LedgerEntry {
+        let mut entry = LedgerEntry::new(profile_name, prof, "vibe", "review", "test", None, None);
+        entry.branch = Some(branch.to_string());
+        entry.validation_result = Some(verdict.to_string());
+        entry.confidence_impact = Some(confidence.to_string());
+        entry
+    }
+
+    #[test]
+    fn review_escalation_reason_none_when_no_prior_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
+    }
+
+    #[test]
+    fn review_escalation_reason_none_with_single_needs_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let prof = profile(tmp.path());
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "NEEDS_FIX", "high"),
+        )
+        .unwrap();
+        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
+    }
+
+    #[test]
+    fn review_escalation_reason_repeated_failure_on_two_consecutive_needs_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let prof = profile(tmp.path());
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "NEEDS_FIX", "high"),
+        )
+        .unwrap();
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "REJECT", "high"),
+        )
+        .unwrap();
+        assert_eq!(
+            review_escalation_reason(&cfg, "test", "gah/branch-1"),
+            Some("repeated_needs_fix")
+        );
+    }
+
+    #[test]
+    fn review_escalation_reason_none_when_needs_fix_not_consecutive_at_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let prof = profile(tmp.path());
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "NEEDS_FIX", "high"),
+        )
+        .unwrap();
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_STRONG", "high"),
+        )
+        .unwrap();
+        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
+    }
+
+    #[test]
+    fn review_escalation_reason_low_confidence_on_most_recent_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let prof = profile(tmp.path());
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_STRONG", "high"),
+        )
+        .unwrap();
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_WEAK", "low"),
+        )
+        .unwrap();
+        assert_eq!(
+            review_escalation_reason(&cfg, "test", "gah/branch-1"),
+            Some("low_confidence")
+        );
+    }
+
+    #[test]
+    fn review_escalation_reason_none_with_medium_confidence_and_no_repeated_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let prof = profile(tmp.path());
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_STRONG", "medium"),
+        )
+        .unwrap();
+        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
+    }
+
+    #[test]
+    fn review_escalation_reason_ignores_other_branch_and_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let prof = profile(tmp.path());
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/other-branch", "NEEDS_FIX", "high"),
+        )
+        .unwrap();
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/other-branch", "REJECT", "high"),
+        )
+        .unwrap();
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("other-profile", &prof, "gah/branch-1", "NEEDS_FIX", "high"),
+        )
+        .unwrap();
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("other-profile", &prof, "gah/branch-1", "REJECT", "high"),
+        )
+        .unwrap();
+        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
     }
 
     fn route_decision(backend: &str, model: Option<&str>, fallback_used: bool) -> RouteDecision {
@@ -6846,6 +7031,62 @@ fn lookup_review_state_by_branch(
                 && entry.branch.as_deref() == Some(branch)
         })
         .map(|entry| render_prior_ledger_state(&entry))
+}
+
+/// The routine reviewer (`review_backend`, e.g. Vibe/Mistral) is fast and
+/// cheap but was never meant to be the last word on a genuinely hard or
+/// repeatedly-failing review. Mirrors `AUTO_RETRY_CAP`'s fix/merge-attempt
+/// convention (controller.rs) for the "repeated failure" trigger; adds an
+/// immediate-escalate path for a reviewer that itself reported low
+/// confidence, since forcing 2 low-confidence rubber stamps before getting
+/// a second opinion defeats the point of tracking confidence at all.
+///
+/// Reads `validation_result`/`confidence_impact` off this branch's own
+/// `mode == "review"` entries -- NOT `review_verdict`/`review_confidence`.
+/// Those two fields are written by `backfill_review_verdict` (ledger.rs,
+/// TICKET-125) onto the *implementation* (fix/improve) entry instead, by
+/// design (see `backfill_review_verdict_attributes_to_implementation_entry_not_reviewer`).
+/// A review dispatch's own entry never carries a `review_verdict`, so
+/// checking that field here would make this permanently a no-op; the
+/// verdict/confidence a review entry actually records about itself live in
+/// `validation_result`/`confidence_impact` (set directly in `review()`).
+fn review_escalation_reason(
+    cfg: &GahConfig,
+    profile_name: &str,
+    branch: &str,
+) -> Option<&'static str> {
+    // Mirrors controller.rs's AUTO_RETRY_CAP convention for fix/merge attempts.
+    const REPEATED_FAILURE_THRESHOLD: usize = 2;
+
+    let entries = ledger::read_entries(cfg).ok()?;
+    let recent: Vec<&LedgerEntry> = entries
+        .iter()
+        .rev()
+        .filter(|e| {
+            e.profile == profile_name && e.mode == "review" && e.branch.as_deref() == Some(branch)
+        })
+        .take(REPEATED_FAILURE_THRESHOLD)
+        .collect();
+
+    if recent
+        .first()
+        .is_some_and(|e| e.confidence_impact.as_deref() == Some("low"))
+    {
+        return Some("low_confidence");
+    }
+
+    if recent.len() == REPEATED_FAILURE_THRESHOLD
+        && recent.iter().all(|e| {
+            matches!(
+                e.validation_result.as_deref(),
+                Some("NEEDS_FIX") | Some("REJECT")
+            )
+        })
+    {
+        return Some("repeated_needs_fix");
+    }
+
+    None
 }
 
 fn render_prior_ledger_state(entry: &LedgerEntry) -> String {
