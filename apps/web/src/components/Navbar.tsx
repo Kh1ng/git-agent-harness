@@ -16,7 +16,7 @@ type NavbarProps = {
   onPageChange: (page: Page) => void;
 };
 
-export const FRONTEND_BUILD = 'controller-activity-2026-07-10';
+export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
 
 const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
