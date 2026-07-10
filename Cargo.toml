@@ -18,7 +18,6 @@ time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 toml = "0.8"
 fs2 = "0.4"
 libc = "0.2"
-nix = { version = "0.29", features = ["process", "term", "fs", "signal", "poll", "feature"] }
 ratatui = "0.30"
 crossterm = "0.29"
 tokio = { version = "1", features = ["full"] }

@@ -744,7 +744,6 @@ dependencies = [
  "futures-util",
  "libc",
  "log",
- "nix",
  "predicates",
  "ratatui",
  "regex",
