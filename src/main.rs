@@ -133,6 +133,15 @@ enum Commands {
         #[command(subcommand)]
         command: LedgerCommands,
     },
+    /// Manager-session review hold: tells gah's own auto-merge loop to
+    /// leave a work_id's PR alone while a human or supervising Claude
+    /// Code/Codex/Hermes session is actively reviewing it out of band.
+    /// gah's own automated loop never uses this -- only a manager session
+    /// invokes it.
+    Hold {
+        #[command(subcommand)]
+        command: HoldCommands,
+    },
     /// One bounded controller iteration: observe, decide one action,
     /// execute at most that action, persist, exit. No daemon.
     Loop {
@@ -513,6 +522,31 @@ enum LedgerCommands {
 }
 
 #[derive(Subcommand)]
+enum HoldCommands {
+    /// Mark a work_id as under active out-of-band manager review. gah's
+    /// `decide_next_action` will skip auto-merging it until it's cleared
+    /// (`gah hold clear`) or the hold self-expires after
+    /// `REVIEW_HOLD_STALE_AFTER_HOURS`.
+    Set {
+        #[arg(long)]
+        profile: String,
+        work_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
+    /// Release a previously set review hold on a work_id.
+    Clear {
+        #[arg(long)]
+        profile: String,
+        work_id: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum TelemetryCommands {
     /// Export telemetry data to versioned repository
     Export {
@@ -720,6 +754,42 @@ fn main() -> Result<()> {
                         path.display()
                     );
                 }
+            }
+        },
+
+        Commands::Hold { command } => match command {
+            HoldCommands::Set {
+                profile,
+                work_id,
+                reason,
+                config_path,
+            } => {
+                let cfg = config::load(config_path.as_deref())?;
+                let prof = config::get_profile(&cfg, &profile)?;
+                let entry = ledger::LedgerEntry::new_review_hold(&profile, prof, &work_id, reason);
+                let path = ledger::append(&cfg, &entry)?;
+                println!(
+                    "Review hold set for work_id '{}' on profile '{}' ({})",
+                    work_id,
+                    profile,
+                    path.display()
+                );
+            }
+            HoldCommands::Clear {
+                profile,
+                work_id,
+                config_path,
+            } => {
+                let cfg = config::load(config_path.as_deref())?;
+                let prof = config::get_profile(&cfg, &profile)?;
+                let entry = ledger::LedgerEntry::new_review_hold_release(&profile, prof, &work_id);
+                let path = ledger::append(&cfg, &entry)?;
+                println!(
+                    "Review hold cleared for work_id '{}' on profile '{}' ({})",
+                    work_id,
+                    profile,
+                    path.display()
+                );
             }
         },
 

@@ -417,6 +417,99 @@ impl LedgerEntry {
             ..Self::new_clear_attempts(profile_name, profile, work_id)
         }
     }
+
+    /// A manager session (human or supervising Claude/Codex/Hermes,
+    /// explicitly NOT gah's own automated loop) is reviewing this work_id
+    /// out of band and wants `decide_next_action` to hold off auto-merging
+    /// it until the review is done. Mirrors `new_claim`'s shape (a
+    /// `LedgerEntry` with a distinct `mode`, superseded by a later entry)
+    /// but is a separate mechanism -- a claim guards dispatch-time duplicate
+    /// work, this guards merge-time timing against an out-of-band review.
+    pub fn new_review_hold(
+        profile_name: &str,
+        profile: &Profile,
+        work_id: &str,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            mode: "review_hold".to_string(),
+            target_summary: reason,
+            ..Self::new_clear_attempts(profile_name, profile, work_id)
+        }
+    }
+
+    /// Releases a prior `new_review_hold` for `work_id`. The hold and its
+    /// release are both plain ledger entries -- `active_review_hold_work_ids`
+    /// determines "active" by finding whichever of the two is most recent.
+    pub fn new_review_hold_release(profile_name: &str, profile: &Profile, work_id: &str) -> Self {
+        Self {
+            mode: "review_hold_release".to_string(),
+            ..Self::new_clear_attempts(profile_name, profile, work_id)
+        }
+    }
+}
+
+/// A manager review is a much shorter-lived action than a full dispatch
+/// attempt (`CLAIM_STALE_AFTER_HOURS` in dispatch.rs is 6h) -- 2h is a
+/// generous margin for a real review session while still releasing a hold
+/// left behind by a crashed/forgotten manager session same-day.
+pub const REVIEW_HOLD_STALE_AFTER_HOURS: i64 = 2;
+
+/// Mirrors dispatch.rs's `is_claim_stale` parsing (RFC3339, falling back to
+/// a raw unix-timestamp string) -- duplicated rather than shared because the
+/// two staleness checks answer different questions (dispatch-time claim vs.
+/// merge-time review hold) with different thresholds, and neither module
+/// depends on the other today.
+fn is_review_hold_stale(entry: &LedgerEntry) -> bool {
+    let entry_time = if let Ok(parsed) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
+        parsed
+    } else if let Ok(secs) = entry.timestamp.parse::<i64>() {
+        if let Ok(dt) = OffsetDateTime::from_unix_timestamp(secs) {
+            dt
+        } else {
+            return true;
+        }
+    } else {
+        return true;
+    };
+    let now = OffsetDateTime::now_utc();
+    now - entry_time > time::Duration::hours(REVIEW_HOLD_STALE_AFTER_HOURS)
+}
+
+/// Scans this profile's ledger entries for active review holds (`gah hold
+/// set` with no later `gah hold clear`, and not yet stale) so
+/// `decide_next_action` can skip auto-merging a work_id a manager session is
+/// actively reviewing out of band. Entries are appended in chronological
+/// order, so a single forward pass where each hold/release overwrites the
+/// previous verdict for its work_id naturally lands on the latest one.
+pub fn active_review_hold_work_ids(
+    cfg: &GahConfig,
+    profile_name: &str,
+) -> std::collections::HashSet<String> {
+    let entries = match read_entries(cfg) {
+        Ok(entries) => entries,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+
+    let mut held: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    for entry in entries.iter().filter(|e| e.profile == profile_name) {
+        let Some(work_id) = entry.work_id.as_deref() else {
+            continue;
+        };
+        match entry.mode.as_str() {
+            "review_hold" => {
+                held.insert(work_id.to_string(), !is_review_hold_stale(entry));
+            }
+            "review_hold_release" => {
+                held.insert(work_id.to_string(), false);
+            }
+            _ => {}
+        }
+    }
+
+    held.into_iter()
+        .filter_map(|(work_id, active)| active.then_some(work_id))
+        .collect()
 }
 
 pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
@@ -2293,13 +2386,16 @@ pub fn usage_summary_for_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        append, backfill_review_verdict, entries_for_work_id, index_entries_by_work_id,
-        is_strong_model, read_entries, reconcile, usage_summary_for_backend, FailureClass,
-        FailureStage, GroupBy, LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
+        active_review_hold_work_ids, append, backfill_review_verdict, entries_for_work_id,
+        index_entries_by_work_id, is_strong_model, read_entries, reconcile,
+        usage_summary_for_backend, FailureClass, FailureStage, GroupBy, LedgerEntry,
+        RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
     use std::fs;
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
 
     // pub(crate) so the sqlite_store::tests submodule (a sibling, not a
     // descendant, of this tests module) can reuse the same fixtures rather
@@ -3200,5 +3296,84 @@ mod tests {
         let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.mode, "claim");
         assert_eq!(parsed.work_id.as_deref(), Some("TICKET-500"));
+    }
+
+    #[test]
+    fn new_review_hold_creates_valid_hold_entry() {
+        let prof = profile();
+        let entry = LedgerEntry::new_review_hold(
+            "test-profile",
+            &prof,
+            "TICKET-600",
+            Some("reviewing PR #204".into()),
+        );
+        assert_eq!(entry.mode, "review_hold");
+        assert_eq!(entry.work_id.as_deref(), Some("TICKET-600"));
+        assert_eq!(entry.target_summary.as_deref(), Some("reviewing PR #204"));
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.mode, "review_hold");
+    }
+
+    #[test]
+    fn active_review_hold_work_ids_hold_with_no_release_is_active() {
+        let (_tmp, cfg) = test_config();
+        let prof = profile();
+        let hold = LedgerEntry::new_review_hold("test", &prof, "TICKET-600", None);
+        append(&cfg, &hold).unwrap();
+
+        let held = active_review_hold_work_ids(&cfg, "test");
+        assert!(held.contains("TICKET-600"));
+    }
+
+    #[test]
+    fn active_review_hold_work_ids_hold_then_release_is_not_active() {
+        let (_tmp, cfg) = test_config();
+        let prof = profile();
+        let hold = LedgerEntry::new_review_hold("test", &prof, "TICKET-600", None);
+        append(&cfg, &hold).unwrap();
+        let release = LedgerEntry::new_review_hold_release("test", &prof, "TICKET-600");
+        append(&cfg, &release).unwrap();
+
+        let held = active_review_hold_work_ids(&cfg, "test");
+        assert!(!held.contains("TICKET-600"));
+    }
+
+    #[test]
+    fn active_review_hold_work_ids_stale_hold_is_not_active_even_without_release() {
+        let (_tmp, cfg) = test_config();
+        let prof = profile();
+        let mut hold = LedgerEntry::new_review_hold("test", &prof, "TICKET-600", None);
+        hold.timestamp = (OffsetDateTime::now_utc() - time::Duration::hours(3))
+            .format(&Rfc3339)
+            .unwrap();
+        append(&cfg, &hold).unwrap();
+
+        let held = active_review_hold_work_ids(&cfg, "test");
+        assert!(!held.contains("TICKET-600"));
+    }
+
+    #[test]
+    fn active_review_hold_work_ids_rehold_after_release_is_active_again() {
+        let (_tmp, cfg) = test_config();
+        let prof = profile();
+        append(
+            &cfg,
+            &LedgerEntry::new_review_hold("test", &prof, "TICKET-600", None),
+        )
+        .unwrap();
+        append(
+            &cfg,
+            &LedgerEntry::new_review_hold_release("test", &prof, "TICKET-600"),
+        )
+        .unwrap();
+        append(
+            &cfg,
+            &LedgerEntry::new_review_hold("test", &prof, "TICKET-600", None),
+        )
+        .unwrap();
+
+        let held = active_review_hold_work_ids(&cfg, "test");
+        assert!(held.contains("TICKET-600"));
     }
 }
