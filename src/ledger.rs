@@ -2238,6 +2238,7 @@ mod tests {
     // than duplicating them.
     pub(crate) fn profile() -> Profile {
         Profile {
+            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),
@@ -2290,6 +2291,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = GahConfig {
             defaults: Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: String::new(),
                 llm_base_url: String::new(),

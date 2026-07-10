@@ -2336,6 +2336,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = GahConfig {
             defaults: Defaults {
+                current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
                 worktree_base: String::new(),
                 llm_base_url: String::new(),

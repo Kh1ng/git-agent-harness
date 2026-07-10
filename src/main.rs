@@ -919,6 +919,7 @@ fn main() -> Result<()> {
                     claude_idle_timeout_seconds: None,
                     max_parallel_workers: None,
                     notify_command,
+                    manager_wake_autonomy: config::WakeAutonomy::default(),
                     policy_path,
                     env_file,
                     env_file_prod,
