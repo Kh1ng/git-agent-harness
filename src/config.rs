@@ -34,7 +34,7 @@ impl MergePolicy {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GahConfig {
     #[serde(default)]
     pub defaults: Defaults,
@@ -42,7 +42,7 @@ pub struct GahConfig {
     pub profiles: HashMap<String, Profile>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Defaults {
     #[serde(default)]
     pub artifact_root: String,
@@ -122,7 +122,7 @@ impl Defaults {
 ///
 /// All flags default to `true` so existing profiles keep their current
 /// behavior unless they opt into a restricted profile explicitly.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct PublishingPolicy {
     /// When false, GAH must not create a PR/MR, and must not generate a
     /// PR/MR title or body as a fallback side effect. The run stops at a
@@ -160,7 +160,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Profile {
     pub display_name: String,
     pub repo_id: String,
@@ -312,7 +312,7 @@ impl Profile {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct CandidateConfig {
     pub backend: String,
     #[serde(default)]
@@ -331,7 +331,7 @@ pub struct CandidateConfig {
     pub quota_days_remaining: Option<f64>,
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct RoutingPolicy {
     #[serde(default)]
     pub default_backend: Option<String>,
@@ -764,11 +764,56 @@ pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile>
     })
 }
 
+/// Save the config back to the TOML file
+pub fn save(config: &GahConfig, path: Option<&str>) -> Result<()> {
+    let target_path = resolve_config_path(path);
+
+    // Ensure parent directory exists
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent).context("creating config directory")?;
+    }
+
+    let toml_string = toml::to_string(config).context("serializing config to TOML")?;
+    std::fs::write(&target_path, toml_string).context("writing config file")?;
+    Ok(())
+}
+
+/// Add a new profile to the config
+pub fn add_profile(config: &mut GahConfig, name: &str, profile: Profile) -> Result<()> {
+    if config.profiles.contains_key(name) {
+        anyhow::bail!("profile '{}' already exists", name);
+    }
+    config.profiles.insert(name.to_string(), profile);
+    Ok(())
+}
+
+/// Remove a profile from the config
+pub fn remove_profile(config: &mut GahConfig, name: &str) -> Result<()> {
+    if !config.profiles.contains_key(name) {
+        anyhow::bail!("profile '{}' not found", name);
+    }
+    config.profiles.remove(name);
+    Ok(())
+}
+
+/// Get a mutable reference to a profile for in-place modification
+pub fn get_profile_mut<'a>(config: &'a mut GahConfig, name: &str) -> Result<&'a mut Profile> {
+    if !config.profiles.contains_key(name) {
+        let names: Vec<String> = config.profiles.keys().cloned().collect();
+        anyhow::bail!(
+            "profile '{}' not found; available: {}",
+            name,
+            names.join(", ")
+        );
+    }
+    Ok(config.profiles.get_mut(name).unwrap())
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::{
-        load, load_canonical_routing, merge_routing_policy, CandidateConfig, GahConfig, Profile,
-        RoutingPolicy,
+        add_profile, get_profile_mut, load, load_canonical_routing, merge_routing_policy,
+        remove_profile, save, CandidateConfig, GahConfig, Profile, RoutingPolicy,
     };
     use std::sync::Mutex;
 
@@ -869,6 +914,79 @@ pub mod tests {
             publishing: Default::default(),
             pacing: Default::default(),
         }
+    }
+
+    fn config_with_one_profile() -> GahConfig {
+        let mut profiles = std::collections::HashMap::new();
+        profiles.insert("test".to_string(), test_profile_for_notifications());
+        GahConfig {
+            defaults: Default::default(),
+            profiles,
+        }
+    }
+
+    #[test]
+    fn add_profile_inserts_new_entry() {
+        let mut cfg = config_with_one_profile();
+        add_profile(&mut cfg, "second", gitlab_profile(None)).unwrap();
+        assert!(cfg.profiles.contains_key("second"));
+        assert_eq!(cfg.profiles.len(), 2);
+    }
+
+    #[test]
+    fn add_profile_rejects_duplicate_name() {
+        let mut cfg = config_with_one_profile();
+        let err = add_profile(&mut cfg, "test", gitlab_profile(None)).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        // Original profile must be untouched by the rejected add.
+        assert_eq!(cfg.profiles.get("test").unwrap().provider, "github");
+    }
+
+    #[test]
+    fn remove_profile_deletes_existing_entry() {
+        let mut cfg = config_with_one_profile();
+        remove_profile(&mut cfg, "test").unwrap();
+        assert!(!cfg.profiles.contains_key("test"));
+    }
+
+    #[test]
+    fn remove_profile_errors_on_missing_name() {
+        let mut cfg = config_with_one_profile();
+        let err = remove_profile(&mut cfg, "nonexistent").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+        // Nothing should have been removed.
+        assert_eq!(cfg.profiles.len(), 1);
+    }
+
+    #[test]
+    fn get_profile_mut_allows_in_place_field_update() {
+        let mut cfg = config_with_one_profile();
+        {
+            let profile = get_profile_mut(&mut cfg, "test").unwrap();
+            profile.display_name = "Renamed".to_string();
+        }
+        assert_eq!(cfg.profiles.get("test").unwrap().display_name, "Renamed");
+    }
+
+    #[test]
+    fn get_profile_mut_errors_on_missing_name_and_lists_available() {
+        let mut cfg = config_with_one_profile();
+        let err = get_profile_mut(&mut cfg, "nonexistent").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+        assert!(err.to_string().contains("test"));
+    }
+
+    #[test]
+    fn save_round_trips_a_profile_through_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = config_with_one_profile();
+        save(&cfg, Some(path.to_str().unwrap())).unwrap();
+
+        let reloaded = load(Some(path.to_str().unwrap())).unwrap();
+        let profile = reloaded.profiles.get("test").unwrap();
+        assert_eq!(profile.display_name, "Repo");
+        assert_eq!(profile.repo, "owner/repo");
     }
 
     #[test]

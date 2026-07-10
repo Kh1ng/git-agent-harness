@@ -411,6 +411,320 @@ export async function runProfileList(config?: string): Promise<ProfileSummary[]>
   return runJsonCommand<ProfileSummary[]>(args, config);
 }
 
+// Profile CRUD operations for Issue #148
+export interface ProfileAddOptions {
+  name: string;
+  display_name: string;
+  repo_id: string;
+  provider: string;
+  repo: string;
+  local_path: string;
+  artifact_root: string;
+  default_target_branch?: string;
+  provider_api_base?: string;
+  provider_project_id?: string;
+  openhands_args?: string[];
+  codex_args?: string[];
+  codex_path?: string;
+  claude_args?: string[];
+  claude_path?: string;
+  agy_path?: string;
+  vibe_args?: string[];
+  vibe_path?: string;
+  opencode_args?: string[];
+  opencode_path?: string;
+  agy_second_home?: string;
+  notify_command?: string;
+  policy_path?: string;
+  env_file?: string;
+  env_file_prod?: string;
+  validation_commands?: string[];
+  auto_fix_commands?: string[];
+  config?: string;
+}
+
+export async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
+  const args = ['profile', 'add', options.name];
+  
+  args.push('--display-name', options.display_name);
+  args.push('--repo-id', options.repo_id);
+  args.push('--provider', options.provider);
+  args.push('--repo', options.repo);
+  args.push('--local-path', options.local_path);
+  args.push('--artifact-root', options.artifact_root);
+  
+  if (options.default_target_branch) {
+    args.push('--default-target-branch', options.default_target_branch);
+  }
+  if (options.provider_api_base) {
+    args.push('--provider-api-base', options.provider_api_base);
+  }
+  if (options.provider_project_id) {
+    args.push('--provider-project-id', options.provider_project_id);
+  }
+  if (options.openhands_args?.length) {
+    args.push('--openhands-args', options.openhands_args.join(','));
+  }
+  if (options.codex_args?.length) {
+    args.push('--codex-args', options.codex_args.join(','));
+  }
+  if (options.codex_path) {
+    args.push('--codex-path', options.codex_path);
+  }
+  if (options.claude_args?.length) {
+    args.push('--claude-args', options.claude_args.join(','));
+  }
+  if (options.claude_path) {
+    args.push('--claude-path', options.claude_path);
+  }
+  if (options.agy_path) {
+    args.push('--agy-path', options.agy_path);
+  }
+  if (options.vibe_args?.length) {
+    args.push('--vibe-args', options.vibe_args.join(','));
+  }
+  if (options.vibe_path) {
+    args.push('--vibe-path', options.vibe_path);
+  }
+  if (options.opencode_args?.length) {
+    args.push('--opencode-args', options.opencode_args.join(','));
+  }
+  if (options.opencode_path) {
+    args.push('--opencode-path', options.opencode_path);
+  }
+  if (options.agy_second_home) {
+    args.push('--agy-second-home', options.agy_second_home);
+  }
+  if (options.notify_command) {
+    args.push('--notify-command', options.notify_command);
+  }
+  if (options.policy_path) {
+    args.push('--policy-path', options.policy_path);
+  }
+  if (options.env_file) {
+    args.push('--env-file', options.env_file);
+  }
+  if (options.env_file_prod) {
+    args.push('--env-file-prod', options.env_file_prod);
+  }
+  if (options.validation_commands?.length) {
+    args.push('--validation-commands', options.validation_commands.join(','));
+  }
+  if (options.auto_fix_commands?.length) {
+    args.push('--auto-fix-commands', options.auto_fix_commands.join(','));
+  }
+  
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
+    
+    let stderr = '';
+    
+    child.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+    
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`gah profile add failed with exit code ${code}: ${stderr}`));
+        return;
+      }
+      resolve(undefined);
+    });
+    
+    child.on('error', (error) => {
+      reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
+    });
+  });
+}
+
+export interface ProfileSetOptions {
+  name: string;
+  display_name?: string;
+  repo_id?: string;
+  provider?: string;
+  repo?: string;
+  local_path?: string;
+  artifact_root?: string;
+  default_target_branch?: string;
+  provider_api_base?: string | null;
+  provider_project_id?: string | null;
+  openhands_args?: string[];
+  codex_args?: string[];
+  codex_path?: string | null;
+  claude_args?: string[];
+  claude_path?: string | null;
+  agy_path?: string | null;
+  vibe_args?: string[];
+  vibe_path?: string | null;
+  opencode_args?: string[];
+  opencode_path?: string | null;
+  agy_second_home?: string | null;
+  notify_command?: string | null;
+  policy_path?: string | null;
+  env_file?: string | null;
+  env_file_prod?: string | null;
+  validation_commands?: string[];
+  auto_fix_commands?: string[];
+  clear?: string[];
+  config?: string;
+}
+
+export async function runProfileSet(options: ProfileSetOptions): Promise<void> {
+  const args = ['profile', 'set', options.name];
+  
+  if (options.display_name) {
+    args.push('--display-name', options.display_name);
+  }
+  if (options.repo_id) {
+    args.push('--repo-id', options.repo_id);
+  }
+  if (options.provider) {
+    args.push('--provider', options.provider);
+  }
+  if (options.repo) {
+    args.push('--repo', options.repo);
+  }
+  if (options.local_path) {
+    args.push('--local-path', options.local_path);
+  }
+  if (options.artifact_root) {
+    args.push('--artifact-root', options.artifact_root);
+  }
+  if (options.default_target_branch) {
+    args.push('--default-target-branch', options.default_target_branch);
+  }
+  if (options.provider_api_base !== undefined && options.provider_api_base !== null) {
+    args.push('--provider-api-base', options.provider_api_base);
+  }
+  if (options.provider_project_id !== undefined && options.provider_project_id !== null) {
+    args.push('--provider-project-id', options.provider_project_id);
+  }
+  if (options.openhands_args?.length) {
+    args.push('--openhands-args', options.openhands_args.join(','));
+  }
+  if (options.codex_args?.length) {
+    args.push('--codex-args', options.codex_args.join(','));
+  }
+  if (options.codex_path !== undefined && options.codex_path !== null) {
+    args.push('--codex-path', options.codex_path);
+  }
+  if (options.claude_args?.length) {
+    args.push('--claude-args', options.claude_args.join(','));
+  }
+  if (options.claude_path !== undefined && options.claude_path !== null) {
+    args.push('--claude-path', options.claude_path);
+  }
+  if (options.agy_path !== undefined && options.agy_path !== null) {
+    args.push('--agy-path', options.agy_path);
+  }
+  if (options.vibe_args?.length) {
+    args.push('--vibe-args', options.vibe_args.join(','));
+  }
+  if (options.vibe_path !== undefined && options.vibe_path !== null) {
+    args.push('--vibe-path', options.vibe_path);
+  }
+  if (options.opencode_args?.length) {
+    args.push('--opencode-args', options.opencode_args.join(','));
+  }
+  if (options.opencode_path !== undefined && options.opencode_path !== null) {
+    args.push('--opencode-path', options.opencode_path);
+  }
+  if (options.agy_second_home !== undefined && options.agy_second_home !== null) {
+    args.push('--agy-second-home', options.agy_second_home);
+  }
+  if (options.notify_command !== undefined && options.notify_command !== null) {
+    args.push('--notify-command', options.notify_command);
+  }
+  if (options.policy_path !== undefined && options.policy_path !== null) {
+    args.push('--policy-path', options.policy_path);
+  }
+  if (options.env_file !== undefined && options.env_file !== null) {
+    args.push('--env-file', options.env_file);
+  }
+  if (options.env_file_prod !== undefined && options.env_file_prod !== null) {
+    args.push('--env-file-prod', options.env_file_prod);
+  }
+  if (options.validation_commands?.length) {
+    args.push('--validation-commands', options.validation_commands.join(','));
+  }
+  if (options.auto_fix_commands?.length) {
+    args.push('--auto-fix-commands', options.auto_fix_commands.join(','));
+  }
+  if (options.clear?.length) {
+    args.push('--clear', options.clear.join(','));
+  }
+  
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
+    
+    let stderr = '';
+    
+    child.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+    
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`gah profile set failed with exit code ${code}: ${stderr}`));
+        return;
+      }
+      resolve(undefined);
+    });
+    
+    child.on('error', (error) => {
+      reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
+    });
+  });
+}
+
+export interface ProfileRemoveOptions {
+  name: string;
+  force?: boolean;
+  config?: string;
+}
+
+export async function runProfileRemove(options: ProfileRemoveOptions): Promise<void> {
+  const args = ['profile', 'remove', options.name];
+  
+  if (options.force) {
+    args.push('--force');
+  }
+  
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
+    
+    let stderr = '';
+    
+    child.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+    
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`gah profile remove failed with exit code ${code}: ${stderr}`));
+        return;
+      }
+      resolve(undefined);
+    });
+    
+    child.on('error', (error) => {
+      reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
+    });
+  });
+}
+
 /**
  * Get the path to the GAH binary (for debugging/testing)
  */

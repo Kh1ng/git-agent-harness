@@ -35,6 +35,7 @@ mod worktree;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use config::Profile;
 
 #[derive(Parser)]
 #[command(name = "gah", about = "git agent harness")]
@@ -252,7 +253,7 @@ enum Commands {
     /// Manage profiles
     Profile {
         #[command(subcommand)]
-        command: ProfileCommands,
+        command: Box<ProfileCommands>,
     },
     /// Generate backend/model comparison report (TICKET-098)
     Report {
@@ -295,6 +296,151 @@ enum ProfileCommands {
         name: String,
         #[arg(long)]
         config: Option<String>,
+    },
+    /// Add a new profile
+    Add {
+        /// Profile name (used as the TOML table key under [profiles])
+        name: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        repo_id: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        local_path: String,
+        #[arg(long)]
+        artifact_root: String,
+        #[arg(long, default_value = "main")]
+        default_target_branch: String,
+        #[arg(long)]
+        provider_api_base: Option<String>,
+        #[arg(long)]
+        provider_project_id: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        /// Extra CLI args for openhands
+        #[arg(long, value_delimiter = ',')]
+        openhands_args: Vec<String>,
+        /// Extra CLI args for codex
+        #[arg(long, value_delimiter = ',')]
+        codex_args: Vec<String>,
+        /// Path to codex executable
+        #[arg(long)]
+        codex_path: Option<String>,
+        /// Extra CLI args for claude
+        #[arg(long, value_delimiter = ',')]
+        claude_args: Vec<String>,
+        /// Path to claude executable
+        #[arg(long)]
+        claude_path: Option<String>,
+        /// Path to agy executable
+        #[arg(long)]
+        agy_path: Option<String>,
+        /// Extra CLI args for vibe
+        #[arg(long, value_delimiter = ',')]
+        vibe_args: Vec<String>,
+        /// Path to vibe executable
+        #[arg(long)]
+        vibe_path: Option<String>,
+        /// Extra CLI args for opencode
+        #[arg(long, value_delimiter = ',')]
+        opencode_args: Vec<String>,
+        /// Path to opencode executable
+        #[arg(long)]
+        opencode_path: Option<String>,
+        /// HOME override for agy-second backend
+        #[arg(long)]
+        agy_second_home: Option<String>,
+        /// Notification command
+        #[arg(long)]
+        notify_command: Option<String>,
+        /// Policy path
+        #[arg(long)]
+        policy_path: Option<String>,
+        /// Dev env file
+        #[arg(long)]
+        env_file: Option<String>,
+        /// Production env file
+        #[arg(long)]
+        env_file_prod: Option<String>,
+        /// Validation commands
+        #[arg(long, value_delimiter = ',')]
+        validation_commands: Vec<String>,
+        /// Auto-fix commands
+        #[arg(long, value_delimiter = ',')]
+        auto_fix_commands: Vec<String>,
+    },
+    /// Set/Update fields of an existing profile
+    Set {
+        name: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        repo_id: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        local_path: Option<String>,
+        #[arg(long)]
+        artifact_root: Option<String>,
+        #[arg(long)]
+        default_target_branch: Option<String>,
+        #[arg(long)]
+        provider_api_base: Option<String>,
+        #[arg(long)]
+        provider_project_id: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        openhands_args: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        codex_args: Vec<String>,
+        #[arg(long)]
+        codex_path: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        claude_args: Vec<String>,
+        #[arg(long)]
+        claude_path: Option<String>,
+        #[arg(long)]
+        agy_path: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        vibe_args: Vec<String>,
+        #[arg(long)]
+        vibe_path: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        opencode_args: Vec<String>,
+        #[arg(long)]
+        opencode_path: Option<String>,
+        #[arg(long)]
+        agy_second_home: Option<String>,
+        #[arg(long)]
+        notify_command: Option<String>,
+        #[arg(long)]
+        policy_path: Option<String>,
+        #[arg(long)]
+        env_file: Option<String>,
+        #[arg(long)]
+        env_file_prod: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        validation_commands: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        auto_fix_commands: Vec<String>,
+        /// Clear the specified field(s) - for fields that support it
+        #[arg(long, value_delimiter = ',')]
+        clear: Vec<String>,
+    },
+    /// Remove a profile
+    Remove {
+        name: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
 }
 
@@ -595,7 +741,7 @@ fn main() -> Result<()> {
             tui::run(&cfg, profile.as_deref())?;
         }
 
-        Commands::Profile { command } => match command {
+        Commands::Profile { command } => match *command {
             ProfileCommands::List { config, json } => {
                 let cfg = config::load(config.as_deref())?;
                 let mut names: Vec<&str> = cfg.profiles.keys().map(String::as_str).collect();
@@ -664,6 +810,296 @@ fn main() -> Result<()> {
                         println!("  - {}", cmd);
                     }
                 }
+            }
+            ProfileCommands::Add {
+                name,
+                display_name,
+                repo_id,
+                provider,
+                repo,
+                local_path,
+                artifact_root,
+                default_target_branch,
+                provider_api_base,
+                provider_project_id,
+                config_path,
+                openhands_args,
+                codex_args,
+                codex_path,
+                claude_args,
+                claude_path,
+                agy_path,
+                vibe_args,
+                vibe_path,
+                opencode_args,
+                opencode_path,
+                agy_second_home,
+                notify_command,
+                policy_path,
+                env_file,
+                env_file_prod,
+                validation_commands,
+                auto_fix_commands,
+            } => {
+                let mut cfg = config::load(config_path.as_deref())?;
+                let profile = Profile {
+                    display_name,
+                    repo_id,
+                    provider,
+                    repo,
+                    local_path,
+                    artifact_root,
+                    default_target_branch,
+                    provider_api_base,
+                    provider_project_id,
+                    oh_profile: None,
+                    openhands_args,
+                    codex_args,
+                    codex_path,
+                    claude_args,
+                    claude_path,
+                    agy_path,
+                    vibe_args,
+                    vibe_path,
+                    opencode_args,
+                    opencode_path,
+                    agy_second_home,
+                    agy_print_timeout_seconds: std::collections::HashMap::new(),
+                    agy_idle_timeout_seconds: None,
+                    notify_command,
+                    policy_path,
+                    env_file,
+                    env_file_prod,
+                    validation_commands,
+                    auto_fix_commands,
+                    test_file_patterns: vec![],
+                    known_baseline_failure_markers: vec![],
+                    model_improve: None,
+                    model_pm: None,
+                    model_review: None,
+                    review_timeout_seconds: None,
+                    routing: config::RoutingPolicy::default(),
+                    publishing: Default::default(),
+                    pacing: Default::default(),
+                    prune_older_than_days: None,
+                };
+                config::add_profile(&mut cfg, &name, profile)?;
+                config::save(&cfg, config_path.as_deref())?;
+                println!("Added profile '{}'", name);
+            }
+            ProfileCommands::Set {
+                name,
+                display_name,
+                repo_id,
+                provider,
+                repo,
+                local_path,
+                artifact_root,
+                default_target_branch,
+                provider_api_base,
+                provider_project_id,
+                config_path,
+                openhands_args,
+                codex_args,
+                codex_path,
+                claude_args,
+                claude_path,
+                agy_path,
+                vibe_args,
+                vibe_path,
+                opencode_args,
+                opencode_path,
+                agy_second_home,
+                notify_command,
+                policy_path,
+                env_file,
+                env_file_prod,
+                validation_commands,
+                auto_fix_commands,
+                clear,
+            } => {
+                let mut cfg = config::load(config_path.as_deref())?;
+                let existing = config::get_profile_mut(&mut cfg, &name)?;
+
+                // Helper to clear a field if requested
+                fn should_clear(field: &str, clear_list: &[String]) -> bool {
+                    clear_list.contains(&field.to_string())
+                }
+
+                // Update fields if provided, or clear if requested
+                if let Some(v) = display_name {
+                    existing.display_name = v;
+                } else if should_clear("display_name", &clear) {
+                    // display_name is required, so we don't actually clear it
+                }
+
+                if let Some(v) = repo_id {
+                    existing.repo_id = v;
+                } else if should_clear("repo_id", &clear) {
+                    // repo_id is required
+                }
+
+                if let Some(v) = provider {
+                    existing.provider = v;
+                } else if should_clear("provider", &clear) {
+                    // provider is required
+                }
+
+                if let Some(v) = repo {
+                    existing.repo = v;
+                } else if should_clear("repo", &clear) {
+                    // repo is required
+                }
+
+                if let Some(v) = local_path {
+                    existing.local_path = v;
+                } else if should_clear("local_path", &clear) {
+                    // local_path is required
+                }
+
+                if let Some(v) = artifact_root {
+                    existing.artifact_root = v;
+                } else if should_clear("artifact_root", &clear) {
+                    // artifact_root is required
+                }
+
+                if let Some(v) = default_target_branch {
+                    existing.default_target_branch = v;
+                } else if should_clear("default_target_branch", &clear) {
+                    // default_target_branch is required
+                }
+
+                if let Some(v) = provider_api_base {
+                    existing.provider_api_base = Some(v);
+                } else if should_clear("provider_api_base", &clear) {
+                    existing.provider_api_base = None;
+                }
+
+                if let Some(v) = provider_project_id {
+                    existing.provider_project_id = Some(v);
+                } else if should_clear("provider_project_id", &clear) {
+                    existing.provider_project_id = None;
+                }
+
+                if !openhands_args.is_empty() {
+                    existing.openhands_args = openhands_args;
+                } else if should_clear("openhands_args", &clear) {
+                    existing.openhands_args.clear();
+                }
+
+                if !codex_args.is_empty() {
+                    existing.codex_args = codex_args;
+                } else if should_clear("codex_args", &clear) {
+                    existing.codex_args.clear();
+                }
+
+                if let Some(v) = codex_path {
+                    existing.codex_path = Some(v);
+                } else if should_clear("codex_path", &clear) {
+                    existing.codex_path = None;
+                }
+
+                if !claude_args.is_empty() {
+                    existing.claude_args = claude_args;
+                } else if should_clear("claude_args", &clear) {
+                    existing.claude_args.clear();
+                }
+
+                if let Some(v) = claude_path {
+                    existing.claude_path = Some(v);
+                } else if should_clear("claude_path", &clear) {
+                    existing.claude_path = None;
+                }
+
+                if let Some(v) = agy_path {
+                    existing.agy_path = Some(v);
+                } else if should_clear("agy_path", &clear) {
+                    existing.agy_path = None;
+                }
+
+                if !vibe_args.is_empty() {
+                    existing.vibe_args = vibe_args;
+                } else if should_clear("vibe_args", &clear) {
+                    existing.vibe_args.clear();
+                }
+
+                if let Some(v) = vibe_path {
+                    existing.vibe_path = Some(v);
+                } else if should_clear("vibe_path", &clear) {
+                    existing.vibe_path = None;
+                }
+
+                if !opencode_args.is_empty() {
+                    existing.opencode_args = opencode_args;
+                } else if should_clear("opencode_args", &clear) {
+                    existing.opencode_args.clear();
+                }
+
+                if let Some(v) = opencode_path {
+                    existing.opencode_path = Some(v);
+                } else if should_clear("opencode_path", &clear) {
+                    existing.opencode_path = None;
+                }
+
+                if let Some(v) = agy_second_home {
+                    existing.agy_second_home = Some(v);
+                } else if should_clear("agy_second_home", &clear) {
+                    existing.agy_second_home = None;
+                }
+
+                if let Some(v) = notify_command {
+                    existing.notify_command = Some(v);
+                } else if should_clear("notify_command", &clear) {
+                    existing.notify_command = None;
+                }
+
+                if let Some(v) = policy_path {
+                    existing.policy_path = Some(v);
+                } else if should_clear("policy_path", &clear) {
+                    existing.policy_path = None;
+                }
+
+                if let Some(v) = env_file {
+                    existing.env_file = Some(v);
+                } else if should_clear("env_file", &clear) {
+                    existing.env_file = None;
+                }
+
+                if let Some(v) = env_file_prod {
+                    existing.env_file_prod = Some(v);
+                } else if should_clear("env_file_prod", &clear) {
+                    existing.env_file_prod = None;
+                }
+
+                if !validation_commands.is_empty() {
+                    existing.validation_commands = validation_commands;
+                } else if should_clear("validation_commands", &clear) {
+                    existing.validation_commands.clear();
+                }
+
+                if !auto_fix_commands.is_empty() {
+                    existing.auto_fix_commands = auto_fix_commands;
+                } else if should_clear("auto_fix_commands", &clear) {
+                    existing.auto_fix_commands.clear();
+                }
+
+                config::save(&cfg, config_path.as_deref())?;
+                println!("Updated profile '{}'", name);
+            }
+            ProfileCommands::Remove {
+                name,
+                config_path,
+                force,
+            } => {
+                if !force {
+                    eprintln!("Warning: Removing profile '{}' cannot be undone.", name);
+                    eprintln!("Use --force to confirm.");
+                    anyhow::bail!("Aborted");
+                }
+                let mut cfg = config::load(config_path.as_deref())?;
+                config::remove_profile(&mut cfg, &name)?;
+                config::save(&cfg, config_path.as_deref())?;
+                println!("Removed profile '{}'", name);
             }
         },
 

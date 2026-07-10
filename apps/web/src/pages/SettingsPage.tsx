@@ -6,6 +6,7 @@ import { useGahStore } from '../store/gahStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
+import { ProfileEditor } from '../components/ProfileEditor.js';
 
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
 
@@ -106,6 +107,10 @@ export function SettingsPage() {
           <Info size={13} className="shrink-0 mt-0.5" aria-hidden="true" />
           Switching profiles reconnects the live WebSocket feed as well as refreshing the REST-backed pages.
         </p>
+      </section>
+
+      <section>
+        <ProfileEditor />
       </section>
 
       <section>
