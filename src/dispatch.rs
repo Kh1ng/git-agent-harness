@@ -1699,6 +1699,29 @@ fn improve(
                         continue;
                     }
                 }
+                // Live-observed bug: a generic backend error (an idle-timeout
+                // kill, a transient crash, anything `mark_backend_unavailable_from_output`
+                // doesn't recognize as a quota/rate-limit message) fell straight
+                // through to bail!() below, ending the ENTIRE dispatch after a
+                // single attempt regardless of --retries -- the reroute branch
+                // above was the ONLY retry path that existed, so a non-quota
+                // failure never got a second attempt at all. Retry with the
+                // SAME backend/model instead, mirroring the validation-failure
+                // retry path (wipe partial changes, rebuild task with context).
+                println!(
+                    "Backend error (exit {}) on attempt {}/{}, not a recognized quota/rate-limit signal -- retrying with the same backend...",
+                    result.exit_code, attempt + 1, max_attempts
+                );
+                let _ = worktree::git(&["reset", "--hard", "HEAD"], &wt);
+                let _ = worktree::git(&["clean", "-fd"], &wt);
+                task = format!(
+                    "{}\n\n## Previous attempt did not complete (attempt {}/{})\n\nThe backend exited with code {} before finishing (not a validation failure -- it errored, crashed, or was killed for producing no output). The worktree has been reset clean. Please try again.",
+                    base_task,
+                    attempt + 1,
+                    max_attempts,
+                    result.exit_code,
+                );
+                continue;
             }
             worktree::cleanup(&wt, repo);
             anyhow::bail!(
