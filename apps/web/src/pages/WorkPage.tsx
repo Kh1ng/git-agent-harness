@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, ListChecks, FileText } from 'lucide-react';
+import { ArrowLeft, ListChecks, FileText, Rocket } from 'lucide-react';
 import type { Session } from '@git-agent-harness/contracts';
+import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -9,6 +10,87 @@ import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyStat
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { SessionCard } from '../components/SessionCard.js';
 import { AttemptTimeline } from '../components/AttemptTimeline.js';
+
+const DISPATCH_MODES = ['fix', 'improve', 'review', 'pm', 'experiment'] as const;
+const DISPATCH_BACKENDS = ['auto', 'openhands', 'codex', 'claude', 'agy', 'vibe', 'opencode'] as const;
+
+/** Minimal "start a new dispatch" form -- the dashboard could only stop/
+ * command sessions that already existed, with no way to start one. Sends
+ * the same `session.start` message the WS contract already defines
+ * (apps/server's SessionManager.startSession); no new server-side work. */
+function NewDispatchForm({ profile, repo }: { profile: string; repo: string | null }) {
+  const { sendMessage, isConnected } = useWebSocket();
+  const [mode, setMode] = useState<(typeof DISPATCH_MODES)[number]>('fix');
+  const [backend, setBackend] = useState<(typeof DISPATCH_BACKENDS)[number]>('auto');
+  const [target, setTarget] = useState('');
+  const [justSent, setJustSent] = useState(false);
+
+  const dispatch = () => {
+    if (!repo) return;
+    sendMessage({
+      type: 'session.start',
+      requestId: `dispatch_${Date.now()}`,
+      profile,
+      providerKind: backend,
+      instanceId: generateProviderInstanceId(backend, 0),
+      repo,
+      mode,
+      backend,
+      target: target.trim() || undefined
+    });
+    setJustSent(true);
+    setTimeout(() => setJustSent(false), 3000);
+  };
+
+  return (
+    <section className="card-padded">
+      <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
+        <Rocket size={15} aria-hidden="true" />
+        Dispatch new work
+      </h3>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-xs text-muted">
+          Mode
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value as typeof mode)}
+            className="block mt-1 bg-raised border border-subtle rounded-md px-2 py-1.5 text-sm text-primary"
+          >
+            {DISPATCH_MODES.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </label>
+        <label className="text-xs text-muted">
+          Backend
+          <select
+            value={backend}
+            onChange={(e) => setBackend(e.target.value as typeof backend)}
+            className="block mt-1 bg-raised border border-subtle rounded-md px-2 py-1.5 text-sm text-primary"
+          >
+            {DISPATCH_BACKENDS.map((b) => (
+              <option key={b} value={b}>{b}</option>
+            ))}
+          </select>
+        </label>
+        <label className="text-xs text-muted flex-1 min-w-[160px]">
+          Target (issue number or ticket path)
+          <input
+            type="text"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            placeholder="e.g. 148"
+            className="block mt-1 w-full bg-raised border border-subtle rounded-md px-2 py-1.5 text-sm text-primary placeholder:text-muted"
+          />
+        </label>
+        <button onClick={dispatch} disabled={!isConnected || !repo} className="btn-primary">
+          {justSent ? 'Sent' : 'Dispatch'}
+        </button>
+      </div>
+      {!repo && <p className="text-xs text-critical mt-2">No repo known for this profile yet -- check Settings.</p>}
+    </section>
+  );
+}
 
 type WorkPageProps = {
   sessions: Session[];
@@ -57,11 +139,16 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const profile = profileOverride ?? wsProfile;
   const status = useGahStore((s) => s.status);
   const fetchStatus = useGahStore((s) => s.fetchStatus);
+  const profiles = useGahStore((s) => s.profiles);
+  const fetchProfiles = useGahStore((s) => s.fetchProfiles);
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchStatus(profile ?? undefined);
-  }, [profile, fetchStatus]);
+    fetchProfiles();
+  }, [profile, fetchStatus, fetchProfiles]);
+
+  const activeProfileRepo = profiles.data?.find((p) => p.name === profile)?.repo ?? null;
 
   if (selectedWorkId) {
     return <WorkDetail workId={selectedWorkId} onBack={() => setSelectedWorkId(null)} />;
@@ -79,6 +166,8 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
         onRefresh={() => fetchStatus(profile ?? undefined, { force: true })}
         refreshing={status.loading}
       />
+
+      <NewDispatchForm profile={profile ?? 'gah'} repo={activeProfileRepo} />
 
       <section>
         <h3 className="text-sm font-semibold text-primary mb-3">Active sessions ({activeSessions.length})</h3>

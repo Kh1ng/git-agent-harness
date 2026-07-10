@@ -1,0 +1,41 @@
+# gah-server.service
+# Runs apps/server (the REST/WebSocket API the dashboard talks to) as a
+# persistent background service.
+#
+# IMPORTANT: the PATH below is required, not cosmetic. apps/server shells
+# out to `gah dispatch`, which in turn runs each profile's
+# `validation_commands` (typically `cargo fmt/clippy/test`, `npm ci`,
+# `npx tsc`, ...) as child processes. A systemd service's default PATH does
+# not include a rustup/nvm-managed toolchain's bin directories, so any
+# dispatch triggered through the dashboard's WebSocket "Dispatch new work"
+# form silently fails baseline validation with `cargo: not found` (or the
+# npm/npx equivalent) unless PATH is set explicitly here -- read-only CLI
+# calls (`gah status`, `gah report`, ...) don't need this and will appear
+# to work fine even when it's missing, which is what let this go unnoticed.
+# Adjust the cargo/node paths below to match your actual toolchain install.
+#
+# Install:
+#   sudo cp gah-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gah-server.service
+[Unit]
+Description=Git Agent Harness API and WebSocket server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=khing
+WorkingDirectory=/home/khing/workspace/agent-lab/repos/github/Kh1ng/git-agent-harness
+Environment=NODE_ENV=production
+Environment=PORT=3773
+Environment=GAH_CONFIG_PATH=/home/khing/.config/gah/config.toml
+Environment=PATH=/home/khing/.cargo/bin:/home/khing/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/khing/.nvm/versions/node/v22.23.1/bin/node apps/server/dist/bin.js
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
