@@ -176,6 +176,12 @@ export interface StatusSnapshot {
   fix_attempt_counts: Record<string, number>;
   merge_attempt_counts: Record<string, number>;
   publishing_allow_pr: boolean;
+  /** TICKET-157: per-backend "configured for this profile" signal, keyed by
+   * logical backend name. Only backends with a real Rust implementation are
+   * present. A `true` value means the backend is set up for the active
+   * profile (explicit path or profile marker). Backends with no
+   * implementation are absent and must be shown as not_implemented. */
+  backend_configured: Record<string, boolean>;
 }
 
 // ---------------------------------------------------------------------------

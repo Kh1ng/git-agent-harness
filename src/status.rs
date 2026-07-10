@@ -42,6 +42,16 @@ pub struct StatusSnapshot {
     /// when a strong reviewer has approved and CI is green. This is an
     /// independent axis from reviewer routing and merge policy.
     pub publishing_allow_pr: bool,
+    /// TICKET-157: per-backend "configured for this profile" signal. Keyed
+    /// by logical backend name. `true` means the backend has a real Rust
+    /// implementation AND is set up for the active profile (an explicit
+    /// path or profile marker is configured). This lets Settings distinguish
+    /// "implemented but not set up for this profile" from "implemented and
+    /// ready" rather than conflating "not explicitly marked unavailable" with
+    /// "available". Backends with no implementation (e.g. grok/cursor) are
+    /// simply absent from this map and should be reported as not_implemented
+    /// by the frontend.
+    pub backend_configured: std::collections::HashMap<String, bool>,
 }
 
 #[derive(Serialize)]
@@ -385,6 +395,29 @@ pub fn build_snapshot(
         }
     }
 
+    // TICKET-157: build the per-backend "configured for this profile" signal.
+    // Only backends with a real Rust implementation are listed. `configured`
+    // is true when the profile sets up this backend (an explicit executable
+    // path or profile marker). `configured_path` echoes the configured marker
+    // for display. Backends with no implementation (grok/cursor) are omitted
+    // entirely so the frontend can show them as not_implemented.
+    let implemented_backends = [
+        "codex",
+        "claude",
+        "agy",
+        "agy-main",
+        "agy-second",
+        "vibe",
+        "opencode",
+        "openhands",
+    ];
+    let mut backend_configured: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+    for backend in implemented_backends {
+        let configured = profile.configured_backend_path(backend).is_some();
+        backend_configured.insert(backend.to_string(), configured);
+    }
+
     let snapshot = StatusSnapshot {
         schema_version: 1,
         generated_at,
@@ -405,6 +438,7 @@ pub fn build_snapshot(
         fix_attempt_counts,
         merge_attempt_counts,
         publishing_allow_pr: profile.publishing.allow_pull_request_creation,
+        backend_configured,
     };
 
     Ok(snapshot)

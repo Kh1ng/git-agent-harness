@@ -1146,6 +1146,7 @@ mod tests {
             fix_attempt_counts: std::collections::HashMap::new(),
             merge_attempt_counts: std::collections::HashMap::new(),
             publishing_allow_pr: true,
+            backend_configured: std::collections::HashMap::new(),
         }
     }
 

@@ -292,6 +292,11 @@ async function sendWelcomeMessage(ws: WebSocket) {
     // by JS, but wrong; DashboardPage already correctly treats it as an
     // object via `{recentLedger && ...}`).
     let recentLedger: RecentLedgerSummary | null = null;
+    // TICKET-157: per-backend "configured for this profile" signal,
+    // derived from the Rust harness `configured_backend_path()`. Maps a
+    // backend name to whether it has a real implementation and is wired
+    // for the active profile.
+    let backendConfigured: Record<string, boolean> = {};
     try {
       const status = await gahCli.runStatus(defaultProfile);
       mergeRequests = status.merge_requests;
@@ -300,6 +305,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
       constraints = status.constraints;
       errors = status.errors;
       recentLedger = status.recent_ledger;
+      backendConfigured = status.backend_configured ?? {};
     } catch (statusError) {
       console.error('Failed to load gah status for welcome message:', statusError);
     }
@@ -312,6 +318,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
       constraints?: Blocker[];
       errors?: StatusError[];
       recentLedger?: RecentLedgerSummary | null;
+      backendConfigured?: Record<string, boolean>;
     } = {
       type: 'server.welcome',
       serverVersion: SERVER_VERSION,
@@ -324,7 +331,8 @@ async function sendWelcomeMessage(ws: WebSocket) {
       blockers,
       constraints,
       errors,
-      recentLedger
+      recentLedger,
+      backendConfigured
     };
 
     ws.send(JSON.stringify(welcomeMessage));

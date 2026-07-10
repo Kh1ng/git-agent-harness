@@ -8,7 +8,7 @@ import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 
 export function SettingsPage() {
-  const { providers, providerStatuses, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
+  const { providers, providerStatuses, backendConfigured, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
   const { theme, setTheme, profileOverride, setProfileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
@@ -103,6 +103,7 @@ export function SettingsPage() {
                 key={provider.instanceId}
                 provider={provider}
                 status={providerStatuses[provider.instanceId]}
+                backendConfigured={backendConfigured}
                 onClick={() => handleRefreshProvider(provider.instanceId)}
               />
             ))}
