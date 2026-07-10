@@ -58,6 +58,8 @@ pub struct WorkMetadata {
     #[serde(default)]
     pub difficulty: Option<String>,
     #[serde(default)]
+    pub task_class: Option<String>,
+    #[serde(default)]
     pub risk: Option<String>,
     #[serde(default)]
     pub recommended_backend: Option<String>,

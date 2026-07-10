@@ -2304,6 +2304,10 @@ fn apply_authoritative_work_identity(
     ticket: Option<&TicketMetadata>,
     fallback_work_id: &str,
 ) {
+    if let Some(ticket) = ticket {
+        ledger.task_class = ticket.task_class.clone();
+        ledger.difficulty = ticket.difficulty.clone();
+    }
     match ticket {
         Some(ticket) if ticket.is_authoritative => {
             ledger.work_id = ticket.work_id.clone().or_else(|| ticket.ticket_id.clone());
@@ -7604,6 +7608,11 @@ fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata>> {
     for line in body.lines().map(str::trim) {
         if let Some(value) = line.strip_prefix("Difficulty:") {
             meta.difficulty = Some(value.trim().to_string());
+        } else if let Some(value) = line
+            .strip_prefix("Task class:")
+            .or_else(|| line.strip_prefix("Task Class:"))
+        {
+            meta.task_class = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Risk:") {
             meta.risk = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Recommended backend:") {
@@ -8710,6 +8719,11 @@ fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMetadata {
     for line in issue.body.lines().map(str::trim) {
         if let Some(value) = line.strip_prefix("Difficulty:") {
             meta.difficulty = Some(value.trim().to_string());
+        } else if let Some(value) = line
+            .strip_prefix("Task class:")
+            .or_else(|| line.strip_prefix("Task Class:"))
+        {
+            meta.task_class = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Risk:") {
             meta.risk = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Recommended backend:") {
