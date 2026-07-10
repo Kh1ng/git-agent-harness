@@ -2959,7 +2959,10 @@ fn review(
     // requested branch up front -- the caller (controller's ReviewMr
     // action) always knows which branch it asked to review, even if
     // resolving the rest of the target fails.
-    ledger.branch = args.branch.clone();
+    ledger.branch = args
+        .branch
+        .clone()
+        .or_else(|| args.mr.as_deref().map(|mr| format!("mr:{mr}")));
     let repo = Path::new(&profile.local_path);
     let mut target = resolve_review_target(cfg, profile, args)?;
     if target.prior_state.is_none() {
