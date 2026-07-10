@@ -405,7 +405,7 @@ pub fn run_vibe_with_executable(
 }
 
 /// Run OpenCode CLI non-interactively via `opencode run --model <model> --dir <path> --auto `<prompt>`.
-/// Worker/fix backend only -- not wired into review.
+/// Worker/fix backend and review backend support.
 /// extra_args come from profile.opencode_args (e.g. `--format json`).
 /// Unlike vibe, opencode DOES take --model, so we pass effective_model through.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -831,10 +831,11 @@ pub fn run_review_backend(
             // in ledger metadata but do not pass it to Vibe CLI.
         }
         "opencode" => {
-            cmd.arg("review").arg(prompt);
+            cmd.arg("run");
             if let Some(model) = effective_model {
                 cmd.args(["--model", model]);
             }
+            cmd.arg(prompt);
         }
         _ => {
             return ReviewRunResult {
