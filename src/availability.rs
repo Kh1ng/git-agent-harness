@@ -610,6 +610,32 @@ pub mod cli {
         }
         Ok(())
     }
+
+    /// Issue #179: a real backend/model recovery (confirmed live -- e.g. a
+    /// codex `quota_exhausted` record surviving hours after the operator
+    /// confirmed the account is actually healthy again) previously had no
+    /// safe fix short of hand-editing the shared `availability.json` file,
+    /// which is read-modify-write racy against concurrent parallel workers.
+    /// This goes through `update_state`'s lock-protected read-modify-write,
+    /// same as every other mutation of this file. `model: None` clears every
+    /// record for the backend regardless of model; `Some(m)` clears only
+    /// that exact model match.
+    pub fn clear(
+        state_path: &std::path::Path,
+        backend: &str,
+        model: Option<&str>,
+    ) -> Result<usize> {
+        let backend = crate::config::canonical_backend_name(backend).to_string();
+        let mut removed = 0usize;
+        super::update_state(state_path, |state| {
+            let before = state.records.len();
+            state.records.retain(|r| {
+                !(r.backend == backend && model.is_none_or(|m| r.model.as_deref() == Some(m)))
+            });
+            removed = before - state.records.len();
+        })?;
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
@@ -1177,5 +1203,92 @@ mod tests {
         )
         .unwrap();
         assert!(d4.eligible);
+    }
+
+    #[test]
+    fn cli_clear_removes_matching_records_for_backend_and_model() {
+        let tmp = TempDir::new().unwrap();
+        let p = path(&tmp);
+        let now = OffsetDateTime::now_utc();
+        record_unavailable(
+            &p,
+            "codex",
+            Some("gpt-5.4-mini"),
+            Reason::QuotaExhausted,
+            Source::BackendError,
+            Some(now + time::Duration::hours(5)),
+            Some("quota exhausted".into()),
+            now,
+        )
+        .unwrap();
+        record_unavailable(
+            &p,
+            "vibe",
+            Some("default"),
+            Reason::QuotaExhausted,
+            Source::BackendError,
+            Some(now + time::Duration::hours(5)),
+            Some("unrelated".into()),
+            now,
+        )
+        .unwrap();
+
+        let removed = cli::clear(&p, "codex", Some("gpt-5.4-mini")).unwrap();
+        assert_eq!(removed, 1);
+
+        let d_codex = availability_for(&p, "codex", Some("gpt-5.4-mini"), now).unwrap();
+        assert!(d_codex.eligible, "cleared record must no longer block");
+        let d_vibe = availability_for(&p, "vibe", Some("default"), now).unwrap();
+        assert!(!d_vibe.eligible, "clear must not touch other backends");
+    }
+
+    #[test]
+    fn cli_clear_without_model_clears_every_model_for_backend() {
+        let tmp = TempDir::new().unwrap();
+        let p = path(&tmp);
+        let now = OffsetDateTime::now_utc();
+        record_unavailable(
+            &p,
+            "agy",
+            Some("Gemini 3.5 Flash (Medium)"),
+            Reason::QuotaExhausted,
+            Source::BackendError,
+            Some(now + time::Duration::hours(5)),
+            None,
+            now,
+        )
+        .unwrap();
+        record_unavailable(
+            &p,
+            "agy",
+            Some("Claude Sonnet 4.6 (Thinking)"),
+            Reason::QuotaExhausted,
+            Source::BackendError,
+            Some(now + time::Duration::hours(5)),
+            None,
+            now,
+        )
+        .unwrap();
+
+        let removed = cli::clear(&p, "agy", None).unwrap();
+        assert_eq!(removed, 2);
+        assert!(
+            availability_for(&p, "agy", Some("Gemini 3.5 Flash (Medium)"), now)
+                .unwrap()
+                .eligible
+        );
+        assert!(
+            availability_for(&p, "agy", Some("Claude Sonnet 4.6 (Thinking)"), now)
+                .unwrap()
+                .eligible
+        );
+    }
+
+    #[test]
+    fn cli_clear_reports_zero_when_nothing_matches() {
+        let tmp = TempDir::new().unwrap();
+        let p = path(&tmp);
+        let removed = cli::clear(&p, "codex", Some("gpt-5.4-mini")).unwrap();
+        assert_eq!(removed, 0);
     }
 }
