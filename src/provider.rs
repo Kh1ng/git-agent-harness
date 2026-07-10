@@ -723,6 +723,7 @@ mod tests {
 
     fn github_profile() -> Profile {
         Profile {
+            prune_older_than_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),
             provider: "github".into(),
@@ -766,6 +767,7 @@ mod tests {
 
     fn gitlab_profile() -> Profile {
         Profile {
+            prune_older_than_days: None,
             provider: "gitlab".into(),
             provider_api_base: Some("https://gitlab.example.com/api/v4".into()),
             provider_project_id: Some("42".into()),

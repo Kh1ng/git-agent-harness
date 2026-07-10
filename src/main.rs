@@ -117,8 +117,8 @@ enum Commands {
     Prune {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
-        #[arg(long, default_value_t = 30)]
-        older_than: u64,
+        #[arg(long)]
+        older_than: Option<u64>,
         #[arg(long)]
         profile: Option<String>,
         #[arg(long, name = "config")]
