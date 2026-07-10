@@ -3972,6 +3972,7 @@ mod tests {
             updated_at: None,
             ci_failed: false,
             ci_passed: false,
+            ci_pending: false,
             work_id: Some("TICKET-202".into()),
         }];
 
@@ -4039,6 +4040,7 @@ mod tests {
             updated_at: None,
             ci_failed: false,
             ci_passed: false,
+            ci_pending: false,
             work_id: Some("TICKET-090".into()),
         }];
 
@@ -4160,6 +4162,7 @@ mod tests {
             updated_at: None,
             ci_failed: false,
             ci_passed: false,
+            ci_pending: false,
             work_id: Some("TICKET-211".into()),
         }];
 

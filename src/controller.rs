@@ -11,6 +11,7 @@ use crate::status::StatusSnapshot;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// TICKET-078: how many times the controller will automatically
 /// Retry/Escalate the same work_id before giving up and requiring a human.
@@ -28,6 +29,20 @@ fn is_infra_failure(failure_class: &str) -> bool {
         failure_class,
         "harness_error" | "environment_error" | "backend_error" | "unknown"
     )
+}
+
+/// Issue #156: produce an RFC3339 timestamp `offset` from "now" for a
+/// `WaitUntil` re-check. Used when a READY_FOR_HUMAN MR's CI is pending so the
+/// controller records a visible, observable deferral instead of a silent no-op.
+fn now_plus(offset: Duration) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        + offset;
+    let secs = now.as_secs();
+    let dt =
+        chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or(chrono::DateTime::UNIX_EPOCH);
+    format!("{}", dt.format("%Y-%m-%dT%H:%M:%SZ"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -201,6 +216,10 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut fix_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut merge_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut human_blocked_mrs: Vec<&crate::sync::SyncMrJson> = Vec::new();
+    // Issue #156: READY_FOR_HUMAN MRs whose CI is non-terminal / unknown
+    // (GitLab head_pipeline gap). They wait for CI to resolve and are not
+    // silently dropped.
+    let mut wait_and_recheck_mrs: Vec<&crate::sync::SyncMrJson> = Vec::new();
 
     for mr in &mrs {
         match mr.classification.as_str() {
@@ -236,8 +255,18 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     // MR without CI passed still defers to the human
                     // immediately — no CI gate needed.
                     human_blocked_mrs.push(mr);
+                } else if mr.ci_pending {
+                    // Issue #156: CI is non-terminal / unknown (running,
+                    // pending, or no pipeline reported yet — GitLab's
+                    // head_pipeline gap). This is not a green light and not a
+                    // failure, so it must surface as a visible, observable
+                    // re-check rather than silently no-op forever. We emit a
+                    // WaitUntil so the controller event stream records the
+                    // deferral and the next loop tick re-observes CI.
+                    wait_and_recheck_mrs.push(mr);
                 } else {
-                    // CI not yet passed — re-check later (no_op fallback).
+                    // CI conclusively failed (or is otherwise not pending):
+                    // re-check later (no_op fallback).
                     human_blocked_mrs.push(mr);
                 }
             }
@@ -306,6 +335,19 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             reason: format!(
                 "MR on branch '{}' classified {} - reusing existing branch",
                 mr.branch, mr.classification
+            ),
+        };
+    }
+    // Issue #156: a READY_FOR_HUMAN MR whose CI is non-terminal / unknown
+    // (GitLab head_pipeline gap) must surface as a visible WaitUntil re-check,
+    // never an indefinite silent no-op. Prefer it over the no-op fallback below.
+    if let Some(mr) = wait_and_recheck_mrs.first() {
+        let until = now_plus(Duration::from_secs(300));
+        return NextAction::WaitUntil {
+            until,
+            reason: format!(
+                "MR on branch '{}' is READY_FOR_HUMAN but CI is not yet conclusively resolved (pending/running/missing) -- waiting to re-check before merge",
+                mr.branch
             ),
         };
     }
@@ -1165,6 +1207,29 @@ mod tests {
             merge_status: None,
             merged: classification == "MERGED",
             ci_passed,
+            ci_pending: false,
+            classification: classification.into(),
+            recommended_action: RecommendedAction::from_class(classification),
+        }
+    }
+
+    /// Issue #156: a `READY_FOR_HUMAN` MR whose CI is non-terminal / unknown
+    /// (GitLab `head_pipeline` gap: running/pending/missing). `ci_passed` is
+    /// false but `ci_pending` is true, so it must surface as a re-check rather
+    /// than silently no-op.
+    fn mr_ci_pending(branch: &str, classification: &str) -> SyncMrJson {
+        SyncMrJson {
+            profile: None,
+            branch: branch.into(),
+            work_id: Some(format!("TICKET-{branch}")),
+            id: Some("1".into()),
+            url: Some(format!("https://example/{branch}")),
+            state: Some("OPEN".into()),
+            draft: false,
+            merge_status: None,
+            merged: classification == "MERGED",
+            ci_passed: false,
+            ci_pending: true,
             classification: classification.into(),
             recommended_action: RecommendedAction::from_class(classification),
         }
@@ -1378,6 +1443,54 @@ mod tests {
         snapshot.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
+    }
+
+    // Issue #156: the exact gap. Under the default `auto` merge policy (which
+    // both shipped profiles silently fall through to), a `READY_FOR_HUMAN` MR
+    // whose CI is non-terminal / unknown (GitLab `head_pipeline` missing or in
+    // a running/pending state) must NOT silently no-op forever. It must surface
+    // as a visible, observable `wait_until` re-check so the next loop tick can
+    // re-observe CI -- not a bare `no_op`, and not a parked state.
+    #[test]
+    fn issue_156_auto_policy_ci_pending_surfaces_as_wait_until() {
+        for branch in ["gah/real-1", "gah/real-2"] {
+            let mut snapshot = empty_snapshot();
+            snapshot
+                .merge_requests
+                .push(mr_ci_pending(branch, "READY_FOR_HUMAN"));
+            // Default (unset) merge policy is `Auto` -- the exact silent
+            // default that triggered the bug report.
+            assert_eq!(
+                snapshot.profile.merge_policy,
+                crate::config::MergePolicy::Auto
+            );
+            let action = decide_next_action(&snapshot);
+            assert_eq!(
+                action.kind(),
+                "wait_until",
+                "CI-pending MR under Auto must be observable, not a silent no_op"
+            );
+            assert!(action.reason().contains("not yet conclusively resolved"));
+        }
+    }
+
+    // Issue #156 regression for the explicit `auto` value (same as the silent
+    // default above) and for the `gitlab_mwps` policy: CI-pending must surface
+    // as a re-check, never auto-merge.
+    #[test]
+    fn issue_156_explicit_auto_and_gitlab_mwps_ci_pending_waits() {
+        for policy in [
+            crate::config::MergePolicy::Auto,
+            crate::config::MergePolicy::GitlabMwps,
+        ] {
+            let mut snapshot = empty_snapshot();
+            snapshot
+                .merge_requests
+                .push(mr_ci_pending("gah/real-1", "READY_FOR_HUMAN"));
+            snapshot.profile.merge_policy = policy;
+            let action = decide_next_action(&snapshot);
+            assert_eq!(action.kind(), "wait_until");
+        }
     }
 
     // Issue #129 Bug A: `READY_FOR_HUMAN` must have exactly ONE defined
@@ -1797,6 +1910,7 @@ mod tests {
             merge_status: Some("can_be_merged".into()),
             merged: false,
             ci_passed: false,
+            ci_pending: false,
             classification: "NEEDS_FIX".into(),
             recommended_action: crate::sync::RecommendedAction::ReuseBranch,
         }

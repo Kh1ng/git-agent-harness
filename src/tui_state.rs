@@ -231,6 +231,7 @@ mod tests {
             merge_status: None,
             merged: classification == "MERGED",
             ci_passed: false,
+            ci_pending: false,
             classification: classification.into(),
             recommended_action: RecommendedAction::from_class(classification),
         }
