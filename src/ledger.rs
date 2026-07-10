@@ -397,6 +397,25 @@ impl LedgerEntry {
             usage: LedgerUsage::default(),
         }
     }
+
+    /// Parallel-worker safety: a "claim" entry written the MOMENT a
+    /// dispatch begins (before any backend work runs), not just when it
+    /// finishes. `run()` only appended a ledger entry at the very end
+    /// (success or failure) -- with multiple `gah loop` workers running
+    /// concurrently for one profile, a ticket that's mid-flight for
+    /// minutes-to-hours had NO ledger trace yet, so a second worker's
+    /// `check_duplicate_work` couldn't see it was already being worked and
+    /// could dispatch the same ticket twice. This entry exists so a
+    /// concurrent worker sees "claimed" immediately. Superseded by the
+    /// real completion entry once the dispatch finishes; `is_claim_stale`
+    /// (dispatch.rs) governs when an orphaned claim (worker crashed/killed
+    /// mid-flight) stops blocking retries.
+    pub fn new_claim(profile_name: &str, profile: &Profile, work_id: &str) -> Self {
+        Self {
+            mode: "claim".to_string(),
+            ..Self::new_clear_attempts(profile_name, profile, work_id)
+        }
+    }
 }
 
 pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
@@ -2248,6 +2267,7 @@ mod tests {
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
             claude_idle_timeout_seconds: None,
+            max_parallel_workers: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -3094,5 +3114,21 @@ mod tests {
         let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.mode, "clear_attempts");
         assert_eq!(parsed.work_id.as_deref(), Some("TICKET-99"));
+    }
+
+    #[test]
+    fn new_claim_creates_valid_claim_entry() {
+        let prof = profile();
+        let entry = LedgerEntry::new_claim("test-profile", &prof, "TICKET-500");
+        assert_eq!(entry.mode, "claim");
+        assert_eq!(entry.work_id.as_deref(), Some("TICKET-500"));
+        assert_eq!(entry.profile, "test-profile");
+        assert!(!entry.human_required);
+        assert_eq!(entry.branch, None);
+        assert_eq!(entry.mr_url, None);
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.mode, "claim");
+        assert_eq!(parsed.work_id.as_deref(), Some("TICKET-500"));
     }
 }

@@ -4615,7 +4615,16 @@ fn loop_once_dispatches_an_eligible_ticket() {
         .stdout(predicate::str::contains("dispatch_ticket"));
 
     let ledger_text = fs::read_to_string(&ledger_path).unwrap();
-    let entry: Value = serde_json::from_str(ledger_text.lines().next().unwrap()).unwrap();
+    // Parallel workers: the first line is now a "claim" entry (written
+    // before any backend work runs, so a concurrent worker sees this
+    // ticket is taken immediately rather than only after the dispatch
+    // finishes minutes-to-hours later) -- the real completion entry is
+    // the first non-claim line.
+    let entry: Value = ledger_text
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|e| e["mode"] != "claim")
+        .expect("a real completion entry after the claim");
     assert_eq!(entry["work_id"], "TICKET-300");
     assert_eq!(entry["validation_result"], "passed");
 

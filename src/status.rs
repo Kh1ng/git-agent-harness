@@ -42,6 +42,11 @@ pub struct StatusSnapshot {
     /// when a strong reviewer has approved and CI is green. This is an
     /// independent axis from reviewer routing and merge policy.
     pub publishing_allow_pr: bool,
+    /// How many `gah loop` workers may run concurrently for this profile
+    /// (see `Profile::max_parallel_workers`). Read by `gah-supervisor.sh`
+    /// to decide how many worker loops to launch when not given explicitly
+    /// on its own command line.
+    pub max_parallel_workers: u32,
     /// TICKET-157: per-backend "configured for this profile" signal. Keyed
     /// by logical backend name. `true` means the backend has a real Rust
     /// implementation AND is set up for the active profile (an explicit
@@ -439,6 +444,7 @@ pub fn build_snapshot(
         fix_attempt_counts,
         merge_attempt_counts,
         publishing_allow_pr: profile.publishing.allow_pull_request_creation,
+        max_parallel_workers: profile.max_parallel_workers(),
         backend_configured,
     };
 
