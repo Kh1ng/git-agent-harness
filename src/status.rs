@@ -190,6 +190,7 @@ pub fn build_snapshot(
                         merge_status: mr.merge_status.clone(),
                         merged: mr.merged,
                         ci_passed: mr.ci_passed,
+                        ci_pending: mr.ci_pending,
                         classification: class.to_string(),
                         recommended_action: action,
                     }
@@ -838,6 +839,7 @@ default_target_branch = "main"
             updated_at: None,
             ci_failed: false,
             ci_passed: false,
+            ci_pending: false,
             work_id: None,
         };
         let class = sync::classify(&mr);
@@ -862,6 +864,7 @@ default_target_branch = "main"
             updated_at: None,
             ci_failed: true,
             ci_passed: false,
+            ci_pending: false,
             work_id: None,
         };
         let class = sync::classify(&mr);

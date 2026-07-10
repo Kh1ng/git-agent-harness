@@ -27,6 +27,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
                 merge_status: mr.merge_status.clone(),
                 merged: mr.merged,
                 ci_passed: mr.ci_passed,
+                ci_pending: mr.ci_pending,
                 classification: classify(mr).to_string(),
                 recommended_action: RecommendedAction::from_class(classify(mr)),
             })
@@ -91,6 +92,10 @@ pub struct SyncMrJson {
     pub merge_status: Option<String>,
     pub merged: bool,
     pub ci_passed: bool,
+    /// Non-terminal / unknown CI (running/pending/missing) for which there
+    /// is no defined next controller action yet. GitHub is never `ci_pending`
+    /// (see `SyncMr::ci_pending`); this mirrors the typed field on `SyncMr`.
+    pub ci_pending: bool,
     pub classification: String,
     pub recommended_action: RecommendedAction,
 }
@@ -115,6 +120,12 @@ pub struct SyncMr {
     /// auto-merge (TICKET-127): merging on "not failed yet" would merge
     /// mid-pipeline.
     pub ci_passed: bool,
+    /// Issue #156: CI is non-terminal / unknown (running/pending/missing) --
+    /// there is no conclusive pass or failure yet. Distinct from `!ci_passed`
+    /// (which is also true once CI has *failed*). GitHub never sets this
+    /// (its classification handles pending via `github_ci_passed`/`_failed`);
+    /// only GitLab's `head_pipeline.status` gap populates it.
+    pub ci_pending: bool,
     /// TICKET-096: populated from an authoritative `TICKET-NNN` token in
     /// the PR/MR title (see `build_mr_title` in dispatch.rs), not from a
     /// separate reconciliation structure.
@@ -284,6 +295,7 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             updated_at: pr.updated_at,
             ci_failed: github_ci_failed(pr.status_check_rollup.as_deref()),
             ci_passed: github_ci_passed(pr.status_check_rollup.as_deref()),
+            ci_pending: false,
         })
         .collect())
 }
@@ -388,6 +400,7 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
                 updated_at: mr.updated_at,
                 ci_failed: gitlab_ci_failed(pipeline_status),
                 ci_passed: gitlab_ci_passed(pipeline_status),
+                ci_pending: gitlab_ci_pending(pipeline_status),
             }
         })
         .collect())
@@ -399,6 +412,24 @@ fn gitlab_ci_failed(pipeline_status: Option<&str>) -> bool {
 
 fn gitlab_ci_passed(pipeline_status: Option<&str>) -> bool {
     pipeline_status == Some("success")
+}
+
+/// True when the GitLab pipeline status is *non-terminal / unknown* -- a
+/// pipeline still `running`/`pending`, or no pipeline reported at all
+/// (`head_pipeline` absent). Distinct from both `gitlab_ci_passed` and
+/// `gitlab_ci_failed` so the controller can surface a visible "wait and
+/// re-check" action instead of letting an MR silently no-op forever
+/// (issue #156). `skipped`/`manual`/`created` are treated as pending too:
+/// they are not a conclusive pass or failure and must not be merged.
+fn gitlab_ci_pending(pipeline_status: Option<&str>) -> bool {
+    matches!(
+        pipeline_status,
+        None | Some("running")
+            | Some("pending")
+            | Some("created")
+            | Some("skipped")
+            | Some("manual")
+    )
 }
 
 /// Used to implement the retry cap for FixMr actions on existing branches.
@@ -464,7 +495,7 @@ pub fn count_merge_attempts_per_branch(
 mod tests {
     use super::{
         classify, extract_work_id_from_title, github_ci_failed, github_ci_passed, gitlab_ci_failed,
-        gitlab_ci_passed, recommended_action, GithubCheck, GithubPr, SyncMr,
+        gitlab_ci_passed, gitlab_ci_pending, recommended_action, GithubCheck, GithubPr, SyncMr,
     };
 
     #[test]
@@ -484,6 +515,26 @@ mod tests {
         // Absent pipeline is "unknown", not "failed" -- matches the
         // pre-existing (if previously hardcoded) semantics.
         assert!(!gitlab_ci_failed(None));
+    }
+
+    #[test]
+    fn gitlab_ci_pending_on_missing_or_non_terminal_status() {
+        // Issue #156: a missing or non-terminal pipeline must NOT collapse
+        // into the same false/false bucket as a genuinely failed one -- it
+        // needs its own distinct, observable classification.
+        assert!(gitlab_ci_pending(None));
+        assert!(gitlab_ci_pending(Some("running")));
+        assert!(gitlab_ci_pending(Some("pending")));
+        assert!(gitlab_ci_pending(Some("created")));
+        assert!(gitlab_ci_pending(Some("skipped")));
+        assert!(gitlab_ci_pending(Some("manual")));
+        // Conclusive states are never "pending".
+        assert!(!gitlab_ci_pending(Some("success")));
+        assert!(!gitlab_ci_pending(Some("failed")));
+        assert!(!gitlab_ci_pending(Some("canceled")));
+        // The three states are mutually exclusive.
+        let s = Some("running");
+        assert!(gitlab_ci_pending(s) && !gitlab_ci_passed(s) && !gitlab_ci_failed(s));
     }
 
     fn check(conclusion: Option<&str>) -> GithubCheck {
@@ -568,6 +619,7 @@ mod tests {
             updated_at: None,
             ci_failed: false,
             ci_passed: false,
+            ci_pending: false,
             work_id: None,
         }
     }

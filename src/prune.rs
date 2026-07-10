@@ -218,6 +218,7 @@ mod tests {
             updated_at: None,
             ci_failed: false,
             ci_passed: false,
+            ci_pending: false,
             work_id: None,
         }
     }
