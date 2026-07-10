@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { getServerReadiness } from './serverReadiness.js';
-import { runStatus, runReport, runLedgerWork, runEvents } from './gahCli.js';
+import { runStatus, runReport, runLedgerWork, runEvents, runProfileList } from './gahCli.js';
 import type { ReportGroupBy } from '@git-agent-harness/contracts';
 
 const SERVER_VERSION = '0.1.0';
@@ -43,6 +43,7 @@ export function createServer() {
         report: '/api/report',
         work: '/api/work/:workId',
         events: '/api/events',
+        profiles: '/api/profiles',
         websocket: '/ws'
       },
       features: {
@@ -96,6 +97,21 @@ export function createServer() {
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load work item history',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Config-driven profile discovery: lets the frontend list/switch between
+  // real configured repos instead of a blind free-text profile field. See
+  // apps/web SettingsPage.
+  app.get('/api/profiles', async (req, res) => {
+    try {
+      const profiles = await runProfileList();
+      res.json(profiles);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load gah profiles',
         message: error instanceof Error ? error.message : String(error)
       });
     }

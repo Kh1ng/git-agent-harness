@@ -11,17 +11,22 @@
  */
 import { create } from 'zustand';
 import { gahApi, GahApiError } from '../api/client.js';
-import type { StatusSnapshot, ReportData, ReportGroupBy, LedgerEntry, ControllerEvent } from '@git-agent-harness/contracts';
+import type { StatusSnapshot, ReportData, ReportGroupBy, LedgerEntry, ControllerEvent, ProfileSummary } from '@git-agent-harness/contracts';
 
 interface Resource<T> {
   data: T | null;
   loading: boolean;
   error: string | null;
   fetchedAt: number | null;
+  /** Serialized fetch params (e.g. the profile) the current data was
+   * fetched for. Switching profiles must always refetch even inside the
+   * freshness window below -- otherwise the dashboard silently shows the
+   * previous profile's numbers for up to FRESH_MS after a switch. */
+  key: string | null;
 }
 
 function emptyResource<T>(): Resource<T> {
-  return { data: null, loading: false, error: null, fetchedAt: null };
+  return { data: null, loading: false, error: null, fetchedAt: null, key: null };
 }
 
 interface GahStoreState {
@@ -29,11 +34,13 @@ interface GahStoreState {
   report: Resource<ReportData>;
   events: Resource<ControllerEvent[]>;
   workTimelines: Record<string, Resource<LedgerEntry[]>>;
+  profiles: Resource<ProfileSummary[]>;
 
   fetchStatus: (profile?: string, opts?: { force?: boolean }) => Promise<void>;
   fetchReport: (params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }, opts?: { force?: boolean }) => Promise<void>;
   fetchEvents: (params?: { profile?: string; since?: string }, opts?: { force?: boolean }) => Promise<void>;
   fetchWorkTimeline: (workId: string, opts?: { force?: boolean }) => Promise<void>;
+  fetchProfiles: (opts?: { force?: boolean }) => Promise<void>;
 }
 
 /** Below this age, a fetch* call reuses the cached value instead of
@@ -42,8 +49,8 @@ interface GahStoreState {
  * minute doesn't re-hit the CLI three times. */
 const FRESH_MS = 15_000;
 
-function isFresh(resource: Resource<unknown>): boolean {
-  return resource.fetchedAt !== null && Date.now() - resource.fetchedAt < FRESH_MS;
+function isFresh(resource: Resource<unknown>, key: string): boolean {
+  return resource.key === key && resource.fetchedAt !== null && Date.now() - resource.fetchedAt < FRESH_MS;
 }
 
 function errorMessage(error: unknown): string {
@@ -56,62 +63,78 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
   report: emptyResource(),
   events: emptyResource(),
   workTimelines: {},
+  profiles: emptyResource(),
 
   async fetchStatus(profile, opts) {
+    const key = profile ?? '';
     const current = get().status;
-    if (current.loading || (!opts?.force && isFresh(current))) return;
+    if (current.loading || (!opts?.force && isFresh(current, key))) return;
     set({ status: { ...current, loading: true, error: null } });
     try {
       const data = await gahApi.getStatus(profile);
-      set({ status: { data, loading: false, error: null, fetchedAt: Date.now() } });
+      set({ status: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
-      set({ status: { ...get().status, loading: false, error: errorMessage(error) } });
+      set({ status: { ...get().status, loading: false, error: errorMessage(error), key } });
     }
   },
 
   async fetchReport(params, opts) {
+    const key = JSON.stringify(params ?? {});
     const current = get().report;
-    if (current.loading || (!opts?.force && isFresh(current))) return;
+    if (current.loading || (!opts?.force && isFresh(current, key))) return;
     set({ report: { ...current, loading: true, error: null } });
     try {
       const data = await gahApi.getReport(params);
-      set({ report: { data, loading: false, error: null, fetchedAt: Date.now() } });
+      set({ report: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
-      set({ report: { ...get().report, loading: false, error: errorMessage(error) } });
+      set({ report: { ...get().report, loading: false, error: errorMessage(error), key } });
     }
   },
 
   async fetchEvents(params, opts) {
+    const key = JSON.stringify(params ?? {});
     const current = get().events;
-    if (current.loading || (!opts?.force && isFresh(current))) return;
+    if (current.loading || (!opts?.force && isFresh(current, key))) return;
     set({ events: { ...current, loading: true, error: null } });
     try {
       const data = await gahApi.getEvents(params);
-      set({ events: { data, loading: false, error: null, fetchedAt: Date.now() } });
+      set({ events: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
-      set({ events: { ...get().events, loading: false, error: errorMessage(error) } });
+      set({ events: { ...get().events, loading: false, error: errorMessage(error), key } });
     }
   },
 
   async fetchWorkTimeline(workId, opts) {
     const current = get().workTimelines[workId] ?? emptyResource<LedgerEntry[]>();
-    if (current.loading || (!opts?.force && isFresh(current))) return;
+    if (current.loading || (!opts?.force && isFresh(current, workId))) return;
     set({ workTimelines: { ...get().workTimelines, [workId]: { ...current, loading: true, error: null } } });
     try {
       const data = await gahApi.getWorkTimeline(workId);
       set({
         workTimelines: {
           ...get().workTimelines,
-          [workId]: { data, loading: false, error: null, fetchedAt: Date.now() }
+          [workId]: { data, loading: false, error: null, fetchedAt: Date.now(), key: workId }
         }
       });
     } catch (error) {
       set({
         workTimelines: {
           ...get().workTimelines,
-          [workId]: { ...current, loading: false, error: errorMessage(error) }
+          [workId]: { ...current, loading: false, error: errorMessage(error), key: workId }
         }
       });
+    }
+  },
+
+  async fetchProfiles(opts) {
+    const current = get().profiles;
+    if (current.loading || (!opts?.force && isFresh(current, ''))) return;
+    set({ profiles: { ...current, loading: true, error: null } });
+    try {
+      const data = await gahApi.getProfiles();
+      set({ profiles: { data, loading: false, error: null, fetchedAt: Date.now(), key: '' } });
+    } catch (error) {
+      set({ profiles: { ...get().profiles, loading: false, error: errorMessage(error), key: '' } });
     }
   }
 }));

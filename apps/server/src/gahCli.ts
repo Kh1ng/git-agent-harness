@@ -14,6 +14,7 @@ import type {
   ReportData,
   ReportGroupBy,
   LedgerEntry,
+  ProfileSummary,
 } from '@git-agent-harness/contracts';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -394,6 +395,20 @@ Output: ${stdout}`));
       reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
     });
   });
+}
+
+/**
+ * Run `gah profile list --json`: the configured profiles (name, repo,
+ * provider, web URL) straight from the TOML config -- re-read fresh on
+ * every call, so adding/removing a `[profiles.x]` block shows up on the
+ * next fetch with no server restart.
+ */
+export async function runProfileList(config?: string): Promise<ProfileSummary[]> {
+  const args = ['profile', 'list', '--json'];
+  if (config) {
+    args.push('--config', config);
+  }
+  return runJsonCommand<ProfileSummary[]>(args, config);
 }
 
 /**

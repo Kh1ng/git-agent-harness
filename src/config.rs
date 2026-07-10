@@ -562,6 +562,24 @@ impl Profile {
         }
     }
 
+    /// Human-facing repo URL (for linking out from the frontend/CLI), as
+    /// opposed to `push_url()` which embeds an oauth2@ placeholder and a
+    /// `.git` suffix meant for git itself, not a browser.
+    pub fn web_url(&self) -> Option<String> {
+        match self.provider.as_str() {
+            "github" => Some(format!(
+                "https://github.com/{}",
+                self.repo.trim_matches('/')
+            )),
+            "gitlab" => {
+                let base = self.gitlab_push_base().ok()?;
+                let host = base.split_once('@').map(|(_, host)| host).unwrap_or(&base);
+                Some(format!("https://{}/{}", host, self.repo.trim_matches('/')))
+            }
+            _ => None,
+        }
+    }
+
     fn gitlab_push_base(&self) -> Result<String> {
         let base = self
             .provider_api_base
@@ -850,6 +868,29 @@ pub mod tests {
     fn gitlab_push_url_rejects_missing_host() {
         let profile = gitlab_profile(Some("https:///api/v4"));
         assert!(profile.push_url().is_err());
+    }
+
+    #[test]
+    fn web_url_github_is_a_clickable_repo_link() {
+        let profile = test_profile_for_notifications();
+        assert_eq!(profile.web_url().unwrap(), "https://github.com/owner/repo");
+    }
+
+    #[test]
+    fn web_url_gitlab_uses_self_hosted_domain_without_credentials_or_git_suffix() {
+        let profile = gitlab_profile(Some("https://gitlab.coltonspurgin.tech/api/v4"));
+        assert_eq!(
+            profile.web_url().unwrap(),
+            "https://gitlab.coltonspurgin.tech/group/repo"
+        );
+    }
+
+    #[test]
+    fn web_url_none_when_provider_unrecognized_or_gitlab_misconfigured() {
+        let mut profile = gitlab_profile(None);
+        assert!(profile.web_url().is_none());
+        profile.provider = "bitbucket".into();
+        assert!(profile.web_url().is_none());
     }
 
     #[test]
