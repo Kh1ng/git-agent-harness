@@ -787,7 +787,17 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
             profile,
             NotifyEvent::DispatchFailed {
                 failure_class: ledger.failure_class.as_deref().unwrap_or("unknown"),
-                work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
+                // Live-observed: a review dispatch that fails before
+                // resolving its target has no work_id (review targets a
+                // branch/MR, not a ticket) -- fall back to the branch so
+                // the notification says something more useful than
+                // "work_id=unknown" for a failure a human can't trace back
+                // to anything.
+                work_id: ledger
+                    .work_id
+                    .as_deref()
+                    .or(ledger.branch.as_deref())
+                    .unwrap_or("unknown"),
             },
         );
     }
@@ -2931,6 +2941,14 @@ fn review(
     session_dir: &Path,
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
+    // Live-observed: a review dispatch that fails resolving its target
+    // (e.g. a transient `git fetch` network reset) returns via `?` below
+    // before any target info reaches the ledger, so the DispatchFailed
+    // notification had nothing to show but "work_id=unknown". Record the
+    // requested branch up front -- the caller (controller's ReviewMr
+    // action) always knows which branch it asked to review, even if
+    // resolving the rest of the target fails.
+    ledger.branch = args.branch.clone();
     let repo = Path::new(&profile.local_path);
     let mut target = resolve_review_target(cfg, profile, args)?;
     if target.prior_state.is_none() {

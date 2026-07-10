@@ -59,6 +59,20 @@ pub enum NotifyEvent<'a> {
     },
 }
 
+/// Render a `backend`/`model` pair for a human-facing message. Some
+/// backends (opencode) name their own models with the backend as a
+/// namespace prefix already (e.g. `opencode/hy3-free`) -- naively
+/// prepending `{backend}/` again produced `opencode/opencode/hy3-free`
+/// (live-observed). Collapses to just `model` when it already starts with
+/// `{backend}/`.
+fn route_label(backend: &str, model: &str) -> String {
+    if model.starts_with(&format!("{backend}/")) {
+        model.to_string()
+    } else {
+        format!("{backend}/{model}")
+    }
+}
+
 /// Render a `NotifyEvent` into the single-line message GAH pipes to
 /// `notify_command`. Pure and allocation-light; unit-tested below.
 pub fn format_message(event: &NotifyEvent) -> String {
@@ -73,7 +87,10 @@ pub fn format_message(event: &NotifyEvent) -> String {
             backend,
             model,
         } => {
-            format!("[gah] MR created {url} (work_id={work_id}, {backend}/{model})")
+            format!(
+                "[gah] MR created {url} (work_id={work_id}, {})",
+                route_label(backend, model)
+            )
         }
         NotifyEvent::ReviewVerdict { verdict, mr_url } => {
             format!("[gah] review {verdict} on {mr_url}")
@@ -137,7 +154,8 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
             backend,
             model,
         } => format!(
-            "A draft PR/MR is ready: {url} (work_id={work_id}, dispatched via {backend}/{model})."
+            "A draft PR/MR is ready: {url} (work_id={work_id}, dispatched via {}).",
+            route_label(backend, model)
         ),
         NotifyEvent::HumanRequired { reason, reference } => {
             let reference_suffix = reference
@@ -273,6 +291,24 @@ mod tests {
     }
 
     #[test]
+    fn mr_created_collapses_duplicate_backend_prefix_in_model_name() {
+        // Live-observed: opencode's own model names already carry
+        // "opencode/" as a namespace prefix (e.g. "opencode/hy3-free"),
+        // producing "opencode/opencode/hy3-free" if backend/model were
+        // naively concatenated.
+        let msg = format_message(&NotifyEvent::MrCreated {
+            url: "https://example.com/mr/1",
+            work_id: "WORK-X",
+            backend: "opencode",
+            model: "opencode/hy3-free",
+        });
+        assert_eq!(
+            msg,
+            "[gah] MR created https://example.com/mr/1 (work_id=WORK-X, opencode/hy3-free)"
+        );
+    }
+
+    #[test]
     fn review_verdict_includes_verdict_and_url() {
         let msg = format_message(&NotifyEvent::ReviewVerdict {
             verdict: "APPROVE_STRONG",
@@ -397,6 +433,19 @@ mod tests {
         let instruction = format_wake_instruction(&event, WakeAutonomy::Full).unwrap();
         assert!(instruction.contains("https://example.com/mr/1"));
         assert!(instruction.contains("merge it if CI is green"));
+    }
+
+    #[test]
+    fn wake_instruction_collapses_duplicate_backend_prefix_in_model_name() {
+        let event = NotifyEvent::MrCreated {
+            url: "https://example.com/mr/1",
+            work_id: "WORK-X",
+            backend: "opencode",
+            model: "opencode/hy3-free",
+        };
+        let instruction = format_wake_instruction(&event, WakeAutonomy::Full).unwrap();
+        assert!(instruction.contains("dispatched via opencode/hy3-free"));
+        assert!(!instruction.contains("opencode/opencode"));
     }
 
     #[test]
