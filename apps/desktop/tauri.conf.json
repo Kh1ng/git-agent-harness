@@ -33,8 +33,8 @@
   },
   "build": {
     "frontendDist": "../web/dist",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
+    "beforeDevCommand": "npm --prefix ../.. run dev:web",
+    "beforeBuildCommand": "npm --prefix ../.. run build:web",
     "devUrl": "http://localhost:3000"
   },
   "bundle": {
