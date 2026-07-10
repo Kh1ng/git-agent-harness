@@ -567,7 +567,10 @@ impl Profile {
     /// `.git` suffix meant for git itself, not a browser.
     pub fn web_url(&self) -> Option<String> {
         match self.provider.as_str() {
-            "github" => Some(format!("https://github.com/{}", self.repo.trim_matches('/'))),
+            "github" => Some(format!(
+                "https://github.com/{}",
+                self.repo.trim_matches('/')
+            )),
             "gitlab" => {
                 let base = self.gitlab_push_base().ok()?;
                 let host = base.split_once('@').map(|(_, host)| host).unwrap_or(&base);
@@ -870,10 +873,7 @@ pub mod tests {
     #[test]
     fn web_url_github_is_a_clickable_repo_link() {
         let profile = test_profile_for_notifications();
-        assert_eq!(
-            profile.web_url().unwrap(),
-            "https://github.com/owner/repo"
-        );
+        assert_eq!(profile.web_url().unwrap(), "https://github.com/owner/repo");
     }
 
     #[test]
