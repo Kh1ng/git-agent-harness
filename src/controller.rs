@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// detector this complements.
 const AUTO_RETRY_CAP: usize = 2;
 
-fn is_genuine_agent_failure(failure_class: &str) -> bool {
+pub(crate) fn is_genuine_agent_failure(failure_class: &str) -> bool {
     matches!(failure_class, "agent_no_progress" | "agent_failure")
 }
 
@@ -385,10 +385,13 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         .collect();
     failed_tickets.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
 
-    // Collect tickets that have exhausted the retry cap
+    // Collect tickets that have exhausted the retry cap (issue #95: only
+    // genuine agent failures count toward the cap; infra-class failures
+    // such as backend_error or environment_error do not permanently poison
+    // a ticket's retry budget).
     let exhausted: HashSet<_> = failed_tickets
         .iter()
-        .filter(|t| t.prior_attempt_count >= AUTO_RETRY_CAP)
+        .filter(|t| t.genuine_agent_failure_count >= AUTO_RETRY_CAP)
         .filter_map(|t| t.work_id.clone())
         .collect();
 
@@ -416,16 +419,16 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     {
         if let Some(first_exhausted) = failed_tickets
             .iter()
-            .find(|t| t.prior_attempt_count >= AUTO_RETRY_CAP)
+            .find(|t| t.genuine_agent_failure_count >= AUTO_RETRY_CAP)
         {
             return NextAction::HumanRequired {
                 reason: format!(
-                    "{} failed {} time(s) with no active MR; stopping automatic retries",
+                    "{} failed {} time(s) (agent failures) with no active MR; stopping automatic retries",
                     first_exhausted
                         .work_id
                         .as_deref()
                         .unwrap_or(&first_exhausted.ticket_path),
-                    first_exhausted.prior_attempt_count
+                    first_exhausted.genuine_agent_failure_count
                 ),
                 reference: first_exhausted
                     .work_id
@@ -1244,6 +1247,15 @@ mod tests {
         has_active_mr: bool,
         human_required: bool,
     ) -> AvailableTicket {
+        // For tests: genuine_agent_failure_count equals prior_attempt_count
+        // unless the caller sets it explicitly. Tests that need different
+        // values construct AvailableTicket directly.
+        let genuine_agent_failure_count =
+            if last_failure_class.is_some_and(super::is_genuine_agent_failure) {
+                prior_attempt_count
+            } else {
+                0
+            };
         AvailableTicket {
             ticket_path: path.into(),
             work_id: work_id.map(str::to_string),
@@ -1251,6 +1263,7 @@ mod tests {
             recommended_backend: None,
             recommended_model: None,
             prior_attempt_count,
+            genuine_agent_failure_count,
             last_failure_class: last_failure_class.map(str::to_string),
             has_active_mr,
             human_required,
@@ -1605,6 +1618,127 @@ mod tests {
         ));
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
+    }
+
+    // Issue #95: infra-class failures must NOT consume the retry cap. A
+    // ticket with 3 backend_error/environment_error failures and 0 genuine
+    // agent failures should still be retried, not halted.
+    #[test]
+    fn infra_failures_do_not_exhaust_retry_cap() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(AvailableTicket {
+            ticket_path: "docs/tickets/TICKET-INFRA-x.md".into(),
+            work_id: Some("TICKET-INFRA".into()),
+            title: None,
+            recommended_backend: None,
+            recommended_model: None,
+            prior_attempt_count: 3,
+            genuine_agent_failure_count: 0, // all were infra failures
+            last_failure_class: Some("backend_error".into()),
+            has_active_mr: false,
+            human_required: false,
+        });
+        // Without a backend eligible, it should not be retried or escalated
+        snapshot.availability.push(ScopeStatusJson {
+            backend: "codex".into(),
+            model: None,
+            quota_pool: None,
+            eligible_now: true,
+            reason: None,
+            unavailable_until: None,
+            source: None,
+            last_error_summary: None,
+            observed_at: None,
+            scope: None,
+        });
+        let action = decide_next_action(&snapshot);
+        // Should retry, not return human_required
+        match action {
+            NextAction::Retry { work_id, .. } => assert_eq!(work_id, "TICKET-INFRA"),
+            other => panic!("expected Retry for infra-only failures, got {other:?}"),
+        }
+    }
+
+    // Issue #95: genuine agent failures MUST still exhaust the retry cap.
+    // A ticket with 2 agent_no_progress failures should be halted.
+    #[test]
+    fn genuine_agent_failures_still_exhaust_retry_cap() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-AGENT-x.md",
+            Some("TICKET-AGENT"),
+            2, // == AUTO_RETRY_CAP
+            Some("agent_no_progress"),
+            false,
+            false,
+        ));
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
+    }
+
+    // Issue #95: mixed failures -- only agent failures count toward the cap.
+    // 2 agent failures + 2 infra failures: agent_failure_count = 2 == cap
+    // => exhausted.
+    #[test]
+    fn mixed_failures_only_agent_count_toward_cap() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(AvailableTicket {
+            ticket_path: "docs/tickets/TICKET-MIXED-x.md".into(),
+            work_id: Some("TICKET-MIXED".into()),
+            title: None,
+            recommended_backend: None,
+            recommended_model: None,
+            prior_attempt_count: 4,         // 2 agent + 2 infra
+            genuine_agent_failure_count: 2, // == AUTO_RETRY_CAP
+            last_failure_class: Some("backend_error".into()),
+            has_active_mr: false,
+            human_required: false,
+        });
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "human_required");
+    }
+
+    // Issue #95: infra-only failures do NOT block other undispatched tickets.
+    // Same as exhausted_ticket_does_not_block_others but with infra failures.
+    #[test]
+    fn infra_exhausted_ticket_does_not_block_others() {
+        let mut snapshot = empty_snapshot();
+        // TICKET-INFRA has 3 infra failures but 0 agent failures -> not exhausted
+        snapshot.available_tickets.push(AvailableTicket {
+            ticket_path: "docs/tickets/TICKET-INFRA-x.md".into(),
+            work_id: Some("TICKET-INFRA".into()),
+            title: None,
+            recommended_backend: None,
+            recommended_model: None,
+            prior_attempt_count: 3,
+            genuine_agent_failure_count: 0,
+            last_failure_class: Some("environment_error".into()),
+            has_active_mr: false,
+            human_required: false,
+        });
+        // TICKET-FRESH is undispatched
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-FRESH-x.md",
+            Some("TICKET-FRESH"),
+            0,
+            None,
+            false,
+            false,
+        ));
+        let action = decide_next_action(&snapshot);
+        // Should dispatch TICKET-FRESH (undispatched ticket has priority
+        // over retry of failed ticket in the decision tree)
+        match action {
+            NextAction::DispatchTicket { work_id, .. } => {
+                assert_eq!(work_id.as_deref(), Some("TICKET-FRESH"))
+            }
+            NextAction::Retry { work_id, .. } => {
+                // Retry of the infra ticket is also acceptable since
+                // the fresh ticket might be filtered by other rules
+                assert_eq!(work_id, "TICKET-INFRA");
+            }
+            other => panic!("expected DispatchTicket or Retry, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2263,6 +2397,7 @@ mod tests {
                 title: Some(format!("Test ticket {}", i)),
                 has_active_mr: false,
                 prior_attempt_count: 0,
+                genuine_agent_failure_count: 0,
                 last_failure_class: None,
                 recommended_backend: None,
                 recommended_model: None,

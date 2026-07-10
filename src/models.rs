@@ -16,6 +16,12 @@ pub struct AvailableTicket {
     pub recommended_backend: Option<String>,
     pub recommended_model: Option<String>,
     pub prior_attempt_count: usize,
+    /// Issue #95: count of attempts whose failure_class is a genuine agent
+    /// failure (agent_no_progress | agent_failure). Infra-class failures
+    /// (backend_error, environment_error, etc.) are still recorded in
+    /// `prior_attempt_count` for history purposes, but only genuine agent
+    /// failures consume the AUTO_RETRY_CAP.
+    pub genuine_agent_failure_count: usize,
     pub last_failure_class: Option<String>,
     pub has_active_mr: bool,
     /// TICKET-human-required-scoping: effective `human_required` for this
