@@ -12,6 +12,7 @@
 import { create } from 'zustand';
 import { gahApi, GahApiError } from '../api/client.js';
 import type { StatusSnapshot, ReportData, ReportGroupBy, LedgerEntry, ControllerEvent, ProfileSummary } from '@git-agent-harness/contracts';
+import type { ProfileAddData, ProfileUpdateData, ProfileRemoveParams } from '../api/client.js';
 
 interface Resource<T> {
   data: T | null;
@@ -29,18 +30,35 @@ function emptyResource<T>(): Resource<T> {
   return { data: null, loading: false, error: null, fetchedAt: null, key: null };
 }
 
+interface ProfileCrudState {
+  adding: boolean;
+  updating: boolean;
+  removing: boolean;
+  addError: string | null;
+  updateError: string | null;
+  removeError: string | null;
+  lastAddSuccess: boolean;
+  lastUpdateSuccess: boolean;
+  lastRemoveSuccess: boolean;
+}
+
 interface GahStoreState {
   status: Resource<StatusSnapshot>;
   report: Resource<ReportData>;
   events: Resource<ControllerEvent[]>;
   workTimelines: Record<string, Resource<LedgerEntry[]>>;
   profiles: Resource<ProfileSummary[]>;
+  profileCrud: ProfileCrudState;
 
   fetchStatus: (profile?: string, opts?: { force?: boolean }) => Promise<void>;
   fetchReport: (params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }, opts?: { force?: boolean }) => Promise<void>;
   fetchEvents: (params?: { profile?: string; since?: string }, opts?: { force?: boolean }) => Promise<void>;
   fetchWorkTimeline: (workId: string, opts?: { force?: boolean }) => Promise<void>;
   fetchProfiles: (opts?: { force?: boolean }) => Promise<void>;
+  addProfile: (data: ProfileAddData) => Promise<void>;
+  updateProfile: (name: string, data: ProfileUpdateData) => Promise<void>;
+  removeProfile: (name: string, params?: ProfileRemoveParams) => Promise<void>;
+  clearProfileErrors: () => void;
 }
 
 /** Below this age, a fetch* call reuses the cached value instead of
@@ -64,6 +82,17 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
   events: emptyResource(),
   workTimelines: {},
   profiles: emptyResource(),
+  profileCrud: {
+    adding: false,
+    updating: false,
+    removing: false,
+    addError: null,
+    updateError: null,
+    removeError: null,
+    lastAddSuccess: false,
+    lastUpdateSuccess: false,
+    lastRemoveSuccess: false,
+  },
 
   async fetchStatus(profile, opts) {
     const key = profile ?? '';
@@ -136,5 +165,142 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
     } catch (error) {
       set({ profiles: { ...get().profiles, loading: false, error: errorMessage(error), key: '' } });
     }
+  },
+
+  async addProfile(data) {
+    set({ profileCrud: { ...get().profileCrud, adding: true, addError: null } });
+    try {
+      await gahApi.addProfile(data);
+      set({ 
+        profileCrud: { 
+          ...get().profileCrud, 
+          adding: false, 
+          addError: null, 
+          lastAddSuccess: true 
+        },
+        // Refresh profiles list
+        profiles: { ...get().profiles, loading: true }
+      });
+      // Re-fetch profiles
+      try {
+        const profilesData = await gahApi.getProfiles();
+        set({ 
+          profiles: { 
+            data: profilesData, 
+            loading: false, 
+            error: null, 
+            fetchedAt: Date.now(), 
+            key: '' 
+          }
+        });
+      } catch {
+        // If refetch fails, that's okay - the add might still have succeeded
+      }
+    } catch (error) {
+      set({ 
+        profileCrud: { 
+          ...get().profileCrud, 
+          adding: false, 
+          addError: errorMessage(error),
+          lastAddSuccess: false 
+        }
+      });
+    }
+  },
+
+  async updateProfile(name, data) {
+    set({ profileCrud: { ...get().profileCrud, updating: true, updateError: null } });
+    try {
+      await gahApi.updateProfile(name, data);
+      set({ 
+        profileCrud: { 
+          ...get().profileCrud, 
+          updating: false, 
+          updateError: null, 
+          lastUpdateSuccess: true 
+        },
+        // Refresh profiles list
+        profiles: { ...get().profiles, loading: true }
+      });
+      // Re-fetch profiles
+      try {
+        const profilesData = await gahApi.getProfiles();
+        set({ 
+          profiles: { 
+            data: profilesData, 
+            loading: false, 
+            error: null, 
+            fetchedAt: Date.now(), 
+            key: '' 
+          }
+        });
+      } catch {
+        // If refetch fails, that's okay - the update might still have succeeded
+      }
+    } catch (error) {
+      set({ 
+        profileCrud: { 
+          ...get().profileCrud, 
+          updating: false, 
+          updateError: errorMessage(error),
+          lastUpdateSuccess: false 
+        }
+      });
+    }
+  },
+
+  async removeProfile(name, params) {
+    set({ profileCrud: { ...get().profileCrud, removing: true, removeError: null } });
+    try {
+      await gahApi.removeProfile(name, params);
+      set({ 
+        profileCrud: { 
+          ...get().profileCrud, 
+          removing: false, 
+          removeError: null, 
+          lastRemoveSuccess: true 
+        },
+        // Refresh profiles list
+        profiles: { ...get().profiles, loading: true }
+      });
+      // Re-fetch profiles
+      try {
+        const profilesData = await gahApi.getProfiles();
+        set({ 
+          profiles: { 
+            data: profilesData, 
+            loading: false, 
+            error: null, 
+            fetchedAt: Date.now(), 
+            key: '' 
+          }
+        });
+      } catch {
+        // If refetch fails, that's okay - the remove might still have succeeded
+      }
+    } catch (error) {
+      set({ 
+        profileCrud: { 
+          ...get().profileCrud, 
+          removing: false, 
+          removeError: errorMessage(error),
+          lastRemoveSuccess: false 
+        }
+      });
+    }
+  },
+
+  clearProfileErrors() {
+    set({ 
+      profileCrud: { 
+        ...get().profileCrud,
+        addError: null,
+        updateError: null,
+        removeError: null,
+        lastAddSuccess: false,
+        lastUpdateSuccess: false,
+        lastRemoveSuccess: false
+      }
+    });
   }
 }));

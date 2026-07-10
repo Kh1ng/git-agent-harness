@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { getServerReadiness } from './serverReadiness.js';
-import { runStatus, runReport, runLedgerWork, runEvents, runProfileList } from './gahCli.js';
+import { runStatus, runReport, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
 import type { ReportGroupBy } from '@git-agent-harness/contracts';
 
 const SERVER_VERSION = '0.1.0';
@@ -112,6 +112,62 @@ export function createServer() {
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah profiles',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Profile CRUD operations for Issue #148
+  app.post('/api/profiles', async (req, res) => {
+    try {
+      const options: ProfileAddOptions = {
+        ...req.body,
+        // Ensure required fields are present
+        name: req.body.name,
+        display_name: req.body.display_name,
+        repo_id: req.body.repo_id,
+        provider: req.body.provider,
+        repo: req.body.repo,
+        local_path: req.body.local_path,
+        artifact_root: req.body.artifact_root,
+      };
+      await runProfileAdd(options);
+      res.status(201).json({ success: true, message: `Profile '${req.body.name}' added` });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to add profile',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.patch('/api/profiles/:name', async (req, res) => {
+    try {
+      const options: ProfileSetOptions = {
+        name: req.params.name,
+        ...req.body,
+      };
+      await runProfileSet(options);
+      res.json({ success: true, message: `Profile '${req.params.name}' updated` });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to update profile',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.delete('/api/profiles/:name', async (req, res) => {
+    try {
+      const options: ProfileRemoveOptions = {
+        name: req.params.name,
+        force: req.query.force === 'true',
+      };
+      await runProfileRemove(options);
+      res.json({ success: true, message: `Profile '${req.params.name}' removed` });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to remove profile',
         message: error instanceof Error ? error.message : String(error)
       });
     }
