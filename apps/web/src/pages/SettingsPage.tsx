@@ -103,10 +103,6 @@ export function SettingsPage() {
             />
           </div>
         )}
-        <p className="mt-3 text-xs text-muted inline-flex items-start gap-1.5">
-          <Info size={13} className="shrink-0 mt-0.5" aria-hidden="true" />
-          Switching profiles reconnects the live WebSocket feed as well as refreshing the REST-backed pages.
-        </p>
       </section>
 
       <section>
