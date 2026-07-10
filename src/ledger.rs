@@ -2928,7 +2928,7 @@ mod tests {
         .unwrap();
 
         assert!(grouped.iter().any(|g| g.group_key == "(unknown model)"));
-        assert!(grouped.iter().all(|g| g.group_key != ""));
+        assert!(grouped.iter().all(|g| !g.group_key.is_empty()));
         assert!(grouped.iter().any(|g| g.group_key == "gpt-4"));
     }
 
