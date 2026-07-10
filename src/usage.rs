@@ -1,5 +1,8 @@
+use crate::ledger::summary::GroupQuotaObservation;
 use crate::ledger::LedgerUsage;
 use regex::Regex;
+use std::path::Path;
+use std::process::Command;
 
 /// Parse generic usage text from backend output logs.
 /// Uses word boundaries to prevent matching partial words like "my_input_tokens_value".
@@ -280,7 +283,6 @@ pub fn parse_codex_exec_json(output: &str) -> LedgerUsage {
 /// timestamps) into the quota fields of `LedgerUsage`. Returns an empty
 /// (all-`None`) `LedgerUsage` when the payload does not contain a
 /// `rateLimits` object.
-#[allow(dead_code)]
 pub fn parse_codex_status_json(output: &str) -> LedgerUsage {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(output) else {
         return LedgerUsage::default();
@@ -330,6 +332,61 @@ pub fn parse_codex_status_json(output: &str) -> LedgerUsage {
     usage
 }
 
+/// #166 (within #151): convert `codex status --json` quota fields into a
+/// structured `GroupQuotaObservation`.
+///
+/// This is the real caller for `parse_codex_status_json` (which previously
+/// had no call site outside its own unit tests). Feeding the account-level
+/// rate-limit data through here — instead of the generic regex scraper — is
+/// exactly the cross-cutting ask in #151: "JSON where the source is JSON --
+/// don't regex-scrape a `--json` flag's own output."
+///
+/// Returns `None` when the payload carries no rate-limit/quota data (never
+/// fabricates a percentage; an absent quota reading stays unknown).
+pub fn codex_status_to_quota_observation(
+    output: &str,
+    backend: &str,
+    model: Option<&str>,
+) -> Option<GroupQuotaObservation> {
+    let usage = parse_codex_status_json(output);
+    usage.usage_source.as_ref()?;
+    Some(GroupQuotaObservation {
+        backend: backend.to_string(),
+        model: model.map(|m| m.to_string()),
+        quota_window: usage.quota_window,
+        quota_used_percent: usage.quota_used_percent,
+        quota_remaining_percent: usage.quota_remaining_percent,
+        quota_reset_at: usage.quota_reset_at,
+        observed_at: usage.observed_at.or_else(|| {
+            time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        }),
+        usage_source: usage.usage_source,
+    })
+}
+
+/// #166 (within #151): run `codex status --json` as a real subprocess and
+/// parse its stdout into a `GroupQuotaObservation`.
+///
+/// Returns `Ok(None)` when `codex` is missing, exits non-zero, or emits no
+/// rate-limit data — callers treat that as "no account quota observation",
+/// never as a fabricated zero/percentage.
+pub fn refresh_codex_quota(
+    codex_cmd: &Path,
+    model: Option<&str>,
+) -> std::io::Result<Option<GroupQuotaObservation>> {
+    let output = Command::new(codex_cmd)
+        .arg("status")
+        .arg("--json")
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(codex_status_to_quota_observation(&stdout, "codex", model))
+}
+
 /// A real quota-window/quota-reset-at value is a short human string ("weekly",
 /// "5h", an ISO timestamp). `[^\n\r]+` alone is unbounded and backend log
 /// text is not always newline-delimited per logical line (e.g. a diff or
@@ -373,6 +430,7 @@ fn find_string_after(text: &str, keys: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::codex_status_to_quota_observation;
     use super::parse_agy_cli_log_delta;
     use super::parse_codex_exec_json;
     use super::parse_codex_status_json;
@@ -441,6 +499,26 @@ mod tests {
     fn codex_status_json_returns_empty_for_missing_rate_limits() {
         let usage = parse_codex_status_json(r#"{"some":"data"}"#);
         assert_eq!(usage.usage_source, None);
+    }
+
+    #[test]
+    fn codex_status_to_quota_observation_maps_quota_fields() {
+        // Real caller for parse_codex_status_json (was #[allow(dead_code)]).
+        let obs = codex_status_to_quota_observation(CODEX_STATUS_JSON, "codex", Some("gpt-5"))
+            .expect("must produce an observation when rate-limit data exists");
+        assert_eq!(obs.backend, "codex");
+        assert_eq!(obs.model.as_deref(), Some("gpt-5"));
+        assert_eq!(obs.quota_used_percent, Some(25.0));
+        assert_eq!(obs.quota_remaining_percent, Some(75.0));
+        assert_eq!(obs.quota_window.as_deref(), Some("300m"));
+        assert_eq!(obs.usage_source.as_deref(), Some("codex_status_json"));
+        assert!(obs.observed_at.is_some());
+    }
+
+    #[test]
+    fn codex_status_to_quota_observation_is_none_without_data() {
+        let obs = codex_status_to_quota_observation(r#"{"some":"data"}"#, "codex", None);
+        assert!(obs.is_none());
     }
 
     // ── Existing generic parser tests ────────────────────────────────────

@@ -8,10 +8,13 @@
 use crate::config;
 use crate::ledger::summary::{build_summary, SummaryData};
 use crate::ledger::{self, GroupBy as LedgerGroupBy};
+use crate::quota_store;
+use crate::runner;
 use anyhow::Result;
 use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 /// Report command parameters
 pub struct ReportArgs {
@@ -102,18 +105,92 @@ pub fn run(args: ReportArgs) -> Result<()> {
 
     let data = build_summary(&cfg, &since, profile.as_deref(), group_by)?;
 
+    // #166: refresh Codex's account-level quota (best-effort) and load the
+    // durable store so the Quota page shows real rate-limit data, not just
+    // per-attempt token counts. A missing `codex` binary is treated as
+    // "no observation" and never fabricates a percentage.
+    let account_quota = refresh_codex_account_quota(&cfg, profile.as_deref());
+
     if json {
         // For JSON output, transform the existing summary data into our report format
-        let report_data =
-            transform_to_report_format(Some(&cfg), &data, group_by, &since, profile.as_deref())?;
+        let report_data = transform_to_report_format(
+            Some(&cfg),
+            &data,
+            group_by,
+            &since,
+            profile.as_deref(),
+            &account_quota,
+        )?;
         println!("{}", serde_json::to_string(&report_data)?);
         return Ok(());
     }
 
     // For plain text output, use the existing grouped display but with report-focused formatting
-    display_report(&data, group_by, &since, profile.as_deref())?;
+    display_report(&data, group_by, &since, profile.as_deref(), &account_quota)?;
 
     Ok(())
+}
+
+/// Merge stored account-level quota observations (from `codex status --json`
+/// and any other backend status endpoints) into a group's per-attempt quota
+/// observations, so the Quota page surfaces both sources.
+///
+/// For `Backend` grouping, observations whose `backend` matches the group key
+/// are included (regardless of `model`). For `Model` grouping, only
+/// observations whose `model` matches the group key are included, plus any
+/// account-level (model-less) observation for that backend.
+fn merge_account_quota(
+    account_quota: &[crate::ledger::summary::GroupQuotaObservation],
+    group_key: &str,
+    is_model: bool,
+    per_attempt: &[crate::ledger::summary::GroupQuotaObservation],
+) -> Vec<crate::ledger::summary::GroupQuotaObservation> {
+    let mut merged: Vec<crate::ledger::summary::GroupQuotaObservation> = per_attempt.to_vec();
+    for obs in account_quota {
+        // For backend grouping, match by backend (model-less account
+        // observations apply to the whole backend). For model grouping,
+        // match by model only -- a model-less account observation can't be
+        // attributed to a specific model and must not leak into every group.
+        let matches = if is_model {
+            obs.model.as_deref() == Some(group_key)
+        } else {
+            obs.backend == group_key
+        };
+        if matches && !merged.contains(obs) {
+            merged.push(obs.clone());
+        }
+    }
+    merged
+}
+
+/// Resolve the `codex` executable from config (explicit path or PATH) so the
+/// refresh runs the same binary GAH would dispatch.
+fn resolve_codex_executable(cfg: &config::GahConfig, profile: Option<&str>) -> Option<PathBuf> {
+    let profile_ref = match profile {
+        Some(name) => config::get_profile(cfg, name).ok(),
+        None => cfg.profiles.values().next(),
+    }?;
+    match runner::resolve_backend_executable(profile_ref, "codex") {
+        runner::ExecutableResolution::Found(path) => Some(path),
+        _ => None,
+    }
+}
+
+/// #166: run `codex status --json`, persist the result to the durable quota
+/// store, and return every stored account-level observation so the Quota page
+/// can render it. Best-effort: if `codex` is unavailable it returns whatever
+/// is already in the store (possibly nothing) without erroring.
+fn refresh_codex_account_quota(
+    cfg: &config::GahConfig,
+    profile: Option<&str>,
+) -> Vec<crate::ledger::summary::GroupQuotaObservation> {
+    if let Some(codex) = resolve_codex_executable(cfg, profile) {
+        let _ = quota_store::refresh_codex_and_store(&codex, None, &quota_store::store_path());
+    }
+    quota_store::load_account_observations()
+        .iter()
+        .map(|rec| rec.to_observation())
+        .collect()
 }
 
 /// One time-bucketed row of the `--series` report: a per-bucket aggregate
@@ -286,6 +363,7 @@ fn transform_to_report_format(
     group_by: LedgerGroupBy,
     since: &str,
     profile: Option<&str>,
+    account_quota: &[crate::ledger::summary::GroupQuotaObservation],
 ) -> Result<ReportData> {
     let grouped_data = if group_by == LedgerGroupBy::Backend {
         &data.grouped_by_backend
@@ -330,7 +408,12 @@ fn transform_to_report_format(
                 cache_write_tokens: group.cache_write_tokens,
                 total_tokens: group.total_tokens,
                 requests_count: group.requests_count,
-                quota_observations: group.quota_observations.clone(),
+                quota_observations: merge_account_quota(
+                    account_quota,
+                    &group.group_key,
+                    is_model,
+                    &group.quota_observations,
+                ),
                 review_verdict_distribution: review_verdicts,
             });
         }
@@ -429,6 +512,7 @@ fn display_report(
     group_by: LedgerGroupBy,
     since: &str,
     profile: Option<&str>,
+    account_quota: &[crate::ledger::summary::GroupQuotaObservation],
 ) -> Result<()> {
     let group_label = if group_by == LedgerGroupBy::Backend {
         "Backend"
@@ -530,8 +614,15 @@ fn display_report(
                     .collect();
                 println!("  Review verdicts: {}", verdicts.join(", "));
             }
-            if !group.quota_observations.is_empty() {
-                for quota in &group.quota_observations {
+            let is_model = group_by == LedgerGroupBy::Model;
+            let merged_quota = merge_account_quota(
+                account_quota,
+                &group.group_key,
+                is_model,
+                &group.quota_observations,
+            );
+            if !merged_quota.is_empty() {
+                for quota in &merged_quota {
                     println!(
                         "  Quota [{}{}]: used={} remaining={} reset={} observed={}",
                         quota.backend,
@@ -646,7 +737,7 @@ mod tests {
     fn test_transform_to_report_format_backend() {
         let data = mock_summary_data();
         let report_data =
-            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None).unwrap();
+            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None, &[]).unwrap();
 
         assert_eq!(report_data.total_entries, 15);
         assert_eq!(report_data.since, "7d");
@@ -678,9 +769,15 @@ mod tests {
         // Swap to model grouping
         data.grouped_by_model = data.grouped_by_backend.take();
 
-        let report_data =
-            transform_to_report_format(None, &data, GroupBy::Model, "30d", Some("test-profile"))
-                .unwrap();
+        let report_data = transform_to_report_format(
+            None,
+            &data,
+            GroupBy::Model,
+            "30d",
+            Some("test-profile"),
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(report_data.total_entries, 15);
         assert_eq!(report_data.since, "30d");
@@ -699,7 +796,7 @@ mod tests {
         data.grouped_by_backend = None;
 
         let report_data =
-            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None).unwrap();
+            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None, &[]).unwrap();
 
         assert_eq!(report_data.comparisons.len(), 0);
     }
@@ -731,7 +828,7 @@ mod tests {
         data.grouped_by_backend = Some(grouped_data);
 
         let report_data =
-            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None).unwrap();
+            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None, &[]).unwrap();
 
         assert!((report_data.comparisons[0].success_rate - 0.5).abs() < 0.001);
     }
@@ -763,7 +860,7 @@ mod tests {
         data.grouped_by_backend = Some(grouped_data);
 
         let report_data =
-            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None).unwrap();
+            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None, &[]).unwrap();
 
         assert_eq!(report_data.comparisons[0].success_rate, 0.0);
     }
