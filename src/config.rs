@@ -218,6 +218,14 @@ pub struct Profile {
     /// this). Defaults to 300s when unset.
     #[serde(default)]
     pub opencode_idle_timeout_seconds: Option<u64>,
+    /// How long OpenHands' own log output can go quiet before GAH considers
+    /// it stalled and kills it, in seconds. Same rationale and mechanism as
+    /// `opencode_idle_timeout_seconds` -- added after a live dispatch (issue
+    /// #87) ran for 2h20m+ with openhands as the backend and `run_openhands`
+    /// had zero supervision of any kind (a plain blocking `cmd.status()`).
+    /// Defaults to 300s when unset.
+    #[serde(default)]
+    pub openhands_idle_timeout_seconds: Option<u64>,
     /// HOME override for the `agy-second` backend name only -- a distinct
     /// authenticated Antigravity account/quota pool from the default `agy`
     /// backend, which otherwise runs under the process's real $HOME. Same
@@ -572,6 +580,10 @@ impl Profile {
         self.opencode_idle_timeout_seconds.unwrap_or(300).max(1)
     }
 
+    pub fn openhands_idle_timeout_seconds(&self) -> u64 {
+        self.openhands_idle_timeout_seconds.unwrap_or(300).max(1)
+    }
+
     pub fn pat(&self) -> String {
         match self.provider.as_str() {
             "gitlab" => std::env::var("GITLAB_PAT2")
@@ -881,6 +893,7 @@ pub mod tests {
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
+            openhands_idle_timeout_seconds: None,
             notify_command: None,
             policy_path: None,
             env_file: None,
@@ -932,6 +945,7 @@ pub mod tests {
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
+            openhands_idle_timeout_seconds: None,
             notify_command: None,
             policy_path: None,
             env_file: None,
