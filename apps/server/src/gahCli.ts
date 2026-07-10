@@ -12,6 +12,7 @@ import type {
   StatusSnapshot,
   ControllerEvent,
   ReportData,
+  ReportSeriesData,
   ReportGroupBy,
   LedgerEntry,
   ProfileSummary,
@@ -208,6 +209,32 @@ export async function runReport(
     args.push('--config-path', options.config);
   }
   return runJsonCommand<ReportData>(args, options.config);
+}
+
+/**
+ * Run `gah report --series --bucket <bucket> --since <since> --json` and
+ * parse the output. Time-bucketed usage/cost/success-rate series for the
+ * Telemetry trend chart (Issue #142). Additive: does not change the
+ * aggregate `runReport` behavior.
+ */
+export async function runReportSeries(
+  options: {
+    since?: string;
+    profile?: string;
+    bucket?: string;
+    config?: string;
+  } = {}
+): Promise<ReportSeriesData> {
+  const args = ['report', '--json', '--series'];
+  args.push('--since', options.since ?? '14d');
+  args.push('--bucket', options.bucket ?? 'daily');
+  if (options.profile) {
+    args.push('--profile', options.profile);
+  }
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runJsonCommand<ReportSeriesData>(args, options.config);
 }
 
 /**

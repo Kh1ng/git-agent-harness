@@ -46,11 +46,13 @@ export function TelemetryPage() {
   const profile = profileOverride ?? wsProfile;
   const report = useGahStore((s) => s.report);
   const fetchReport = useGahStore((s) => s.fetchReport);
-  const trend = report.data?.trend ?? [];
+  const reportSeries = useGahStore((s) => s.reportSeries);
+  const fetchReportSeries = useGahStore((s) => s.fetchReportSeries);
+  const trend = reportSeries.data?.series ?? [];
   const trendOptions = [
     { id: 'tokens', label: 'Input+output tokens', data: trend.map((p) => ({ date: p.date, value: p.total_tokens })), format: formatTokens },
     { id: 'cost', label: 'Cost (USD)', data: trend.map((p) => ({ date: p.date, value: p.actual_cost_usd ?? p.estimated_cost_usd ?? 0 })), format: (v: number) => formatCost(v) },
-    { id: 'success', label: 'Success rate', data: trend.map((p) => ({ date: p.date, value: p.entries ? p.validation_pass / p.entries : 0 })), format: (v: number) => formatPercent(v) }
+    { id: 'success', label: 'Success rate', data: trend.map((p) => ({ date: p.date, value: p.success_rate })), format: (v: number) => formatPercent(v) }
   ] as const;
   const [groupBy, setGroupBy] = useState<ReportGroupBy>('backend');
   const [sortKey, setSortKey] = useState<SortKey>('entries');
@@ -59,6 +61,7 @@ export function TelemetryPage() {
 
   useEffect(() => {
     fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true });
+    fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupBy, profile]);
 
@@ -112,9 +115,9 @@ export function TelemetryPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <h3 className="text-sm font-semibold text-primary">Usage trend</h3>
           <div className="flex items-center gap-3">
-            <span className="inline-flex items-center gap-1 text-xs text-warning">
+            <span className="inline-flex items-center gap-1 text-xs text-muted">
               <FlaskConical size={12} aria-hidden="true" />
-              Ledger-derived daily data
+              Real ledger series ({reportSeries.data?.bucket ?? 'daily'})
             </span>
             <select
               value={trendMetric}
@@ -129,7 +132,19 @@ export function TelemetryPage() {
             </select>
           </div>
         </div>
-        <TrendChart data={activeTrend.data} valueLabel={activeTrend.label} formatValue={activeTrend.format as (v: number) => string} />
+        {reportSeries.loading && !reportSeries.data ? (
+          <LoadingState label="Loading usage trend…" />
+        ) : reportSeries.error ? (
+          <ErrorState
+            message={reportSeries.error}
+            endpoint="/api/report/series"
+            onRetry={() => fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true })}
+          />
+        ) : activeTrend.data.length === 0 ? (
+          <EmptyState icon={FlaskConical} title="No trend data for this window" description="Try a longer time range once more runs have completed." />
+        ) : (
+          <TrendChart data={activeTrend.data} valueLabel={activeTrend.label} formatValue={activeTrend.format as (v: number) => string} />
+        )}
       </section>
 
       <section>

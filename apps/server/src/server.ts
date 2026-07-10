@@ -1,8 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import { getServerReadiness } from './serverReadiness.js';
-import { runStatus, runReport, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
-import type { ReportGroupBy } from '@git-agent-harness/contracts';
+import { runStatus, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
+import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
 
 const SERVER_VERSION = '0.1.0';
 
@@ -85,6 +85,21 @@ export function createServer() {
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah report',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/report/series', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const since = typeof req.query.since === 'string' ? req.query.since : undefined;
+    const bucket = typeof req.query.bucket === 'string' ? req.query.bucket : undefined;
+    try {
+      const series: ReportSeriesData = await runReportSeries({ profile, since, bucket });
+      res.json(series);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load gah report series',
         message: error instanceof Error ? error.message : String(error)
       });
     }
