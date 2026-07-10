@@ -71,3 +71,4 @@ docs/MANAGER_MEMORY.md
 artifacts/
 dist/
 deploy/
+.worktrees/
