@@ -343,13 +343,10 @@ mod tests {
     #[test]
     fn review_verdict_includes_verdict_and_url() {
         let msg = format_message(&NotifyEvent::ReviewVerdict {
-            verdict: "APPROVE_STRONG",
+            verdict: "APPROVE",
             mr_url: "https://example.com/mr/2",
         });
-        assert_eq!(
-            msg,
-            "[gah] review APPROVE_STRONG on https://example.com/mr/2"
-        );
+        assert_eq!(msg, "[gah] review APPROVE on https://example.com/mr/2");
     }
 
     #[test]
@@ -432,7 +429,7 @@ mod tests {
                 model: "m",
             },
             NotifyEvent::ReviewVerdict {
-                verdict: "APPROVE_STRONG",
+                verdict: "APPROVE",
                 mr_url: "u",
             },
             NotifyEvent::DispatchFailed {

@@ -814,7 +814,7 @@ pub mod sqlite_store {
             super::super::backfill_review_verdict(
                 &cfg,
                 "gah/test-1",
-                "APPROVE_STRONG",
+                "APPROVE",
                 "high",
                 "claude",
                 Some("claude-sonnet-4"),
@@ -828,7 +828,7 @@ pub mod sqlite_store {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(review_verdict.as_deref(), Some("APPROVE_STRONG"));
+            assert_eq!(review_verdict.as_deref(), Some("APPROVE"));
         }
     }
 }
@@ -1652,7 +1652,7 @@ pub mod summary {
                     println!("    Average cost: ${:.4}", cost);
                 }
                 if let Some(cost) = group.cost_per_approve_strong {
-                    println!("    Cost per APPROVE_STRONG: ${:.4}", cost);
+                    println!("    Cost per APPROVE: ${:.4}", cost);
                 }
                 println!(
                     "    Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
@@ -1711,7 +1711,7 @@ pub mod summary {
                     println!("    Average cost: ${:.4}", cost);
                 }
                 if let Some(cost) = group.cost_per_approve_strong {
-                    println!("    Cost per APPROVE_STRONG: ${:.4}", cost);
+                    println!("    Cost per APPROVE: ${:.4}", cost);
                 }
                 println!(
                     "    Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
@@ -1822,7 +1822,7 @@ pub mod summary {
             }
             if matches!(
                 entry.validation_result.as_deref(),
-                Some("passed") | Some("APPROVE_STRONG") | Some("APPROVE_WEAK")
+                Some("passed") | Some("APPROVE")
             ) {
                 validation_pass += 1;
             }
@@ -2010,7 +2010,7 @@ pub mod summary {
             let mut estimated_cost_total = 0.0f64;
             let mut actual_cost_seen = false;
             let mut estimated_cost_seen = false;
-            let mut approve_strong_count = 0usize;
+            let mut approve_count = 0usize;
             let mut total_duration = 0.0f64;
             let mut duration_count = 0usize;
             let mut input_tokens = 0u64;
@@ -2034,7 +2034,7 @@ pub mod summary {
                 // Count validation passes
                 if matches!(
                     entry.validation_result.as_deref(),
-                    Some("passed") | Some("APPROVE_STRONG") | Some("APPROVE_WEAK")
+                    Some("passed") | Some("APPROVE")
                 ) {
                     validation_pass += 1;
                 }
@@ -2044,8 +2044,16 @@ pub mod summary {
                     *review_verdict_distribution
                         .entry(verdict.clone())
                         .or_default() += 1;
-                    if verdict == "APPROVE_STRONG" {
-                        approve_strong_count += 1;
+                    // Only one APPROVE verdict remains (no more STRONG/WEAK
+                    // self-reported split), so this can no longer distinguish
+                    // strong-tier vs weak-tier approvals by verdict text
+                    // alone. A real per-tier cost breakdown would need
+                    // `reviewer_tier` persisted on `LedgerEntry` itself (today
+                    // it only lives on the transient `ReviewVerdict` in
+                    // models.rs, never written to the ledger) -- out of scope
+                    // here; tracked as a fast-follow.
+                    if verdict == "APPROVE" {
+                        approve_count += 1;
                     }
                 }
 
@@ -2168,9 +2176,9 @@ pub mod summary {
                 None
             };
 
-            // Calculate cost per APPROVE_STRONG outcome
-            let cost_per_approve_strong = if approve_strong_count > 0 && cost_seen {
-                Some(total_cost_usd / approve_strong_count as f64)
+            // Calculate cost per APPROVE outcome
+            let cost_per_approve_strong = if approve_count > 0 && cost_seen {
+                Some(total_cost_usd / approve_count as f64)
             } else {
                 None
             };
@@ -3072,15 +3080,9 @@ mod tests {
     #[test]
     fn backfill_review_verdict_returns_false_when_no_matching_branch() {
         let (_tmp, cfg) = test_config();
-        let found = backfill_review_verdict(
-            &cfg,
-            "gah/no-such-branch",
-            "APPROVE_STRONG",
-            "high",
-            "codex",
-            None,
-        )
-        .unwrap();
+        let found =
+            backfill_review_verdict(&cfg, "gah/no-such-branch", "APPROVE", "high", "codex", None)
+                .unwrap();
         assert!(!found);
     }
 
@@ -3101,7 +3103,7 @@ mod tests {
             LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
         entry1.effective_backend = "codex".to_string();
         entry1.effective_model = Some("claude-sonnet".to_string());
-        entry1.review_verdict = Some("APPROVE_STRONG".to_string());
+        entry1.review_verdict = Some("APPROVE".to_string());
         entry1.review_confidence = Some("high".to_string());
         entry1.reviewer_backend = Some("codex".to_string());
         entry1.reviewer_model = Some("claude-sonnet".to_string());
@@ -3136,9 +3138,7 @@ mod tests {
         assert_eq!(codex_group.entries, 1);
         assert_eq!(codex_group.validation_pass, 1);
         assert_eq!(
-            codex_group
-                .review_verdict_distribution
-                .get("APPROVE_STRONG"),
+            codex_group.review_verdict_distribution.get("APPROVE"),
             Some(&1)
         );
         assert!((codex_group.total_cost_usd.unwrap() - 0.5).abs() < f64::EPSILON);
@@ -3207,7 +3207,7 @@ mod tests {
             LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
         entry1.effective_backend = "codex".to_string();
         entry1.effective_model = Some("gpt-4".to_string());
-        entry1.review_verdict = Some("APPROVE_STRONG".to_string());
+        entry1.review_verdict = Some("APPROVE".to_string());
         entry1.validation_result = Some("passed".to_string());
         entry1.usage.actual_cost_usd = Some(1.0);
 
@@ -3215,7 +3215,7 @@ mod tests {
             LedgerEntry::new("test", &profile(), "codex", "improve", "test2", None, None);
         entry2.effective_backend = "codex".to_string();
         entry2.effective_model = Some("gpt-4".to_string());
-        entry2.review_verdict = Some("APPROVE_STRONG".to_string());
+        entry2.review_verdict = Some("APPROVE".to_string());
         entry2.validation_result = Some("passed".to_string());
         entry2.usage.actual_cost_usd = Some(2.0);
 
@@ -3244,7 +3244,7 @@ mod tests {
         assert_eq!(gpt4_group.entries, 2);
         assert_eq!(gpt4_group.validation_pass, 2);
         assert_eq!(
-            gpt4_group.review_verdict_distribution.get("APPROVE_STRONG"),
+            gpt4_group.review_verdict_distribution.get("APPROVE"),
             Some(&2)
         );
         assert!((gpt4_group.total_cost_usd.unwrap() - 3.0).abs() < f64::EPSILON);

@@ -60,8 +60,9 @@ pub enum NextAction {
         mr_url: Option<String>,
         reason: String,
     },
-    /// TICKET-127: auto-merge -- a strong-reviewer APPROVE_STRONG plus
-    /// conclusively-green CI, gated by the same retry cap as FixMr.
+    /// TICKET-127: auto-merge -- a strong-tier reviewer's APPROVE (high
+    /// confidence) plus conclusively-green CI, gated by the same retry cap
+    /// as FixMr.
     MergeMr {
         work_id: Option<String>,
         branch: String,
