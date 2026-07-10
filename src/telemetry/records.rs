@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Record types for telemetry data (used for enum tags)
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordType {
@@ -39,7 +40,7 @@ pub struct TelemetryRecord {
 pub struct AttemptUsageRecord {
     #[serde(flatten)]
     pub base: TelemetryRecord,
-    
+
     /// Profile identifier
     pub profile: String,
     /// Repository identifier
@@ -48,14 +49,14 @@ pub struct AttemptUsageRecord {
     pub repo: String,
     /// Provider (github, gitlab, etc.)
     pub provider: String,
-    
+
     /// Work identifier
     pub work_id: Option<String>,
     /// Target summary/description
     pub target_summary: Option<String>,
     /// Mode of operation (fix, improve, review, etc.)
     pub mode: String,
-    
+
     /// Attempt identifier within the dispatch
     pub attempt_number: u32,
     /// Backend used for this attempt
@@ -68,7 +69,7 @@ pub struct AttemptUsageRecord {
     pub effective_model: Option<String>,
     /// Requested model
     pub requested_model: Option<String>,
-    
+
     /// Exit code from the attempt
     pub exit_code: Option<i32>,
     /// Duration in seconds
@@ -79,14 +80,14 @@ pub struct AttemptUsageRecord {
     pub failure_class: Option<String>,
     /// Failure stage
     pub failure_stage: Option<String>,
-    
+
     /// Whether this was a fallback attempt
     pub fallback_used: bool,
     /// Whether human intervention was required
     pub human_required: bool,
     /// Routing reason
     pub routing_reason: Option<String>,
-    
+
     /// Usage source (where the usage data came from)
     pub usage_source: Option<String>,
     /// Input tokens consumed
@@ -105,7 +106,7 @@ pub struct AttemptUsageRecord {
     pub estimated_cost_usd: Option<f64>,
     /// Actual cost in USD
     pub actual_cost_usd: Option<f64>,
-    
+
     /// Quota window identifier
     pub quota_window: Option<String>,
     /// Quota used percentage
@@ -121,7 +122,7 @@ pub struct AttemptUsageRecord {
 pub struct QuotaObservationRecord {
     #[serde(flatten)]
     pub base: TelemetryRecord,
-    
+
     /// Profile identifier
     pub profile: String,
     /// Repository identifier
@@ -130,10 +131,10 @@ pub struct QuotaObservationRecord {
     pub repo: String,
     /// Provider (github, gitlab, etc.)
     pub provider: String,
-    
+
     /// Work identifier (if associated with specific work)
     pub work_id: Option<String>,
-    
+
     /// Backend being observed
     pub backend: String,
     /// Effective backend
@@ -142,7 +143,7 @@ pub struct QuotaObservationRecord {
     pub model: Option<String>,
     /// Effective model
     pub effective_model: Option<String>,
-    
+
     /// Account scope (if known)
     pub account_scope: Option<String>,
     /// Quota pool identifier (if known)
@@ -164,7 +165,7 @@ pub struct QuotaObservationRecord {
 pub struct TaskOutcomeRecord {
     #[serde(flatten)]
     pub base: TelemetryRecord,
-    
+
     /// Profile identifier
     pub profile: String,
     /// Repository identifier
@@ -173,7 +174,7 @@ pub struct TaskOutcomeRecord {
     pub repo: String,
     /// Provider (github, gitlab, etc.)
     pub provider: String,
-    
+
     /// Work identifier
     pub work_id: String,
     /// Target summary/description
@@ -182,7 +183,7 @@ pub struct TaskOutcomeRecord {
     pub mode: String,
     /// Branch being worked on
     pub branch: Option<String>,
-    
+
     /// Dispatch reason
     pub dispatch_reason: Option<String>,
     /// Number of attempts started
@@ -203,7 +204,7 @@ pub struct TaskOutcomeRecord {
     pub reviewer_backend: Option<String>,
     /// Reviewer model
     pub reviewer_model: Option<String>,
-    
+
     /// Commit attempted
     pub commit_attempted: bool,
     /// Commit created
@@ -218,21 +219,21 @@ pub struct TaskOutcomeRecord {
     pub mr_created: bool,
     /// MR URL
     pub mr_url: Option<String>,
-    
+
     /// Files changed
     pub files_changed: Option<u32>,
     /// Insertions
     pub insertions: Option<u32>,
     /// Deletions
     pub deletions: Option<u32>,
-    
+
     /// Failure class
     pub failure_class: Option<String>,
     /// Failure stage
     pub failure_stage: Option<String>,
     /// Error summary
     pub error_summary: Option<String>,
-    
+
     /// Aggregate usage data
     pub usage_source: Option<String>,
     pub input_tokens: Option<u64>,
@@ -243,7 +244,7 @@ pub struct TaskOutcomeRecord {
     pub requests_count: Option<u64>,
     pub estimated_cost_usd: Option<f64>,
     pub actual_cost_usd: Option<f64>,
-    
+
     /// Final outcome (derived from available data)
     pub final_outcome: Option<String>,
     /// Merge status (if applicable)
@@ -255,7 +256,7 @@ pub struct TaskOutcomeRecord {
 pub struct ReviewOutcomeRecord {
     #[serde(flatten)]
     pub base: TelemetryRecord,
-    
+
     /// Profile identifier
     pub profile: String,
     /// Repository identifier
@@ -264,14 +265,14 @@ pub struct ReviewOutcomeRecord {
     pub repo: String,
     /// Provider (github, gitlab, etc.)
     pub provider: String,
-    
+
     /// Work identifier being reviewed
     pub work_id: String,
     /// Branch being reviewed
     pub branch: Option<String>,
     /// MR URL
     pub mr_url: Option<String>,
-    
+
     /// Review verdict
     pub review_verdict: String,
     /// Review confidence
@@ -280,12 +281,12 @@ pub struct ReviewOutcomeRecord {
     pub reviewer_backend: String,
     /// Reviewer model
     pub reviewer_model: Option<String>,
-    
+
     /// Duration of review in seconds
     pub duration_seconds: Option<f64>,
     /// Timestamp when review was completed
     pub review_completed_at: String,
-    
+
     /// Backend/model that created the work being reviewed
     pub implementation_backend: Option<String>,
     /// Model that created the work being reviewed
@@ -315,7 +316,7 @@ impl ExportedTelemetryRecord {
             ExportedTelemetryRecord::ReviewOutcome(record) => record.base.record_id.clone(),
         }
     }
-    
+
     pub fn get_observed_at(&self) -> String {
         match self {
             ExportedTelemetryRecord::AttemptUsage(record) => record.base.observed_at.clone(),
@@ -324,7 +325,8 @@ impl ExportedTelemetryRecord {
             ExportedTelemetryRecord::ReviewOutcome(record) => record.base.observed_at.clone(),
         }
     }
-    
+
+    #[allow(dead_code)]
     pub fn get_record_type(&self) -> RecordType {
         match self {
             ExportedTelemetryRecord::AttemptUsage(_) => RecordType::AttemptUsage,
@@ -373,9 +375,9 @@ pub struct PartitionKey {
 
 impl PartitionKey {
     pub fn from_date_str(date_str: &str) -> Option<Self> {
-        use time::OffsetDateTime;
         use time::format_description::well_known::Rfc3339;
-        
+        use time::OffsetDateTime;
+
         // Try to parse various date formats
         if let Ok(parsed) = OffsetDateTime::parse(date_str, &Rfc3339) {
             return Some(Self {
@@ -384,7 +386,7 @@ impl PartitionKey {
                 day: parsed.day() as u32,
             });
         }
-        
+
         // Try YYYY-MM-DD format
         let parts: Vec<&str> = date_str.split('-').collect();
         if parts.len() == 3 {
@@ -396,32 +398,31 @@ impl PartitionKey {
                 return Some(Self { year, month, day });
             }
         }
-        
+
         None
     }
-    
-    pub fn to_path_string(&self) -> String {
+
+    pub fn to_path_string(self) -> String {
         format!("{:04}/{:02}/{:02}", self.year, self.month, self.day)
     }
-    
-    pub fn to_date_string(&self) -> String {
+
+    pub fn to_date_string(self) -> String {
         format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
     }
 }
 
 /// Generate partition key from timestamp
 pub fn partition_key_from_timestamp(timestamp: &str) -> PartitionKey {
-    PartitionKey::from_date_str(timestamp)
-        .unwrap_or_else(|| {
-            use time::OffsetDateTime;
-            // Default to today if parsing fails
-            let now = OffsetDateTime::now_utc();
-            PartitionKey {
-                year: now.year(),
-                month: now.month() as u32,
-                day: now.day() as u32,
-            }
-        })
+    PartitionKey::from_date_str(timestamp).unwrap_or_else(|| {
+        use time::OffsetDateTime;
+        // Default to today if parsing fails
+        let now = OffsetDateTime::now_utc();
+        PartitionKey {
+            year: now.year(),
+            month: now.month() as u32,
+            day: now.day() as u32,
+        }
+    })
 }
 
 /// Generate a deterministic record ID for attempt usage
@@ -433,8 +434,13 @@ pub fn generate_attempt_usage_id(
     effective_model: Option<&str>,
 ) -> String {
     let work_part = work_id.map(|w| format!("w:{}", w)).unwrap_or_default();
-    let model_part = effective_model.map(|m| format!("m:{}", m)).unwrap_or_else(|| backend.to_string());
-    format!("attempt_usage:{}:a{}:{}:{}:{}", entry_timestamp, attempt_number, backend, model_part, work_part)
+    let model_part = effective_model
+        .map(|m| format!("m:{}", m))
+        .unwrap_or_else(|| backend.to_string());
+    format!(
+        "attempt_usage:{}:a{}:{}:{}:{}",
+        entry_timestamp, attempt_number, backend, model_part, work_part
+    )
 }
 
 /// Generate a deterministic record ID for quota observation
@@ -445,15 +451,17 @@ pub fn generate_quota_observation_id(
     quota_window: &str,
 ) -> String {
     let model_part = model.map(|m| format!("m:{}", m)).unwrap_or_default();
-    format!("quota_obs:{}:{}:{}:{}", observed_at, backend, model_part, quota_window)
+    format!(
+        "quota_obs:{}:{}:{}:{}",
+        observed_at, backend, model_part, quota_window
+    )
 }
 
 /// Generate a deterministic record ID for task outcome
-pub fn generate_task_outcome_id(
-    entry_timestamp: &str,
-    work_id: Option<&str>,
-) -> String {
-    let work_part = work_id.map(|w| format!("w:{}", w)).unwrap_or_else(|| entry_timestamp.to_string());
+pub fn generate_task_outcome_id(entry_timestamp: &str, work_id: Option<&str>) -> String {
+    let work_part = work_id
+        .map(|w| format!("w:{}", w))
+        .unwrap_or_else(|| entry_timestamp.to_string());
     format!("task_outcome:{}:{}", entry_timestamp, work_part)
 }
 
@@ -464,6 +472,8 @@ pub fn generate_review_outcome_id(
     review_verdict: &str,
     review_completed_at: &str,
 ) -> String {
-    format!("review_outcome:{}:w:{}:v:{}:{}", 
-        entry_timestamp, work_id, review_verdict, review_completed_at)
+    format!(
+        "review_outcome:{}:w:{}:v:{}:{}",
+        entry_timestamp, work_id, review_verdict, review_completed_at
+    )
 }

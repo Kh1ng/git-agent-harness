@@ -26,11 +26,11 @@ pub mod runner;
 pub mod server;
 pub mod status;
 pub mod sync;
+pub mod telemetry;
 pub mod tui;
 pub mod usage;
 pub mod work_claim;
 pub mod worktree;
-pub mod telemetry;
 
 #[cfg(test)]
 pub mod test_support;

@@ -2,12 +2,11 @@
 //!
 //! Comprehensive tests for the telemetry export functionality.
 
-use super::records::*;
-use super::extractor::*;
 use super::exporter::*;
-use crate::ledger::{AttemptRecord, LedgerEntry, LedgerUsage};
+use super::extractor::*;
+use super::records::*;
+use crate::ledger::LedgerEntry;
 use tempfile::tempdir;
-
 
 #[cfg(test)]
 mod telemetry_tests {
@@ -35,40 +34,40 @@ mod telemetry_tests {
     #[test]
     fn test_generate_record_ids() {
         let id1 = generate_attempt_usage_id(
-            "2026-07-10T12:00:00Z", 
-            Some("work-123"), 
-            1, 
-            "backend-a", 
-            Some("model-x")
+            "2026-07-10T12:00:00Z",
+            Some("work-123"),
+            1,
+            "backend-a",
+            Some("model-x"),
         );
         let id2 = generate_attempt_usage_id(
-            "2026-07-10T12:00:00Z", 
-            Some("work-123"), 
-            1, 
-            "backend-a", 
-            Some("model-x")
+            "2026-07-10T12:00:00Z",
+            Some("work-123"),
+            1,
+            "backend-a",
+            Some("model-x"),
         );
-        
+
         // Same inputs should produce same ID
         assert_eq!(id1, id2);
-        
+
         // Different attempt number should produce different ID
         let id3 = generate_attempt_usage_id(
-            "2026-07-10T12:00:00Z", 
-            Some("work-123"), 
-            2, 
-            "backend-a", 
-            Some("model-x")
+            "2026-07-10T12:00:00Z",
+            Some("work-123"),
+            2,
+            "backend-a",
+            Some("model-x"),
         );
         assert_ne!(id1, id3);
-        
+
         // Different work ID should produce different ID
         let id4 = generate_attempt_usage_id(
-            "2026-07-10T12:00:00Z", 
-            Some("work-456"), 
-            1, 
-            "backend-a", 
-            Some("model-x")
+            "2026-07-10T12:00:00Z",
+            Some("work-456"),
+            1,
+            "backend-a",
+            Some("model-x"),
         );
         assert_ne!(id1, id4);
     }
@@ -81,7 +80,7 @@ mod telemetry_tests {
             exported_at: "2026-07-10T12:00:00Z".to_string(),
             observed_at: "2026-07-10T12:00:00Z".to_string(),
         };
-        
+
         let record = AttemptUsageRecord {
             base: base.clone(),
             profile: "test".to_string(),
@@ -119,12 +118,12 @@ mod telemetry_tests {
             quota_remaining_percent: None,
             quota_reset_at: None,
         };
-        
+
         let exported = ExportedTelemetryRecord::AttemptUsage(record);
         let json = serde_json::to_string(&exported).unwrap();
         // println!("JSON: {}", json); // Debug output
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        
+
         // Check that schema_version is present (inside data due to enum tag)
         assert_eq!(parsed["record_type"], "attempt_usage");
         assert_eq!(parsed["data"]["schema_version"], SCHEMA_VERSION);
@@ -138,7 +137,7 @@ mod telemetry_tests {
             exported_at: "2026-07-10T12:00:00Z".to_string(),
             observed_at: "2026-07-10T12:00:00Z".to_string(),
         };
-        
+
         let record = TaskOutcomeRecord {
             base,
             profile: "test-profile".to_string(),
@@ -184,15 +183,15 @@ mod telemetry_tests {
             final_outcome: Some("SUCCESS".to_string()),
             merge_status: None,
         };
-        
+
         let exported = ExportedTelemetryRecord::TaskOutcome(record);
         let json = serde_json::to_string(&exported).unwrap();
-        
+
         // Should be valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.get("record_type").is_some());
         assert_eq!(parsed["record_type"], "task_outcome");
-        
+
         // Check that the work_id is preserved
         assert_eq!(parsed["data"]["work_id"], "work-123");
         assert_eq!(parsed["data"]["mode"], "fix");
@@ -203,10 +202,10 @@ mod telemetry_tests {
         let entry = create_test_ledger_entry();
         let exported_at = "2026-07-10T13:00:00Z";
         let records = extract_telemetry_records(&entry, exported_at);
-        
+
         // Should have at least task outcome record
         assert!(!records.is_empty());
-        
+
         // Check that schema version is set correctly
         for record in &records {
             match record {
@@ -240,23 +239,20 @@ mod telemetry_tests {
         entry.usage.output_tokens = None;
         entry.usage.estimated_cost_usd = None;
         entry.usage.actual_cost_usd = None;
-        
+
         let exported_at = "2026-07-10T13:00:00Z";
         let records = extract_telemetry_records(&entry, exported_at);
-        
+
         for record in &records {
-            match record {
-                ExportedTelemetryRecord::TaskOutcome(r) => {
-                    // Check that unknown values remain None
-                    assert!(r.duration_seconds.is_none());
-                    assert!(r.backend_exit_code.is_none());
-                    assert!(r.validation_result.is_none());
-                    assert!(r.input_tokens.is_none());
-                    assert!(r.output_tokens.is_none());
-                    assert!(r.estimated_cost_usd.is_none());
-                    assert!(r.actual_cost_usd.is_none());
-                }
-                _ => {}
+            if let ExportedTelemetryRecord::TaskOutcome(r) = record {
+                // Check that unknown values remain None
+                assert!(r.duration_seconds.is_none());
+                assert!(r.backend_exit_code.is_none());
+                assert!(r.validation_result.is_none());
+                assert!(r.input_tokens.is_none());
+                assert!(r.output_tokens.is_none());
+                assert!(r.estimated_cost_usd.is_none());
+                assert!(r.actual_cost_usd.is_none());
             }
         }
     }
@@ -264,8 +260,8 @@ mod telemetry_tests {
     #[test]
     fn test_no_double_counting_of_usage() {
         use crate::ledger::{AttemptRecord, LedgerUsage};
-        
-        let attempt = AttemptRecord {
+
+        let _attempt = AttemptRecord {
             attempt_number: 1,
             backend: "test-backend".to_string(),
             effective_model: Some("test-model".to_string()),
@@ -292,7 +288,7 @@ mod telemetry_tests {
                 quota_reset_at: None,
             },
         };
-        
+
         let mut entry = create_test_ledger_entry();
         // Add an attempt with different usage
         let attempt = AttemptRecord {
@@ -340,22 +336,24 @@ mod telemetry_tests {
             quota_remaining_percent: None,
             quota_reset_at: None,
         };
-        
+
         let exported_at = "2026-07-10T13:00:00Z";
         let records = extract_telemetry_records(&entry, exported_at);
-        
+
         // Count attempt usage records vs task outcome records
-        let attempt_usage_count = records.iter()
+        let attempt_usage_count = records
+            .iter()
             .filter(|r| matches!(r, ExportedTelemetryRecord::AttemptUsage(_)))
             .count();
-        let task_outcome_count = records.iter()
+        let task_outcome_count = records
+            .iter()
             .filter(|r| matches!(r, ExportedTelemetryRecord::TaskOutcome(_)))
             .count();
-            
+
         // Should have 1 attempt usage record and 1 task outcome record
         assert!(attempt_usage_count >= 1);
         assert!(task_outcome_count >= 1);
-        
+
         // Check that the task outcome record doesn't include the attempt's specific usage
         for record in &records {
             if let ExportedTelemetryRecord::TaskOutcome(task_record) = record {
@@ -372,10 +370,10 @@ mod telemetry_tests {
         let exported_at = "2026-07-10T13:00:00Z";
         let records1 = extract_telemetry_records(&entry, exported_at);
         let records2 = extract_telemetry_records(&entry, exported_at);
-        
+
         // Same entry should produce same records with same IDs
         assert_eq!(records1.len(), records2.len());
-        
+
         for (r1, r2) in records1.iter().zip(records2.iter()) {
             assert_eq!(r1.get_id(), r2.get_id());
         }
@@ -388,17 +386,17 @@ mod telemetry_tests {
         entry.review_verdict = Some("APPROVE_STRONG".to_string());
         let outcome = determine_final_outcome(&entry);
         assert_eq!(outcome, Some("APPROVE_STRONG".to_string()));
-        
+
         // Test APPROVE_WEAK
         entry.review_verdict = Some("APPROVE_WEAK".to_string());
         let outcome = determine_final_outcome(&entry);
         assert_eq!(outcome, Some("APPROVE_WEAK".to_string()));
-        
+
         // Test NEEDS_FIX
         entry.review_verdict = Some("NEEDS_FIX".to_string());
         let outcome = determine_final_outcome(&entry);
         assert_eq!(outcome, Some("NEEDS_FIX".to_string()));
-        
+
         // Test validation passed
         entry.review_verdict = None;
         entry.validation_result = Some("pass".to_string());
@@ -406,7 +404,7 @@ mod telemetry_tests {
         entry.push_succeeded = false;
         let outcome = determine_final_outcome(&entry);
         assert_eq!(outcome, Some("VALIDATION_PASSED".to_string()));
-        
+
         // Test success
         entry.validation_result = None;
         entry.backend_exit_code = Some(0);
@@ -418,29 +416,29 @@ mod telemetry_tests {
     fn test_telemetry_exporter_basic() {
         let temp_dir = tempdir().unwrap();
         let telemetry_path = temp_dir.path().join("telemetry");
-        
+
         let config = TelemetryConfig {
             telemetry_repo_path: telemetry_path.clone(),
             format: ExportFormat::Jsonl,
             generate_manifests: false,
             commit_batch_size: None,
         };
-        
+
         let mut exporter = TelemetryExporter::new(config).unwrap();
-        
+
         // Test with empty entries
         let entries: Vec<LedgerEntry> = vec![];
         exporter.export_from_entries(&entries).unwrap();
-        
+
         assert_eq!(exporter.records_exported(), 0);
-        
+
         // Test with one entry
         let entry = create_test_ledger_entry();
         exporter.export_from_entries(&[entry]).unwrap();
-        
+
         // Should have exported some records
         assert!(exporter.records_exported() > 0);
-        
+
         // Verify repository structure was created
         assert!(telemetry_path.join("raw").join("usage").exists());
         assert!(telemetry_path.join("raw").join("quota").exists());
@@ -454,28 +452,30 @@ mod telemetry_tests {
     fn test_deduplication() {
         let temp_dir = tempdir().unwrap();
         let telemetry_path = temp_dir.path().join("telemetry");
-        
+
         let config = TelemetryConfig {
             telemetry_repo_path: telemetry_path.clone(),
             format: ExportFormat::Jsonl,
             generate_manifests: false,
             commit_batch_size: None,
         };
-        
+
         let mut exporter = TelemetryExporter::new(config).unwrap();
-        
+
         // Create test entries
         let entry = create_test_ledger_entry();
-        
+
         // First export
-        exporter.export_from_entries(&[entry.clone()]).unwrap();
+        exporter
+            .export_from_entries(std::slice::from_ref(&entry))
+            .unwrap();
         let first_export_count = exporter.records_exported();
         assert!(first_export_count > 0);
-        
+
         // Second export of the same entry should not export duplicates
         exporter.export_from_entries(&[entry]).unwrap();
         let second_export_count = exporter.records_exported();
-        
+
         // Should be the same count (no new records exported)
         assert_eq!(first_export_count, second_export_count);
     }
@@ -484,37 +484,42 @@ mod telemetry_tests {
     fn test_manifest_generation() {
         let temp_dir = tempdir().unwrap();
         let telemetry_path = temp_dir.path().join("telemetry");
-        
+
         let config = TelemetryConfig {
             telemetry_repo_path: telemetry_path.clone(),
             format: ExportFormat::Jsonl,
             generate_manifests: true,
             commit_batch_size: None,
         };
-        
+
         let mut exporter = TelemetryExporter::new(config).unwrap();
-        
+
         // Export some entries
         let entry = create_test_ledger_entry();
         exporter.export_from_entries(&[entry]).unwrap();
-        
+
         // Check that manifests directory was created and has files
         let manifests_dir = telemetry_path.join("manifests");
         assert!(manifests_dir.exists());
-        
+
         // Count manifest files
         let manifest_files: Vec<_> = std::fs::read_dir(&manifests_dir)
             .unwrap()
             .filter_map(|entry| {
                 let entry = entry.unwrap();
-                if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+                if entry
+                    .path()
+                    .extension()
+                    .map(|e| e == "json")
+                    .unwrap_or(false)
+                {
                     Some(entry.path())
                 } else {
                     None
                 }
             })
             .collect();
-        
+
         // Should have at least one manifest file
         assert!(!manifest_files.is_empty());
     }

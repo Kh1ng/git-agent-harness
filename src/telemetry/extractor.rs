@@ -5,32 +5,34 @@
 use super::records::*;
 use crate::ledger::LedgerEntry;
 
-
 /// Extract attempt usage records from a ledger entry
 pub fn extract_attempt_usage_records(
     entry: &LedgerEntry,
     exported_at: &str,
 ) -> Vec<AttemptUsageRecord> {
     let mut records = Vec::new();
-    
+
     for attempt in &entry.attempts {
-        let observed_at = attempt.usage.observed_at.clone() 
-            .or_else(|| Some(entry.timestamp.clone())) 
+        let observed_at = attempt
+            .usage
+            .observed_at
+            .clone()
+            .or_else(|| Some(entry.timestamp.clone()))
             .unwrap_or_else(|| exported_at.to_string());
-        
+
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
             record_id: generate_attempt_usage_id(
-                &entry.timestamp, 
-                entry.work_id.as_deref(), 
+                &entry.timestamp,
+                entry.work_id.as_deref(),
                 attempt.attempt_number,
                 &attempt.backend,
-                attempt.effective_model.as_deref()
+                attempt.effective_model.as_deref(),
             ),
             exported_at: exported_at.to_string(),
             observed_at: observed_at.clone(),
         };
-        
+
         let record = AttemptUsageRecord {
             base,
             profile: entry.profile.clone(),
@@ -68,10 +70,10 @@ pub fn extract_attempt_usage_records(
             quota_remaining_percent: attempt.usage.quota_remaining_percent,
             quota_reset_at: attempt.usage.quota_reset_at.clone(),
         };
-        
+
         records.push(record);
     }
-    
+
     records
 }
 
@@ -81,29 +83,32 @@ pub fn extract_quota_observation_records(
     exported_at: &str,
 ) -> Vec<QuotaObservationRecord> {
     let mut records = Vec::new();
-    
+
     // Extract from top-level entry usage if it has quota information
-    if entry.usage.quota_window.is_some() 
-        || entry.usage.quota_used_percent.is_some() 
-        || entry.usage.quota_remaining_percent.is_some() {
-        
-        let observed_at = entry.usage.observed_at.clone()
+    if entry.usage.quota_window.is_some()
+        || entry.usage.quota_used_percent.is_some()
+        || entry.usage.quota_remaining_percent.is_some()
+    {
+        let observed_at = entry
+            .usage
+            .observed_at
+            .clone()
             .unwrap_or_else(|| entry.timestamp.clone());
-        
+
         let quota_window = entry.usage.quota_window.clone().unwrap_or_default();
-        
+
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
             record_id: generate_quota_observation_id(
                 &observed_at,
                 &entry.effective_backend,
                 entry.effective_model.as_deref(),
-                &quota_window
+                &quota_window,
             ),
             exported_at: exported_at.to_string(),
             observed_at: observed_at.clone(),
         };
-        
+
         let record = QuotaObservationRecord {
             base,
             profile: entry.profile.clone(),
@@ -116,40 +121,47 @@ pub fn extract_quota_observation_records(
             model: entry.requested_model.clone(),
             effective_model: entry.effective_model.clone(),
             account_scope: None, // Not currently tracked in ledger
-            quota_pool: None,   // Not currently tracked in ledger
+            quota_pool: None,    // Not currently tracked in ledger
             quota_window: quota_window.clone(),
             quota_used_percent: entry.usage.quota_used_percent,
             quota_remaining_percent: entry.usage.quota_remaining_percent,
             quota_reset_at: entry.usage.quota_reset_at.clone(),
-            observation_source: entry.usage.usage_source.clone().unwrap_or_else(|| "ledger_entry".to_string()),
+            observation_source: entry
+                .usage
+                .usage_source
+                .clone()
+                .unwrap_or_else(|| "ledger_entry".to_string()),
         };
-        
+
         records.push(record);
     }
-    
+
     // Extract from individual attempt usage
     for attempt in &entry.attempts {
-        if attempt.usage.quota_window.is_some() 
-            || attempt.usage.quota_used_percent.is_some() 
-            || attempt.usage.quota_remaining_percent.is_some() {
-            
-            let observed_at = attempt.usage.observed_at.clone()
+        if attempt.usage.quota_window.is_some()
+            || attempt.usage.quota_used_percent.is_some()
+            || attempt.usage.quota_remaining_percent.is_some()
+        {
+            let observed_at = attempt
+                .usage
+                .observed_at
+                .clone()
                 .unwrap_or_else(|| entry.timestamp.clone());
-            
+
             let quota_window = attempt.usage.quota_window.clone().unwrap_or_default();
-            
+
             let base = TelemetryRecord {
                 schema_version: SCHEMA_VERSION,
                 record_id: generate_quota_observation_id(
                     &observed_at,
                     &attempt.backend,
                     attempt.effective_model.as_deref(),
-                    &quota_window
+                    &quota_window,
                 ),
                 exported_at: exported_at.to_string(),
                 observed_at: observed_at.clone(),
             };
-            
+
             let record = QuotaObservationRecord {
                 base,
                 profile: entry.profile.clone(),
@@ -167,13 +179,17 @@ pub fn extract_quota_observation_records(
                 quota_used_percent: attempt.usage.quota_used_percent,
                 quota_remaining_percent: attempt.usage.quota_remaining_percent,
                 quota_reset_at: attempt.usage.quota_reset_at.clone(),
-                observation_source: attempt.usage.usage_source.clone().unwrap_or_else(|| "attempt_usage".to_string()),
+                observation_source: attempt
+                    .usage
+                    .usage_source
+                    .clone()
+                    .unwrap_or_else(|| "attempt_usage".to_string()),
             };
-            
+
             records.push(record);
         }
     }
-    
+
     records
 }
 
@@ -183,20 +199,23 @@ pub fn extract_task_outcome_records(
     exported_at: &str,
 ) -> Vec<TaskOutcomeRecord> {
     let observed_at = entry.timestamp.clone();
-    
+
     let final_outcome = determine_final_outcome(entry);
     let merge_status = determine_merge_status(entry);
-    
+
     // Use work_id if available, otherwise use timestamp
-    let work_id = entry.work_id.clone().unwrap_or_else(|| entry.timestamp.clone());
-    
+    let work_id = entry
+        .work_id
+        .clone()
+        .unwrap_or_else(|| entry.timestamp.clone());
+
     let base = TelemetryRecord {
         schema_version: SCHEMA_VERSION,
         record_id: generate_task_outcome_id(&entry.timestamp, entry.work_id.as_deref()),
         exported_at: exported_at.to_string(),
         observed_at: observed_at.clone(),
     };
-    
+
     vec![TaskOutcomeRecord {
         base,
         profile: entry.profile.clone(),
@@ -250,34 +269,46 @@ pub fn extract_review_outcome_records(
     exported_at: &str,
 ) -> Vec<ReviewOutcomeRecord> {
     let mut records = Vec::new();
-    
+
     // Only create review outcome records for review-mode entries with verdicts
     if entry.mode == "review" && entry.review_verdict.is_some() {
         let observed_at = entry.timestamp.clone();
         let review_completed_at = entry.timestamp.clone(); // Use entry timestamp as completion time
-        
-        let work_id = entry.work_id.clone().unwrap_or_else(|| "unknown".to_string());
-        let review_verdict = entry.review_verdict.clone().unwrap_or_else(|| "unknown".to_string());
-        let review_confidence = entry.review_confidence.clone().unwrap_or_else(|| "unknown".to_string());
-        let reviewer_backend = entry.reviewer_backend.clone().unwrap_or_else(|| "unknown".to_string());
-        
+
+        let work_id = entry
+            .work_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let review_verdict = entry
+            .review_verdict
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let review_confidence = entry
+            .review_confidence
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let reviewer_backend = entry
+            .reviewer_backend
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
             record_id: generate_review_outcome_id(
                 &entry.timestamp,
                 &work_id,
                 &review_verdict,
-                &review_completed_at
+                &review_completed_at,
             ),
             exported_at: exported_at.to_string(),
             observed_at: observed_at.clone(),
         };
-        
+
         // Use the entry's own backend/model as implementation backend/model
         // In a full implementation, this would be looked up from the implementation entry
         let implementation_backend = entry.backend.clone();
         let implementation_model = entry.effective_model.clone();
-        
+
         let record = ReviewOutcomeRecord {
             base,
             profile: entry.profile.clone(),
@@ -296,37 +327,40 @@ pub fn extract_review_outcome_records(
             implementation_backend: Some(implementation_backend),
             implementation_model,
         };
-        
+
         records.push(record);
     }
-    
+
     records
 }
 
 /// Extract all telemetry records from a ledger entry
-pub fn extract_telemetry_records(entry: &LedgerEntry, exported_at: &str) -> Vec<ExportedTelemetryRecord> {
+pub fn extract_telemetry_records(
+    entry: &LedgerEntry,
+    exported_at: &str,
+) -> Vec<ExportedTelemetryRecord> {
     let mut all_records = Vec::new();
-    
+
     // Extract attempt usage records
     for attempt_record in extract_attempt_usage_records(entry, exported_at) {
         all_records.push(ExportedTelemetryRecord::AttemptUsage(attempt_record));
     }
-    
+
     // Extract quota observation records
     for quota_record in extract_quota_observation_records(entry, exported_at) {
         all_records.push(ExportedTelemetryRecord::QuotaObservation(quota_record));
     }
-    
+
     // Extract task outcome records
     for task_record in extract_task_outcome_records(entry, exported_at) {
         all_records.push(ExportedTelemetryRecord::TaskOutcome(task_record));
     }
-    
+
     // Extract review outcome records
     for review_record in extract_review_outcome_records(entry, exported_at) {
         all_records.push(ExportedTelemetryRecord::ReviewOutcome(review_record));
     }
-    
+
     all_records
 }
 
@@ -354,12 +388,15 @@ pub fn determine_final_outcome(entry: &LedgerEntry) -> Option<String> {
         return Some("HUMAN_BLOCKED".to_string());
     }
     if entry.failure_class.is_some() {
-        return Some(format!("FAILURE:{}", entry.failure_class.as_deref().unwrap()));
+        return Some(format!(
+            "FAILURE:{}",
+            entry.failure_class.as_deref().unwrap()
+        ));
     }
     if entry.backend_exit_code == Some(0) {
         return Some("SUCCESS".to_string());
     }
-    
+
     None
 }
 
@@ -373,10 +410,10 @@ pub fn determine_merge_status(entry: &LedgerEntry) -> Option<String> {
         }
         return Some("MR_CREATED".to_string());
     }
-    
+
     if entry.commit_created && entry.push_succeeded {
         return Some("PUSHED".to_string());
     }
-    
+
     None
 }

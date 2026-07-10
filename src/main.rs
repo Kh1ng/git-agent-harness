@@ -23,6 +23,7 @@ mod runner;
 mod server;
 mod status;
 mod sync;
+mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod tui;
@@ -31,7 +32,6 @@ mod usage;
 mod validation_check;
 mod work_claim;
 mod worktree;
-mod telemetry;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -623,7 +623,8 @@ fn main() -> Result<()> {
                 generate_manifests,
                 config_path,
             } => {
-                let format_enum = format.parse::<telemetry::exporter::ExportFormat>()
+                let format_enum = format
+                    .parse::<telemetry::exporter::ExportFormat>()
                     .map_err(|e| anyhow::anyhow!("Invalid format: {}", e))?;
                 telemetry::cli::run_export(
                     telemetry_repo_path.as_deref(),
@@ -640,10 +641,7 @@ fn main() -> Result<()> {
                 telemetry_repo_path,
                 config_path,
             } => {
-                telemetry::cli::run_status(
-                    telemetry_repo_path.as_deref(),
-                    config_path.as_deref(),
-                )?;
+                telemetry::cli::run_status(telemetry_repo_path.as_deref(), config_path.as_deref())?;
             }
         },
     }
