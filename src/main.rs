@@ -866,6 +866,7 @@ fn main() -> Result<()> {
                     agy_second_home,
                     agy_print_timeout_seconds: std::collections::HashMap::new(),
                     agy_idle_timeout_seconds: None,
+                    opencode_idle_timeout_seconds: None,
                     notify_command,
                     policy_path,
                     env_file,

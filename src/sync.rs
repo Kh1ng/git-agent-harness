@@ -734,6 +734,7 @@ mod tests {
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds: None,
             notify_command: None,
             policy_path: None,
             env_file: None,

@@ -431,6 +431,7 @@ pub fn run_opencode(
     model: Option<&str>,
     extra_args: &[String],
     env_vars: &[(String, String)],
+    idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     run_opencode_with_executable(
         Path::new("opencode"),
@@ -440,9 +441,18 @@ pub fn run_opencode(
         model,
         extra_args,
         env_vars,
+        idle_timeout_seconds,
     )
 }
 
+/// Issue #170: a live dispatch hung for 3+ hours with zero output and no
+/// supervision at all -- opencode had no timeout of any kind (the previous
+/// implementation used a plain blocking `cmd.status()`). Now uses the same
+/// idle-detection approach as `run_agy_with_executable`: kill only when the
+/// log has genuinely gone quiet for `idle_timeout_seconds`, never on a flat
+/// wall-clock budget (opencode's own multi-step sub-agent orchestration can
+/// legitimately pause between visible output while still working).
+#[allow(clippy::too_many_arguments)]
 pub fn run_opencode_with_executable(
     executable: &Path,
     worktree: &Path,
@@ -451,12 +461,10 @@ pub fn run_opencode_with_executable(
     model: Option<&str>,
     extra_args: &[String],
     env_vars: &[(String, String)],
+    idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
-
-    let log_file = fs::File::create(&log_path).context("creating log file")?;
-    let log_err = log_file.try_clone()?;
 
     let start = Instant::now();
     let mut cmd = Command::new(executable);
@@ -475,18 +483,88 @@ pub fn run_opencode_with_executable(
     cmd.args(extra_args);
 
     cmd.current_dir(worktree)
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
-    let status = cmd
-        .status()
+
+    let mut child = cmd
+        .spawn()
         .context("launching opencode; is it installed and on PATH?")?;
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let stdout_thread = child
+        .stdout
+        .take()
+        .map(|stdout| copy_stream_to_file(stdout, log_path.clone(), Some(progress_tx.clone())));
+    let stderr_thread = child
+        .stderr
+        .take()
+        .map(|stderr| copy_stream_to_file(stderr, log_path.clone(), Some(progress_tx)));
+
+    let idle_timeout = Duration::from_secs(idle_timeout_seconds);
+    let startup_grace = idle_timeout + idle_timeout;
+    let poll_interval = Duration::from_millis(500);
+    let mut last_seen_len = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+    let mut last_progress_at = Instant::now();
+    let mut saw_progress = false;
+    let mut killed_for_idle = false;
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(-1),
+            Ok(None) => {
+                while progress_rx.try_recv().is_ok() {
+                    last_seen_len = fs::metadata(&log_path)
+                        .map(|m| m.len())
+                        .unwrap_or(last_seen_len);
+                    last_progress_at = Instant::now();
+                    saw_progress = true;
+                }
+                let current_len = fs::metadata(&log_path)
+                    .map(|m| m.len())
+                    .unwrap_or(last_seen_len);
+                if current_len != last_seen_len {
+                    last_seen_len = current_len;
+                    last_progress_at = Instant::now();
+                    saw_progress = true;
+                }
+                let stalled = if saw_progress {
+                    last_progress_at.elapsed() >= idle_timeout
+                } else {
+                    start.elapsed() >= startup_grace
+                };
+                if stalled {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    killed_for_idle = true;
+                    break -1;
+                }
+                thread::sleep(poll_interval);
+            }
+            Err(_) => break -1,
+        }
+    };
+    let duration = start.elapsed();
+    if let Some(handle) = stdout_thread {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_thread {
+        let _ = handle.join();
+    }
+
+    if killed_for_idle {
+        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
+            use std::io::Write;
+            let _ = writeln!(
+                file,
+                "GAH: killed after {idle_timeout_seconds}s with no new output (stalled, not just slow)."
+            );
+        }
+    }
 
     Ok(RunResult {
-        exit_code: status.code().unwrap_or(-1),
-        duration_secs: start.elapsed().as_secs_f64(),
+        exit_code,
+        duration_secs: duration.as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
     })
@@ -1167,6 +1245,7 @@ mod tests {
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -1620,6 +1699,7 @@ mod tests {
             Some("provider/test-model"),
             &["--format".to_string(), "json".to_string()],
             &envs,
+            300,
         )
         .unwrap();
 
@@ -1649,6 +1729,7 @@ mod tests {
             None,
             &[],
             &envs,
+            300,
         )
         .unwrap();
 
@@ -1675,7 +1756,7 @@ mod tests {
             ),
         ];
 
-        run_opencode(&f.worktree, "task", &f.session_dir, None, &[], &envs).unwrap();
+        run_opencode(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=opencode-env-value"));
@@ -1686,11 +1767,57 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err = run_opencode(&f.worktree, "task", &f.session_dir, None, &[], &envs).unwrap_err();
+        let err =
+            run_opencode(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap_err();
 
         assert!(err
             .to_string()
             .contains("launching opencode; is it installed"));
+    }
+
+    #[test]
+    fn run_opencode_kills_process_after_idle_timeout_with_no_new_output() {
+        // Issue #170: a live opencode dispatch hung for 3+ hours with zero
+        // output and no supervision at all -- opencode previously used a
+        // plain blocking `cmd.status()`. This pins the fix: it must be
+        // killed once output has genuinely stopped, not allowed to run
+        // forever.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "opencode",
+            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+        );
+        let envs = vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )];
+
+        let result = run_opencode_with_executable(
+            &f.bin_dir.join("opencode"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            1, // idle timeout: 1s of silence is stalled
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("step1"));
+        assert!(!log.contains("step2"));
+        assert!(
+            log.contains("killed after 1s with no new output"),
+            "got log: {log}"
+        );
     }
 
     // ── run_agy ─────────────────────────────────────────────────────────
