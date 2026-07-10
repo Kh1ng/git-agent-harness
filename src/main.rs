@@ -287,6 +287,8 @@ enum ProfileCommands {
     List {
         #[arg(long)]
         config: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Show details for a profile
     Show {
@@ -594,13 +596,40 @@ fn main() -> Result<()> {
         }
 
         Commands::Profile { command } => match command {
-            ProfileCommands::List { config } => {
+            ProfileCommands::List { config, json } => {
                 let cfg = config::load(config.as_deref())?;
                 let mut names: Vec<&str> = cfg.profiles.keys().map(String::as_str).collect();
                 names.sort_unstable();
-                for name in names {
-                    let p = &cfg.profiles[name];
-                    println!("{:<25} {} ({})", name, p.display_name, p.provider);
+                if json {
+                    #[derive(serde::Serialize)]
+                    struct ProfileSummary<'a> {
+                        name: &'a str,
+                        display_name: &'a str,
+                        provider: &'a str,
+                        repo: &'a str,
+                        local_path: &'a str,
+                        web_url: Option<String>,
+                    }
+                    let summaries: Vec<ProfileSummary> = names
+                        .iter()
+                        .map(|name| {
+                            let p = &cfg.profiles[*name];
+                            ProfileSummary {
+                                name,
+                                display_name: &p.display_name,
+                                provider: &p.provider,
+                                repo: &p.repo,
+                                local_path: &p.local_path,
+                                web_url: p.web_url(),
+                            }
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string(&summaries)?);
+                } else {
+                    for name in names {
+                        let p = &cfg.profiles[name];
+                        println!("{:<25} {} ({})", name, p.display_name, p.provider);
+                    }
                 }
             }
             ProfileCommands::Show { name, config } => {

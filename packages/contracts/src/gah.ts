@@ -239,6 +239,22 @@ export interface ReportTrendPoint {
 }
 
 // ---------------------------------------------------------------------------
+// gah profile list --json (src/main.rs)
+// ---------------------------------------------------------------------------
+
+export interface ProfileSummary {
+  name: string;
+  display_name: string;
+  provider: string;
+  repo: string;
+  local_path: string;
+  /** Human-facing repo link (github.com/... or the gitlab host), null if
+   * the provider isn't recognized or a self-hosted gitlab is missing
+   * provider_api_base. */
+  web_url: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // gah events --json (src/events.rs)
 // ---------------------------------------------------------------------------
 

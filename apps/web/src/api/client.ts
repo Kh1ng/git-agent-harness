@@ -21,7 +21,8 @@ import type {
   ReportData,
   ReportGroupBy,
   LedgerEntry,
-  ControllerEvent
+  ControllerEvent,
+  ProfileSummary
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -65,6 +66,7 @@ export interface GahDataSource {
   getReport(params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }): Promise<ReportData>;
   getWorkTimeline(workId: string): Promise<LedgerEntry[]>;
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
+  getProfiles(): Promise<ProfileSummary[]>;
 }
 
 export const gahApi: GahDataSource = {
@@ -86,5 +88,8 @@ export const gahApi: GahDataSource = {
       profile: params.profile,
       since: params.since
     });
+  },
+  getProfiles() {
+    return getJson<ProfileSummary[]>('/api/profiles');
   }
 };
