@@ -436,6 +436,7 @@ mod tests {
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
             claude_idle_timeout_seconds: None,
+            max_parallel_workers: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,

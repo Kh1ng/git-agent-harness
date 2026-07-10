@@ -29,6 +29,12 @@ pub struct AvailableTicket {
     /// `human_required`). Scoped to this ticket only; it does NOT block the
     /// profile. `None` work items (no work_id) are treated as not blocked.
     pub human_required: bool,
+    /// Parallel workers: another concurrent `gah loop`/`gah dispatch`
+    /// process claimed this work_id recently and hasn't finished (or been
+    /// abandoned long enough to ignore) it yet. Excluded from selection
+    /// the same way `has_active_mr` tickets are -- there's no point
+    /// picking a ticket a sibling worker is already mid-flight on.
+    pub has_active_claim: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

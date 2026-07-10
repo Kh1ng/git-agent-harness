@@ -216,6 +216,7 @@ mod tests {
             fix_attempt_counts: std::collections::HashMap::new(),
             merge_attempt_counts: std::collections::HashMap::new(),
             publishing_allow_pr: true,
+            max_parallel_workers: 1,
             backend_configured: std::collections::HashMap::new(),
         }
     }
@@ -250,6 +251,7 @@ mod tests {
             last_failure_class: None,
             has_active_mr: false,
             human_required: false,
+            has_active_claim: false,
         }
     }
 

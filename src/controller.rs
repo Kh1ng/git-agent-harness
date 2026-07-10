@@ -376,7 +376,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut failed_tickets: Vec<_> = snapshot
         .available_tickets
         .iter()
-        .filter(|t| !t.has_active_mr && t.prior_attempt_count > 0)
+        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count > 0)
         // TICKET-human-required-scoping: a work-item-scoped human_required
         // ticket is blocked at the item level. Skip it so it is neither
         // retried, escalated, nor redispatched -- but unrelated eligible
@@ -408,10 +408,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 .as_deref()
                 .is_some_and(|fc| is_infra_failure(fc) && some_backend_eligible)
     });
-    let has_undispatched = snapshot
-        .available_tickets
-        .iter()
-        .any(|t| !t.has_active_mr && t.prior_attempt_count == 0 && !t.human_required);
+    let has_undispatched = snapshot.available_tickets.iter().any(|t| {
+        !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0 && !t.human_required
+    });
 
     // Handle exhausted tickets: if there are exhausted tickets and NO other actionable items,
     // return HumanRequired for the first exhausted ticket
@@ -480,7 +479,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut undispatched: Vec<_> = snapshot
         .available_tickets
         .iter()
-        .filter(|t| !t.has_active_mr && t.prior_attempt_count == 0)
+        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0)
         // TICKET-human-required-scoping: skip work-item-scoped
         // human_required tickets; they await human action, not dispatch.
         .filter(|t| !t.human_required)
@@ -1191,6 +1190,7 @@ mod tests {
             fix_attempt_counts: std::collections::HashMap::new(),
             merge_attempt_counts: std::collections::HashMap::new(),
             publishing_allow_pr: true,
+            max_parallel_workers: 1,
             backend_configured: std::collections::HashMap::new(),
         }
     }
@@ -1267,6 +1267,7 @@ mod tests {
             last_failure_class: last_failure_class.map(str::to_string),
             has_active_mr,
             human_required,
+            has_active_claim: false,
         }
     }
 
@@ -1637,6 +1638,7 @@ mod tests {
             last_failure_class: Some("backend_error".into()),
             has_active_mr: false,
             human_required: false,
+            has_active_claim: false,
         });
         // Without a backend eligible, it should not be retried or escalated
         snapshot.availability.push(ScopeStatusJson {
@@ -1693,6 +1695,7 @@ mod tests {
             last_failure_class: Some("backend_error".into()),
             has_active_mr: false,
             human_required: false,
+            has_active_claim: false,
         });
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "human_required");
@@ -1715,6 +1718,7 @@ mod tests {
             last_failure_class: Some("environment_error".into()),
             has_active_mr: false,
             human_required: false,
+            has_active_claim: false,
         });
         // TICKET-FRESH is undispatched
         snapshot.available_tickets.push(ticket(
@@ -2402,6 +2406,7 @@ mod tests {
                 recommended_backend: None,
                 recommended_model: None,
                 human_required: false,
+                has_active_claim: false,
             });
         }
 

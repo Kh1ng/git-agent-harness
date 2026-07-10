@@ -909,6 +909,7 @@ fn main() -> Result<()> {
                     vibe_idle_timeout_seconds: None,
                     codex_idle_timeout_seconds: None,
                     claude_idle_timeout_seconds: None,
+                    max_parallel_workers: None,
                     notify_command,
                     policy_path,
                     env_file,

@@ -168,6 +168,32 @@ fn is_ledger_entry_stale(entry: &LedgerEntry) -> bool {
     now - entry_time > time::Duration::days(14)
 }
 
+/// Parallel workers: how long a "claim" entry (`LedgerEntry::new_claim`)
+/// blocks a ticket before it's treated as abandoned (worker crashed/killed
+/// mid-flight, or was force-killed by the idle-timeout watchdog after
+/// producing partial output that never reached a real completion entry).
+/// 6 hours is a generous margin above the longest real dispatch duration
+/// observed in practice (~3.9h, a slow openhands/hy3 run) -- long enough
+/// that a live, still-working claim is never mistaken for abandoned, short
+/// enough that a genuinely dead claim doesn't block a ticket for days.
+const CLAIM_STALE_AFTER_HOURS: i64 = 6;
+
+fn is_claim_stale(entry: &LedgerEntry) -> bool {
+    let entry_time = if let Ok(parsed) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
+        parsed
+    } else if let Ok(secs) = entry.timestamp.parse::<i64>() {
+        if let Ok(dt) = OffsetDateTime::from_unix_timestamp(secs) {
+            dt
+        } else {
+            return true;
+        }
+    } else {
+        return true;
+    };
+    let now = OffsetDateTime::now_utc();
+    now - entry_time > time::Duration::hours(CLAIM_STALE_AFTER_HOURS)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateWorkError {
     pub work_id: String,
@@ -197,7 +223,38 @@ pub(crate) fn duplicate_work_error(err: &anyhow::Error) -> Option<&DuplicateWork
     err.downcast_ref::<DuplicateWorkError>()
 }
 
-fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()> {
+/// Parallel workers: another concurrent `gah loop`/`gah dispatch` process
+/// already claimed this work_id and hasn't finished (or abandoned) it yet.
+/// Distinct from `DuplicateWorkError` (which means a real PR/MR already
+/// exists) since no PR/branch may exist at all here -- the other worker
+/// might still be mid-backend-run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveClaimError {
+    pub work_id: String,
+}
+
+impl fmt::Display for ActiveClaimError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Refusing dispatch: work ID '{}' was claimed by another in-flight dispatch within the last {CLAIM_STALE_AFTER_HOURS}h",
+            self.work_id
+        )
+    }
+}
+
+impl std::error::Error for ActiveClaimError {}
+
+/// Returns the resolved work_id on success (so `run()` can immediately
+/// write a parallel-worker claim for it), or an error if this work_id is
+/// already spoken for -- by a real open PR/MR (`DuplicateWorkError`) or by
+/// another in-flight worker's claim (`ActiveClaimError`). `Ok(None)` means
+/// no work_id could be resolved (nothing to claim, nothing to block).
+fn check_duplicate_work(
+    cfg: &GahConfig,
+    profile: &Profile,
+    args: &DispatchArgs,
+) -> Result<Option<String>> {
     let target = if args.target.is_empty() {
         if args.mode == "improve" || args.mode == "fix" {
             let default = PathBuf::from(&profile.artifact_root)
@@ -216,7 +273,7 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
     };
 
     if target.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let p = Path::new(&target);
@@ -241,19 +298,19 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
     };
 
     let Some(work_id) = work_id else {
-        return Ok(());
+        return Ok(None);
     };
 
     let matching_entries = match crate::ledger::entries_for_work_id(cfg, &work_id) {
         Ok(entries) => entries,
         Err(e) => {
             eprintln!("warning: failed to read ledger entries: {:#}", e);
-            return Ok(());
+            return Ok(Some(work_id));
         }
     };
 
     if matching_entries.is_empty() {
-        return Ok(());
+        return Ok(Some(work_id));
     }
 
     // Try to fetch MRs/PRs from provider
@@ -262,6 +319,15 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
     for entry in matching_entries {
         if is_ledger_entry_stale(&entry) {
             continue;
+        }
+
+        // Parallel workers: another concurrent dispatch already claimed
+        // this work_id and hasn't finished (or been abandoned long enough
+        // to ignore) yet.
+        if entry.mode == "claim" && !is_claim_stale(&entry) {
+            return Err(anyhow::Error::new(ActiveClaimError {
+                work_id: work_id.clone(),
+            }));
         }
 
         // Check if there is a matching MR
@@ -310,7 +376,7 @@ fn check_duplicate_work(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs)
         }
     }
 
-    Ok(())
+    Ok(Some(work_id))
 }
 
 /// TICKET-078: observation feed for `decide_next_action` -- one entry per
@@ -329,9 +395,9 @@ fn ledger_lookup_for_ticket(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
-) -> Option<(usize, usize, Option<String>, bool, bool)> {
+) -> Option<(usize, usize, Option<String>, bool, bool, bool)> {
     let Some(wid) = work_id else {
-        return Some((0, 0, None, false, false));
+        return Some((0, 0, None, false, false, false));
     };
     let entries = ledger_entries_by_work_id.get(wid);
     let mut count = 0usize;
@@ -339,6 +405,7 @@ fn ledger_lookup_for_ticket(
     let mut last_failure_class = None;
     let mut has_active_mr = false;
     let mut has_merged_mr = false;
+    let mut has_active_claim = false;
     // TICKET-human-required-scoping: effective human_required for this work
     // item is the most recent of its own (non-stale, repo-scoped) ledger
     // entries that carry a `human_required` flag. This is the canonical,
@@ -368,10 +435,24 @@ fn ledger_lookup_for_ticket(
             agent_failure_count = 0;
             last_failure_class = None;
             has_active_mr = false;
+            has_active_claim = false;
             human_required = false;
             continue;
         }
+        // Parallel workers: a claim marks the ticket as currently in-flight
+        // for another concurrent worker. It's a lease marker, not a real
+        // attempt outcome -- it doesn't count toward the retry cap, but it
+        // does need to block re-selection until it either resolves (a real
+        // completion entry follows) or goes stale (abandoned worker).
+        if e.mode == "claim" {
+            has_active_claim = !is_claim_stale(e);
+            continue;
+        }
         count += 1;
+        // A real completion entry (of any outcome) means whatever claim
+        // preceded this attempt has resolved -- this ticket is no longer
+        // in-flight from that worker's perspective.
+        has_active_claim = false;
         // Issue #95: only genuine agent failures count toward the retry
         // cap. Infra-class failures (backend_error, environment_error,
         // harness_error, unknown) still record in the ledger and appear
@@ -407,6 +488,7 @@ fn ledger_lookup_for_ticket(
         last_failure_class,
         has_active_mr,
         human_required,
+        has_active_claim,
     ))
 }
 
@@ -478,6 +560,7 @@ pub fn scan_available_tickets(
                 last_failure_class,
                 has_active_mr,
                 human_required,
+                has_active_claim,
             )) = ledger_lookup_for_ticket(
                 work_id.as_deref(),
                 profile,
@@ -499,6 +582,7 @@ pub fn scan_available_tickets(
                 last_failure_class,
                 has_active_mr,
                 human_required,
+                has_active_claim,
             });
         }
     }
@@ -547,6 +631,7 @@ pub fn scan_available_tickets(
             last_failure_class,
             has_active_mr,
             human_required,
+            has_active_claim,
         )) = ledger_lookup_for_ticket(
             work_id.as_deref(),
             profile,
@@ -568,6 +653,7 @@ pub fn scan_available_tickets(
             last_failure_class,
             has_active_mr,
             human_required,
+            has_active_claim,
         });
     }
 
@@ -647,7 +733,16 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     self_check_validation_gate(profile, cfg, args.skip_validation_gate)?;
 
     if args.mode == "improve" || args.mode == "fix" || args.mode == "experiment" {
-        check_duplicate_work(cfg, profile, args)?;
+        if let Some(work_id) = check_duplicate_work(cfg, profile, args)? {
+            // Parallel workers: claim this work_id immediately, before any
+            // backend work runs, so a concurrent `gah loop`/`gah dispatch`
+            // process sees it right away rather than only after this
+            // attempt finishes (minutes to hours later).
+            let claim = LedgerEntry::new_claim(&args.profile, profile, &work_id);
+            if let Err(e) = ledger::append(cfg, &claim) {
+                eprintln!("warning: failed to append claim ledger entry: {e:#}");
+            }
+        }
     }
 
     let ts = timestamp();
@@ -3575,6 +3670,7 @@ mod tests {
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
             claude_idle_timeout_seconds: None,
+            max_parallel_workers: None,
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -4437,6 +4533,62 @@ mod tests {
         assert_eq!(
             candidates[0].genuine_agent_failure_count, 0,
             "tombstone should reset genuine_agent_failure_count to 0"
+        );
+    }
+
+    // Parallel workers: a fresh claim marks a ticket has_active_claim,
+    // excluding it from re-selection; a real completion entry after the
+    // claim resolves it, and a stale claim stops blocking on its own.
+    #[test]
+    fn scan_available_tickets_reflects_claim_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-501-test.md"),
+            "# TICKET-501: Test\n\nGoal: test claim lifecycle\n",
+        )
+        .unwrap();
+
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
+
+        // A fresh claim, nothing else -> has_active_claim = true.
+        let claim = LedgerEntry::new_claim("test", &prof, "TICKET-501");
+        let index = crate::ledger::index_entries_by_work_id(std::slice::from_ref(&claim));
+        let candidates = scan_available_tickets(&prof, &[], &index);
+        assert_eq!(candidates.len(), 1);
+        assert!(
+            candidates[0].has_active_claim,
+            "fresh claim should mark the ticket as actively claimed"
+        );
+        assert_eq!(
+            candidates[0].prior_attempt_count, 0,
+            "a claim is a lease marker, not a counted attempt"
+        );
+
+        // A real completion entry after the claim resolves it.
+        let mut completed = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        completed.work_id = Some("TICKET-501".into());
+        completed.failure_class = Some("backend_error".into());
+        let index = crate::ledger::index_entries_by_work_id(&[claim, completed]);
+        let candidates = scan_available_tickets(&prof, &[], &index);
+        assert!(
+            !candidates[0].has_active_claim,
+            "a completion entry after the claim must clear has_active_claim"
+        );
+
+        // A stale (>6h old) claim with no completion after it -> not active.
+        let mut stale_claim = LedgerEntry::new_claim("test", &prof, "TICKET-501");
+        stale_claim.timestamp = (OffsetDateTime::now_utc() - time::Duration::hours(7))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let index = crate::ledger::index_entries_by_work_id(&[stale_claim]);
+        let candidates = scan_available_tickets(&prof, &[], &index);
+        assert!(
+            !candidates[0].has_active_claim,
+            "a stale claim must no longer block re-selection"
         );
     }
 
@@ -6150,6 +6302,93 @@ The parser should retain structured sections.\n\n\
         fs::write(&ledger_path, format!("{}\n", ledger_line_active_branch)).unwrap();
 
         let res = super::check_duplicate_work(&cfg, &prof_with_repo, &args);
+        assert!(res.is_ok());
+    }
+
+    // Parallel workers: a recent, non-stale claim entry (no PR/branch yet --
+    // the claiming worker may still be mid-backend-run) must block a second
+    // concurrent dispatch of the same work_id.
+    #[test]
+    fn check_duplicate_work_blocks_on_active_claim() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        setup_fake_gh(&bin_dir, "[]");
+        let _guard = PathGuard::set(&bin_dir);
+
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        let ticket_path = ticket_dir.join("TICKET-500-test.md");
+        fs::write(
+            &ticket_path,
+            "# TICKET-500: Test\n\nGoal: test claim guard\n",
+        )
+        .unwrap();
+
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.provider = "github".to_string();
+        prof.repo = "owner/repo".to_string();
+
+        let ledger_path = tmp.path().join("ledger.jsonl");
+        let claim = LedgerEntry::new_claim("test", &prof, "TICKET-500");
+        fs::write(
+            &ledger_path,
+            format!("{}\n", serde_json::to_string(&claim).unwrap()),
+        )
+        .unwrap();
+
+        let args = super::DispatchArgs {
+            profile: "test".to_string(),
+            mode: "improve".to_string(),
+            backend: "codex".to_string(),
+            target: ticket_path.display().to_string(),
+            branch: None,
+            mr: None,
+            current_branch: false,
+            budget: 0,
+            dry_run: false,
+            config_path: None,
+            oh_profile: None,
+            model: None,
+            retries: 0,
+            allow_draft_fail: false,
+            prod: false,
+            allow_unknown_red_baseline: false,
+            escalate: false,
+            existing_branch: None,
+            skip_validation_gate: false,
+            dispatch_reason: None,
+        };
+
+        // Fresh claim -> blocked.
+        let res = super::check_duplicate_work(&cfg, &prof, &args);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("claimed by another in-flight dispatch"));
+
+        // A stale claim (older than CLAIM_STALE_AFTER_HOURS) -> no longer blocks.
+        let mut stale_claim = claim.clone();
+        stale_claim.timestamp = (OffsetDateTime::now_utc() - time::Duration::hours(7))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        fs::write(
+            &ledger_path,
+            format!("{}\n", serde_json::to_string(&stale_claim).unwrap()),
+        )
+        .unwrap();
+        let res = super::check_duplicate_work(&cfg, &prof, &args);
         assert!(res.is_ok());
     }
 

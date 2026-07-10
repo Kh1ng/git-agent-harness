@@ -244,6 +244,17 @@ pub struct Profile {
     /// unset.
     #[serde(default)]
     pub claude_idle_timeout_seconds: Option<u64>,
+    /// How many `gah loop` workers may run concurrently for this profile.
+    /// Consulted by `gah-supervisor.sh`, not by `gah loop`/`gah dispatch`
+    /// themselves (each invocation is a single process; concurrency is a
+    /// property of how many of them run at once, not something the binary
+    /// enforces internally). Parallel-safety comes from the ledger claim
+    /// mechanism (`LedgerEntry::new_claim`, `check_duplicate_work`'s
+    /// `ActiveClaimError`) -- workers never need to coordinate directly,
+    /// they just skip whatever another worker already claimed. Defaults to
+    /// 1 (current, sequential behavior) when unset.
+    #[serde(default)]
+    pub max_parallel_workers: Option<u32>,
     /// HOME override for the `agy-second` backend name only -- a distinct
     /// authenticated Antigravity account/quota pool from the default `agy`
     /// backend, which otherwise runs under the process's real $HOME. Same
@@ -614,6 +625,10 @@ impl Profile {
         self.claude_idle_timeout_seconds.unwrap_or(300).max(1)
     }
 
+    pub fn max_parallel_workers(&self) -> u32 {
+        self.max_parallel_workers.unwrap_or(1).max(1)
+    }
+
     pub fn pat(&self) -> String {
         match self.provider.as_str() {
             "gitlab" => std::env::var("GITLAB_PAT2")
@@ -949,6 +964,7 @@ pub mod tests {
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
             claude_idle_timeout_seconds: None,
+            max_parallel_workers: None,
             notify_command: None,
             policy_path: None,
             env_file: None,
@@ -1004,6 +1020,7 @@ pub mod tests {
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
             claude_idle_timeout_seconds: None,
+            max_parallel_workers: None,
             notify_command: None,
             policy_path: None,
             env_file: None,
