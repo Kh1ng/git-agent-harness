@@ -200,7 +200,7 @@ pub fn load_state(state_path: &Path) -> Result<AvailabilityState> {
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", state_path.display())),
     };
-    let state: AvailabilityState = serde_json::from_str(&text)
+    let mut state: AvailabilityState = serde_json::from_str(&text)
         .with_context(|| format!("parsing availability state {}", state_path.display()))?;
     if state.version != CURRENT_VERSION {
         anyhow::bail!(
@@ -209,6 +209,17 @@ pub fn load_state(state_path: &Path) -> Result<AvailabilityState> {
             state.version,
             CURRENT_VERSION,
         );
+    }
+    // Canonicalize backend aliases (e.g. "cloud-coder" -> "openhands") at
+    // the single load point so every consumer -- list_scopes,
+    // availability_for, latest_for_scope/pool, and update_state's
+    // read-modify-write cycle -- sees consistent scope keys. This also
+    // self-heals historical records written under the old alias the next
+    // time the file is rewritten, with no separate migration needed.
+    for record in &mut state.records {
+        if record.backend != crate::config::canonical_backend_name(&record.backend) {
+            record.backend = crate::config::canonical_backend_name(&record.backend).to_string();
+        }
     }
     Ok(state)
 }
