@@ -783,7 +783,15 @@ mod tests {
             r#"{"display_name":"r","repo_id":"r","provider":"github","repo":"o/r","local_path":"/tmp","artifact_root":"/tmp","default_target_branch":"main"}"#,
         )
         .expect("valid profile json");
-        let mut e = crate::ledger::LedgerEntry::new(profile_name, &profile, "agy", "improve", "target", None, None);
+        let mut e = crate::ledger::LedgerEntry::new(
+            profile_name,
+            &profile,
+            "agy",
+            "improve",
+            "target",
+            None,
+            None,
+        );
         e.timestamp = timestamp.to_string();
         e.profile = profile_name.to_string();
         e.validation_result = validation_result.map(String::from);
@@ -842,10 +850,38 @@ mod tests {
         let d1 = "2026-07-01";
         let d2 = "2026-07-02";
         let entries = vec![
-            entry("gah", &format!("{d1}T10:00:00Z"), Some("passed"), 100, 1.0, 0.9),
-            entry("gah", &format!("{d1}T12:00:00Z"), Some("APPROVE_WEAK"), 200, 2.0, 1.8),
-            entry("gah", &format!("{d2}T09:00:00Z"), Some("passed"), 300, 3.0, 2.7),
-            entry("gah", &format!("{d2}T15:00:00Z"), Some("failed"), 400, 4.0, 3.6),
+            entry(
+                "gah",
+                &format!("{d1}T10:00:00Z"),
+                Some("passed"),
+                100,
+                1.0,
+                0.9,
+            ),
+            entry(
+                "gah",
+                &format!("{d1}T12:00:00Z"),
+                Some("APPROVE_WEAK"),
+                200,
+                2.0,
+                1.8,
+            ),
+            entry(
+                "gah",
+                &format!("{d2}T09:00:00Z"),
+                Some("passed"),
+                300,
+                3.0,
+                2.7,
+            ),
+            entry(
+                "gah",
+                &format!("{d2}T15:00:00Z"),
+                Some("failed"),
+                400,
+                4.0,
+                3.6,
+            ),
         ];
 
         let (_tmp, cfg) = config_with_ledger(&entries);
@@ -874,7 +910,14 @@ mod tests {
     fn test_build_series_filters_by_profile() {
         let entries = vec![
             entry("gah", "2026-07-01T10:00:00Z", Some("passed"), 100, 1.0, 0.9),
-            entry("other", "2026-07-01T11:00:00Z", Some("passed"), 999, 9.0, 8.0),
+            entry(
+                "other",
+                "2026-07-01T11:00:00Z",
+                Some("passed"),
+                999,
+                9.0,
+                8.0,
+            ),
         ];
 
         let (_tmp, cfg) = config_with_ledger(&entries);
