@@ -775,6 +775,8 @@ fn main() -> Result<()> {
                     existing_branch,
                     skip_validation_gate,
                     dispatch_reason: None,
+                    work_id: None,
+                    run_id: None,
                 },
             )?;
         }

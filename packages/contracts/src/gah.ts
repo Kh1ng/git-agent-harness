@@ -301,7 +301,21 @@ export interface ControllerEvent {
   event_type: string;
   profile: string | null;
   work_id: string | null;
+  run_id?: string | null;
   details: string;
+}
+
+export type ControllerActivityStatus = 'running' | 'finished' | 'failed';
+
+export interface ControllerActivity {
+  run_id: string;
+  profile: string | null;
+  work_id: string | null;
+  started_at: string;
+  finished_at: string | null;
+  action: string;
+  status: ControllerActivityStatus;
+  outcome: string | null;
 }
 
 // ---------------------------------------------------------------------------

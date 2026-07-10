@@ -1,5 +1,6 @@
 use crate::config::{GahConfig, Profile};
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -424,6 +425,21 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
         fs::create_dir_all(parent)
             .with_context(|| format!("creating ledger directory {}", parent.display()))?;
     }
+    // Dispatch workers append and review backfills concurrently. Serialize
+    // both operations with a sidecar lock so a backfill cannot rewrite a
+    // stale snapshot and erase another worker's append.
+    let lock_path = path.with_extension("lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening ledger lock {}", lock_path.display()))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("locking ledger {}", lock_path.display()))?;
+
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -477,6 +493,19 @@ pub fn backfill_review_verdict(
     reviewer_backend: &str,
     reviewer_model: Option<&str>,
 ) -> Result<bool> {
+    let path = cfg.defaults.ledger_path();
+    let lock_path = path.with_extension("lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening ledger lock {}", lock_path.display()))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("locking ledger {}", lock_path.display()))?;
+
     let mut entries = read_entries(cfg)?;
     let target_idx = entries
         .iter()
@@ -497,7 +526,6 @@ pub fn backfill_review_verdict(
     entries[idx].reviewer_backend = Some(reviewer_backend.to_string());
     entries[idx].reviewer_model = reviewer_model.map(|m| m.to_string());
 
-    let path = cfg.defaults.ledger_path();
     let mut out = String::new();
     for entry in &entries {
         out.push_str(&serde_json::to_string(entry).context("serializing ledger entry")?);

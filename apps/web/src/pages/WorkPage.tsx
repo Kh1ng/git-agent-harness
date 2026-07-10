@@ -10,6 +10,7 @@ import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyStat
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { SessionCard } from '../components/SessionCard.js';
 import { AttemptTimeline } from '../components/AttemptTimeline.js';
+import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
 
 const DISPATCH_MODES = ['fix', 'improve', 'review', 'pm', 'experiment'] as const;
 const DISPATCH_BACKENDS = ['auto', 'openhands', 'codex', 'claude', 'agy', 'vibe', 'opencode'] as const;
@@ -134,7 +135,7 @@ function WorkDetail({ workId, onBack }: { workId: string; onBack: () => void }) 
 }
 
 export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
-  const wsProfile = useWebSocket().profile;
+  const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
   const profile = profileOverride ?? wsProfile;
   const status = useGahStore((s) => s.status);
@@ -168,6 +169,10 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
       />
 
       <NewDispatchForm profile={profile ?? 'gah'} repo={activeProfileRepo} />
+
+      <section>
+        <ControllerActivityCard activity={controllerActivity} />
+      </section>
 
       <section>
         <h3 className="text-sm font-semibold text-primary mb-3">Active sessions ({activeSessions.length})</h3>
