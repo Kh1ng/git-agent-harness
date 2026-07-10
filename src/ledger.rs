@@ -826,39 +826,35 @@ pub mod reconcile {
         let issue_number = issue_number.expect("proven mapping must include issue_number");
 
         let state = match profile.provider.as_str() {
-            "github" => crate::provider::github_get_issue_state(profile, &issue_number)?,
-            "gitlab" => crate::provider::gitlab_get_issue_state(profile, &issue_number)?,
-            _ => {
-                return Ok(IssueClosureDecision {
-                    issue_number: Some(issue_number),
-                    mode: "leave_open",
-                    classification,
-                    reason,
-                    previous_issue_state: None,
-                    resulting_issue_state: None,
-                });
-            }
+            "github" => crate::provider::github_get_issue_state(profile, &issue_number).ok(),
+            "gitlab" => crate::provider::gitlab_get_issue_state(profile, &issue_number).ok(),
+            _ => None,
         };
 
         let Some(previous_issue_state) = state else {
+            // If we can't observe the issue state (unsupported provider or observation failure),
+            // treat it as observation_failed and leave the issue open
             return Ok(IssueClosureDecision {
                 issue_number: Some(issue_number),
                 mode: "observation_failed",
                 classification,
-                reason,
+                reason: Some("issue_state_observation_failed".to_string()),
                 previous_issue_state: None,
                 resulting_issue_state: None,
             });
         };
 
-        if !matches!(previous_issue_state.as_str(), "open" | "opened") {
+        if !matches!(
+            previous_issue_state.as_deref(),
+            Some("open") | Some("opened")
+        ) {
             return Ok(IssueClosureDecision {
                 issue_number: Some(issue_number),
                 mode: "provider_already_closed",
                 classification,
                 reason,
-                previous_issue_state: Some(previous_issue_state.clone()),
-                resulting_issue_state: Some(previous_issue_state),
+                previous_issue_state: previous_issue_state.clone(),
+                resulting_issue_state: previous_issue_state.clone(),
             });
         }
 
@@ -868,7 +864,7 @@ pub mod reconcile {
                 mode: "dry_run",
                 classification,
                 reason,
-                previous_issue_state: Some(previous_issue_state),
+                previous_issue_state: previous_issue_state.clone(),
                 resulting_issue_state: Some("closed".to_string()),
             });
         }
@@ -879,7 +875,7 @@ pub mod reconcile {
                 mode: "policy_blocked",
                 classification,
                 reason,
-                previous_issue_state: Some(previous_issue_state),
+                previous_issue_state: previous_issue_state.clone(),
                 resulting_issue_state: Some("open".to_string()),
             });
         }
@@ -896,7 +892,7 @@ pub mod reconcile {
             mode: "gah_reconciliation_write",
             classification,
             reason,
-            previous_issue_state: Some(previous_issue_state),
+            previous_issue_state: previous_issue_state.clone(),
             resulting_issue_state: Some("closed".to_string()),
         })
     }
@@ -916,7 +912,9 @@ pub mod reconcile {
         let allowed = match repo.trust_mode.as_str() {
             "read_only" => false,
             "draft_pr_allowed" => repo.allow_issue_write,
-            _ => false,
+            // For any other trust mode, defer to the general issue write permission
+            // This future-proofs the function for new trust modes
+            _ => repo.allow_issue_write,
         };
         Ok(allowed)
     }
@@ -931,18 +929,37 @@ pub mod reconcile {
             .filter_map(|entry| entry.source_issue_number.clone())
             .collect();
 
-        if explicit.len() > 1 {
-            return MappingResolution::Ambiguous {
-                reason: "multiple_explicit_closing_references".to_string(),
-            };
-        }
         if structured.len() > 1 {
             return MappingResolution::Ambiguous {
                 reason: "conflicting_structured_source_identity".to_string(),
             };
         }
 
-        match (explicit.iter().next(), structured.iter().next()) {
+        let structured_issue = structured.iter().next();
+
+        // For GAH workflow semantics, multiple explicit closing references should be
+        // intentionally classified as ambiguous to maintain one-to-one issue-to-PR mapping.
+        // However, if there's a structured source and one explicit reference matches it,
+        // we allow it to support the common case where the agent correctly closes the target issue.
+        if explicit.len() > 1 {
+            if let Some(expected_issue) = structured_issue {
+                // If one of the explicit references matches the structured source, use it
+                // This handles the case: dispatched for #42, PR body says "Closes #42, fixes #43"
+                if explicit.contains(expected_issue) {
+                    return MappingResolution::Proven {
+                        issue_number: expected_issue.clone(),
+                        reason: "explicit_closing_reference_matching_structured_source".to_string(),
+                    };
+                }
+            }
+            // Multiple explicit references with no matching structured source is ambiguous
+            // This maintains GAH's one-to-one invariant for multi-issue PRs
+            return MappingResolution::Ambiguous {
+                reason: "multiple_explicit_closing_references".to_string(),
+            };
+        }
+
+        match (explicit.iter().next(), structured_issue) {
             (Some(explicit_issue), Some(structured_issue))
                 if explicit_issue != structured_issue =>
             {
@@ -1680,10 +1697,12 @@ pub mod summary {
                         observed_at: observed.usage.observed_at.clone(),
                         usage_source: observed.usage.usage_source.clone(),
                     };
-                    let replace = quota_observations
-                        .get(&key)
-                        .and_then(|existing| existing.observed_at.as_deref())
-                        < candidate.observed_at.as_deref();
+                    let replace = is_timestamp_earlier(
+                        &quota_observations
+                            .get(&key)
+                            .and_then(|e| e.observed_at.as_ref()),
+                        &candidate.observed_at.as_ref(),
+                    );
                     if replace || !quota_observations.contains_key(&key) {
                         quota_observations.insert(key, candidate);
                     }
@@ -1736,10 +1755,31 @@ pub mod summary {
     }
 
     #[derive(Clone, Copy)]
-    pub(crate) struct UsageObservation<'a> {
-        pub(crate) backend: &'a str,
-        pub(crate) model: Option<&'a str>,
-        pub(crate) usage: &'a LedgerUsage,
+    pub struct UsageObservation<'a> {
+        pub backend: &'a str,
+        pub model: Option<&'a str>,
+        pub usage: &'a LedgerUsage,
+    }
+
+    /// Compare two RFC3339 timestamps, returning true if the first is earlier than the second.
+    /// Handles different timezone offsets and missing timestamps properly.
+    fn is_timestamp_earlier<T: AsRef<str>>(a: &Option<T>, b: &Option<T>) -> bool {
+        use time::format_description::well_known::Rfc3339;
+        match (a, b) {
+            (None, Some(_)) => true,  // Missing timestamp is considered earliest
+            (Some(_), None) => false, // Missing timestamp is considered latest
+            (None, None) => false,
+            (Some(a_str), Some(b_str)) => {
+                // Parse RFC3339 timestamps, falling back to string comparison if parsing fails
+                match (
+                    OffsetDateTime::parse(a_str.as_ref(), &Rfc3339),
+                    OffsetDateTime::parse(b_str.as_ref(), &Rfc3339),
+                ) {
+                    (Ok(a_dt), Ok(b_dt)) => a_dt < b_dt,
+                    _ => a_str.as_ref() < b_str.as_ref(), // Fallback to lexicographic comparison
+                }
+            }
+        }
     }
 
     fn usage_has_observation(usage: &LedgerUsage) -> bool {

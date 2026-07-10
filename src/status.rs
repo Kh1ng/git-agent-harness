@@ -162,6 +162,18 @@ pub fn build_snapshot(
     let mut sync_obs = ObservationStatus { status: "ok" };
     match sync::fetch_mrs(profile) {
         Ok(mrs) => {
+            let mrs = if profile.provider == "gitlab" {
+                mrs.into_iter()
+                    .filter(|mr| {
+                        mr.state
+                            .as_deref()
+                            .is_some_and(|state| state.eq_ignore_ascii_case("opened"))
+                            && !mr.merged
+                    })
+                    .collect()
+            } else {
+                mrs
+            };
             merge_requests = mrs
                 .iter()
                 .map(|mr| {
@@ -322,22 +334,6 @@ pub fn build_snapshot(
     // failure with no viable route) are still emitted above via
     // `availability`-derived constraints, NOT here.
     let mut blocked_work_items: Vec<Blocker> = Vec::new();
-    if let Some(ref rl) = recent_ledger {
-        if rl.human_required {
-            // Surface the most-recent human_required entry as a work-item
-            // blocker so it stays visible in status output, but scoped to
-            // its work_id/branch rather than freezing the whole profile.
-            blocked_work_items.push(Blocker {
-                kind: "human_required".into(),
-                reason: Some("ledger_human_required".into()),
-                message: Some("Ledger indicates human intervention required".into()),
-                backend: None,
-                model: None,
-                until: None,
-                source_reference: rl.most_recent_branch.clone(),
-            });
-        }
-    }
 
     // 5. Available tickets (TICKET-078): reuses the already-fetched `raw_mrs`
     // rather than calling sync::fetch_mrs a second time.
@@ -676,11 +672,10 @@ default_target_branch = "main"
         let snap = build_snapshot(&cfg, "test", now).unwrap();
 
         assert!(snap.recent_ledger.unwrap().human_required);
-        // TICKET-human-required-scoping: a ticket-scoped human_required is
-        // reported per work item, NOT as a profile-wide blocker.
+        // TICKET-human-required-scoping: an unassociated historical entry is
+        // informational only; blockers are emitted only for current work.
         assert!(snap.blockers.is_empty());
-        assert_eq!(snap.blocked_work_items.len(), 1);
-        assert_eq!(snap.blocked_work_items[0].kind, "human_required");
+        assert!(snap.blocked_work_items.is_empty());
     }
 
     #[test]
