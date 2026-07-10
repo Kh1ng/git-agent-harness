@@ -220,7 +220,10 @@ pub fn run_codex_with_executable(
 
     let start = Instant::now();
     let mut cmd = Command::new(executable);
+    // Issue #152: --json produces structured JSONL output for programmatic
+    // usage extraction in parse_codex_exec_json (usage.rs).
     cmd.arg("exec")
+        .arg("--json")
         .arg(task)
         .args(filtered_codex_args(extra_args))
         .args(codex_model_args(model))
@@ -1296,6 +1299,7 @@ mod tests {
 
         let argv = recorded_argv(&f.record_dir);
         assert_eq!(argv[0], "exec");
+        assert_eq!(argv[1], "--json");
         assert!(argv.contains(&"the codex task".to_string()));
         assert!(argv.contains(&"-c".to_string()));
         assert!(argv.contains(&"model=gpt".to_string()));
@@ -1374,6 +1378,7 @@ mod tests {
 
         let argv = recorded_argv(&f.record_dir);
         assert_eq!(argv[0], "exec");
+        assert_eq!(argv[1], "--json");
         assert!(argv.contains(&"task".to_string()));
         assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(argv.contains(&"--trace".to_string()));

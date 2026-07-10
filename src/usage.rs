@@ -101,6 +101,127 @@ fn find_f64(text: &str, keys: &[&str]) -> Option<f64> {
     })
 }
 
+/// Parse JSONL output from `codex exec --json`.
+/// Scans for `turn.completed` events and aggregates their usage data into
+/// a `LedgerUsage` struct. Returns an empty (all-`None`) `LedgerUsage` when
+/// no structured usage data is found — callers distinguish "no JSON events"
+/// from "parsed successfully" by checking `usage_source`.
+pub fn parse_codex_exec_json(output: &str) -> LedgerUsage {
+    let mut input_tokens: Option<u64> = None;
+    let mut output_tokens: Option<u64> = None;
+    let mut cache_read_tokens: Option<u64> = None;
+    let mut turns_found = 0u64;
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() || !line.starts_with('{') {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value["type"].as_str() != Some("turn.completed") {
+            continue;
+        }
+        let Some(usage_obj) = value.get("usage") else {
+            continue;
+        };
+
+        turns_found += 1;
+
+        if let Some(v) = usage_obj.get("input_tokens").and_then(|v| v.as_u64()) {
+            input_tokens = Some(input_tokens.unwrap_or(0) + v);
+        }
+        if let Some(v) = usage_obj.get("output_tokens").and_then(|v| v.as_u64()) {
+            output_tokens = Some(output_tokens.unwrap_or(0) + v);
+        }
+        if let Some(v) = usage_obj
+            .get("cached_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            cache_read_tokens = Some(cache_read_tokens.unwrap_or(0) + v);
+        }
+        // reasoning_output_tokens are billed as output tokens — add them in
+        if let Some(v) = usage_obj
+            .get("reasoning_output_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            output_tokens = Some(output_tokens.unwrap_or(0) + v);
+        }
+    }
+
+    if turns_found == 0 {
+        return LedgerUsage::default();
+    }
+
+    let mut usage = LedgerUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        ..LedgerUsage::default()
+    };
+
+    usage.total_tokens = match (usage.input_tokens, usage.output_tokens) {
+        (Some(input), Some(output)) => Some(input + output),
+        _ => usage.total_tokens,
+    };
+    usage.requests_count = Some(turns_found);
+    usage.usage_source = Some("codex_exec_json".to_string());
+
+    usage
+}
+
+/// Parse JSON output from `codex status --json`.
+/// Extracts rate-limit and quota data (primary/secondary windows, reset
+/// timestamps) into the quota fields of `LedgerUsage`. Returns an empty
+/// (all-`None`) `LedgerUsage` when the payload does not contain a
+/// `rateLimits` object.
+#[allow(dead_code)]
+pub fn parse_codex_status_json(output: &str) -> LedgerUsage {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(output) else {
+        return LedgerUsage::default();
+    };
+
+    let Some(rate_limits) = root.get("rateLimits") else {
+        return LedgerUsage::default();
+    };
+
+    let mut usage = LedgerUsage::default();
+    let mut has_data = false;
+
+    if let Some(primary) = rate_limits.get("primary") {
+        if let Some(pct) = primary.get("usedPercent").and_then(|v| v.as_f64()) {
+            usage.quota_used_percent = Some(pct);
+            has_data = true;
+        }
+        if let Some(mins) = primary.get("windowDurationMins").and_then(|v| v.as_u64()) {
+            usage.quota_window = Some(format!("{}m", mins));
+            has_data = true;
+        }
+        if let Some(ts) = primary.get("resetsAt").and_then(|v| v.as_i64()) {
+            if let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(ts) {
+                if let Ok(formatted) = dt.format(&time::format_description::well_known::Rfc3339) {
+                    usage.quota_reset_at = Some(formatted);
+                    has_data = true;
+                }
+            }
+        }
+    }
+
+    if let Some(secondary) = rate_limits.get("secondary") {
+        if let Some(pct) = secondary.get("usedPercent").and_then(|v| v.as_f64()) {
+            usage.quota_remaining_percent = Some(100.0 - pct);
+            has_data = true;
+        }
+    }
+
+    if has_data {
+        usage.usage_source = Some("codex_status_json".to_string());
+    }
+
+    usage
+}
+
 /// A real quota-window/quota-reset-at value is a short human string ("weekly",
 /// "5h", an ISO timestamp). `[^\n\r]+` alone is unbounded and backend log
 /// text is not always newline-delimited per logical line (e.g. a diff or
@@ -144,7 +265,74 @@ fn find_string_after(text: &str, keys: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_codex_exec_json;
+    use super::parse_codex_status_json;
     use super::parse_generic_usage;
+
+    // ── codex exec --json (Issue #152) ───────────────────────────────────
+
+    const CODEX_EXEC_JSON: &str = include_str!("../tests/fixtures/codex-exec-json.jsonl");
+
+    #[test]
+    fn codex_exec_json_aggregates_usage_across_turns() {
+        let usage = parse_codex_exec_json(CODEX_EXEC_JSON);
+        assert_eq!(usage.input_tokens, Some(14230 + 5200));
+        assert_eq!(usage.output_tokens, Some(2150 + 890 + 340));
+        assert_eq!(usage.cache_read_tokens, Some(11800));
+        assert_eq!(usage.total_tokens, Some(14230 + 5200 + 2150 + 890 + 340));
+        assert_eq!(usage.requests_count, Some(2));
+        assert_eq!(usage.usage_source.as_deref(), Some("codex_exec_json"));
+    }
+
+    #[test]
+    fn codex_exec_json_returns_empty_for_non_json_output() {
+        let text = "some plain text\ninput_tokens: 500\n";
+        let usage = parse_codex_exec_json(text);
+        assert_eq!(usage.usage_source, None);
+        assert_eq!(usage.input_tokens, None);
+    }
+
+    #[test]
+    fn codex_exec_json_returns_empty_for_unrelated_json() {
+        let text = r#"{"type":"item.agent_message","content":"hello"}"#;
+        let usage = parse_codex_exec_json(text);
+        assert_eq!(usage.usage_source, None);
+    }
+
+    #[test]
+    fn codex_exec_json_returns_empty_for_empty_input() {
+        assert_eq!(parse_codex_exec_json("").usage_source, None);
+        assert_eq!(parse_codex_exec_json("\n\n").usage_source, None);
+    }
+
+    // ── codex status --json (Issue #152) ─────────────────────────────────
+
+    const CODEX_STATUS_JSON: &str = include_str!("../tests/fixtures/codex-status-json.json");
+
+    #[test]
+    fn codex_status_json_extracts_quota_fields() {
+        let usage = parse_codex_status_json(CODEX_STATUS_JSON);
+        assert_eq!(usage.quota_used_percent, Some(25.0));
+        assert_eq!(usage.quota_remaining_percent, Some(82.0));
+        assert_eq!(usage.quota_window.as_deref(), Some("300m"));
+        // 1777534802 -> 2026-04-29-ish (UTC)
+        assert!(usage.quota_reset_at.is_some());
+        assert_eq!(usage.usage_source.as_deref(), Some("codex_status_json"));
+    }
+
+    #[test]
+    fn codex_status_json_returns_empty_for_non_json_input() {
+        let usage = parse_codex_status_json("not json at all");
+        assert_eq!(usage.usage_source, None);
+    }
+
+    #[test]
+    fn codex_status_json_returns_empty_for_missing_rate_limits() {
+        let usage = parse_codex_status_json(r#"{"some":"data"}"#);
+        assert_eq!(usage.usage_source, None);
+    }
+
+    // ── Existing generic parser tests ────────────────────────────────────
 
     #[test]
     fn parses_basic_usage_fields() {
