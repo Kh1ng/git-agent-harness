@@ -238,6 +238,16 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 }
             }
             "READY_FOR_HUMAN" => {
+                let work_id_str = mr.work_id.as_deref().unwrap_or("");
+                if snapshot.review_held_work_ids.contains(work_id_str) {
+                    // A manager session is actively reviewing this MR out of
+                    // band (`gah hold set`). Don't auto-merge out from under
+                    // them, but don't freeze the rest of the profile either
+                    // -- just skip this MR for this loop tick. The manager
+                    // clears the hold (`gah hold clear`) when done, or it
+                    // self-expires after REVIEW_HOLD_STALE_AFTER_HOURS.
+                    continue;
+                }
                 let merge_policy = snapshot.profile.merge_policy;
                 if mr.ci_passed {
                     let merge_attempts = snapshot
@@ -1204,6 +1214,7 @@ mod tests {
             available_tickets: vec![],
             fix_attempt_counts: std::collections::HashMap::new(),
             merge_attempt_counts: std::collections::HashMap::new(),
+            review_held_work_ids: std::collections::HashSet::new(),
             publishing_allow_pr: true,
             max_parallel_workers: 1,
             backend_configured: std::collections::HashMap::new(),
@@ -1538,6 +1549,28 @@ mod tests {
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "merge_mr");
         assert_ne!(action.kind(), "human_required");
+    }
+
+    // Review hold: a manager session running `gah hold set` on a work_id
+    // must stop gah's own loop from auto-merging it out from under them,
+    // even though every other input (READY_FOR_HUMAN, green CI, auto
+    // policy) would otherwise produce MergeMr. The MR is simply skipped for
+    // this tick, not escalated -- with no other actionable work in the
+    // snapshot, that means NoOp.
+    #[test]
+    fn ready_for_human_review_held_work_id_does_not_auto_merge() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .merge_requests
+            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        snapshot.profile.merge_policy = crate::config::MergePolicy::Auto;
+        snapshot
+            .review_held_work_ids
+            .insert("TICKET-gah/real-1".to_string());
+
+        let action = decide_next_action(&snapshot);
+        assert_ne!(action.kind(), "merge_mr");
+        assert_eq!(action.kind(), "no_op");
     }
 
     // Issue #129 Bug A: the complement -- the only case READY_FOR_HUMAN parks

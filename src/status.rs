@@ -37,6 +37,12 @@ pub struct StatusSnapshot {
     /// TICKET-127: merge attempt counts per branch for the auto-merge
     /// retry cap.
     pub merge_attempt_counts: std::collections::HashMap<String, usize>,
+    /// work_ids currently under an active `gah hold set` -- a manager
+    /// session (human or supervising Claude/Codex/Hermes) reviewing the
+    /// work_id's PR out of band. The controller must not auto-merge these
+    /// out from under an in-progress review; see `decide_next_action`'s
+    /// READY_FOR_HUMAN arm.
+    pub review_held_work_ids: std::collections::HashSet<String>,
     /// TICKET-128: per-profile publishing policy. When PR/MR creation is
     /// disabled, the controller must never enter the auto-merge path even
     /// when a strong reviewer has approved and CI is green. This is an
@@ -170,6 +176,9 @@ pub fn build_snapshot(
     let fix_attempt_counts = sync::count_fix_attempts_per_branch(cfg);
     // TICKET-127: Count merge attempts per branch for the auto-merge retry cap
     let merge_attempt_counts = sync::count_merge_attempts_per_branch(cfg);
+    // review-hold: work_ids a manager session is actively reviewing via
+    // `gah hold set`, out of band from gah's own auto-merge loop.
+    let review_held_work_ids = ledger::active_review_hold_work_ids(cfg, profile_name);
 
     // 1. Sync State
     let mut merge_requests = Vec::new();
@@ -443,6 +452,7 @@ pub fn build_snapshot(
         available_tickets,
         fix_attempt_counts,
         merge_attempt_counts,
+        review_held_work_ids,
         publishing_allow_pr: profile.publishing.allow_pull_request_creation,
         max_parallel_workers: profile.max_parallel_workers(),
         backend_configured,
