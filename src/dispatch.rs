@@ -3863,7 +3863,7 @@ mod tests {
         .unwrap();
         crate::ledger::append(
             &cfg,
-            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_STRONG", "high"),
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "high"),
         )
         .unwrap();
         assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
@@ -3876,12 +3876,12 @@ mod tests {
         let prof = profile(tmp.path());
         crate::ledger::append(
             &cfg,
-            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_STRONG", "high"),
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "high"),
         )
         .unwrap();
         crate::ledger::append(
             &cfg,
-            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_WEAK", "low"),
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "low"),
         )
         .unwrap();
         assert_eq!(
@@ -3897,7 +3897,7 @@ mod tests {
         let prof = profile(tmp.path());
         crate::ledger::append(
             &cfg,
-            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_STRONG", "medium"),
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "medium"),
         )
         .unwrap();
         assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);

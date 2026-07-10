@@ -1704,7 +1704,7 @@ fn review_writes_structured_verdict_and_posts_comment() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -1736,7 +1736,7 @@ fn review_writes_structured_verdict_and_posts_comment() {
     let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(report.contains("Review notes"));
-    assert!(verdict.contains("\"verdict\": \"APPROVE_STRONG\""));
+    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
     assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
     assert!(prompt.contains("Source: feature/review"));
     assert!(prompt.contains("Target: main"));
@@ -1759,7 +1759,7 @@ fn review_routes_to_agy_candidate_and_writes_verdict() {
         &fake_bin,
         "agy",
         &format!(
-            "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -1837,7 +1837,7 @@ fn review_falls_back_to_next_candidate_on_agy_empty_output() {
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
-        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}\nEOF\n",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}\nEOF\n",
     );
     make_fake_bin_with_body(
         &fake_bin,
@@ -1900,7 +1900,7 @@ fn review_uses_explicit_claude_path() {
         explicit_claude.parent().unwrap(),
         "claude-explicit",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -2016,7 +2016,7 @@ fn review_activates_and_records_capability_when_installed() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -2118,7 +2118,7 @@ fn review_parse_failure_preserves_raw_report() {
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
-        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false\nEOF\n",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false\nEOF\n",
     );
     make_fake_bin_with_body(
         &fake_bin,
@@ -2171,7 +2171,7 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
-        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}\nEOF\n",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}\nEOF\n",
     );
     make_fake_bin_with_body(
         &fake_bin,
@@ -2247,7 +2247,7 @@ fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
-        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}\nEOF\n",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}\nEOF\n",
     );
     make_fake_bin_with_body(
         &fake_bin,
@@ -2306,7 +2306,7 @@ fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -2375,7 +2375,7 @@ fn review_uses_profile_repo_not_current_worktree() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -4941,7 +4941,7 @@ fn publishing_disabled_still_runs_reviewer() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -4973,7 +4973,7 @@ fn publishing_disabled_still_runs_reviewer() {
     let report = fs::read_to_string(session.join("review-report.md")).unwrap();
     let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
     assert!(report.contains("Review notes"));
-    assert!(verdict.contains("\"verdict\": \"APPROVE_STRONG\""));
+    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
     // The prompt was still written for the reviewer (review is not disabled).
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(prompt.contains("Source: feature/review"));
@@ -5071,7 +5071,7 @@ fn issue_comments_disabled_skips_tracker_comment() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE_STRONG\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -5114,7 +5114,7 @@ fn issue_comments_disabled_skips_tracker_comment() {
     let sessions = tmp.path().join("artifacts/real/sessions");
     let session = latest_child_dir(&sessions);
     let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
-    assert!(verdict.contains("\"verdict\": \"APPROVE_STRONG\""));
+    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
 }
 
 /// Acceptance: a pet-project profile with publishing enabled keeps the
