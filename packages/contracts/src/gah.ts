@@ -245,6 +245,27 @@ export interface ReportTrendPoint {
 }
 
 // ---------------------------------------------------------------------------
+// gah report --series --bucket daily --json (Issue #142)
+// Time-bucketed usage/cost/success-rate series for the trend chart.
+// ---------------------------------------------------------------------------
+
+export interface ReportSeriesPoint {
+  date: string;
+  total_tokens: number;
+  actual_cost_usd: number | null;
+  estimated_cost_usd: number | null;
+  success_rate: number;
+}
+
+export interface ReportSeriesData {
+  ledger_path: string;
+  since: string;
+  bucket: string;
+  profile: string | null;
+  series: ReportSeriesPoint[];
+}
+
+// ---------------------------------------------------------------------------
 // gah profile list --json (src/main.rs)
 // ---------------------------------------------------------------------------
 

@@ -20,6 +20,13 @@ pub struct ReportArgs {
     pub config_path: Option<String>,
     pub group_by: LedgerGroupBy,
     pub json: bool,
+    /// When set, emit a time-bucketed series (one row per bucket) instead
+    /// of the single aggregate-per-backend/model report. Additive flag: the
+    /// non-series aggregate behavior is unchanged when this is false.
+    pub series: bool,
+    /// Bucket granularity for `--series`. Currently only `daily` is
+    /// supported; each bucket is keyed by calendar date (UTC).
+    pub bucket: String,
 }
 
 /// Unified report data structure
@@ -76,10 +83,23 @@ pub fn run(args: ReportArgs) -> Result<()> {
         config_path,
         group_by,
         json,
+        series,
+        bucket,
     } = args;
 
     // Use the existing ledger summary functionality but with grouping
     let cfg = config::load(config_path.as_deref())?;
+
+    if series {
+        let series_data = build_series(&cfg, &since, profile.as_deref(), &bucket)?;
+        if json {
+            println!("{}", serde_json::to_string(&series_data)?);
+        } else {
+            display_series(&series_data)?;
+        }
+        return Ok(());
+    }
+
     let data = build_summary(&cfg, &since, profile.as_deref(), group_by)?;
 
     if json {
@@ -92,6 +112,169 @@ pub fn run(args: ReportArgs) -> Result<()> {
 
     // For plain text output, use the existing grouped display but with report-focused formatting
     display_report(&data, group_by, &since, profile.as_deref())?;
+
+    Ok(())
+}
+
+/// One time-bucketed row of the `--series` report: a per-bucket aggregate
+/// of usage/cost/success over ledger entries whose timestamp falls in the
+/// bucket.
+#[derive(Debug, Serialize)]
+pub struct ReportSeriesPoint {
+    /// Bucket key. For `daily` this is the calendar date (`YYYY-MM-DD`), UTC.
+    pub date: String,
+    pub total_tokens: u64,
+    pub actual_cost_usd: Option<f64>,
+    pub estimated_cost_usd: Option<f64>,
+    /// Fraction 0..1 (entries with a validation pass / total entries).
+    pub success_rate: f64,
+    pub entries: usize,
+    pub validation_pass: usize,
+}
+
+/// Top-level payload for `gah report --series --json`.
+#[derive(Debug, Serialize)]
+pub struct ReportSeriesData {
+    pub ledger_path: String,
+    pub since: String,
+    pub bucket: String,
+    pub profile: Option<String>,
+    pub series: Vec<ReportSeriesPoint>,
+}
+
+/// Build a time-bucketed series of usage/cost/success over the ledger.
+///
+/// Reuses the same ledger-scanning logic as the existing aggregate report
+/// (read entries, apply `--since`/`--profile` filters, bucket by calendar
+/// date for `daily`, aggregate token/cost/validation fields from the
+/// per-attempt usage records), just grouping into a series of buckets
+/// instead of collapsing to one row per backend/model.
+pub fn build_series(
+    cfg: &config::GahConfig,
+    since: &str,
+    profile: Option<&str>,
+    bucket: &str,
+) -> Result<ReportSeriesData> {
+    if bucket != "daily" {
+        anyhow::bail!(
+            "unsupported --bucket value '{}'; only 'daily' is supported",
+            bucket
+        );
+    }
+
+    let cutoff = ledger::summary::parse_since(since)?;
+    let mut entries = ledger::read_entries(cfg)?;
+    if let Some(profile) = profile {
+        entries.retain(|entry| entry.profile == profile);
+    }
+    entries.retain(|entry| entry.timestamp >= cutoff);
+
+    let mut points: BTreeMap<String, ReportSeriesPoint> = BTreeMap::new();
+    for entry in &entries {
+        // Bucket key is the calendar date prefix (UTC). Entries without a
+        // usable date prefix are skipped rather than silently dropped into
+        // a wrong bucket.
+        let Some(date) = entry.timestamp.get(..10) else {
+            continue;
+        };
+        let point = points
+            .entry(date.to_string())
+            .or_insert_with(|| ReportSeriesPoint {
+                date: date.to_string(),
+                total_tokens: 0,
+                actual_cost_usd: None,
+                estimated_cost_usd: None,
+                success_rate: 0.0,
+                entries: 0,
+                validation_pass: 0,
+            });
+        point.entries += 1;
+        if matches!(
+            entry.validation_result.as_deref(),
+            Some("passed") | Some("APPROVE_STRONG") | Some("APPROVE_WEAK")
+        ) {
+            point.validation_pass += 1;
+        }
+
+        // Token/cost telemetry lives on the per-attempt usage records, not
+        // the top-level entry usage (which is only populated for some
+        // backends). Aggregate from attempts, falling back to the
+        // top-level entry usage when there are no attempts.
+        let mut tokens: u64 = 0;
+        let mut actual: Option<f64> = None;
+        let mut estimated: Option<f64> = None;
+        let mut saw_usage = false;
+        for attempt in &entry.attempts {
+            if let Some(t) = attempt.usage.total_tokens {
+                tokens += t;
+                saw_usage = true;
+            }
+            add_optional(&mut actual, attempt.usage.actual_cost_usd);
+            add_optional(&mut estimated, attempt.usage.estimated_cost_usd);
+        }
+        if !saw_usage {
+            tokens += entry.usage.total_tokens.unwrap_or(0);
+            add_optional(&mut actual, entry.usage.actual_cost_usd);
+            add_optional(&mut estimated, entry.usage.estimated_cost_usd);
+        }
+        point.total_tokens += tokens;
+        add_optional(&mut point.actual_cost_usd, actual);
+        add_optional(&mut point.estimated_cost_usd, estimated);
+    }
+
+    let mut series: Vec<ReportSeriesPoint> = points.into_values().collect();
+    for point in &mut series {
+        point.success_rate = if point.entries > 0 {
+            point.validation_pass as f64 / point.entries as f64
+        } else {
+            0.0
+        };
+    }
+
+    Ok(ReportSeriesData {
+        ledger_path: cfg.defaults.ledger_path().to_string_lossy().to_string(),
+        since: since.to_string(),
+        bucket: bucket.to_string(),
+        profile: profile.map(String::from),
+        series,
+    })
+}
+
+/// Plain-text rendering for `gah report --series`.
+fn display_series(data: &ReportSeriesData) -> Result<()> {
+    println!("Time-bucketed usage series (bucket: {}):", data.bucket);
+    println!("Ledger: {}", data.ledger_path);
+    println!("Window: last {}", data.since);
+    if let Some(profile) = &data.profile {
+        println!("Profile: {}", profile);
+    }
+    println!();
+
+    if data.series.is_empty() {
+        println!("  No entries in this window.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<12} {:>10} {:>12} {:>12} {:>8}",
+        "date", "tokens", "actual$", "est$", "success"
+    );
+    for point in &data.series {
+        println!(
+            "{:<12} {:>10} {:>12} {:>12} {:>7.1}%",
+            point.date,
+            point.total_tokens,
+            point
+                .actual_cost_usd
+                .map(|c| format!("{c:.4}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            point
+                .estimated_cost_usd
+                .map(|c| format!("{c:.4}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            point.success_rate * 100.0
+        );
+    }
 
     Ok(())
 }
@@ -583,5 +766,136 @@ mod tests {
             transform_to_report_format(None, &data, GroupBy::Backend, "7d", None).unwrap();
 
         assert_eq!(report_data.comparisons[0].success_rate, 0.0);
+    }
+
+    /// Build a `LedgerEntry` with a fixed timestamp/profile/validation and a
+    /// single attempt carrying the given usage. Uses `LedgerEntry::new` for
+    /// the defaults, then overrides the fields the series logic reads.
+    fn entry(
+        profile_name: &str,
+        timestamp: &str,
+        validation_result: Option<&str>,
+        total_tokens: u64,
+        actual_cost_usd: f64,
+        estimated_cost_usd: f64,
+    ) -> crate::ledger::LedgerEntry {
+        let profile: crate::config::Profile = serde_json::from_str(
+            r#"{"display_name":"r","repo_id":"r","provider":"github","repo":"o/r","local_path":"/tmp","artifact_root":"/tmp","default_target_branch":"main"}"#,
+        )
+        .expect("valid profile json");
+        let mut e = crate::ledger::LedgerEntry::new(profile_name, &profile, "agy", "improve", "target", None, None);
+        e.timestamp = timestamp.to_string();
+        e.profile = profile_name.to_string();
+        e.validation_result = validation_result.map(String::from);
+        e.attempts = vec![crate::ledger::AttemptRecord {
+            attempt_number: 1,
+            backend: "agy".to_string(),
+            effective_model: None,
+            exit_code: None,
+            validation_result: None,
+            failure_class: None,
+            failure_stage: None,
+            duration_seconds: None,
+            diff_path: None,
+            usage: crate::ledger::LedgerUsage {
+                total_tokens: Some(total_tokens),
+                actual_cost_usd: Some(actual_cost_usd),
+                estimated_cost_usd: Some(estimated_cost_usd),
+                ..Default::default()
+            },
+        }];
+        e
+    }
+
+    /// Write `entries` to a temp ledger file and return a config that points
+    /// at it. The temp dir is returned so the caller keeps it alive for the
+    /// duration of the assertions.
+    fn config_with_ledger(
+        entries: &[crate::ledger::LedgerEntry],
+    ) -> (tempfile::TempDir, crate::config::GahConfig) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger_path = tmp.path().join("ledger.jsonl");
+        let artifact_root = tmp.path().to_string_lossy().into_owned();
+        let mut text = String::new();
+        for entry in entries {
+            text.push_str(&serde_json::to_string(entry).unwrap());
+            text.push('\n');
+        }
+        std::fs::write(&ledger_path, text).unwrap();
+        let cfg = crate::config::GahConfig {
+            defaults: crate::config::Defaults {
+                artifact_root,
+                worktree_base: String::new(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        (tmp, cfg)
+    }
+
+    #[test]
+    fn test_build_series_buckets_by_day() {
+        // Two days, two entries each. Day 1: both pass. Day 2: one pass one fail.
+        let d1 = "2026-07-01";
+        let d2 = "2026-07-02";
+        let entries = vec![
+            entry("gah", &format!("{d1}T10:00:00Z"), Some("passed"), 100, 1.0, 0.9),
+            entry("gah", &format!("{d1}T12:00:00Z"), Some("APPROVE_WEAK"), 200, 2.0, 1.8),
+            entry("gah", &format!("{d2}T09:00:00Z"), Some("passed"), 300, 3.0, 2.7),
+            entry("gah", &format!("{d2}T15:00:00Z"), Some("failed"), 400, 4.0, 3.6),
+        ];
+
+        let (_tmp, cfg) = config_with_ledger(&entries);
+        let data = build_series(&cfg, "30d", None, "daily").unwrap();
+
+        assert_eq!(data.bucket, "daily");
+        assert_eq!(data.series.len(), 2);
+
+        let day1 = data.series.iter().find(|p| p.date == d1).unwrap();
+        assert_eq!(day1.entries, 2);
+        assert_eq!(day1.validation_pass, 2);
+        assert!((day1.success_rate - 1.0).abs() < 1e-9);
+        assert_eq!(day1.total_tokens, 300);
+        assert!((day1.actual_cost_usd.unwrap() - 3.0).abs() < 1e-9);
+        assert!((day1.estimated_cost_usd.unwrap() - 2.7).abs() < 1e-9);
+
+        let day2 = data.series.iter().find(|p| p.date == d2).unwrap();
+        assert_eq!(day2.entries, 2);
+        assert_eq!(day2.validation_pass, 1);
+        assert!((day2.success_rate - 0.5).abs() < 1e-9);
+        assert_eq!(day2.total_tokens, 700);
+        assert!((day2.actual_cost_usd.unwrap() - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_build_series_filters_by_profile() {
+        let entries = vec![
+            entry("gah", "2026-07-01T10:00:00Z", Some("passed"), 100, 1.0, 0.9),
+            entry("other", "2026-07-01T11:00:00Z", Some("passed"), 999, 9.0, 8.0),
+        ];
+
+        let (_tmp, cfg) = config_with_ledger(&entries);
+        let data = build_series(&cfg, "30d", Some("gah"), "daily").unwrap();
+
+        assert_eq!(data.series.len(), 1);
+        assert_eq!(data.series[0].total_tokens, 100);
+        assert_eq!(data.profile.as_deref(), Some("gah"));
+    }
+
+    #[test]
+    fn test_build_series_rejects_unknown_bucket() {
+        let (_tmp, cfg) = config_with_ledger(&[]);
+        let err = build_series(&cfg, "30d", None, "hourly").unwrap_err();
+        assert!(err.to_string().contains("unsupported --bucket"));
+    }
+
+    #[test]
+    fn test_build_series_empty_when_no_entries() {
+        let (_tmp, cfg) = config_with_ledger(&[]);
+        let data = build_series(&cfg, "30d", None, "daily").unwrap();
+        assert!(data.series.is_empty());
     }
 }

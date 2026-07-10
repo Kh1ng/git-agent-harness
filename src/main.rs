@@ -268,6 +268,14 @@ enum Commands {
         group_by: ledger::GroupBy,
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Emit a time-bucketed series (one row per bucket) instead of the
+        /// single aggregate-per-backend/model report. Additive: the existing
+        /// aggregate behavior is unchanged when this is absent.
+        #[arg(long, default_value_t = false)]
+        series: bool,
+        /// Bucket granularity for `--series`. Only `daily` is supported.
+        #[arg(long, default_value = "daily")]
+        bucket: String,
     },
     /// Start the WebSocket server for desktop/web interface
     Server {
@@ -1153,6 +1161,8 @@ fn main() -> Result<()> {
             config_path,
             group_by,
             json,
+            series,
+            bucket,
         } => {
             report::run(report::ReportArgs {
                 since,
@@ -1160,6 +1170,8 @@ fn main() -> Result<()> {
                 config_path,
                 group_by,
                 json,
+                series,
+                bucket,
             })?;
         }
 

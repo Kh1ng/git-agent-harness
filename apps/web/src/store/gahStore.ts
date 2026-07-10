@@ -11,7 +11,7 @@
  */
 import { create } from 'zustand';
 import { gahApi, GahApiError } from '../api/client.js';
-import type { StatusSnapshot, ReportData, ReportGroupBy, LedgerEntry, ControllerEvent, ProfileSummary } from '@git-agent-harness/contracts';
+import type { StatusSnapshot, ReportData, ReportSeriesData, ReportGroupBy, LedgerEntry, ControllerEvent, ProfileSummary } from '@git-agent-harness/contracts';
 import type { ProfileAddData, ProfileUpdateData, ProfileRemoveParams } from '../api/client.js';
 
 interface Resource<T> {
@@ -45,6 +45,7 @@ interface ProfileCrudState {
 interface GahStoreState {
   status: Resource<StatusSnapshot>;
   report: Resource<ReportData>;
+  reportSeries: Resource<ReportSeriesData>;
   events: Resource<ControllerEvent[]>;
   workTimelines: Record<string, Resource<LedgerEntry[]>>;
   profiles: Resource<ProfileSummary[]>;
@@ -52,6 +53,7 @@ interface GahStoreState {
 
   fetchStatus: (profile?: string, opts?: { force?: boolean }) => Promise<void>;
   fetchReport: (params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }, opts?: { force?: boolean }) => Promise<void>;
+  fetchReportSeries: (params?: { profile?: string; since?: string; bucket?: string }, opts?: { force?: boolean }) => Promise<void>;
   fetchEvents: (params?: { profile?: string; since?: string }, opts?: { force?: boolean }) => Promise<void>;
   fetchWorkTimeline: (workId: string, opts?: { force?: boolean }) => Promise<void>;
   fetchProfiles: (opts?: { force?: boolean }) => Promise<void>;
@@ -79,6 +81,7 @@ function errorMessage(error: unknown): string {
 export const useGahStore = create<GahStoreState>((set, get) => ({
   status: emptyResource(),
   report: emptyResource(),
+  reportSeries: emptyResource(),
   events: emptyResource(),
   workTimelines: {},
   profiles: emptyResource(),
@@ -117,6 +120,19 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
       set({ report: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
       set({ report: { ...get().report, loading: false, error: errorMessage(error), key } });
+    }
+  },
+
+  async fetchReportSeries(params, opts) {
+    const key = JSON.stringify(params ?? {});
+    const current = get().reportSeries;
+    if (current.loading || (!opts?.force && isFresh(current, key))) return;
+    set({ reportSeries: { ...current, loading: true, error: null } });
+    try {
+      const data = await gahApi.getReportSeries(params);
+      set({ reportSeries: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
+    } catch (error) {
+      set({ reportSeries: { ...get().reportSeries, loading: false, error: errorMessage(error), key } });
     }
   },
 

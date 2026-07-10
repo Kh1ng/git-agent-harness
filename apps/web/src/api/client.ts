@@ -19,6 +19,7 @@
 import type {
   StatusSnapshot,
   ReportData,
+  ReportSeriesData,
   ReportGroupBy,
   LedgerEntry,
   ControllerEvent,
@@ -137,6 +138,7 @@ function profileRemoveParamsToRecord(params?: ProfileRemoveParams): Record<strin
 export interface GahDataSource {
   getStatus(profile?: string): Promise<StatusSnapshot>;
   getReport(params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }): Promise<ReportData>;
+  getReportSeries(params?: { profile?: string; since?: string; bucket?: string }): Promise<ReportSeriesData>;
   getWorkTimeline(workId: string): Promise<LedgerEntry[]>;
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
   getProfiles(): Promise<ProfileSummary[]>;
@@ -215,6 +217,13 @@ export const gahApi: GahDataSource = {
       profile: params.profile,
       since: params.since,
       groupBy: params.groupBy
+    });
+  },
+  getReportSeries(params = {}) {
+    return getJson<ReportSeriesData>('/api/report/series', {
+      profile: params.profile,
+      since: params.since,
+      bucket: params.bucket
     });
   },
   getWorkTimeline(workId) {
