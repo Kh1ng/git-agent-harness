@@ -35,6 +35,8 @@ type WebSocketContextType = {
   providers: ProviderInstance[];
   providerStatuses: Record<ProviderInstanceId, ProviderStatus>;
   serverProviderCatalog: ServerProviderCatalog | null;
+  // TICKET-157: per-backend "configured for this profile" signal.
+  backendConfigured: Record<string, boolean>;
   serverVersion: string | null;
   profile: string | null;
   mergeRequests: MergeRequest[];
@@ -66,6 +68,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [providers, setProviders] = useState<ProviderInstance[]>([]);
   const [providerStatuses, setProviderStatuses] = useState<Record<ProviderInstanceId, ProviderStatus>>({});
   const [serverProviderCatalog, setServerProviderCatalog] = useState<ServerProviderCatalog | null>(null);
+  // TICKET-157: per-backend "configured for this profile" signal from
+  // `configured_backend_path()`. Maps backend name -> configured bool.
+  const [backendConfigured, setBackendConfigured] = useState<Record<string, boolean>>({});
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [profile, setProfile] = useState<string | null>(null);
   const [mergeRequests, setMergeRequests] = useState<MergeRequest[]>([]);
@@ -138,6 +143,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               if (message.constraints) setConstraints(message.constraints);
               if (message.errors) setErrors(message.errors);
               if (message.recentLedger !== undefined) setRecentLedger(message.recentLedger);
+              if (message.backendConfigured) setBackendConfigured(message.backendConfigured);
               break;
 
             case 'session.started':
@@ -283,6 +289,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     providers,
     providerStatuses,
     serverProviderCatalog,
+    backendConfigured,
     serverVersion,
     profile,
     mergeRequests,

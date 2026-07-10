@@ -519,6 +519,15 @@ impl Profile {
             "agy" | "agy-main" | "agy-second" => self.agy_path.as_deref(),
             "vibe" => self.vibe_path.as_deref(),
             "opencode" => self.opencode_path.as_deref(),
+            // OpenHands is a real, fully wired backend (run_opencode /
+            // run_opencode_with_executable in runner.rs). Its "configured for
+            // this profile" signal is the presence of an oh_profile; there is
+            // no optional explicit executable path (the openhands CLI is
+            // resolved on PATH), so we surface the profile name as the
+            // configured marker. Prior to this it was absent from the match
+            // arm, so Settings could not distinguish "implemented but not set
+            // up for this profile" from "implemented and ready".
+            "openhands" => self.oh_profile.as_deref(),
             _ => None,
         }
     }

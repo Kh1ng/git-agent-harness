@@ -22,10 +22,11 @@ export type ProviderKind =
 export type ProviderInstanceId = string;
 
 export type ProviderStatus = 
-  | { type: "unavailable" }
+  | { type: "unavailable"; reason?: string }
   | { type: "available"; version: string }
   | { type: "authenticated"; version: string; userId: string }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string }
+  | { type: "not_implemented" };
 
 // Session types
 export type SessionId = string;
@@ -66,6 +67,11 @@ export type ServerMessage =
       constraints?: Blocker[];
       errors?: StatusError[];
       recentLedger?: RecentLedgerSummary | null;
+      // TICKET-157: per-backend "configured for this profile" signal,
+      // derived from the Rust harness `configured_backend_path()`.
+      // Maps a backend name (e.g. "codex", "opencode") to whether it has
+      // a real implementation and is wired for the active profile.
+      backendConfigured?: Record<string, boolean>;
     }
   | {
       type: "server.ping";

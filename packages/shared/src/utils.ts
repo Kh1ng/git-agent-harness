@@ -37,15 +37,20 @@ export function getEnvVar(name: string, defaultValue: string = ''): string {
 }
 
 // Provider utilities
+// NOTE(TICKET-157): `grok` and `cursor` exist only as UI scaffolding in
+// `ProviderKind`/`getSupportedProviders` -- they have zero backend
+// implementation in the Rust harness (no config field, no dispatch match
+// arm, no path/args override). They are intentionally excluded here so
+// Settings does not show a bogus "available" status for something that
+// cannot run. Use the `not_implemented` ProviderStatus variant to surface
+// them as UI placeholders if needed.
 export function isProviderAvailable(kind: ProviderKind): boolean {
   const availableProviders: ProviderKind[] = [
     "github",
     "gitlab", 
     "codex",
     "claude",
-    "cursor",
     "opencode",
-    "grok",
     "openhands",
     "agy",
     "vibe"
@@ -59,9 +64,7 @@ export function getSupportedProviders(): ProviderKind[] {
     "gitlab",
     "codex", 
     "claude",
-    "cursor",
     "opencode",
-    "grok",
     "openhands",
     "agy",
     "vibe",

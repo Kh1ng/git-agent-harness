@@ -10,7 +10,7 @@ import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
 
 export function SettingsPage() {
-  const { providers, providerStatuses, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
+  const { providers, providerStatuses, backendConfigured, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
   const { theme, setTheme, profileOverride, setProfileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
@@ -119,6 +119,7 @@ export function SettingsPage() {
                 key={provider.instanceId}
                 provider={provider}
                 status={providerStatuses[provider.instanceId]}
+                backendConfigured={backendConfigured}
                 onClick={() => handleRefreshProvider(provider.instanceId)}
               />
             ))}
