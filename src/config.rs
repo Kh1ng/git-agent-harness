@@ -709,6 +709,27 @@ fn normalize_repo_path(repo: &str) -> String {
     }
 }
 
+/// Canonicalizes `--backend` aliases that execute the same backend but were
+/// being recorded under their literal alias string, producing duplicate
+/// cards for one backend on the quota page (e.g. "openhands" and
+/// "cloud-coder" both run OpenHands via `runner::backend_command_name`, but
+/// only "openhands" was ever normalized there -- the raw CLI string was
+/// still what got written to `requested_backend`/`effective_backend` and
+/// from there into the ledger). Applied both where new dispatches are
+/// routed (dispatch.rs) and when grouping the ledger for the quota page
+/// (ledger.rs), so it also merges pre-existing historical entries recorded
+/// under the old alias rather than only preventing new duplicates.
+/// Deliberately does NOT touch "auto": that backend's *effective* backend
+/// is resolved dynamically per-attempt by `routing::decide`, not a fixed
+/// alias, so it must pass through unchanged.
+pub fn canonical_backend_name(name: &str) -> &str {
+    if name == "cloud-coder" {
+        "openhands"
+    } else {
+        name
+    }
+}
+
 pub fn default_config_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     PathBuf::from(home).join(".config/gah")
@@ -886,8 +907,9 @@ pub fn get_profile_mut<'a>(config: &'a mut GahConfig, name: &str) -> Result<&'a 
 #[cfg(test)]
 pub mod tests {
     use super::{
-        add_profile, get_profile_mut, load, load_canonical_routing, merge_routing_policy,
-        remove_profile, save, CandidateConfig, GahConfig, Profile, RoutingPolicy,
+        add_profile, canonical_backend_name, get_profile_mut, load, load_canonical_routing,
+        merge_routing_policy, remove_profile, save, CandidateConfig, GahConfig, Profile,
+        RoutingPolicy,
     };
     use std::sync::Mutex;
 
@@ -1594,5 +1616,25 @@ improve_backend = "agy"
         assert_eq!(effective.improve_backend.as_deref(), Some("agy"));
         assert_eq!(effective.pm_candidates.as_ref().map(Vec::len), Some(1));
         assert!(effective.allow_review_fallback);
+    }
+
+    #[test]
+    fn canonical_backend_name_merges_cloud_coder_alias_into_openhands() {
+        // Live-observed: --backend openhands and --backend cloud-coder both
+        // run the identical OpenHands executable (runner::backend_command_name),
+        // but nothing canonicalized the raw CLI string before it reached the
+        // ledger/quota page, producing two separate cards for one backend.
+        assert_eq!(canonical_backend_name("cloud-coder"), "openhands");
+        assert_eq!(canonical_backend_name("openhands"), "openhands");
+    }
+
+    #[test]
+    fn canonical_backend_name_leaves_other_backends_and_auto_untouched() {
+        // "auto" must NOT be rewritten here: its effective backend is
+        // resolved dynamically per-attempt by routing::decide, not a fixed
+        // alias.
+        for name in ["auto", "codex", "claude", "vibe", "opencode", "agy"] {
+            assert_eq!(canonical_backend_name(name), name);
+        }
     }
 }

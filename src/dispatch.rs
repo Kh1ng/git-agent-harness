@@ -1424,7 +1424,7 @@ fn improve(
     .ok();
     let route_req = RouteRequest {
         mode: &args.mode,
-        requested_backend: &args.backend,
+        requested_backend: config::canonical_backend_name(&args.backend),
         requested_model: args.model.as_deref(),
         recommended_backend: ticket_meta
             .as_ref()
@@ -2147,7 +2147,7 @@ fn experiment(
         RouteRequest {
             last_failure_class: None,
             mode: "experiment",
-            requested_backend: &args.backend,
+            requested_backend: config::canonical_backend_name(&args.backend),
             requested_model: args.model.as_deref(),
             recommended_backend: None,
             recommended_model: None,
@@ -2486,7 +2486,7 @@ fn pm(
     let preflight_ctx = collect_pm_preflight(profile, repo)?;
     let route_req = RouteRequest {
         mode: "pm",
-        requested_backend: &args.backend,
+        requested_backend: config::canonical_backend_name(&args.backend),
         requested_model: args.model.as_deref(),
         recommended_backend: None,
         recommended_model: None,
@@ -2847,7 +2847,7 @@ fn review(
         RouteRequest {
             last_failure_class: None,
             mode: "review",
-            requested_backend: &args.backend,
+            requested_backend: config::canonical_backend_name(&args.backend),
             requested_model: args.model.as_deref(),
             recommended_backend: None,
             recommended_model: None,
@@ -2902,7 +2902,7 @@ fn review(
                         RouteRequest {
                             last_failure_class: None,
                             mode: "review",
-                            requested_backend: &args.backend,
+                            requested_backend: config::canonical_backend_name(&args.backend),
                             requested_model: args.model.as_deref(),
                             recommended_backend: None,
                             recommended_model: None,
@@ -4889,6 +4889,44 @@ mod tests {
     }
 
     #[test]
+    fn backend_failure_reset_time_resolves_in_local_offset_not_utc() {
+        // Live-observed bug: a Codex reset message with a bare "9:01 PM"
+        // (no timezone) was resolved as if it were UTC, so on this
+        // UTC-5 host a ~3am local reset displayed as "~14h remaining"
+        // instead of already having passed. now_with_local_offset() must
+        // supply the host's real offset so "9:01 PM" means 9:01 PM local
+        // time, not 9:01 PM UTC.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("availability.json");
+        mark_backend_unavailable_from_output_at(
+            &state,
+            "codex",
+            Some("local/test"),
+            None,
+            CODEX_FULL_RESET,
+            "/tmp/backend-output.log",
+        )
+        .unwrap()
+        .unwrap();
+
+        let state = load_state(&state).unwrap();
+        let unavailable_until = state.records[0].unavailable_until.as_deref().unwrap();
+        let resolved = OffsetDateTime::parse(
+            unavailable_until,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let local_offset_seconds = chrono::Local::now().offset().local_minus_utc();
+        let local_offset = time::UtcOffset::from_whole_seconds(local_offset_seconds).unwrap();
+        let in_local = resolved.to_offset(local_offset);
+
+        // The fixture says "9:01 PM" -- that must be the LOCAL hour/minute
+        // regardless of what the host's offset actually is.
+        assert_eq!(in_local.hour(), 21);
+        assert_eq!(in_local.minute(), 1);
+    }
+
+    #[test]
     fn pm_preflight_requires_manager_memory() {
         let tmp = tempfile::tempdir().unwrap();
         init_repo(tmp.path());
@@ -6143,7 +6181,7 @@ fn dry_run_route(
         RouteRequest {
             last_failure_class: None,
             mode,
-            requested_backend: &args.backend,
+            requested_backend: config::canonical_backend_name(&args.backend),
             requested_model: args.model.as_deref(),
             recommended_backend: ticket_meta
                 .as_ref()
@@ -6710,6 +6748,22 @@ fn route_identity(backend: &str, model: Option<&str>) -> String {
     format!("{backend}\u{0}{}", model.unwrap_or(""))
 }
 
+/// Current instant, but with the *local* UTC offset attached rather than
+/// always `+00:00`. `quota_parser::parse` treats a no-timezone time-of-day
+/// string in backend output (e.g. Codex's "resets 9:01 PM") as being in
+/// `now`'s offset, since that's the only clock available to a backend CLI
+/// printing to its own terminal -- it means local wall-clock time, not
+/// UTC. Passing `OffsetDateTime::now_utc()` silently mis-resolved every
+/// such reset by exactly the host's UTC offset (observed live: a ~3am
+/// local reset displaying as "~14h remaining" on a UTC-5 host). Falls back
+/// to UTC only if the local offset genuinely can't be determined.
+fn now_with_local_offset() -> OffsetDateTime {
+    let local_offset_seconds = chrono::Local::now().offset().local_minus_utc();
+    let offset =
+        time::UtcOffset::from_whole_seconds(local_offset_seconds).unwrap_or(time::UtcOffset::UTC);
+    OffsetDateTime::now_utc().to_offset(offset)
+}
+
 fn mark_backend_unavailable_from_output(
     backend: &str,
     model: Option<&str>,
@@ -6735,7 +6789,7 @@ fn mark_backend_unavailable_from_output_at(
     log_text: &str,
     log_path: &str,
 ) -> Result<Option<crate::quota_parser::ParsedFailure>> {
-    let now = OffsetDateTime::now_utc();
+    let now = now_with_local_offset();
     let Some(parsed) = crate::quota_parser::parse(backend, log_text, now) else {
         return Ok(None);
     };

@@ -312,11 +312,15 @@ pub fn parse_codex_status_json(output: &str) -> LedgerUsage {
         }
     }
 
-    if let Some(secondary) = rate_limits.get("secondary") {
-        if let Some(pct) = secondary.get("usedPercent").and_then(|v| v.as_f64()) {
-            usage.quota_remaining_percent = Some(100.0 - pct);
-            has_data = true;
-        }
+    // `quota_remaining_percent` must be the complement of `quota_used_percent`
+    // for the *same* window (primary) -- it previously read `secondary`'s
+    // usedPercent instead, silently mixing a different quota window (e.g.
+    // Codex's 5h primary vs its weekly secondary) into what looked like one
+    // consistent used/remaining pair. `secondary` isn't represented in this
+    // single-row `LedgerUsage` shape yet; a real per-window breakdown is
+    // issue #166's job when it wires this into a live refresh path.
+    if let Some(pct) = usage.quota_used_percent {
+        usage.quota_remaining_percent = Some(100.0 - pct);
     }
 
     if has_data {
@@ -418,7 +422,9 @@ mod tests {
     fn codex_status_json_extracts_quota_fields() {
         let usage = parse_codex_status_json(CODEX_STATUS_JSON);
         assert_eq!(usage.quota_used_percent, Some(25.0));
-        assert_eq!(usage.quota_remaining_percent, Some(82.0));
+        // Must be the complement of quota_used_percent for the SAME
+        // (primary) window, not a mix-in of secondary's usedPercent.
+        assert_eq!(usage.quota_remaining_percent, Some(75.0));
         assert_eq!(usage.quota_window.as_deref(), Some("300m"));
         // 1777534802 -> 2026-04-29-ish (UTC)
         assert!(usage.quota_reset_at.is_some());

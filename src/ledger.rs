@@ -1585,10 +1585,10 @@ pub mod summary {
         for entry in &entries {
             *by_mode.entry(entry.mode.clone()).or_default() += 1;
             *by_backend
-                .entry(entry.effective_backend.clone())
+                .entry(crate::config::canonical_backend_name(&entry.effective_backend).to_string())
                 .or_default() += 1;
             *by_requested_backend
-                .entry(entry.requested_backend.clone())
+                .entry(crate::config::canonical_backend_name(&entry.requested_backend).to_string())
                 .or_default() += 1;
             if let Some(model) = &entry.effective_model {
                 *by_model.entry(model.clone()).or_default() += 1;
@@ -1670,9 +1670,9 @@ pub mod summary {
         let grouped_by_backend = if group_by == GroupBy::Backend {
             build_grouped_summary(
                 &entries,
-                |entry| entry.effective_backend.clone(),
-                |observed| observed.backend.to_string(),
-                |backend, _model| backend.to_string(),
+                |entry| crate::config::canonical_backend_name(&entry.effective_backend).to_string(),
+                |observed| crate::config::canonical_backend_name(observed.backend).to_string(),
+                |backend, _model| crate::config::canonical_backend_name(backend).to_string(),
             )
         } else {
             None
