@@ -2,127 +2,222 @@
 @tailwind components;
 @tailwind utilities;
 
+/**
+ * Design tokens. Dark-first (this is an operator control plane, not a
+ * marketing site) with a light override for `[data-theme="light"]` or
+ * `prefers-color-scheme: light`. Values are the dataviz skill's validated
+ * reference palette (references/palette.md) -- chosen for its restraint
+ * (no gradient, no saturated brand hue) and re-used unmodified rather than
+ * inventing a new one for a single frontend pass.
+ */
+:root {
+  --surface-page: 13 13 13;      /* #0d0d0d */
+  --surface-card: 26 26 25;      /* #1a1a19 */
+  --surface-raised: 35 35 33;    /* #232321, one step up for popovers/modals */
+  --border-hairline: 255 255 255; /* used at 10% alpha */
+  --border-subtle: 44 44 42;     /* #2c2c2a gridline-strength border */
+
+  --ink-primary: 255 255 255;
+  --ink-secondary: 195 194 183;  /* #c3c2b7 */
+  --ink-muted: 137 135 129;      /* #898781 */
+
+  --status-good: 12 163 12;      /* #0ca30c */
+  --status-warning: 250 178 25;  /* #fab219 */
+  --status-serious: 236 131 90;  /* #ec835a */
+  --status-critical: 208 59 59;  /* #d03b3b */
+  --status-unknown: 137 135 129; /* same as ink-muted: neutral, not alarming */
+
+  --accent: 57 135 229;          /* #3987e5, categorical slot 1 (blue), dark step */
+
+  /* Categorical series order is fixed -- never reassigned per filter. */
+  --series-1: 57 135 229;   /* blue */
+  --series-2: 25 158 112;   /* aqua */
+  --series-3: 201 133 0;    /* yellow */
+  --series-4: 0 131 0;      /* green */
+  --series-5: 144 133 233;  /* violet */
+  --series-6: 230 103 103;  /* red */
+  --series-7: 213 81 129;   /* magenta */
+  --series-8: 217 89 38;    /* orange */
+}
+
+[data-theme='light'] {
+  --surface-page: 249 249 247;   /* #f9f9f7 */
+  --surface-card: 252 252 251;   /* #fcfcfb */
+  --surface-raised: 255 255 255;
+  --border-hairline: 11 11 11;
+  --border-subtle: 225 224 217;  /* #e1e0d9 */
+
+  --ink-primary: 11 11 11;
+  --ink-secondary: 82 81 78;     /* #52514e */
+  --ink-muted: 137 135 129;
+
+  --status-good: 12 163 12;
+  --status-warning: 250 178 25;
+  --status-serious: 236 131 90;
+  --status-critical: 208 59 59;
+  --status-unknown: 137 135 129;
+
+  --accent: 42 120 214;          /* #2a78d6, categorical slot 1, light step */
+
+  --series-1: 42 120 214;
+  --series-2: 27 175 122;
+  --series-3: 237 161 0;
+  --series-4: 0 131 0;
+  --series-5: 74 58 167;
+  --series-6: 227 73 72;
+  --series-7: 232 123 164;
+  --series-8: 235 104 52;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --surface-page: 249 249 247;
+    --surface-card: 252 252 251;
+    --surface-raised: 255 255 255;
+    --border-hairline: 11 11 11;
+    --border-subtle: 225 224 217;
+    --ink-primary: 11 11 11;
+    --ink-secondary: 82 81 78;
+    --ink-muted: 137 135 129;
+    --accent: 42 120 214;
+    --series-1: 42 120 214;
+    --series-2: 27 175 122;
+    --series-3: 237 161 0;
+    --series-4: 0 131 0;
+    --series-5: 74 58 167;
+    --series-6: 227 73 72;
+    --series-7: 232 123 164;
+    --series-8: 235 104 52;
+  }
+}
+
 @layer base {
   html {
     @apply antialiased;
   }
-  
+
   body {
-    @apply bg-gray-50 text-gray-900;
+    @apply bg-page text-primary;
+    font-feature-settings: 'tnum' 0;
+  }
+
+  ::selection {
+    background-color: rgb(var(--accent) / 0.35);
+  }
+
+  :focus-visible {
+    outline: 2px solid rgb(var(--accent));
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
 @layer components {
-  .btn {
-    @apply px-4 py-2 rounded-md text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2;
-  }
-  
-  .btn-primary {
-    @apply bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500;
-  }
-  
-  .btn-secondary {
-    @apply bg-gray-100 text-gray-700 hover:bg-gray-200 focus:ring-gray-500;
-  }
-  
-  .btn-danger {
-    @apply bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
-  }
-  
   .card {
-    @apply bg-white rounded-lg shadow-md p-6;
+    @apply bg-card border border-subtle rounded-lg;
   }
-  
+
+  .card-padded {
+    @apply card p-4 sm:p-5;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors focus-visible:outline-none disabled:opacity-50 disabled:cursor-not-allowed;
+    min-height: 36px;
+  }
+
+  .btn-primary {
+    @apply btn text-white;
+    background-color: rgb(var(--accent));
+  }
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+
+  .btn-secondary {
+    @apply btn bg-raised text-primary border border-subtle hover:bg-white/5;
+  }
+
   .badge {
-    @apply px-2 py-1 rounded-full text-xs font-medium;
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium leading-none;
   }
-  
-  .badge-success {
-    @apply bg-green-100 text-green-800;
+
+  .badge-good {
+    background-color: rgb(var(--status-good) / 0.15);
+    color: rgb(var(--status-good));
   }
-  
   .badge-warning {
-    @apply bg-yellow-100 text-yellow-800;
+    background-color: rgb(var(--status-warning) / 0.18);
+    color: rgb(var(--status-warning));
   }
-  
-  .badge-error {
-    @apply bg-red-100 text-red-800;
+  .badge-serious {
+    background-color: rgb(var(--status-serious) / 0.18);
+    color: rgb(var(--status-serious));
   }
-  
-  .badge-info {
-    @apply bg-blue-100 text-blue-800;
+  .badge-critical {
+    background-color: rgb(var(--status-critical) / 0.15);
+    color: rgb(var(--status-critical));
+  }
+  .badge-unknown {
+    background-color: rgb(var(--status-unknown) / 0.15);
+    color: rgb(var(--ink-secondary));
+  }
+
+  .table-base {
+    @apply w-full text-sm;
+  }
+  .table-base th {
+    @apply text-left font-medium text-muted text-xs uppercase tracking-wide px-3 py-2 border-b border-subtle;
+  }
+  .table-base td {
+    @apply px-3 py-2 border-b border-subtle text-secondary;
+    font-variant-numeric: tabular-nums;
+  }
+  .table-base tbody tr:hover {
+    background-color: rgb(var(--surface-raised) / 0.5);
+  }
+
+  .nav-link {
+    @apply flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-secondary transition-colors;
+  }
+  .nav-link:hover {
+    @apply text-primary bg-white/5;
+  }
+  .nav-link-active {
+    @apply text-primary;
+    background-color: rgb(var(--accent) / 0.15);
+  }
+
+  .stat-tile {
+    @apply card-padded flex flex-col gap-1;
+  }
+  .stat-tile-value {
+    @apply text-2xl font-semibold text-primary;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-tile-label {
+    @apply text-xs font-medium text-muted uppercase tracking-wide;
   }
 }
 
-/* Custom styles */
-#root {
-  min-height: 100vh;
-}
-
-/* Terminal styles */
+/* Terminal styles (SessionDetailModal xterm host) */
 .terminal {
-  background-color: #1e1e1e;
-  color: #cccccc;
-  font-family: 'Courier New', Courier, monospace;
-  font-size: 14px;
+  background-color: rgb(var(--surface-page));
+  color: rgb(var(--ink-secondary));
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 13px;
   line-height: 1.5;
   padding: 1rem;
   border-radius: 0.5rem;
   overflow: auto;
 }
-
-.terminal .prompt {
-  color: #4fc1ff;
-}
-
-.terminal .output {
-  color: #cccccc;
-}
-
-.terminal .error {
-  color: #f14c4c;
-}
-
-/* Status indicator animation */
-@keyframes pulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
-}
-
-.animate-pulse {
-  animation: pulse 2s infinite;
-}
-
-/* Session card styles */
-.session-card {
-  transition: all 0.2s ease;
-}
-
-.session-card:hover {
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
-}
-
-/* Provider icon styles */
-.provider-icon {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.provider-icon.github { background-color: #24292f; }
-.provider-icon.gitlab { background-color: #fc6d26; }
-.provider-icon.codex { background-color: #2563eb; }
-.provider-icon.claude { background-color: #8b5cf6; }
-.provider-icon.cursor { background-color: #3b82f6; }
-.provider-icon.opencode { background-color: #10b981; }
-.provider-icon.grok { background-color: #ec4899; }
-.provider-icon.openhands { background-color: #7c3aed; }
-.provider-icon.agy { background-color: #1f2937; }
-.provider-icon.vibe { background-color: #06b6d4; }

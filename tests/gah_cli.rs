@@ -1582,6 +1582,105 @@ llm_model_cloud = ""
         .stdout(predicate::str::contains("pm"));
 }
 
+/// Data source for the frontend attempt-timeline view (Work detail page).
+/// Thin wrapper around `ledger::entries_for_work_id` -- this test proves
+/// the CLI wiring (flag parsing, filtering by work_id, JSON shape), not the
+/// filtering logic itself, which already has its own unit tests in
+/// src/ledger.rs.
+#[test]
+fn ledger_work_filters_to_one_work_id_and_supports_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("gah.toml");
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[defaults]
+artifact_root = "{root}/artifacts"
+worktree_base = "{root}/worktrees"
+llm_base_url = ""
+llm_model_local = ""
+llm_model_cloud = ""
+"#,
+            root = tmp.path().display()
+        ),
+    )
+    .unwrap();
+    let ledger_dir = tmp.path().join("artifacts");
+    fs::create_dir_all(&ledger_dir).unwrap();
+    fs::write(
+        ledger_dir.join("ledger.jsonl"),
+        "{\"timestamp\":\"2026-07-04T10:00:00Z\",\"session_id\":\"1\",\"profile\":\"real\",\"display_name\":\"Real\",\"repo_id\":\"real\",\"repo\":\"owner/real\",\"local_path\":\"/tmp/repo\",\"provider\":\"github\",\"backend\":\"codex\",\"requested_backend\":\"codex\",\"effective_backend\":\"codex\",\"requested_model\":null,\"effective_model\":\"gpt-5.4\",\"routing_reason\":null,\"fallback_used\":false,\"confidence_impact\":null,\"human_required\":false,\"mode\":\"fix\",\"target_summary\":null,\"work_id\":\"TICKET-042\",\"branch\":\"gah/test-1\",\"session_dir\":null,\"duration_seconds\":42.0,\"backend_exit_code\":0,\"validation_result\":\"passed\",\"commit_attempted\":true,\"commit_created\":true,\"push_attempted\":true,\"push_succeeded\":true,\"mr_attempted\":true,\"mr_created\":true,\"mr_url\":\"https://example/pr/1\",\"files_changed\":3,\"insertions\":10,\"deletions\":2,\"error_summary\":null,\"usage\":{\"input_tokens\":100,\"output_tokens\":50,\"total_tokens\":150,\"estimated_cost_usd\":0.02,\"actual_cost_usd\":null,\"usage_source\":\"codex\"}}\n{\"timestamp\":\"2026-07-04T11:00:00Z\",\"session_id\":\"2\",\"profile\":\"real\",\"display_name\":\"Real\",\"repo_id\":\"real\",\"repo\":\"owner/real\",\"local_path\":\"/tmp/repo\",\"provider\":\"github\",\"backend\":\"codex\",\"requested_backend\":\"codex\",\"effective_backend\":\"codex\",\"requested_model\":null,\"effective_model\":null,\"routing_reason\":null,\"fallback_used\":false,\"confidence_impact\":null,\"human_required\":false,\"mode\":\"fix\",\"target_summary\":null,\"work_id\":\"TICKET-999-other\",\"branch\":null,\"session_dir\":null,\"duration_seconds\":null,\"backend_exit_code\":0,\"validation_result\":null,\"commit_attempted\":false,\"commit_created\":false,\"push_attempted\":false,\"push_succeeded\":false,\"mr_attempted\":false,\"mr_created\":false,\"mr_url\":null,\"files_changed\":null,\"insertions\":null,\"deletions\":null,\"error_summary\":null,\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"total_tokens\":null,\"estimated_cost_usd\":null,\"actual_cost_usd\":null,\"usage_source\":null}}\n",
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "ledger",
+            "work",
+            "TICKET-042",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 entries"))
+        .stdout(predicate::str::contains("codex/gpt-5.4"))
+        .stdout(predicate::str::contains("$0.0200"))
+        .stdout(predicate::str::contains("TICKET-999-other").not());
+
+    let out = bin()
+        .args([
+            "ledger",
+            "work",
+            "TICKET-042",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let parsed: Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    let entries = parsed.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["work_id"], "TICKET-042");
+    assert_eq!(entries[0]["usage"]["estimated_cost_usd"], 0.02);
+}
+
+#[test]
+fn ledger_work_with_no_matching_entries_reports_none_found() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("gah.toml");
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[defaults]
+artifact_root = "{root}/artifacts"
+worktree_base = "{root}/worktrees"
+llm_base_url = ""
+llm_model_local = ""
+llm_model_cloud = ""
+"#,
+            root = tmp.path().display()
+        ),
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "ledger",
+            "work",
+            "TICKET-does-not-exist",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No ledger entries found"));
+}
+
 #[test]
 fn review_writes_structured_verdict_and_posts_comment() {
     let tmp = tempfile::tempdir().unwrap();

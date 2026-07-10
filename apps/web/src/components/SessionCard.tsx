@@ -1,109 +1,69 @@
-import React from 'react';
+import { GitBranch, Cpu, Brain } from 'lucide-react';
 import type { Session } from '@git-agent-harness/contracts';
+import { StatusBadge, type StatusTone } from './ui/StatusBadge.js';
+import { providerIcon } from '../lib/icons.js';
 
 type SessionCardProps = {
   session: Session;
   onClick: () => void;
 };
 
-const statusColors: Record<string, string> = {
-  idle: 'bg-gray-100 text-gray-800',
-  starting: 'bg-yellow-100 text-yellow-800',
-  running: 'bg-green-100 text-green-800',
-  stopping: 'bg-yellow-100 text-yellow-800',
-  stopped: 'bg-gray-100 text-gray-800',
-  error: 'bg-red-100 text-red-800',
-};
-
-const providerIcons: Record<string, string> = {
-  github: '💻',
-  gitlab: '🦊',
-  codex: '🤖',
-  claude: '🎯',
-  cursor: '✨',
-  opencode: '🔓',
-  grok: '🌟',
-  openhands: '🤝',
-  agy: '🧠',
-  vibe: '⚡',
-  auto: '🎲',
-};
-
-const modeIcons: Record<string, string> = {
-  improve: '✨',
-  pm: '📋',
-  review: '👀',
-  fix: '🔧',
-  experiment: '🧪',
+const STATUS_TONE: Record<Session['status'], StatusTone> = {
+  idle: 'unknown',
+  starting: 'warning',
+  running: 'good',
+  stopping: 'warning',
+  stopped: 'unknown',
+  error: 'critical'
 };
 
 export function SessionCard({ session, onClick }: SessionCardProps) {
-  const statusColor = statusColors[session.status] || 'bg-gray-100 text-gray-800';
-  const providerIcon = providerIcons[session.providerKind] || '📦';
-  const modeIcon = session.mode ? (modeIcons[session.mode] || '🎯') : '🎯';
+  const Icon = providerIcon(session.providerKind);
 
   return (
-    <div 
+    <button
       onClick={onClick}
-      className="card session-card cursor-pointer transition-shadow"
+      className="card-padded w-full text-left transition-colors hover:border-accent/40 focus-visible:outline-none"
     >
-      <div className="flex items-start justify-between">
-        <div className="flex-1">
-          <div className="flex items-center space-x-3">
-            <span className="text-2xl">{providerIcon}</span>
-            <div>
-              <h3 className="text-lg font-semibold text-gray-900">
-                {session.repo}
-              </h3>
-              <p className="text-sm text-gray-500">
-                {session.id}
-              </p>
-            </div>
-          </div>
-          
-          <div className="mt-4">
-            <div className="flex items-center space-x-4 text-sm">
-              <span className="flex items-center">
-                <span className="mr-1">{modeIcon}</span>
-                <span className="text-gray-600">{session.mode}</span>
-              </span>
-              
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3 min-w-0">
+          <Icon size={18} className="text-muted shrink-0 mt-0.5" aria-hidden="true" />
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-primary truncate">{session.repo || session.id}</h3>
+            <p className="text-xs text-muted truncate">{session.id}</p>
+
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-secondary">
+              {session.mode && <span>{session.mode}</span>}
               {session.branch && (
-                <span className="flex items-center">
-                  <span className="mr-1">🌿</span>
-                  <span className="text-gray-600">{session.branch}</span>
+                <span className="inline-flex items-center gap-1">
+                  <GitBranch size={12} aria-hidden="true" />
+                  {session.branch}
                 </span>
               )}
-              
               {session.backend && (
-                <span className="flex items-center">
-                  <span className="mr-1">⚙️</span>
-                  <span className="text-gray-600">{session.backend}</span>
+                <span className="inline-flex items-center gap-1">
+                  <Cpu size={12} aria-hidden="true" />
+                  {session.backend}
                 </span>
               )}
-              
               {session.model && (
-                <span className="flex items-center">
-                  <span className="mr-1">🧠</span>
-                  <span className="text-gray-600">{session.model}</span>
+                <span className="inline-flex items-center gap-1">
+                  <Brain size={12} aria-hidden="true" />
+                  {session.model}
                 </span>
               )}
             </div>
           </div>
         </div>
-        
-        <div className="ml-4">
-          <span className={`badge ${statusColor}`}>
-            {session.status}
-          </span>
-        </div>
+
+        <StatusBadge tone={STATUS_TONE[session.status]} label={session.status} />
       </div>
-      
+
       {session.error && (
-        <div className="mt-3 p-2 bg-red-50 rounded-md">
-          <p className="text-sm text-red-700">{session.error}</p>
+        <div className="mt-3 p-2 rounded-md text-xs text-critical" style={{ background: 'rgb(var(--status-critical) / 0.08)' }}>
+          {session.error}
         </div>
       )}
-    </div>
+    </button>
   );
 }

@@ -3,6 +3,8 @@
  * Inspired by t3code architecture but adapted for GAH needs
  */
 
+import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary } from './gah.js';
+
 // Provider types
 export type ProviderKind = 
   | "github" 
@@ -58,12 +60,12 @@ export type ServerMessage =
       providers: Record<ProviderInstanceId, ProviderStatus>;
       // TICKET-114: Real GAH data from CLI
       profile?: string;
-      mergeRequests?: any[];
-      availability?: any[];
-      blockers?: any[];
-      constraints?: any[];
-      errors?: any[];
-      recentLedger?: any;
+      mergeRequests?: MergeRequest[];
+      availability?: AvailabilityScope[];
+      blockers?: Blocker[];
+      constraints?: Blocker[];
+      errors?: StatusError[];
+      recentLedger?: RecentLedgerSummary | null;
     }
   | {
       type: "server.ping";

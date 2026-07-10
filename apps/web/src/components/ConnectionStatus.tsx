@@ -1,4 +1,4 @@
-import React from 'react';
+import { Wifi, WifiOff, Loader2 } from 'lucide-react';
 
 type ConnectionStatusProps = {
   isConnected: boolean;
@@ -7,82 +7,32 @@ type ConnectionStatusProps = {
   serverVersion: string | null;
 };
 
-export function ConnectionStatus({ 
-  isConnected, 
-  isConnecting, 
-  error, 
-  serverVersion 
-}: ConnectionStatusProps) {
+/** Compact connection indicator, not a full-width banner -- it only needs
+ * to be loud when something is actually wrong (disconnected/erroring);
+ * "connected" should be a quiet, glanceable fact, not a persistent alert. */
+export function ConnectionStatus({ isConnected, isConnecting, error, serverVersion }: ConnectionStatusProps) {
   if (isConnecting) {
     return (
-      <div className="rounded-md bg-yellow-50 p-4">
-        <div className="flex">
-          <div className="flex-shrink-0">
-            <div className="h-5 w-5 rounded-full bg-yellow-400 animate-pulse"></div>
-          </div>
-          <div className="ml-3">
-            <p className="text-sm font-medium text-yellow-800">
-              Connecting to server...
-            </p>
-          </div>
-        </div>
-      </div>
+      <span className="inline-flex items-center gap-1.5 text-xs text-muted">
+        <Loader2 size={12} className="animate-spin" aria-hidden="true" />
+        Connecting…
+      </span>
     );
   }
 
-  if (error) {
+  if (error || !isConnected) {
     return (
-      <div className="rounded-md bg-red-50 p-4">
-        <div className="flex">
-          <div className="flex-shrink-0">
-            <div className="h-5 w-5 rounded-full bg-red-400"></div>
-          </div>
-          <div className="ml-3">
-            <p className="text-sm font-medium text-red-800">
-              Connection error: {error}
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!isConnected) {
-    return (
-      <div className="rounded-md bg-gray-50 p-4">
-        <div className="flex">
-          <div className="flex-shrink-0">
-            <div className="h-5 w-5 rounded-full bg-gray-400"></div>
-          </div>
-          <div className="ml-3">
-            <p className="text-sm font-medium text-gray-800">
-              Disconnected from server
-            </p>
-          </div>
-        </div>
-      </div>
+      <span className="inline-flex items-center gap-1.5 text-xs text-critical" role="status">
+        <WifiOff size={12} aria-hidden="true" />
+        {error ? `Connection error: ${error}` : 'Disconnected'}
+      </span>
     );
   }
 
   return (
-    <div className="rounded-md bg-green-50 p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center">
-          <div className="flex-shrink-0">
-            <div className="h-5 w-5 rounded-full bg-green-400 animate-pulse"></div>
-          </div>
-          <div className="ml-3">
-            <p className="text-sm font-medium text-green-800">
-              Connected to server
-              {serverVersion && (
-                <span className="ml-2 text-sm font-normal text-green-600">
-                  v{serverVersion}
-                </span>
-              )}
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
+    <span className="inline-flex items-center gap-1.5 text-xs text-muted" role="status">
+      <Wifi size={12} className="text-good" aria-hidden="true" />
+      Live{serverVersion && <span className="text-muted">· v{serverVersion}</span>}
+    </span>
   );
 }

@@ -1,197 +1,149 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { X, Square, Send } from 'lucide-react';
 import type { Session } from '@git-agent-harness/contracts';
+import { useWebSocket } from '../ws/WebSocketContext.js';
+import { StatusBadge, type StatusTone } from './ui/StatusBadge.js';
+import { providerIcon } from '../lib/icons.js';
 
 type SessionDetailModalProps = {
   session: Session;
   onClose: () => void;
 };
 
-const statusColors: Record<string, string> = {
-  idle: 'bg-gray-100 text-gray-800',
-  starting: 'bg-yellow-100 text-yellow-800',
-  running: 'bg-green-100 text-green-800',
-  stopping: 'bg-yellow-100 text-yellow-800',
-  stopped: 'bg-gray-100 text-gray-800',
-  error: 'bg-red-100 text-red-800',
+const STATUS_TONE: Record<Session['status'], StatusTone> = {
+  idle: 'unknown',
+  starting: 'warning',
+  running: 'good',
+  stopping: 'warning',
+  stopped: 'unknown',
+  error: 'critical'
 };
 
-const providerIcons: Record<string, string> = {
-  github: '💻',
-  gitlab: '🦊',
-  codex: '🤖',
-  claude: '🎯',
-  cursor: '✨',
-  opencode: '🔓',
-  grok: '🌟',
-  openhands: '🤝',
-  agy: '🧠',
-  vibe: '⚡',
-  auto: '🎲',
-};
+function Field({ label, value }: { label: string; value: string | number | undefined | null }) {
+  if (value === undefined || value === null || value === '') return null;
+  return (
+    <div>
+      <h4 className="text-xs font-medium text-muted uppercase tracking-wide mb-1">{label}</h4>
+      <p className="text-sm text-primary">{value}</p>
+    </div>
+  );
+}
 
 export function SessionDetailModal({ session, onClose }: SessionDetailModalProps) {
-  const [output, setOutput] = useState<string>('');
-  const statusColor = statusColors[session.status] || 'bg-gray-100 text-gray-800';
-  const providerIcon = providerIcons[session.providerKind] || '📦';
+  const { sessionOutput, sendMessage, isConnected } = useWebSocket();
+  const [command, setCommand] = useState('');
+  const outputRef = useRef<HTMLDivElement>(null);
+  const output = sessionOutput[session.id];
+  const Icon = providerIcon(session.providerKind);
+  const isRunning = session.status === 'running';
 
-  // Simulate output updates
   useEffect(() => {
-    // In a real implementation, this would subscribe to session output updates
-    const interval = setInterval(() => {
-      if (session.status === 'running') {
-        setOutput(prev => prev + `Session ${session.id} is running...\n`);
-      }
-    }, 3000);
-    
-    return () => clearInterval(interval);
-  }, [session.id, session.status]);
+    outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight });
+  }, [output?.stdout, output?.stderr]);
 
-  const handleStopSession = () => {
-    // Send stop command via WebSocket
-    // This would be implemented in a real version
-    alert(`Would stop session ${session.id}`);
-    onClose();
+  const handleStop = () => {
+    sendMessage({
+      type: 'session.stop',
+      requestId: `req_${Date.now()}`,
+      sessionId: session.id
+    });
   };
 
   const handleSendCommand = () => {
-    const command = prompt('Enter command:');
-    if (command) {
-      // Send command via WebSocket
-      alert(`Would send command: ${command}`);
-    }
+    const trimmed = command.trim();
+    if (!trimmed) return;
+    sendMessage({
+      type: 'session.sendCommand',
+      requestId: `req_${Date.now()}`,
+      sessionId: session.id,
+      command: trimmed
+    });
+    setCommand('');
   };
 
+  const combinedOutput = [output?.stdout, output?.stderr].filter(Boolean).join('');
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="flex justify-between items-center p-6 border-b border-gray-200">
-          <div className="flex items-center space-x-3">
-            <span className="text-2xl">{providerIcon}</span>
-            <div>
-              <h3 className="text-lg font-semibold text-gray-900">
-                Session Details
-              </h3>
-              <p className="text-sm text-gray-500">{session.id}</p>
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
+      <div className="card max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="flex justify-between items-center p-4 sm:p-5 border-b border-subtle">
+          <div className="flex items-center gap-3 min-w-0">
+            <Icon size={20} className="text-muted shrink-0" aria-hidden="true" />
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-primary truncate">{session.repo || 'Session'}</h3>
+              <p className="text-xs text-muted truncate">{session.id}</p>
             </div>
           </div>
-          
-          <div className="flex items-center space-x-3">
-            <span className={`badge ${statusColor}`}>
-              {session.status}
-            </span>
-            <button 
-              onClick={onClose}
-              className="text-gray-400 hover:text-gray-600"
-            >
-              ×
+
+          <div className="flex items-center gap-3 shrink-0">
+            <StatusBadge tone={STATUS_TONE[session.status]} label={session.status} />
+            <button onClick={onClose} className="text-muted hover:text-primary" aria-label="Close">
+              <X size={18} />
             </button>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-            <div>
-              <h4 className="text-sm font-medium text-gray-500 mb-2">Repository</h4>
-              <p className="text-gray-900">{session.repo}</p>
-            </div>
-            
-            <div>
-              <h4 className="text-sm font-medium text-gray-500 mb-2">Provider</h4>
-              <p className="text-gray-900">{session.providerKind}</p>
-            </div>
-            
-            <div>
-              <h4 className="text-sm font-medium text-gray-500 mb-2">Mode</h4>
-              <p className="text-gray-900">{session.mode}</p>
-            </div>
-            
-            <div>
-              <h4 className="text-sm font-medium text-gray-500 mb-2">Backend</h4>
-              <p className="text-gray-900">{session.backend || 'N/A'}</p>
-            </div>
-            
-            {session.branch && (
-              <div>
-                <h4 className="text-sm font-medium text-gray-500 mb-2">Branch</h4>
-                <p className="text-gray-900">{session.branch}</p>
-              </div>
-            )}
-            
-            {session.target && (
-              <div>
-                <h4 className="text-sm font-medium text-gray-500 mb-2">Target</h4>
-                <p className="text-gray-900">{session.target}</p>
-              </div>
-            )}
-            
-            {session.model && (
-              <div>
-                <h4 className="text-sm font-medium text-gray-500 mb-2">Model</h4>
-                <p className="text-gray-900">{session.model}</p>
-              </div>
-            )}
-            
-            {session.budget && (
-              <div>
-                <h4 className="text-sm font-medium text-gray-500 mb-2">Budget</h4>
-                <p className="text-gray-900">{session.budget}</p>
-              </div>
-            )}
-            
-            <div>
-              <h4 className="text-sm font-medium text-gray-500 mb-2">Started</h4>
-              <p className="text-gray-900">{session.startedAt || 'N/A'}</p>
-            </div>
-            
-            {session.endedAt && (
-              <div>
-                <h4 className="text-sm font-medium text-gray-500 mb-2">Ended</h4>
-                <p className="text-gray-900">{session.endedAt}</p>
-              </div>
-            )}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-5">
+            <Field label="Provider" value={session.providerKind} />
+            <Field label="Mode" value={session.mode} />
+            <Field label="Backend" value={session.backend} />
+            <Field label="Branch" value={session.branch} />
+            <Field label="Model" value={session.model} />
+            <Field label="Budget" value={session.budget} />
+            <Field label="Started" value={session.startedAt} />
+            <Field label="Ended" value={session.endedAt} />
           </div>
 
           {session.error && (
-            <div className="mb-6 p-4 bg-red-50 rounded-lg">
-              <h4 className="text-sm font-medium text-red-800 mb-2">Error</h4>
-              <ReactMarkdown className="text-red-700 text-sm">{session.error}</ReactMarkdown>
+            <div className="mb-5 p-3 rounded-md badge-critical" style={{ background: 'rgb(var(--status-critical) / 0.08)' }}>
+              <h4 className="text-xs font-medium text-critical uppercase tracking-wide mb-1">Error</h4>
+              <div className="text-sm text-primary">
+                <ReactMarkdown>{session.error}</ReactMarkdown>
+              </div>
             </div>
           )}
 
-          <div className="mb-4">
-            <h4 className="text-sm font-medium text-gray-500 mb-2">Output</h4>
-            <div className="terminal max-h-64 overflow-y-auto">
-              <pre className="whitespace-pre-wrap">{output || 'Session output will appear here...'}</pre>
+          <div>
+            <h4 className="text-xs font-medium text-muted uppercase tracking-wide mb-2">Output</h4>
+            <div className="terminal max-h-72 overflow-y-auto" ref={outputRef}>
+              <pre className="whitespace-pre-wrap">
+                {combinedOutput || 'No output received yet.'}
+              </pre>
             </div>
           </div>
         </div>
 
-        <div className="flex justify-end space-x-3 p-6 border-t border-gray-200 bg-gray-50">
-          {session.status === 'running' && (
-            <button 
-              onClick={handleSendCommand}
-              className="btn btn-secondary"
-            >
-              Send Command
-            </button>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-4 sm:p-5 border-t border-subtle bg-raised">
+          {isRunning && (
+            <div className="flex-1 flex items-center gap-2 min-w-0">
+              <input
+                type="text"
+                value={command}
+                onChange={(e) => setCommand(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSendCommand()}
+                placeholder="Send a command to this session…"
+                disabled={!isConnected}
+                className="flex-1 bg-page border border-subtle rounded-md px-3 py-1.5 text-sm text-primary placeholder:text-muted focus-visible:outline-none min-w-0"
+              />
+              <button onClick={handleSendCommand} disabled={!isConnected || !command.trim()} className="btn-secondary">
+                <Send size={14} aria-hidden="true" />
+                Send
+              </button>
+            </div>
           )}
-          
-          {session.status === 'running' && (
-            <button 
-              onClick={handleStopSession}
-              className="btn btn-danger"
-            >
-              Stop Session
+          <div className="flex items-center gap-2 justify-end">
+            {isRunning && (
+              <button onClick={handleStop} disabled={!isConnected} className="btn-secondary text-critical border-critical/30">
+                <Square size={14} aria-hidden="true" />
+                Stop
+              </button>
+            )}
+            <button onClick={onClose} className="btn-secondary">
+              Close
             </button>
-          )}
-          
-          <button 
-            onClick={onClose}
-            className="btn btn-secondary"
-          >
-            Close
-          </button>
+          </div>
         </div>
       </div>
     </div>

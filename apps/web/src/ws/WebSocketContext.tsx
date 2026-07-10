@@ -1,5 +1,24 @@
-import React, { createContext, useContext, useEffect, useState, useCallback, ReactNode } from 'react';
-import type { ServerMessage, ClientMessage, Session, ProviderInstance, ServerProviderCatalog, ProviderStatus, ProviderInstanceId } from '@git-agent-harness/contracts';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from 'react';
+import type {
+  ServerMessage,
+  ClientMessage,
+  Session,
+  SessionId,
+  ProviderInstance,
+  ServerProviderCatalog,
+  ProviderStatus,
+  ProviderInstanceId,
+  MergeRequest,
+  AvailabilityScope,
+  Blocker,
+  StatusError,
+  RecentLedgerSummary
+} from '@git-agent-harness/contracts';
+
+export interface SessionOutput {
+  stdout: string;
+  stderr: string;
+}
 
 type WebSocketContextType = {
   socket: WebSocket | null;
@@ -8,17 +27,21 @@ type WebSocketContextType = {
   error: string | null;
   messages: ServerMessage[];
   sessions: Session[];
+  /** Real per-line stdout/stderr streamed from the server, keyed by
+   * session id -- see SessionManager.ts's getServerPushBus().publish()
+   * calls, which this actually consumes now instead of discarding. */
+  sessionOutput: Record<SessionId, SessionOutput>;
   providers: ProviderInstance[];
   providerStatuses: Record<ProviderInstanceId, ProviderStatus>;
   serverProviderCatalog: ServerProviderCatalog | null;
   serverVersion: string | null;
   profile: string | null;
-  mergeRequests: any[];
-  availability: any[];
-  blockers: any[];
-  constraints: any[];
-  errors: any[];
-  recentLedger: any;
+  mergeRequests: MergeRequest[];
+  availability: AvailabilityScope[];
+  blockers: Blocker[];
+  constraints: Blocker[];
+  errors: StatusError[];
+  recentLedger: RecentLedgerSummary | null;
   sendMessage: (message: ClientMessage) => void;
   reconnect: () => void;
   disconnect: () => void;
@@ -36,17 +59,19 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ServerMessage[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionOutput, setSessionOutput] = useState<Record<SessionId, SessionOutput>>({});
   const [providers, setProviders] = useState<ProviderInstance[]>([]);
   const [providerStatuses, setProviderStatuses] = useState<Record<ProviderInstanceId, ProviderStatus>>({});
   const [serverProviderCatalog, setServerProviderCatalog] = useState<ServerProviderCatalog | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [profile, setProfile] = useState<string | null>(null);
-  const [mergeRequests, setMergeRequests] = useState<any[]>([]);
-  const [availability, setAvailability] = useState<any[]>([]);
-  const [blockers, setBlockers] = useState<any[]>([]);
-  const [constraints, setConstraints] = useState<any[]>([]);
-  const [errors, setErrors] = useState<any[]>([]);
-  const [recentLedger, setRecentLedger] = useState<any>(null);
+  const [mergeRequests, setMergeRequests] = useState<MergeRequest[]>([]);
+  const [availability, setAvailability] = useState<AvailabilityScope[]>([]);
+  const [blockers, setBlockers] = useState<Blocker[]>([]);
+  const [constraints, setConstraints] = useState<Blocker[]>([]);
+  const [errors, setErrors] = useState<StatusError[]>([]);
+  const [recentLedger, setRecentLedger] = useState<RecentLedgerSummary | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
 
   const connect = useCallback(() => {
     setIsConnecting(true);
@@ -54,13 +79,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
 
     try {
       const newSocket = new WebSocket(SERVER_WS_URL);
-      
+
       newSocket.onopen = () => {
         setIsConnected(true);
         setIsConnecting(false);
         setSocket(newSocket);
-        
-        // Send client hello
+        socketRef.current = newSocket;
+
         newSocket.send(JSON.stringify({
           type: 'client.hello' as const,
           clientVersion: '0.1.0',
@@ -76,10 +101,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         setIsConnected(false);
         setIsConnecting(false);
         setSocket(null);
+        socketRef.current = null;
       };
 
       newSocket.onerror = (errorEvent: Event) => {
-        // ErrorEvent has message property but is typed as Event
         const errorMessage = 'message' in errorEvent && typeof errorEvent.message === 'string' ? errorEvent.message : 'WebSocket connection error';
         setError(errorMessage);
         setIsConnecting(false);
@@ -88,33 +113,29 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       newSocket.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data) as ServerMessage;
-          
-          // Store the raw message
-          setMessages(prev => [...prev.slice(-100), message]); // Keep last 100 messages
-          
-          // Handle different message types
+
+          setMessages(prev => [...prev.slice(-100), message]);
+
           switch (message.type) {
             case 'server.welcome':
               setServerVersion(message.serverVersion);
               setServerProviderCatalog(message.serverProviderCatalog);
               setSessions(message.sessions);
               setProviderStatuses(message.providers);
-              
-              // Extract provider instances from catalog
+
               if (message.serverProviderCatalog?.providers) {
                 setProviders(message.serverProviderCatalog.providers);
               }
-              
-              // Extract real GAH data for TICKET-114
+
               if (message.profile) setProfile(message.profile);
               if (message.mergeRequests) setMergeRequests(message.mergeRequests);
               if (message.availability) setAvailability(message.availability);
               if (message.blockers) setBlockers(message.blockers);
               if (message.constraints) setConstraints(message.constraints);
               if (message.errors) setErrors(message.errors);
-              if (message.recentLedger) setRecentLedger(message.recentLedger);
+              if (message.recentLedger !== undefined) setRecentLedger(message.recentLedger);
               break;
-              
+
             case 'session.started':
             case 'session.stopped':
             case 'session.status':
@@ -130,27 +151,41 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
                 return [...prev, message.session];
               });
               break;
-              
+
             case 'session.stdout':
-            case 'session.stderr':
-              // These are handled by the session detail views
+              setSessionOutput(prev => {
+                const existing = prev[message.sessionId] ?? { stdout: '', stderr: '' };
+                return {
+                  ...prev,
+                  [message.sessionId]: { ...existing, stdout: existing.stdout + message.data + '\n' }
+                };
+              });
               break;
-              
+
+            case 'session.stderr':
+              setSessionOutput(prev => {
+                const existing = prev[message.sessionId] ?? { stdout: '', stderr: '' };
+                return {
+                  ...prev,
+                  [message.sessionId]: { ...existing, stderr: existing.stderr + message.data + '\n' }
+                };
+              });
+              break;
+
             case 'provider.statusChanged':
               setProviderStatuses(prev => ({
                 ...prev,
                 [message.instanceId]: message.status
               }));
               break;
-              
+
             case 'provider.listUpdated':
               setProviderStatuses(message.providers);
               break;
-              
+
             case 'server.ping':
-              // Pong not needed, server just sends pings for keepalive
               break;
-              
+
             case 'error':
               setError(message.error);
               break;
@@ -160,7 +195,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
       };
 
-      // Set up keepalive
       const keepaliveInterval = setInterval(() => {
         if (newSocket.readyState === WebSocket.OPEN) {
           newSocket.send(JSON.stringify({
@@ -171,14 +205,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
       }, 30000);
 
-      // Clean up on unmount
       return () => {
         clearInterval(keepaliveInterval);
         if (newSocket.readyState === WebSocket.OPEN) {
           newSocket.close();
         }
       };
-      
+
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
       setIsConnecting(false);
@@ -186,65 +219,64 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const sendMessage = useCallback((message: ClientMessage) => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    const current = socketRef.current;
+    if (current && current.readyState === WebSocket.OPEN) {
       try {
-        socket.send(JSON.stringify(message));
+        current.send(JSON.stringify(message));
       } catch (error) {
         setError(error instanceof Error ? error.message : String(error));
       }
     } else {
       setError('Not connected to server');
     }
-  }, [socket]);
+  }, []);
 
   const reconnect = useCallback(() => {
-    // Close existing connection first
-    if (socket) {
-      socket.close();
+    if (socketRef.current) {
+      socketRef.current.close();
       setSocket(null);
+      socketRef.current = null;
     }
     setIsConnected(false);
     setIsConnecting(true);
     connect();
-  }, [socket, connect]);
-
-  const disconnect = useCallback(() => {
-    if (socket) {
-      socket.close();
-      setSocket(null);
-      setIsConnected(false);
-    }
-  }, [socket]);
-
-  // Initial connection
-  useEffect(() => {
-    connect();
-    
-    return () => {
-      if (socket) {
-        socket.close();
-      }
-    };
   }, [connect]);
 
-  // Auto-reconnect when disconnected
+  const disconnect = useCallback(() => {
+    if (socketRef.current) {
+      socketRef.current.close();
+      setSocket(null);
+      socketRef.current = null;
+      setIsConnected(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const cleanup = connect();
+    return () => {
+      cleanup?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (!isConnected && !isConnecting && !error && socket === null) {
       const timer = setTimeout(() => {
         reconnect();
       }, 5000);
-      
+
       return () => clearTimeout(timer);
     }
   }, [isConnected, isConnecting, error, socket, reconnect]);
 
-  const value = {
+  const value: WebSocketContextType = {
     socket,
     isConnected,
     isConnecting,
     error,
     messages,
     sessions,
+    sessionOutput,
     providers,
     providerStatuses,
     serverProviderCatalog,
