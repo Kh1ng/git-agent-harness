@@ -7,6 +7,8 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 
+const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
+
 export function SettingsPage() {
   const { providers, providerStatuses, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
   const { theme, setTheme, profileOverride, setProfileOverride } = useUiStore();
@@ -20,6 +22,11 @@ export function SettingsPage() {
   const configuredProfiles = profiles.data ?? [];
   const selectedName = profileOverride ?? profile ?? '';
   const selected = configuredProfiles.find((p) => p.name === selectedName);
+
+  const agentBackends = providers.filter((p) => !SCM_PROVIDER_KINDS.has(p.providerKind));
+  const activeScmProvider = selected?.provider
+    ? providers.find((p) => p.providerKind === selected.provider)
+    : null;
 
   const handleRefreshProvider = (instanceId: string) => {
     if (isConnected) {
@@ -86,6 +93,15 @@ export function SettingsPage() {
             {selected.repo}
           </a>
         )}
+        {activeScmProvider && (
+          <div className="mt-3 pt-3 border-t border-subtle">
+            <ProviderStatusCard
+              provider={activeScmProvider}
+              status={providerStatuses[activeScmProvider.instanceId]}
+              onClick={() => handleRefreshProvider(activeScmProvider.instanceId)}
+            />
+          </div>
+        )}
         <p className="mt-3 text-xs text-muted inline-flex items-start gap-1.5">
           <Info size={13} className="shrink-0 mt-0.5" aria-hidden="true" />
           Switching profiles reconnects the live WebSocket feed as well as refreshing the REST-backed pages.
@@ -93,12 +109,12 @@ export function SettingsPage() {
       </section>
 
       <section>
-        <h3 className="text-sm font-semibold text-primary mb-3">Providers {serverVersion && <span className="text-muted font-normal">· server v{serverVersion}</span>}</h3>
-        {providers.length === 0 ? (
-          <EmptyState icon={Info} title="No providers registered" />
+        <h3 className="text-sm font-semibold text-primary mb-3">Agent backends {serverVersion && <span className="text-muted font-normal">· server v{serverVersion}</span>}</h3>
+        {agentBackends.length === 0 ? (
+          <EmptyState icon={Info} title="No agent backends registered" />
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {providers.map((provider) => (
+            {agentBackends.map((provider) => (
               <ProviderStatusCard
                 key={provider.instanceId}
                 provider={provider}
