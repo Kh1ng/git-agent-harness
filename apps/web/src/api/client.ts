@@ -26,7 +26,7 @@ import type {
 
 const SERVER_URL =
   (import.meta as unknown as { env: { VITE_SERVER_URL?: string } }).env?.VITE_SERVER_URL ||
-  'http://localhost:3773';
+  window.location.origin;
 
 export class GahApiError extends Error {
   constructor(

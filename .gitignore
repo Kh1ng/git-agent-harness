@@ -68,3 +68,6 @@ Thumbs.db
 OPENHANDS_TASK.md
 TODO.md
 docs/MANAGER_MEMORY.md
+artifacts/
+dist/
+deploy/

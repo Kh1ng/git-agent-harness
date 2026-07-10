@@ -61,9 +61,7 @@ export function SettingsPage() {
         </div>
         <p className="mt-3 text-xs text-muted inline-flex items-start gap-1.5">
           <Info size={13} className="shrink-0 mt-0.5" aria-hidden="true" />
-          Active sessions and provider status below always reflect the server's connected profile — switching
-          this override does not request a different profile's live session stream (no WS message for that
-          exists yet).
+          Applying a profile reconnects the live WebSocket feed as well as refreshing the REST-backed pages.
         </p>
       </section>
 

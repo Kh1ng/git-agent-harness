@@ -7,10 +7,11 @@
 /// and is the canonical source of truth for GAH's own retry-cap/status logic.
 use crate::config;
 use crate::ledger::summary::{build_summary, SummaryData};
-use crate::ledger::GroupBy as LedgerGroupBy;
+use crate::ledger::{self, GroupBy as LedgerGroupBy};
 use anyhow::Result;
 use serde::Serialize;
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 
 /// Report command parameters
 pub struct ReportArgs {
@@ -30,6 +31,17 @@ struct ReportData {
     profile: Option<String>,
     group_by: String,
     comparisons: Vec<BackendModelComparison>,
+    trend: Vec<TrendPoint>,
+}
+
+#[derive(Debug, Serialize)]
+struct TrendPoint {
+    date: String,
+    entries: usize,
+    validation_pass: usize,
+    total_tokens: u64,
+    actual_cost_usd: Option<f64>,
+    estimated_cost_usd: Option<f64>,
 }
 
 /// Comparison data for a single backend or model
@@ -72,7 +84,8 @@ pub fn run(args: ReportArgs) -> Result<()> {
 
     if json {
         // For JSON output, transform the existing summary data into our report format
-        let report_data = transform_to_report_format(&data, group_by, &since, profile.as_deref())?;
+        let report_data =
+            transform_to_report_format(Some(&cfg), &data, group_by, &since, profile.as_deref())?;
         println!("{}", serde_json::to_string(&report_data)?);
         return Ok(());
     }
@@ -85,6 +98,7 @@ pub fn run(args: ReportArgs) -> Result<()> {
 
 /// Transform summary data to report format
 fn transform_to_report_format(
+    cfg: Option<&config::GahConfig>,
     data: &SummaryData,
     group_by: LedgerGroupBy,
     since: &str,
@@ -142,6 +156,11 @@ fn transform_to_report_format(
     // Sort by entries descending for better readability
     comparisons.sort_by_key(|b| Reverse(b.entries));
 
+    let trend = cfg
+        .map(|cfg| build_trend(cfg, since, profile))
+        .transpose()?
+        .unwrap_or_default();
+
     Ok(ReportData {
         ledger_path: data.ledger_path.clone(),
         total_entries: data.entries,
@@ -149,7 +168,58 @@ fn transform_to_report_format(
         profile: profile.map(String::from),
         group_by: group_label.to_string(),
         comparisons,
+        trend,
     })
+}
+
+fn build_trend(
+    cfg: &config::GahConfig,
+    since: &str,
+    profile: Option<&str>,
+) -> Result<Vec<TrendPoint>> {
+    let cutoff = ledger::summary::parse_since(since)?;
+    let mut entries = ledger::read_entries(cfg)?;
+    if let Some(profile) = profile {
+        entries.retain(|entry| entry.profile == profile);
+    }
+    entries.retain(|entry| entry.timestamp >= cutoff);
+
+    let mut points: BTreeMap<String, TrendPoint> = BTreeMap::new();
+    for entry in &entries {
+        let Some(date) = entry.timestamp.get(..10) else {
+            continue;
+        };
+        let point = points
+            .entry(date.to_string())
+            .or_insert_with(|| TrendPoint {
+                date: date.to_string(),
+                entries: 0,
+                validation_pass: 0,
+                total_tokens: 0,
+                actual_cost_usd: None,
+                estimated_cost_usd: None,
+            });
+        point.entries += 1;
+        if matches!(
+            entry.validation_result.as_deref(),
+            Some("passed") | Some("APPROVE_STRONG") | Some("APPROVE_WEAK")
+        ) {
+            point.validation_pass += 1;
+        }
+        point.total_tokens += entry.usage.total_tokens.unwrap_or(0);
+        add_optional(&mut point.actual_cost_usd, entry.usage.actual_cost_usd);
+        add_optional(
+            &mut point.estimated_cost_usd,
+            entry.usage.estimated_cost_usd,
+        );
+    }
+    Ok(points.into_values().collect())
+}
+
+fn add_optional(total: &mut Option<f64>, value: Option<f64>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or(0.0) + value);
+    }
 }
 
 /// Display report in plain text format
@@ -374,7 +444,8 @@ mod tests {
     #[test]
     fn test_transform_to_report_format_backend() {
         let data = mock_summary_data();
-        let report_data = transform_to_report_format(&data, GroupBy::Backend, "7d", None).unwrap();
+        let report_data =
+            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None).unwrap();
 
         assert_eq!(report_data.total_entries, 15);
         assert_eq!(report_data.since, "7d");
@@ -407,7 +478,8 @@ mod tests {
         data.grouped_by_model = data.grouped_by_backend.take();
 
         let report_data =
-            transform_to_report_format(&data, GroupBy::Model, "30d", Some("test-profile")).unwrap();
+            transform_to_report_format(None, &data, GroupBy::Model, "30d", Some("test-profile"))
+                .unwrap();
 
         assert_eq!(report_data.total_entries, 15);
         assert_eq!(report_data.since, "30d");
@@ -425,7 +497,8 @@ mod tests {
         let mut data = mock_summary_data();
         data.grouped_by_backend = None;
 
-        let report_data = transform_to_report_format(&data, GroupBy::Backend, "7d", None).unwrap();
+        let report_data =
+            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None).unwrap();
 
         assert_eq!(report_data.comparisons.len(), 0);
     }
@@ -456,7 +529,8 @@ mod tests {
         let mut data = mock_summary_data();
         data.grouped_by_backend = Some(grouped_data);
 
-        let report_data = transform_to_report_format(&data, GroupBy::Backend, "7d", None).unwrap();
+        let report_data =
+            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None).unwrap();
 
         assert!((report_data.comparisons[0].success_rate - 0.5).abs() < 0.001);
     }
@@ -487,7 +561,8 @@ mod tests {
         let mut data = mock_summary_data();
         data.grouped_by_backend = Some(grouped_data);
 
-        let report_data = transform_to_report_format(&data, GroupBy::Backend, "7d", None).unwrap();
+        let report_data =
+            transform_to_report_format(None, &data, GroupBy::Backend, "7d", None).unwrap();
 
         assert_eq!(report_data.comparisons[0].success_rate, 0.0);
     }

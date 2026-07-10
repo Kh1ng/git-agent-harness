@@ -27,10 +27,10 @@ import type {
 
 // Session store for tracking active WebSocket connections
 class WebSocketSessionStore {
-  private sessions: Map<WebSocket, { clientVersion: string; capabilities: ClientCapabilities }> = new Map();
+  private sessions: Map<WebSocket, { clientVersion: string; capabilities: ClientCapabilities; profile: string }> = new Map();
   
-  add(ws: WebSocket, clientVersion: string, capabilities: ClientCapabilities) {
-    this.sessions.set(ws, { clientVersion, capabilities });
+  add(ws: WebSocket, clientVersion: string, capabilities: ClientCapabilities, profile: string) {
+    this.sessions.set(ws, { clientVersion, capabilities, profile });
   }
   
   remove(ws: WebSocket) {
@@ -117,7 +117,8 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
   switch (message.type) {
     case 'client.hello':
       // Store client info
-      sessionStore.add(ws, message.clientVersion, message.capabilities);
+      const profile = message.profile ?? 'gah';
+      sessionStore.add(ws, message.clientVersion, message.capabilities, profile);
       console.log(`Client hello from ${message.clientVersion}`);
       break;
       
@@ -280,7 +281,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
     // path TICKET-113 already wired up -- there's no separate
     // per-field ProviderRegistry accessor, `gah status --json` returns
     // all of this in one call.
-    const defaultProfile = 'gah';
+    const defaultProfile = sessionStore.get(ws)?.profile ?? 'gah';
     let mergeRequests: MergeRequest[] = [];
     let availability: AvailabilityScope[] = [];
     let blockers: Blocker[] = [];

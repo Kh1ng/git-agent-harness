@@ -114,6 +114,7 @@ export type ClientMessage =
   | {
       type: "client.hello";
       clientVersion: string;
+      profile?: string;
       capabilities: ClientCapabilities;
     }
   | {

@@ -8,18 +8,11 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { TrendChart } from '../components/TrendChart.js';
 import { formatCost, formatDuration, formatPercent, formatTokens, formatCount } from '../lib/format.js';
-import { DEV_FIXTURE_TREND_TOKENS, DEV_FIXTURE_TREND_COST, DEV_FIXTURE_TREND_SUCCESS_RATE } from '../fixtures.js';
 
 type SortKey = keyof Pick<
   BackendModelComparison,
   'entries' | 'success_rate' | 'average_duration_seconds' | 'total_tokens' | 'actual_cost_usd' | 'estimated_cost_usd'
 >;
-
-const TREND_OPTIONS = [
-  { id: 'tokens', label: 'Input+output tokens', data: DEV_FIXTURE_TREND_TOKENS, format: formatTokens },
-  { id: 'cost', label: 'Cost (USD)', data: DEV_FIXTURE_TREND_COST, format: (v: number) => formatCost(v) },
-  { id: 'success', label: 'Success rate', data: DEV_FIXTURE_TREND_SUCCESS_RATE, format: (v: number) => formatPercent(v) }
-] as const;
 
 function SortHeader({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
@@ -38,10 +31,16 @@ export function TelemetryPage() {
   const profile = profileOverride ?? wsProfile;
   const report = useGahStore((s) => s.report);
   const fetchReport = useGahStore((s) => s.fetchReport);
+  const trend = report.data?.trend ?? [];
+  const trendOptions = [
+    { id: 'tokens', label: 'Input+output tokens', data: trend.map((p) => ({ date: p.date, value: p.total_tokens })), format: formatTokens },
+    { id: 'cost', label: 'Cost (USD)', data: trend.map((p) => ({ date: p.date, value: p.actual_cost_usd ?? p.estimated_cost_usd ?? 0 })), format: (v: number) => formatCost(v) },
+    { id: 'success', label: 'Success rate', data: trend.map((p) => ({ date: p.date, value: p.entries ? p.validation_pass / p.entries : 0 })), format: (v: number) => formatPercent(v) }
+  ] as const;
   const [groupBy, setGroupBy] = useState<ReportGroupBy>('backend');
   const [sortKey, setSortKey] = useState<SortKey>('entries');
   const [sortDesc, setSortDesc] = useState(true);
-  const [trendMetric, setTrendMetric] = useState<(typeof TREND_OPTIONS)[number]['id']>('tokens');
+  const [trendMetric, setTrendMetric] = useState<(typeof trendOptions)[number]['id']>('tokens');
 
   useEffect(() => {
     fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true });
@@ -70,7 +69,7 @@ export function TelemetryPage() {
     }
   };
 
-  const activeTrend = TREND_OPTIONS.find((t) => t.id === trendMetric)!;
+  const activeTrend = trendOptions.find((t) => t.id === trendMetric)!;
 
   return (
     <div className="space-y-6">
@@ -100,14 +99,14 @@ export function TelemetryPage() {
           <div className="flex items-center gap-3">
             <span className="inline-flex items-center gap-1 text-xs text-warning">
               <FlaskConical size={12} aria-hidden="true" />
-              Development fixture — no raw time-series endpoint yet
+              Ledger-derived daily data
             </span>
             <select
               value={trendMetric}
               onChange={(e) => setTrendMetric(e.target.value as typeof trendMetric)}
               className="bg-raised border border-subtle rounded-md px-2 py-1 text-xs text-primary"
             >
-              {TREND_OPTIONS.map((opt) => (
+              {trendOptions.map((opt) => (
                 <option key={opt.id} value={opt.id}>
                   {opt.label}
                 </option>

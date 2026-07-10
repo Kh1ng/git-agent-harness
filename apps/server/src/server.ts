@@ -43,7 +43,7 @@ export function createServer() {
         report: '/api/report',
         work: '/api/work/:workId',
         events: '/api/events',
-        websocket: 'ws://localhost:3773'
+        websocket: '/ws'
       },
       features: {
         webSocket: true,

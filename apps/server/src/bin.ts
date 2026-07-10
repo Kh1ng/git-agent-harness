@@ -6,8 +6,10 @@ import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
 import { isGahCliAvailable } from './gahCli.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
+import { markReadinessCheck } from './serverReadiness.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
+const HOST = process.env.HOST || '0.0.0.0';
 
 async function main() {
   console.log('Starting Git Agent Harness server...');
@@ -30,19 +32,27 @@ async function main() {
   } else {
     console.log('GAH CLI not found - running in limited mode');
   }
+  markReadinessCheck(
+    'rustBackend',
+    cliAvailable,
+    cliAvailable ? undefined : 'gah CLI not found'
+  );
 
   // Initialize provider registry with default profile
   const providerRegistry = getProviderRegistry();
   providerRegistry.setDefaultProfile('gah');
+  await providerRegistry.refreshAllFromGah();
+  markReadinessCheck('providerRegistry', true);
   
   // Set up WebSocket handler
   createWebSocketHandler(wss);
+  markReadinessCheck('webSocket', true);
   
   // Start HTTP server
-  server.listen(PORT, () => {
-    console.log(`Git Agent Harness server listening on port ${PORT}`);
-    console.log(`WebSocket server available at ws://localhost:${PORT}`);
-    console.log(`Health check at http://localhost:${PORT}/health`);
+  server.listen(PORT, HOST, () => {
+    console.log(`Git Agent Harness server listening on ${HOST}:${PORT}`);
+    console.log(`WebSocket server available on ws://${HOST}:${PORT}`);
+    console.log(`Health check available on http://${HOST}:${PORT}/health`);
   });
   
   // Handle graceful shutdown

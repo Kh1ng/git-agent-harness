@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from 'react';
+import { useUiStore } from '../store/uiStore.js';
 import type {
   ServerMessage,
   ClientMessage,
@@ -50,9 +51,11 @@ type WebSocketContextType = {
 const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
 
 // Vite injects import.meta.env - use type assertion for TypeScript
-const SERVER_WS_URL = (import.meta as unknown as { env: { VITE_WS_URL?: string } }).env?.VITE_WS_URL || 'ws://localhost:3773';
+const SERVER_WS_URL = (import.meta as unknown as { env: { VITE_WS_URL?: string } }).env?.VITE_WS_URL ||
+  `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
 export function WebSocketProvider({ children }: { children: ReactNode }) {
+  const profileOverride = useUiStore((state) => state.profileOverride);
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(true);
@@ -89,6 +92,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         newSocket.send(JSON.stringify({
           type: 'client.hello' as const,
           clientVersion: '0.1.0',
+          profile: profileOverride ?? undefined,
           capabilities: {
             supportsTerminal: true,
             supportsNotifications: true,
@@ -216,7 +220,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       setError(error instanceof Error ? error.message : String(error));
       setIsConnecting(false);
     }
-  }, []);
+  }, [profileOverride]);
 
   const sendMessage = useCallback((message: ClientMessage) => {
     const current = socketRef.current;
@@ -256,8 +260,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     return () => {
       cleanup?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [connect]);
 
   useEffect(() => {
     if (!isConnected && !isConnecting && !error && socket === null) {

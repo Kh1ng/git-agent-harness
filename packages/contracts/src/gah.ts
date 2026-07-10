@@ -226,6 +226,16 @@ export interface ReportData {
   profile: string | null;
   group_by: string;
   comparisons: BackendModelComparison[];
+  trend: ReportTrendPoint[];
+}
+
+export interface ReportTrendPoint {
+  date: string;
+  entries: number;
+  validation_pass: number;
+  total_tokens: number;
+  actual_cost_usd: number | null;
+  estimated_cost_usd: number | null;
 }
 
 // ---------------------------------------------------------------------------

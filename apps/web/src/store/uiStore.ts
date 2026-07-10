@@ -1,15 +1,8 @@
 /**
  * Small UI-preference store: theme and an optional profile override.
  *
- * Honest limitation (see Settings page): the WebSocket welcome message's
- * live session/provider data is tied to whatever profile the server
- * hardcodes at connect time (currently always "gah" -- see
- * apps/server/src/wsServer.ts's `defaultProfile`). Overriding the profile
- * here only affects the REST-backed pull data (status/report/events/work),
- * which genuinely does re-fetch fresh per profile. True multi-profile live
- * session switching would need a WS message to request a different
- * profile's welcome payload, which doesn't exist yet -- rather than fake
- * it, this is called out directly in the Settings UI.
+ * The WebSocket provider reconnects with the selected profile so live status
+ * and provider data follow the same profile as the REST-backed pages.
  */
 import { create } from 'zustand';
 
