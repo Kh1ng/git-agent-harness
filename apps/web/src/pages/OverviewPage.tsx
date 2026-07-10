@@ -42,6 +42,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
 
   const activeSessions = sessions.filter((s) => ['starting', 'running'].includes(s.status));
   const activeControllerRuns = controllerActivity.filter((run) => run.status === 'running');
+  const activeWorkCount = activeSessions.length + activeControllerRuns.length;
 
   const refresh = () => {
     fetchStatus(profile ?? undefined, { force: true });
@@ -119,7 +120,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
           icon={Coins}
           hint={totalActualCost === null && totalEstimatedCost !== null ? 'estimated' : undefined}
         />
-        <StatTile label="Active sessions" value={String(activeSessions.length + activeControllerRuns.length)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
+        <StatTile label="Active work" value={String(activeWorkCount)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
       </div>
 
       {(blockers.length > 0 || blockedWorkItems.length > 0) && (
@@ -155,10 +156,20 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section>
           <h3 className="text-sm font-semibold text-primary mb-3">What's running now</h3>
-          {activeSessions.length === 0 ? (
+          {activeWorkCount === 0 ? (
             <EmptyState icon={Timer} title="No active sessions" description="Dispatched work will appear here while it runs." />
           ) : (
             <div className="space-y-3">
+              {activeControllerRuns.map((run) => (
+                <div key={run.run_id} className="card-padded flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-mono text-xs text-primary">{run.work_id ?? 'unassigned'}</p>
+                    <p className="text-xs text-secondary mt-1">{run.action}</p>
+                    <p className="text-[10px] text-muted mt-1 truncate">run {run.run_id}</p>
+                  </div>
+                  <StatusBadge tone="good" label="running" />
+                </div>
+              ))}
               {activeSessions.slice(0, 4).map((session) => (
                 <SessionCard key={session.id} session={session} onClick={() => onSelectSession(session)} />
               ))}
