@@ -62,12 +62,24 @@ class WebSocketSessionStore {
 const sessionStore = new WebSocketSessionStore();
 const pushBus = createServerPushBus();
 
+// Temporary storage for profile from query params, used before client.hello arrives
+const pendingProfiles = new Map<WebSocket, string>();
+
 export function createWebSocketHandler(wss: WebSocketServer) {
   wss.on('connection', (ws: WebSocket, req) => {
     console.log('WebSocket client connected');
     
     let clientInfo: { clientVersion: string; capabilities: ClientCapabilities } | null = null;
     let isAuthenticated = false;
+    
+    // Extract profile from query parameters in the connection URL
+    const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+    const profileFromQuery = url.searchParams.get('profile') || null;
+    
+    // Store profile from query param temporarily until client.hello arrives
+    if (profileFromQuery) {
+      pendingProfiles.set(ws, profileFromQuery);
+    }
     
     ws.on('message', async (data: WebSocket.RawData) => {
       try {
@@ -90,6 +102,7 @@ export function createWebSocketHandler(wss: WebSocketServer) {
       if (clientInfo) {
         sessionStore.remove(ws);
       }
+      pendingProfiles.delete(ws);
     });
     
     ws.on('error', (error) => {
@@ -117,9 +130,13 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
   switch (message.type) {
     case 'client.hello':
       // Store client info
-      const profile = message.profile ?? 'gah';
+      // Use profile from client.hello message, or fall back to query param from pendingProfiles, or default to 'gah'
+      const pendingProfile = pendingProfiles.get(ws);
+      const profile = message.profile ?? pendingProfile ?? 'gah';
       sessionStore.add(ws, message.clientVersion, message.capabilities, profile);
-      console.log(`Client hello from ${message.clientVersion}`);
+      // Clean up pending profile
+      pendingProfiles.delete(ws);
+      console.log(`Client hello from ${message.clientVersion} with profile: ${profile}`);
       break;
       
     case 'session.start':
@@ -281,7 +298,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
     // path TICKET-113 already wired up -- there's no separate
     // per-field ProviderRegistry accessor, `gah status --json` returns
     // all of this in one call.
-    const defaultProfile = sessionStore.get(ws)?.profile ?? 'gah';
+    const defaultProfile = sessionStore.get(ws)?.profile ?? pendingProfiles.get(ws) ?? 'gah';
     let mergeRequests: MergeRequest[] = [];
     let availability: AvailabilityScope[] = [];
     let blockers: Blocker[] = [];

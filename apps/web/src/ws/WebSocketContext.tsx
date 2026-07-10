@@ -53,8 +53,16 @@ type WebSocketContextType = {
 const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
 
 // Vite injects import.meta.env - use type assertion for TypeScript
-const SERVER_WS_URL = (import.meta as unknown as { env: { VITE_WS_URL?: string } }).env?.VITE_WS_URL ||
+const SERVER_WS_BASE = (import.meta as unknown as { env: { VITE_WS_URL?: string } }).env?.VITE_WS_URL ||
   `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+
+function getWebSocketUrl(profile?: string | null): string {
+  const url = new URL(SERVER_WS_BASE);
+  if (profile) {
+    url.searchParams.set('profile', profile);
+  }
+  return url.toString();
+}
 
 export function WebSocketProvider({ children }: { children: ReactNode }) {
   const profileOverride = useUiStore((state) => state.profileOverride);
@@ -86,7 +94,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     setError(null);
 
     try {
-      const newSocket = new WebSocket(SERVER_WS_URL);
+      const newSocket = new WebSocket(getWebSocketUrl(profileOverride));
 
       newSocket.onopen = () => {
         setIsConnected(true);
