@@ -1,4 +1,4 @@
-use crate::config::{self, GahConfig, Profile};
+use crate::config::{self, CandidateConfig, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
 use crate::models::{AvailableTicket, PmPlan, WorkMetadata};
@@ -3038,32 +3038,30 @@ fn review(
         runner::load_env_file(resolved_env)
     };
 
-    // Escalate to the weak/escalatory reviewer for THIS review call only,
-    // before routing sees the request -- a genuinely stuck or low-confidence
-    // routine review shouldn't get another rubber stamp from the same tier.
-    // Fails open (falls through to the normal requested backend/model) if
-    // no weak reviewer is configured, matching `derive_reviewer_tier`'s
-    // fallback-chain lookup (~line 7918).
+    // Escalate to the escalatory reviewer (ESCALATORY_REVIEW list, Issue #123)
+    // for THIS review call only, before routing sees the request -- a
+    // genuinely stuck or low-confidence routine review shouldn't get another
+    // rubber stamp from the same tier. Fails open (falls through to the normal
+    // requested backend/model) if no escalatory reviewer is configured,
+    // matching `derive_reviewer_tier`'s fallback-chain lookup. The first
+    // escalatory entry is used for the escalation; it is an ordered cascade
+    // and the controller re-routes across `review_candidates` on failure.
     let escalation_reason = review_escalation_reason(cfg, &args.profile, &target.source_branch);
-    let weak_review_backend = profile.routing.weak_review_backend.as_deref().or(cfg
-        .defaults
+    let escalatory: Vec<CandidateConfig> = profile
         .routing
-        .weak_review_backend
-        .as_deref());
-    let weak_review_model = profile.routing.weak_review_model.as_deref().or(cfg
-        .defaults
-        .routing
-        .weak_review_model
-        .as_deref());
-    let (requested_backend, requested_model) = match (escalation_reason, weak_review_backend) {
-        (Some(reason), Some(backend)) => {
+        .effective_escalatory_reviewers()
+        .into_iter()
+        .chain(cfg.defaults.routing.effective_escalatory_reviewers())
+        .collect();
+    let (requested_backend, requested_model) = match (escalation_reason, escalatory.first()) {
+        (Some(reason), Some(esc)) => {
             println!(
                 "Escalating review to {}/{} ({reason}) for branch {}",
-                backend,
-                weak_review_model.unwrap_or("default"),
+                esc.backend,
+                esc.model.as_deref().unwrap_or("default"),
                 target.source_branch
             );
-            (backend, weak_review_model)
+            (esc.backend.as_str(), esc.model.as_deref())
         }
         _ => (
             config::canonical_backend_name(&args.backend),
@@ -3962,7 +3960,11 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_tier_weak_when_backend_matches_weak_config() {
+    fn reviewer_tier_escalatory_when_backend_matches_legacy_weak_config() {
+        // Issue #123: the deprecated single `weak_review_*` entry is the
+        // one-entry escalatory cascade, so any review routed to it is now an
+        // ESCALATORY (escalate-and-continue) tier, not the old human-gated
+        // Weak tier.
         let tmp = tempfile::tempdir().unwrap();
         let mut prof = profile(tmp.path());
         prof.routing.weak_review_backend = Some("codex".into());
@@ -3971,7 +3973,60 @@ mod tests {
         let route = route_decision("codex", None, true);
         assert_eq!(
             derive_reviewer_tier(&cfg, &prof, &route),
-            ReviewerTier::Weak
+            ReviewerTier::Escalatory
+        );
+    }
+
+    #[test]
+    fn reviewer_tier_escalatory_for_any_escalatory_reviewers_list_entry() {
+        // Issue #123: ESCALATORY_REVIEW is a LIST. Every entry in the list
+        // must classify as the escalatory tier, regardless of order.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        let candidate = |backend: &str, model: &str| crate::config::CandidateConfig {
+            backend: backend.into(),
+            model: Some(model.into()),
+            ..Default::default()
+        };
+        prof.routing.escalatory_reviewers = vec![
+            candidate("claude", "claude-sonnet-4"),
+            candidate("kimi", "kimi-k2"),
+            candidate("glm", "glm-4.7"),
+        ];
+        let cfg = gah_config(RoutingPolicy::default());
+
+        for (backend, model) in [
+            ("claude", "claude-sonnet-4"),
+            ("kimi", "kimi-k2"),
+            ("glm", "glm-4.7"),
+        ] {
+            let route = route_decision(backend, Some(model), true);
+            assert_eq!(
+                derive_reviewer_tier(&cfg, &prof, &route),
+                ReviewerTier::Escalatory,
+                "escalatory entry {}/{} not classified as escalatory",
+                backend,
+                model
+            );
+        }
+    }
+
+    #[test]
+    fn reviewer_tier_routine_reviewer_is_strong() {
+        // Issue #123: ROUTINE_REVIEWER is the single STRONG first-line reviewer.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        prof.routing.routine_reviewer = Some(crate::config::CandidateConfig {
+            backend: "vibe".into(),
+            model: Some("mistral-medium-3.5".into()),
+            ..Default::default()
+        });
+        let cfg = gah_config(RoutingPolicy::default());
+
+        let route = route_decision("vibe", Some("mistral-medium-3.5"), true);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Strong
         );
     }
 
@@ -8106,6 +8161,11 @@ enum ReviewerTier {
     Strong,
     Standard,
     Weak,
+    /// Issue #123: an escalatory reviewer (a more-capable model from the
+    /// ESCALATORY_REVIEW list) the pipeline escalated to and continued with.
+    /// Auto-merge eligible like `Strong`, but recorded distinctly so the
+    /// cascade origin is observable.
+    Escalatory,
 }
 
 impl ReviewerTier {
@@ -8114,6 +8174,7 @@ impl ReviewerTier {
             Self::Strong => "strong",
             Self::Standard => "standard",
             Self::Weak => "weak",
+            Self::Escalatory => "escalatory",
         }
     }
 }
@@ -8128,6 +8189,32 @@ fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecisio
         backend_cfg.is_some_and(|b| b == route.effective_backend)
             && (model_cfg.is_none() || model_cfg == effective_model)
     };
+    let routine = profile
+        .routing
+        .effective_routine_reviewer()
+        .or_else(|| cfg.defaults.routing.effective_routine_reviewer());
+    let escalatory = profile
+        .routing
+        .effective_escalatory_reviewers()
+        .into_iter()
+        .chain(cfg.defaults.routing.effective_escalatory_reviewers())
+        .collect::<Vec<_>>();
+
+    // Issue #123: an escalatory reviewer (Sonnet/Kimi/GLM/...) is a distinct
+    // capability tier -- escalate-and-continue, auto-merge eligible. It takes
+    // precedence over the routine/strong classification so an explicitly
+    // escalated review is never mislabeled as the routine first-line tier.
+    for esc in &escalatory {
+        if selected(Some(esc.backend.as_str()), esc.model.as_deref()) {
+            return ReviewerTier::Escalatory;
+        }
+    }
+    // Routine reviewer is the STRONG first-line authority.
+    if let Some(routine) = &routine {
+        if selected(Some(routine.backend.as_str()), routine.model.as_deref()) {
+            return ReviewerTier::Strong;
+        }
+    }
     let strong_backend = profile.routing.strong_review_backend.as_deref().or(cfg
         .defaults
         .routing

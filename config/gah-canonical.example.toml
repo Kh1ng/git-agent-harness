@@ -12,9 +12,19 @@
 # they did before this file existed.
 
 [routing]
-strong_review_backend = "claude"
-strong_review_model = "sonnet"
-weak_review_backend = "codex"
+# Issue #123: two-tier reviewer model.
+#
+# ROUTINE_REVIEWER -- the single STRONG first-line reviewer (replaces the
+# deprecated strong_review_backend/strong_review_model pair).
+routine_reviewer = { backend = "claude", model = "sonnet" }
+# ESCALATORY_REVIEW -- an ORDERED LIST of advanced reviewers used when routine
+# review escalates (replaces the deprecated single weak_review_backend/
+# weak_review_model pair). Escalatory reviewers are escalate-and-continue
+# (auto-merge eligible), distinct from the legacy weak tier that forced
+# human_required.
+escalatory_reviewers = [
+    { backend = "codex", model = "default" },
+]
 
 [routing.review_required_capabilities]
 claude = ["ponytail"]

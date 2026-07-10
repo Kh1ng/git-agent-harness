@@ -86,15 +86,14 @@ pub reviewer_class: Option<String>,  // "strong", "weak", or backend-specific
 
 **Logic:**
 ```rust
-// In apply_route_to_ledger or review preprocessing
+// In apply_route_to_ledger or review preprocessing.
+// Today this is `dispatch::derive_reviewer_tier` (Issue #123): an escalatory
+// reviewer (ESCALATORY_REVIEW list) -> "escalatory", the routine reviewer
+// (routine_reviewer / strong_review_*) -> "strong", a review_candidates entry
+// -> "strong", otherwise "standard".
 fn determine_reviewer_class(route: &RouteDecision) -> String {
-    if route.effective_backend == profile.routing.strong_review_backend.as_deref() {
-        "strong".to_string()
-    } else if route.effective_backend == profile.routing.weak_review_backend.as_deref() {
-        "weak".to_string()
-    } else {
-        format!("{}:{}", route.effective_backend, route.effective_model.as_deref().unwrap_or(""))
-    }
+    let tier = dispatch::derive_reviewer_tier(cfg, profile, route);
+    tier.as_str().to_string()
 }
 ```
 
@@ -730,3 +729,52 @@ misconfiguration in `doctor` rather than at merge time.
 ### Backward Compatibility
 Default `None`/`Auto` preserves existing behavior. No call sites of
 `decide_next_action` changed (it still takes only `&StatusSnapshot`).
+
+---
+
+## Reviewer tier model (Issue #123 / TICKET-118 stabilization)
+
+The reviewer tier was originally a single `strong_review_backend/model` +
+single `weak_review_backend/model` pair. That cannot express the intended
+two-tier model:
+
+- **ROUTINE_REVIEWER** (single, STRONG) -- first-line reviewer
+  (e.g. Mistral-Medium via vibe).
+- **ESCALATORY_REVIEW** (ORDERED LIST) -- advanced reviewers used when
+  routine review escalates (Sonnet, Kimi, GLM, ...). This is a list, not a
+  single backend, which the old `weak_review_*` fields could not express.
+
+### Config (`RoutingPolicy`)
+```toml
+[routing]
+# preferred: new two-tier scheme
+routine_reviewer = { backend = "vibe", model = "mistral-medium-3.5" }
+escalatory_reviewers = [
+    { backend = "claude", model = "claude-sonnet-4" },
+    { backend = "kimi",   model = "kimi-k2" },
+    { backend = "glm",    model = "glm-4.7" },
+]
+```
+The deprecated `strong_review_backend/model` and `weak_review_backend/model`
+fields remain for backward compatibility. `RoutingPolicy::
+effective_routine_reviewer()` maps `strong_review_*` onto `routine_reviewer`;
+`effective_escalatory_reviewers()` maps `weak_review_*` onto a single-entry
+`escalatory_reviewers` list. Both schemes must NOT be set simultaneously --
+`doctor::check_reviewer_config` fails on that mutual-exclusivity conflict.
+
+### Tiers (`dispatch::ReviewerTier`)
+`derive_reviewer_tier()` now resolves:
+
+- matches an `escalatory_reviewer` entry -> `Escalatory` (escalate-and-continue,
+  auto-merge eligible, recorded distinctly from `Strong`).
+- matches `routine_reviewer` (or `strong_review_*`) -> `Strong`.
+- matches `weak_review_*` (legacy) -> `Escalatory` via the back-compat shim.
+- matches a `review_candidates` entry -> `Strong`.
+- otherwise -> `Standard`.
+
+Escalation (`review_escalation_reason` path) routes to the first entry of the
+`escalatory_reviewers` list instead of the single `weak_review_backend`.
+
+### Validation (`doctor::check_reviewer_config`)
+Added to the `validate` set: fails on new+legacy mutual exclusivity, warns when
+no routine reviewer is configured, and reports the resolved escalatory list.

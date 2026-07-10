@@ -26,6 +26,7 @@ pub fn run_with_validate(
             failed |= !check_backend_executables(&cfg.defaults, profile);
             failed |= !check_review_capabilities(&cfg, profile);
             failed |= !check_merge_policy(profile);
+            failed |= !check_reviewer_config(&cfg.defaults, profile);
         }
     }
 
@@ -275,6 +276,76 @@ fn check_backend_executables(defaults: &Defaults, profile: &Profile) -> bool {
 /// internally consistent with the provider. `gitlab_mwps` only makes sense
 /// for a GitLab-backed profile; flag it on any other provider so the operator
 /// discovers the misconfiguration in `doctor` rather than at merge time.
+/// Issue #123 / TICKET-stabilization: validate the reviewer-tier config.
+///
+/// Two schemes exist: the new `routine_reviewer` + `escalatory_reviewers`
+/// list, and the deprecated single `strong_review_*` / `weak_review_*` pair.
+/// They are mutually exclusive -- setting both is a misconfiguration the
+/// back-compat shim cannot resolve unambiguously. A routine reviewer (new or
+/// legacy) is required for review to have an authority tier.
+pub(crate) fn check_reviewer_config(defaults: &Defaults, profile: &Profile) -> bool {
+    let routing = profile.effective_routing(defaults);
+    let uses_new = routing.routine_reviewer.is_some() || !routing.escalatory_reviewers.is_empty();
+    let uses_legacy =
+        routing.strong_review_backend.is_some() || routing.weak_review_backend.is_some();
+
+    if uses_new && uses_legacy {
+        print_check(
+            CheckStatus::Fail,
+            "reviewer config",
+            "both new (routine_reviewer/escalatory_reviewers) and deprecated \
+             (strong_review_*/weak_review_*) reviewer fields are set; they are \
+             mutually exclusive -- migrate fully to the new scheme",
+        );
+        return false;
+    }
+
+    match routing.effective_routine_reviewer() {
+        Some(r) => print_check(
+            CheckStatus::Pass,
+            "reviewer config",
+            &format!(
+                "routine reviewer '{}'{}",
+                r.backend,
+                r.model
+                    .as_deref()
+                    .map(|m| format!("/{m}"))
+                    .unwrap_or_default()
+            ),
+        ),
+        None => print_check(
+            CheckStatus::Warn,
+            "reviewer config",
+            "no routine reviewer configured (set routine_reviewer or \
+             strong_review_backend) -- routine review has no STRONG authority tier",
+        ),
+    }
+
+    let escalatory = routing.effective_escalatory_reviewers();
+    if !escalatory.is_empty() {
+        let summary = escalatory
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}{}",
+                    c.backend,
+                    c.model
+                        .as_deref()
+                        .map(|m| format!("/{m}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        print_check(
+            CheckStatus::Pass,
+            "reviewer config",
+            &format!("escalatory reviewers: {}", summary),
+        );
+    }
+    true
+}
+
 pub(crate) fn check_merge_policy(profile: &Profile) -> bool {
     let policy = match &profile.routing.merge_policy {
         None => {
@@ -355,10 +426,14 @@ fn configured_backends(defaults: &Defaults, profile: &Profile) -> Vec<String> {
         {
             backends.insert(b.clone());
         }
+        if let Some(r) = &routing.routine_reviewer {
+            backends.insert(r.backend.clone());
+        }
         for list in [
             &routing.pm_candidates,
             &routing.improve_candidates,
             &routing.review_candidates,
+            &Some(routing.escalatory_reviewers.clone()),
         ]
         .into_iter()
         .flatten()
