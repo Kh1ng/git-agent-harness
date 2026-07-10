@@ -1957,6 +1957,7 @@ mod tests {
 
     fn profile() -> Profile {
         Profile {
+            prune_older_than_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),
             provider: "github".into(),

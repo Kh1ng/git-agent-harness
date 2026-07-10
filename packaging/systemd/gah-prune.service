@@ -1,0 +1,29 @@
+# gah-prune.service
+# Prunes stale GAH worktrees and sessions for every configured profile.
+#
+# `gah prune` with no --profile prunes ALL profiles; each profile applies its
+# own per-profile `prune_older_than_days` retention window (falling back to the
+# 30-day default when unset). Merged/closed PR/MR worktrees are always pruned,
+# regardless of the retention window.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp gah-prune.service gah-prune.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now gah-prune.timer
+[Unit]
+Description=GAH prune — remove stale worktrees and sessions for all profiles
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=khing
+Group=khing
+ExecStart=/usr/local/bin/gah prune
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

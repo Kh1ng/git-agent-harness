@@ -407,6 +407,7 @@ mod tests {
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
+            prune_older_than_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),
             provider: "gitlab".into(),

@@ -658,6 +658,7 @@ mod tests {
     ) -> crate::ledger::LedgerEntry {
         let tmp = tempfile::tempdir().unwrap();
         let prof = crate::config::Profile {
+            prune_older_than_days: None,
             display_name: "test".into(),
             repo_id: "test".into(),
             repo: "test".into(),

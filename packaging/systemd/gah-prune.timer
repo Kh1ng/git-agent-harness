@@ -1,0 +1,19 @@
+# gah-prune.timer
+# Runs gah-prune.service daily so worktrees/sessions are reclaimed on a
+# schedule instead of accumulating until someone runs `gah prune` by hand.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp gah-prune.service gah-prune.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now gah-prune.timer
+[Unit]
+Description=Daily GAH prune of stale worktrees and sessions
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*-*-* 04:17:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
