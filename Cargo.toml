@@ -17,10 +17,13 @@ regex = "1"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 toml = "0.8"
 fs2 = "0.4"
+libc = "0.2"
+nix = { version = "0.29", features = ["process", "term", "fs", "signal", "poll", "feature"] }
 ratatui = "0.30"
 crossterm = "0.29"
 tokio = { version = "1", features = ["full"] }
 tungstenite = "0.20"
+uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 chrono = "0.4"
 log = "0.4"

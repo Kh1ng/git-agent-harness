@@ -2,6 +2,7 @@ mod availability;
 mod baseline;
 mod candidates;
 mod capability;
+pub mod claude_monitor;
 mod config;
 mod controller;
 mod dispatch;

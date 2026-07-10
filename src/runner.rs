@@ -40,6 +40,12 @@ pub struct RunResult {
     /// whole log — is what usage/quota parsing consumes, so a single
     /// attempt's usage is never polluted by prior runs.
     pub agy_cli_log_delta: Option<String>,
+    /// For Claude Code: the path to the session transcript `.jsonl`
+    /// produced by this run, if Claude Code wrote one. Backs the
+    /// transcript/Stop-hook per-attempt usage parser (issue #153). `None`
+    /// for non-Claude backends and for runs where the transcript could not
+    /// be located.
+    pub transcript_path: Option<String>,
 }
 
 pub struct LlmConfig {
@@ -260,6 +266,7 @@ pub fn run_openhands(
         duration_secs: duration.as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        transcript_path: None,
     })
 }
 
@@ -325,6 +332,7 @@ pub fn run_codex_with_executable(
         duration_secs: start.elapsed().as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        transcript_path: None,
     })
 }
 
@@ -408,13 +416,32 @@ pub fn run_claude_with_executable(
     let log_file = fs::File::create(&log_path).context("creating log file")?;
     let log_err = log_file.try_clone()?;
 
+    // Issue #153: pin a stable session id so we can locate the exact
+    // transcript `.jsonl` Claude Code writes afterwards (the source of real
+    // per-attempt token/cost usage, rather than scraping stdout).
+    let session_id = uuid::Uuid::new_v4().to_string();
+    // Find the HOME this invocation will run under (a per-attempt HOME is
+    // injected via env_vars; fall back to the ambient HOME).
+    let home = env_vars
+        .iter()
+        .find_map(|(k, v)| (k == "HOME").then_some(PathBuf::from(v)))
+        .or_else(|| env::var("HOME").ok().map(PathBuf::from));
+
     let start = Instant::now();
     let mut cmd = Command::new(executable);
-    cmd.args(["-p", task])
-        .args(extra_args)
-        .current_dir(worktree)
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err));
+    cmd.args([
+        "-p",
+        task,
+        "--output-format",
+        "text",
+        "--verbose",
+        "--session-id",
+        &session_id,
+    ])
+    .args(extra_args)
+    .current_dir(worktree)
+    .stdout(Stdio::from(log_file))
+    .stderr(Stdio::from(log_err));
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
@@ -422,11 +449,19 @@ pub fn run_claude_with_executable(
         .status()
         .context("launching claude; is it installed and on PATH?")?;
 
+    // Locate the transcript for the pinned session id so per-attempt usage
+    // parsing can consume it.
+    let transcript_path = home
+        .as_ref()
+        .and_then(|h| crate::claude_monitor::find_claude_transcript(h, worktree, &session_id))
+        .map(|p| p.to_string_lossy().into_owned());
+
     Ok(RunResult {
         exit_code: status.code().unwrap_or(-1),
         duration_secs: start.elapsed().as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        transcript_path,
     })
 }
 
@@ -490,6 +525,7 @@ pub fn run_vibe_with_executable(
         duration_secs: start.elapsed().as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        transcript_path: None,
     })
 }
 
@@ -641,6 +677,7 @@ pub fn run_opencode_with_executable(
         duration_secs: duration.as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        transcript_path: None,
     })
 }
 
@@ -860,6 +897,7 @@ pub fn run_agy_with_executable(
             duration_secs: duration.as_secs_f64(),
             log_path: log_path.to_string_lossy().into_owned(),
             agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+            transcript_path: None,
         });
     }
 
@@ -883,6 +921,7 @@ pub fn run_agy_with_executable(
             duration_secs: duration.as_secs_f64(),
             log_path: log_path.to_string_lossy().into_owned(),
             agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+            transcript_path: None,
         });
     }
 
@@ -891,6 +930,7 @@ pub fn run_agy_with_executable(
         duration_secs: duration.as_secs_f64(),
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+        transcript_path: None,
     })
 }
 
