@@ -851,7 +851,7 @@ fn load_worker_fixture(name: &str) -> Scenario {
         "empty_success" => Scenario::success(),
         "invalid_output" => Scenario::success().with_stdout("unexpected output"),
         "review_approve" => Scenario::success().with_stdout(
-            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
+            r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
         ),
         "hang" => Scenario {
             exit_code: 0,

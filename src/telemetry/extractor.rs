@@ -366,11 +366,8 @@ pub fn extract_telemetry_records(
 
 /// Determine final outcome from ledger entry data
 pub fn determine_final_outcome(entry: &LedgerEntry) -> Option<String> {
-    if entry.review_verdict.as_deref() == Some("APPROVE_STRONG") {
-        return Some("APPROVE_STRONG".to_string());
-    }
-    if entry.review_verdict.as_deref() == Some("APPROVE_WEAK") {
-        return Some("APPROVE_WEAK".to_string());
+    if entry.review_verdict.as_deref() == Some("APPROVE") {
+        return Some("APPROVE".to_string());
     }
     if entry.review_verdict.as_deref() == Some("NEEDS_FIX") {
         return Some("NEEDS_FIX".to_string());

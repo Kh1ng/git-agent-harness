@@ -191,7 +191,7 @@ pub fn build_series(
         point.entries += 1;
         if matches!(
             entry.validation_result.as_deref(),
-            Some("passed") | Some("APPROVE_STRONG") | Some("APPROVE_WEAK")
+            Some("passed") | Some("APPROVE")
         ) {
             point.validation_pass += 1;
         }
@@ -385,7 +385,7 @@ fn build_trend(
         point.entries += 1;
         if matches!(
             entry.validation_result.as_deref(),
-            Some("passed") | Some("APPROVE_STRONG") | Some("APPROVE_WEAK")
+            Some("passed") | Some("APPROVE")
         ) {
             point.validation_pass += 1;
         }
@@ -576,7 +576,7 @@ mod tests {
             entries: 10,
             attempts: 5,
             validation_pass: 8,
-            review_verdict_distribution: BTreeMap::from([("APPROVE_STRONG".to_string(), 2)]),
+            review_verdict_distribution: BTreeMap::from([("APPROVE".to_string(), 2)]),
             total_cost_usd: Some(1.50),
             actual_cost_usd: Some(1.50),
             estimated_cost_usd: None,
@@ -862,7 +862,7 @@ mod tests {
             entry(
                 "gah",
                 &format!("{d1}T12:00:00Z"),
-                Some("APPROVE_WEAK"),
+                Some("APPROVE"),
                 200,
                 2.0,
                 1.8,

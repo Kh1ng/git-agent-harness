@@ -381,16 +381,11 @@ mod telemetry_tests {
 
     #[test]
     fn test_final_outcome_determination() {
-        // Test APPROVE_STRONG
+        // Test APPROVE
         let mut entry = create_test_ledger_entry();
-        entry.review_verdict = Some("APPROVE_STRONG".to_string());
+        entry.review_verdict = Some("APPROVE".to_string());
         let outcome = determine_final_outcome(&entry);
-        assert_eq!(outcome, Some("APPROVE_STRONG".to_string()));
-
-        // Test APPROVE_WEAK
-        entry.review_verdict = Some("APPROVE_WEAK".to_string());
-        let outcome = determine_final_outcome(&entry);
-        assert_eq!(outcome, Some("APPROVE_WEAK".to_string()));
+        assert_eq!(outcome, Some("APPROVE".to_string()));
 
         // Test NEEDS_FIX
         entry.review_verdict = Some("NEEDS_FIX".to_string());

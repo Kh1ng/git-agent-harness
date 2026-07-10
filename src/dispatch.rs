@@ -3007,9 +3007,8 @@ fn review(
          1. Markdown review notes.\n\
          2. A JSON object with fields: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes.\n\
          blocking_findings, non_blocking_findings, and risk_notes must be JSON arrays of strings, even when empty or when only one item exists.\n\
-         Verdict must be one of APPROVE_STRONG, APPROVE_WEAK, NEEDS_FIX, REJECT, HUMAN_REVIEW, defined as:\n\
-         - APPROVE_STRONG: you have high confidence this change is correct, safe, and complete. No unresolved concern is worth surfacing as something that should change before merge.\n\
-         - APPROVE_WEAK: you believe the change is likely fine, but YOUR OWN review confidence is low -- insufficient context, a domain you couldn't fully verify, or a partial review. This is not a substitute for NEEDS_FIX.\n\
+         Verdict must be one of APPROVE, NEEDS_FIX, REJECT, HUMAN_REVIEW, defined as:\n\
+         - APPROVE: you believe the change is correct, safe, and complete enough to merge. Report your ACTUAL confidence honestly in the separate `confidence` field (high/medium/low) -- do not inflate confidence to sound more certain, and do not downgrade to NEEDS_FIX just to hedge when you'd otherwise approve. A low-confidence approval is a real, useful signal (insufficient context, a domain you couldn't fully verify, a partial review) and will correctly route to a human -- it is not a failure to be avoided.\n\
          - NEEDS_FIX: you found a concrete, real problem that should be fixed before merge. Put it in blocking_findings, even if it isn't an immediate crash -- e.g. silent data loss, a hidden failure mode, or anything that would take real effort to diagnose later if left in. Do not downgrade a genuine risk into non_blocking_findings/risk_notes just because it wouldn't break the build today.\n\
          - REJECT: the change is fundamentally wrong and should not be merged as-is.\n\
          - HUMAN_REVIEW: you cannot make a confident recommendation at all.\n\
@@ -3230,7 +3229,7 @@ fn review(
                 cfg,
                 profile,
                 NotifyEvent::ReviewVerdict {
-                    verdict: published_review_verdict(&verdict.verdict).leak(),
+                    verdict: &verdict.verdict,
                     mr_url: mr_url.as_deref().unwrap_or("unknown"),
                 },
             );
@@ -3674,8 +3673,8 @@ mod tests {
         first_markdown_heading, format_issue_for_focus, is_issue_number_reference,
         mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
         parse_review_verdict, parse_ticket_metadata, parse_ticket_metadata_from_issue,
-        published_review_verdict, render_review_comment, review_escalation_reason, review_labels,
-        review_preflight, run_backend, scan_available_tickets, strip_terminal_noise,
+        render_review_comment, review_escalation_reason, review_labels, review_preflight,
+        run_backend, scan_available_tickets, strip_terminal_noise,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
     };
@@ -3864,7 +3863,7 @@ mod tests {
         .unwrap();
         crate::ledger::append(
             &cfg,
-            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_STRONG", "high"),
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "high"),
         )
         .unwrap();
         assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
@@ -3877,12 +3876,12 @@ mod tests {
         let prof = profile(tmp.path());
         crate::ledger::append(
             &cfg,
-            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_STRONG", "high"),
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "high"),
         )
         .unwrap();
         crate::ledger::append(
             &cfg,
-            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_WEAK", "low"),
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "low"),
         )
         .unwrap();
         assert_eq!(
@@ -3898,7 +3897,7 @@ mod tests {
         let prof = profile(tmp.path());
         crate::ledger::append(
             &cfg,
-            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE_STRONG", "medium"),
+            &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "medium"),
         )
         .unwrap();
         assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
@@ -4050,17 +4049,17 @@ mod tests {
     }
 
     #[test]
-    fn approve_strong_from_weak_tier_still_forces_human_review_and_label() {
+    fn approve_from_weak_tier_still_forces_human_review_and_label() {
         // TICKET-108: this is the case the old fallback_used-based rewrite
         // used to handle by corrupting the verdict string. Now the verdict
         // text is untouched and reviewer_tier carries the distrust signal.
-        let json = r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
         let usage = crate::ledger::LedgerUsage::default();
         let route = route_decision("codex", None, true);
         let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Weak).unwrap();
 
         assert_eq!(
-            verdict.verdict, "APPROVE_STRONG",
+            verdict.verdict, "APPROVE",
             "verdict text is never rewritten"
         );
         assert_eq!(verdict.reviewer_tier.as_deref(), Some("weak"));
@@ -4073,8 +4072,8 @@ mod tests {
     }
 
     #[test]
-    fn approve_strong_from_strong_tier_is_not_forced_to_human_review() {
-        let json = r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+    fn approve_from_strong_tier_is_not_forced_to_human_review() {
+        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
         let usage = crate::ledger::LedgerUsage::default();
         let route = route_decision("claude", Some("sonnet"), false);
         let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
@@ -4086,11 +4085,12 @@ mod tests {
     }
 
     #[test]
-    fn approve_weak_verdict_forces_human_review_regardless_of_tier() {
-        // A weak VERDICT (the reviewer's own uncertainty) is a separate
-        // signal from reviewer TIER (who reviewed) -- even a strong-tier
-        // reviewer returning APPROVE_WEAK must still get human eyes.
-        let json = r#"{"verdict":"APPROVE_WEAK","confidence":"medium","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+    fn low_confidence_approve_forces_human_review_regardless_of_tier() {
+        // Low self-reported CONFIDENCE (the reviewer's own uncertainty) is a
+        // separate signal from reviewer TIER (who reviewed) -- even a
+        // strong-tier reviewer returning APPROVE with confidence:"low" must
+        // still get human eyes.
+        let json = r#"{"verdict":"APPROVE","confidence":"low","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
         let usage = crate::ledger::LedgerUsage::default();
         let route = route_decision("claude", Some("sonnet"), false);
         let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
@@ -4107,7 +4107,7 @@ mod tests {
     fn parse_review_verdict_handles_vibe_json_output() {
         // Test parsing of actual Vibe CLI output format
         // Vibe with --output text returns just the content, which should be a ReviewVerdict JSON object
-        let vibe_json_output = r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let vibe_json_output = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
 
         let route = crate::routing::RouteDecision {
             requested_backend: "vibe".to_string(),
@@ -4126,7 +4126,7 @@ mod tests {
         let verdict =
             parse_review_verdict(vibe_json_output, &route, &usage, ReviewerTier::Standard).unwrap();
 
-        assert_eq!(verdict.verdict, "APPROVE_STRONG");
+        assert_eq!(verdict.verdict, "APPROVE");
         assert_eq!(verdict.confidence, "high");
         assert!(!verdict.human_required);
         assert_eq!(verdict.blocking_findings, Vec::<String>::new());
@@ -5949,12 +5949,13 @@ The parser should retain structured sections.\n\n\
 
     #[test]
     fn render_review_comment_includes_non_blocking_findings_and_risk_notes() {
-        // Regression: a verdict with zero blocking_findings (e.g. APPROVE_WEAK)
-        // still carries real substance in these two fields. The posted PR
-        // comment was silently dropping both, leaving reviewers with nothing
-        // but a bare verdict/confidence line and no actual feedback.
+        // Regression: a verdict with zero blocking_findings (e.g. a
+        // low-confidence APPROVE) still carries real substance in these two
+        // fields. The posted PR comment was silently dropping both, leaving
+        // reviewers with nothing but a bare verdict/confidence line and no
+        // actual feedback.
         let verdict: crate::models::ReviewVerdict = serde_json::from_str(
-            r#"{"verdict":"APPROVE_WEAK","confidence":"0.78","human_required":true,
+            r#"{"verdict":"APPROVE","confidence":"low","human_required":true,
                 "blocking_findings":[],
                 "non_blocking_findings":["missing test coverage on one path"],
                 "risk_notes":["new module coupling"]}"#,
@@ -5967,42 +5968,14 @@ The parser should retain structured sections.\n\n\
         assert!(comment.contains("new module coupling"));
     }
 
-    #[test]
-    fn published_review_verdict_strips_internal_tier() {
-        // Issue #129 Bug B: the reviewer may return APPROVE_STRONG /
-        // APPROVE_WEAK as an internal routing tier. That tier must NOT leak
-        // into the human-facing review status -- humans see a strict
-        // APPROVE / REJECT. The STRONG/WEAK strength stays internal and only
-        // drives auto-merge eligibility.
-        assert_eq!(published_review_verdict("APPROVE_STRONG"), "APPROVE");
-        assert_eq!(published_review_verdict("APPROVE_WEAK"), "APPROVE");
-        assert_eq!(published_review_verdict("REJECT"), "REJECT");
-        // NEEDS_FIX / HUMAN_REVIEW carry no tier, published as-is.
-        assert_eq!(published_review_verdict("NEEDS_FIX"), "NEEDS_FIX");
-        assert_eq!(published_review_verdict("HUMAN_REVIEW"), "HUMAN_REVIEW");
-    }
-
-    #[test]
-    fn render_review_comment_publishes_approve_not_internal_tier() {
-        // Issue #129 Bug B: the posted MR body must show APPROVE, never the
-        // internal APPROVE_STRONG / APPROVE_WEAK routing tier.
-        let strong: crate::models::ReviewVerdict = serde_json::from_str(
-            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,
-                "blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
-        )
-        .unwrap();
-        let weak: crate::models::ReviewVerdict = serde_json::from_str(
-            r#"{"verdict":"APPROVE_WEAK","confidence":"medium","human_required":true,
-                "blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
-        )
-        .unwrap();
-        let s = render_review_comment(&strong, Path::new("/tmp/session"));
-        let w = render_review_comment(&weak, Path::new("/tmp/session"));
-        assert!(s.contains("GAH review verdict: `APPROVE`"));
-        assert!(!s.contains("APPROVE_STRONG"));
-        assert!(w.contains("GAH review verdict: `APPROVE`"));
-        assert!(!w.contains("APPROVE_WEAK"));
-    }
+    // published_review_verdict_strips_internal_tier and
+    // render_review_comment_publishes_approve_not_internal_tier used to pin
+    // that the internal APPROVE_STRONG/APPROVE_WEAK routing tier never leaked
+    // into human-facing text. Now that the verdict vocabulary has no
+    // internal-only tier at all (verdict is always one of
+    // APPROVE/NEEDS_FIX/REJECT/HUMAN_REVIEW), that property holds by
+    // construction and there is nothing left to regress -- deleted rather
+    // than kept as tests asserting an invariant that can no longer break.
 
     #[test]
     fn apply_diff_stats_reports_zero_before_commit_but_correct_after() {
@@ -8228,7 +8201,9 @@ fn parse_review_verdict(
             verdict.confidence = "medium".into();
         }
     }
-    if matches!(verdict.verdict.as_str(), "APPROVE_WEAK" | "HUMAN_REVIEW") {
+    if verdict.verdict == "HUMAN_REVIEW"
+        || (verdict.verdict == "APPROVE" && verdict.confidence == "low")
+    {
         verdict.human_required = true;
     }
     verdict.reviewer_tier = Some(tier.as_str().to_string());
@@ -8248,24 +8223,8 @@ fn parse_review_verdict(
     Ok(verdict)
 }
 
-/// Issue #129 / #128: the reviewer's own verdict vocabulary includes an
-/// internal routing tier (`APPROVE_STRONG` / `APPROVE_WEAK`) that must never
-/// be published verbatim to the repository. Humans and the issue tracker see
-/// a strict `APPROVE` / `REJECT` status; the STRONG/WEAK strength stays
-/// internal and only drives merge-policy / auto-merge eligibility in the
-/// controller (see `review_labels` and `decide_next_action`).
-pub(crate) fn published_review_verdict(verdict: &str) -> String {
-    match verdict {
-        "APPROVE_STRONG" | "APPROVE_WEAK" => "APPROVE".to_string(),
-        "REJECT" => "REJECT".to_string(),
-        // NEEDS_FIX / HUMAN_REVIEW carry no strength tier, so they are
-        // published as-is.
-        other => other.to_string(),
-    }
-}
-
 fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &Path) -> String {
-    let published = published_review_verdict(&verdict.verdict);
+    let published = &verdict.verdict;
     let mut out = format!(
         "GAH review verdict: `{}`\n\nConfidence: `{}`\nHuman required: `{}`\nReviewer: `{}` / `{}`\nArtifacts: `{}`\n",
         published,
@@ -8281,9 +8240,9 @@ fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &P
             out.push_str(&format!("- {}\n", item));
         }
     }
-    // A verdict with zero blocking findings (e.g. APPROVE_WEAK) still
-    // carries real substance in these two fields -- dropping them left the
-    // posted PR comment as a bare verdict line with no actual feedback.
+    // A verdict with zero blocking findings (e.g. a low-confidence APPROVE)
+    // still carries real substance in these two fields -- dropping them left
+    // the posted PR comment as a bare verdict line with no actual feedback.
     if !verdict.non_blocking_findings.is_empty() {
         out.push_str("\nNon-blocking findings:\n");
         for item in &verdict.non_blocking_findings {
@@ -8300,14 +8259,17 @@ fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &P
 }
 
 fn review_labels(verdict: &crate::models::ReviewVerdict) -> Vec<&'static str> {
-    // TICKET-108: an APPROVE_STRONG verdict from a weak-tier reviewer still
-    // needs human eyes -- reviewer identity and verdict text are combined
-    // here, not conflated into a single rewritten string.
+    // TICKET-108: an APPROVE from a weak-tier reviewer, or a low-confidence
+    // APPROVE from any reviewer, still needs human eyes -- reviewer identity
+    // and the model's self-reported confidence are combined here, not
+    // conflated into a single rewritten verdict string.
     let is_weak_tier = verdict.reviewer_tier.as_deref() == Some("weak");
+    let is_low_confidence = verdict.confidence == "low";
     match verdict.verdict.as_str() {
-        "APPROVE_STRONG" if is_weak_tier => vec!["gah-review-weak", "gah-human-review"],
-        "APPROVE_STRONG" => vec!["gah-ready-for-human"],
-        "APPROVE_WEAK" => vec!["gah-review-weak", "gah-human-review"],
+        "APPROVE" if is_weak_tier || is_low_confidence => {
+            vec!["gah-review-weak", "gah-human-review"]
+        }
+        "APPROVE" => vec!["gah-ready-for-human"],
         "NEEDS_FIX" | "REJECT" => vec!["gah-needs-fix"],
         "HUMAN_REVIEW" => vec!["gah-human-review"],
         _ => vec![],

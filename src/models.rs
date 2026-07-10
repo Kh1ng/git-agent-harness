@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn review_verdict_accepts_string_arrays() {
         let verdict: ReviewVerdict = serde_json::from_str(
-            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":["a"],"non_blocking_findings":["b"],"risk_notes":["c"]}"#,
+            r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":["a"],"non_blocking_findings":["b"],"risk_notes":["c"]}"#,
         )
         .unwrap();
         assert_eq!(verdict.blocking_findings, vec!["a"]);
@@ -351,7 +351,7 @@ mod tests {
         // instead of "high"/"medium"/"low", crashing the whole verdict
         // parse with "invalid type: floating point, expected a string".
         let verdict: ReviewVerdict = serde_json::from_str(
-            r#"{"verdict":"APPROVE_STRONG","confidence":0.78,"human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
+            r#"{"verdict":"APPROVE","confidence":0.78,"human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
         )
         .unwrap();
         assert_eq!(verdict.confidence, "0.78");
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn review_verdict_normalizes_single_strings() {
         let verdict: ReviewVerdict = serde_json::from_str(
-            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":"a","non_blocking_findings":"b","risk_notes":"c"}"#,
+            r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":"a","non_blocking_findings":"b","risk_notes":"c"}"#,
         )
         .unwrap();
         assert_eq!(verdict.blocking_findings, vec!["a"]);
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn review_verdict_normalizes_null_and_missing_lists() {
         let with_null: ReviewVerdict = serde_json::from_str(
-            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false,"blocking_findings":null,"non_blocking_findings":null,"risk_notes":null}"#,
+            r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":null,"non_blocking_findings":null,"risk_notes":null}"#,
         )
         .unwrap();
         assert!(with_null.blocking_findings.is_empty());
@@ -379,7 +379,7 @@ mod tests {
         assert!(with_null.risk_notes.is_empty());
 
         let missing: ReviewVerdict = serde_json::from_str(
-            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false}"#,
+            r#"{"verdict":"APPROVE","confidence":"high","human_required":false}"#,
         )
         .unwrap();
         assert!(missing.blocking_findings.is_empty());
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn review_verdict_still_rejects_malformed_json() {
         serde_json::from_str::<ReviewVerdict>(
-            r#"{"verdict":"APPROVE_STRONG","confidence":"high","human_required":false"#,
+            r#"{"verdict":"APPROVE","confidence":"high","human_required":false"#,
         )
         .unwrap_err();
     }
