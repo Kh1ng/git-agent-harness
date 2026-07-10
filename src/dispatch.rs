@@ -1021,10 +1021,31 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
 /// `ReviewRunResult` for the pattern that does), so this reads that one
 /// attempt's own log from disk. A read or parse failure yields an empty
 /// (all-`None`) `LedgerUsage`, never a fabricated zero.
+///
+/// Issue #152: tries the codex exec --json parser first (JSONL event stream
+/// produced when `--json` is passed to codex exec). Falls back to the
+/// generic regex-based parser for non-JSONL output from other backends.
 fn attempt_usage(log_path: &str) -> crate::ledger::LedgerUsage {
-    let mut usage = fs::read_to_string(log_path)
-        .map(|text| usage::parse_generic_usage(&text, "attempt_output_log"))
-        .unwrap_or_default();
+    let text = match fs::read_to_string(log_path) {
+        Ok(t) => t,
+        Err(_) => return crate::ledger::LedgerUsage::default(),
+    };
+
+    // Try codex exec --json parser first — handles JSONL output from
+    // codex exec --json where the generic regex parser would find nothing.
+    let mut usage = usage::parse_codex_exec_json(&text);
+    if usage.usage_source.is_some() {
+        usage.observed_at = Some(
+            time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        );
+        return usage;
+    }
+
+    // Fall back to the generic regex-based parser for other backends (or
+    // for codex running in non-JSON mode).
+    let mut usage = usage::parse_generic_usage(&text, "attempt_output_log");
     if usage.usage_source.is_some() {
         usage.observed_at = Some(
             time::OffsetDateTime::now_utc()

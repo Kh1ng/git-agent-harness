@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"th_abc123","timestamp":"2026-07-10T12:00:00Z"}
+{"type":"turn.started","turn_id":"trn_001"}
+{"type":"item.agent_message","content":"I will examine the codebase and implement the fix."}
+{"type":"item.command_execution","command":"ls src/","exit_code":0}
+{"type":"turn.completed","usage":{"input_tokens":14230,"cached_input_tokens":11800,"output_tokens":2150}}
+{"type":"turn.started","turn_id":"trn_002"}
+{"type":"item.file_change","path":"src/auth.ts","action":"edit"}
+{"type":"item.command_execution","command":"cargo test","exit_code":0}
+{"type":"turn.completed","usage":{"input_tokens":5200,"output_tokens":890,"reasoning_output_tokens":340}}
+{"type":"thread.completed","turn_count":2}
