@@ -131,7 +131,10 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
               <tbody>
                 {tickets.map((t) => (
                   <tr key={t.ticket_path}>
-                    <td className="text-primary">{t.work_id ?? t.title ?? t.ticket_path}</td>
+                    <td className="text-primary">
+                      {t.work_id && <span className="font-mono text-xs text-muted mr-1.5">{t.work_id}</span>}
+                      {t.title ?? (!t.work_id ? t.ticket_path : null)}
+                    </td>
                     <td>
                       {t.recommended_backend
                         ? `${t.recommended_backend}${t.recommended_model ? `/${t.recommended_model}` : ''}`

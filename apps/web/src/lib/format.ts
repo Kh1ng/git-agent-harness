@@ -68,6 +68,23 @@ export function formatAge(iso: string | null | undefined, now: Date = new Date()
   return `${days}d ago`;
 }
 
+/** Absolute local-timezone timestamp for an event/observation, e.g.
+ * "Jul 9, 3:14 PM" -- the raw ISO string GAH emits is always UTC, which
+ * reads as "wrong time" to anyone not in UTC. Returns null for
+ * unparsable input so callers can fall back to the raw string rather
+ * than rendering "Invalid Date". */
+export function formatLocalTime(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  });
+}
+
 /** An observation older than this is flagged stale in the UI -- old
  * enough that a human should not trust it as "current." */
 export const STALE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes

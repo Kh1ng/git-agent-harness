@@ -350,6 +350,15 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
         .with_context(|| format!("opening ledger {}", path.display()))?;
     serde_json::to_writer(&mut file, entry).context("serializing ledger entry")?;
     file.write_all(b"\n").context("writing ledger newline")?;
+    drop(file);
+
+    // Redundant SQLite mirror, kept in lockstep with the JSONL file (still
+    // the sole source of truth). Best-effort: a mirror failure must never
+    // fail the real dispatch write path.
+    if let Err(err) = sqlite_store::sync_from_jsonl(cfg) {
+        eprintln!("warning: failed to sync sqlite ledger mirror: {err:#}");
+    }
+
     Ok(path)
 }
 
@@ -414,6 +423,11 @@ pub fn backfill_review_verdict(
         out.push('\n');
     }
     fs::write(&path, out).with_context(|| format!("rewriting ledger {}", path.display()))?;
+
+    if let Err(err) = sqlite_store::sync_from_jsonl(cfg) {
+        eprintln!("warning: failed to sync sqlite ledger mirror: {err:#}");
+    }
+
     Ok(true)
 }
 
@@ -440,6 +454,167 @@ pub fn index_entries_by_work_id(entries: &[LedgerEntry]) -> LedgerEntriesByWorkI
         }
     }
     index
+}
+
+/// SQLite mirror of the JSONL ledger. `ledger.jsonl` remains the sole
+/// source of truth (every read path in this file still reads it); this is
+/// a redundant copy for evaluating SQLite as ledger storage without
+/// committing to a migration yet -- see the module's `sync_from_jsonl` doc
+/// for the tradeoff this makes.
+pub mod sqlite_store {
+    use super::{read_entries, LedgerEntry};
+    use crate::config::GahConfig;
+    use anyhow::{Context, Result};
+    use rusqlite::{params, Connection};
+    use std::path::PathBuf;
+
+    pub fn db_path(cfg: &GahConfig) -> PathBuf {
+        cfg.defaults.ledger_path().with_extension("db")
+    }
+
+    fn ensure_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ledger_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                work_id TEXT,
+                mode TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                effective_backend TEXT NOT NULL,
+                effective_model TEXT,
+                requested_model TEXT,
+                validation_result TEXT,
+                review_verdict TEXT,
+                human_required INTEGER NOT NULL,
+                duration_seconds REAL,
+                failure_class TEXT,
+                total_tokens INTEGER,
+                actual_cost_usd REAL,
+                estimated_cost_usd REAL,
+                raw_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ledger_entries_profile_ts
+                ON ledger_entries(profile, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_ledger_entries_work_id
+                ON ledger_entries(work_id);",
+        )?;
+        Ok(())
+    }
+
+    fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
+        let raw_json = serde_json::to_string(entry).context("serializing ledger entry")?;
+        tx.execute(
+            "INSERT INTO ledger_entries (
+                timestamp, profile, work_id, mode, backend, effective_backend,
+                effective_model, requested_model, validation_result, review_verdict,
+                human_required, duration_seconds, failure_class, total_tokens,
+                actual_cost_usd, estimated_cost_usd, raw_json
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            params![
+                entry.timestamp,
+                entry.profile,
+                entry.work_id,
+                entry.mode,
+                entry.backend,
+                entry.effective_backend,
+                entry.effective_model,
+                entry.requested_model,
+                entry.validation_result,
+                entry.review_verdict,
+                entry.human_required as i64,
+                entry.duration_seconds,
+                entry.failure_class,
+                entry.usage.total_tokens.map(|v| v as i64),
+                entry.usage.actual_cost_usd,
+                entry.usage.estimated_cost_usd,
+                raw_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild the mirror wholesale from the JSONL ledger (still
+    /// authoritative) rather than incrementally inserting/updating rows in
+    /// lockstep with `append`/`backfill_review_verdict`. A full rebuild
+    /// trivially can't drift from the JSONL it's derived from, which an
+    /// incremental dual-write easily could (e.g. `backfill_review_verdict`
+    /// rewrites an arbitrary earlier line, not just the latest one).
+    /// ponytail: O(entries) per call -- fine at today's ledger size
+    /// (hundreds of lines, sub-second); once the JSONL file is large
+    /// enough for this to show up in dispatch latency, switch to keyed
+    /// incremental upserts (e.g. by rowid keyed to line number, or a real
+    /// per-entry id added to LedgerEntry) instead of a full rebuild.
+    pub fn sync_from_jsonl(cfg: &GahConfig) -> Result<()> {
+        let entries = read_entries(cfg)?;
+        let db_path = db_path(cfg);
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut conn = Connection::open(&db_path)
+            .with_context(|| format!("opening sqlite ledger {}", db_path.display()))?;
+        ensure_schema(&conn)?;
+        conn.execute("DELETE FROM ledger_entries", [])
+            .context("clearing sqlite ledger mirror before resync")?;
+        let tx = conn.transaction().context("opening sqlite transaction")?;
+        for entry in &entries {
+            insert_entry(&tx, entry)?;
+        }
+        tx.commit().context("committing sqlite ledger mirror")?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::ledger::append;
+        use crate::ledger::tests::{profile, test_config};
+
+        #[test]
+        fn sync_mirrors_appended_entries_and_stays_in_lockstep_on_backfill() {
+            let (_tmp, cfg) = test_config();
+
+            let mut entry =
+                LedgerEntry::new("test", &profile(), "codex", "improve", "target", None, None);
+            entry.branch = Some("gah/test-1".to_string());
+            entry.effective_model = Some("gpt-5".to_string());
+            append(&cfg, &entry).unwrap();
+
+            let db_path = db_path(&cfg);
+            let conn = Connection::open(&db_path).unwrap();
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+            let review_verdict: Option<String> = conn
+                .query_row(
+                    "SELECT review_verdict FROM ledger_entries LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(review_verdict, None);
+
+            super::super::backfill_review_verdict(
+                &cfg,
+                "gah/test-1",
+                "APPROVE_STRONG",
+                "high",
+                "claude",
+                Some("claude-sonnet-4"),
+            )
+            .unwrap();
+
+            let review_verdict: Option<String> = conn
+                .query_row(
+                    "SELECT review_verdict FROM ledger_entries LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(review_verdict.as_deref(), Some("APPROVE_STRONG"));
+        }
+    }
 }
 
 /// TICKET-072: append-only reconciliation of dispatched work with later
@@ -1355,6 +1530,14 @@ pub mod summary {
         Ok(())
     }
 
+    /// Label for entries/observations/attempts with no known model (e.g. an
+    /// early-exit dispatch that never reached route resolution). Previously
+    /// these silently collapsed into a `""` group key via `unwrap_or_default`,
+    /// which merged every "we don't know the model" entry into one opaque,
+    /// unlabeled bucket in `gah report --group-by model` -- indistinguishable
+    /// from a real (if oddly-named) model called "".
+    pub const UNKNOWN_MODEL_LABEL: &str = "(unknown model)";
+
     pub fn build_summary(
         cfg: &config::GahConfig,
         since: &str,
@@ -1498,9 +1681,23 @@ pub mod summary {
         let grouped_by_model = if group_by == GroupBy::Model {
             build_grouped_summary(
                 &entries,
-                |entry| entry.effective_model.clone().unwrap_or_default(),
-                |observed| observed.model.unwrap_or_default().to_string(),
-                |_backend, model| model.unwrap_or_default().to_string(),
+                |entry| {
+                    entry
+                        .effective_model
+                        .clone()
+                        .unwrap_or_else(|| UNKNOWN_MODEL_LABEL.to_string())
+                },
+                |observed| {
+                    observed
+                        .model
+                        .map(str::to_string)
+                        .unwrap_or_else(|| UNKNOWN_MODEL_LABEL.to_string())
+                },
+                |_backend, model| {
+                    model
+                        .map(str::to_string)
+                        .unwrap_or_else(|| UNKNOWN_MODEL_LABEL.to_string())
+                },
             )
         } else {
             None
@@ -1955,7 +2152,10 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
 
-    fn profile() -> Profile {
+    // pub(crate) so the sqlite_store::tests submodule (a sibling, not a
+    // descendant, of this tests module) can reuse the same fixtures rather
+    // than duplicating them.
+    pub(crate) fn profile() -> Profile {
         Profile {
             display_name: "Repo".into(),
             repo_id: "repo".into(),
@@ -1998,7 +2198,7 @@ mod tests {
         }
     }
 
-    fn test_config() -> (tempfile::TempDir, GahConfig) {
+    pub(crate) fn test_config() -> (tempfile::TempDir, GahConfig) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = GahConfig {
             defaults: Defaults {
@@ -2684,6 +2884,52 @@ mod tests {
             Some(&1)
         );
         assert!((vibe_group.total_cost_usd.unwrap() - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn model_grouping_labels_missing_model_instead_of_collapsing_to_empty_string() {
+        // Regression: build_summary's grouped_by_model closures used to be
+        // `unwrap_or_default()`, so every entry with no effective_model
+        // (an early-exit dispatch, a review-mode entry, etc.) silently
+        // merged into one opaque `""` group -- indistinguishable in the API
+        // response from a real model literally named "". Production now
+        // uses `summary::UNKNOWN_MODEL_LABEL` for this same fallback.
+        let (_tmp, _cfg) = test_config();
+        let mut entry1 = LedgerEntry::new("test", &profile(), "auto", "fix", "test1", None, None);
+        entry1.effective_backend = "auto".to_string();
+        entry1.effective_model = None;
+
+        let mut entry2 =
+            LedgerEntry::new("test", &profile(), "codex", "improve", "test2", None, None);
+        entry2.effective_backend = "codex".to_string();
+        entry2.effective_model = Some("gpt-4".to_string());
+
+        let entries = vec![entry1, entry2];
+        let grouped = super::summary::build_grouped_summary(
+            &entries,
+            |entry| {
+                entry
+                    .effective_model
+                    .clone()
+                    .unwrap_or_else(|| super::summary::UNKNOWN_MODEL_LABEL.to_string())
+            },
+            |observed| {
+                observed
+                    .model
+                    .map(str::to_string)
+                    .unwrap_or_else(|| super::summary::UNKNOWN_MODEL_LABEL.to_string())
+            },
+            |_backend, model| {
+                model
+                    .map(str::to_string)
+                    .unwrap_or_else(|| super::summary::UNKNOWN_MODEL_LABEL.to_string())
+            },
+        )
+        .unwrap();
+
+        assert!(grouped.iter().any(|g| g.group_key == "(unknown model)"));
+        assert!(grouped.iter().all(|g| g.group_key != ""));
+        assert!(grouped.iter().any(|g| g.group_key == "gpt-4"));
     }
 
     #[test]

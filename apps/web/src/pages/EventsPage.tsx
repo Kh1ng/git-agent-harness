@@ -6,6 +6,17 @@ import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
+import { formatLocalTime, formatAge } from '../lib/format.js';
+
+/** `details` is free-form text from the controller (src/events.rs) --
+ * for the routine per-tick "observation_completed" event it's always
+ * exactly this pattern, which repeats the profile name already shown
+ * elsewhere on the page and adds nothing. Every other event's details
+ * (human_required reasons, dispatch decisions, etc.) are real content
+ * and still render as-is below. */
+function isRedundantProfileEcho(eventType: string, details: string): boolean {
+  return eventType === 'observation_completed' && /^profile=\S+$/.test(details);
+}
 
 const EVENT_ICON: Record<string, LucideIcon> = {
   observation_completed: CircleDot,
@@ -79,6 +90,9 @@ export function EventsPage() {
             .reverse()
             .map((event, i) => {
               const Icon = EVENT_ICON[event.event_type] ?? CircleDot;
+              const localTime = formatLocalTime(event.timestamp);
+              const age = formatAge(event.timestamp);
+              const showDetails = event.details && !isRedundantProfileEcho(event.event_type, event.details);
               return (
                 <li key={i} className="card-padded flex items-start gap-3 py-2.5">
                   <Icon size={15} className="text-secondary shrink-0 mt-0.5" aria-hidden="true" />
@@ -86,9 +100,12 @@ export function EventsPage() {
                     <div className="flex flex-wrap items-baseline gap-x-2">
                       <span className="text-sm font-medium text-primary">{event.event_type.replace(/_/g, ' ')}</span>
                       {event.work_id && <span className="text-xs text-accent font-mono">{event.work_id}</span>}
-                      <span className="text-xs text-muted font-mono ml-auto">{event.timestamp}</span>
+                      <span className="text-xs text-muted ml-auto" title={event.timestamp}>
+                        {localTime ?? event.timestamp}
+                        {age && <span className="text-muted/70"> · {age}</span>}
+                      </span>
                     </div>
-                    {event.details && <p className="text-xs text-secondary mt-0.5 break-words">{event.details}</p>}
+                    {showDetails && <p className="text-xs text-secondary mt-0.5 break-words">{event.details}</p>}
                   </div>
                 </li>
               );
