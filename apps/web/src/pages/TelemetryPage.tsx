@@ -14,6 +14,21 @@ type SortKey = keyof Pick<
   'entries' | 'success_rate' | 'average_duration_seconds' | 'total_tokens' | 'actual_cost_usd' | 'estimated_cost_usd'
 >;
 
+/** The most recently observed quota_used_percent for a comparison row, or
+ * null if the backend/model has never reported one. A row can carry
+ * multiple quota_observations (different windows, e.g. "5-hour" vs
+ * "weekly") -- most recent by observed_at wins, matching how QuotaPage
+ * already resolves the same ambiguity per scope. Subscription backends
+ * (agy, codex/claude CLI) have no real per-token $ cost, so this is the
+ * metric that actually means something for them -- cost columns stay for
+ * backends that do have one (e.g. metered API usage). */
+function latestQuotaUsedPercent(row: BackendModelComparison): { percent: number; window: string | null } | null {
+  const withPercent = row.quota_observations.filter((q) => q.quota_used_percent !== null && q.quota_used_percent !== undefined);
+  if (withPercent.length === 0) return null;
+  const latest = withPercent.reduce((a, b) => ((b.observed_at ?? '') > (a.observed_at ?? '') ? b : a));
+  return { percent: latest.quota_used_percent as number, window: latest.quota_window ?? null };
+}
+
 function SortHeader({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
     <th>
@@ -144,6 +159,7 @@ export function TelemetryPage() {
                   <SortHeader label="Actual cost" active={sortKey === 'actual_cost_usd'} onClick={() => toggleSort('actual_cost_usd')} />
                   <SortHeader label="Est. cost" active={sortKey === 'estimated_cost_usd'} onClick={() => toggleSort('estimated_cost_usd')} />
                   <th>Cost / success</th>
+                  <th>Quota used</th>
                 </tr>
               </thead>
               <tbody>
@@ -152,6 +168,7 @@ export function TelemetryPage() {
                     row.validation_pass > 0 && (row.actual_cost_usd !== null || row.estimated_cost_usd !== null)
                       ? (row.actual_cost_usd ?? row.estimated_cost_usd ?? 0) / row.validation_pass
                       : null;
+                  const quota = latestQuotaUsedPercent(row);
                   return (
                     <tr key={row.backend_or_model}>
                       <td className="text-primary font-medium">{row.backend_or_model}</td>
@@ -165,6 +182,16 @@ export function TelemetryPage() {
                       <td>{formatCost(row.actual_cost_usd)}</td>
                       <td>{formatCost(row.estimated_cost_usd)}</td>
                       <td>{costPerSuccess !== null ? formatCost(costPerSuccess) : 'Unknown'}</td>
+                      <td>
+                        {quota ? (
+                          <>
+                            {formatPercent(quota.percent / 100)}
+                            {quota.window && <span className="text-muted"> ({quota.window})</span>}
+                          </>
+                        ) : (
+                          <span className="text-muted">Unknown</span>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}

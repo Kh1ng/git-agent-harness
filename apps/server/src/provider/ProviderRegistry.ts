@@ -26,11 +26,6 @@ class ProviderRegistryImpl {
   private defaultProfile: string = 'gah';
   
   constructor() {
-    // Initialize with default unavailable statuses for all supported providers
-    for (const kind of getSupportedProviders()) {
-      this.providerStatuses.set(kind, { type: 'unavailable' });
-    }
-    
     // Set default versions for known providers
     this.providerVersions.set('github', 'cli-2.0.0');
     this.providerVersions.set('gitlab', 'cli-15.0.0');
@@ -42,6 +37,18 @@ class ProviderRegistryImpl {
     this.providerVersions.set('openhands', '1.0.0');
     this.providerVersions.set('agy', '1.0.0');
     this.providerVersions.set('vibe', '1.0.0');
+
+    // Default every provider to available, not unavailable: `gah status`'s
+    // availability list is a durable record of NEGATIVE observations only
+    // (a backend that hit quota/auth failure gets an entry; a backend
+    // that's simply never had a problem gets none at all -- see
+    // src/availability.rs record_unavailable/record_available). Defaulting
+    // absent-from-the-list to "unavailable" reads the lack of a bad record
+    // as itself a bad sign, which is backwards -- it made Settings show
+    // "unavailable" for backends real dispatches were actively using.
+    for (const kind of getSupportedProviders()) {
+      this.providerStatuses.set(kind, { type: 'available', version: this.providerVersions.get(kind) || '1.0.0' });
+    }
   }
   
   isProviderAvailable(kind: ProviderKind): boolean {
