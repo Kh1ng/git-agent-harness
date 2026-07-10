@@ -742,7 +742,9 @@ dependencies = [
  "crossterm",
  "fs2",
  "futures-util",
+ "libc",
  "log",
+ "nix",
  "predicates",
  "ratatui",
  "regex",
@@ -754,6 +756,7 @@ dependencies = [
  "tokio",
  "toml",
  "tungstenite",
+ "uuid",
 ]
 
 [[package]]

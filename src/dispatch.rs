@@ -1031,11 +1031,67 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
 /// (quota/reset messages) -- the offset-scoped tail captured by runner,
 /// NOT a fresh read of the whole cli.log, so a single attempt's usage is
 /// never polluted by prior runs or concurrent appends.
-fn attempt_usage(log_path: &str, agy_cli_log_delta: Option<&str>) -> crate::ledger::LedgerUsage {
+fn attempt_usage(
+    log_path: &str,
+    agy_cli_log_delta: Option<&str>,
+    backend: Option<&str>,
+    transcript_path: Option<&str>,
+    claude_path: Option<&str>,
+) -> crate::ledger::LedgerUsage {
     let text = match fs::read_to_string(log_path) {
         Ok(t) => t,
         Err(_) => return crate::ledger::LedgerUsage::default(),
     };
+
+    // Claude Code: prefer the structured session transcript for real
+    // per-attempt token/cost usage (issue #153). Never scrape stdout text.
+    if backend == Some("claude") {
+        if let Some(transcript) = transcript_path {
+            if let Ok(t) = fs::read_to_string(transcript) {
+                let transcript_usage = crate::claude_monitor::parse_claude_transcript_usage(&t);
+                if transcript_usage.usage_source.is_some() {
+                    let mut merged = transcript_usage;
+                    // Merge any quota/cost info the log text parser still finds.
+                    let log_usage = usage::parse_generic_usage(&text, "attempt_output_log");
+                    merged = usage::merge_usage(merged, log_usage);
+                    // Optionally enrich with a live `/usage` PTY probe (issue
+                    // #153). Gated behind GAH_CLAUDE_LIVE_USAGE so normal
+                    // dispatch stays bounded — the probe only runs when the
+                    // operator explicitly opts in.
+                    if let Some(path) = claude_path {
+                        if std::env::var_os("GAH_CLAUDE_LIVE_USAGE").is_some() {
+                            if let Ok(capture) =
+                                crate::claude_monitor::capture_usage_via_pty(path, None)
+                            {
+                                let live =
+                                    crate::claude_monitor::parse_claude_usage_text(&capture.raw);
+                                merged = usage::merge_usage(merged, live);
+                            }
+                        }
+                    }
+                    if merged.usage_source.is_some() {
+                        merged.observed_at = Some(
+                            time::OffsetDateTime::now_utc()
+                                .format(&time::format_description::well_known::Rfc3339)
+                                .unwrap_or_default(),
+                        );
+                    }
+                    return merged;
+                }
+            }
+        }
+        // No transcript yet (or none located): fall back to the generic
+        // stdout parser so partial observations are still recorded.
+        let mut usage = usage::parse_generic_usage(&text, "attempt_output_log");
+        if usage.usage_source.is_some() {
+            usage.observed_at = Some(
+                time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+            );
+        }
+        return usage;
+    }
 
     // Try codex exec --json parser first — handles JSONL output from
     // codex exec --json where the generic regex parser would find nothing.
@@ -1310,6 +1366,13 @@ fn improve(
     session_dir: &Path,
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
+    // Resolve the Claude executable path so the optional live `/usage` PTY
+    // probe (issue #153) can drive a real session when explicitly enabled.
+    let claude_path = profile
+        .claude_path
+        .clone()
+        .unwrap_or_else(|| "claude".to_string());
+
     // Enforce policy before any mutations
     let push_action = if args.prod {
         "git-push-prod"
@@ -1592,7 +1655,13 @@ fn improve(
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
-                usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
+                usage: attempt_usage(
+                    &result.log_path,
+                    result.agy_cli_log_delta.as_deref(),
+                    Some(route.effective_backend.as_str()),
+                    result.transcript_path.as_deref(),
+                    Some(&claude_path),
+                ),
             });
             let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
             if attempt + 1 < max_attempts {
@@ -1647,7 +1716,13 @@ fn improve(
                 failure_stage: None,
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
-                usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
+                usage: attempt_usage(
+                    &result.log_path,
+                    result.agy_cli_log_delta.as_deref(),
+                    Some(route.effective_backend.as_str()),
+                    result.transcript_path.as_deref(),
+                    Some(&claude_path),
+                ),
             });
             break;
         }
@@ -1673,7 +1748,13 @@ fn improve(
                     failure_stage: None,
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
-                    usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
+                    usage: attempt_usage(
+                        &result.log_path,
+                        result.agy_cli_log_delta.as_deref(),
+                        Some(route.effective_backend.as_str()),
+                        result.transcript_path.as_deref(),
+                        Some(&claude_path),
+                    ),
                 });
                 break;
             }
@@ -1729,7 +1810,13 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path,
-                        usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
+                        usage: attempt_usage(
+                            &result.log_path,
+                            result.agy_cli_log_delta.as_deref(),
+                            Some(route.effective_backend.as_str()),
+                            result.transcript_path.as_deref(),
+                            Some(&claude_path),
+                        ),
                     });
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
@@ -1808,7 +1895,13 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
-                        usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
+                        usage: attempt_usage(
+                            &result.log_path,
+                            result.agy_cli_log_delta.as_deref(),
+                            Some(route.effective_backend.as_str()),
+                            result.transcript_path.as_deref(),
+                            Some(&claude_path),
+                        ),
                     });
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
@@ -1832,7 +1925,13 @@ fn improve(
                         failure_stage: None,
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
-                        usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
+                        usage: attempt_usage(
+                            &result.log_path,
+                            result.agy_cli_log_delta.as_deref(),
+                            Some(route.effective_backend.as_str()),
+                            result.transcript_path.as_deref(),
+                            Some(&claude_path),
+                        ),
                     });
                     break;
                 } else {
@@ -1852,7 +1951,13 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
-                        usage: attempt_usage(&result.log_path, result.agy_cli_log_delta.as_deref()),
+                        usage: attempt_usage(
+                            &result.log_path,
+                            result.agy_cli_log_delta.as_deref(),
+                            Some(route.effective_backend.as_str()),
+                            result.transcript_path.as_deref(),
+                            Some(&claude_path),
+                        ),
                     });
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
@@ -2125,6 +2230,7 @@ fn experiment(
                 duration_secs: 0.0,
                 log_path: log_path.to_string_lossy().into_owned(),
                 agy_cli_log_delta: None,
+                transcript_path: None,
             }
         }
     };
@@ -3715,7 +3821,7 @@ mod tests {
         )
         .unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap(), None);
+        let usage = attempt_usage(path.to_str().unwrap(), None, None, None, None);
         assert_eq!(usage.input_tokens, Some(500));
         assert_eq!(usage.output_tokens, Some(120));
         assert_eq!(usage.total_tokens, Some(620));
@@ -3724,7 +3830,13 @@ mod tests {
     #[test]
     fn attempt_usage_is_empty_not_zero_when_log_missing() {
         // TICKET-101: unknown must remain unknown, never a fabricated zero.
-        let usage = attempt_usage("/definitely/does/not/exist/backend-output.log", None);
+        let usage = attempt_usage(
+            "/definitely/does/not/exist/backend-output.log",
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.usage_source, None);
     }
@@ -3735,7 +3847,7 @@ mod tests {
         let path = tmp.path().join("backend-output.log");
         fs::write(&path, "agent made some edits, no usage reported\n").unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap(), None);
+        let usage = attempt_usage(path.to_str().unwrap(), None, None, None, None);
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.usage_source, None);
     }

@@ -1,0 +1,5 @@
+Token usage by model
+  claude-sonnet-4-20250514: 12,345 input + 678 output (0 cache creation, 12,345 cache read) = 25,368 total
+  claude-opus-4-20250514: 1,000 input + 200 output (10 cache creation, 0 cache read) = 1,210 total
+
+Total cost:                $0.0123

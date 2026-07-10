@@ -1,0 +1,5 @@
+{"type":"system","sessionId":"sess-fixture-1"}
+{"type":"assistant","message":{"id":"turn-1","role":"assistant","model":"claude-sonnet-4-20250514","usage":{"input_tokens":2100,"output_tokens":420,"cache_creation_input_tokens":80,"cache_read_input_tokens":9900}},"cost_usd":0.0081}
+{"type":"user","message":{"role":"user","content":"refactor please"}}
+{"type":"assistant","message":{"id":"turn-2","role":"assistant","model":"claude-sonnet-4-20250514","usage":{"input_tokens":640,"output_tokens":150,"cache_creation_input_tokens":0,"cache_read_input_tokens":3300}},"cost_usd":0.0024}
+{"type":"assistant","message":{"id":"turn-3","role":"assistant","model":"claude-sonnet-4-20250514","usage":{}}}
