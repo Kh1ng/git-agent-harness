@@ -698,7 +698,31 @@ pub fn run_once(
         }
         record_action_events(cfg, profile_name, &original_action, &action)?;
 
-        let outcome = execute_action(cfg, profile_name, &action, skip_validation_gate)?;
+        let outcome = if let Some(work_id) = action.work_id().filter(|_| {
+            !matches!(
+                action,
+                NextAction::WaitUntil { .. }
+                    | NextAction::HumanRequired { .. }
+                    | NextAction::NoOp { .. }
+            )
+        }) {
+            if !crate::work_claim::try_claim_work(profile_name, work_id)? {
+                format!("Skipped already-claimed work '{work_id}'")
+            } else {
+                match execute_action(cfg, profile_name, &action, skip_validation_gate) {
+                    Ok(outcome) => {
+                        crate::work_claim::release_work(profile_name, work_id)?;
+                        outcome
+                    }
+                    Err(error) => {
+                        crate::work_claim::release_work(profile_name, work_id)?;
+                        return Err(error);
+                    }
+                }
+            }
+        } else {
+            execute_action(cfg, profile_name, &action, skip_validation_gate)?
+        };
 
         let stop_event_type = match &action {
             NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
@@ -847,12 +871,17 @@ fn run_parallel_once(
 
                 // Claim this work_id before execution to prevent duplicate dispatch
                 if let Some(work_id) = action_work_id {
-                    crate::work_claim::claim_work(profile_name, work_id)?;
+                    if !crate::work_claim::try_claim_work(profile_name, work_id)? {
+                        continue;
+                    }
                     executed_work_ids.insert(work_id.to_string());
                 }
 
                 match execute_action(cfg, profile_name, &action, skip_validation_gate) {
                     Ok(outcome) => {
+                        if let Some(work_id) = action_work_id {
+                            crate::work_claim::release_work(profile_name, work_id)?;
+                        }
                         let stop_event_type = crate::events::EventType::LoopStopped;
                         crate::events::record(
                             cfg,

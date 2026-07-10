@@ -1,8 +1,24 @@
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn fetch_origin(repo: &Path) -> Result<()> {
+    let git_dir = repo.join(".git");
+    let lock_path = git_dir.join("gah-fetch.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening fetch lock {}", lock_path.display()))?;
+    lock.lock_exclusive().context("locking shared git fetch")?;
+    let result = git(&["fetch", "-q", "origin", "--prune"], repo);
+    FileExt::unlock(&lock).ok();
+    result.map(|_| ())
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DiffStats {
@@ -42,7 +58,7 @@ pub fn create(
     new_branch: &str,
     worktree_base: &Path,
 ) -> Result<PathBuf> {
-    git(&["fetch", "-q", "origin", "--prune"], repo)?;
+    fetch_origin(repo)?;
 
     let origin_ref = format!("origin/{}", target_branch);
     let worktree_path = worktree_base.join(new_branch.replace('/', "-"));
@@ -70,7 +86,7 @@ pub fn create_existing(
     existing_branch: &str,
     worktree_base: &Path,
 ) -> Result<PathBuf> {
-    git(&["fetch", "-q", "origin", "--prune"], repo)?;
+    fetch_origin(repo)?;
 
     let origin_ref = format!("origin/{}", existing_branch);
     let worktree_path = worktree_base.join(existing_branch.replace('/', "-"));

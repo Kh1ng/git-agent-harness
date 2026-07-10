@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Work claim state for tracking in-flight work IDs per profile
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -50,15 +50,37 @@ impl WorkClaimState {
     }
 }
 
-/// Global in-memory state with file persistence
-static STATE: OnceLock<Mutex<WorkClaimState>> = OnceLock::new();
-
 /// Path to the work claims file
 fn work_claims_path() -> PathBuf {
     resolve_state_path_from_env(
         std::env::var("XDG_STATE_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
     )
+}
+
+fn work_claims_lock_path() -> PathBuf {
+    let mut path = work_claims_path();
+    path.set_extension("json.lock");
+    path
+}
+
+fn with_locked_state<T>(update: impl FnOnce(&mut WorkClaimState) -> Result<T>) -> Result<T> {
+    let path = work_claims_path();
+    let parent = path.parent().unwrap();
+    fs::create_dir_all(parent).with_context(|| format!("creating state dir: {:?}", parent))?;
+    let lock_path = work_claims_lock_path();
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening claim lock: {:?}", lock_path))?;
+    lock.lock_exclusive().context("locking work claims")?;
+    let mut state = load_state()?;
+    let result = update(&mut state)?;
+    save_state(&state)?;
+    FileExt::unlock(&lock).ok();
+    Ok(result)
 }
 
 /// Resolve the state file path from explicit env values. Pure function (no
@@ -74,27 +96,6 @@ fn resolve_state_path_from_env(xdg_state_home: Option<&str>, home: Option<&str>)
         .join("state")
         .join("gah")
         .join("work_claims.json")
-}
-
-/// Initialize the global state
-fn init_state() -> Result<()> {
-    let state = load_state()?;
-    let global = STATE.get_or_init(|| Mutex::new(WorkClaimState::new()));
-    let mut guard = global
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Mutex poisoned"))?;
-    *guard = state;
-    Ok(())
-}
-
-/// Get the global work claim state
-fn get_state() -> Result<MutexGuard<'static, WorkClaimState>> {
-    init_state()?;
-    STATE
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("Work claim state not initialized"))?
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Mutex poisoned"))
 }
 
 /// Load work claim state from file
@@ -130,39 +131,41 @@ fn save_state(state: &WorkClaimState) -> Result<()> {
 }
 
 /// Claim a work_id for a profile and persist to file
-pub fn claim_work(profile: &str, work_id: &str) -> Result<()> {
-    let mut state = get_state()?;
-    state.claim(profile, work_id);
-    save_state(&state)?;
-    Ok(())
+/// Atomically claim work across independent GAH processes.
+pub fn try_claim_work(profile: &str, work_id: &str) -> Result<bool> {
+    with_locked_state(|state| {
+        if state.is_claimed(profile, work_id) {
+            return Ok(false);
+        }
+        state.claim(profile, work_id);
+        Ok(true)
+    })
 }
 
 /// Release all claims for a profile (useful for cleanup)
 pub fn release_all_for_profile(profile: &str) -> Result<()> {
-    let mut state = get_state()?;
-    state.claims.remove(profile);
-    save_state(&state)?;
-    Ok(())
+    with_locked_state(|state| {
+        state.claims.remove(profile);
+        Ok(())
+    })
 }
 
 /// Release a work_id for a profile and persist to file  
 pub fn release_work(profile: &str, work_id: &str) -> Result<()> {
-    let mut state = get_state()?;
-    state.release(profile, work_id);
-    save_state(&state)?;
-    Ok(())
+    with_locked_state(|state| {
+        state.release(profile, work_id);
+        Ok(())
+    })
 }
 
 /// Get all claimed work_ids for a profile
 pub fn get_claimed_work_ids(profile: &str) -> Result<Vec<String>> {
-    let state = get_state()?;
-    Ok(state.get_claimed(profile))
+    with_locked_state(|state| Ok(state.get_claimed(profile)))
 }
 
 /// Check if a work_id is claimed for a profile
 pub fn is_claimed(profile: &str, work_id: &str) -> Result<bool> {
-    let state = get_state()?;
-    Ok(state.is_claimed(profile, work_id))
+    with_locked_state(|state| Ok(state.is_claimed(profile, work_id)))
 }
 
 #[cfg(test)]
