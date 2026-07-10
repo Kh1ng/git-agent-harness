@@ -205,6 +205,55 @@ fn report_attributes_usage_to_actual_attempt_backend_and_model() {
 }
 
 #[test]
+fn report_trend_aggregates_tokens_from_attempt_usage() {
+    // The Telemetry trend chart reads gah report --json `trend[].total_tokens`.
+    // Token/cost telemetry is reported per attempt (entry.usage is not
+    // populated for most backends), so the trend must aggregate from
+    // attempts[*].usage rather than the (usually empty) top-level usage.
+    let attempts = vec![
+        attempt_usage(
+            1,
+            "codex",
+            Some("gpt-4"),
+            serde_json::json!({
+                "usage_source": "attempt_output_log",
+                "observed_at": "2026-01-01T00:00:00Z",
+                "input_tokens": 100,
+                "total_tokens": 300
+            }),
+        ),
+        attempt_usage(
+            2,
+            "vibe",
+            Some("mistral-medium"),
+            serde_json::json!({
+                "usage_source": "attempt_output_log",
+                "observed_at": "2026-01-01T00:01:00Z",
+                "input_tokens": 200,
+                "total_tokens": 500,
+                "actual_cost_usd": 0.25
+            }),
+        ),
+    ];
+    // Top-level entry usage left empty to mirror real dispatch behavior.
+    let ledger = TestLedger::new().with_entry(usage_entry(
+        "codex",
+        Some("gpt-4"),
+        serde_json::json!({}),
+        attempts,
+    ));
+
+    let mut harness = ScenarioHarness::new("github").with_ledger(ledger);
+    let report = harness.run_report_json("backend").unwrap();
+    let trend = report["trend"].as_array().unwrap();
+    assert_eq!(trend.len(), 1, "expected one day bucket: {report}");
+    assert_eq!(trend[0]["entries"], 1);
+    // 300 + 500 from the two attempts' usage.
+    assert_eq!(trend[0]["total_tokens"], 800);
+    assert_eq!(trend[0]["actual_cost_usd"], 0.25);
+}
+
+#[test]
 fn report_preserves_unknown_and_exposes_quota_observations() {
     let mut ledger = TestLedger::new();
     ledger = ledger.with_entry(usage_entry(

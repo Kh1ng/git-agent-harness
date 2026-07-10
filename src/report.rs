@@ -206,12 +206,30 @@ fn build_trend(
         ) {
             point.validation_pass += 1;
         }
-        point.total_tokens += entry.usage.total_tokens.unwrap_or(0);
-        add_optional(&mut point.actual_cost_usd, entry.usage.actual_cost_usd);
-        add_optional(
-            &mut point.estimated_cost_usd,
-            entry.usage.estimated_cost_usd,
-        );
+        // Token/cost telemetry lives on the per-attempt usage records, not
+        // the top-level entry usage (which is only populated for some
+        // backends). Aggregate from attempts, falling back to the
+        // top-level entry usage when there are no attempts.
+        let mut tokens: u64 = 0;
+        let mut actual: Option<f64> = None;
+        let mut estimated: Option<f64> = None;
+        let mut saw_usage = false;
+        for attempt in &entry.attempts {
+            if let Some(t) = attempt.usage.total_tokens {
+                tokens += t;
+                saw_usage = true;
+            }
+            add_optional(&mut actual, attempt.usage.actual_cost_usd);
+            add_optional(&mut estimated, attempt.usage.estimated_cost_usd);
+        }
+        if !saw_usage {
+            tokens += entry.usage.total_tokens.unwrap_or(0);
+            add_optional(&mut actual, entry.usage.actual_cost_usd);
+            add_optional(&mut estimated, entry.usage.estimated_cost_usd);
+        }
+        point.total_tokens += tokens;
+        add_optional(&mut point.actual_cost_usd, actual);
+        add_optional(&mut point.estimated_cost_usd, estimated);
     }
     Ok(points.into_values().collect())
 }
