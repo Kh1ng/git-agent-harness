@@ -246,6 +246,7 @@ mod tests {
             recommended_backend: None,
             recommended_model: None,
             prior_attempt_count,
+            genuine_agent_failure_count: 0,
             last_failure_class: None,
             has_active_mr: false,
             human_required: false,

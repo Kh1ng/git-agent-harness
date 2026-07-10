@@ -335,6 +335,68 @@ impl LedgerEntry {
         self.failure_class = Some(class.as_str().to_string());
         self.failure_stage = Some(stage.as_str().to_string());
     }
+
+    /// Issue #95: create a tombstone entry for `gah clear-attempts`. The
+    /// tombstone marks all prior ledger entries for the given `work_id` as
+    /// stale. It does NOT rewrite history -- the original entries remain in
+    /// the JSONL file, but `ledger_lookup_for_ticket` will reset its running
+    /// counters when it encounters a `clear_attempts` entry.
+    pub fn new_clear_attempts(profile_name: &str, profile: &Profile, work_id: &str) -> Self {
+        Self {
+            timestamp: OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
+            session_id: None,
+            profile: profile_name.to_string(),
+            display_name: profile.display_name.clone(),
+            repo_id: profile.repo_id.clone(),
+            repo: profile.repo.clone(),
+            local_path: profile.local_path.clone(),
+            provider: profile.provider.clone(),
+            backend: String::new(),
+            requested_backend: String::new(),
+            effective_backend: String::new(),
+            requested_model: None,
+            effective_model: None,
+            routing_reason: None,
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
+            routing_diagnostics: None,
+            mode: "clear_attempts".to_string(),
+            target_summary: None,
+            work_id: Some(work_id.to_string()),
+            source_issue_number: None,
+            work_title: None,
+            branch: None,
+            session_dir: None,
+            duration_seconds: None,
+            backend_exit_code: None,
+            validation_result: None,
+            review_verdict: None,
+            review_confidence: None,
+            reviewer_backend: None,
+            reviewer_model: None,
+            commit_attempted: false,
+            commit_created: false,
+            push_attempted: false,
+            push_succeeded: false,
+            mr_attempted: false,
+            mr_created: false,
+            mr_url: None,
+            files_changed: None,
+            insertions: None,
+            deletions: None,
+            error_summary: None,
+            failure_class: None,
+            failure_stage: None,
+            attempts_started: 0,
+            attempts_completed: 0,
+            attempts: Vec::new(),
+            dispatch_reason: None,
+            usage: LedgerUsage::default(),
+        }
+    }
 }
 
 pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
@@ -3013,5 +3075,24 @@ mod tests {
             |backend, _model| backend.to_string(),
         );
         assert!(grouped.is_none());
+    }
+
+    // Issue #95: new_clear_attempts creates a valid tombstone entry
+    #[test]
+    fn new_clear_attempts_creates_valid_tombstone() {
+        let prof = profile();
+        let entry = LedgerEntry::new_clear_attempts("test-profile", &prof, "TICKET-99");
+        assert_eq!(entry.mode, "clear_attempts");
+        assert_eq!(entry.work_id.as_deref(), Some("TICKET-99"));
+        assert_eq!(entry.profile, "test-profile");
+        assert_eq!(entry.repo_id, prof.repo_id);
+        assert!(!entry.human_required);
+        assert_eq!(entry.failure_class, None);
+        assert_eq!(entry.attempts_started, 0);
+        // Must serialize/deserialize cleanly (JSONL round-trip)
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.mode, "clear_attempts");
+        assert_eq!(parsed.work_id.as_deref(), Some("TICKET-99"));
     }
 }

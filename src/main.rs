@@ -482,6 +482,19 @@ enum LedgerCommands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Issue #95: append a tombstone ledger entry that marks all prior
+    /// attempts for a work_id as stale. Does NOT rewrite history -- the
+    /// original entries remain in the JSONL file but are superseded by the
+    /// tombstone. After clearing, the ticket becomes dispatchable again.
+    ClearAttempts {
+        #[arg(long)]
+        profile: String,
+        work_id: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -635,6 +648,30 @@ fn main() -> Result<()> {
                             cost,
                         );
                     }
+                }
+            }
+            LedgerCommands::ClearAttempts {
+                profile,
+                work_id,
+                config_path,
+                dry_run,
+            } => {
+                let cfg = config::load(config_path.as_deref())?;
+                let prof = config::get_profile(&cfg, &profile)?;
+                let entry = ledger::LedgerEntry::new_clear_attempts(&profile, prof, &work_id);
+                if dry_run {
+                    println!(
+                        "Dry run: would append tombstone entry for work_id '{}':",
+                        work_id
+                    );
+                    println!("{}", serde_json::to_string_pretty(&entry)?);
+                } else {
+                    let path = ledger::append(&cfg, &entry)?;
+                    println!(
+                        "Appended tombstone entry for work_id '{}' to {}",
+                        work_id,
+                        path.display()
+                    );
                 }
             }
         },

@@ -329,12 +329,13 @@ fn ledger_lookup_for_ticket(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
-) -> Option<(usize, Option<String>, bool, bool)> {
+) -> Option<(usize, usize, Option<String>, bool, bool)> {
     let Some(wid) = work_id else {
-        return Some((0, None, false, false));
+        return Some((0, 0, None, false, false));
     };
     let entries = ledger_entries_by_work_id.get(wid);
     let mut count = 0usize;
+    let mut agent_failure_count = 0usize;
     let mut last_failure_class = None;
     let mut has_active_mr = false;
     let mut has_merged_mr = false;
@@ -358,7 +359,28 @@ fn ledger_lookup_for_ticket(
         if is_ledger_entry_stale(e) {
             continue;
         }
+        // Issue #95: tombstone entry from `gah clear-attempts`. When
+        // encountered, reset all running counters -- only entries AFTER
+        // the latest tombstone count. The tombstone itself is not counted
+        // as an attempt.
+        if e.mode == "clear_attempts" {
+            count = 0;
+            agent_failure_count = 0;
+            last_failure_class = None;
+            has_active_mr = false;
+            human_required = false;
+            continue;
+        }
         count += 1;
+        // Issue #95: only genuine agent failures count toward the retry
+        // cap. Infra-class failures (backend_error, environment_error,
+        // harness_error, unknown) still record in the ledger and appear
+        // in status, but do not permanently consume the cap.
+        if let Some(ref fc) = e.failure_class {
+            if crate::controller::is_genuine_agent_failure(fc) {
+                agent_failure_count += 1;
+            }
+        }
         last_failure_class = e.failure_class.clone().or(last_failure_class);
         if e.human_required {
             human_required = true;
@@ -379,7 +401,13 @@ fn ledger_lookup_for_ticket(
     if has_merged_mr {
         return None;
     }
-    Some((count, last_failure_class, has_active_mr, human_required))
+    Some((
+        count,
+        agent_failure_count,
+        last_failure_class,
+        has_active_mr,
+        human_required,
+    ))
 }
 
 /// Leading `TICKET-<digits>` numeric id out of a work_id string, e.g.
@@ -444,13 +472,18 @@ pub fn scan_available_tickets(
                 continue;
             }
             let work_id = meta.work_id.clone().or_else(|| meta.ticket_id.clone());
-            let Some((prior_attempt_count, last_failure_class, has_active_mr, human_required)) =
-                ledger_lookup_for_ticket(
-                    work_id.as_deref(),
-                    profile,
-                    all_mrs,
-                    ledger_entries_by_work_id,
-                )
+            let Some((
+                prior_attempt_count,
+                genuine_agent_failure_count,
+                last_failure_class,
+                has_active_mr,
+                human_required,
+            )) = ledger_lookup_for_ticket(
+                work_id.as_deref(),
+                profile,
+                all_mrs,
+                ledger_entries_by_work_id,
+            )
             else {
                 continue;
             };
@@ -462,6 +495,7 @@ pub fn scan_available_tickets(
                 recommended_backend: meta.recommended_backend.clone(),
                 recommended_model: meta.recommended_model.clone(),
                 prior_attempt_count,
+                genuine_agent_failure_count,
                 last_failure_class,
                 has_active_mr,
                 human_required,
@@ -507,13 +541,18 @@ pub fn scan_available_tickets(
         {
             continue;
         }
-        let Some((prior_attempt_count, last_failure_class, has_active_mr, human_required)) =
-            ledger_lookup_for_ticket(
-                work_id.as_deref(),
-                profile,
-                all_mrs,
-                ledger_entries_by_work_id,
-            )
+        let Some((
+            prior_attempt_count,
+            genuine_agent_failure_count,
+            last_failure_class,
+            has_active_mr,
+            human_required,
+        )) = ledger_lookup_for_ticket(
+            work_id.as_deref(),
+            profile,
+            all_mrs,
+            ledger_entries_by_work_id,
+        )
         else {
             continue;
         };
@@ -525,6 +564,7 @@ pub fn scan_available_tickets(
             recommended_backend: meta.recommended_backend.clone(),
             recommended_model: meta.recommended_model.clone(),
             prior_attempt_count,
+            genuine_agent_failure_count,
             last_failure_class,
             has_active_mr,
             human_required,
@@ -4354,6 +4394,131 @@ mod tests {
             .unwrap();
         assert_eq!(second.prior_attempt_count, 1);
         assert!(second.has_active_mr);
+    }
+
+    // Issue #95: a tombstone entry (mode="clear_attempts") resets the
+    // prior_attempt_count and genuine_agent_failure_count for its work_id.
+    #[test]
+    fn clear_attempts_tombstone_resets_ticket_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-300-test.md"),
+            "# TICKET-300: Test\n\nGoal: test\n",
+        )
+        .unwrap();
+
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
+
+        // 3 infra failures before the tombstone
+        let mut e1 = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        e1.work_id = Some("TICKET-300".into());
+        e1.failure_class = Some("backend_error".into());
+        let mut e2 = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        e2.work_id = Some("TICKET-300".into());
+        e2.failure_class = Some("environment_error".into());
+        let mut e3 = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        e3.work_id = Some("TICKET-300".into());
+        e3.failure_class = Some("backend_error".into());
+
+        // Tombstone
+        let tombstone = LedgerEntry::new_clear_attempts("test", &prof, "TICKET-300");
+
+        let index = crate::ledger::index_entries_by_work_id(&[e1, e2, e3, tombstone]);
+        let candidates = scan_available_tickets(&prof, &[], &index);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].prior_attempt_count, 0,
+            "tombstone should reset prior_attempt_count to 0"
+        );
+        assert_eq!(
+            candidates[0].genuine_agent_failure_count, 0,
+            "tombstone should reset genuine_agent_failure_count to 0"
+        );
+    }
+
+    // Issue #95: entries after a tombstone DO count.
+    #[test]
+    fn entries_after_tombstone_still_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-301-test.md"),
+            "# TICKET-301: Test\n\nGoal: test\n",
+        )
+        .unwrap();
+
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
+
+        // Pre-tombstone failures
+        let mut e1 = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        e1.work_id = Some("TICKET-301".into());
+        e1.failure_class = Some("agent_no_progress".into());
+
+        // Tombstone
+        let tombstone = LedgerEntry::new_clear_attempts("test", &prof, "TICKET-301");
+
+        // Post-tombstone failure
+        let mut e2 = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        e2.work_id = Some("TICKET-301".into());
+        e2.failure_class = Some("backend_error".into());
+
+        let index = crate::ledger::index_entries_by_work_id(&[e1, tombstone, e2]);
+        let candidates = scan_available_tickets(&prof, &[], &index);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].prior_attempt_count, 1,
+            "only the post-tombstone entry should count"
+        );
+        assert_eq!(
+            candidates[0].genuine_agent_failure_count, 0,
+            "post-tombstone entry is infra failure, not agent"
+        );
+    }
+
+    // Issue #95: infra failures don't count toward genuine_agent_failure_count
+    #[test]
+    fn infra_failures_not_counted_as_agent_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-302-test.md"),
+            "# TICKET-302: Test\n\nGoal: test\n",
+        )
+        .unwrap();
+
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
+
+        let mut e1 = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        e1.work_id = Some("TICKET-302".into());
+        e1.failure_class = Some("backend_error".into());
+        let mut e2 = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        e2.work_id = Some("TICKET-302".into());
+        e2.failure_class = Some("environment_error".into());
+        let mut e3 = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        e3.work_id = Some("TICKET-302".into());
+        e3.failure_class = Some("harness_error".into());
+
+        let index = crate::ledger::index_entries_by_work_id(&[e1, e2, e3]);
+        let candidates = scan_available_tickets(&prof, &[], &index);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].prior_attempt_count, 3,
+            "all 3 entries should count in prior_attempt_count"
+        );
+        assert_eq!(
+            candidates[0].genuine_agent_failure_count, 0,
+            "none are genuine agent failures"
+        );
     }
 
     #[test]
