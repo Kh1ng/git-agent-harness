@@ -1879,6 +1879,11 @@ pub mod summary {
         }
 
         let mut summaries = Vec::new();
+        // #166 / #151 cross-cutting: durable account-level quota observations
+        // (e.g. from `codex status --json`) are kept in a separate store
+        // from per-attempt usage. Load it once here; merging into each group
+        // is scoped so it can never fabricate data where none exists.
+        let account_quota_observations = crate::quota_store::load_account_observations();
         let all_group_keys: std::collections::BTreeSet<String> = groups
             .keys()
             .chain(usage_groups.keys())
@@ -2012,6 +2017,41 @@ pub mod summary {
                     if replace || !quota_observations.contains_key(&key) {
                         quota_observations.insert(key, candidate);
                     }
+                }
+            }
+
+            // #166 / #151 cross-cutting: merge in any durable account-level
+            // quota observation (e.g. from `codex status --json`) so the
+            // Quota/Telemetry pages show real backend quota data, not just
+            // per-attempt tokens. Account observations are backend-scoped
+            // (model = None), so matching the group key against the record's
+            // backend limits the merge to backend-grouped rows naturally.
+            if let Some(account) =
+                crate::quota_store::latest_for(&account_quota_observations, &group_key, None)
+            {
+                let key = (
+                    account.backend.clone(),
+                    account.model.clone(),
+                    account.quota_window.clone(),
+                );
+                let candidate = GroupQuotaObservation {
+                    backend: account.backend.clone(),
+                    model: account.model.clone(),
+                    quota_window: account.quota_window.clone(),
+                    quota_used_percent: account.quota_used_percent,
+                    quota_remaining_percent: account.quota_remaining_percent,
+                    quota_reset_at: account.quota_reset_at.clone(),
+                    observed_at: account.observed_at.clone(),
+                    usage_source: account.usage_source.clone(),
+                };
+                let replace = is_timestamp_earlier(
+                    &quota_observations
+                        .get(&key)
+                        .and_then(|e| e.observed_at.as_ref()),
+                    &candidate.observed_at.as_ref(),
+                );
+                if replace || !quota_observations.contains_key(&key) {
+                    quota_observations.insert(key, candidate);
                 }
             }
 

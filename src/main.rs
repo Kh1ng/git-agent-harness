@@ -18,6 +18,7 @@ mod provider;
 mod prune;
 mod quota;
 mod quota_parser;
+mod quota_store;
 mod report;
 mod routing;
 mod runner;
@@ -37,6 +38,7 @@ mod worktree;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config::Profile;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "gah", about = "git agent harness")]
@@ -289,6 +291,11 @@ enum Commands {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
+    /// Manage persisted account-level quota observations (issue #151 / #166)
+    Quota {
+        #[command(subcommand)]
+        command: QuotaCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -532,6 +539,38 @@ enum TelemetryCommands {
         telemetry_repo_path: Option<String>,
         #[arg(long, name = "config")]
         config_path: Option<String>,
+    },
+}
+
+/// Quota/usage observation management (issue #151 / #166).
+#[derive(Subcommand)]
+enum QuotaCommands {
+    /// Refresh account-level quota (e.g. `codex status --json`) and persist
+    /// the observation so the Quota/Telemetry pages show real data.
+    Refresh {
+        /// Backend whose account quota to refresh (e.g. "codex").
+        #[arg(long, default_value = "codex")]
+        backend: String,
+        /// Model qualifier for the observation (usually unset for
+        /// account-level readings).
+        #[arg(long)]
+        model: Option<String>,
+        /// Path/command for the backend CLI (defaults to the backend name on
+        /// PATH, e.g. "codex"). Only `codex` has a structured status parser
+        /// today; other backends fall back to "no data" rather than guessing.
+        #[arg(long)]
+        command: Option<String>,
+        /// Override the durable store path (default: $XDG_STATE_HOME/gah/...).
+        /// Mainly for testing/automation.
+        #[arg(long, name = "store")]
+        store_path: Option<String>,
+    },
+    /// List persisted account-level quota observations.
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, name = "store")]
+        store_path: Option<String>,
     },
 }
 
@@ -1214,6 +1253,71 @@ fn main() -> Result<()> {
                 config_path,
             } => {
                 telemetry::cli::run_status(telemetry_repo_path.as_deref(), config_path.as_deref())?;
+            }
+        },
+        Commands::Quota { command } => match command {
+            QuotaCommands::Refresh {
+                backend,
+                model,
+                command: cmd,
+                store_path: store_arg,
+            } => {
+                let codex_cmd = cmd.unwrap_or_else(|| backend.clone());
+                let path = store_arg
+                    .map(PathBuf::from)
+                    .unwrap_or_else(quota_store::store_path);
+                match quota_store::refresh_codex_and_store(&codex_cmd, model.as_deref(), &path) {
+                    Ok(Some(rec)) => {
+                        println!(
+                            "Refreshed {} {} quota: used={:?}% remaining={:?}% window={:?} reset={:?} (source={})",
+                            rec.backend,
+                            rec.model.as_deref().unwrap_or(""),
+                            rec.quota_used_percent,
+                            rec.quota_remaining_percent,
+                            rec.quota_window,
+                            rec.quota_reset_at,
+                            rec.usage_source.as_deref().unwrap_or(""),
+                        );
+                    }
+                    Ok(None) => {
+                        println!(
+                            "No account-level quota data from `{} status --json` (ok: nothing fabricated).",
+                            codex_cmd
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Quota refresh failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            QuotaCommands::List {
+                json,
+                store_path: store_arg,
+            } => {
+                let path = store_arg
+                    .map(PathBuf::from)
+                    .unwrap_or_else(quota_store::store_path);
+                let records = quota_store::load(&path).unwrap_or_default();
+                if json {
+                    println!("{}", serde_json::to_string(&records)?);
+                } else if records.is_empty() {
+                    println!("No persisted quota observations.");
+                } else {
+                    for rec in &records {
+                        println!(
+                            "{} {}/{}: used={:?}% remaining={:?}% window={:?} reset={:?} ({})",
+                            rec.observed_at.as_deref().unwrap_or(""),
+                            rec.backend,
+                            rec.model.as_deref().unwrap_or(""),
+                            rec.quota_used_percent,
+                            rec.quota_remaining_percent,
+                            rec.quota_window,
+                            rec.quota_reset_at,
+                            rec.usage_source.as_deref().unwrap_or(""),
+                        );
+                    }
+                }
             }
         },
     }
