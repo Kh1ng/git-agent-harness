@@ -76,7 +76,7 @@ export function QuotaPage() {
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatTile
           label="Entries (7d)"
-          value={usage?.entries ? formatCount(usage.entries) : 'No data'}
+          value={formatCount(usage?.entries)}
           icon={ListChecks}
           hint={usage?.validation_pass !== null && usage?.validation_pass !== undefined ? `${usage.validation_pass} validated` : undefined}
         />
@@ -84,7 +84,7 @@ export function QuotaPage() {
           label="Success rate"
           value={formatPercent(usage?.success_rate)}
           icon={CheckCircle2}
-          hint={usage?.entries ? `${usage.validation_pass}/${usage.entries} validated` : undefined}
+          hint={usage?.entries !== null && usage?.entries !== undefined ? `${usage.validation_pass}/${usage.entries} validated` : undefined}
         />
         <StatTile
           label="Usage (7d)"

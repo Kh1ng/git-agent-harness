@@ -131,12 +131,12 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatTile label="Tasks (7d)" value={totalEntries > 0 ? String(totalEntries) : 'No data'} icon={ListChecks} />
+        <StatTile label="Tasks (7d)" value={formatCount(usage?.entries)} icon={ListChecks} />
         <StatTile
           label="Success rate"
           value={formatPercent(successRate)}
           icon={CheckCircle2}
-          hint={totalEntries > 0 ? `${usage?.validation_pass ?? 0}/${totalEntries} validated` : undefined}
+          hint={usage?.entries !== null && usage?.entries !== undefined ? `${usage?.validation_pass ?? 0}/${totalEntries} validated` : undefined}
         />
         <StatTile
           label="Usage (7d)"
