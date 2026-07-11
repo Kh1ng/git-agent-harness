@@ -379,10 +379,14 @@ pub fn capture_usage_via_pty(
     let status = match script_bin {
         Some(script) => {
             let cmd = format!("{} /usage", claude_path);
-            std::process::Command::new(script)
-                .arg("-qec")
-                .arg(&cmd)
-                .arg(&typescript)
+            let mut command = std::process::Command::new(script);
+            #[cfg(target_os = "macos")]
+            command
+                .args(["-q", typescript.to_str().unwrap_or("")])
+                .args(["sh", "-c", &cmd]);
+            #[cfg(not(target_os = "macos"))]
+            command.args(["-qec", &cmd]).arg(&typescript);
+            command
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
