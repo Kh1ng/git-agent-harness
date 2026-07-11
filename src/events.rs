@@ -137,6 +137,65 @@ pub fn read_events(cfg: &GahConfig) -> Result<Vec<ControllerEvent>> {
     Ok(events)
 }
 
+/// `dispatch_started` run_ids for `profile` with no matching terminal event
+/// (`dispatch_finished` or `duplicate_guard_triggered`), paired with the
+/// work_id the start event recorded. Terminal events are correlated purely
+/// by `run_id`, matching the dashboard's `deriveControllerActivity`
+/// (apps/server/src/controllerActivity.ts) so Rust and the dashboard agree
+/// on what "still running" means.
+fn orphaned_dispatch_runs(
+    events: &[ControllerEvent],
+    profile: &str,
+) -> Vec<(String, Option<String>)> {
+    let mut started = vec![];
+    let mut finished = std::collections::HashSet::new();
+    for event in events {
+        let Some(run_id) = event.run_id.as_deref() else {
+            continue;
+        };
+        if event.profile.as_deref() != Some(profile) {
+            continue;
+        }
+        match event.event_type.as_str() {
+            "dispatch_started" => started.push((run_id.to_string(), event.work_id.clone())),
+            "dispatch_finished" | "duplicate_guard_triggered" => {
+                finished.insert(run_id.to_string());
+            }
+            _ => {}
+        }
+    }
+    started
+        .into_iter()
+        .filter(|(run_id, _)| !finished.contains(run_id))
+        .collect()
+}
+
+/// Close out every `dispatch_started` for `profile` that never got a
+/// terminal event -- i.e. whatever process started it (a `gah loop`
+/// daemon) was killed/restarted before recording completion. Call once,
+/// right after acquiring the per-profile execution lock: holding that lock
+/// proves no other process can be concurrently dispatching for this
+/// profile, so anything still open at that moment is provably abandoned,
+/// not just slow. Without this, the dashboard's "Controller activity"
+/// panel counts every such orphan as running forever.
+///
+/// Returns the number of orphans reconciled.
+pub fn reconcile_abandoned_dispatches(cfg: &GahConfig, profile_name: &str) -> Result<usize> {
+    let events = read_events(cfg)?;
+    let orphans = orphaned_dispatch_runs(&events, profile_name);
+    for (run_id, work_id) in &orphans {
+        record_with_run_id(
+            cfg,
+            EventType::DispatchFinished,
+            Some(profile_name),
+            work_id.as_deref(),
+            Some(run_id),
+            "abandoned (process restarted)",
+        )?;
+    }
+    Ok(orphans.len())
+}
+
 /// TICKET-084: `gah events [--json] [--since DURATION] [--profile NAME]`.
 /// Same shape as `gah ledger summary` -- read, filter, print. No
 /// `--watch`/follow mode per the ticket's own "do not overbuild before
@@ -174,7 +233,10 @@ pub fn run(cfg: &GahConfig, since: &str, profile: Option<&str>, json: bool) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{append, read_events, record_with_run_id, ControllerEvent, EventType};
+    use super::{
+        append, orphaned_dispatch_runs, read_events, reconcile_abandoned_dispatches,
+        record_with_run_id, ControllerEvent, EventType,
+    };
     use crate::config::{Defaults, GahConfig, RoutingPolicy};
     use std::collections::HashMap;
 
@@ -293,5 +355,92 @@ mod tests {
         let events = read_events(&cfg).unwrap();
         assert_eq!(events[0].run_id.as_deref(), Some("run-123"));
         assert_eq!(events[0].work_id.as_deref(), Some("TICKET-140"));
+    }
+
+    /// Incident: a `gah loop` process gets killed/restarted mid-dispatch,
+    /// leaving a `dispatch_started` with no matching `dispatch_finished`
+    /// forever -- the dashboard's "Controller activity" panel counts it as
+    /// running indefinitely. Reconciliation (called once, right after a
+    /// fresh process acquires the per-profile lock) must close it out.
+    #[test]
+    fn reconcile_abandoned_dispatches_closes_out_orphaned_run_and_stops_counting_it_as_running() {
+        let (_tmp, cfg) = test_config();
+        record_with_run_id(
+            &cfg,
+            EventType::DispatchStarted,
+            Some("real"),
+            Some("TICKET-500"),
+            Some("run-abandoned"),
+            "dispatch_ticket: TICKET-500",
+        )
+        .unwrap();
+        // An unrelated, still-legitimately-finished run for the same
+        // profile must be left alone.
+        record_with_run_id(
+            &cfg,
+            EventType::DispatchStarted,
+            Some("real"),
+            Some("TICKET-501"),
+            Some("run-finished"),
+            "dispatch_ticket: TICKET-501",
+        )
+        .unwrap();
+        record_with_run_id(
+            &cfg,
+            EventType::DispatchFinished,
+            Some("real"),
+            Some("TICKET-501"),
+            Some("run-finished"),
+            "dispatch_ticket: success",
+        )
+        .unwrap();
+
+        // Before reconciliation, the abandoned run_id would be counted as
+        // "currently running" (the same logic the dashboard uses).
+        let before = read_events(&cfg).unwrap();
+        assert_eq!(
+            orphaned_dispatch_runs(&before, "real"),
+            vec![("run-abandoned".to_string(), Some("TICKET-500".to_string()))]
+        );
+
+        let reconciled = reconcile_abandoned_dispatches(&cfg, "real").unwrap();
+        assert_eq!(reconciled, 1);
+
+        let after = read_events(&cfg).unwrap();
+        // No longer counted as running.
+        assert!(orphaned_dispatch_runs(&after, "real").is_empty());
+        // A terminal event now exists for it.
+        let synthetic = after
+            .iter()
+            .find(|e| {
+                e.run_id.as_deref() == Some("run-abandoned") && e.event_type == "dispatch_finished"
+            })
+            .expect("synthetic dispatch_finished must exist for the abandoned run_id");
+        assert_eq!(synthetic.work_id.as_deref(), Some("TICKET-500"));
+        assert_eq!(synthetic.details, "abandoned (process restarted)");
+
+        // Running reconciliation again is a no-op (idempotent) -- no
+        // duplicate synthetic event.
+        let reconciled_again = reconcile_abandoned_dispatches(&cfg, "real").unwrap();
+        assert_eq!(reconciled_again, 0);
+    }
+
+    #[test]
+    fn reconcile_abandoned_dispatches_ignores_other_profiles() {
+        let (_tmp, cfg) = test_config();
+        record_with_run_id(
+            &cfg,
+            EventType::DispatchStarted,
+            Some("other-profile"),
+            Some("TICKET-1"),
+            Some("run-other"),
+            "dispatch_ticket: TICKET-1",
+        )
+        .unwrap();
+
+        let reconciled = reconcile_abandoned_dispatches(&cfg, "real").unwrap();
+        assert_eq!(reconciled, 0);
+        let events = read_events(&cfg).unwrap();
+        assert_eq!(events.len(), 1, "must not touch other profiles' events");
     }
 }
