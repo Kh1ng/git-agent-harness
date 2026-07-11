@@ -1889,6 +1889,7 @@ pub mod summary {
                 |entry| crate::config::canonical_backend_name(&entry.effective_backend).to_string(),
                 |observed| crate::config::canonical_backend_name(observed.backend).to_string(),
                 |backend, _model| crate::config::canonical_backend_name(backend).to_string(),
+                true,
             )
         } else {
             None
@@ -1914,6 +1915,7 @@ pub mod summary {
                         .map(str::to_string)
                         .unwrap_or_else(|| UNKNOWN_MODEL_LABEL.to_string())
                 },
+                false,
             )
         } else {
             None
@@ -1956,6 +1958,34 @@ pub mod summary {
         entry_group_key_fn: F,
         usage_group_key_fn: U,
         attempt_group_key_fn: A,
+        merge_account_quota: bool,
+    ) -> Option<Vec<GroupSummary>>
+    where
+        F: Fn(&super::LedgerEntry) -> String,
+        U: Fn(UsageObservation<'_>) -> String,
+        A: Fn(&str, Option<&str>) -> String,
+    {
+        build_grouped_summary_with_account_quota(
+            entries,
+            entry_group_key_fn,
+            usage_group_key_fn,
+            attempt_group_key_fn,
+            merge_account_quota,
+            &crate::quota_store::load_account_observations(),
+        )
+    }
+
+    /// Like [`build_grouped_summary`] but with the account-level quota
+    /// observations injected explicitly (issue #206 regression coverage), so
+    /// the merge behaviour can be tested hermetically without touching the
+    /// global on-disk quota store.
+    pub fn build_grouped_summary_with_account_quota<F, U, A>(
+        entries: &[super::LedgerEntry],
+        entry_group_key_fn: F,
+        usage_group_key_fn: U,
+        attempt_group_key_fn: A,
+        merge_account_quota: bool,
+        account_quota_observations: &[crate::quota_store::QuotaObservationRecord],
     ) -> Option<Vec<GroupSummary>>
     where
         F: Fn(&super::LedgerEntry) -> String,
@@ -1988,9 +2018,9 @@ pub mod summary {
         let mut summaries = Vec::new();
         // #166 / #151 cross-cutting: durable account-level quota observations
         // (e.g. from `codex status --json`) are kept in a separate store
-        // from per-attempt usage. Load it once here; merging into each group
-        // is scoped so it can never fabricate data where none exists.
-        let account_quota_observations = crate::quota_store::load_account_observations();
+        // from per-attempt usage. They are injected by the caller; merging
+        // into each group is scoped so it can never fabricate data where none
+        // exists.
         let all_group_keys: std::collections::BTreeSet<String> = groups
             .keys()
             .chain(usage_groups.keys())
@@ -2139,34 +2169,39 @@ pub mod summary {
             // quota observation (e.g. from `codex status --json`) so the
             // Quota/Telemetry pages show real backend quota data, not just
             // per-attempt tokens. Account observations are backend-scoped
-            // (model = None), so matching the group key against the record's
-            // backend limits the merge to backend-grouped rows naturally.
-            if let Some(account) =
-                crate::quota_store::latest_for(&account_quota_observations, &group_key, None)
-            {
-                let key = (
-                    account.backend.clone(),
-                    account.model.clone(),
-                    account.quota_window.clone(),
-                );
-                let candidate = GroupQuotaObservation {
-                    backend: account.backend.clone(),
-                    model: account.model.clone(),
-                    quota_window: account.quota_window.clone(),
-                    quota_used_percent: account.quota_used_percent,
-                    quota_remaining_percent: account.quota_remaining_percent,
-                    quota_reset_at: account.quota_reset_at.clone(),
-                    observed_at: account.observed_at.clone(),
-                    usage_source: account.usage_source.clone(),
-                };
-                let replace = is_timestamp_earlier(
-                    &quota_observations
-                        .get(&key)
-                        .and_then(|e| e.observed_at.as_ref()),
-                    &candidate.observed_at.as_ref(),
-                );
-                if replace || !quota_observations.contains_key(&key) {
-                    quota_observations.insert(key, candidate);
+            // (model = None), so `group_key` is the record's backend only when
+            // grouping by backend. In the model-grouped view `group_key` is a
+            // model name and would essentially never match a backend-scoped
+            // record, so we skip the merge entirely there (issue #206) rather
+            // than silently no-op against a mismatched key.
+            if merge_account_quota {
+                if let Some(account) =
+                    crate::quota_store::latest_for(account_quota_observations, &group_key, None)
+                {
+                    let key = (
+                        account.backend.clone(),
+                        account.model.clone(),
+                        account.quota_window.clone(),
+                    );
+                    let candidate = GroupQuotaObservation {
+                        backend: account.backend.clone(),
+                        model: account.model.clone(),
+                        quota_window: account.quota_window.clone(),
+                        quota_used_percent: account.quota_used_percent,
+                        quota_remaining_percent: account.quota_remaining_percent,
+                        quota_reset_at: account.quota_reset_at.clone(),
+                        observed_at: account.observed_at.clone(),
+                        usage_source: account.usage_source.clone(),
+                    };
+                    let replace = is_timestamp_earlier(
+                        &quota_observations
+                            .get(&key)
+                            .and_then(|e| e.observed_at.as_ref()),
+                        &candidate.observed_at.as_ref(),
+                    );
+                    if replace || !quota_observations.contains_key(&key) {
+                        quota_observations.insert(key, candidate);
+                    }
                 }
             }
 
@@ -3127,6 +3162,7 @@ mod tests {
             |entry| entry.effective_backend.clone(),
             |observed| observed.backend.to_string(),
             |backend, _model| backend.to_string(),
+            true,
         );
 
         assert!(grouped.is_some());
@@ -3192,6 +3228,7 @@ mod tests {
                     .map(str::to_string)
                     .unwrap_or_else(|| super::summary::UNKNOWN_MODEL_LABEL.to_string())
             },
+            false,
         )
         .unwrap();
 
@@ -3233,6 +3270,7 @@ mod tests {
             |entry| entry.effective_model.clone().unwrap_or_default(),
             |observed| observed.model.unwrap_or_default().to_string(),
             |_backend, model| model.unwrap_or_default().to_string(),
+            false,
         );
 
         assert!(grouped.is_some());
@@ -3265,6 +3303,76 @@ mod tests {
         assert!((mistral_group.total_cost_usd.unwrap() - 0.5).abs() < f64::EPSILON);
     }
 
+    // Issue #206: an account-level quota observation (backend-scoped,
+    // model = None) must surface in the backend-grouped view, and must NOT
+    // leak into the model-grouped view where the group key is a model name.
+    #[test]
+    fn account_quota_merges_into_backend_group_only() {
+        let (_tmp, _cfg) = test_config();
+        let mut entry =
+            LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
+        entry.effective_backend = "codex".to_string();
+        entry.effective_model = Some("gpt-5".to_string());
+        let entries = vec![entry];
+
+        let account = crate::quota_store::QuotaObservationRecord {
+            backend: "codex".to_string(),
+            model: None,
+            quota_window: Some("weekly".to_string()),
+            quota_used_percent: Some(42.0),
+            quota_remaining_percent: Some(58.0),
+            quota_reset_at: Some("2026-07-12T00:00:00Z".to_string()),
+            observed_at: Some("2026-07-10T00:00:00Z".to_string()),
+            usage_source: Some("codex status --json".to_string()),
+        };
+        let observations = vec![account];
+
+        // Backend-grouped: the account observation must appear on the codex row.
+        let backend_grouped = super::summary::build_grouped_summary_with_account_quota(
+            &entries,
+            |entry| entry.effective_backend.clone(),
+            |observed| observed.backend.to_string(),
+            |backend, _model| backend.to_string(),
+            true,
+            &observations,
+        )
+        .unwrap();
+        let codex_group = backend_grouped
+            .iter()
+            .find(|g| g.group_key == "codex")
+            .unwrap();
+        assert!(
+            codex_group
+                .quota_observations
+                .iter()
+                .any(|q| q.quota_used_percent == Some(42.0)),
+            "backend-grouped view should surface the account quota observation"
+        );
+
+        // Model-grouped: the account observation must NOT show up (the group
+        // key "gpt-5" is a model name, not a backend).
+        let model_grouped = super::summary::build_grouped_summary_with_account_quota(
+            &entries,
+            |entry| entry.effective_model.clone().unwrap_or_default(),
+            |observed| observed.model.unwrap_or_default().to_string(),
+            |_backend, model| model.unwrap_or_default().to_string(),
+            false,
+            &observations,
+        )
+        .unwrap();
+        let gpt5_group = model_grouped
+            .iter()
+            .find(|g| g.group_key == "gpt-5")
+            .unwrap();
+        assert!(
+            !gpt5_group
+                .quota_observations
+                .iter()
+                .any(|q| q.quota_used_percent == Some(42.0)),
+            "model-grouped view must not leak the backend-scoped account quota observation"
+        );
+    }
+
     #[test]
     fn build_grouped_summary_empty_entries() {
         let entries: Vec<LedgerEntry> = vec![];
@@ -3273,6 +3381,7 @@ mod tests {
             |entry| entry.effective_backend.clone(),
             |observed| observed.backend.to_string(),
             |backend, _model| backend.to_string(),
+            true,
         );
         assert!(grouped.is_none());
     }
