@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 #[allow(dead_code)] // unwired variants are the schema for future tickets, not unused code
 pub enum EventType {
     ObservationCompleted,
+    ContextBuilt,
     ActionDecided,
     ActionOverridden,
     DispatchStarted,
@@ -38,6 +39,7 @@ impl EventType {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ObservationCompleted => "observation_completed",
+            Self::ContextBuilt => "context_built",
             Self::ActionDecided => "action_decided",
             Self::ActionOverridden => "action_overridden",
             Self::DispatchStarted => "dispatch_started",
@@ -255,6 +257,7 @@ mod tests {
     fn test_config() -> (tempfile::TempDir, GahConfig) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = GahConfig {
+            context: Default::default(),
             defaults: Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),

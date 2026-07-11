@@ -605,6 +605,10 @@ mod telemetry_tests {
             attempts_completed: 1,
             attempts: vec![],
             dispatch_reason: None,
+            context_phase: None,
+            context_estimated_tokens_before: None,
+            context_estimated_tokens_after: None,
+            context_compacted: false,
             usage: crate::ledger::LedgerUsage::default(),
         }
     }

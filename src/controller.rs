@@ -24,7 +24,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const AUTO_RETRY_CAP: usize = 2;
 
 pub(crate) fn is_genuine_agent_failure(failure_class: &str) -> bool {
-    matches!(failure_class, "agent_no_progress" | "agent_failure")
+    matches!(
+        failure_class,
+        "agent_no_progress" | "agent_failure" | "context_limit_exceeded"
+    )
 }
 
 fn is_infra_failure(failure_class: &str) -> bool {
@@ -1941,6 +1944,23 @@ mod tests {
     }
 
     #[test]
+    fn context_limit_failure_escalates_without_being_orphaned() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-context.md",
+            Some("TICKET-context"),
+            1,
+            Some("context_limit_exceeded"),
+            false,
+            false,
+        ));
+        assert!(matches!(
+            decide_next_action(&snapshot),
+            NextAction::Escalate { .. }
+        ));
+    }
+
+    #[test]
     fn infra_failure_retries_only_when_a_backend_is_eligible() {
         let mut snapshot = empty_snapshot();
         snapshot.available_tickets.push(ticket(
@@ -2750,6 +2770,7 @@ mod tests {
     fn event_test_config() -> (tempfile::TempDir, GahConfig) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = GahConfig {
+            context: Default::default(),
             defaults: Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),

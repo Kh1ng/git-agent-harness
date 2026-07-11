@@ -63,6 +63,8 @@ pub struct GahConfig {
     pub defaults: Defaults,
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
+    #[serde(default)]
+    pub context: crate::context::ContextConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -1207,6 +1209,7 @@ pub mod tests {
         let mut profiles = std::collections::HashMap::new();
         profiles.insert("test".to_string(), test_profile_for_notifications());
         GahConfig {
+            context: Default::default(),
             defaults: Default::default(),
             profiles,
         }
