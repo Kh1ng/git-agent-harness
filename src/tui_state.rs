@@ -57,14 +57,15 @@ impl AppState {
     }
 }
 
-/// Only these variants actually run a dispatch; `FixMr` does no I/O (fix
-/// mode can't yet continue an existing branch) and `WaitUntil`/
+/// Only these variants actually perform an automated action; `FixMr` runs a
+/// dispatch, `MarkReadyForReview` flips provider state, and `WaitUntil`/
 /// `HumanRequired`/`NoOp` are informational, so none of those should ever
 /// reach a confirm prompt.
 fn is_dispatchable(action: &NextAction) -> bool {
     matches!(
         action,
         NextAction::ReviewMr { .. }
+            | NextAction::MarkReadyForReview { .. }
             | NextAction::FixMr { .. }
             | NextAction::DispatchTicket { .. }
             | NextAction::Retry { .. }
