@@ -6097,6 +6097,12 @@ The parser should retain structured sections.\n\n\
         // that false summary into real MR bodies. dispatch.rs's real call
         // sites now run this after the commit; this test pins why order
         // matters by exercising both states directly.
+        // Hold the shared PATH guard for the complete test. Other tests
+        // install fake provider binaries by mutating PATH; without this
+        // guard, one of those mutations can make the git commands below
+        // resolve to a fake/missing executable and the ignored commit error
+        // looks like a diff-stat regression.
+        let _path_guard = crate::test_support::PathGuard::set("");
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         init_repo(repo);
@@ -6136,11 +6142,16 @@ The parser should retain structured sections.\n\n\
             .current_dir(repo)
             .output()
             .unwrap();
-        Command::new("git")
+        let commit = Command::new("git")
             .args(["commit", "-m", "add file"])
             .current_dir(repo)
             .output()
             .unwrap();
+        assert!(
+            commit.status.success(),
+            "test commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
 
         // After commit: HEAD has moved, so the comparison now sees the
         // real change -- this is what dispatch.rs's real call sites rely on.
