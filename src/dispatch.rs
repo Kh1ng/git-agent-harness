@@ -917,7 +917,12 @@ fn run_backend(
     // Held for the duration of the actual backend call -- dropped on every
     // exit path (success, error, or panic) -- so routing's
     // `max_concurrent_per_model` check sees an accurate live count.
-    let _concurrency_slot = routing::ConcurrencyGuard::acquire(backend, effective_model);
+    let concurrency_cap = profile
+        .max_concurrent_per_model
+        .get(&format!("{backend}/{}", effective_model.unwrap_or("")))
+        .copied();
+    let _concurrency_slot =
+        routing::ConcurrencyGuard::acquire_shared(backend, effective_model, concurrency_cap)?;
     let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
     if backend == "agy-second" {
         if let Some(home) = profile.agy_second_home.as_deref().filter(|h| !h.is_empty()) {

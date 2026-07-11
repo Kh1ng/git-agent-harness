@@ -4,11 +4,17 @@ use crate::ledger::{BackendUsageSummary, RoutingCandidateDiagnostic, RoutingDiag
 use crate::quota::{self, PaceBand};
 use crate::runner;
 use anyhow::Result;
+use fs2::FileExt;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -41,6 +47,7 @@ pub fn current_concurrent(backend: &str, model: Option<&str>) -> u32 {
 /// of `work_claim::release_work`'s success/error coverage, just via RAII).
 pub struct ConcurrencyGuard {
     key: String,
+    shared_file: Option<File>,
 }
 
 impl ConcurrencyGuard {
@@ -51,12 +58,65 @@ impl ConcurrencyGuard {
             .unwrap()
             .entry(key.clone())
             .or_insert(0) += 1;
-        ConcurrencyGuard { key }
+        ConcurrencyGuard {
+            key,
+            shared_file: None,
+        }
+    }
+
+    /// Reserve one configured backend/model slot across processes. A flock is
+    /// released by the kernel if the worker dies, so a crashed actor cannot
+    /// permanently consume quota capacity. This intentionally uses the
+    /// smallest safe primitive: one lock file per slot, with a bounded slot
+    /// count read from profile policy.
+    pub fn acquire_shared(backend: &str, model: Option<&str>, cap: Option<u32>) -> Result<Self> {
+        let Some(cap) = cap else {
+            return Ok(Self::acquire(backend, model));
+        };
+        let cap = cap.max(1);
+        let key = concurrency_key(backend, model);
+        let root = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+            })
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("gah")
+            .join("concurrency");
+        std::fs::create_dir_all(&root)?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        key.hash(&mut hasher);
+        let stem = format!("{:x}", hasher.finish());
+
+        loop {
+            for slot in 0..cap {
+                let path = root.join(format!("{stem}-{slot}.lock"));
+                let file = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(path)?;
+                match file.try_lock_exclusive() {
+                    Ok(()) => {
+                        let mut guard = Self::acquire(backend, model);
+                        guard.shared_file = Some(file);
+                        return Ok(guard);
+                    }
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 
 impl Drop for ConcurrencyGuard {
     fn drop(&mut self) {
+        if let Some(file) = self.shared_file.take() {
+            let _ = file.unlock();
+        }
         let mut counters = concurrency_counters().lock().unwrap();
         if let Some(count) = counters.get_mut(&self.key) {
             *count = count.saturating_sub(1);
