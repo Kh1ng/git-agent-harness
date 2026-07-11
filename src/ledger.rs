@@ -118,6 +118,23 @@ pub struct AttemptRecord {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
+    /// Normalized accounting class. This is explicit even when the backend
+    /// cannot identify it; `unknown` is never treated as zero-cost.
+    #[serde(default)]
+    pub usage_classification: Option<String>,
+    /// Safe logical instance/account labels; never secrets or raw API keys.
+    #[serde(default)]
+    pub backend_instance: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub account_label: Option<String>,
+    #[serde(default)]
+    pub pricing_source: Option<String>,
+    #[serde(default)]
+    pub pricing_version: Option<String>,
+    #[serde(default)]
+    pub cost_unknown_reason: Option<String>,
     #[serde(default)]
     pub observed_at: Option<String>,
     pub input_tokens: Option<u64>,

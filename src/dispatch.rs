@@ -1199,9 +1199,22 @@ fn attempt_usage(
     transcript_path: Option<&str>,
     claude_path: Option<&str>,
 ) -> crate::ledger::LedgerUsage {
+    let normalize = |mut usage: crate::ledger::LedgerUsage| {
+        // Always preserve a normalized, non-secret instance identity. The
+        // current providers do not expose a trustworthy billing classification
+        // uniformly, so classify it as unknown rather than guessing quota or
+        // API spend. Follow-up pricing/account tickets can fill these fields
+        // from explicit route configuration.
+        usage.backend_instance = backend.map(str::to_string);
+        usage.usage_classification = Some("unknown".to_string());
+        if usage.actual_cost_usd.is_none() && usage.estimated_cost_usd.is_none() {
+            usage.cost_unknown_reason = Some("backend did not report billable cost".to_string());
+        }
+        usage
+    };
     let text = match fs::read_to_string(log_path) {
         Ok(t) => t,
-        Err(_) => return crate::ledger::LedgerUsage::default(),
+        Err(_) => return normalize(crate::ledger::LedgerUsage::default()),
     };
 
     // Claude Code: prefer the structured session transcript for real
@@ -1237,7 +1250,7 @@ fn attempt_usage(
                                 .unwrap_or_default(),
                         );
                     }
-                    return merged;
+                    return normalize(merged);
                 }
             }
         }
@@ -1251,7 +1264,7 @@ fn attempt_usage(
                     .unwrap_or_default(),
             );
         }
-        return usage;
+        return normalize(usage);
     }
 
     // Try codex exec --json parser first — handles JSONL output from
@@ -1275,7 +1288,7 @@ fn attempt_usage(
                 .unwrap_or_default(),
         );
     }
-    usage
+    normalize(usage)
 }
 
 fn usage_has_observation(usage: &crate::ledger::LedgerUsage) -> bool {
