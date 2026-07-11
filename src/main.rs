@@ -846,15 +846,31 @@ fn main() -> Result<()> {
             skip_validation_gate,
         } => {
             let cfg = config::load(config_path.as_deref())?;
+            let resolved_config_path = config::resolve_config_path(config_path.as_deref());
             let parallel = if parallel == 0 {
                 config::get_profile(&cfg, &profile)?.max_parallel_workers() as usize
             } else {
                 parallel
             };
             if once {
+                // `--once` still does real execution (spawns backends, claims
+                // tickets, writes ledger entries) so it must coordinate via
+                // the same profile lock as the daemon (`gah loop` with no
+                // `--once`) -- otherwise both can run concurrently against
+                // the same profile. `run_loop` acquires this lock itself for
+                // the daemon case; do not acquire it again from within
+                // `run_once` itself, only here at the entry point.
+                let _lock = controller::acquire_profile_lock(&profile, &resolved_config_path)?;
                 controller::run_once(&cfg, &profile, json, parallel, skip_validation_gate)?;
             } else {
-                controller::run_loop(&cfg, &profile, json, parallel, skip_validation_gate)?;
+                controller::run_loop(
+                    &cfg,
+                    &profile,
+                    json,
+                    parallel,
+                    skip_validation_gate,
+                    &resolved_config_path,
+                )?;
             }
         }
 
@@ -916,6 +932,14 @@ fn main() -> Result<()> {
             // not just sessions started from the dashboard itself -- see
             // issue #197.
             let run_id = Uuid::new_v4().to_string();
+            // A manual `gah dispatch` does real execution (spawns a backend,
+            // may claim a ticket, writes ledger entries) just like the loop
+            // daemon does, so it must coordinate via the same per-profile
+            // lock -- otherwise a manual dispatch can run uncoordinated
+            // alongside a `gah loop --profile <profile>` daemon already
+            // owning that profile.
+            let resolved_config_path = config::resolve_config_path(config_path.as_deref());
+            let _lock = controller::acquire_profile_lock(&profile, &resolved_config_path)?;
             let args = dispatch::DispatchArgs {
                 profile,
                 mode,
