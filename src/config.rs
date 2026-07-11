@@ -873,9 +873,36 @@ pub fn resolve_config_path(config_path: Option<&str>) -> PathBuf {
 /// config (`GAH_CANONICAL_CONFIG` override, else `~/.config/gah/canonical.toml`
 /// -- same `~/.config/gah/` convention as the default repo config path).
 pub fn canonical_config_path() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(path) = CANONICAL_CONFIG_TEST_OVERRIDE.with(|cell| cell.borrow().clone()) {
+            return path;
+        }
+    }
     std::env::var("GAH_CANONICAL_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_config_dir().join("canonical.toml"))
+}
+
+// Tests used to coordinate this via a process-global env var (GAH_CANONICAL_CONFIG)
+// guarded by a mutex, but that only serialized the tests that *set* the var --
+// any other test calling `load()` concurrently on a different thread could still
+// read the env var mid-mutation. A thread-local override sidesteps the race
+// entirely: cargo test gives each running test exclusive use of its own thread.
+#[cfg(test)]
+thread_local! {
+    static CANONICAL_CONFIG_TEST_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_canonical_config_override(path: impl Into<PathBuf>) {
+    CANONICAL_CONFIG_TEST_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(path.into()));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_canonical_config_override() {
+    CANONICAL_CONFIG_TEST_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1033,11 +1060,10 @@ pub fn get_profile_mut<'a>(config: &'a mut GahConfig, name: &str) -> Result<&'a 
 #[cfg(test)]
 pub mod tests {
     use super::{
-        add_profile, canonical_backend_name, get_profile_mut, load, load_canonical_routing,
-        merge_routing_policy, remove_profile, save, CandidateConfig, GahConfig, Profile,
-        RoutingPolicy,
+        add_profile, canonical_backend_name, clear_canonical_config_override, get_profile_mut,
+        load, load_canonical_routing, merge_routing_policy, remove_profile, save,
+        set_canonical_config_override, CandidateConfig, GahConfig, Profile, RoutingPolicy,
     };
-    use std::sync::Mutex;
 
     /// Build a structurally complete `Profile` for unit tests in other modules
     /// (e.g. `notifications`). Mirrors the shape of `dispatch::tests::profile`
@@ -1094,12 +1120,6 @@ pub mod tests {
             pacing: Default::default(),
         }
     }
-
-    // TICKET-106: GAH_CANONICAL_CONFIG is a process-global env var; every
-    // test that touches it must go through this lock (same reasoning as
-    // test_support::PathGuard for PATH) or parallel test threads corrupt
-    // each other's view of it.
-    static CANONICAL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
@@ -1454,32 +1474,26 @@ pub mod tests {
 
     #[test]
     fn load_canonical_routing_is_none_when_file_does_not_exist() {
-        let _lock = CANONICAL_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var(
-            "GAH_CANONICAL_CONFIG",
-            tmp.path().join("does-not-exist.toml"),
-        );
+        set_canonical_config_override(tmp.path().join("does-not-exist.toml"));
         let result = load_canonical_routing().unwrap();
-        std::env::remove_var("GAH_CANONICAL_CONFIG");
+        clear_canonical_config_override();
         assert!(result.is_none());
     }
 
     #[test]
     fn load_canonical_routing_fails_loudly_on_malformed_file() {
-        let _lock = CANONICAL_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("canonical.toml");
         std::fs::write(&path, "not valid toml [[[").unwrap();
-        std::env::set_var("GAH_CANONICAL_CONFIG", &path);
+        set_canonical_config_override(&path);
         let result = load_canonical_routing();
-        std::env::remove_var("GAH_CANONICAL_CONFIG");
+        clear_canonical_config_override();
         assert!(result.is_err());
     }
 
     #[test]
     fn load_merges_canonical_into_repo_defaults_routing() {
-        let _lock = CANONICAL_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let canonical_path = tmp.path().join("canonical.toml");
         std::fs::write(
@@ -1487,7 +1501,7 @@ pub mod tests {
             "[routing]\ndefault_backend = \"codex\"\nreview_backend = \"claude\"\n",
         )
         .unwrap();
-        std::env::set_var("GAH_CANONICAL_CONFIG", &canonical_path);
+        set_canonical_config_override(&canonical_path);
 
         let repo_config_path = tmp.path().join("gah-config.toml");
         std::fs::write(
@@ -1497,7 +1511,7 @@ pub mod tests {
         .unwrap();
 
         let cfg = load(Some(repo_config_path.to_str().unwrap())).unwrap();
-        std::env::remove_var("GAH_CANONICAL_CONFIG");
+        clear_canonical_config_override();
 
         // repo's own default_backend wins...
         assert_eq!(cfg.defaults.routing.default_backend.as_deref(), Some("agy"));
@@ -1513,7 +1527,6 @@ pub mod tests {
         // TICKET-106 AC: "World Cup can inherit canonical routing while
         // overriding repo-specific behavior" -- simulated with two throwaway
         // repo configs rather than touching a real second repo.
-        let _lock = CANONICAL_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let canonical_path = tmp.path().join("canonical.toml");
         std::fs::write(
@@ -1521,7 +1534,7 @@ pub mod tests {
             "[routing]\nreview_backend = \"claude\"\nstrong_review_backend = \"claude\"\n",
         )
         .unwrap();
-        std::env::set_var("GAH_CANONICAL_CONFIG", &canonical_path);
+        set_canonical_config_override(&canonical_path);
 
         let minimal_repo_path = tmp.path().join("minimal-repo.toml");
         std::fs::write(
@@ -1539,7 +1552,7 @@ pub mod tests {
 
         let minimal_cfg = load(Some(minimal_repo_path.to_str().unwrap())).unwrap();
         let overriding_cfg = load(Some(overriding_repo_path.to_str().unwrap())).unwrap();
-        std::env::remove_var("GAH_CANONICAL_CONFIG");
+        clear_canonical_config_override();
 
         // A minimal repo config with no routing section at all still
         // receives canonical routing automatically.
