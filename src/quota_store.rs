@@ -65,10 +65,13 @@ pub fn load(state_path: &Path) -> Result<Vec<QuotaObservationRecord>> {
         if line.trim().is_empty() {
             continue;
         }
-        records.push(
-            serde_json::from_str::<QuotaObservationRecord>(line)
-                .context("parse quota observation record")?,
-        );
+        // Skip only the malformed line, not the whole file: one corrupt JSONL
+        // record (e.g. a partial write) must not discard every valid
+        // observation before/after it. Mirrors availability.rs's resilience.
+        match serde_json::from_str::<QuotaObservationRecord>(line) {
+            Ok(rec) => records.push(rec),
+            Err(_) => continue,
+        }
     }
     Ok(records)
 }
@@ -231,6 +234,43 @@ mod tests {
         let latest = latest_for(&records, "codex", None).unwrap();
         assert_eq!(latest.observed_at.as_deref(), Some("2026-04-29T10:00:00Z"));
         assert_eq!(latest.quota_used_percent, Some(40.0));
+    }
+
+    // Issue #206: a single malformed JSONL line must be skipped, not cause the
+    // whole store (every valid record before/after it) to be discarded.
+    #[test]
+    fn load_skips_malformed_line_and_keeps_valid_records() {
+        let (_dir, path) = tmp_store();
+        let good1 = QuotaObservationRecord {
+            backend: "codex".into(),
+            model: None,
+            quota_window: Some("weekly".into()),
+            quota_used_percent: Some(10.0),
+            quota_remaining_percent: Some(90.0),
+            quota_reset_at: None,
+            observed_at: Some("2026-04-28T10:00:00Z".into()),
+            usage_source: Some("codex_status_json".into()),
+        };
+        let good2 = QuotaObservationRecord {
+            quota_used_percent: Some(20.0),
+            observed_at: Some("2026-04-29T10:00:00Z".into()),
+            ..good1.clone()
+        };
+        let mut contents = serde_json::to_string(&good1).unwrap();
+        contents.push('\n');
+        contents.push_str("{ this is not valid json ]\n");
+        contents.push_str(&serde_json::to_string(&good2).unwrap());
+        contents.push('\n');
+        std::fs::write(&path, contents).unwrap();
+
+        let records = load(&path).unwrap();
+        assert_eq!(
+            records.len(),
+            2,
+            "the bad line should be skipped, not fatal"
+        );
+        assert_eq!(records[0].quota_used_percent, Some(10.0));
+        assert_eq!(records[1].quota_used_percent, Some(20.0));
     }
 
     #[test]
