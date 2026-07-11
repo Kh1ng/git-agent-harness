@@ -155,7 +155,9 @@ export function QuotaPage() {
                       </p>
                     </>
                   ) : (
-                    <p className="text-xs text-muted mb-2">No percentage reported</p>
+                    <p className="text-xs text-muted mb-2">
+                      {q.backend === 'openhands' ? 'No metering available for this backend' : 'No percentage reported'}
+                    </p>
                   )}
 
                   <div className="flex items-center justify-between text-xs text-muted pt-2 border-t border-subtle">

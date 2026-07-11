@@ -76,6 +76,105 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
     usage
 }
 
+/// Parse quota-limit headers surfaced by OpenHands when its LLM backend
+/// runs through a proxy that exposes `x-ratelimit-*` metadata.
+///
+/// The proxy/upstream does not give us a single canonical "percentage
+/// used" field, so we summarize the most constrained bucket we can see:
+/// choose the bucket with the smallest remaining percentage and convert
+/// it into the same quota fields the rest of the harness already knows
+/// how to display.
+///
+/// Returns an empty usage record when no recognizable rate-limit headers
+/// are present.
+pub fn parse_openhands_usage(text: &str) -> LedgerUsage {
+    #[derive(Debug)]
+    struct Bucket {
+        label: &'static str,
+        used_percent: f64,
+        remaining_percent: f64,
+        reset_at: Option<String>,
+    }
+
+    let mut buckets = Vec::new();
+
+    let candidates = [
+        (
+            "tokens 1h",
+            &[
+                "x-ratelimit-limit-tokens-1h",
+                "x-ratelimit-remaining-tokens-1h",
+                "x-ratelimit-reset-tokens-1h",
+            ][..],
+        ),
+        (
+            "requests 1h",
+            &[
+                "x-ratelimit-limit-requests-1h",
+                "x-ratelimit-remaining-requests-1h",
+                "x-ratelimit-reset-requests-1h",
+            ][..],
+        ),
+        (
+            "tokens",
+            &[
+                "x-ratelimit-limit-tokens",
+                "x-ratelimit-remaining-tokens",
+                "x-ratelimit-reset-tokens",
+            ][..],
+        ),
+        (
+            "requests",
+            &[
+                "x-ratelimit-limit-requests",
+                "x-ratelimit-remaining-requests",
+                "x-ratelimit-reset-requests",
+            ][..],
+        ),
+    ];
+
+    for (label, keys) in candidates {
+        let Some(limit) = find_header_u64(text, &[keys[0]]) else {
+            continue;
+        };
+        let Some(remaining) = find_header_u64(text, &[keys[1]]) else {
+            continue;
+        };
+        if limit == 0 || remaining > limit {
+            continue;
+        }
+
+        let used_percent = ((limit - remaining) as f64 / limit as f64) * 100.0;
+        let remaining_percent = (remaining as f64 / limit as f64) * 100.0;
+        let reset_at = find_header_u64(text, &[keys[2]])
+            .or_else(|| find_header_u64(text, &["retry-after"]))
+            .map(|seconds| format!("in {seconds}s"));
+
+        buckets.push(Bucket {
+            label,
+            used_percent,
+            remaining_percent,
+            reset_at,
+        });
+    }
+
+    let Some(bucket) = buckets
+        .into_iter()
+        .min_by(|a, b| a.remaining_percent.total_cmp(&b.remaining_percent))
+    else {
+        return LedgerUsage::default();
+    };
+
+    LedgerUsage {
+        usage_source: Some("openhands_rate_limit_headers".to_string()),
+        quota_window: Some(bucket.label.to_string()),
+        quota_used_percent: Some(bucket.used_percent),
+        quota_remaining_percent: Some(bucket.remaining_percent),
+        quota_reset_at: bucket.reset_at,
+        ..LedgerUsage::default()
+    }
+}
+
 /// Parse the durable metadata written by Mistral Vibe for a completed
 /// programmatic session. Vibe records cumulative prompt/completion tokens and
 /// the active model in `logs/session/<id>/meta.json`; the CLI's human-readable
@@ -266,6 +365,19 @@ fn find_f64(text: &str, keys: &[&str]) -> Option<f64> {
         re.captures(text)
             .and_then(|caps| caps.get(1))
             .and_then(|m| m.as_str().parse::<f64>().ok())
+    })
+}
+
+fn find_header_u64(text: &str, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        let re = Regex::new(&format!(
+            r#"(?i)"?{}\b"?\s*[:=]\s*"?([0-9]+)"?"#,
+            regex::escape(key)
+        ))
+        .ok()?;
+        re.captures(text)
+            .and_then(|caps| caps.get(1))
+            .and_then(|m| m.as_str().parse::<u64>().ok())
     })
 }
 
@@ -496,6 +608,7 @@ mod tests {
     use super::parse_codex_exec_json;
     use super::parse_codex_status_json;
     use super::parse_generic_usage;
+    use super::parse_openhands_usage;
     use super::parse_vibe_session_metadata;
 
     // ── codex exec --json (Issue #152) ───────────────────────────────────
@@ -692,5 +805,48 @@ mod tests {
         assert_eq!(usage.quota_used_percent, None);
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.usage_source, None);
+    }
+
+    #[test]
+    fn openhands_rate_limit_headers_extract_percentage_and_reset() {
+        let text = r#"
+            x-ratelimit-limit-requests-1h: 800
+            x-ratelimit-remaining-requests-1h: 0
+            x-ratelimit-reset-requests-1h: 3100
+        "#;
+        let usage = parse_openhands_usage(text);
+        assert_eq!(
+            usage.usage_source.as_deref(),
+            Some("openhands_rate_limit_headers")
+        );
+        assert_eq!(usage.quota_window.as_deref(), Some("requests 1h"));
+        assert_eq!(usage.quota_used_percent, Some(100.0));
+        assert_eq!(usage.quota_remaining_percent, Some(0.0));
+        assert_eq!(usage.quota_reset_at.as_deref(), Some("in 3100s"));
+    }
+
+    #[test]
+    fn openhands_rate_limit_headers_choose_most_constrained_bucket() {
+        let text = r#"
+            {"x-ratelimit-limit-requests-1h":"800","x-ratelimit-remaining-requests-1h":"600"}
+            {"x-ratelimit-limit-tokens-1h":"10000","x-ratelimit-remaining-tokens-1h":"1000"}
+        "#;
+        let usage = parse_openhands_usage(text);
+        assert_eq!(
+            usage.usage_source.as_deref(),
+            Some("openhands_rate_limit_headers")
+        );
+        assert_eq!(usage.quota_window.as_deref(), Some("tokens 1h"));
+        assert_eq!(usage.quota_used_percent, Some(90.0));
+        assert_eq!(usage.quota_remaining_percent, Some(10.0));
+    }
+
+    #[test]
+    fn openhands_usage_returns_empty_without_headers() {
+        let usage = parse_openhands_usage("agent started\nmade progress\nfinished");
+        assert_eq!(usage.usage_source, None);
+        assert_eq!(usage.quota_window, None);
+        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.quota_remaining_percent, None);
     }
 }

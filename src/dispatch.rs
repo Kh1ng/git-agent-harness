@@ -1318,6 +1318,12 @@ fn attempt_usage(
     } else {
         crate::ledger::LedgerUsage::default()
     };
+    if backend == Some("openhands") {
+        let openhands_usage = usage::parse_openhands_usage(&text);
+        if openhands_usage.usage_source.is_some() {
+            usage = usage::merge_usage(openhands_usage, usage);
+        }
+    }
     let has_json_lines = text.lines().any(|line| line.trim_start().starts_with('{'));
     if usage.usage_source.is_none() && (backend != Some("codex") || !has_json_lines) {
         // Fall back to the generic regex-based parser for other backends (or
