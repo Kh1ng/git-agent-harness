@@ -4634,6 +4634,140 @@ fn loop_once_dispatches_an_eligible_ticket() {
     assert!(events_text.contains("dispatch_finished"));
 }
 
+/// Regression for the parallel-batch-abort bug: a terminal decision
+/// (NoOp/HumanRequired/WaitUntil) for ONE slot must not stop OTHER slots in
+/// the same `--parallel` batch from being tried. Simulated here via a `gh`
+/// stub that fails `pr list` on exactly the second call (a transient sync
+/// hiccup) -- the middle of 3 slots hits it and legitimately decides NoOp
+/// ("observation incomplete"), while slot 1 (before the hiccup) and slot 3
+/// (after it clears) each find a distinct, real, dispatchable ticket. Before
+/// the fix, the middle slot's NoOp `break`s the whole batch and TICKET-301
+/// (only reachable from slot 3) never gets dispatched.
+#[test]
+fn parallel_loop_slot_terminal_action_does_not_abort_later_slots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    let github_root = tmp.path().join("github-root");
+    let origin = github_root.join("owner/real.git");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    init_git_repo(&repo);
+    fs::create_dir_all(origin.parent().unwrap()).unwrap();
+    ProcessCommand::new("git")
+        .args(["init", "--bare", origin.to_str().unwrap()])
+        .output()
+        .unwrap();
+    configure_git_url_instead_of(
+        &home,
+        "https://github.com/",
+        &format!("file://{}/", github_root.display()),
+    );
+    ProcessCommand::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/real.git",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    fs::write(
+        repo.join("docs/tickets/TICKET-300-loop-test.md"),
+        "# TICKET-300: Loop test ticket A\n\nGoal: test loop --parallel dispatch\n\nRecommended backend: codex\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("docs/tickets/TICKET-301-loop-test.md"),
+        "# TICKET-301: Loop test ticket B\n\nGoal: test loop --parallel dispatch\n\nRecommended backend: codex\n",
+    )
+    .unwrap();
+
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "validation_commands = [\"true\"]\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    let pr_list_count_file = tmp.path().join("pr_list_count");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+             \x20\x20count=$(( $(cat '{count_file}' 2>/dev/null || echo 0) + 1 ))\n\
+             \x20\x20echo \"$count\" > '{count_file}'\n\
+             \x20\x20if [ \"$count\" = \"2\" ]; then echo 'simulated transient sync failure' >&2; exit 1; fi\n\
+             \x20\x20echo '[]'; exit 0\n\
+             fi\n\
+             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\n\
+             if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\n\
+             exit 0\n",
+            count_file = pr_list_count_file.display()
+        ),
+    );
+
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let events_path = tmp.path().join("events.jsonl");
+
+    bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+            "--parallel",
+            "3",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .env("GAH_EVENTS_PATH", &events_path)
+        .assert()
+        .success();
+
+    // Both distinct tickets must have a real (non-claim) completion entry --
+    // slot 3's dispatch of TICKET-301 must not have been aborted by slot 2's
+    // NoOp verdict on the transient sync hiccup.
+    let ledger_text = fs::read_to_string(&ledger_path).unwrap();
+    let dispatched_work_ids: std::collections::HashSet<String> = ledger_text
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .filter(|e| e["mode"] != "claim")
+        .filter_map(|e| e["work_id"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        dispatched_work_ids.contains("TICKET-300"),
+        "expected TICKET-300 dispatched, got: {dispatched_work_ids:?}"
+    );
+    assert!(
+        dispatched_work_ids.contains("TICKET-301"),
+        "expected TICKET-301 dispatched (slot 3, after a middle slot's NoOp), got: {dispatched_work_ids:?}"
+    );
+}
+
 /// TICKET-084: `gah events` reads back exactly what `gah loop --once`
 /// wrote, and `--profile` filters to just that profile's events.
 #[test]

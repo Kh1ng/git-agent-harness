@@ -820,6 +820,15 @@ fn run_parallel_once(
 
     std::thread::scope(|scope| -> Result<()> {
         let mut handles = Vec::new();
+        // A terminal decision (NoOp/HumanRequired/WaitUntil) for one slot only
+        // means *that slot* found nothing new to do in this batch -- it does
+        // not mean other slots wouldn't find distinct eligible work from their
+        // own fresh snapshot. So terminal actions are deferred rather than
+        // executed immediately: only the last one seen is executed/recorded,
+        // and only if no slot in the batch spawned real work, preserving the
+        // "why did we stop" signal for the genuinely-no-work case without
+        // aborting the rest of the batch for a single slot's verdict.
+        let mut pending_terminal: Option<(NextAction, NextAction)> = None;
         for _ in 0..effective_parallel_limit {
             // Re-fetch claimed work IDs to get fresh state (other processes might have claimed work)
             let claimed_work_ids = crate::work_claim::get_claimed_work_ids(profile_name)?;
@@ -908,31 +917,15 @@ fn run_parallel_once(
                 }
             }
 
-            // For terminal actions (WaitUntil, HumanRequired, NoOp), we stop after the first one
+            // For terminal actions (WaitUntil, HumanRequired, NoOp), this slot
+            // found nothing to do -- record it as the current "why we might
+            // stop" candidate and let the next slot try independently, rather
+            // than aborting the whole batch (see comment above `handles`).
             match &action {
                 NextAction::WaitUntil { .. }
                 | NextAction::HumanRequired { .. }
                 | NextAction::NoOp { .. } => {
-                    // Execute this single terminal action and stop
-                    record_action_events(cfg, profile_name, &original_action, &action)?;
-                    let outcome = execute_action(cfg, profile_name, &action, skip_validation_gate)?;
-
-                    let stop_event_type = match &action {
-                        NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
-                        NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
-                        NextAction::NoOp { .. } => crate::events::EventType::LoopStopped,
-                        _ => unreachable!(),
-                    };
-                    crate::events::record(
-                        cfg,
-                        stop_event_type,
-                        Some(profile_name),
-                        action.work_id(),
-                        outcome.clone(),
-                    )?;
-
-                    results.push(LoopOnceResult { action, outcome });
-                    break;
+                    pending_terminal = Some((original_action, action));
                 }
                 _ => {
                     // For dispatch actions, record and execute
@@ -981,6 +974,34 @@ fn run_parallel_once(
                 }
             }
         }
+
+        // Only surface a terminal decision if the batch found no real work at
+        // all -- if any slot spawned a dispatch/review action, the terminal
+        // verdicts from other slots were just "nothing left for this slot"
+        // noise, not a reason to report the batch as stopped.
+        if handles.is_empty() {
+            if let Some((original_action, action)) = pending_terminal {
+                record_action_events(cfg, profile_name, &original_action, &action)?;
+                let outcome = execute_action(cfg, profile_name, &action, skip_validation_gate)?;
+
+                let stop_event_type = match &action {
+                    NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
+                    NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
+                    NextAction::NoOp { .. } => crate::events::EventType::LoopStopped,
+                    _ => unreachable!(),
+                };
+                crate::events::record(
+                    cfg,
+                    stop_event_type,
+                    Some(profile_name),
+                    action.work_id(),
+                    outcome.clone(),
+                )?;
+
+                results.push(LoopOnceResult { action, outcome });
+            }
+        }
+
         for handle in handles {
             results.push(
                 handle
