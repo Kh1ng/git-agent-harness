@@ -522,3 +522,433 @@ fn filtered_entries<'a>(
         .filter(|entry| entry_matches_candidate(entry, backend, model))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::availability::{BlockScope, Reason, ScopeStatus, Source};
+    use crate::config::tests::test_profile_for_notifications;
+    use crate::ledger::summary::GroupQuotaObservation;
+
+    /// A `GroupSummary` with every field zeroed/empty, so individual tests
+    /// only spell out the fields they actually care about via struct-update
+    /// syntax (`GroupSummary { entries: 3, ..empty_group() }`). No `Default`
+    /// impl exists on the production type (see `ledger.rs`), so this mirrors
+    /// that module's own fixture convention.
+    fn empty_group() -> ledger::summary::GroupSummary {
+        ledger::summary::GroupSummary {
+            group_key: "g".to_string(),
+            entries: 0,
+            attempts: 0,
+            validation_pass: 0,
+            success_rate: None,
+            review_verdict_distribution: Default::default(),
+            total_cost_usd: None,
+            actual_cost_usd: None,
+            estimated_cost_usd: None,
+            average_cost_usd: None,
+            average_duration_seconds: None,
+            cost_per_approve_strong: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            requests_count: None,
+            tokens_per_success: None,
+            requests_per_success: None,
+            quota_observations: vec![],
+        }
+    }
+
+    fn group_obs(
+        backend: &str,
+        model: Option<&str>,
+        window: &str,
+        remaining_percent: Option<f64>,
+        observed_at: &str,
+    ) -> GroupQuotaObservation {
+        GroupQuotaObservation {
+            backend: backend.to_string(),
+            model: model.map(str::to_string),
+            quota_window: Some(window.to_string()),
+            quota_used_percent: None,
+            quota_remaining_percent: remaining_percent,
+            quota_reset_at: None,
+            observed_at: Some(observed_at.to_string()),
+            usage_source: None,
+        }
+    }
+
+    fn account_record(
+        backend: &str,
+        model: Option<&str>,
+        window: &str,
+        remaining_percent: Option<f64>,
+        observed_at: &str,
+    ) -> quota_store::QuotaObservationRecord {
+        quota_store::QuotaObservationRecord {
+            backend: backend.to_string(),
+            model: model.map(str::to_string),
+            quota_window: Some(window.to_string()),
+            quota_used_percent: None,
+            quota_remaining_percent: remaining_percent,
+            quota_reset_at: None,
+            observed_at: Some(observed_at.to_string()),
+            usage_source: None,
+        }
+    }
+
+    // -- summarize_groups --------------------------------------------------
+
+    #[test]
+    fn summarize_groups_sums_across_groups_and_computes_success_rate() {
+        let a = ledger::summary::GroupSummary {
+            entries: 4,
+            attempts: 5,
+            validation_pass: 3,
+            total_tokens: Some(100),
+            requests_count: Some(10),
+            actual_cost_usd: Some(1.5),
+            estimated_cost_usd: Some(0.5),
+            ..empty_group()
+        };
+        let b = ledger::summary::GroupSummary {
+            entries: 6,
+            attempts: 6,
+            validation_pass: 3,
+            total_tokens: Some(200),
+            requests_count: Some(20),
+            actual_cost_usd: Some(2.0),
+            estimated_cost_usd: None,
+            ..empty_group()
+        };
+        let summary = summarize_groups(vec![a, b]);
+        assert_eq!(summary.entries, 10);
+        assert_eq!(summary.attempts, 11);
+        assert_eq!(summary.validation_pass, 6);
+        assert_eq!(summary.total_tokens, Some(300));
+        assert_eq!(summary.requests_count, Some(30));
+        assert!((summary.actual_cost_usd.unwrap() - 3.5).abs() < f64::EPSILON);
+        // Only `a` has an estimated cost; `b`'s None must not zero it out.
+        assert!((summary.estimated_cost_usd.unwrap() - 0.5).abs() < f64::EPSILON);
+        assert!((summary.success_rate.unwrap() - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn summarize_groups_empty_input_has_no_success_rate_or_totals() {
+        let summary = summarize_groups(vec![]);
+        assert_eq!(summary.entries, 0);
+        assert_eq!(summary.success_rate, None);
+        assert_eq!(summary.total_tokens, None);
+        assert_eq!(summary.requests_count, None);
+    }
+
+    #[test]
+    fn summarize_groups_all_none_token_fields_stay_none_not_zero() {
+        // Regression guard: a group that never reported tokens must leave the
+        // aggregate at `None` ("unknown"), not silently become `Some(0)`.
+        let a = ledger::summary::GroupSummary {
+            entries: 2,
+            attempts: 2,
+            validation_pass: 1,
+            ..empty_group()
+        };
+        let summary = summarize_groups(vec![a]);
+        assert_eq!(summary.total_tokens, None);
+        assert_eq!(summary.requests_count, None);
+        assert_eq!(summary.actual_cost_usd, None);
+    }
+
+    // -- aggregate_usage -----------------------------------------------------
+
+    #[test]
+    fn aggregate_usage_prefers_model_group_over_backend_group() {
+        let backend = ledger::summary::GroupSummary {
+            entries: 10,
+            ..empty_group()
+        };
+        let model = ledger::summary::GroupSummary {
+            entries: 3,
+            ..empty_group()
+        };
+        let usage = aggregate_usage(Some(&backend), Some(&model));
+        assert_eq!(usage.entries, 3);
+    }
+
+    #[test]
+    fn aggregate_usage_falls_back_to_backend_group_when_no_model_group() {
+        let backend = ledger::summary::GroupSummary {
+            entries: 10,
+            ..empty_group()
+        };
+        let usage = aggregate_usage(Some(&backend), None);
+        assert_eq!(usage.entries, 10);
+    }
+
+    #[test]
+    fn aggregate_usage_defaults_when_neither_group_present() {
+        let usage = aggregate_usage(None, None);
+        assert_eq!(usage.entries, 0);
+        assert_eq!(usage.success_rate, None);
+    }
+
+    // -- aggregate_observations ----------------------------------------------
+
+    #[test]
+    fn aggregate_observations_combines_backend_and_model_group_observations() {
+        let backend = ledger::summary::GroupSummary {
+            quota_observations: vec![group_obs(
+                "codex",
+                None,
+                "weekly",
+                Some(50.0),
+                "2026-07-01T00:00:00Z",
+            )],
+            ..empty_group()
+        };
+        let model = ledger::summary::GroupSummary {
+            quota_observations: vec![group_obs(
+                "codex",
+                Some("gpt-5"),
+                "5h",
+                Some(80.0),
+                "2026-07-02T00:00:00Z",
+            )],
+            ..empty_group()
+        };
+        let obs = aggregate_observations(Some(&backend), Some(&model), &[], "codex", Some("gpt-5"));
+        assert_eq!(obs.len(), 2);
+        assert!(obs
+            .iter()
+            .any(|o| o.quota_window.as_deref() == Some("weekly")));
+        assert!(obs.iter().any(|o| o.quota_window.as_deref() == Some("5h")));
+    }
+
+    #[test]
+    fn aggregate_observations_appends_matching_account_level_observation() {
+        let account = vec![account_record(
+            "codex",
+            None,
+            "weekly",
+            Some(42.0),
+            "2026-07-03T00:00:00Z",
+        )];
+        let obs = aggregate_observations(None, None, &account, "codex", None);
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].quota_remaining_percent, Some(42.0));
+    }
+
+    #[test]
+    fn aggregate_observations_does_not_leak_account_observation_across_model_scope() {
+        // Candidate scoping: an account-level record for "gpt-4" must not
+        // surface on a "gpt-5" candidate's observations just because the
+        // backend matches.
+        let account = vec![account_record(
+            "codex",
+            Some("gpt-4"),
+            "weekly",
+            Some(42.0),
+            "2026-07-03T00:00:00Z",
+        )];
+        let obs = aggregate_observations(None, None, &account, "codex", Some("gpt-5"));
+        assert!(obs.is_empty());
+    }
+
+    #[test]
+    fn aggregate_observations_dedups_identical_entries_from_backend_and_model_groups() {
+        let dup = group_obs("codex", None, "weekly", Some(50.0), "2026-07-01T00:00:00Z");
+        let backend = ledger::summary::GroupSummary {
+            quota_observations: vec![dup.clone()],
+            ..empty_group()
+        };
+        let model = ledger::summary::GroupSummary {
+            quota_observations: vec![dup],
+            ..empty_group()
+        };
+        let obs = aggregate_observations(Some(&backend), Some(&model), &[], "codex", None);
+        assert_eq!(obs.len(), 1, "identical observations must collapse to one");
+    }
+
+    // -- add_candidate --------------------------------------------------------
+
+    #[test]
+    fn add_candidate_merges_modes_for_the_same_key_without_duplicating() {
+        let mut aggregates = Vec::new();
+        let mut index = HashMap::new();
+        let candidate = CandidateConfig {
+            backend: "codex".to_string(),
+            model: Some("gpt-5".to_string()),
+            ..Default::default()
+        };
+        add_candidate(&mut aggregates, &mut index, "pm", candidate.clone());
+        add_candidate(&mut aggregates, &mut index, "improve", candidate.clone());
+        add_candidate(&mut aggregates, &mut index, "pm", candidate);
+
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].1.modes, vec!["pm", "improve"]);
+    }
+
+    #[test]
+    fn add_candidate_treats_different_quota_pools_as_distinct_candidates() {
+        // Candidate scoping: "agy" and "agy-second" are different instances
+        // and must never collapse into a single row (see QuotaPage.tsx's own
+        // `scopeIdentity` doc comment for the same invariant on the UI side).
+        let mut aggregates = Vec::new();
+        let mut index = HashMap::new();
+        let a = CandidateConfig {
+            backend: "agy".to_string(),
+            quota_pool: Some("agy".to_string()),
+            ..Default::default()
+        };
+        let b = CandidateConfig {
+            backend: "agy".to_string(),
+            quota_pool: Some("agy-second".to_string()),
+            ..Default::default()
+        };
+        add_candidate(&mut aggregates, &mut index, "review", a);
+        add_candidate(&mut aggregates, &mut index, "review", b);
+
+        assert_eq!(aggregates.len(), 2);
+    }
+
+    // -- build_candidates -----------------------------------------------------
+
+    #[test]
+    fn build_candidates_falls_back_to_default_backend_when_none_configured() {
+        let routing = RoutingPolicy {
+            default_backend: Some("vibe".to_string()),
+            default_model: Some("mistral-medium".to_string()),
+            ..RoutingPolicy::default()
+        };
+        let profile = test_profile_for_notifications();
+        let backend_map = HashMap::new();
+        let model_map = HashMap::new();
+        let scope_lookup = HashMap::new();
+        let account_quota = vec![];
+
+        let candidates = build_candidates(
+            &routing,
+            &profile,
+            &backend_map,
+            &model_map,
+            &scope_lookup,
+            &account_quota,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].backend, "vibe");
+        assert_eq!(candidates[0].modes, vec!["default"]);
+        assert!(
+            candidates[0].eligible_now,
+            "no availability record for this scope must default to eligible, not blocked"
+        );
+    }
+
+    #[test]
+    fn build_candidates_keeps_distinct_quota_pools_separately_scoped() {
+        // Two candidates sharing a backend but different quota_pool must not
+        // share eligibility -- one being blocked must not leak onto the other.
+        let routing = RoutingPolicy {
+            review_candidates: Some(vec![
+                CandidateConfig {
+                    backend: "agy".to_string(),
+                    quota_pool: Some("agy".to_string()),
+                    ..Default::default()
+                },
+                CandidateConfig {
+                    backend: "agy".to_string(),
+                    quota_pool: Some("agy-second".to_string()),
+                    ..Default::default()
+                },
+            ]),
+            ..RoutingPolicy::default()
+        };
+        let profile = test_profile_for_notifications();
+        let backend_map = HashMap::new();
+        let model_map = HashMap::new();
+        let mut scope_lookup = HashMap::new();
+        scope_lookup.insert(
+            ("agy".to_string(), None, Some("agy".to_string())),
+            ScopeStatus {
+                backend: "agy".to_string(),
+                model: None,
+                quota_pool: Some("agy".to_string()),
+                eligible: false,
+                reason: Some(Reason::QuotaExhausted),
+                unavailable_until: Some("2026-07-12T00:00:00Z".to_string()),
+                scope: Some(BlockScope::QuotaPool),
+                source: Some(Source::BackendError),
+                last_error_summary: None,
+                observed_at: Some("2026-07-11T00:00:00Z".to_string()),
+            },
+        );
+        let account_quota = vec![];
+
+        let candidates = build_candidates(
+            &routing,
+            &profile,
+            &backend_map,
+            &model_map,
+            &scope_lookup,
+            &account_quota,
+        );
+
+        assert_eq!(candidates.len(), 2);
+        let agy = candidates
+            .iter()
+            .find(|c| c.quota_pool.as_deref() == Some("agy"))
+            .expect("agy pool present");
+        assert!(!agy.eligible_now);
+        assert_eq!(agy.reason.as_deref(), Some("quota_exhausted"));
+
+        let agy_second = candidates
+            .iter()
+            .find(|c| c.quota_pool.as_deref() == Some("agy-second"))
+            .expect("agy-second pool present");
+        assert!(
+            agy_second.eligible_now,
+            "a block on the 'agy' pool must not leak onto the sibling 'agy-second' pool"
+        );
+    }
+
+    #[test]
+    fn build_candidates_sorts_quota_observations_by_window_then_recency() {
+        let routing = RoutingPolicy {
+            default_backend: Some("codex".to_string()),
+            ..RoutingPolicy::default()
+        };
+        let profile = test_profile_for_notifications();
+        let mut backend_map = HashMap::new();
+        backend_map.insert(
+            "codex".to_string(),
+            ledger::summary::GroupSummary {
+                quota_observations: vec![
+                    group_obs("codex", None, "weekly", Some(10.0), "2026-07-01T00:00:00Z"),
+                    group_obs("codex", None, "5h", Some(90.0), "2026-07-02T00:00:00Z"),
+                ],
+                ..empty_group()
+            },
+        );
+        let model_map = HashMap::new();
+        let scope_lookup = HashMap::new();
+        let account_quota = vec![];
+
+        let candidates = build_candidates(
+            &routing,
+            &profile,
+            &backend_map,
+            &model_map,
+            &scope_lookup,
+            &account_quota,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        let windows: Vec<String> = candidates[0]
+            .quota_observations
+            .iter()
+            .map(|o| o.quota_window.clone().unwrap())
+            .collect();
+        assert_eq!(windows, vec!["5h".to_string(), "weekly".to_string()]);
+    }
+}
