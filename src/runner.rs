@@ -176,7 +176,14 @@ fn spawn_with_idle_watch(
                 }
                 thread::sleep(poll_interval);
             }
-            Err(_) => break -1,
+            Err(_) => {
+                // try_wait() itself erroring is rare, but the child may
+                // still be alive -- kill and reap rather than risk leaking
+                // it (same pattern as the idle-kill branch above).
+                let _ = child.kill();
+                let _ = child.wait();
+                break -1;
+            }
         }
     };
     let duration = start.elapsed();
