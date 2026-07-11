@@ -4082,11 +4082,10 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_tier_escalatory_when_backend_matches_legacy_weak_config() {
-        // Issue #123: the deprecated single `weak_review_*` entry is the
-        // one-entry escalatory cascade, so any review routed to it is now an
-        // ESCALATORY (escalate-and-continue) tier, not the old human-gated
-        // Weak tier.
+    fn reviewer_tier_weak_when_backend_matches_legacy_weak_config() {
+        // Issue #233: the legacy single `weak_review_*` entry still feeds
+        // routing backfill, but it must not grant the auto-merge-eligible
+        // escalatory tier.
         let tmp = tempfile::tempdir().unwrap();
         let mut prof = profile(tmp.path());
         prof.routing.weak_review_backend = Some("codex".into());
@@ -4095,14 +4094,14 @@ mod tests {
         let route = route_decision("codex", None, true);
         assert_eq!(
             derive_reviewer_tier(&cfg, &prof, &route),
-            ReviewerTier::Escalatory
+            ReviewerTier::Weak
         );
     }
 
     #[test]
-    fn reviewer_tier_escalatory_for_any_escalatory_reviewers_list_entry() {
-        // Issue #123: ESCALATORY_REVIEW is a LIST. Every entry in the list
-        // must classify as the escalatory tier, regardless of order.
+    fn reviewer_tier_escalatory_for_explicit_escalatory_reviewers_list_entry() {
+        // Issue #233: an explicitly declared escalatory reviewer is the only
+        // path to the auto-merge-eligible tier.
         let tmp = tempfile::tempdir().unwrap();
         let mut prof = profile(tmp.path());
         let candidate = |backend: &str, model: &str| crate::config::CandidateConfig {
@@ -4115,22 +4114,15 @@ mod tests {
             candidate("kimi", "kimi-k2"),
             candidate("glm", "glm-4.7"),
         ];
+        prof.routing.weak_review_backend = Some("claude".into());
+        prof.routing.weak_review_model = Some("claude-sonnet-4".into());
         let cfg = gah_config(RoutingPolicy::default());
 
-        for (backend, model) in [
-            ("claude", "claude-sonnet-4"),
-            ("kimi", "kimi-k2"),
-            ("glm", "glm-4.7"),
-        ] {
-            let route = route_decision(backend, Some(model), true);
-            assert_eq!(
-                derive_reviewer_tier(&cfg, &prof, &route),
-                ReviewerTier::Escalatory,
-                "escalatory entry {}/{} not classified as escalatory",
-                backend,
-                model
-            );
-        }
+        let route = route_decision("claude", Some("claude-sonnet-4"), true);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Escalatory
+        );
     }
 
     #[test]
@@ -4230,9 +4222,20 @@ mod tests {
         // TICKET-108: this is the case the old fallback_used-based rewrite
         // used to handle by corrupting the verdict string. Now the verdict
         // text is untouched and reviewer_tier carries the distrust signal.
+        // Issue #233: legacy weak-only configs must still force the human
+        // gate and weak-review labels.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        prof.routing.weak_review_backend = Some("codex".into());
+        let cfg = gah_config(RoutingPolicy::default());
+        let route = route_decision("codex", None, true);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Weak
+        );
+
         let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
         let usage = crate::ledger::LedgerUsage::default();
-        let route = route_decision("codex", None, true);
         let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Weak).unwrap();
 
         assert_eq!(
@@ -8401,15 +8404,16 @@ fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecisio
         .or_else(|| cfg.defaults.routing.effective_routine_reviewer());
     let escalatory = profile
         .routing
-        .effective_escalatory_reviewers()
-        .into_iter()
-        .chain(cfg.defaults.routing.effective_escalatory_reviewers())
+        .escalatory_reviewers
+        .iter()
+        .cloned()
+        .chain(cfg.defaults.routing.escalatory_reviewers.clone())
         .collect::<Vec<_>>();
 
-    // Issue #123: an escalatory reviewer (Sonnet/Kimi/GLM/...) is a distinct
-    // capability tier -- escalate-and-continue, auto-merge eligible. It takes
-    // precedence over the routine/strong classification so an explicitly
-    // escalated review is never mislabeled as the routine first-line tier.
+    // Issue #233: tier classification must only honor explicitly declared
+    // escalatory reviewers. The legacy weak-review keys still feed routing
+    // backfill via `effective_escalatory_reviewers()`, but they do not imply
+    // the auto-merge-eligible escalatory tier.
     for esc in &escalatory {
         if selected(Some(esc.backend.as_str()), esc.model.as_deref()) {
             return ReviewerTier::Escalatory;
