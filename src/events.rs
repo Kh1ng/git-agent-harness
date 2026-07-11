@@ -4,6 +4,7 @@
 
 use crate::config::GahConfig;
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -74,13 +75,24 @@ pub fn append(cfg: &GahConfig, event: &ControllerEvent) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("creating events directory {}", parent.display()))?;
     }
+    let lock_path = path.with_extension("lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening events lock {}", lock_path.display()))?;
+    lock.lock_exclusive()
+        .with_context(|| format!("locking events {}", path.display()))?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .with_context(|| format!("opening events log {}", path.display()))?;
-    serde_json::to_writer(&mut file, event).context("serializing controller event")?;
-    file.write_all(b"\n").context("writing events newline")?;
+    let mut line = serde_json::to_vec(event).context("serializing controller event")?;
+    line.push(b'\n');
+    file.write_all(&line).context("writing controller event")?;
     Ok(())
 }
 
