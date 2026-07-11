@@ -48,24 +48,34 @@ struct Cli {
     command: Commands,
 }
 
+/// Sub-actions of `gah availability`.
+#[derive(Subcommand)]
+enum AvailabilityAction {
+    /// Issue #179: operator override for a stale availability/quota-exhaustion
+    /// record once the backend is confirmed actually healthy again. Appends a
+    /// `status: available, source: manual` record for the given scope via the
+    /// same lock-protected read-modify-write as every other availability
+    /// write, so it's safe against concurrent parallel workers. Use --model to
+    /// limit the clear to one model, or --quota-pool to clear a pool-wide
+    /// block; omit both to mark the whole backend available.
+    Clear {
+        #[arg(long)]
+        backend: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        quota_pool: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Show durable backend/model availability state (global, not per-profile)
     Availability {
         #[arg(long, default_value_t = false)]
         json: bool,
-    },
-    /// Issue #179: clear a stale availability/quota-exhaustion record once
-    /// the backend is confirmed actually healthy again -- goes through the
-    /// same locked read-modify-write as every other availability write, so
-    /// it's safe against concurrent parallel workers (unlike hand-editing
-    /// availability.json directly). Omit --model to clear every record for
-    /// the backend regardless of model.
-    AvailabilityClear {
-        #[arg(long)]
-        backend: String,
-        #[arg(long)]
-        model: Option<String>,
+        #[command(subcommand)]
+        action: Option<AvailabilityAction>,
     },
     /// Convert gate findings into backlog candidates
     Candidates {
@@ -624,21 +634,28 @@ enum QuotaCommands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Availability { json } => availability::cli::run(json)?,
-        Commands::AvailabilityClear { backend, model } => {
-            let removed = availability::cli::clear(
-                &availability::resolve_state_path(),
-                &backend,
-                model.as_deref(),
-            )?;
-            println!(
-                "Cleared {removed} availability record(s) for backend '{backend}'{}",
-                model
-                    .as_deref()
-                    .map(|m| format!(" / model '{m}'"))
-                    .unwrap_or_default()
-            );
-        }
+        Commands::Availability { json, action } => match action {
+            Some(AvailabilityAction::Clear {
+                backend,
+                model,
+                quota_pool,
+            }) => {
+                availability::cli::clear(
+                    &availability::resolve_state_path(),
+                    &backend,
+                    model.as_deref(),
+                    quota_pool.as_deref(),
+                )?;
+                println!(
+                    "Marked backend '{backend}' available{}",
+                    model
+                        .as_deref()
+                        .map(|m| format!(" / model '{m}'"))
+                        .unwrap_or_default()
+                );
+            }
+            None => availability::cli::run(json)?,
+        },
 
         Commands::Candidates {
             gate_artifact,
