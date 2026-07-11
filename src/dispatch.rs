@@ -912,6 +912,12 @@ fn run_backend(
     effective_model: Option<&str>,
     env_path: Option<&str>,
 ) -> Result<runner::RunResult> {
+    // Live incident (2026-07-11): concurrent dispatches landing on the same
+    // shared free-tier backend+model (opencode/hy3-free) silently rate-limit.
+    // Held for the duration of the actual backend call -- dropped on every
+    // exit path (success, error, or panic) -- so routing's
+    // `max_concurrent_per_model` check sees an accurate live count.
+    let _concurrency_slot = routing::ConcurrencyGuard::acquire(backend, effective_model);
     let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
     if backend == "agy-second" {
         if let Some(home) = profile.agy_second_home.as_deref().filter(|h| !h.is_empty()) {
@@ -3884,6 +3890,7 @@ mod tests {
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
+            max_concurrent_per_model: std::collections::HashMap::new(),
             openhands_idle_timeout_seconds: None,
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
