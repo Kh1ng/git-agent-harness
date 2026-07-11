@@ -1851,6 +1851,45 @@ mod tests {
         }
     }
 
+    // Live incident: a `git fetch` failure during worktree setup (e.g. a
+    // misconfigured remote, transient auth prompt) is a harness-level
+    // plumbing failure classified `harness_error`, not an agent failure.
+    // Before the dispatch.rs fix, this path left `failure_class` as `None`,
+    // which neither the escalate loop (`is_genuine_agent_failure`) nor the
+    // retry loop (`is_infra_failure`) picks up -- both gate on
+    // `Some(failure_class)` -- so the ticket became permanently un-actionable
+    // once `prior_attempt_count > 0`. With `failure_class` correctly set to
+    // `harness_error`, it must flow through the infra-failure retry path.
+    #[test]
+    fn git_fetch_harness_error_is_retried_not_orphaned() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-FETCH-x.md",
+            Some("TICKET-FETCH"),
+            1,
+            Some("harness_error"),
+            false,
+            false,
+        ));
+        snapshot.availability.push(ScopeStatusJson {
+            backend: "codex".into(),
+            model: None,
+            quota_pool: None,
+            eligible_now: true,
+            reason: None,
+            unavailable_until: None,
+            source: None,
+            last_error_summary: None,
+            observed_at: None,
+            scope: None,
+        });
+        let action = decide_next_action(&snapshot);
+        match action {
+            NextAction::Retry { work_id, .. } => assert_eq!(work_id, "TICKET-FETCH"),
+            other => panic!("expected Retry for harness_error, got {other:?}"),
+        }
+    }
+
     // Issue #95: genuine agent failures MUST still exhaust the retry cap.
     // A ticket with 2 agent_no_progress failures should be halted.
     #[test]

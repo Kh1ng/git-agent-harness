@@ -1691,18 +1691,24 @@ fn improve(
             "Creating worktree from existing branch '{}'...",
             existing_branch
         );
-        let wt = worktree::create_existing(repo, existing_branch, &worktree_base)?;
+        let wt = classify_worktree_result(
+            ledger,
+            worktree::create_existing(repo, existing_branch, &worktree_base),
+        )?;
         (existing_branch.clone(), wt)
     } else {
         println!(
             "Creating worktree from {}...",
             profile.default_target_branch
         );
-        let wt = worktree::create(
-            repo,
-            &profile.default_target_branch,
-            &branch,
-            &worktree_base,
+        let wt = classify_worktree_result(
+            ledger,
+            worktree::create(
+                repo,
+                &profile.default_target_branch,
+                &branch,
+                &worktree_base,
+            ),
         )?;
         (branch, wt)
     };
@@ -2442,11 +2448,14 @@ fn experiment(
         "Creating worktree from {}...",
         profile.default_target_branch
     );
-    let wt = worktree::create(
-        repo,
-        &profile.default_target_branch,
-        &branch,
-        &worktree_base,
+    let wt = classify_worktree_result(
+        ledger,
+        worktree::create(
+            repo,
+            &profile.default_target_branch,
+            &branch,
+            &worktree_base,
+        ),
     )?;
     ledger.branch = Some(branch.clone());
     println!("Worktree: {}", wt.display());
@@ -3735,11 +3744,11 @@ mod tests {
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
         attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body,
         build_metadata_rich_mr_body, build_mr_title, build_pm_plan_task, build_standard_mr_body,
-        build_task, classify_validation_failure_progress, collect_pm_preflight,
-        collect_ticket_summaries, derive_reviewer_tier, extract_backend_summary,
-        extract_issue_number, first_markdown_heading, format_issue_for_focus,
-        is_issue_number_reference, mark_backend_unavailable_from_output_at, next_ticket_id,
-        parse_pm_plan, parse_review_verdict, parse_ticket_metadata,
+        build_task, classify_validation_failure_progress, classify_worktree_result,
+        collect_pm_preflight, collect_ticket_summaries, derive_reviewer_tier,
+        extract_backend_summary, extract_issue_number, first_markdown_heading,
+        format_issue_for_focus, is_issue_number_reference, mark_backend_unavailable_from_output_at,
+        next_ticket_id, parse_pm_plan, parse_review_verdict, parse_ticket_metadata,
         parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
         review_labels, review_preflight, run_backend, scan_available_tickets, strip_terminal_noise,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
@@ -5582,6 +5591,57 @@ mod tests {
 
         assert_eq!(entry.effective_model, None);
         assert_eq!(entry.effective_backend, "openhands");
+    }
+
+    // Live incident: a `git fetch` failure during worktree setup (bad
+    // remote URL, auth prompt) propagated via `?` past every
+    // `ledger.set_failure()` call site, leaving `failure_class` `None` in
+    // the ledger and making the ticket permanently un-retryable (see
+    // `git_fetch_harness_error_is_retried_not_orphaned` in controller.rs).
+    // `classify_worktree_result` is the fix: it must classify the error as
+    // `harness_error`/`preflight` before propagating it.
+    #[test]
+    fn classify_worktree_result_sets_harness_error_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+        assert_eq!(entry.failure_class, None);
+
+        let result: anyhow::Result<()> = Err(anyhow::anyhow!(
+            "git fetch -q origin --prune: fatal: could not read Username for 'https://gitlab.com': terminal prompts disabled"
+        ));
+        let classified = classify_worktree_result(&mut entry, result);
+
+        assert!(classified.is_err());
+        assert_eq!(entry.failure_class.as_deref(), Some("harness_error"));
+        assert_eq!(entry.failure_stage.as_deref(), Some("preflight"));
+    }
+
+    #[test]
+    fn classify_worktree_result_leaves_ledger_untouched_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+
+        let result: anyhow::Result<u32> = Ok(42);
+        let classified = classify_worktree_result(&mut entry, result);
+
+        assert_eq!(classified.unwrap(), 42);
+        assert_eq!(entry.failure_class, None);
     }
 
     #[test]
@@ -7619,6 +7679,26 @@ fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecision) {
     ledger.confidence_impact = route.confidence_impact.clone();
     ledger.human_required = route.human_required;
     ledger.routing_diagnostics = route.routing_diagnostics.clone();
+}
+
+/// Live-observed bug: `worktree::create`/`create_existing` failures (e.g. a
+/// transient `git fetch` auth/network error) were propagating via `?`
+/// straight past every `ledger.set_failure()` call site, reaching `run()`'s
+/// top-level handler with `failure_class` still `None`. An unclassified
+/// ticket is invisible to both of `decide_next_action`'s retry/escalate
+/// loops (both gate on `Some(failure_class)`), so it becomes permanently
+/// stuck once `prior_attempt_count > 0`. This is a harness/setup problem
+/// (git plumbing), not the agent or backend failing at its job -- same
+/// reasoning as the `BackendLaunch` classification below -- so classify it
+/// the same way before propagating.
+fn classify_worktree_result<T>(ledger: &mut LedgerEntry, result: Result<T>) -> Result<T> {
+    if result.is_err() {
+        ledger.set_failure(
+            crate::ledger::FailureClass::HarnessError,
+            crate::ledger::FailureStage::Preflight,
+        );
+    }
+    result
 }
 
 fn decide_route(
