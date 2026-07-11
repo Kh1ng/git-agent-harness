@@ -262,6 +262,17 @@ pub struct Profile {
     /// this). Defaults to 300s when unset.
     #[serde(default)]
     pub opencode_idle_timeout_seconds: Option<u64>,
+    /// Per-model override for `opencode_idle_timeout_seconds`, keyed by the
+    /// exact model name passed to `opencode --model` (e.g.
+    /// "litellm-lan/qwen3.6:35b-a3b"). Some models routed through opencode
+    /// are genuinely slow-but-working (a self-hosted litellm proxy) rather
+    /// than hung, while others (a free-tier rate-limited model) hang with
+    /// zero output and should be killed fast -- one flat idle timeout for
+    /// every opencode model is too coarse. Falls back to the flat
+    /// `opencode_idle_timeout_seconds` when no entry matches. Same pattern
+    /// as `agy_print_timeout_seconds` below.
+    #[serde(default)]
+    pub opencode_idle_timeout_seconds_by_model: HashMap<String, u64>,
     /// How long OpenHands' own log output can go quiet before GAH considers
     /// it stalled and kills it, in seconds. Same rationale and mechanism as
     /// `opencode_idle_timeout_seconds` -- added after a live dispatch (issue
@@ -1098,6 +1109,7 @@ pub mod tests {
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
             openhands_idle_timeout_seconds: None,
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
@@ -1149,6 +1161,7 @@ pub mod tests {
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
             openhands_idle_timeout_seconds: None,
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,

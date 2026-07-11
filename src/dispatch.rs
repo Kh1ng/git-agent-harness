@@ -970,7 +970,14 @@ fn run_backend(
             effective_model,
             &profile.opencode_args,
             &env_vars,
-            profile.opencode_idle_timeout_seconds(),
+            effective_model
+                .and_then(|m| {
+                    profile
+                        .opencode_idle_timeout_seconds_by_model
+                        .get(m)
+                        .copied()
+                })
+                .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
         ),
         _ => runner::run_openhands(
             wt,
@@ -3861,6 +3868,7 @@ mod tests {
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
             openhands_idle_timeout_seconds: None,
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
@@ -5388,6 +5396,127 @@ mod tests {
 
         let captured = fs::read_to_string(&argv_capture).unwrap();
         assert!(!captured.contains("--print-timeout"), "got: {captured}");
+    }
+
+    /// Issue: opencode routes both a free-tier model that hangs at zero
+    /// output when rate-limited (kill fast) and a real-but-slow self-hosted
+    /// litellm model (give it more time) through the same flat
+    /// `opencode_idle_timeout_seconds`. Mirrors
+    /// `run_backend_looks_up_agy_print_timeout_by_exact_model_name`: prove
+    /// the per-model override in `opencode_idle_timeout_seconds_by_model`
+    /// is what actually governs the kill, not the flat default, by setting
+    /// the flat default so high the test would hang if it were used.
+    #[test]
+    fn run_backend_looks_up_opencode_idle_timeout_by_exact_model_name() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        let fake_opencode = bin_dir.join("opencode");
+        fs::write(
+            &fake_opencode,
+            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_opencode).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_opencode, perms).unwrap();
+        }
+
+        let mut prof = profile(tmp.path());
+        prof.opencode_path = Some(fake_opencode.display().to_string());
+        prof.opencode_idle_timeout_seconds = Some(100); // flat default: would hang the test if used
+        prof.opencode_idle_timeout_seconds_by_model
+            .insert("litellm-lan/qwen3.6:35b-a3b".to_string(), 1);
+
+        let session_dir = tmp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let llm = crate::runner::LlmConfig {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "unused-for-opencode".to_string(),
+        };
+
+        let result = run_backend(
+            "opencode",
+            &prof,
+            tmp.path(),
+            "do the thing",
+            &session_dir,
+            &llm,
+            Some("litellm-lan/qwen3.6:35b-a3b"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            log.contains("killed after 1s with no new output"),
+            "got: {log}"
+        );
+    }
+
+    /// Complement to the above: a model with no per-model entry must fall
+    /// back to the flat `opencode_idle_timeout_seconds`, not silently pick
+    /// up some other model's override.
+    #[test]
+    fn run_backend_falls_back_to_flat_opencode_idle_timeout_for_unmapped_model() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        let fake_opencode = bin_dir.join("opencode");
+        fs::write(
+            &fake_opencode,
+            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_opencode).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_opencode, perms).unwrap();
+        }
+
+        let mut prof = profile(tmp.path());
+        prof.opencode_path = Some(fake_opencode.display().to_string());
+        prof.opencode_idle_timeout_seconds = Some(1); // flat fallback: should apply
+        prof.opencode_idle_timeout_seconds_by_model
+            .insert("hy3-free".to_string(), 100); // a different model's override
+
+        let session_dir = tmp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let llm = crate::runner::LlmConfig {
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "unused-for-opencode".to_string(),
+        };
+
+        let result = run_backend(
+            "opencode",
+            &prof,
+            tmp.path(),
+            "do the thing",
+            &session_dir,
+            &llm,
+            Some("litellm-lan/qwen3.6:35b-a3b"), // not in the map
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            log.contains("killed after 1s with no new output"),
+            "got: {log}"
+        );
     }
 
     #[test]
