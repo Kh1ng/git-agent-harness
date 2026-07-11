@@ -7,7 +7,7 @@
 import { spawn, SpawnOptions } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs';
 import type {
   StatusSnapshot,
   ControllerEvent,
@@ -750,6 +750,171 @@ export async function runProfileRemove(options: ProfileRemoveOptions): Promise<v
       reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// `gah loop --profile <p>` start/stop/status from the dashboard (Issue: web
+// UI start/stop switch for the loop daemon, so an operator doesn't have to
+// SSH in to kill a stuck loop).
+//
+// Conflict detection is deliberately NOT reimplemented here: `gah` itself
+// already owns the per-profile flock at `acquire_profile_lock`
+// (src/controller.rs) and fails fast with "gah already running for
+// profile ..." if a second process (this one, a terminal, or another `gah
+// loop`) tries to start concurrently. Duplicating that check in Node would
+// be a second, potentially-inconsistent source of truth over the same OS
+// lock. Instead: spawn, and if the child exits almost immediately with a
+// non-zero code, treat it as "already running" rather than "started".
+//
+// The PID *is* tracked here (not by `gah`), because "is it alive" and "stop
+// it" need a PID, and it must survive the Node server itself restarting --
+// so it's persisted to a small JSON file rather than kept in memory only.
+// ---------------------------------------------------------------------------
+
+/** Same state-dir fallback chain as `loop_lock_path` in src/controller.rs,
+ * so the PID file lives next to gah's own lock file. */
+function loopStateDir(): string {
+  const base =
+    process.env.XDG_STATE_HOME ||
+    (process.env.HOME ? resolve(process.env.HOME, '.local/state') : '/tmp');
+  return resolve(base, 'gah');
+}
+
+function loopPidFile(profile: string): string {
+  return resolve(loopStateDir(), `loop-${profile.replace(/\//g, '_')}.pid.json`);
+}
+
+function loopLogFile(profile: string): string {
+  return resolve(loopStateDir(), `loop-${profile.replace(/\//g, '_')}.log`);
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but is owned by someone else -- still
+    // alive. Any other error (ESRCH, etc.) means it's gone.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+export interface LoopStatus {
+  running: boolean;
+  pid?: number;
+  startedAt?: string;
+}
+
+/** Whether `gah loop --profile <profile>` is currently running, per the PID
+ * file written at spawn time by `startLoop`. A stale file left behind by a
+ * crashed process correctly reports not-running once the PID is dead. */
+export function getLoopStatus(profile: string): LoopStatus {
+  const pidFile = loopPidFile(profile);
+  if (!existsSync(pidFile)) {
+    return { running: false };
+  }
+  try {
+    const record = JSON.parse(readFileSync(pidFile, 'utf8')) as { pid: number; startedAt: string };
+    if (isProcessAlive(record.pid)) {
+      return { running: true, pid: record.pid, startedAt: record.startedAt };
+    }
+    return { running: false };
+  } catch {
+    return { running: false };
+  }
+}
+
+export interface StartLoopResult {
+  started: boolean;
+  pid?: number;
+  alreadyRunning?: boolean;
+  error?: string;
+}
+
+/** How long to wait after spawning before deciding the child "stuck around"
+ * (i.e. really started, as opposed to failing fast on the profile lock or a
+ * config error). `acquire_profile_lock` is attempted within the first
+ * instant of the process's life, so this only needs to be comfortably
+ * longer than process-startup jitter. */
+const LOOP_START_SETTLE_MS = 1000;
+
+export async function startLoop(profile: string, config?: string): Promise<StartLoopResult> {
+  const existing = getLoopStatus(profile);
+  if (existing.running) {
+    return { started: false, alreadyRunning: true, pid: existing.pid };
+  }
+
+  const stateDir = loopStateDir();
+  mkdirSync(stateDir, { recursive: true });
+  const logFd = openSync(loopLogFile(profile), 'a');
+
+  const args = ['loop', '--profile', profile];
+  if (config) {
+    args.push('--config-path', config);
+  }
+
+  const child = spawn(GAH_BINARY, args, {
+    ...getSpawnOptions(config),
+    detached: true,
+    stdio: ['ignore', logFd, logFd]
+  });
+  closeSync(logFd); // the child holds its own copy of the fd; ours can close
+
+  return new Promise((resolvePromise) => {
+    let settled = false;
+
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise({ started: false, error: `Failed to spawn gah: ${error.message}` });
+    });
+
+    child.once('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise({
+        started: false,
+        error:
+          `gah loop exited immediately (code ${code}) -- likely already running for this ` +
+          `profile from outside the web UI, or a config error. Check ${loopLogFile(profile)}.`
+      });
+    });
+
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.removeAllListeners('exit');
+      child.removeAllListeners('error');
+      child.unref();
+      const pid = child.pid;
+      if (pid !== undefined) {
+        writeFileSync(loopPidFile(profile), JSON.stringify({ pid, startedAt: new Date().toISOString() }));
+      }
+      resolvePromise({ started: true, pid });
+    }, LOOP_START_SETTLE_MS);
+  });
+}
+
+export interface StopLoopResult {
+  stopped: boolean;
+  error?: string;
+}
+
+/** Graceful stop: SIGTERM to the PID persisted by `startLoop`, matching how
+ * the loop has been stopped manually (`kill -TERM <pid>`). Does not touch
+ * the PID file -- the next `getLoopStatus` call naturally reports
+ * not-running once the process is actually gone. */
+export function stopLoop(profile: string): StopLoopResult {
+  const status = getLoopStatus(profile);
+  if (!status.running || status.pid === undefined) {
+    return { stopped: false, error: `No running loop found for profile '${profile}'` };
+  }
+  try {
+    process.kill(status.pid, 'SIGTERM');
+    return { stopped: true };
+  } catch (error) {
+    return { stopped: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /**

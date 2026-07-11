@@ -6,7 +6,9 @@ import {
   Timer,
   GitMerge,
   AlertTriangle,
-  ShieldAlert
+  ShieldAlert,
+  Play,
+  Square
 } from 'lucide-react';
 import type { Page } from '../App.js';
 import type { Session } from '@git-agent-harness/contracts';
@@ -28,17 +30,31 @@ type OverviewPageProps = {
 };
 
 export function OverviewPage({ sessions, onSelectSession, onNavigate }: OverviewPageProps) {
-  const { status, report } = useGahStore();
+  const { status, report, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
   const profile = profileOverride ?? wsProfile;
   const fetchStatus = useGahStore((s) => s.fetchStatus);
   const fetchReport = useGahStore((s) => s.fetchReport);
+  const fetchLoopStatus = useGahStore((s) => s.fetchLoopStatus);
+  const startLoop = useGahStore((s) => s.startLoop);
+  const stopLoop = useGahStore((s) => s.stopLoop);
 
   useEffect(() => {
     fetchStatus(profile ?? undefined);
     fetchReport({ profile: profile ?? undefined, since: '7d' });
-  }, [profile, fetchStatus, fetchReport]);
+    if (profile) fetchLoopStatus(profile);
+  }, [profile, fetchStatus, fetchReport, fetchLoopStatus]);
+
+  const loopRunning = loopStatus.data?.running ?? false;
+  const toggleLoop = () => {
+    if (!profile) return;
+    if (loopRunning) {
+      stopLoop(profile);
+    } else {
+      startLoop(profile);
+    }
+  };
 
   const activeSessions = sessions.filter((s) => ['starting', 'running'].includes(s.status));
   const activeControllerRuns = controllerActivity.filter((run) => run.status === 'running');
@@ -104,7 +120,26 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
         description={snapshot ? `Profile: ${snapshot.profile.display_name}` : undefined}
         onRefresh={refresh}
         refreshing={status.loading}
+        actions={
+          profile && (
+            <div className="flex items-center gap-2">
+              <StatusBadge tone={loopRunning ? 'good' : 'unknown'} label={loopRunning ? 'Loop running' : 'Loop stopped'} />
+              <button
+                onClick={toggleLoop}
+                disabled={loopAction.pending || loopStatus.loading}
+                className={loopRunning ? 'btn-secondary text-critical border-critical/30' : 'btn-secondary'}
+                title={loopAction.error ?? undefined}
+              >
+                {loopRunning ? <Square size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
+                <span className="hidden sm:inline">{loopRunning ? 'Stop loop' : 'Start loop'}</span>
+              </button>
+            </div>
+          )
+        }
       />
+      {loopAction.error && (
+        <p className="text-xs text-critical -mt-4">{loopAction.error}</p>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatTile label="Tasks (7d)" value={totalEntries > 0 ? String(totalEntries) : 'No data'} icon={ListChecks} />
