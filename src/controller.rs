@@ -1,6 +1,6 @@
 //! TICKET-077: durable, typed controller actions. The schema only -- no
 //! execution here (see `dispatch::run` for execution, wired from
-//! `gah loop --once`, TICKET-079).
+//! `gah loop`, TICKET-079).
 //!
 //! Every variant carries a mandatory `reason` (why this action was
 //! selected) plus enough identity to execute it without re-observing
@@ -9,8 +9,11 @@
 
 use crate::status::StatusSnapshot;
 use anyhow::Result;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// TICKET-078: how many times the controller will automatically
@@ -608,6 +611,48 @@ fn record_action_events(
 pub struct LoopOnceResult {
     pub action: NextAction,
     pub outcome: String,
+}
+
+fn loop_lock_path(profile_name: &str) -> PathBuf {
+    let state_root = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    state_root
+        .join("gah")
+        .join(format!("loop-{}.lock", profile_name.replace('/', "_")))
+}
+
+/// Run the controller continuously in one process. The process lock is held
+/// for the lifetime of the loop so a second manager for the same profile
+/// cannot create a competing worker pool.
+pub fn run_loop(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    json: bool,
+    parallel: usize,
+    skip_validation_gate: bool,
+) -> Result<()> {
+    let lock_path = loop_lock_path(profile_name);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock.try_lock_exclusive().map_err(|_| {
+        anyhow::anyhow!(
+            "gah loop already running for profile '{profile_name}' (lock: {})",
+            lock_path.display()
+        )
+    })?;
+
+    loop {
+        run_once(cfg, profile_name, json, parallel, skip_validation_gate)?;
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
 }
 
 pub fn run_once(

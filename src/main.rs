@@ -154,8 +154,8 @@ enum Commands {
         #[command(subcommand)]
         command: HoldCommands,
     },
-    /// One bounded controller iteration: observe, decide one action,
-    /// execute at most that action, persist, exit. No daemon.
+    /// Run the controller continuously. Use --once for one bounded
+    /// observation/decision/execution cycle.
     Loop {
         #[arg(long)]
         profile: String,
@@ -163,12 +163,12 @@ enum Commands {
         config_path: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
-        /// Required -- this is the only supported mode; named explicitly
-        /// so a future recurring mode can't be silently assumed.
+        /// Run exactly one bounded controller iteration instead of the
+        /// default recurring loop.
         #[arg(long, default_value_t = false)]
         once: bool,
         /// TICKET-096: Run up to N tickets concurrently instead of one at a time
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "0")]
         parallel: usize,
         /// TICKET-073: skip the fresh-worktree self-verification of this
         /// profile's `validation_commands`. Only use after acknowledging a
@@ -827,14 +827,17 @@ fn main() -> Result<()> {
             parallel,
             skip_validation_gate,
         } => {
-            if !once {
-                anyhow::bail!(
-                    "gah loop requires --once; there is no recurring/daemon mode yet -- \
-                     see TICKET-079/082"
-                );
-            }
             let cfg = config::load(config_path.as_deref())?;
-            controller::run_once(&cfg, &profile, json, parallel, skip_validation_gate)?;
+            let parallel = if parallel == 0 {
+                config::get_profile(&cfg, &profile)?.max_parallel_workers() as usize
+            } else {
+                parallel
+            };
+            if once {
+                controller::run_once(&cfg, &profile, json, parallel, skip_validation_gate)?;
+            } else {
+                controller::run_loop(&cfg, &profile, json, parallel, skip_validation_gate)?;
+            }
         }
 
         Commands::Events {

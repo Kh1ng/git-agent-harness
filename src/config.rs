@@ -288,15 +288,9 @@ pub struct Profile {
     /// unset.
     #[serde(default)]
     pub claude_idle_timeout_seconds: Option<u64>,
-    /// How many `gah loop` workers may run concurrently for this profile.
-    /// Consulted by `gah-supervisor.sh`, not by `gah loop`/`gah dispatch`
-    /// themselves (each invocation is a single process; concurrency is a
-    /// property of how many of them run at once, not something the binary
-    /// enforces internally). Parallel-safety comes from the ledger claim
-    /// mechanism (`LedgerEntry::new_claim`, `check_duplicate_work`'s
-    /// `ActiveClaimError`) -- workers never need to coordinate directly,
-    /// they just skip whatever another worker already claimed. Defaults to
-    /// 1 (current, sequential behavior) when unset.
+    /// How many tickets `gah loop` may execute concurrently for this profile.
+    /// The native recurring loop owns this worker pool; the shell supervisor
+    /// is only a compatibility launcher. Defaults to 1 when unset.
     #[serde(default)]
     pub max_parallel_workers: Option<u32>,
     /// HOME override for the `agy-second` backend name only -- a distinct

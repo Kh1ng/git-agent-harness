@@ -4468,9 +4468,10 @@ fn ledger_reconcile_appends_entry_when_mr_state_changed() {
     assert_eq!(reconciliation_text.lines().count(), 1);
 }
 
-/// TICKET-079: `--once` is required -- there is no recurring/daemon mode.
+/// TICKET-079: recurring mode is the default; --once remains an explicit
+/// bounded/testing mode.
 #[test]
-fn loop_requires_explicit_once_flag() {
+fn loop_without_once_is_accepted_as_recurring_mode() {
     bin()
         .args([
             "loop",
@@ -4481,7 +4482,7 @@ fn loop_requires_explicit_once_flag() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("requires --once"));
+        .stderr(predicate::str::contains("no config found"));
 }
 
 /// TICKET-079: nothing to do (no tickets, no MRs, no availability records)
