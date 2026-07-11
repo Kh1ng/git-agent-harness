@@ -194,6 +194,46 @@ export interface StatusSnapshot {
 }
 
 // ---------------------------------------------------------------------------
+// gah quota snapshot --json (src/quota_snapshot.rs)
+// ---------------------------------------------------------------------------
+
+export interface QuotaUsageSummary {
+  entries: number;
+  attempts: number;
+  validation_pass: number;
+  success_rate: number | null;
+  total_tokens: number | null;
+  requests_count: number | null;
+  actual_cost_usd: number | null;
+  estimated_cost_usd: number | null;
+}
+
+export interface QuotaCandidateStatus {
+  modes: string[];
+  backend: string;
+  model: string | null;
+  quota_pool?: string | null;
+  configured: boolean;
+  eligible_now: boolean;
+  reason?: string | null;
+  unavailable_until?: string | null;
+  source?: string | null;
+  last_error_summary?: string | null;
+  observed_at?: string | null;
+  usage: QuotaUsageSummary;
+  quota_observations: QuotaObservation[];
+}
+
+export interface QuotaSnapshot {
+  schema_version: number;
+  generated_at: string;
+  profile: ProfileIdentity;
+  since: string;
+  usage: QuotaUsageSummary;
+  candidates: QuotaCandidateStatus[];
+}
+
+// ---------------------------------------------------------------------------
 // gah report --json (src/report.rs)
 // ---------------------------------------------------------------------------
 

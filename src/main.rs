@@ -19,6 +19,7 @@ mod provider;
 mod prune;
 mod quota;
 mod quota_parser;
+mod quota_snapshot;
 mod quota_store;
 mod report;
 mod routing;
@@ -629,6 +630,18 @@ enum QuotaCommands {
         json: bool,
         #[arg(long, name = "store")]
         store_path: Option<String>,
+    },
+    /// Build the canonical profile-scoped quota snapshot used by the web
+    /// dashboard and CLI inspection paths.
+    Snapshot {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, default_value = "7d")]
+        since: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
     },
 }
 
@@ -1468,6 +1481,15 @@ fn main() -> Result<()> {
                         );
                     }
                 }
+            }
+            QuotaCommands::Snapshot {
+                profile,
+                since,
+                json,
+                config_path,
+            } => {
+                let cfg = config::load(config_path.as_deref())?;
+                quota_snapshot::run(&cfg, &profile, &since, json)?;
             }
         },
     }

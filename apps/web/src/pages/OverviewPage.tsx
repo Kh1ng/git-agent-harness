@@ -20,7 +20,7 @@ import { StatusBadge, classificationTone } from '../components/ui/StatusBadge.js
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { SessionCard } from '../components/SessionCard.js';
-import { formatCost, formatPercent, formatAge, formatLocalTime, isStale } from '../lib/format.js';
+import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount } from '../lib/format.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
 
 type OverviewPageProps = {
@@ -30,21 +30,21 @@ type OverviewPageProps = {
 };
 
 export function OverviewPage({ sessions, onSelectSession, onNavigate }: OverviewPageProps) {
-  const { status, report, loopStatus, loopAction } = useGahStore();
+  const { status, quota, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
   const profile = profileOverride ?? wsProfile;
   const fetchStatus = useGahStore((s) => s.fetchStatus);
-  const fetchReport = useGahStore((s) => s.fetchReport);
+  const fetchQuota = useGahStore((s) => s.fetchQuota);
   const fetchLoopStatus = useGahStore((s) => s.fetchLoopStatus);
   const startLoop = useGahStore((s) => s.startLoop);
   const stopLoop = useGahStore((s) => s.stopLoop);
 
   useEffect(() => {
     fetchStatus(profile ?? undefined);
-    fetchReport({ profile: profile ?? undefined, since: '7d' });
+    fetchQuota({ profile: profile ?? undefined, since: '7d' });
     if (profile) fetchLoopStatus(profile);
-  }, [profile, fetchStatus, fetchReport, fetchLoopStatus]);
+  }, [profile, fetchStatus, fetchQuota, fetchLoopStatus]);
 
   const loopRunning = loopStatus.data?.running ?? false;
   const toggleLoop = () => {
@@ -62,14 +62,14 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
 
   const refresh = () => {
     fetchStatus(profile ?? undefined, { force: true });
-    fetchReport({ profile: profile ?? undefined, since: '7d' }, { force: true });
+    fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
   };
 
   // The page's own title/refresh control renders unconditionally below --
   // only the content area swaps to loading/error, so a total data-fetch
   // failure never leaves the user looking at a page with no identity and
   // no way to retry.
-  if (status.loading && !status.data) {
+  if ((status.loading && !status.data) || (quota.loading && !quota.data)) {
     return (
       <div className="space-y-6">
         <PageHeader title="Overview" onRefresh={refresh} refreshing />
@@ -77,16 +77,17 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
       </div>
     );
   }
-  if (status.error && !status.data) {
+  if ((status.error && !status.data) || (quota.error && !quota.data)) {
     return (
       <div className="space-y-6">
         <PageHeader title="Overview" onRefresh={refresh} />
-        <ErrorState message={status.error} endpoint="/api/status" onRetry={refresh} />
+        <ErrorState message={status.error ?? quota.error ?? 'Failed to load overview data'} endpoint="/api/status" onRetry={refresh} />
       </div>
     );
   }
 
   const snapshot = status.data;
+  const quotaSnapshot = quota.data;
   // Genuine profile-wide blockers (sync down, no viable route) vs.
   // work-item-scoped blockers (a ticket/MR needs a human) are two
   // different fields -- a ticket being blocked does NOT freeze the whole
@@ -96,22 +97,10 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
   const blockedWorkItems = snapshot?.blocked_work_items ?? [];
   const needsReviewMrs = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'NEEDS_REVIEW');
   const recentMerges = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'MERGED').slice(0, 5);
-  const unavailableBackends = (snapshot?.availability ?? []).filter((a) => !a.eligible_now);
-
-  // Success rate + cost roll-up across all report comparisons (whichever
-  // grouping the report defaults to). Unknown stays unknown -- see
-  // lib/format.ts.
-  const comparisons = report.data?.comparisons ?? [];
-  const totalEntries = comparisons.reduce((sum, c) => sum + c.entries, 0);
-  const totalPass = comparisons.reduce((sum, c) => sum + c.validation_pass, 0);
-  const successRate = totalEntries > 0 ? totalPass / totalEntries : null;
-  const hasCost = comparisons.some((c) => c.actual_cost_usd !== null || c.estimated_cost_usd !== null);
-  const totalActualCost = hasCost
-    ? comparisons.reduce((sum, c) => sum + (c.actual_cost_usd ?? 0), 0)
-    : null;
-  const totalEstimatedCost = hasCost
-    ? comparisons.reduce((sum, c) => sum + (c.estimated_cost_usd ?? 0), 0)
-    : null;
+  const unavailableBackends = (quotaSnapshot?.candidates ?? []).filter((c) => !c.eligible_now);
+  const usage = quotaSnapshot?.usage;
+  const totalEntries = usage?.entries ?? 0;
+  const successRate = usage?.success_rate ?? null;
 
   return (
     <div className="space-y-6">
@@ -142,18 +131,18 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatTile label="Tasks (7d)" value={totalEntries > 0 ? String(totalEntries) : 'No data'} icon={ListChecks} />
+        <StatTile label="Tasks (7d)" value={formatCount(usage?.entries)} icon={ListChecks} />
         <StatTile
           label="Success rate"
           value={formatPercent(successRate)}
           icon={CheckCircle2}
-          hint={totalEntries > 0 ? `${totalPass}/${totalEntries} validated` : undefined}
+          hint={usage?.entries !== null && usage?.entries !== undefined ? `${usage?.validation_pass ?? 0}/${totalEntries} validated` : undefined}
         />
         <StatTile
-          label="Cost (7d)"
-          value={formatCost(totalActualCost ?? totalEstimatedCost)}
+          label="Usage (7d)"
+          value={formatTokens(usage?.total_tokens)}
           icon={Coins}
-          hint={totalActualCost === null && totalEstimatedCost !== null ? 'estimated' : undefined}
+          hint={usage?.requests_count !== null && usage?.requests_count !== undefined ? `${formatCount(usage.requests_count)} requests` : undefined}
         />
         <StatTile label="Active work" value={String(activeWorkCount)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
       </div>
@@ -217,18 +206,21 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
 
         <section>
           <h3 className="text-sm font-semibold text-primary mb-3">Backend availability</h3>
-          {unavailableBackends.length === 0 && (snapshot?.availability.length ?? 0) === 0 ? (
-            <EmptyState icon={CheckCircle2} title="No availability state recorded" description="Everything is eligible by default." />
+          {unavailableBackends.length === 0 && (quotaSnapshot?.candidates.length ?? 0) === 0 ? (
+            <EmptyState icon={CheckCircle2} title="No quota snapshot recorded" description="Everything is eligible by default until a configured candidate reports otherwise." />
           ) : unavailableBackends.length === 0 ? (
             <div className="card-padded flex items-center gap-2 text-sm text-good">
               <CheckCircle2 size={16} aria-hidden="true" />
-              All known backends eligible
+              All configured candidates eligible
             </div>
           ) : (
             <div className="space-y-2">
               {unavailableBackends.map((a, i) => (
                 <div key={i} className="card-padded flex items-center justify-between text-sm">
-                  <span className="text-primary">{a.model ? `${a.backend}/${a.model}` : a.backend}</span>
+                  <span className="text-primary">
+                    {a.model ? `${a.backend}/${a.model}` : a.backend}
+                    {a.quota_pool ? ` · ${a.quota_pool}` : ''}
+                  </span>
                   <StatusBadge tone="critical" label={a.reason ?? 'unavailable'} />
                 </div>
               ))}

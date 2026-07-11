@@ -65,7 +65,7 @@ pub struct StatusSnapshot {
     pub backend_configured: std::collections::HashMap<String, bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug, Clone)]
 pub struct ProfileIdentity {
     pub profile: String,
     pub display_name: String,
