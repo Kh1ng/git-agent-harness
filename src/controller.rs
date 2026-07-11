@@ -736,8 +736,23 @@ pub fn run_loop(
     crate::events::reconcile_abandoned_dispatches(cfg, profile_name)?;
 
     loop {
-        run_once(cfg, profile_name, json, parallel, skip_validation_gate)?;
-        std::thread::sleep(std::time::Duration::from_secs(30));
+        // A failed iteration (validation-gate failure, transient provider
+        // error, ...) must NOT kill the daemon. Incident 2026-07-11: every
+        // respawned loop died ~2s after start on a gate failure, so dispatch
+        // events kept firing from short-lived processes that no `pgrep`/ps
+        // scan could catch ("phantom dispatches" while /api/loop/status
+        // correctly said not-running). The failure is already recorded as a
+        // dispatch_finished event by execute_action's plumbing; log it and
+        // keep the daemon alive.
+        match run_once(cfg, profile_name, json, parallel, skip_validation_gate) {
+            Ok(()) => std::thread::sleep(std::time::Duration::from_secs(30)),
+            Err(error) => {
+                eprintln!("gah loop: iteration failed; retrying after backoff: {error:#}");
+                // ponytail: fixed 5-min backoff; make it exponential if a
+                // hot failure ever burns real quota.
+                std::thread::sleep(std::time::Duration::from_secs(300));
+            }
+        }
     }
 }
 

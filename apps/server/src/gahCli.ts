@@ -4,7 +4,7 @@
  * Replaces the broken stdin/stdout bridge in rustBackend.ts
  */
 
-import { spawn, SpawnOptions } from 'node:child_process';
+import { spawn, spawnSync, SpawnOptions } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accessSync, constants, existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs';
@@ -822,23 +822,43 @@ export interface LoopStatus {
   startedAt?: string;
 }
 
-/** Whether `gah loop --profile <profile>` is currently running, per the PID
- * file written at spawn time by `startLoop`. A stale file left behind by a
- * crashed process correctly reports not-running once the PID is dead. */
+/** A `gah loop` for this profile started OUTSIDE this server (terminal,
+ * watchdog/supervisor respawn) never gets a PID file, so the PID-file check
+ * alone reports running:false while dispatches visibly continue (incident
+ * 2026-07-11: gah-watchdog.timer respawned the loop every 10 minutes while
+ * /api/loop/status said not-running). pgrep is the fallback source of
+ * truth. Matches both `gah loop --profile p` and full-binary-path spawns. */
+export function findExternalLoopPid(profile: string): number | undefined {
+  const escaped = profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const result = spawnSync('pgrep', ['-f', `gah loop --profile ${escaped}( |$)`], {
+    encoding: 'utf8'
+  });
+  const first = result.stdout?.split('\n').map((l) => parseInt(l, 10)).find((n) => Number.isFinite(n));
+  return first;
+}
+
+/** Whether `gah loop --profile <profile>` is currently running: first per
+ * the PID file written at spawn time by `startLoop` (a stale file left
+ * behind by a crashed process correctly reports not-running once the PID is
+ * dead), then falling back to a process scan for loops started outside the
+ * web UI. */
 export function getLoopStatus(profile: string): LoopStatus {
   const pidFile = loopPidFile(profile);
-  if (!existsSync(pidFile)) {
-    return { running: false };
-  }
-  try {
-    const record = JSON.parse(readFileSync(pidFile, 'utf8')) as { pid: number; startedAt: string };
-    if (isProcessAlive(record.pid)) {
-      return { running: true, pid: record.pid, startedAt: record.startedAt };
+  if (existsSync(pidFile)) {
+    try {
+      const record = JSON.parse(readFileSync(pidFile, 'utf8')) as { pid: number; startedAt: string };
+      if (isProcessAlive(record.pid)) {
+        return { running: true, pid: record.pid, startedAt: record.startedAt };
+      }
+    } catch {
+      // fall through to the process scan
     }
-    return { running: false };
-  } catch {
-    return { running: false };
   }
+  const externalPid = findExternalLoopPid(profile);
+  if (externalPid !== undefined) {
+    return { running: true, pid: externalPid };
+  }
+  return { running: false };
 }
 
 export interface StartLoopResult {
