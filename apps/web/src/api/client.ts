@@ -18,6 +18,7 @@
  */
 import type {
   StatusSnapshot,
+  QuotaSnapshot,
   ReportData,
   ReportSeriesData,
   ReportGroupBy,
@@ -156,6 +157,7 @@ export interface StopLoopResult {
 
 export interface GahDataSource {
   getStatus(profile?: string): Promise<StatusSnapshot>;
+  getQuota(params?: { profile?: string; since?: string }): Promise<QuotaSnapshot>;
   getReport(params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }): Promise<ReportData>;
   getReportSeries(params?: { profile?: string; since?: string; bucket?: string }): Promise<ReportSeriesData>;
   getWorkTimeline(workId: string): Promise<LedgerEntry[]>;
@@ -234,6 +236,12 @@ async function deleteJson<T>(path: string, params?: Record<string, string | unde
 export const gahApi: GahDataSource = {
   getStatus(profile) {
     return getJson<StatusSnapshot>('/api/status', { profile });
+  },
+  getQuota(params = {}) {
+    return getJson<QuotaSnapshot>('/api/quota', {
+      profile: params.profile,
+      since: params.since
+    });
   },
   getReport(params = {}) {
     return getJson<ReportData>('/api/report', {

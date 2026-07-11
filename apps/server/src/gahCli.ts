@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { accessSync, constants, existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs';
 import type {
   StatusSnapshot,
+  QuotaSnapshot,
   ControllerEvent,
   ReportData,
   ReportSeriesData,
@@ -148,6 +149,22 @@ Output: ${stdout}`));
       reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
     });
   });
+}
+
+/**
+ * Run `gah quota snapshot --profile <profile> --since <since> --json` and
+ * parse the output. This is the canonical quota/usage/availability payload
+ * consumed by Overview and Quota.
+ */
+export async function runQuota(
+  options: { profile: string; since?: string; config?: string }
+): Promise<QuotaSnapshot> {
+  const args = ['quota', 'snapshot', '--profile', options.profile, '--json'];
+  args.push('--since', options.since ?? '7d');
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runJsonCommand<QuotaSnapshot>(args, options.config);
 }
 
 /**

@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { getServerReadiness } from './serverReadiness.js';
-import { runStatus, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, getLoopStatus, startLoop, stopLoop, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
+import { runStatus, runQuota, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, getLoopStatus, startLoop, stopLoop, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
 import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
 
@@ -41,6 +41,7 @@ export function createServer() {
         health: '/health',
         info: '/api/info',
         status: '/api/status',
+        quota: '/api/quota',
         report: '/api/report',
         work: '/api/work/:workId',
         events: '/api/events',
@@ -73,6 +74,20 @@ export function createServer() {
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah status',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/quota', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const since = typeof req.query.since === 'string' ? req.query.since : '7d';
+    try {
+      const quota = await runQuota({ profile, since });
+      res.json(quota);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load gah quota snapshot',
         message: error instanceof Error ? error.message : String(error)
       });
     }

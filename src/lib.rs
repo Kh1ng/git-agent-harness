@@ -22,6 +22,7 @@ pub mod provider;
 pub mod prune;
 pub mod quota;
 pub mod quota_parser;
+pub mod quota_snapshot;
 pub mod quota_store;
 pub mod report;
 pub mod routing;
