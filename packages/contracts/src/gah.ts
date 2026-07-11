@@ -132,11 +132,20 @@ export interface MergeRequest {
   work_id?: string | null;
   id: string | null;
   url: string | null;
+  /** Human-readable PR/MR title (TICKET-198). */
+  title?: string | null;
   state: string | null;
   draft: boolean;
   merge_status: string | null;
   merged: boolean;
+  /** RFC3339 merge timestamp for merged MRs (TICKET-198). */
+  merged_at?: string | null;
   ci_passed: boolean;
+  /** Backend/model that produced the merge, joined from the ledger (TICKET-198). */
+  effective_backend?: string | null;
+  effective_model?: string | null;
+  /** Review verdict recorded for the merge, joined from the ledger (TICKET-198). */
+  review_verdict?: string | null;
   classification: string;
   recommended_action: RecommendedAction;
 }

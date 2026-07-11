@@ -14,23 +14,13 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
     let mrs = fetch_mrs(profile)?;
 
     if json {
+        let ledger_index = crate::ledger::read_entries(cfg)
+            .ok()
+            .map(|e| crate::ledger::index_entries_by_work_id(&e))
+            .unwrap_or_default();
         let rows: Vec<SyncMrJson> = mrs
             .iter()
-            .map(|mr| SyncMrJson {
-                profile: Some(profile_name.to_string()),
-                branch: mr.branch.clone(),
-                work_id: mr.work_id.clone(),
-                id: mr.id.clone(),
-                url: mr.url.clone(),
-                state: mr.state.clone(),
-                draft: mr.draft,
-                merge_status: mr.merge_status.clone(),
-                merged: mr.merged,
-                ci_passed: mr.ci_passed,
-                ci_pending: mr.ci_pending,
-                classification: classify(mr).to_string(),
-                recommended_action: RecommendedAction::from_class(classify(mr)),
-            })
+            .map(|mr| sync_mr_to_json(mr, Some(profile_name.to_string()), &ledger_index))
             .collect();
         println!("{}", serde_json::to_string(&rows)?);
         return Ok(());
@@ -92,6 +82,22 @@ pub struct SyncMrJson {
     pub merge_status: Option<String>,
     pub merged: bool,
     pub ci_passed: bool,
+    /// TICKET-198: human-readable PR/MR title, surfaced on the dashboard's
+    /// Recently Merged panel instead of the raw branch name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// TICKET-198: merge timestamp (RFC3339) for merged MRs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
+    /// TICKET-198: backend/model that produced the merge, from the ledger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_backend: Option<String>,
+    /// TICKET-198: model that produced the merge, from the ledger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// TICKET-198: review verdict recorded for the merge, from the ledger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_verdict: Option<String>,
     /// Non-terminal / unknown CI (running/pending/missing) for which there
     /// is no defined next controller action yet. GitHub is never `ci_pending`
     /// (see `SyncMr::ci_pending`); this mirrors the typed field on `SyncMr`.
@@ -113,6 +119,9 @@ pub struct SyncMr {
     pub merge_status: Option<String>,
     pub merged: bool,
     pub updated_at: Option<String>,
+    /// TICKET-198: merge timestamp (RFC3339) for merged MRs, surfaced on the
+    /// dashboard's Recently Merged panel. Empty for unmerged MRs.
+    pub merged_at: Option<String>,
     pub ci_failed: bool,
     /// True only when CI has *conclusively* passed (every check/pipeline
     /// terminal and green) -- distinct from `!ci_failed`, which is also
@@ -197,6 +206,78 @@ pub fn recommended_action(class: &str) -> &'static str {
         "STALE" => "inspect before reusing branch",
         _ => "inspect manually",
     }
+}
+
+/// TICKET-198: build the machine-readable `SyncMrJson` row, enriching it with
+/// the ledger-derived backend/model and review verdict for the merge (when a
+/// `work_id` is available to join on). Centralized so `gah sync --json` and
+/// `gah status --json` emit an identical shape.
+pub fn sync_mr_to_json(
+    mr: &SyncMr,
+    profile: Option<String>,
+    ledger: &crate::ledger::LedgerEntriesByWorkId,
+) -> SyncMrJson {
+    let class = classify(mr);
+    let (effective_backend, effective_model, review_verdict) = ledger_info_for_mr(ledger, mr);
+    SyncMrJson {
+        profile,
+        branch: mr.branch.clone(),
+        work_id: mr.work_id.clone(),
+        id: mr.id.clone(),
+        url: mr.url.clone(),
+        title: Some(mr.title.clone()),
+        state: mr.state.clone(),
+        draft: mr.draft,
+        merge_status: mr.merge_status.clone(),
+        merged: mr.merged,
+        merged_at: mr.merged_at.clone(),
+        ci_passed: mr.ci_passed,
+        ci_pending: mr.ci_pending,
+        effective_backend,
+        effective_model,
+        review_verdict,
+        classification: class.to_string(),
+        recommended_action: RecommendedAction::from_class(class),
+    }
+}
+
+/// Join an MR to its ledger entries (by `work_id`) and return the
+/// backend/model that produced it plus the recorded review verdict. Prefers
+/// the entry whose `mr_url` matches this MR exactly, otherwise the most
+/// recent entry that recorded a backend.
+fn ledger_info_for_mr(
+    ledger: &crate::ledger::LedgerEntriesByWorkId,
+    mr: &SyncMr,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(work_id) = mr.work_id.as_ref() else {
+        return (None, None, None);
+    };
+    let Some(entries) = ledger.get(work_id) else {
+        return (None, None, None);
+    };
+    let chosen = entries
+        .iter()
+        .find(|e| e.mr_url.as_deref() == mr.url.as_deref())
+        .or_else(|| {
+            entries
+                .iter()
+                .rev()
+                .find(|e| !e.effective_backend.is_empty())
+        });
+    let Some(entry) = chosen else {
+        return (None, None, None);
+    };
+    let backend = if entry.effective_backend.is_empty() {
+        None
+    } else {
+        Some(entry.effective_backend.clone())
+    };
+    let model = if backend.is_some() {
+        entry.effective_model.clone()
+    } else {
+        None
+    };
+    (backend, model, entry.review_verdict.clone())
 }
 
 fn is_closed_unmerged(state: Option<&str>, merged: bool) -> bool {
@@ -293,6 +374,7 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             merge_status: pr.merge_state_status,
             merged: pr.merged_at.is_some(),
             updated_at: pr.updated_at,
+            merged_at: pr.merged_at,
             ci_failed: github_ci_failed(pr.status_check_rollup.as_deref()),
             ci_passed: github_ci_passed(pr.status_check_rollup.as_deref()),
             ci_pending: false,
@@ -398,6 +480,7 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
                 merge_status: mr.detailed_merge_status.or(mr.merge_status),
                 merged: mr.merged_at.is_some(),
                 updated_at: mr.updated_at,
+                merged_at: mr.merged_at,
                 ci_failed: gitlab_ci_failed(pipeline_status),
                 ci_passed: gitlab_ci_passed(pipeline_status),
                 ci_pending: gitlab_ci_pending(pipeline_status),
@@ -617,6 +700,7 @@ mod tests {
             merge_status: None,
             merged: false,
             updated_at: None,
+            merged_at: None,
             ci_failed: false,
             ci_passed: false,
             ci_pending: false,

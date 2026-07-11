@@ -18,7 +18,7 @@ import { StatusBadge, classificationTone } from '../components/ui/StatusBadge.js
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { SessionCard } from '../components/SessionCard.js';
-import { formatCost, formatPercent, formatAge, isStale } from '../lib/format.js';
+import { formatCost, formatPercent, formatAge, formatLocalTime, isStale } from '../lib/format.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
 
 type OverviewPageProps = {
@@ -251,14 +251,53 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
           ) : (
             <div className="card overflow-hidden">
               <table className="table-base">
+                <thead>
+                  <tr>
+                    <th>Work</th>
+                    <th>Title</th>
+                    <th>Backend</th>
+                    <th>Merged</th>
+                    <th>Review</th>
+                    <th></th>
+                  </tr>
+                </thead>
                 <tbody>
                   {recentMerges.map((mr) => (
                     <tr key={mr.branch}>
-                      <td className="font-mono text-xs">{mr.branch}</td>
+                      <td className="font-mono text-xs whitespace-nowrap">
+                        {mr.work_id ?? <span className="text-muted">—</span>}
+                      </td>
+                      <td className="text-xs max-w-[16rem] truncate" title={mr.title ?? mr.branch}>
+                        {mr.url ? (
+                          <a href={mr.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-accent hover:underline">
+                            {mr.title ?? mr.branch}
+                          </a>
+                        ) : (
+                          (mr.title ?? mr.branch)
+                        )}
+                      </td>
+                      <td className="text-xs whitespace-nowrap text-secondary">
+                        {mr.effective_backend
+                          ? `${mr.effective_backend}${mr.effective_model ? `/${mr.effective_model}` : ''}`
+                          : <span className="text-muted">—</span>}
+                      </td>
+                      <td className="text-xs whitespace-nowrap text-secondary">
+                        {mr.merged_at ? (formatAge(mr.merged_at) ?? formatLocalTime(mr.merged_at) ?? '—') : <span className="text-muted">—</span>}
+                      </td>
+                      <td className="text-xs whitespace-nowrap">
+                        {mr.review_verdict ? (
+                          <StatusBadge
+                            tone={mr.review_verdict.toLowerCase().includes('approve') ? 'good' : 'warning'}
+                            label={mr.review_verdict}
+                          />
+                        ) : (
+                          <span className="text-muted">—</span>
+                        )}
+                      </td>
                       <td>
                         {mr.url && (
-                          <a href={mr.url} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline text-xs">
-                            View MR
+                          <a href={mr.url} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline text-xs whitespace-nowrap">
+                            View
                           </a>
                         )}
                       </td>
