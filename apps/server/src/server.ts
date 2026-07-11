@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { getServerReadiness } from './serverReadiness.js';
-import { runStatus, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
+import { runStatus, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, getLoopStatus, startLoop, stopLoop, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
 import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
 
@@ -46,6 +46,9 @@ export function createServer() {
         events: '/api/events',
         controllerActivity: '/api/controller-activity',
         profiles: '/api/profiles',
+        loopStatus: '/api/loop/status',
+        loopStart: '/api/loop/start',
+        loopStop: '/api/loop/stop',
         websocket: '/ws'
       },
       features: {
@@ -188,6 +191,43 @@ export function createServer() {
         message: error instanceof Error ? error.message : String(error)
       });
     }
+  });
+
+  // Start/stop/status for the `gah loop --profile <p>` daemon, so a stuck
+  // loop can be killed from the dashboard instead of requiring SSH/terminal
+  // access. Conflict detection is `gah`'s own per-profile flock
+  // (acquire_profile_lock in src/controller.rs) -- see gahCli.ts for why the
+  // check isn't reimplemented here.
+  app.get('/api/loop/status', (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    res.json(getLoopStatus(profile));
+  });
+
+  app.post('/api/loop/start', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    try {
+      const result = await startLoop(profile);
+      if (!result.started) {
+        res.status(409).json(result);
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to start gah loop',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/loop/stop', (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const result = stopLoop(profile);
+    if (!result.stopped) {
+      res.status(409).json(result);
+      return;
+    }
+    res.json(result);
   });
 
   app.get('/api/events', async (req, res) => {

@@ -12,7 +12,7 @@
 import { create } from 'zustand';
 import { gahApi, GahApiError } from '../api/client.js';
 import type { StatusSnapshot, ReportData, ReportSeriesData, ReportGroupBy, LedgerEntry, ControllerEvent, ProfileSummary } from '@git-agent-harness/contracts';
-import type { ProfileAddData, ProfileUpdateData, ProfileRemoveParams } from '../api/client.js';
+import type { ProfileAddData, ProfileUpdateData, ProfileRemoveParams, LoopStatus } from '../api/client.js';
 
 interface Resource<T> {
   data: T | null;
@@ -50,6 +50,8 @@ interface GahStoreState {
   workTimelines: Record<string, Resource<LedgerEntry[]>>;
   profiles: Resource<ProfileSummary[]>;
   profileCrud: ProfileCrudState;
+  loopStatus: Resource<LoopStatus>;
+  loopAction: { pending: boolean; error: string | null };
 
   fetchStatus: (profile?: string, opts?: { force?: boolean }) => Promise<void>;
   fetchReport: (params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }, opts?: { force?: boolean }) => Promise<void>;
@@ -61,6 +63,9 @@ interface GahStoreState {
   updateProfile: (name: string, data: ProfileUpdateData) => Promise<void>;
   removeProfile: (name: string, params?: ProfileRemoveParams) => Promise<void>;
   clearProfileErrors: () => void;
+  fetchLoopStatus: (profile: string, opts?: { force?: boolean }) => Promise<void>;
+  startLoop: (profile: string) => Promise<void>;
+  stopLoop: (profile: string) => Promise<void>;
 }
 
 /** Below this age, a fetch* call reuses the cached value instead of
@@ -85,6 +90,8 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
   events: emptyResource(),
   workTimelines: {},
   profiles: emptyResource(),
+  loopStatus: emptyResource(),
+  loopAction: { pending: false, error: null },
   profileCrud: {
     adding: false,
     updating: false,
@@ -307,8 +314,8 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
   },
 
   clearProfileErrors() {
-    set({ 
-      profileCrud: { 
+    set({
+      profileCrud: {
         ...get().profileCrud,
         addError: null,
         updateError: null,
@@ -318,5 +325,39 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
         lastRemoveSuccess: false
       }
     });
+  },
+
+  async fetchLoopStatus(profile, opts) {
+    const current = get().loopStatus;
+    if (current.loading || (!opts?.force && isFresh(current, profile))) return;
+    set({ loopStatus: { ...current, loading: true, error: null } });
+    try {
+      const data = await gahApi.getLoopStatus(profile);
+      set({ loopStatus: { data, loading: false, error: null, fetchedAt: Date.now(), key: profile } });
+    } catch (error) {
+      set({ loopStatus: { ...get().loopStatus, loading: false, error: errorMessage(error), key: profile } });
+    }
+  },
+
+  async startLoop(profile) {
+    set({ loopAction: { pending: true, error: null } });
+    try {
+      const result = await gahApi.startLoop(profile);
+      set({ loopAction: { pending: false, error: result.started ? null : (result.error ?? 'Loop is already running') } });
+    } catch (error) {
+      set({ loopAction: { pending: false, error: errorMessage(error) } });
+    }
+    await get().fetchLoopStatus(profile, { force: true });
+  },
+
+  async stopLoop(profile) {
+    set({ loopAction: { pending: true, error: null } });
+    try {
+      const result = await gahApi.stopLoop(profile);
+      set({ loopAction: { pending: false, error: result.stopped ? null : (result.error ?? 'Failed to stop loop') } });
+    } catch (error) {
+      set({ loopAction: { pending: false, error: errorMessage(error) } });
+    }
+    await get().fetchLoopStatus(profile, { force: true });
   }
 }));

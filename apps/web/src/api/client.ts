@@ -136,6 +136,24 @@ function profileRemoveParamsToRecord(params?: ProfileRemoveParams): Record<strin
   return result;
 }
 
+export interface LoopStatus {
+  running: boolean;
+  pid?: number;
+  startedAt?: string;
+}
+
+export interface StartLoopResult {
+  started: boolean;
+  pid?: number;
+  alreadyRunning?: boolean;
+  error?: string;
+}
+
+export interface StopLoopResult {
+  stopped: boolean;
+  error?: string;
+}
+
 export interface GahDataSource {
   getStatus(profile?: string): Promise<StatusSnapshot>;
   getReport(params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }): Promise<ReportData>;
@@ -147,6 +165,9 @@ export interface GahDataSource {
   addProfile(data: ProfileAddData): Promise<{ success: boolean; message: string }>;
   updateProfile(name: string, data: ProfileUpdateData): Promise<{ success: boolean; message: string }>;
   removeProfile(name: string, params?: ProfileRemoveParams): Promise<{ success: boolean; message: string }>;
+  getLoopStatus(profile?: string): Promise<LoopStatus>;
+  startLoop(profile: string): Promise<StartLoopResult>;
+  stopLoop(profile: string): Promise<StopLoopResult>;
 }
 
 async function postJson<T, U>(path: string, body: U): Promise<T> {
@@ -254,5 +275,30 @@ export const gahApi: GahDataSource = {
   },
   removeProfile(name, params = {}) {
     return deleteJson<{ success: boolean; message: string }>(`/api/profiles/${encodeURIComponent(name)}`, profileRemoveParamsToRecord(params));
+  },
+  getLoopStatus(profile) {
+    return getJson<LoopStatus>('/api/loop/status', { profile });
+  },
+  async startLoop(profile) {
+    // Unlike the other POSTs above, a non-2xx here (409) still carries a
+    // meaningful body -- "already running", with the existing pid -- not
+    // just an error to throw, so this reads the JSON directly instead of
+    // going through postJson's throw-on-!ok.
+    const url = new URL('/api/loop/start', SERVER_URL);
+    const res = await fetch(url.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile })
+    });
+    return (await res.json()) as StartLoopResult;
+  },
+  async stopLoop(profile) {
+    const url = new URL('/api/loop/stop', SERVER_URL);
+    const res = await fetch(url.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile })
+    });
+    return (await res.json()) as StopLoopResult;
   }
 };
