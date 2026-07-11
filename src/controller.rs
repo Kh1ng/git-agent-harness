@@ -745,6 +745,10 @@ pub fn run_once(
     parallel: usize,
     skip_validation_gate: bool,
 ) -> Result<()> {
+    let claim_scope = {
+        let profile = crate::config::get_profile(cfg, profile_name)?;
+        format!("{profile_name}@{}", profile.repo_id)
+    };
     let now = time::OffsetDateTime::now_utc();
     let snapshot = crate::status::build_snapshot(cfg, profile_name, now)?;
     crate::events::record(
@@ -834,16 +838,16 @@ pub fn run_once(
                     | NextAction::NoOp { .. }
             )
         }) {
-            if !crate::work_claim::try_claim_work(profile_name, work_id)? {
+            if !crate::work_claim::try_claim_work(&claim_scope, work_id)? {
                 format!("Skipped already-claimed work '{work_id}'")
             } else {
                 match execute_action(cfg, profile_name, &action, skip_validation_gate) {
                     Ok(outcome) => {
-                        crate::work_claim::release_work(profile_name, work_id)?;
+                        crate::work_claim::release_work(&claim_scope, work_id)?;
                         outcome
                     }
                     Err(error) => {
-                        crate::work_claim::release_work(profile_name, work_id)?;
+                        crate::work_claim::release_work(&claim_scope, work_id)?;
                         return Err(error);
                     }
                 }
@@ -890,6 +894,10 @@ fn run_parallel_once(
     use std::collections::HashSet;
 
     let mut executed_work_ids = HashSet::new();
+    let claim_scope = {
+        let profile = crate::config::get_profile(cfg, profile_name)?;
+        format!("{profile_name}@{}", profile.repo_id)
+    };
 
     // Profile routing decides which eligible backend handles each action. Do
     // not use the number of persisted availability rows as a worker limit:
@@ -914,7 +922,7 @@ fn run_parallel_once(
         let mut pending_terminal: Option<(NextAction, NextAction)> = None;
         for _ in 0..effective_parallel_limit {
             // Re-fetch claimed work IDs to get fresh state (other processes might have claimed work)
-            let claimed_work_ids = crate::work_claim::get_claimed_work_ids(profile_name)?;
+            let claimed_work_ids = crate::work_claim::get_claimed_work_ids(&claim_scope)?;
 
             // Re-build snapshot to get fresh state (this is conservative but safe)
             let mut fresh_snapshot =
@@ -992,7 +1000,7 @@ fn run_parallel_once(
             let action_work_id = action.work_id();
             if let Some(work_id) = action_work_id {
                 if claimed_work_ids.contains(&work_id.to_string())
-                    || crate::work_claim::is_claimed(profile_name, work_id)?
+                    || crate::work_claim::is_claimed(&claim_scope, work_id)?
                     || executed_work_ids.contains(work_id)
                 {
                     // Skip this action as it's already in flight or claimed
@@ -1016,7 +1024,7 @@ fn run_parallel_once(
 
                     // Claim this work_id before execution to prevent duplicate dispatch
                     if let Some(work_id) = action_work_id {
-                        if !crate::work_claim::try_claim_work(profile_name, work_id)? {
+                        if !crate::work_claim::try_claim_work(&claim_scope, work_id)? {
                             continue;
                         }
                         executed_work_ids.insert(work_id.to_string());
@@ -1024,6 +1032,7 @@ fn run_parallel_once(
 
                     let action_for_thread = action.clone();
                     let profile_for_thread = profile_name.to_string();
+                    let claim_scope_for_thread = claim_scope.clone();
                     let work_id_for_thread = action_work_id.map(str::to_string);
                     handles.push(scope.spawn(move || {
                         let result = execute_action(
@@ -1040,7 +1049,8 @@ fn run_parallel_once(
                             }
                         };
                         if let Some(work_id) = work_id_for_thread.as_deref() {
-                            let _ = crate::work_claim::release_work(&profile_for_thread, work_id);
+                            let _ =
+                                crate::work_claim::release_work(&claim_scope_for_thread, work_id);
                         }
                         let _ = crate::events::record(
                             cfg,
@@ -1118,7 +1128,7 @@ fn run_parallel_once(
     // Clean up any stale claims if we encountered errors
     // (This is a safety net - normally individual claims should be released)
     if results.iter().any(|r| r.outcome.starts_with("Error:")) {
-        crate::work_claim::release_all_for_profile(profile_name)?;
+        crate::work_claim::release_all_for_profile(&claim_scope)?;
     }
 
     Ok(())
