@@ -24,7 +24,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const AUTO_RETRY_CAP: usize = 2;
 
 pub(crate) fn is_genuine_agent_failure(failure_class: &str) -> bool {
-    matches!(failure_class, "agent_no_progress" | "agent_failure")
+    matches!(
+        failure_class,
+        "agent_no_progress" | "agent_failure" | "context_limit_exceeded"
+    )
 }
 
 fn is_infra_failure(failure_class: &str) -> bool {
@@ -1938,6 +1941,23 @@ mod tests {
             NextAction::Escalate { work_id, .. } => assert_eq!(work_id, "TICKET-001"),
             other => panic!("expected Escalate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn context_limit_failure_escalates_without_being_orphaned() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-context.md",
+            Some("TICKET-context"),
+            1,
+            Some("context_limit_exceeded"),
+            false,
+            false,
+        ));
+        assert!(matches!(
+            decide_next_action(&snapshot),
+            NextAction::Escalate { .. }
+        ));
     }
 
     #[test]

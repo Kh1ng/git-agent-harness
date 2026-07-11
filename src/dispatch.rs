@@ -1827,6 +1827,7 @@ fn improve(
     let max_attempts = args.retries + 1;
     let mut validation_failed = false;
     let mut prev_failure: Option<String> = None;
+    let mut prior_phase_context: Option<String> = None;
     let mut backend_summary = String::new();
     for attempt in 0..max_attempts {
         println!(
@@ -1845,12 +1846,25 @@ fn improve(
         } else {
             None
         };
+        let fresh_context = if args.mode == "fix" {
+            cfg.context
+                .effective(&args.profile, &route.effective_backend)
+                .fresh_context_on_fix
+        } else {
+            true
+        };
+        if !fresh_context {
+            if let Some(previous) = prior_phase_context.as_deref() {
+                task = format!("{task}\n\n## Prior Phase Context\n{previous}");
+            }
+        }
         task = match enforce_context_budget(
             cfg,
             profile,
             &args.profile,
             &route.effective_backend,
             if args.mode == "fix" { "fix" } else { "coding" },
+            fresh_context,
             &task,
             &attempt_session,
             args.run_id.as_deref(),
@@ -1999,6 +2013,7 @@ fn improve(
                 );
                 let _ = worktree::git(&["reset", "--hard", "HEAD"], &wt);
                 let _ = worktree::git(&["clean", "-fd"], &wt);
+                prior_phase_context = Some(task.clone());
                 task = format!(
                     "{}\n\n## Previous attempt did not complete (attempt {}/{})\n\nThe backend exited with code {} before finishing (not a validation failure -- it errored, crashed, or was killed for producing no output). The worktree has been reset clean. Please try again.",
                     base_task,
@@ -2086,6 +2101,7 @@ fn improve(
                     &failure_output,
                 );
                 prev_failure = Some(failure_output.clone());
+                prior_phase_context = Some(task.clone());
 
                 if attempt + 1 < max_attempts
                     && !failure_progress.unchanged_from_baseline()
@@ -3221,6 +3237,7 @@ fn review(
     // often lists real fallbacks (agy-second, claude) that just sat unused.
     const MAX_REVIEW_ATTEMPTS: usize = 3;
     let mut applied_capabilities = vec![];
+    let mut prior_review_context = String::new();
     let mut result = None;
     for attempt_number in 0..MAX_REVIEW_ATTEMPTS {
         apply_route_to_ledger(ledger, &route);
@@ -3233,13 +3250,22 @@ fn review(
             capability_prefix.push_str(prefix);
             applied_capabilities.push(capability.clone());
         }
-        let prompt = format!("{capability_prefix}{prompt_suffix}");
+        let fresh_context = cfg
+            .context
+            .effective(&args.profile, &route.effective_backend)
+            .fresh_context_on_review;
+        let mut prompt = format!("{capability_prefix}{prompt_suffix}");
+        if !fresh_context && !prior_review_context.is_empty() {
+            prompt.push_str("\n\n## Prior Review Attempt\n");
+            prompt.push_str(&prior_review_context);
+        }
         let prompt = enforce_context_budget(
             cfg,
             profile,
             &args.profile,
             &route.effective_backend,
             "review",
+            fresh_context,
             &prompt,
             session_dir,
             args.run_id.as_deref(),
@@ -3255,6 +3281,9 @@ fn review(
             route.effective_model.as_deref(),
             &env_vars,
         );
+        if !fresh_context && !attempt.stdout.trim().is_empty() {
+            prior_review_context = utf8_safe_suffix(&attempt.stdout, 20_000).to_string();
+        }
         let is_last_attempt = attempt_number + 1 == MAX_REVIEW_ATTEMPTS;
         if !is_last_attempt {
             if let runner::ReviewProcessOutcome::NonZeroExit(_) = attempt.outcome {
@@ -3672,6 +3701,7 @@ fn enforce_context_budget(
     profile_name: &str,
     backend: &str,
     phase: &str,
+    fresh_context: bool,
     prompt: &str,
     session_dir: &Path,
     run_id: Option<&str>,
@@ -3708,8 +3738,7 @@ fn enforce_context_budget(
         "soft_limit_tokens": context_cfg.soft_limit_tokens,
         "hard_limit_tokens": context_cfg.hard_limit_tokens,
         "compacted": build.compacted,
-        "fresh_context": phase == "review" && context_cfg.fresh_context_on_review
-            || phase == "fix" && context_cfg.fresh_context_on_fix,
+        "fresh_context": fresh_context,
         "largest_sections": build.largest_sections,
     });
     let _ = crate::events::record_with_run_id(
