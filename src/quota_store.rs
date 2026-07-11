@@ -88,7 +88,8 @@ pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
         .append(true)
         .open(state_path)
         .context("open quota store")?;
-    let _ = file.lock_exclusive();
+    file.lock_exclusive()
+        .with_context(|| format!("locking {}", state_path.display()))?;
     let line = serde_json::to_string(rec).context("serialize quota observation")?;
     writeln!(file, "{line}").context("write quota observation")?;
     let _ = file.unlock();
