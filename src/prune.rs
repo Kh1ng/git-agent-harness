@@ -216,6 +216,7 @@ mod tests {
             merge_status: None,
             merged,
             updated_at: None,
+            merged_at: None,
             ci_failed: false,
             ci_passed: false,
             ci_pending: false,

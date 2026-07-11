@@ -184,6 +184,14 @@ pub fn build_snapshot(
     let mut merge_requests = Vec::new();
     let mut raw_mrs: Vec<sync::SyncMr> = Vec::new();
     let mut sync_obs = ObservationStatus { status: "ok" };
+
+    // Ledger read is hoisted above the sync step so recently-merged MRs can be
+    // enriched with their backend/model and review verdict (TICKET-198).
+    let ledger_result = ledger::read_entries(cfg);
+    let ledger_entries_by_work_id = ledger_result
+        .as_ref()
+        .map(|e| ledger::index_entries_by_work_id(e))
+        .unwrap_or_default();
     match sync::fetch_mrs(profile) {
         Ok(mrs) => {
             let mrs = if profile.provider == "gitlab" {
@@ -200,25 +208,7 @@ pub fn build_snapshot(
             };
             merge_requests = mrs
                 .iter()
-                .map(|mr| {
-                    let class = sync::classify(mr);
-                    let action = sync::RecommendedAction::from_class(class);
-                    sync::SyncMrJson {
-                        profile: None,
-                        branch: mr.branch.clone(),
-                        work_id: mr.work_id.clone(),
-                        id: mr.id.clone(),
-                        url: mr.url.clone(),
-                        state: mr.state.clone(),
-                        draft: mr.draft,
-                        merge_status: mr.merge_status.clone(),
-                        merged: mr.merged,
-                        ci_passed: mr.ci_passed,
-                        ci_pending: mr.ci_pending,
-                        classification: class.to_string(),
-                        recommended_action: action,
-                    }
-                })
+                .map(|mr| sync::sync_mr_to_json(mr, None, &ledger_entries_by_work_id))
                 .collect();
             raw_mrs = mrs;
         }
@@ -270,11 +260,9 @@ pub fn build_snapshot(
 
     // 3. Ledger State
     let mut recent_ledger = None;
-    let mut ledger_entries_by_work_id = crate::ledger::LedgerEntriesByWorkId::new();
     let mut ledger_obs = ObservationStatus { status: "ok" };
-    match ledger::read_entries(cfg) {
+    match &ledger_result {
         Ok(entries) => {
-            ledger_entries_by_work_id = ledger::index_entries_by_work_id(&entries);
             let mut latest: Option<&LedgerEntry> = None;
             let mut max_ts: Option<OffsetDateTime> = None;
 
@@ -887,6 +875,7 @@ default_target_branch = "main"
             merge_status: Some("CLEAN".into()),
             merged: false,
             updated_at: None,
+            merged_at: None,
             ci_failed: false,
             ci_passed: false,
             ci_pending: false,
@@ -912,6 +901,7 @@ default_target_branch = "main"
             merge_status: Some("DIRTY".into()),
             merged: false,
             updated_at: None,
+            merged_at: None,
             ci_failed: true,
             ci_passed: false,
             ci_pending: false,

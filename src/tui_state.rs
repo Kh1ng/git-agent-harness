@@ -233,8 +233,13 @@ mod tests {
             draft: false,
             merge_status: None,
             merged: classification == "MERGED",
+            merged_at: None,
             ci_passed: false,
             ci_pending: false,
+            title: None,
+            effective_backend: None,
+            effective_model: None,
+            review_verdict: None,
             classification: classification.into(),
             recommended_action: RecommendedAction::from_class(classification),
         }
