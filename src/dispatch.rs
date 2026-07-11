@@ -4392,6 +4392,59 @@ mod tests {
     }
 
     #[test]
+    fn parse_review_verdict_skips_incidental_empty_braces_in_prose() {
+        // Regression (TICKET-177 / live repro): reviewer prose discusses a
+        // regex literal containing a bare `{}` format-string placeholder
+        // BEFORE the real JSON verdict block. The old first-match brace
+        // scanner grabbed the incidental `{}` (a structurally valid but
+        // empty JSON object) and failed to deserialize into ReviewVerdict.
+        let review_text = r##"## Review Notes
+
+### Correctness
+
+Found an issue: `find_header_u64` uses `r#"(?i)"?{}\b"?\s*[:=]\s*"?([0-9]+)"?"#`
+which lacks a leading boundary check.
+
+## JSON Summary
+
+```json
+{
+  "verdict": "NEEDS_FIX",
+  "confidence": "high",
+  "human_required": false,
+  "blocking_findings": ["regex lacks leading boundary assertion"],
+  "non_blocking_findings": [],
+  "risk_notes": []
+}
+```
+"##;
+
+        let route = crate::routing::RouteDecision {
+            requested_backend: "vibe".to_string(),
+            effective_backend: "vibe".to_string(),
+            requested_model: Some("mistral-medium-3.5".to_string()),
+            effective_model: Some("mistral-medium-3.5".to_string()),
+            effective_quota_pool: None,
+            routing_reason: "test".to_string(),
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
+            routing_diagnostics: None,
+        };
+        let usage = crate::ledger::LedgerUsage::default();
+
+        let verdict =
+            parse_review_verdict(review_text, &route, &usage, ReviewerTier::Standard).unwrap();
+
+        assert_eq!(verdict.verdict, "NEEDS_FIX");
+        assert_eq!(verdict.confidence, "high");
+        assert_eq!(
+            verdict.blocking_findings,
+            vec!["regex lacks leading boundary assertion".to_string()]
+        );
+    }
+
+    #[test]
     fn review_preflight_fails_with_backend_unavailable_when_executable_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let mut prof = profile(tmp.path());
@@ -7593,17 +7646,37 @@ fn parse_pm_plan(log_text: &str) -> Result<PmPlan> {
     Ok(plan)
 }
 
+// ponytail: name says "first" but behavior is "last valid" now -- kept the
+// name to avoid touching call sites for a rename; the doc comment is the
+// source of truth.
+//
+/// Extracts the verdict/plan JSON object from free-form model output. Model
+/// prose commonly mentions incidental empty `{}` (e.g. quoting a regex
+/// literal or format-string placeholder) before the real structured answer,
+/// so scanning left-to-right for the first structurally-valid JSON object is
+/// wrong -- it grabs the incidental fragment instead of the intended one.
+/// Prefer the last ```json fenced block if the text has one (models
+/// naturally wrap their final structured answer that way); otherwise fall
+/// back to the last balanced `{...}` substring in the whole text that parses
+/// as valid JSON.
 fn extract_first_json_object(text: &str) -> Option<String> {
+    if let Some(fenced) = extract_last_fenced_json_block(text) {
+        return Some(fenced);
+    }
     let bytes = text.as_bytes();
-    for start in 0..bytes.len() {
+    let mut last_valid: Option<String> = None;
+    let mut start = 0usize;
+    while start < bytes.len() {
         if bytes[start] != b'{' {
+            start += 1;
             continue;
         }
         let mut depth = 0i32;
         let mut in_string = false;
         let mut escaped = false;
-        for end in start..bytes.len() {
-            let ch = bytes[end] as char;
+        let mut matched_end = None;
+        for (end, &byte) in bytes.iter().enumerate().skip(start) {
+            let ch = byte as char;
             if in_string {
                 if escaped {
                     escaped = false;
@@ -7620,18 +7693,52 @@ fn extract_first_json_object(text: &str) -> Option<String> {
                 '}' => {
                     depth -= 1;
                     if depth == 0 {
-                        let candidate = &text[start..=end];
-                        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                            return Some(candidate.to_string());
-                        }
+                        matched_end = Some(end);
                         break;
                     }
                 }
                 _ => {}
             }
         }
+        match matched_end {
+            // Found a balanced top-level span -- validate it, then jump past
+            // its closing brace entirely. Without this jump, the next outer
+            // iteration would step into the span's interior and re-match any
+            // nested object (e.g. a ticket sub-object inside a PM plan) as
+            // its own "later" candidate, which is never what's wanted here.
+            Some(end) => {
+                let candidate = &text[start..=end];
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    last_valid = Some(candidate.to_string());
+                }
+                start = end + 1;
+            }
+            None => start += 1,
+        }
     }
-    None
+    last_valid
+}
+
+/// Finds the last ` ```json ... ``` ` fenced block in `text` whose contents
+/// parse as valid JSON, if any.
+fn extract_last_fenced_json_block(text: &str) -> Option<String> {
+    const FENCE_OPEN: &str = "```json";
+    const FENCE_CLOSE: &str = "```";
+    let mut last_valid: Option<String> = None;
+    let mut search_from = 0usize;
+    while let Some(rel_open) = text[search_from..].find(FENCE_OPEN) {
+        let content_start = search_from + rel_open + FENCE_OPEN.len();
+        let Some(rel_close) = text[content_start..].find(FENCE_CLOSE) else {
+            break;
+        };
+        let content_end = content_start + rel_close;
+        let candidate = text[content_start..content_end].trim();
+        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+            last_valid = Some(candidate.to_string());
+        }
+        search_from = content_end + FENCE_CLOSE.len();
+    }
+    last_valid
 }
 
 fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<PathBuf>> {
