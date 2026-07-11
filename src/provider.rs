@@ -218,7 +218,7 @@ fn gitlab_post_review_comment(
             api_base, project_id, mr.id
         );
         let payload = serde_json::json!({ "add_labels": labels.join(",") });
-        let _ = run_curl_json(&[
+        if let Err(err) = run_curl_json(&[
             "-s",
             "-X",
             "PUT",
@@ -229,7 +229,9 @@ fn gitlab_post_review_comment(
             "-d",
             &payload.to_string(),
             &labels_url,
-        ]);
+        ]) {
+            eprintln!("warning: failed to apply labels to MR {}: {:#}", mr.id, err);
+        }
     }
     Ok(())
 }
@@ -260,17 +262,34 @@ fn github_post_review_comment(
         );
     }
     if !labels.is_empty() {
-        let _ = provider_command("gh")
-            .args([
-                "pr",
-                "edit",
-                &pr_number,
-                "--repo",
-                &profile.repo,
-                "--add-label",
-                &labels.join(","),
-            ])
-            .output();
+        // ponytail: `gh pr edit --add-label` mutates via a GraphQL path that
+        // fails on this repo every time with a "Projects (classic)" sunset
+        // error, regardless of the label. The REST labels endpoint doesn't
+        // go through that mutation shape, so use it instead. Confirmed live:
+        // `gh api repos/<repo>/issues/<n>/labels -f "labels[]=<label>"`
+        // succeeds where `gh pr edit --add-label` fails.
+        let mut args = vec![
+            "api".to_string(),
+            format!("repos/{}/issues/{}/labels", profile.repo, pr_number),
+        ];
+        for label in labels {
+            args.push("-f".to_string());
+            args.push(format!("labels[]={}", label));
+        }
+        match provider_command("gh").args(&args).output() {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => eprintln!(
+                "warning: failed to apply labels to PR {}: {}",
+                pr_number,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to apply labels to PR {}: {:#}",
+                    pr_number, err
+                )
+            }
+        }
     }
     Ok(())
 }
@@ -1048,5 +1067,89 @@ esac
         let call = fs::read_to_string(bin_dir.join("ready_call.txt")).unwrap();
         assert!(call.contains(" 7 "));
         assert!(call.contains("--ready"));
+    }
+
+    #[test]
+    fn github_post_review_comment_applies_labels_via_rest_api_not_pr_edit() {
+        // Regression: `gh pr edit --add-label` fails every time on real repos
+        // with a "Projects (classic)" GraphQL error, and the old code
+        // silently swallowed that failure so labels never got applied. This
+        // pins that we now hit the REST labels endpoint instead, and that
+        // `gh pr edit` is never invoked for this path.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            r#"#!/bin/sh
+case "$1" in
+  pr)
+    case "$2" in
+      list) printf '[{"number":42}]\n' ;;
+      comment) exit 0 ;;
+      edit) echo "gh pr edit must not be called" >&2; exit 1 ;;
+      *) echo "unexpected pr subcommand: $@" >&2; exit 1 ;;
+    esac
+    ;;
+  api)
+    echo "$@" > "${0%/*}/label_call.txt"
+    exit 0
+    ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        super::post_review_comment(
+            &github_profile(),
+            "gah/test",
+            "review body",
+            &["gah-ready-for-human"],
+        )
+        .unwrap();
+
+        let call = fs::read_to_string(bin_dir.join("label_call.txt")).unwrap();
+        assert!(call.contains("repos/owner/repo/issues/42/labels"));
+        assert!(call.contains("labels[]=gah-ready-for-human"));
+    }
+
+    #[test]
+    fn github_post_review_comment_survives_label_apply_failure() {
+        // A label-apply failure must stay non-fatal and visible (not a
+        // silent `let _ =`) -- the review comment itself already posted
+        // successfully, so the whole call should not error out.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            r#"#!/bin/sh
+case "$1" in
+  pr)
+    case "$2" in
+      list) printf '[{"number":42}]\n' ;;
+      comment) exit 0 ;;
+      *) echo "unexpected pr subcommand: $@" >&2; exit 1 ;;
+    esac
+    ;;
+  api) echo "GraphQL: Projects (classic) is being deprecated" >&2; exit 1 ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        super::post_review_comment(
+            &github_profile(),
+            "gah/test",
+            "review body",
+            &["gah-ready-for-human"],
+        )
+        .unwrap();
     }
 }
