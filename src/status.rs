@@ -556,17 +556,20 @@ default_target_branch = "main"
 "#,
         )
         .unwrap();
-        crate::config::load(Some(path.to_str().unwrap())).unwrap()
+        let mut cfg = crate::config::load(Some(path.to_str().unwrap())).unwrap();
+        // Keep every status test's ledger inside its own temp directory
+        // without mutating the process-global GAH_LEDGER_PATH override.
+        cfg.defaults.artifact_root = tmp.path().to_string_lossy().into_owned();
+        cfg
     }
 
     #[test]
     fn empty_clean_profile_snapshot() {
-        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         // Force availability and ledger to be read from temp
-        std::env::set_var("GAH_AVAILABILITY_PATH", tmp.path().join("avail.json"));
-        std::env::set_var("GAH_LEDGER_PATH", tmp.path().join("ledger.jsonl"));
+        let _availability_guard =
+            crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
 
         let now = OffsetDateTime::now_utc();
         let snap = build_snapshot(&cfg, "test", now).unwrap();
@@ -584,11 +587,10 @@ default_target_branch = "main"
 
     #[test]
     fn active_backend_wide_block() {
-        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let avail_path = tmp.path().join("avail.json");
-        std::env::set_var("GAH_AVAILABILITY_PATH", &avail_path);
+        let _availability_guard = crate::test_support::AvailabilityEnvGuard::set(&avail_path);
 
         let state = AvailabilityState {
             version: 1,
@@ -621,11 +623,10 @@ default_target_branch = "main"
 
     #[test]
     fn model_specific_availability_block_preserves_scope() {
-        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let avail_path = tmp.path().join("avail.json");
-        std::env::set_var("GAH_AVAILABILITY_PATH", &avail_path);
+        let _availability_guard = crate::test_support::AvailabilityEnvGuard::set(&avail_path);
 
         let state = AvailabilityState {
             version: 1,
@@ -656,11 +657,10 @@ default_target_branch = "main"
 
     #[test]
     fn expired_availability_record_skipped() {
-        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let avail_path = tmp.path().join("avail.json");
-        std::env::set_var("GAH_AVAILABILITY_PATH", &avail_path);
+        let _availability_guard = crate::test_support::AvailabilityEnvGuard::set(&avail_path);
 
         let state = AvailabilityState {
             version: 1,
@@ -688,11 +688,9 @@ default_target_branch = "main"
 
     #[test]
     fn human_required_state_becomes_blocker() {
-        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let ledger_path = tmp.path().join("ledger.jsonl");
-        std::env::set_var("GAH_LEDGER_PATH", &ledger_path);
 
         let mut entry = LedgerEntry::new(
             "test",
@@ -719,11 +717,10 @@ default_target_branch = "main"
 
     #[test]
     fn partial_subsystem_error_is_in_errors() {
-        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let avail_path = tmp.path().join("avail.json");
-        std::env::set_var("GAH_AVAILABILITY_PATH", &avail_path);
+        let _availability_guard = crate::test_support::AvailabilityEnvGuard::set(&avail_path);
 
         // Write garbage JSON to force parsing error
         fs::write(&avail_path, "{garbage").unwrap();
@@ -743,11 +740,9 @@ default_target_branch = "main"
 
     #[test]
     fn ledger_failure_and_attempt_fields_are_populated() {
-        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let ledger_path = tmp.path().join("ledger.jsonl");
-        std::env::set_var("GAH_LEDGER_PATH", &ledger_path);
 
         let mut entry = LedgerEntry::new(
             "test",
@@ -783,11 +778,9 @@ default_target_branch = "main"
 
     #[test]
     fn recent_ledger_exposes_work_id() {
-        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let ledger_path = tmp.path().join("ledger.jsonl");
-        std::env::set_var("GAH_LEDGER_PATH", &ledger_path);
 
         let mut entry = LedgerEntry::new(
             "test",
@@ -813,11 +806,9 @@ default_target_branch = "main"
 
     #[test]
     fn recent_ledger_exposes_routing_diagnostics() {
-        let _lock = crate::test_support::LEDGER_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let cfg = make_test_cfg(&tmp);
         let ledger_path = tmp.path().join("ledger.jsonl");
-        std::env::set_var("GAH_LEDGER_PATH", &ledger_path);
 
         let mut entry = LedgerEntry::new(
             "test",

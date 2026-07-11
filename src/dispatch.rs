@@ -7106,6 +7106,9 @@ The parser should retain structured sections.\n\n\
         prof.repo = "owner/repo".to_string();
 
         let ledger_path = tmp.path().join("ledger.jsonl");
+        // The test configuration's artifact root points at `tmp`, so the
+        // duplicate guard reads this isolated ledger without mutating a
+        // process-global environment variable.
 
         // 3. Case A: No previous work -> Should pass
         let args = super::DispatchArgs {

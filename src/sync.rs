@@ -756,11 +756,7 @@ mod tests {
 
     fn test_cfg_with_ledger(
         entries: &[crate::ledger::LedgerEntry],
-    ) -> (
-        crate::config::GahConfig,
-        tempfile::TempDir,
-        crate::test_support::LedgerEnvGuard,
-    ) {
+    ) -> (crate::config::GahConfig, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = crate::config::GahConfig {
             context: Default::default(),
@@ -775,17 +771,10 @@ mod tests {
             },
             profiles: std::collections::HashMap::new(),
         };
-        // GAH_LEDGER_PATH is a process-global env var that status tests set
-        // during `cargo test`. Without this guard, parallel status tests can
-        // redirect our ledger reads/writes to their tempdir. The guard sets
-        // the env var to our tempdir's ledger file and restores it on drop.
-        // Must be held for the entire test (including the read in
-        // count_fix_attempts_per_branch), so it's returned to the caller.
-        let guard = crate::test_support::LedgerEnvGuard::set(tmp.path().join("ledger.jsonl"));
         for entry in entries {
             crate::ledger::append(&cfg, entry).unwrap();
         }
-        (cfg, tmp, guard)
+        (cfg, tmp)
     }
 
     fn ledger_entry(
@@ -857,7 +846,7 @@ mod tests {
     /// zero post-review repair retries.
     #[test]
     fn internal_retries_in_initial_dispatch_count_zero() {
-        let (cfg, _tmp, _guard) =
+        let (cfg, _tmp) =
             test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", Some("initial"), 2)]);
         let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
@@ -871,7 +860,7 @@ mod tests {
     /// regardless of how many internal attempts it used.
     #[test]
     fn one_repair_dispatch_counts_one() {
-        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[
+        let (cfg, _tmp) = test_cfg_with_ledger(&[
             ledger_entry("fix", "branch-A", Some("initial"), 2),
             ledger_entry("fix", "branch-A", Some("post_review_repair"), 3),
         ]);
@@ -887,7 +876,7 @@ mod tests {
     /// inflate the repair-cycle count — it increments exactly once per entry.
     #[test]
     fn internal_retries_in_repair_dispatch_do_not_inflate() {
-        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[ledger_entry(
+        let (cfg, _tmp) = test_cfg_with_ledger(&[ledger_entry(
             "fix",
             "branch-A",
             Some("post_review_repair"),
@@ -905,7 +894,7 @@ mod tests {
     /// post-review repair cycles (AUTO_RETRY_CAP=2).
     #[test]
     fn two_repair_dispatches_hit_cap() {
-        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[
+        let (cfg, _tmp) = test_cfg_with_ledger(&[
             ledger_entry("fix", "branch-A", Some("initial"), 2),
             ledger_entry("fix", "branch-A", Some("post_review_repair"), 1),
             ledger_entry("fix", "branch-A", Some("post_review_repair"), 1),
@@ -921,7 +910,7 @@ mod tests {
     /// Entries with mode != "fix" (review, merge) never count.
     #[test]
     fn review_and_merge_entries_never_count() {
-        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[
+        let (cfg, _tmp) = test_cfg_with_ledger(&[
             ledger_entry("review", "branch-A", Some("review"), 1),
             ledger_entry("merge", "branch-A", None, 1),
         ]);
@@ -936,7 +925,7 @@ mod tests {
     /// count — they cannot be proven to be post-review repairs.
     #[test]
     fn legacy_entries_without_dispatch_reason_do_not_count() {
-        let (cfg, _tmp, _guard) = test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", None, 2)]);
+        let (cfg, _tmp) = test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", None, 2)]);
         let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
             counts.get("branch-A").copied().unwrap_or(0),

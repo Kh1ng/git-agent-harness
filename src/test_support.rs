@@ -20,28 +20,36 @@ use std::sync::{Mutex, MutexGuard};
 
 static PATH_LOCK: Mutex<()> = Mutex::new(());
 static EXEC_LOCK: Mutex<()> = Mutex::new(());
-pub(crate) static LEDGER_LOCK: Mutex<()> = Mutex::new(());
+static AVAILABILITY_LOCK: Mutex<()> = Mutex::new(());
 
-pub struct LedgerEnvGuard {
+/// Scoped override for the process-global availability store path used by
+/// tests. Just like the ledger override, it must be restored before another
+/// parallel test can observe process state.
+pub struct AvailabilityEnvGuard {
     _lock: MutexGuard<'static, ()>,
+    original: Option<OsString>,
 }
 
-impl LedgerEnvGuard {
-    /// Sets `GAH_LEDGER_PATH` to `path` for the duration of the guard.
-    /// Process-wide lock because `GAH_LEDGER_PATH` is a global env var —
-    /// without this lock, parallel tests that derive the ledger path from
-    /// `artifact_root` silently read/write the wrong file when a status
-    /// test momentarily sets the env var.
+impl AvailabilityEnvGuard {
     pub fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
-        let lock = LEDGER_LOCK.lock().unwrap();
-        std::env::set_var("GAH_LEDGER_PATH", path);
-        Self { _lock: lock }
+        let lock = AVAILABILITY_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let original = std::env::var_os("GAH_AVAILABILITY_PATH");
+        std::env::set_var("GAH_AVAILABILITY_PATH", path);
+        Self {
+            _lock: lock,
+            original,
+        }
     }
 }
 
-impl Drop for LedgerEnvGuard {
+impl Drop for AvailabilityEnvGuard {
     fn drop(&mut self) {
-        std::env::remove_var("GAH_LEDGER_PATH");
+        match &self.original {
+            Some(path) => std::env::set_var("GAH_AVAILABILITY_PATH", path),
+            None => std::env::remove_var("GAH_AVAILABILITY_PATH"),
+        }
     }
 }
 
@@ -52,7 +60,11 @@ pub struct ExecGuard {
 impl ExecGuard {
     pub fn new() -> Self {
         Self {
-            _lock: EXEC_LOCK.lock().unwrap(),
+            // A failed test must not poison the shared execution lock and hide
+            // the real failure behind dozens of unrelated test failures.
+            _lock: EXEC_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
         }
     }
 }
@@ -70,7 +82,9 @@ pub struct PathGuard {
 
 impl PathGuard {
     pub fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
-        let lock = PATH_LOCK.lock().unwrap();
+        let lock = PATH_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let original = std::env::var_os("PATH");
         let requested = path.as_ref();
         let combined = match (requested.is_empty(), &original) {
