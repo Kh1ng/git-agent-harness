@@ -763,6 +763,7 @@ mod tests {
     ) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),

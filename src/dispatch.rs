@@ -1845,6 +1845,23 @@ fn improve(
         } else {
             None
         };
+        task = match enforce_context_budget(
+            cfg,
+            profile,
+            &args.profile,
+            &route.effective_backend,
+            if args.mode == "fix" { "fix" } else { "coding" },
+            &task,
+            &attempt_session,
+            args.run_id.as_deref(),
+            ledger,
+        ) {
+            Ok(prompt) => prompt,
+            Err(err) => {
+                worktree::cleanup(&wt, repo);
+                return Err(err);
+            }
+        };
         let result = run_backend(
             &route.effective_backend,
             profile,
@@ -3127,7 +3144,7 @@ fn review(
          - HUMAN_REVIEW: you cannot make a confident recommendation at all.\n\
          Repo: {}. MR: {}. Source: {}. Target: {}. CI status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
-         Prior run state:\n{}\n\nDiff:\n```\n{}\n```\nChanged files:\n{}",
+         Prior run state:\n{}\n\n## Diff\n\n```\n{}\n```\nChanged files:\n{}",
         profile.repo,
         target.mr_id.as_deref().unwrap_or("n/a"),
         target.source_branch,
@@ -3217,6 +3234,17 @@ fn review(
             applied_capabilities.push(capability.clone());
         }
         let prompt = format!("{capability_prefix}{prompt_suffix}");
+        let prompt = enforce_context_budget(
+            cfg,
+            profile,
+            &args.profile,
+            &route.effective_backend,
+            "review",
+            &prompt,
+            session_dir,
+            args.run_id.as_deref(),
+            ledger,
+        )?;
 
         let attempt = runner::run_review_backend(
             profile,
@@ -3637,6 +3665,64 @@ fn build_task(
     task
 }
 
+#[allow(clippy::too_many_arguments)]
+fn enforce_context_budget(
+    cfg: &GahConfig,
+    _profile: &Profile,
+    profile_name: &str,
+    backend: &str,
+    phase: &str,
+    prompt: &str,
+    session_dir: &Path,
+    run_id: Option<&str>,
+    ledger: &mut LedgerEntry,
+) -> Result<String> {
+    let context_cfg = cfg.context.effective(profile_name, backend);
+    let build = match crate::context::enforce(prompt, &context_cfg) {
+        Ok(build) => build,
+        Err(err) => {
+            ledger.set_failure(
+                crate::ledger::FailureClass::ContextLimitExceeded,
+                crate::ledger::FailureStage::AgentRun,
+            );
+            ledger.context_phase = Some(phase.to_string());
+            ledger.context_estimated_tokens_before = Some(crate::context::estimate_tokens(prompt));
+            ledger.context_estimated_tokens_after = None;
+            ledger.context_compacted = true;
+            return Err(err);
+        }
+    };
+    ledger.context_phase = Some(phase.to_string());
+    ledger.context_estimated_tokens_before = Some(build.estimated_tokens_before_reduction);
+    ledger.context_estimated_tokens_after = Some(build.estimated_tokens_after_reduction);
+    ledger.context_compacted = build.compacted;
+    let _ = fs::write(
+        session_dir.join("context-built.json"),
+        serde_json::to_vec_pretty(&build)?,
+    );
+    let details = serde_json::json!({
+        "phase": phase,
+        "backend": backend,
+        "estimated_tokens_before_reduction": build.estimated_tokens_before_reduction,
+        "estimated_tokens_after_reduction": build.estimated_tokens_after_reduction,
+        "soft_limit_tokens": context_cfg.soft_limit_tokens,
+        "hard_limit_tokens": context_cfg.hard_limit_tokens,
+        "compacted": build.compacted,
+        "fresh_context": phase == "review" && context_cfg.fresh_context_on_review
+            || phase == "fix" && context_cfg.fresh_context_on_fix,
+        "largest_sections": build.largest_sections,
+    });
+    let _ = crate::events::record_with_run_id(
+        cfg,
+        crate::events::EventType::ContextBuilt,
+        Some(profile_name),
+        ledger.work_id.as_deref(),
+        run_id,
+        details.to_string(),
+    );
+    Ok(build.prompt)
+}
+
 /// Build task with issue details for the Focus section
 fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &IssueDetails) -> String {
     let instruction = match mode {
@@ -3932,6 +4018,7 @@ mod tests {
 
     fn gah_config(routing: RoutingPolicy) -> GahConfig {
         GahConfig {
+            context: Default::default(),
             defaults: Defaults {
                 current_manager: None,
                 artifact_root: String::new(),
@@ -3949,6 +4036,7 @@ mod tests {
     // so `ledger::append`/`read_entries` have somewhere to write.
     fn gah_config_with_ledger(tmp: &Path, routing: RoutingPolicy) -> GahConfig {
         GahConfig {
+            context: Default::default(),
             defaults: Defaults {
                 current_manager: None,
                 artifact_root: tmp.display().to_string(),
@@ -4557,6 +4645,7 @@ which lacks a leading boundary check.
         )
         .unwrap();
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
@@ -4621,6 +4710,7 @@ which lacks a leading boundary check.
         let _guard = PathGuard::set(&bin_dir);
 
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
@@ -4692,6 +4782,7 @@ which lacks a leading boundary check.
         .unwrap();
 
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
@@ -4730,6 +4821,7 @@ which lacks a leading boundary check.
         )
         .unwrap();
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
@@ -4778,6 +4870,7 @@ which lacks a leading boundary check.
         )
         .unwrap();
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
@@ -4839,6 +4932,7 @@ which lacks a leading boundary check.
         )
         .unwrap();
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
@@ -4913,6 +5007,7 @@ which lacks a leading boundary check.
         )
         .unwrap();
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
@@ -6910,6 +7005,7 @@ The parser should retain structured sections.\n\n\
 
         // 2. Setup config & profile
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
@@ -7065,6 +7161,7 @@ The parser should retain structured sections.\n\n\
         .unwrap();
 
         let cfg = crate::config::GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),

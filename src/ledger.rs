@@ -24,6 +24,7 @@ pub enum FailureClass {
     BackendError,
     AgentNoProgress,
     AgentFailure,
+    ContextLimitExceeded,
     ValidationFailure,
     /// TICKET-073: the dispatch *gate* itself (a profile's
     /// `validation_commands`) failed self-verification against a fresh
@@ -43,6 +44,7 @@ impl FailureClass {
             Self::BackendError => "backend_error",
             Self::AgentNoProgress => "agent_no_progress",
             Self::AgentFailure => "agent_failure",
+            Self::ContextLimitExceeded => "context_limit_exceeded",
             Self::ValidationFailure => "validation_failure",
             Self::ValidationGate => "validation_gate",
             Self::HumanBlocked => "human_blocked",
@@ -290,6 +292,15 @@ pub struct LedgerEntry {
     /// single dispatch (attempts_started) do NOT consume retry budget.
     #[serde(default)]
     pub dispatch_reason: Option<String>,
+    /// Context budgeting metadata for the assembled phase prompt.
+    #[serde(default)]
+    pub context_phase: Option<String>,
+    #[serde(default)]
+    pub context_estimated_tokens_before: Option<u64>,
+    #[serde(default)]
+    pub context_estimated_tokens_after: Option<u64>,
+    #[serde(default)]
+    pub context_compacted: bool,
     pub usage: LedgerUsage,
 }
 
@@ -357,6 +368,10 @@ impl LedgerEntry {
             attempts_completed: 0,
             attempts: Vec::new(),
             dispatch_reason: None,
+            context_phase: None,
+            context_estimated_tokens_before: None,
+            context_estimated_tokens_after: None,
+            context_compacted: false,
             usage: LedgerUsage::default(),
         }
     }
@@ -430,6 +445,10 @@ impl LedgerEntry {
             attempts_completed: 0,
             attempts: Vec::new(),
             dispatch_reason: None,
+            context_phase: None,
+            context_estimated_tokens_before: None,
+            context_estimated_tokens_after: None,
+            context_compacted: false,
             usage: LedgerUsage::default(),
         }
     }
@@ -2554,6 +2573,7 @@ mod tests {
     pub(crate) fn test_config() -> (tempfile::TempDir, GahConfig) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = GahConfig {
+            context: Default::default(),
             defaults: Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),

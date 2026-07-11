@@ -400,6 +400,7 @@ mod tests {
 
     fn test_gah_config(current_manager: Option<&str>) -> GahConfig {
         GahConfig {
+            context: Default::default(),
             defaults: crate::config::Defaults {
                 current_manager: current_manager.map(String::from),
                 ..Default::default()

@@ -7,6 +7,7 @@ pub mod candidates;
 pub mod capability;
 pub mod claude_monitor;
 pub mod config;
+pub mod context;
 pub mod controller;
 pub mod dispatch;
 pub mod doctor;

@@ -4,6 +4,7 @@ mod candidates;
 mod capability;
 pub mod claude_monitor;
 mod config;
+mod context;
 mod controller;
 mod dispatch;
 mod doctor;

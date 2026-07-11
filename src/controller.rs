@@ -2750,6 +2750,7 @@ mod tests {
     fn event_test_config() -> (tempfile::TempDir, GahConfig) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = GahConfig {
+            context: Default::default(),
             defaults: Defaults {
                 current_manager: None,
                 artifact_root: tmp.path().to_string_lossy().into_owned(),
