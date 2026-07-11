@@ -542,9 +542,10 @@ pub fn run_vibe_with_executable(
     // --trust: automation-only, not persisted to trusted_folders.toml --
     // skips the interactive trust prompt without touching global config.
     // --auto-approve: same automation need as agy's --dangerously-skip-permissions.
-    // JSON is still written to the attempt log, while Vibe's durable session
-    // metadata supplies the authoritative token/model totals.
-    cmd.args(["-p", task, "--trust", "--auto-approve", "--output", "json"])
+    // Vibe's durable session metadata supplies the authoritative token/model
+    // totals. Keep the established text output mode for the runner's idle
+    // watcher and backend summary handling.
+    cmd.args(["-p", task, "--trust", "--auto-approve"])
         .args(extra_args)
         .current_dir(worktree);
     for (k, v) in env_vars {
