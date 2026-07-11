@@ -923,6 +923,7 @@ fn run_backend(
         .copied();
     let _concurrency_slot =
         routing::ConcurrencyGuard::acquire_shared(backend, effective_model, concurrency_cap)?;
+    let origin_before = worktree::git(&["remote", "get-url", "origin"], wt).ok();
     let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
     if backend == "agy-second" {
         if let Some(home) = profile.agy_second_home.as_deref().filter(|h| !h.is_empty()) {
@@ -931,7 +932,7 @@ fn run_backend(
             env_vars.push(("HOME".to_string(), home.to_string()));
         }
     }
-    match backend {
+    let result = match backend {
         "codex" => runner::run_codex_with_executable(
             &runner::require_backend_executable(profile, backend)?,
             wt,
@@ -999,7 +1000,17 @@ fn run_backend(
             &env_vars,
             profile.openhands_idle_timeout_seconds(),
         ),
+    };
+    if let Some(origin_before) = origin_before {
+        let origin_after = worktree::git(&["remote", "get-url", "origin"], wt)
+            .context("checking git origin after backend run")?;
+        if origin_after != origin_before {
+            anyhow::bail!(
+                "git origin changed during backend run: before='{origin_before}' after='{origin_after}'"
+            );
+        }
     }
+    result
 }
 
 /// Run `auto_fix_commands` in the worktree, best-effort, right before
