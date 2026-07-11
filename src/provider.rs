@@ -281,16 +281,31 @@ fn github_post_review_comment(
 /// shelling out to the same `glab`/`gh` CLIs already used elsewhere here
 /// rather than reimplementing GitLab's title-based draft toggle over raw
 /// REST.
-pub fn merge_mr(profile: &Profile, branch: &str) -> Result<()> {
+pub fn mark_ready_for_review(profile: &Profile, branch: &str) -> Result<()> {
     let target = find_review_target_by_branch(profile, branch)?;
     match profile.provider.as_str() {
-        "gitlab" => gitlab_merge_mr(profile, &target.id),
-        "github" => github_merge_mr(profile, &target.id),
+        "gitlab" => gitlab_mark_ready_for_review(profile, &target.id),
+        "github" => github_mark_ready_for_review(profile, &target.id),
         other => anyhow::bail!("unsupported provider: {}", other),
     }
 }
 
-fn gitlab_merge_mr(profile: &Profile, iid: &str) -> Result<()> {
+pub fn merge_mr(profile: &Profile, branch: &str) -> Result<()> {
+    let target = find_review_target_by_branch(profile, branch)?;
+    match profile.provider.as_str() {
+        "gitlab" => {
+            gitlab_mark_ready_for_review(profile, &target.id)?;
+            gitlab_merge_mr(profile, &target.id)
+        }
+        "github" => {
+            github_mark_ready_for_review(profile, &target.id)?;
+            github_merge_mr(profile, &target.id)
+        }
+        other => anyhow::bail!("unsupported provider: {}", other),
+    }
+}
+
+fn gitlab_mark_ready_for_review(profile: &Profile, iid: &str) -> Result<()> {
     let ready = provider_command("glab")
         .args(["mr", "update", iid, "--ready", "--repo", &profile.repo])
         .output()
@@ -301,6 +316,10 @@ fn gitlab_merge_mr(profile: &Profile, iid: &str) -> Result<()> {
             String::from_utf8_lossy(&ready.stderr).trim()
         );
     }
+    Ok(())
+}
+
+fn gitlab_merge_mr(profile: &Profile, iid: &str) -> Result<()> {
     let merge = provider_command("glab")
         .args([
             "mr",
@@ -462,16 +481,6 @@ pub fn gitlab_get_issue_state(profile: &Profile, issue_number: &str) -> Result<O
 }
 
 fn github_merge_mr(profile: &Profile, number: &str) -> Result<()> {
-    let ready = provider_command("gh")
-        .args(["pr", "ready", number, "--repo", &profile.repo])
-        .output()
-        .context("gh pr ready")?;
-    if !ready.status.success() {
-        anyhow::bail!(
-            "gh pr ready failed: {}",
-            String::from_utf8_lossy(&ready.stderr).trim()
-        );
-    }
     let merge = provider_command("gh")
         .args([
             "pr",
@@ -488,6 +497,20 @@ fn github_merge_mr(profile: &Profile, number: &str) -> Result<()> {
         anyhow::bail!(
             "gh pr merge failed: {}",
             String::from_utf8_lossy(&merge.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn github_mark_ready_for_review(profile: &Profile, number: &str) -> Result<()> {
+    let ready = provider_command("gh")
+        .args(["pr", "ready", number, "--repo", &profile.repo])
+        .output()
+        .context("gh pr ready")?;
+    if !ready.status.success() {
+        anyhow::bail!(
+            "gh pr ready failed: {}",
+            String::from_utf8_lossy(&ready.stderr).trim()
         );
     }
     Ok(())
@@ -684,7 +707,10 @@ fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_draft_mr, find_review_target_by_mr, merge_mr, TEST_PATH_OVERRIDE};
+    use super::{
+        create_draft_mr, find_review_target_by_mr, mark_ready_for_review, merge_mr,
+        TEST_PATH_OVERRIDE,
+    };
     use crate::config::{Profile, RoutingPolicy};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -906,6 +932,33 @@ esac
     }
 
     #[test]
+    fn mark_ready_for_review_github_un_drafts_only() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            r#"#!/bin/sh
+case "$1 $2" in
+  "pr list") printf '[{"number":42}]\n' ;;
+  "pr view") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
+  "pr ready") echo "$@" > "${0%/*}/ready_call.txt"; exit 0 ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        mark_ready_for_review(&github_profile(), "gah/test").unwrap();
+
+        let call = fs::read_to_string(bin_dir.join("ready_call.txt")).unwrap();
+        assert!(call.contains("42"));
+        assert!(!call.contains("merge"));
+    }
+
+    #[test]
     fn merge_mr_github_fails_loudly_when_merge_rejected() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = TempDir::new().unwrap();
@@ -963,5 +1016,37 @@ esac
         assert!(call.contains(" 7 "));
         assert!(call.contains("--squash"));
         assert!(call.contains("--remove-source-branch"));
+    }
+
+    #[test]
+    fn mark_ready_for_review_gitlab_un_drafts_only() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "curl",
+            r#"#!/bin/sh
+printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main"}]\n'
+"#,
+        );
+        make_fake_bin(
+            &bin_dir,
+            "glab",
+            r#"#!/bin/sh
+case "$1 $2" in
+  "mr update") echo "$@" > "${0%/*}/ready_call.txt"; exit 0 ;;
+  *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        mark_ready_for_review(&gitlab_profile(), "gah/test").unwrap();
+
+        let call = fs::read_to_string(bin_dir.join("ready_call.txt")).unwrap();
+        assert!(call.contains(" 7 "));
+        assert!(call.contains("--ready"));
     }
 }

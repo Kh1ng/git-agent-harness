@@ -57,6 +57,12 @@ pub enum NextAction {
         mr_url: Option<String>,
         reason: String,
     },
+    MarkReadyForReview {
+        work_id: Option<String>,
+        branch: String,
+        mr_url: Option<String>,
+        reason: String,
+    },
     FixMr {
         work_id: Option<String>,
         branch: String,
@@ -115,6 +121,7 @@ impl NextAction {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::ReviewMr { .. } => "review_mr",
+            Self::MarkReadyForReview { .. } => "mark_ready_for_review",
             Self::FixMr { .. } => "fix_mr",
             Self::MergeMr { .. } => "merge_mr",
             Self::DispatchTicket { .. } => "dispatch_ticket",
@@ -129,6 +136,7 @@ impl NextAction {
     pub fn reason(&self) -> &str {
         match self {
             Self::ReviewMr { reason, .. }
+            | Self::MarkReadyForReview { reason, .. }
             | Self::FixMr { reason, .. }
             | Self::MergeMr { reason, .. }
             | Self::DispatchTicket { reason, .. }
@@ -145,6 +153,7 @@ impl NextAction {
     pub fn work_id(&self) -> Option<&str> {
         match self {
             Self::ReviewMr { work_id, .. }
+            | Self::MarkReadyForReview { work_id, .. }
             | Self::FixMr { work_id, .. }
             | Self::MergeMr { work_id, .. } => work_id.as_deref(),
             Self::DispatchTicket { work_id, .. } => work_id.as_deref(),
@@ -161,13 +170,17 @@ impl NextAction {
 /// 1. incomplete critical observation -> stop safely (NoOp)
 /// 2. a recorded blocker (today: ledger human_required) -> HumanRequired
 /// 3. an MR classified NEEDS_REVIEW -> ReviewMr
-/// 4. an MR classified CI_FAILED/NEEDS_FIX -> FixMr (if retry cap not exceeded)
-/// 5. an MR classified CI_FAILED/NEEDS_FIX -> HumanRequired (if retry cap exceeded)
-/// 6. an MR classified READY_FOR_HUMAN -> HumanRequired ONLY when the merge
+/// 4. an MR classified READY_FOR_HUMAN with draft=true and conclusively-green
+///    CI -> MarkReadyForReview
+/// 5. an MR classified READY_FOR_HUMAN with draft=false and conclusively-green
+///    CI -> MergeMr (or HumanRequired if merge policy forbids auto-merge)
+/// 6. an MR classified CI_FAILED/NEEDS_FIX -> FixMr (if retry cap not exceeded)
+/// 7. an MR classified CI_FAILED/NEEDS_FIX -> HumanRequired (if retry cap exceeded)
+/// 8. an MR classified READY_FOR_HUMAN -> HumanRequired ONLY when the merge
 ///    policy forbids auto-merge (StopForHuman) or CI isn't conclusively green
 ///    (see the READY_FOR_HUMAN arm below). With green CI and an auto-merge
-///    policy, it instead becomes MergeMr. READY_FOR_HUMAN therefore has exactly
-///    ONE defined next-action per policy, not two divergent outcomes.
+///    policy, it first becomes MarkReadyForReview while still draft, then
+///    MergeMr once the PR/MR is no longer draft.
 /// 7. a ticket with failed history, no active MR, capability failure,
 ///    under the retry cap -> Escalate
 /// 8. a ticket with failed history, no active MR, infra failure, some
@@ -217,6 +230,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     // the first one; only if NO item is actionable do we fall back to a
     // profile-wide HumanRequired at the end of the function.
     let mut review_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
+    let mut ready_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut fix_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut merge_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut human_blocked_mrs: Vec<&crate::sync::SyncMrJson> = Vec::new();
@@ -254,15 +268,19 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 }
                 let merge_policy = snapshot.profile.merge_policy;
                 if mr.ci_passed {
-                    let merge_attempts = snapshot
-                        .merge_attempt_counts
-                        .get(&mr.branch)
-                        .copied()
-                        .unwrap_or(0);
-                    if merge_attempts < AUTO_RETRY_CAP {
-                        merge_candidates.push(mr);
+                    if mr.draft {
+                        ready_candidates.push(mr);
                     } else {
-                        human_blocked_mrs.push(mr);
+                        let merge_attempts = snapshot
+                            .merge_attempt_counts
+                            .get(&mr.branch)
+                            .copied()
+                            .unwrap_or(0);
+                        if merge_attempts < AUTO_RETRY_CAP {
+                            merge_candidates.push(mr);
+                        } else {
+                            human_blocked_mrs.push(mr);
+                        }
                     }
                 } else if merge_policy == crate::config::MergePolicy::StopForHuman {
                     // TICKET-127: under stop_for_human, a READY_FOR_HUMAN
@@ -296,6 +314,17 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             branch: mr.branch.clone(),
             mr_url: mr.url.clone(),
             reason: format!("MR on branch '{}' classified NEEDS_REVIEW", mr.branch),
+        };
+    }
+    if let Some(mr) = ready_candidates.first() {
+        return NextAction::MarkReadyForReview {
+            work_id: mr.work_id.clone(),
+            branch: mr.branch.clone(),
+            mr_url: mr.url.clone(),
+            reason: format!(
+                "MR on branch '{}' classified READY_FOR_HUMAN with draft=true and CI passing; marking ready for review",
+                mr.branch
+            ),
         };
     }
     if let Some(mr) = merge_candidates.first() {
@@ -1139,6 +1168,11 @@ pub(crate) fn execute_action(
             run_dispatch_and_record(cfg, "review", action.work_id(), &args)?;
             Ok(format!("Dispatched review for branch '{branch}'"))
         }
+        NextAction::MarkReadyForReview { branch, .. } => {
+            let profile = crate::config::get_profile(cfg, profile_name)?;
+            crate::provider::mark_ready_for_review(profile, branch)?;
+            Ok(format!("Marked MR on branch '{branch}' ready for review"))
+        }
         NextAction::FixMr { branch, .. } => {
             let args = crate::dispatch::DispatchArgs {
                 target: branch.clone(),
@@ -1383,6 +1417,15 @@ mod tests {
         };
         assert_eq!(escalate.kind(), "escalate");
         assert_eq!(escalate.work_id(), Some("TICKET-043"));
+
+        let ready = NextAction::MarkReadyForReview {
+            work_id: Some("TICKET-044".into()),
+            branch: "gah/real-4".into(),
+            mr_url: Some("https://example/pull/4".into()),
+            reason: "CI green, still draft".into(),
+        };
+        assert_eq!(ready.kind(), "mark_ready_for_review");
+        assert_eq!(ready.work_id(), Some("TICKET-044"));
     }
 
     #[test]
@@ -1392,6 +1435,19 @@ mod tests {
             branch: "gah/real-1".into(),
             mr_url: Some("https://example/pull/1".into()),
             reason: "classified NEEDS_REVIEW".into(),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let parsed: NextAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, action);
+    }
+
+    #[test]
+    fn mark_ready_round_trips_through_json() {
+        let action = NextAction::MarkReadyForReview {
+            work_id: Some("TICKET-004".into()),
+            branch: "gah/real-4".into(),
+            mr_url: Some("https://example/pull/4".into()),
+            reason: "CI green, still draft".into(),
         };
         let json = serde_json::to_string(&action).unwrap();
         let parsed: NextAction = serde_json::from_str(&json).unwrap();
@@ -1646,21 +1702,32 @@ mod tests {
     }
 
     #[test]
-    fn ready_for_human_mr_with_ci_passed_becomes_merge_mr() {
-        // TICKET-127: strong-reviewer approval (the only path onto
-        // READY_FOR_HUMAN via the bare `gah-ready-for-human` label) plus
-        // conclusively-green CI should auto-merge instead of waiting on a
-        // human.
+    fn ready_for_human_draft_mr_with_ci_passed_becomes_mark_ready_for_review() {
+        // Draft MRs must leave draft as soon as CI is conclusively green,
+        // regardless of merge policy. Merge happens later, after the
+        // controller observes the non-draft state.
         let mut snapshot = empty_snapshot();
-        snapshot
-            .merge_requests
-            .push(mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true));
+        let mut mr = mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true);
+        mr.draft = true;
+        snapshot.merge_requests.push(mr);
         let action = decide_next_action(&snapshot);
-        assert_eq!(action.kind(), "merge_mr");
+        assert_eq!(action.kind(), "mark_ready_for_review");
         match action {
-            NextAction::MergeMr { branch, .. } => assert_eq!(branch, "gah/real-1"),
-            other => panic!("expected MergeMr, got {other:?}"),
+            NextAction::MarkReadyForReview { branch, .. } => assert_eq!(branch, "gah/real-1"),
+            other => panic!("expected MarkReadyForReview, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ready_for_human_draft_mr_with_ci_passed_marks_ready_for_review_under_stop_for_human() {
+        let mut snapshot = empty_snapshot();
+        let mut mr = mr_with_ci("gah/real-1", "READY_FOR_HUMAN", true);
+        mr.draft = true;
+        snapshot.merge_requests.push(mr);
+        snapshot.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
+
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "mark_ready_for_review");
     }
 
     #[test]
