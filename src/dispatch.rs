@@ -9503,9 +9503,9 @@ fn resolve_target_to_issue_or_string(
 }
 
 fn timestamp() -> String {
-    SystemTime::now()
+    let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .to_string()
+        .unwrap_or_default()
+        .as_secs();
+    format!("{seconds}-{}", uuid::Uuid::new_v4().simple())
 }
