@@ -1311,7 +1311,8 @@ fn attempt_usage(
     } else {
         crate::ledger::LedgerUsage::default()
     };
-    if usage.usage_source.is_none() {
+    let has_json_lines = text.lines().any(|line| line.trim_start().starts_with('{'));
+    if usage.usage_source.is_none() && (backend != Some("codex") || !has_json_lines) {
         // Fall back to the generic regex-based parser for other backends (or
         // for codex running in non-JSON mode).
         usage = usage::parse_generic_usage(&text, "attempt_output_log");
@@ -4408,6 +4409,25 @@ mod tests {
         assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
         assert_eq!(usage.requests_count, Some(1));
         assert_eq!(usage.usage_classification, Some("quota_backed".to_string()));
+    }
+
+    #[test]
+    fn attempt_usage_does_not_scrape_codex_tool_output_as_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("backend-output.log");
+        fs::write(
+            &path,
+            r#"{"type":"item.completed","item":{"aggregated_output":"input_tokens: 500"}}
+{"type":"item.started","item":{"type":"command_execution"}}
+"#,
+        )
+        .unwrap();
+
+        let usage = attempt_usage(path.to_str().unwrap(), None, Some("codex"), None, None);
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.requests_count, Some(1));
+        assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
     }
 
     #[test]
