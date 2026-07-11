@@ -136,7 +136,11 @@ fn spawn_with_idle_watch(
         .map(|stderr| copy_stream_to_file(stderr, log_path.to_path_buf(), Some(progress_tx)));
 
     let idle_timeout = Duration::from_secs(idle_timeout_seconds);
-    let startup_grace = idle_timeout + idle_timeout;
+    // A backend that emits no output is already indistinguishable from a
+    // stalled launch after one idle window. Do not double the stall budget:
+    // that kept three workers occupied for ten minutes before the controller
+    // could reroute them.
+    let startup_grace = idle_timeout;
     let poll_interval = Duration::from_millis(500);
     let mut last_seen_len = fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
     let mut last_progress_at = Instant::now();

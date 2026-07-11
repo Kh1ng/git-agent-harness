@@ -1880,6 +1880,20 @@ fn improve(
                 ),
             });
             let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+            let stalled = log_text.contains("GAH: killed after ")
+                && log_text.contains(" with no new output (stalled, not just slow).");
+            if stalled {
+                notify_event(
+                    cfg,
+                    profile,
+                    NotifyEvent::BackendStalled {
+                        work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
+                        backend: &route.effective_backend,
+                        model: route.effective_model.as_deref().unwrap_or(&llm.model),
+                        duration_seconds: result.duration_secs,
+                    },
+                );
+            }
             if attempt + 1 < max_attempts {
                 if let Some(parsed) = mark_backend_unavailable_from_output(
                     &route.effective_backend,
@@ -7675,6 +7689,38 @@ fn mark_backend_unavailable_from_output_at(
     log_path: &str,
 ) -> Result<Option<crate::quota_parser::ParsedFailure>> {
     let now = now_with_local_offset();
+    // An idle watchdog kill is a backend outage signal, not an ordinary agent
+    // failure. Keep this route out of the candidate set for a short bounded
+    // cooldown so the next attempt can use another backend/model instead of
+    // burning the same five-minute stall again.
+    if log_text.contains("GAH: killed after ")
+        && log_text.contains(" with no new output (stalled, not just slow).")
+    {
+        let cooldown = now + time::Duration::minutes(15);
+        crate::availability::record_unavailable(
+            state_path,
+            backend,
+            model.filter(|m| !m.is_empty()),
+            quota_pool,
+            crate::availability::Reason::BackendOutage,
+            crate::availability::Source::BackendError,
+            Some(cooldown),
+            Some(format!(
+                "backend idle watchdog stalled; cooldown=15m; log={log_path}"
+            )),
+            now,
+        )?;
+        return Ok(Some(crate::quota_parser::ParsedFailure {
+            backend: backend.to_string(),
+            kind: crate::quota_parser::FailureKind::RateLimited,
+            retryable: true,
+            reset_at: Some(cooldown.format(&Rfc3339)?),
+            retry_after_seconds: Some(15 * 60),
+            confidence: crate::quota_parser::Confidence::High,
+            matched_evidence: "GAH idle watchdog stall".to_string(),
+            unresolved_timezone: None,
+        }));
+    }
     let Some(parsed) = crate::quota_parser::parse(backend, log_text, now) else {
         return Ok(None);
     };

@@ -1,0 +1,13 @@
+[Unit]
+Description=GAH Telegram health notification
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=khing
+Group=khing
+ExecStart=/bin/sh -c 'msg=$$(/usr/bin/python3 /home/khing/workspace/agent-lab/scripts/gah-watchdog.py); if [ -n "$$msg" ]; then printf "%s\\n" "$$msg" | /usr/local/bin/hermes send -t telegram -q; fi'
+TimeoutStartSec=90
+StandardOutput=journal
+StandardError=journal
