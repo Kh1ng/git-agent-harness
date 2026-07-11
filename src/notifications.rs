@@ -57,6 +57,14 @@ pub enum NotifyEvent<'a> {
         failure_class: &'a str,
         work_id: &'a str,
     },
+    /// A backend was killed by GAH's idle watchdog. This is actionable even
+    /// when the dispatch still has another route to try.
+    BackendStalled {
+        work_id: &'a str,
+        backend: &'a str,
+        model: &'a str,
+        duration_seconds: f64,
+    },
 }
 
 /// Render a `backend`/`model` pair for a human-facing message. Some
@@ -104,6 +112,15 @@ pub fn format_message(event: &NotifyEvent) -> String {
         } => {
             format!("[gah] dispatch failed [{failure_class}] work_id={work_id}")
         }
+        NotifyEvent::BackendStalled {
+            work_id,
+            backend,
+            model,
+            duration_seconds,
+        } => format!(
+            "[gah] backend stalled work_id={work_id} route={} duration={duration_seconds:.0}s; rerouting",
+            route_label(backend, model)
+        ),
     }
 }
 
@@ -170,6 +187,15 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
             failure_class,
             work_id,
         } => format!("A dispatch failed terminally: [{failure_class}] work_id={work_id}."),
+        NotifyEvent::BackendStalled {
+            work_id,
+            backend,
+            model,
+            duration_seconds,
+        } => format!(
+            "Backend stalled for work_id={work_id} on {} after {duration_seconds:.0}s; GAH is rerouting.",
+            route_label(backend, model)
+        ),
         // Already resolved -- nothing for a woken agent to act on.
         NotifyEvent::MrMerged { .. } => return None,
     };

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the GAH Telegram health check every ten minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
