@@ -40,11 +40,9 @@ pub struct RunResult {
     /// whole log — is what usage/quota parsing consumes, so a single
     /// attempt's usage is never polluted by prior runs.
     pub agy_cli_log_delta: Option<String>,
-    /// For Claude Code: the path to the session transcript `.jsonl`
-    /// produced by this run, if Claude Code wrote one. Backs the
-    /// transcript/Stop-hook per-attempt usage parser (issue #153). `None`
-    /// for non-Claude backends and for runs where the transcript could not
-    /// be located.
+    /// Backend-owned structured usage artifact. Claude uses its transcript
+    /// JSONL; Vibe uses its session `meta.json`. `None` when the backend did
+    /// not produce a discoverable artifact.
     pub transcript_path: Option<String>,
 }
 
@@ -538,12 +536,15 @@ pub fn run_vibe_with_executable(
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
+    let started_at = std::time::SystemTime::now();
 
     let mut cmd = Command::new(executable);
     // --trust: automation-only, not persisted to trusted_folders.toml --
     // skips the interactive trust prompt without touching global config.
     // --auto-approve: same automation need as agy's --dangerously-skip-permissions.
-    cmd.args(["-p", task, "--trust", "--auto-approve"])
+    // JSON is still written to the attempt log, while Vibe's durable session
+    // metadata supplies the authoritative token/model totals.
+    cmd.args(["-p", task, "--trust", "--auto-approve", "--output", "json"])
         .args(extra_args)
         .current_dir(worktree);
     for (k, v) in env_vars {
@@ -557,13 +558,75 @@ pub fn run_vibe_with_executable(
         "launching vibe; is it installed and on PATH?",
     )?;
 
+    let metadata_path = find_vibe_session_metadata(env_vars, worktree, started_at);
+
     Ok(RunResult {
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
-        transcript_path: None,
+        transcript_path: metadata_path,
     })
+}
+
+/// Locate the Vibe session created by this invocation without relying on a
+/// global "latest session" guess. Matching both working directory and start
+/// time prevents concurrent workers from attributing each other's usage.
+fn find_vibe_session_metadata(
+    env_vars: &[(String, String)],
+    worktree: &Path,
+    started_at: std::time::SystemTime,
+) -> Option<String> {
+    let home = env_vars
+        .iter()
+        .find(|(key, _)| key == "VIBE_HOME")
+        .map(|(_, value)| PathBuf::from(value))
+        .or_else(|| {
+            env_vars
+                .iter()
+                .find(|(key, _)| key == "HOME")
+                .map(|(_, value)| PathBuf::from(value).join(".vibe"))
+        })
+        .or_else(|| env::var_os("VIBE_HOME").map(PathBuf::from))
+        .or_else(|| env::var_os("HOME").map(|value| PathBuf::from(value).join(".vibe")))?;
+    let sessions = home.join("logs/session");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let worktree_string = worktree.to_string_lossy().into_owned();
+    for entry in fs::read_dir(sessions).ok()?.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let metadata_path = dir.join("meta.json");
+        let Ok(modified) = fs::metadata(&metadata_path).and_then(|metadata| metadata.modified())
+        else {
+            continue;
+        };
+        if modified < started_at {
+            continue;
+        }
+        let Ok(metadata) = fs::read_to_string(&metadata_path) else {
+            continue;
+        };
+        let Ok(root) = serde_json::from_str::<serde_json::Value>(&metadata) else {
+            continue;
+        };
+        let cwd = root
+            .get("environment")
+            .and_then(|environment| environment.get("working_directory"))
+            .and_then(|value| value.as_str());
+        if cwd != Some(worktree_string.as_str()) {
+            continue;
+        }
+        if best
+            .as_ref()
+            .map(|(time, _)| modified > *time)
+            .unwrap_or(true)
+        {
+            best = Some((modified, metadata_path));
+        }
+    }
+    best.map(|(_, path)| path.to_string_lossy().into_owned())
 }
 
 /// Run OpenCode CLI non-interactively via `opencode run --model <model> --dir <path> --auto `<prompt>`.
@@ -724,7 +787,29 @@ fn agy_cli_log_path(env_vars: &[(String, String)], _executable: &Path) -> Option
         .find(|(k, _)| k == "HOME")
         .map(|(_, v)| v.clone())
         .or_else(|| std::env::var("HOME").ok())?;
-    Some(PathBuf::from(home).join(".gemini/antigravity-cli/cli.log"))
+    let root = PathBuf::from(home).join(".gemini/antigravity-cli");
+    let legacy = root.join("cli.log");
+    if legacy.exists() {
+        return Some(legacy);
+    }
+    // Recent AGY releases rotate logs under `log/cli-*.log`; use the newest
+    // file so the run-scoped offset still works with the installed layout.
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(root.join("log")).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !path.file_name()?.to_string_lossy().starts_with("cli-") {
+            continue;
+        }
+        let modified = fs::metadata(&path).ok()?.modified().ok()?;
+        if newest
+            .as_ref()
+            .map(|(time, _)| modified > *time)
+            .unwrap_or(true)
+        {
+            newest = Some((modified, path));
+        }
+    }
+    newest.map(|(_, path)| path)
 }
 
 /// #155: read only the bytes appended to AGY's cli.log after `pre_offset`,

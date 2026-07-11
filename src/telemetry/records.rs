@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Current schema version for exported telemetry records
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -69,6 +69,8 @@ pub struct AttemptUsageRecord {
     pub effective_model: Option<String>,
     /// Requested model
     pub requested_model: Option<String>,
+    /// Model reported by the backend/session, when available
+    pub actual_model: Option<String>,
 
     /// Exit code from the attempt
     pub exit_code: Option<i32>,
@@ -90,6 +92,16 @@ pub struct AttemptUsageRecord {
 
     /// Usage source (where the usage data came from)
     pub usage_source: Option<String>,
+    /// Explicit accounting classification: quota_backed, api_key_backed,
+    /// local_unmetered, or unknown.
+    pub usage_classification: Option<String>,
+    /// Safe logical backend instance/account attribution.
+    pub backend_instance: Option<String>,
+    pub model_provider: Option<String>,
+    pub account_label: Option<String>,
+    pub pricing_source: Option<String>,
+    pub pricing_version: Option<String>,
+    pub cost_unknown_reason: Option<String>,
     /// Input tokens consumed
     pub input_tokens: Option<u64>,
     /// Output tokens produced

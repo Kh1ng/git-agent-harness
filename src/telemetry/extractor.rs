@@ -46,8 +46,13 @@ pub fn extract_attempt_usage_records(
             backend: attempt.backend.clone(),
             effective_backend: attempt.backend.clone(),
             requested_backend: entry.requested_backend.clone(),
-            effective_model: attempt.effective_model.clone(),
+            effective_model: attempt
+                .usage
+                .actual_model
+                .clone()
+                .or_else(|| attempt.effective_model.clone()),
             requested_model: entry.requested_model.clone(),
+            actual_model: attempt.usage.actual_model.clone(),
             exit_code: attempt.exit_code,
             duration_seconds: attempt.duration_seconds,
             validation_result: attempt.validation_result.clone(),
@@ -57,6 +62,41 @@ pub fn extract_attempt_usage_records(
             human_required: entry.human_required,
             routing_reason: entry.routing_reason.clone(),
             usage_source: attempt.usage.usage_source.clone(),
+            usage_classification: attempt
+                .usage
+                .usage_classification
+                .clone()
+                .or_else(|| entry.usage.usage_classification.clone()),
+            backend_instance: attempt
+                .usage
+                .backend_instance
+                .clone()
+                .or_else(|| Some(attempt.backend.clone())),
+            model_provider: attempt
+                .usage
+                .provider
+                .clone()
+                .or_else(|| entry.usage.provider.clone()),
+            account_label: attempt
+                .usage
+                .account_label
+                .clone()
+                .or_else(|| entry.usage.account_label.clone()),
+            pricing_source: attempt
+                .usage
+                .pricing_source
+                .clone()
+                .or_else(|| entry.usage.pricing_source.clone()),
+            pricing_version: attempt
+                .usage
+                .pricing_version
+                .clone()
+                .or_else(|| entry.usage.pricing_version.clone()),
+            cost_unknown_reason: attempt
+                .usage
+                .cost_unknown_reason
+                .clone()
+                .or_else(|| entry.usage.cost_unknown_reason.clone()),
             input_tokens: attempt.usage.input_tokens,
             output_tokens: attempt.usage.output_tokens,
             cache_read_tokens: attempt.usage.cache_read_tokens,
@@ -120,8 +160,11 @@ pub fn extract_quota_observation_records(
             effective_backend: entry.effective_backend.clone(),
             model: entry.requested_model.clone(),
             effective_model: entry.effective_model.clone(),
-            account_scope: None, // Not currently tracked in ledger
-            quota_pool: None,    // Not currently tracked in ledger
+            account_scope: entry.usage.account_label.clone(),
+            quota_pool: entry
+                .routing_diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.selected_quota_pool.clone()),
             quota_window: quota_window.clone(),
             quota_used_percent: entry.usage.quota_used_percent,
             quota_remaining_percent: entry.usage.quota_remaining_percent,
@@ -173,8 +216,15 @@ pub fn extract_quota_observation_records(
                 effective_backend: attempt.backend.clone(),
                 model: attempt.effective_model.clone(),
                 effective_model: attempt.effective_model.clone(),
-                account_scope: None,
-                quota_pool: None,
+                account_scope: attempt
+                    .usage
+                    .account_label
+                    .clone()
+                    .or_else(|| entry.usage.account_label.clone()),
+                quota_pool: entry
+                    .routing_diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.selected_quota_pool.clone()),
                 quota_window: quota_window.clone(),
                 quota_used_percent: attempt.usage.quota_used_percent,
                 quota_remaining_percent: attempt.usage.quota_remaining_percent,

@@ -1,6 +1,7 @@
 use crate::ledger::summary::GroupQuotaObservation;
 use crate::ledger::LedgerUsage;
 use regex::Regex;
+use serde_json::Value;
 use std::process::Command;
 
 /// Parse generic usage text from backend output logs.
@@ -73,6 +74,59 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
         usage.usage_source = Some(source_hint.to_string());
     }
     usage
+}
+
+/// Parse the durable metadata written by Mistral Vibe for a completed
+/// programmatic session. Vibe records cumulative prompt/completion tokens and
+/// the active model in `logs/session/<id>/meta.json`; the CLI's human-readable
+/// stdout does not reliably include those values.
+pub fn parse_vibe_session_metadata(metadata_json: &str) -> LedgerUsage {
+    let Ok(root) = serde_json::from_str::<Value>(metadata_json) else {
+        return LedgerUsage::default();
+    };
+    let stats = root.get("stats").unwrap_or(&Value::Null);
+    let input_tokens = stats.get("session_prompt_tokens").and_then(Value::as_u64);
+    let output_tokens = stats
+        .get("session_completion_tokens")
+        .and_then(Value::as_u64);
+    let total_tokens = match (input_tokens, output_tokens) {
+        (Some(input), Some(output)) => Some(input + output),
+        _ => stats
+            .get("session_total_llm_tokens")
+            .and_then(Value::as_u64),
+    };
+    let requests_count = stats.get("steps").and_then(Value::as_u64);
+    let actual_model = root
+        .get("config")
+        .and_then(|config| config.get("active_model"))
+        .and_then(Value::as_str)
+        .or_else(|| root.get("model").and_then(Value::as_str))
+        .map(str::to_string);
+    let observed_at = root
+        .get("end_time")
+        .and_then(Value::as_str)
+        .or_else(|| root.get("start_time").and_then(Value::as_str))
+        .map(str::to_string);
+
+    if input_tokens.is_none()
+        && output_tokens.is_none()
+        && total_tokens.is_none()
+        && requests_count.is_none()
+        && actual_model.is_none()
+    {
+        return LedgerUsage::default();
+    }
+
+    LedgerUsage {
+        usage_source: Some("vibe_session_metadata".to_string()),
+        actual_model,
+        observed_at,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        requests_count,
+        ..LedgerUsage::default()
+    }
 }
 
 /// #155 (TICKET-066 / #151): parse AGY's own quota/reset messages from a
@@ -155,6 +209,14 @@ fn agy_find_after(text: &str, keys: &[&str]) -> Option<String> {
 /// stdout parse doesn't have). Returns a new `LedgerUsage`.
 pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
     LedgerUsage {
+        usage_classification: base.usage_classification.or(other.usage_classification),
+        backend_instance: base.backend_instance.or(other.backend_instance),
+        provider: base.provider.or(other.provider),
+        actual_model: base.actual_model.or(other.actual_model),
+        account_label: base.account_label.or(other.account_label),
+        pricing_source: base.pricing_source.or(other.pricing_source),
+        pricing_version: base.pricing_version.or(other.pricing_version),
+        cost_unknown_reason: base.cost_unknown_reason.or(other.cost_unknown_reason),
         input_tokens: base.input_tokens.or(other.input_tokens),
         output_tokens: base.output_tokens.or(other.output_tokens),
         cache_read_tokens: base.cache_read_tokens.or(other.cache_read_tokens),
@@ -434,6 +496,7 @@ mod tests {
     use super::parse_codex_exec_json;
     use super::parse_codex_status_json;
     use super::parse_generic_usage;
+    use super::parse_vibe_session_metadata;
 
     // ── codex exec --json (Issue #152) ───────────────────────────────────
 
@@ -448,6 +511,24 @@ mod tests {
         assert_eq!(usage.total_tokens, Some(14230 + 5200 + 2150 + 890 + 340));
         assert_eq!(usage.requests_count, Some(2));
         assert_eq!(usage.usage_source.as_deref(), Some("codex_exec_json"));
+    }
+
+    #[test]
+    fn vibe_session_metadata_extracts_tokens_model_and_steps() {
+        let usage = parse_vibe_session_metadata(
+            r#"{
+              "start_time":"2026-07-10T10:00:00Z",
+              "end_time":"2026-07-10T10:02:00Z",
+              "config":{"active_model":"mistral-medium-3.5"},
+              "stats":{"steps":4,"session_prompt_tokens":1200,"session_completion_tokens":300,"session_total_llm_tokens":1500}
+            }"#,
+        );
+        assert_eq!(usage.input_tokens, Some(1200));
+        assert_eq!(usage.output_tokens, Some(300));
+        assert_eq!(usage.total_tokens, Some(1500));
+        assert_eq!(usage.requests_count, Some(4));
+        assert_eq!(usage.actual_model.as_deref(), Some("mistral-medium-3.5"));
+        assert_eq!(usage.usage_source.as_deref(), Some("vibe_session_metadata"));
     }
 
     #[test]

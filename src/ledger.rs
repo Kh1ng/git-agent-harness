@@ -118,6 +118,27 @@ pub struct AttemptRecord {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
+    /// Normalized accounting class. This is explicit even when the backend
+    /// cannot identify it; `unknown` is never treated as zero-cost.
+    #[serde(default)]
+    pub usage_classification: Option<String>,
+    /// Safe logical instance/account labels; never secrets or raw API keys.
+    #[serde(default)]
+    pub backend_instance: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Model reported by the backend/session, distinct from the route's
+    /// requested/effective model when an alias or fallback substituted it.
+    #[serde(default)]
+    pub actual_model: Option<String>,
+    #[serde(default)]
+    pub account_label: Option<String>,
+    #[serde(default)]
+    pub pricing_source: Option<String>,
+    #[serde(default)]
+    pub pricing_version: Option<String>,
+    #[serde(default)]
+    pub cost_unknown_reason: Option<String>,
     #[serde(default)]
     pub observed_at: Option<String>,
     pub input_tokens: Option<u64>,
@@ -1480,6 +1501,9 @@ pub mod summary {
         pub entries: usize,
         pub attempts: usize,
         pub validation_pass: usize,
+        /// Validation success divided by executions in this backend/model
+        /// group. `None` means no executions were observed.
+        pub success_rate: Option<f64>,
         pub review_verdict_distribution: BTreeMap<String, usize>,
         pub total_cost_usd: Option<f64>,
         pub actual_cost_usd: Option<f64>,
@@ -1493,6 +1517,8 @@ pub mod summary {
         pub cache_write_tokens: Option<u64>,
         pub total_tokens: Option<u64>,
         pub requests_count: Option<u64>,
+        pub tokens_per_success: Option<f64>,
+        pub requests_per_success: Option<f64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub quota_observations: Vec<GroupQuotaObservation>,
     }
@@ -2224,12 +2250,25 @@ pub mod summary {
             } else {
                 None
             };
+            let success_rate = (group_entry_count > 0)
+                .then_some(validation_pass as f64 / group_entry_count as f64);
+            let tokens_per_success = if validation_pass > 0 && total_tokens_seen {
+                Some(total_tokens as f64 / validation_pass as f64)
+            } else {
+                None
+            };
+            let requests_per_success = if validation_pass > 0 && requests_count_seen {
+                Some(requests_count as f64 / validation_pass as f64)
+            } else {
+                None
+            };
 
             summaries.push(GroupSummary {
                 group_key,
                 entries: group_entry_count,
                 attempts,
                 validation_pass,
+                success_rate,
                 review_verdict_distribution,
                 total_cost_usd: cost_seen.then_some(total_cost_usd),
                 actual_cost_usd: actual_cost_seen.then_some(actual_cost_total),
@@ -2243,6 +2282,8 @@ pub mod summary {
                 cache_write_tokens: cache_write_tokens_seen.then_some(cache_write_tokens),
                 total_tokens: total_tokens_seen.then_some(total_tokens),
                 requests_count: requests_count_seen.then_some(requests_count),
+                tokens_per_success,
+                requests_per_success,
                 quota_observations: quota_observations.into_values().collect(),
             });
         }
