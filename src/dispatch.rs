@@ -3667,12 +3667,12 @@ mod tests {
         attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body,
         build_metadata_rich_mr_body, build_mr_title, build_pm_plan_task, build_standard_mr_body,
         build_task, classify_validation_failure_progress, collect_pm_preflight,
-        collect_ticket_summaries, derive_reviewer_tier, extract_issue_number,
-        first_markdown_heading, format_issue_for_focus, is_issue_number_reference,
-        mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
-        parse_review_verdict, parse_ticket_metadata, parse_ticket_metadata_from_issue,
-        render_review_comment, review_escalation_reason, review_labels, review_preflight,
-        run_backend, scan_available_tickets, strip_terminal_noise,
+        collect_ticket_summaries, derive_reviewer_tier, extract_backend_summary,
+        extract_issue_number, first_markdown_heading, format_issue_for_focus,
+        is_issue_number_reference, mark_backend_unavailable_from_output_at, next_ticket_id,
+        parse_pm_plan, parse_review_verdict, parse_ticket_metadata,
+        parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
+        review_labels, review_preflight, run_backend, scan_available_tickets, strip_terminal_noise,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
     };
@@ -3709,6 +3709,59 @@ mod tests {
     fn strip_terminal_noise_leaves_plain_text_untouched() {
         let plain = "Implemented the fix.\nAll tests pass.";
         assert_eq!(strip_terminal_noise(plain), plain);
+    }
+
+    #[test]
+    fn strip_terminal_noise_removes_cargo_test_spam() {
+        // Reproduces the exact garbage confirmed live in PR #217: a correct
+        // one-line quota_store.rs fix whose PR body and commit message were
+        // buried under dozens of raw `cargo test` result lines, with the
+        // backend's one real summary sentence left at the very end.
+        let raw = "running 23 tests\n\
+                   test utf8_safety_with_various_multibyte_chars ... ok\n\
+                   test strip_terminal_noise_leaves_plain_text_untouched ... ok\n\
+                   test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n\
+                   \n\
+                   Doc-tests git_agent_harness\n\
+                   $ cargo test 2>&1 | grep -E \"test result|FAILED|error\\[\" | tail -40\n\
+                   test result: ok. 551 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n\
+                   \n\
+                   All tests pass. Fixed `quota_store::append` to propagate flock failure \
+                   (src/quota_store.rs:91) matching the sibling convention in \
+                   availability.rs/ledger.rs.";
+        let cleaned = strip_terminal_noise(raw);
+        assert_eq!(
+            cleaned,
+            "All tests pass. Fixed `quota_store::append` to propagate flock failure \
+             (src/quota_store.rs:91) matching the sibling convention in \
+             availability.rs/ledger.rs."
+        );
+    }
+
+    #[test]
+    fn extract_backend_summary_survives_test_spam_past_2000_raw_chars() {
+        // The old implementation truncated to the last 2000 *raw* chars
+        // before stripping noise, so a long enough cargo test dump could
+        // consume the whole window and leave nothing (or a fragment) of the
+        // real summary. Build a log where the noise alone exceeds 2000
+        // chars, confirming the wider read-then-clean-then-truncate order
+        // still recovers the real sentence.
+        let mut log = String::new();
+        for i in 0..80 {
+            log.push_str(&format!("test some_test_case_{i} ... ok\n"));
+        }
+        log.push_str(
+            "test result: ok. 80 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        );
+        assert!(log.len() > 2000, "fixture must exceed the raw tail window");
+        log.push_str("All tests pass. Fixed the bug.");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("backend-output.log");
+        std::fs::write(&log_path, &log).unwrap();
+
+        let summary = extract_backend_summary(log_path.to_str().unwrap());
+        assert_eq!(summary, "All tests pass. Fixed the bug.");
     }
 
     fn profile(local_path: &Path) -> Profile {
@@ -7822,6 +7875,27 @@ fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
     }
 }
 
+/// True for a line that is raw test-runner/build-tool output rather than
+/// prose: `cargo test` per-test lines and result tables, `Doc-tests`
+/// headers, shell echoes of the command itself, and pytest/dotnet summary
+/// lines. Confirmed live (PR #217): a one-line quota_store.rs fix whose
+/// PR body and commit message were buried under dozens of these lines,
+/// with the backend's one real summary sentence left at the very end.
+fn is_test_runner_noise_line(line: &str) -> bool {
+    let patterns = [
+        r"^running \d+ tests?$",
+        r"^test \S.*\.\.\. (ok|FAILED|ignored)$",
+        r"^test result: (ok|FAILED)\.",
+        r"^\$ \S",
+        r"^Doc-tests \S",
+        r"^\d+ \w+(, \d+ \w+)* in [\d.]+s\b",
+        r"^(Passed!|Failed!|Test Run (Successful|Failed))\b",
+    ];
+    patterns
+        .iter()
+        .any(|p| regex::Regex::new(p).unwrap().is_match(line))
+}
+
 /// Extract the backend summary from the tail of the backend output log.
 /// This captures the backend's own final summary/reasoning.
 /// Strips terminal rendering noise from a backend's raw log tail before it
@@ -7832,7 +7906,8 @@ fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
 /// backend-output.log outside the `--json` event stream and get grabbed
 /// verbatim by the raw-tail extraction below -- landing in the PR body
 /// looking like the model itself produced garbled text, when it's actually
-/// terminal styling the extraction never stripped.
+/// terminal styling the extraction never stripped. Also strips raw
+/// test-runner/build-tool output (see `is_test_runner_noise_line`).
 fn strip_terminal_noise(text: &str) -> String {
     let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
     let without_ansi = ansi.replace_all(text, "");
@@ -7849,7 +7924,8 @@ fn strip_terminal_noise(text: &str) -> String {
                 // substrings rather than a single fixed prefix.
                 || line.contains("openhands --resume")
                 || line.contains("resume this")
-                || *line == "conversation.")
+                || *line == "conversation."
+                || is_test_runner_noise_line(line))
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -7857,14 +7933,19 @@ fn strip_terminal_noise(text: &str) -> String {
 
 fn extract_backend_summary(log_path: &str) -> String {
     let log_text = fs::read_to_string(log_path).unwrap_or_default();
-    // Take the last ~2000 characters to get the backend's final summary
     if log_text.is_empty() {
-        String::new()
-    } else {
-        // Use UTF-8 safe suffix to avoid cutting in the middle of a character
-        let tail = utf8_safe_suffix(&log_text, 2000);
-        strip_terminal_noise(tail)
+        return String::new();
     }
+    // Widen the raw read window well past the final ~2000-char summary
+    // target: test-runner/build noise (e.g. a `cargo test` dump) can run to
+    // thousands of characters right before the backend's real closing
+    // sentence, so stripping noise from only the last 2000 raw chars can
+    // truncate mid-table and leave a fragment or nothing at all (PR #217).
+    // Read a wider window, strip noise from it, then take the tail of the
+    // CLEANED text -- not the other way around.
+    let wide_tail = utf8_safe_suffix(&log_text, 20_000);
+    let cleaned = strip_terminal_noise(wide_tail);
+    utf8_safe_suffix(&cleaned, 2000).to_string()
 }
 
 fn format_validation_outcome(result: Option<&str>) -> &'static str {
