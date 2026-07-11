@@ -396,6 +396,13 @@ pub fn availability_for(
 ) -> Result<AvailabilityDecision> {
     let state = load_state(state_path)?;
 
+    // Precedence is a single timeline per scope: the *last* record in file
+    // order matching a scope decides. A newer `available` record (e.g. an
+    // operator `gah availability clear`, which appends rather than rewriting)
+    // therefore overrides any older `unavailable` in the same scope -- that's
+    // why `clear` works without deleting history. An *active* `unavailable`
+    // record still blocks, with the usual pool > backend-wide > model-specific
+    // precedence when two active blocks coexist.
     if let Some(pool) = quota_pool {
         if let Some(record) = latest_for_pool(&state.records, pool) {
             if is_active(record, now) {
@@ -405,6 +412,9 @@ pub fn availability_for(
                     unavailable_until: record.unavailable_until.clone(),
                     scope: Some(BlockScope::QuotaPool),
                 });
+            }
+            if record.status == Status::Available {
+                return Ok(AvailabilityDecision::eligible());
             }
         }
     }
@@ -418,6 +428,9 @@ pub fn availability_for(
                 scope: Some(BlockScope::BackendWide),
             });
         }
+        if record.status == Status::Available {
+            return Ok(AvailabilityDecision::eligible());
+        }
     }
 
     if let Some(model) = model {
@@ -429,6 +442,9 @@ pub fn availability_for(
                     unavailable_until: record.unavailable_until.clone(),
                     scope: Some(BlockScope::ModelSpecific),
                 });
+            }
+            if record.status == Status::Available {
+                return Ok(AvailabilityDecision::eligible());
             }
         }
     }
@@ -529,7 +545,10 @@ fn format_remaining(until: &str, now: OffsetDateTime) -> Option<String> {
 
 /// TICKET-069: `gah availability` (human) and `gah availability --json`.
 pub mod cli {
-    use super::{format_remaining, list_scopes, resolve_state_path, ScopeStatus};
+    use super::{
+        format_remaining, list_scopes, now_rfc3339, resolve_state_path, AvailabilityRecord, Reason,
+        ScopeStatus, Source, Status,
+    };
     use anyhow::Result;
     use serde::Serialize;
     use time::OffsetDateTime;
@@ -611,30 +630,47 @@ pub mod cli {
         Ok(())
     }
 
-    /// Issue #179: a real backend/model recovery (confirmed live -- e.g. a
-    /// codex `quota_exhausted` record surviving hours after the operator
-    /// confirmed the account is actually healthy again) previously had no
-    /// safe fix short of hand-editing the shared `availability.json` file,
-    /// which is read-modify-write racy against concurrent parallel workers.
-    /// This goes through `update_state`'s lock-protected read-modify-write,
-    /// same as every other mutation of this file. `model: None` clears every
-    /// record for the backend regardless of model; `Some(m)` clears only
-    /// that exact model match.
+    /// Issue #179: operator override for "the tracked availability is wrong,
+    /// an operator knows better" (confirmed live -- e.g. a codex
+    /// `quota_exhausted` record surviving hours after the operator confirmed
+    /// the account is actually healthy again). This appends a
+    /// `status: available, source: manual` record for the given scope via the
+    /// same lock-protected `update_state` read-modify-write every other
+    /// availability mutation uses, so it's safe against concurrent parallel
+    /// workers -- unlike hand-editing `availability.json` directly, which is
+    /// read-modify-write racy.
+    ///
+    /// It appends (never rewrites history): eligibility is always derived from
+    /// the *last* record in file order matching a scope, so a fresh
+    /// `available` record immediately unblocks that scope on the next
+    /// `availability_for` read. `model: None` marks the backend-wide scope
+    /// (overrides any backend-wide block); `Some(m)` marks only that exact
+    /// model; `quota_pool: Some(p)` marks the pool-wide scope. These are
+    /// independent scopes in `availability_for`'s precedence, so a scoped
+    /// clear never affects other scopes.
     pub fn clear(
         state_path: &std::path::Path,
         backend: &str,
         model: Option<&str>,
-    ) -> Result<usize> {
+        quota_pool: Option<&str>,
+    ) -> Result<()> {
         let backend = crate::config::canonical_backend_name(backend).to_string();
-        let mut removed = 0usize;
+        let now = OffsetDateTime::now_utc();
+        let record = AvailabilityRecord {
+            backend: backend.clone(),
+            model: model.map(str::to_string),
+            quota_pool: quota_pool.map(str::to_string),
+            status: Status::Available,
+            reason: Reason::Unknown,
+            observed_at: now_rfc3339(now),
+            unavailable_until: None,
+            source: Source::Manual,
+            last_error_summary: None,
+        };
         super::update_state(state_path, |state| {
-            let before = state.records.len();
-            state.records.retain(|r| {
-                !(r.backend == backend && model.is_none_or(|m| r.model.as_deref() == Some(m)))
-            });
-            removed = before - state.records.len();
+            state.records.push(record);
         })?;
-        Ok(removed)
+        Ok(())
     }
 }
 
@@ -1206,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_clear_removes_matching_records_for_backend_and_model() {
+    fn cli_clear_marks_backend_and_model_available_without_touching_others() {
         let tmp = TempDir::new().unwrap();
         let p = path(&tmp);
         let now = OffsetDateTime::now_utc();
@@ -1233,17 +1269,34 @@ mod tests {
         )
         .unwrap();
 
-        let removed = cli::clear(&p, "codex", Some("gpt-5.4-mini")).unwrap();
-        assert_eq!(removed, 1);
+        // Pre-condition: codex model is blocked.
+        assert!(
+            !availability_for(&p, "codex", Some("gpt-5.4-mini"), now)
+                .unwrap()
+                .eligible
+        );
+
+        cli::clear(&p, "codex", Some("gpt-5.4-mini"), None).unwrap();
 
         let d_codex = availability_for(&p, "codex", Some("gpt-5.4-mini"), now).unwrap();
-        assert!(d_codex.eligible, "cleared record must no longer block");
+        assert!(d_codex.eligible, "cleared scope must be eligible again");
         let d_vibe = availability_for(&p, "vibe", Some("default"), now).unwrap();
         assert!(!d_vibe.eligible, "clear must not touch other backends");
+
+        // Append-only: the original blocking record is preserved, with a
+        // newer manual `available` record now winning the scope.
+        let state = load_state(&p).unwrap();
+        assert!(state.records.iter().any(|r| r.backend == "codex"
+            && r.model.as_deref() == Some("gpt-5.4-mini")
+            && r.status == Status::Unavailable));
+        assert!(state.records.iter().any(|r| r.backend == "codex"
+            && r.model.as_deref() == Some("gpt-5.4-mini")
+            && r.status == Status::Available
+            && r.source == Source::Manual));
     }
 
     #[test]
-    fn cli_clear_without_model_clears_every_model_for_backend() {
+    fn cli_clear_without_model_marks_backend_wide_available() {
         let tmp = TempDir::new().unwrap();
         let p = path(&tmp);
         let now = OffsetDateTime::now_utc();
@@ -1270,8 +1323,7 @@ mod tests {
         )
         .unwrap();
 
-        let removed = cli::clear(&p, "agy", None).unwrap();
-        assert_eq!(removed, 2);
+        cli::clear(&p, "agy", None, None).unwrap();
         assert!(
             availability_for(&p, "agy", Some("Gemini 3.5 Flash (Medium)"), now)
                 .unwrap()
@@ -1285,10 +1337,57 @@ mod tests {
     }
 
     #[test]
-    fn cli_clear_reports_zero_when_nothing_matches() {
+    fn cli_clear_with_quota_pool_marks_only_that_pool() {
         let tmp = TempDir::new().unwrap();
         let p = path(&tmp);
-        let removed = cli::clear(&p, "codex", Some("gpt-5.4-mini")).unwrap();
-        assert_eq!(removed, 0);
+        let now = OffsetDateTime::now_utc();
+        super::record_unavailable(
+            &p,
+            "claude",
+            Some("claude-sonnet"),
+            Some("claude-main"),
+            Reason::QuotaExhausted,
+            Source::BackendError,
+            Some(now + time::Duration::hours(1)),
+            None,
+            now,
+        )
+        .unwrap();
+        assert!(
+            !super::availability_for(
+                &p,
+                "claude",
+                Some("claude-sonnet"),
+                Some("claude-main"),
+                now
+            )
+            .unwrap()
+            .eligible
+        );
+
+        cli::clear(&p, "claude", None, Some("claude-main")).unwrap();
+
+        assert!(
+            super::availability_for(
+                &p,
+                "claude",
+                Some("claude-sonnet"),
+                Some("claude-main"),
+                now
+            )
+            .unwrap()
+            .eligible,
+            "clearing the pool must unblock candidates sharing it"
+        );
+
+        // Append-only: exactly one new manual record added.
+        let state = load_state(&p).unwrap();
+        let manual: Vec<_> = state
+            .records
+            .iter()
+            .filter(|r| r.source == Source::Manual && r.status == Status::Available)
+            .collect();
+        assert_eq!(manual.len(), 1);
+        assert_eq!(manual[0].quota_pool.as_deref(), Some("claude-main"));
     }
 }
