@@ -613,14 +613,72 @@ pub struct LoopOnceResult {
     pub outcome: String,
 }
 
-fn loop_lock_path(profile_name: &str) -> PathBuf {
+/// The lock is scoped by profile name AND config file identity: a profile
+/// is really a named entry *within a specific config file*, so two
+/// different config files that happen to define a same-named profile (e.g.
+/// separate test fixtures, or a user's dev vs. prod config) are genuinely
+/// independent and must not block each other. Two invocations against the
+/// same config file (the real-world incident this guards against: the
+/// daemon and an ad-hoc `--once` both using the default
+/// `~/.config/gah/config.toml`) hash to the same lock file.
+fn loop_lock_path(profile_name: &str, config_path: &std::path::Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
     let state_root = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    state_root
-        .join("gah")
-        .join(format!("loop-{}.lock", profile_name.replace('/', "_")))
+    let canonical_config =
+        std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical_config.hash(&mut hasher);
+    state_root.join("gah").join(format!(
+        "loop-{}-{:x}.lock",
+        profile_name.replace('/', "_"),
+        hasher.finish()
+    ))
+}
+
+/// Held for the lifetime of a single gah invocation (daemon loop, `--once`,
+/// or a manual `dispatch`) that performs real execution -- spawning
+/// backends, claiming tickets, writing ledger entries -- for a profile.
+/// Dropping it releases the underlying flock.
+// The File is never read again -- it exists only so its flock is released on
+// Drop, when the guard goes out of scope at the end of the invocation.
+#[allow(dead_code)]
+pub struct ProfileLock(std::fs::File);
+
+/// Acquire the exclusive per-profile execution lock so that only one gah
+/// process at a time can do real execution work for a given profile of a
+/// given config file.
+///
+/// Callers (see `main.rs`) must call this exactly ONCE per process, at the
+/// outermost entry point for whichever command they're running, and hold
+/// the returned guard for the rest of that invocation. Do not call this
+/// again from within an already-locked process (e.g. from inside
+/// `run_loop`'s per-iteration `run_once` calls) -- POSIX flock exclusivity
+/// is per open-file-description, not per-process, so a second `open()` +
+/// `try_lock_exclusive()` from the same process would conflict with its own
+/// already-held lock and deadlock.
+pub fn acquire_profile_lock(
+    profile_name: &str,
+    config_path: &std::path::Path,
+) -> Result<ProfileLock> {
+    let lock_path = loop_lock_path(profile_name, config_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock.try_lock_exclusive().map_err(|_| {
+        anyhow::anyhow!(
+            "gah already running for profile '{profile_name}' (lock: {})",
+            lock_path.display()
+        )
+    })?;
+    Ok(ProfileLock(lock))
 }
 
 /// Run the controller continuously in one process. The process lock is held
@@ -632,22 +690,9 @@ pub fn run_loop(
     json: bool,
     parallel: usize,
     skip_validation_gate: bool,
+    config_path: &std::path::Path,
 ) -> Result<()> {
-    let lock_path = loop_lock_path(profile_name);
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    lock.try_lock_exclusive().map_err(|_| {
-        anyhow::anyhow!(
-            "gah loop already running for profile '{profile_name}' (lock: {})",
-            lock_path.display()
-        )
-    })?;
+    let _lock = acquire_profile_lock(profile_name, config_path)?;
 
     loop {
         run_once(cfg, profile_name, json, parallel, skip_validation_gate)?;
@@ -1251,7 +1296,56 @@ pub(crate) fn run_dispatch_and_record(
 
 #[cfg(test)]
 mod tests {
-    use super::{NextAction, AUTO_RETRY_CAP};
+    use super::{acquire_profile_lock, loop_lock_path, NextAction, AUTO_RETRY_CAP};
+
+    /// TICKET/incident: an autonomous session ran `gah loop --profile X
+    /// --once` as an ad-hoc diagnostic while the real daemon (`gah loop
+    /// --profile X`, no `--once`) was already running for that profile --
+    /// both executed uncoordinated. `acquire_profile_lock` is the single
+    /// shared entry point both `--once` (main.rs) and manual `gah dispatch`
+    /// (main.rs) now call before doing any real execution; prove a second
+    /// caller for the same profile is rejected, regardless of which of
+    /// those two call sites it simulates.
+    ///
+    /// Uses a unique profile name (not a mocked/overridden lock path) so
+    /// this can't collide with a real profile's lock file or with another
+    /// test running concurrently -- avoids the env-var test race documented
+    /// on `canonical_config_path` above.
+    #[test]
+    fn acquire_profile_lock_rejects_concurrent_second_holder() {
+        let profile = format!("test-lock-race-{}", std::process::id());
+        // A real config file stand-in: two invocations against the *same*
+        // config path are what the real incident looked like (daemon and
+        // `--once` both using the default config).
+        let config_file = tempfile::NamedTempFile::new().unwrap();
+        let config_path = config_file.path();
+        let lock_path = loop_lock_path(&profile, config_path);
+
+        // Simulates the daemon (`gah loop --profile <p>`, no `--once`)
+        // already holding the lock for this profile.
+        let daemon_lock =
+            acquire_profile_lock(&profile, config_path).expect("daemon should acquire cleanly");
+
+        // Simulates a `gah loop --profile <p> --once` invocation racing
+        // against the still-running daemon.
+        let once_err = acquire_profile_lock(&profile, config_path)
+            .err()
+            .expect("--once attempt must fail while the daemon holds the lock");
+        assert!(once_err.to_string().contains(&profile));
+        assert!(once_err
+            .to_string()
+            .contains(&lock_path.display().to_string()));
+
+        // Simulates a manual `gah dispatch --profile <p>` invocation also
+        // racing against the still-running daemon.
+        let dispatch_err = acquire_profile_lock(&profile, config_path)
+            .err()
+            .expect("manual dispatch attempt must fail while the daemon holds the lock");
+        assert!(dispatch_err.to_string().contains(&profile));
+
+        drop(daemon_lock);
+        let _ = std::fs::remove_file(&lock_path);
+    }
 
     #[test]
     fn kind_is_stable_short_name_per_variant() {
