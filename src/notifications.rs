@@ -251,12 +251,23 @@ fn spawn_manager_wake(manager: &str, instruction: &str, log_dir: &std::path::Pat
     }
 
     // Deliberately fire-and-forget: this must not block the dispatch/loop
-    // that triggered it. The spawned process becomes independent; if this
-    // (typically short-lived) gah process exits first, the child is simply
-    // reparented to init, same as any other background process launched
-    // this way -- no zombie risk.
-    if let Err(err) = cmd.spawn() {
-        eprintln!("[gah] manager_wake: failed to spawn '{manager}' (swallowed): {err:#}");
+    // that triggered it. But `gah loop` (unlike a one-shot `--once` call) is
+    // a long-running daemon that can keep running for hours after this --
+    // it does NOT exit soon after, so the child is never reparented to init
+    // for reaping. Dropping the `Child` handle without ever waiting on it
+    // left it as a `[claude] <defunct>` zombie, owned by the still-running
+    // gah loop process, until that process itself eventually exited. A
+    // background thread that just waits on it keeps this non-blocking for
+    // the caller while still reaping the child whenever it finishes.
+    match cmd.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(err) => {
+            eprintln!("[gah] manager_wake: failed to spawn '{manager}' (swallowed): {err:#}");
+        }
     }
 }
 
@@ -577,6 +588,92 @@ mod tests {
         assert!(
             log_contents.contains("https://example.com/mr/9"),
             "expected wake log to record the instruction, got: {log_contents:?}"
+        );
+    }
+
+    /// Regression: the spawned manager-wake child must actually be reaped,
+    /// not left as a `[claude] <defunct>` zombie under the still-running
+    /// caller. The fake binary reports its own pid before exiting; once it
+    /// has exited we poll `/proc/<pid>` -- a reaped process's entry
+    /// disappears entirely, while an un-waited zombie keeps a `Z` (zombie)
+    /// stat entry around indefinitely (until *this test process* exits).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn notify_event_manager_wake_does_not_leave_a_zombie() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let pid_file = tmp.path().join("child.pid");
+        let bin_path = bin_dir.join("claude");
+        std::fs::write(
+            &bin_path,
+            format!("#!/bin/sh\necho $$ > '{}'\nexit 0\n", pid_file.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin_path, perms).unwrap();
+        }
+        let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
+
+        let mut profile = crate::config::tests::test_profile_for_notifications();
+        profile.manager_wake_autonomy = WakeAutonomy::Full;
+        let mut cfg = test_gah_config(Some("claude"));
+        cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
+
+        notify_event(
+            &cfg,
+            &profile,
+            NotifyEvent::MrCreated {
+                url: "https://example.com/mr/9",
+                work_id: "WORK-9",
+                backend: "codex",
+                model: "gpt",
+            },
+        );
+
+        // Wait for the fake binary to report its pid and exit.
+        let mut pid = None;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(p) = text.trim().parse::<i32>() {
+                    pid = Some(p);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let pid = pid.expect("fake claude binary never reported its pid");
+
+        // Give the background reaper thread a moment to call wait() after
+        // the child exits, then confirm the process is fully gone -- not
+        // lingering as a zombie (stat state 'Z').
+        let proc_path = format!("/proc/{pid}");
+        let mut reaped = false;
+        for _ in 0..100 {
+            match std::fs::read_to_string(format!("{proc_path}/stat")) {
+                Ok(stat) if stat.contains(") Z ") => {
+                    // still a zombie, keep polling
+                }
+                Ok(_) => {
+                    // Unlikely (would mean the pid got reused already), but
+                    // not a zombie either way -- treat as reaped.
+                    reaped = true;
+                    break;
+                }
+                Err(_) => {
+                    reaped = true; // /proc entry gone entirely: fully reaped
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            reaped,
+            "expected child pid {pid} to be reaped (no zombie), but {proc_path} is still a zombie"
         );
     }
 
