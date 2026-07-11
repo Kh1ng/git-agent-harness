@@ -96,6 +96,7 @@ impl ConcurrencyGuard {
                     .create(true)
                     .read(true)
                     .write(true)
+                    .truncate(false)
                     .open(path)?;
                 match file.try_lock_exclusive() {
                     Ok(()) => {
