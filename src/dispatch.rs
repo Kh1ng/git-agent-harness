@@ -3363,10 +3363,9 @@ fn review(
                     "Publishing policy forbids agent-authored issue/MR comments; review verdict ({} confidence={}) written locally only.",
                     verdict.verdict, verdict.confidence
                 );
-            } else if let Err(err) =
+            } else {
                 provider::post_review_comment(profile, &target.source_branch, &mr_body, &labels)
-            {
-                eprintln!("warning: failed to post MR review comment: {:#}", err);
+                    .context("publishing review comment and labels")?;
             }
             if verdict.human_required {
                 println!("Review requires human attention.");

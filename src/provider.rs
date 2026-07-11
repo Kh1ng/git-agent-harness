@@ -218,7 +218,7 @@ fn gitlab_post_review_comment(
             api_base, project_id, mr.id
         );
         let payload = serde_json::json!({ "add_labels": labels.join(",") });
-        if let Err(err) = run_curl_json(&[
+        run_curl_json(&[
             "-s",
             "-X",
             "PUT",
@@ -229,9 +229,8 @@ fn gitlab_post_review_comment(
             "-d",
             &payload.to_string(),
             &labels_url,
-        ]) {
-            eprintln!("warning: failed to apply labels to MR {}: {:#}", mr.id, err);
-        }
+        ])
+        .with_context(|| format!("applying review labels to MR {}", mr.id))?;
     }
     Ok(())
 }
@@ -276,19 +275,16 @@ fn github_post_review_comment(
             args.push("-f".to_string());
             args.push(format!("labels[]={}", label));
         }
-        match provider_command("gh").args(&args).output() {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => eprintln!(
-                "warning: failed to apply labels to PR {}: {}",
+        let out = provider_command("gh")
+            .args(&args)
+            .output()
+            .context("gh api review labels")?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "applying review labels to PR {} failed: {}",
                 pr_number,
                 String::from_utf8_lossy(&out.stderr).trim()
-            ),
-            Err(err) => {
-                eprintln!(
-                    "warning: failed to apply labels to PR {}: {:#}",
-                    pr_number, err
-                )
-            }
+            );
         }
     }
     Ok(())
@@ -1131,10 +1127,10 @@ esac
     }
 
     #[test]
-    fn github_post_review_comment_survives_label_apply_failure() {
-        // A label-apply failure must stay non-fatal and visible (not a
-        // silent `let _ =`) -- the review comment itself already posted
-        // successfully, so the whole call should not error out.
+    fn github_post_review_comment_reports_label_apply_failure() {
+        // A posted comment without its controller label is not a successful
+        // review. Surface the failure so the controller can bound retries and
+        // escalate instead of repeatedly treating the PR as unreviewed.
         let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = TempDir::new().unwrap();
         let bin_dir = tmp.path().join("bin");
@@ -1158,12 +1154,13 @@ esac
         );
         let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
-        super::post_review_comment(
+        let err = super::post_review_comment(
             &github_profile(),
             "gah/test",
             "review body",
             &["gah-ready-for-human"],
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(err.to_string().contains("applying review labels"));
     }
 }
