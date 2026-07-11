@@ -66,6 +66,12 @@ pub fn parse_claude_transcript_usage(transcript_jsonl: &str) -> LedgerUsage {
             continue;
         };
         saw_any = true;
+        if usage.actual_model.is_none() {
+            usage.actual_model = message
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
 
         let get = |k: &str| u.get(k).and_then(|v| v.as_u64());
         usage.input_tokens =
@@ -487,6 +493,7 @@ mod tests {
         assert_eq!(u.cache_read_tokens, Some(13200));
         assert_eq!(u.total_tokens, Some(3310));
         assert_eq!(u.actual_cost_usd, Some(0.0105));
+        assert_eq!(u.actual_model.as_deref(), Some("claude-sonnet-4-20250514"));
         assert_eq!(u.usage_source.as_deref(), Some("claude_transcript_json"));
     }
 

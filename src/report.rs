@@ -71,6 +71,8 @@ struct BackendModelComparison {
     cache_write_tokens: Option<u64>,
     total_tokens: Option<u64>,
     requests_count: Option<u64>,
+    tokens_per_success: Option<f64>,
+    requests_per_success: Option<f64>,
     quota_observations: Vec<crate::ledger::summary::GroupQuotaObservation>,
     review_verdict_distribution: Vec<(String, usize)>,
 }
@@ -300,11 +302,7 @@ fn transform_to_report_format(
 
     if let Some(groups) = grouped_data {
         for group in groups {
-            let success_rate = if group.entries > 0 {
-                group.validation_pass as f64 / group.entries as f64
-            } else {
-                0.0
-            };
+            let success_rate = group.success_rate.unwrap_or(0.0);
 
             let review_verdicts: Vec<(String, usize)> = group
                 .review_verdict_distribution
@@ -330,6 +328,8 @@ fn transform_to_report_format(
                 cache_write_tokens: group.cache_write_tokens,
                 total_tokens: group.total_tokens,
                 requests_count: group.requests_count,
+                tokens_per_success: group.tokens_per_success,
+                requests_per_success: group.requests_per_success,
                 quota_observations: group.quota_observations.clone(),
                 review_verdict_distribution: review_verdicts,
             });
@@ -576,6 +576,7 @@ mod tests {
             entries: 10,
             attempts: 5,
             validation_pass: 8,
+            success_rate: Some(0.8),
             review_verdict_distribution: BTreeMap::from([("APPROVE".to_string(), 2)]),
             total_cost_usd: Some(1.50),
             actual_cost_usd: Some(1.50),
@@ -589,6 +590,8 @@ mod tests {
             cache_write_tokens: None,
             total_tokens: Some(1000),
             requests_count: Some(10),
+            tokens_per_success: Some(125.0),
+            requests_per_success: Some(1.25),
             quota_observations: vec![],
         });
         grouped_by_backend.push(GroupSummary {
@@ -596,6 +599,7 @@ mod tests {
             entries: 5,
             attempts: 3,
             validation_pass: 4,
+            success_rate: Some(0.8),
             review_verdict_distribution: BTreeMap::new(),
             total_cost_usd: Some(2.00),
             actual_cost_usd: Some(2.00),
@@ -609,6 +613,8 @@ mod tests {
             cache_write_tokens: None,
             total_tokens: Some(500),
             requests_count: Some(10),
+            tokens_per_success: Some(125.0),
+            requests_per_success: Some(2.5),
             quota_observations: vec![],
         });
 
@@ -711,6 +717,7 @@ mod tests {
             entries: 4,
             attempts: 2,
             validation_pass: 2,
+            success_rate: Some(0.5),
             review_verdict_distribution: BTreeMap::new(),
             total_cost_usd: None,
             actual_cost_usd: None,
@@ -724,6 +731,8 @@ mod tests {
             cache_write_tokens: None,
             total_tokens: None,
             requests_count: None,
+            tokens_per_success: None,
+            requests_per_success: None,
             quota_observations: vec![],
         }];
 
@@ -743,6 +752,7 @@ mod tests {
             entries: 0,
             attempts: 0,
             validation_pass: 0,
+            success_rate: None,
             review_verdict_distribution: BTreeMap::new(),
             total_cost_usd: None,
             actual_cost_usd: None,
@@ -756,6 +766,8 @@ mod tests {
             cache_write_tokens: None,
             total_tokens: None,
             requests_count: None,
+            tokens_per_success: None,
+            requests_per_success: None,
             quota_observations: vec![],
         }];
 

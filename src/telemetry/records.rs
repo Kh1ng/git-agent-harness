@@ -69,6 +69,8 @@ pub struct AttemptUsageRecord {
     pub effective_model: Option<String>,
     /// Requested model
     pub requested_model: Option<String>,
+    /// Model reported by the backend/session, when available
+    pub actual_model: Option<String>,
 
     /// Exit code from the attempt
     pub exit_code: Option<i32>,

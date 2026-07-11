@@ -1200,21 +1200,45 @@ fn attempt_usage(
     claude_path: Option<&str>,
 ) -> crate::ledger::LedgerUsage {
     let normalize = |mut usage: crate::ledger::LedgerUsage| {
-        // Always preserve a normalized, non-secret instance identity. The
-        // current providers do not expose a trustworthy billing classification
-        // uniformly, so classify it as unknown rather than guessing quota or
-        // API spend. Follow-up pricing/account tickets can fill these fields
-        // from explicit route configuration.
+        // These four named backends are subscription/account-backed in the
+        // operator's routing policy. This is a classification of accounting
+        // source, not a claim that their subscription has zero economic value.
         usage.backend_instance = backend.map(str::to_string);
-        usage.usage_classification = Some("unknown".to_string());
+        usage.usage_classification = match backend {
+            Some("claude" | "codex" | "vibe" | "agy" | "agy-main" | "agy-second") => {
+                Some("quota_backed".to_string())
+            }
+            Some(_) => Some("unknown".to_string()),
+            None => None,
+        };
+        usage.provider = match backend {
+            Some("claude") => Some("anthropic".to_string()),
+            Some("codex") => Some("openai".to_string()),
+            Some("vibe") => Some("mistral".to_string()),
+            Some("agy" | "agy-main" | "agy-second") => Some("google".to_string()),
+            _ => usage.provider,
+        };
+        if usage.requests_count.is_none() {
+            // A launched backend invocation is one consumed subscription
+            // request even when its CLI exposes no token counters.
+            usage.requests_count = Some(1);
+        }
+        if usage.usage_source.is_none() {
+            usage.usage_source = Some("execution_observed".to_string());
+        }
         if usage.actual_cost_usd.is_none() && usage.estimated_cost_usd.is_none() {
-            usage.cost_unknown_reason = Some("backend did not report billable cost".to_string());
+            usage.cost_unknown_reason = Some(
+                "subscription backend does not expose a defensible per-execution dollar cost"
+                    .to_string(),
+            );
         }
         usage
     };
     let text = match fs::read_to_string(log_path) {
         Ok(t) => t,
-        Err(_) => return normalize(crate::ledger::LedgerUsage::default()),
+        // No artifact means the execution evidence itself is unavailable;
+        // preserve unknown rather than manufacturing a consumed request.
+        Err(_) => return crate::ledger::LedgerUsage::default(),
     };
 
     // Claude Code: prefer the structured session transcript for real
@@ -1267,9 +1291,26 @@ fn attempt_usage(
         return normalize(usage);
     }
 
+    // Vibe's structured session metadata is passed through the same artifact
+    // slot as Claude's transcript.
+    if backend == Some("vibe") {
+        if let Some(metadata) = transcript_path {
+            if let Ok(metadata_json) = fs::read_to_string(metadata) {
+                let session_usage = usage::parse_vibe_session_metadata(&metadata_json);
+                if session_usage.usage_source.is_some() {
+                    return normalize(session_usage);
+                }
+            }
+        }
+    }
+
     // Try codex exec --json parser first — handles JSONL output from
     // codex exec --json where the generic regex parser would find nothing.
-    let mut usage = usage::parse_codex_exec_json(&text);
+    let mut usage = if backend == Some("codex") {
+        usage::parse_codex_exec_json(&text)
+    } else {
+        crate::ledger::LedgerUsage::default()
+    };
     if usage.usage_source.is_none() {
         // Fall back to the generic regex-based parser for other backends (or
         // for codex running in non-JSON mode).
@@ -4336,7 +4377,7 @@ mod tests {
         )
         .unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap(), None, None, None, None);
+        let usage = attempt_usage(path.to_str().unwrap(), None, Some("vibe"), None, None);
         assert_eq!(usage.input_tokens, Some(500));
         assert_eq!(usage.output_tokens, Some(120));
         assert_eq!(usage.total_tokens, Some(620));
@@ -4362,9 +4403,11 @@ mod tests {
         let path = tmp.path().join("backend-output.log");
         fs::write(&path, "agent made some edits, no usage reported\n").unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap(), None, None, None, None);
+        let usage = attempt_usage(path.to_str().unwrap(), None, Some("vibe"), None, None);
         assert_eq!(usage.input_tokens, None);
-        assert_eq!(usage.usage_source, None);
+        assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
+        assert_eq!(usage.requests_count, Some(1));
+        assert_eq!(usage.usage_classification, Some("quota_backed".to_string()));
     }
 
     #[test]

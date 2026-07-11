@@ -46,8 +46,13 @@ pub fn extract_attempt_usage_records(
             backend: attempt.backend.clone(),
             effective_backend: attempt.backend.clone(),
             requested_backend: entry.requested_backend.clone(),
-            effective_model: attempt.effective_model.clone(),
+            effective_model: attempt
+                .usage
+                .actual_model
+                .clone()
+                .or_else(|| attempt.effective_model.clone()),
             requested_model: entry.requested_model.clone(),
+            actual_model: attempt.usage.actual_model.clone(),
             exit_code: attempt.exit_code,
             duration_seconds: attempt.duration_seconds,
             validation_result: attempt.validation_result.clone(),
