@@ -1960,6 +1960,49 @@ mod tests {
         ));
     }
 
+    // Live bug: `dispatch::decide_route` used to classify
+    // `RouteError::NoEligibleBackend` (every candidate backend momentarily
+    // quota-exhausted/cooling down) as `human_blocked`, which is excluded
+    // from `is_infra_failure` -- permanently orphaning the ticket even after
+    // a backend recovered, since this class is neither retried nor escalated
+    // nor flagged `human_required`. Now fixed to classify as `backend_error`,
+    // which *is* in `is_infra_failure`'s list; this pins that once a backend
+    // becomes eligible again, the ticket is retried, not silently dropped.
+    #[test]
+    fn backend_error_from_no_eligible_backend_retries_once_a_backend_is_eligible() {
+        let mut snapshot = empty_snapshot();
+        snapshot.available_tickets.push(ticket(
+            "docs/tickets/TICKET-noelig.md",
+            Some("TICKET-noelig"),
+            1,
+            Some("backend_error"),
+            false,
+            false,
+        ));
+
+        // No eligible backend at all -> must not retry blindly.
+        let action = decide_next_action(&snapshot);
+        assert_eq!(action.kind(), "no_op");
+
+        // Now a backend is eligible -> retry, not orphaned.
+        snapshot.availability.push(ScopeStatusJson {
+            backend: "codex".into(),
+            model: None,
+            quota_pool: None,
+            eligible_now: true,
+            reason: None,
+            unavailable_until: None,
+            source: None,
+            last_error_summary: None,
+            observed_at: None,
+            scope: None,
+        });
+        match decide_next_action(&snapshot) {
+            NextAction::Retry { work_id, .. } => assert_eq!(work_id, "TICKET-noelig"),
+            other => panic!("expected Retry, got {other:?}"),
+        }
+    }
+
     #[test]
     fn infra_failure_retries_only_when_a_backend_is_eligible() {
         let mut snapshot = empty_snapshot();

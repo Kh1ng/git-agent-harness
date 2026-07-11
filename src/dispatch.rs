@@ -3894,7 +3894,7 @@ mod tests {
         attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body,
         build_metadata_rich_mr_body, build_mr_title, build_pm_plan_task, build_standard_mr_body,
         build_task, classify_validation_failure_progress, classify_worktree_result,
-        collect_pm_preflight, collect_ticket_summaries, derive_reviewer_tier,
+        collect_pm_preflight, collect_ticket_summaries, decide_route, derive_reviewer_tier,
         extract_backend_summary, extract_issue_number, first_markdown_heading,
         format_issue_for_focus, is_issue_number_reference, mark_backend_unavailable_from_output_at,
         next_ticket_id, parse_pm_plan, parse_review_verdict, parse_ticket_metadata,
@@ -3908,6 +3908,7 @@ mod tests {
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
     use crate::models::PmPlan;
+    use crate::routing::{RouteError, RouteRequest};
     use crate::test_support::PathGuard;
     use std::fs;
     use std::path::Path;
@@ -5977,6 +5978,44 @@ which lacks a leading boundary check.
 
         assert_eq!(classified.unwrap(), 42);
         assert_eq!(entry.failure_class, None);
+    }
+
+    // Live bug: every candidate backend being simultaneously unavailable
+    // (quota/cooldown) is transient and self-resolves once availability
+    // windows expire -- same reasoning as `classify_worktree_result` above.
+    // `decide_route` used to classify `RouteError::NoEligibleBackend` as
+    // `human_blocked`, which `controller::is_infra_failure` deliberately
+    // excludes from retry, permanently orphaning the ticket even after a
+    // backend recovers. It must classify as `backend_error` instead.
+    #[test]
+    fn decide_route_classifies_no_eligible_backend_as_backend_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        // A backend name unknown to `runner::backend_command_name` is always
+        // reported unavailable regardless of the host's real PATH, making
+        // `RouteError::NoEligibleBackend` deterministic without touching
+        // PATH or the on-disk availability state file.
+        prof.routing.pm_candidates = Some(vec![crate::config::CandidateConfig {
+            backend: "not-a-real-backend".into(),
+            ..Default::default()
+        }]);
+        let cfg = gah_config(RoutingPolicy::default());
+        let mut ledger = LedgerEntry::new("test", &prof, "codex", "pm", "target", None, None);
+
+        let req = RouteRequest {
+            mode: "pm",
+            requested_backend: "auto",
+            requested_model: None,
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: None,
+            usage_summary: None,
+            last_failure_class: None,
+        };
+
+        let err = decide_route(&cfg, &prof, req, &mut ledger).unwrap_err();
+        assert!(err.downcast_ref::<RouteError>().is_some());
+        assert_eq!(ledger.failure_class.as_deref(), Some("backend_error"));
     }
 
     #[test]
@@ -8191,11 +8230,20 @@ fn decide_route(
     match routing::decide(&cfg.defaults, profile, req) {
         Ok(route) => Ok(route),
         Err(err) => {
-            if err.downcast_ref::<RouteError>().is_some() {
-                ledger.set_failure(
-                    crate::ledger::FailureClass::HumanBlocked,
-                    crate::ledger::FailureStage::Route,
-                );
+            if let Some(route_err) = err.downcast_ref::<RouteError>() {
+                // Transient: every candidate backend is momentarily unavailable
+                // (quota/cooldown), and this self-resolves once an
+                // `unavailable_until`/`earliest_reset` window passes -- same
+                // "harness/setup, not agent failure" reasoning as
+                // `classify_worktree_result` above. Match exhaustively so a
+                // future non-transient `RouteError` variant doesn't silently
+                // inherit this classification.
+                let class = match route_err {
+                    RouteError::NoEligibleBackend { .. } => {
+                        crate::ledger::FailureClass::BackendError
+                    }
+                };
+                ledger.set_failure(class, crate::ledger::FailureStage::Route);
             } else if format!("{:#}", err).contains("parsing availability state") {
                 ledger.set_failure(
                     crate::ledger::FailureClass::EnvironmentError,
