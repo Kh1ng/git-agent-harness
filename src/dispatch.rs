@@ -1132,6 +1132,17 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     let hash = vc::hash_validation_commands(&profile.validation_commands);
     let state_path = vc::resolve_state_path();
 
+    // Hold the lock across the whole decide-then-verify sequence, not just the
+    // final write. Without this, concurrent callers (parallel workers in the
+    // same `gah loop`, or separate processes) can each independently read
+    // "needs recheck", each spin up their own redundant fresh-worktree run,
+    // and race to record whichever result lands last -- multiplying load
+    // exactly when the gate is already the bottleneck, and making the
+    // recorded pass/fail state nondeterministic. Only one fresh-worktree
+    // self-check for this state file runs at a time; everyone else blocks
+    // briefly and then takes the fast path once it lands.
+    let lock_file = vc::acquire_lock(&state_path)?;
+
     let state = vc::load_state(&state_path)
         .with_context(|| format!("loading validation-check state {}", state_path.display()))?;
 
@@ -1140,6 +1151,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
             "[validation-gate] commands unchanged (hash {}) — skipping fresh-worktree self-check",
             &hash[..hash.len().min(8)]
         );
+        fs2::FileExt::unlock(&lock_file).ok();
         return Ok(());
     }
 
@@ -1183,8 +1195,11 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     worktree::cleanup(&wt, repo);
     let _ = worktree::git_raw(&["branch", "-D", &branch], repo);
 
-    vc::record_check(&state_path, &profile.repo_id, &hash, ok, &verified_at)
-        .with_context(|| format!("recording validation-check result {}", state_path.display()))?;
+    let record_result =
+        vc::record_check_locked(&state_path, &profile.repo_id, &hash, ok, &verified_at)
+            .with_context(|| format!("recording validation-check result {}", state_path.display()));
+    fs2::FileExt::unlock(&lock_file).ok();
+    record_result?;
 
     if let Err(text) = result {
         anyhow::bail!(
