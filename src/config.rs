@@ -892,7 +892,7 @@ pub fn canonical_config_path() -> PathBuf {
 #[cfg(test)]
 thread_local! {
     static CANONICAL_CONFIG_TEST_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
