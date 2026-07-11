@@ -5,12 +5,16 @@
 
 mod support;
 use support::scenario::ScenarioHarness;
-use support::{FakeBackend, Scenario};
+use support::{ExecGuard, FakeBackend, Scenario};
 use tempfile::TempDir;
 
 /// Fake `gh` executable returns fixtures and logs calls.
 #[test]
 fn fake_provider_gh_returns_fixture() {
+    // Serializes this write-then-exec sequence against any other thread's
+    // fork() in this test binary (including `ScenarioHarness`'s subprocess
+    // spawns) -- see `ExecGuard`'s doc comment in `tests/support/mod.rs`.
+    let _exec_guard = ExecGuard::new();
     let tmp = TempDir::new().unwrap();
     let fb = FakeBackend::new(tmp.path(), "gh");
     fb.install(Scenario::success().with_stdout("[{\"number\":1}]"));
@@ -51,6 +55,7 @@ fn fake_ledger_writes_readable_jsonl() {
 /// Fake worker executable returns configured output and logs calls.
 #[test]
 fn fake_worker_returns_output() {
+    let _exec_guard = ExecGuard::new();
     let tmp = TempDir::new().unwrap();
     let fb = FakeBackend::new(tmp.path(), "openhands");
     fb.install(Scenario::success().with_stdout("task complete"));
