@@ -163,17 +163,15 @@ pub fn load_state(state_path: &Path) -> Result<ValidationCheckState> {
     Ok(state)
 }
 
-/// Record (upsert) a profile's self-check result under an exclusive advisory
-/// lock, using an atomic write-temp-then-rename so readers never observe a
-/// partial file and a crash mid-write can never corrupt the previous good
-/// state.
-pub fn record_check(
-    state_path: &Path,
-    profile: &str,
-    commands_hash: &str,
-    ok: bool,
-    verified_at: &str,
-) -> Result<()> {
+/// Acquire the exclusive advisory lock guarding `validation_check.json`,
+/// blocking until held. Callers that need to read-decide-then-write (the
+/// TOCTOU-prone self-check sequence in `dispatch::self_check_validation_gate`)
+/// must hold this across the *whole* sequence, not just the final write --
+/// otherwise concurrent callers can both decide "needs recheck", both spin up
+/// a redundant fresh-worktree run, and race to record whichever result lands
+/// last. The lock is released when the returned `File` is dropped (standard
+/// flock semantics), or explicitly via `FileExt::unlock`.
+pub fn acquire_lock(state_path: &Path) -> Result<File> {
     let dir = state_path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).with_context(|| format!("creating directory {}", dir.display()))?;
 
@@ -187,6 +185,22 @@ pub fn record_check(
     lock_file
         .lock_exclusive()
         .with_context(|| format!("locking {}", lock_path.display()))?;
+    Ok(lock_file)
+}
+
+/// Record (upsert) a profile's self-check result, assuming the caller already
+/// holds the lock from `acquire_lock`. Uses an atomic write-temp-then-rename
+/// so readers never observe a partial file and a crash mid-write can never
+/// corrupt the previous good state.
+pub fn record_check_locked(
+    state_path: &Path,
+    profile: &str,
+    commands_hash: &str,
+    ok: bool,
+    verified_at: &str,
+) -> Result<()> {
+    let dir = state_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir).with_context(|| format!("creating directory {}", dir.display()))?;
 
     let mut state = load_state(state_path)?;
     state.profiles.insert(
@@ -223,8 +237,21 @@ pub fn record_check(
         )
     })?;
 
-    FileExt::unlock(&lock_file).ok();
     Ok(())
+}
+
+#[cfg(test)]
+fn record_check(
+    state_path: &Path,
+    profile: &str,
+    commands_hash: &str,
+    ok: bool,
+    verified_at: &str,
+) -> Result<()> {
+    let lock_file = acquire_lock(state_path)?;
+    let result = record_check_locked(state_path, profile, commands_hash, ok, verified_at);
+    FileExt::unlock(&lock_file).ok();
+    result
 }
 
 /// Format the current time as RFC3339, for `last_verified_at`.
@@ -393,6 +420,50 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftover.is_empty());
+    }
+
+    // ── acquire_lock serializes concurrent callers ───────────────────────
+
+    #[test]
+    fn acquire_lock_blocks_concurrent_holders_until_released() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmp = TempDir::new().unwrap();
+        let p = path(&tmp);
+        let active = Arc::new(AtomicU32::new(0));
+        let max_observed = Arc::new(AtomicU32::new(0));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let p = p.clone();
+                let active = Arc::clone(&active);
+                let max_observed = Arc::clone(&max_observed);
+                thread::spawn(move || {
+                    let lock_file = acquire_lock(&p).unwrap();
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_observed.fetch_max(now, Ordering::SeqCst);
+                    // Simulate the fresh-worktree run taking real time, so a
+                    // racing second thread that failed to serialize would
+                    // overlap here.
+                    thread::sleep(Duration::from_millis(30));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    FileExt::unlock(&lock_file).ok();
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            max_observed.load(Ordering::SeqCst),
+            1,
+            "acquire_lock must serialize callers -- never more than one holder at a time"
+        );
     }
 
     // ── path resolution ──────────────────────────────────────────────────
