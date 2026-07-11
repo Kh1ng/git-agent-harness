@@ -273,6 +273,22 @@ pub struct Profile {
     /// as `agy_print_timeout_seconds` below.
     #[serde(default)]
     pub opencode_idle_timeout_seconds_by_model: HashMap<String, u64>,
+    /// Live incident (2026-07-11): `opencode/hy3-free` is a shared free-tier
+    /// quota that silently rate-limits (zero output, hangs until the idle
+    /// timeout kills it) when more than one dispatch lands on it at the same
+    /// time -- confirmed via raw session logs (a 4-line build banner, then
+    /// nothing). `max_parallel_workers` has no awareness of what other slots
+    /// in the same batch already picked, so concurrent dispatches can double
+    /// up on the same backend+model. Caps how many dispatches this profile
+    /// may run concurrently against a given backend+model pair, keyed by
+    /// `"{backend}/{model}"` (e.g. `"opencode/opencode/hy3-free"`). No entry
+    /// means unlimited -- opt-in only, so backends without a configured cap
+    /// are unaffected. Enforced by an in-process counter (see
+    /// `routing::ConcurrencyGuard`), not persisted and not cross-process:
+    /// `acquire_profile_lock` already guarantees only one `gah` process
+    /// dispatches for a given profile at a time.
+    #[serde(default)]
+    pub max_concurrent_per_model: HashMap<String, u32>,
     /// How long OpenHands' own log output can go quiet before GAH considers
     /// it stalled and kills it, in seconds. Same rationale and mechanism as
     /// `opencode_idle_timeout_seconds` -- added after a live dispatch (issue
@@ -1110,6 +1126,7 @@ pub mod tests {
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
+            max_concurrent_per_model: std::collections::HashMap::new(),
             openhands_idle_timeout_seconds: None,
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
@@ -1162,6 +1179,7 @@ pub mod tests {
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
+            max_concurrent_per_model: std::collections::HashMap::new(),
             openhands_idle_timeout_seconds: None,
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,

@@ -795,6 +795,7 @@ mod tests {
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
+            max_concurrent_per_model: std::collections::HashMap::new(),
             openhands_idle_timeout_seconds: None,
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,

@@ -5,11 +5,88 @@ use crate::quota::{self, PaceBand};
 use crate::runner;
 use anyhow::Result;
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+fn concurrency_key(backend: &str, model: Option<&str>) -> String {
+    format!("{backend}/{}", model.unwrap_or(""))
+}
+
+fn concurrency_counters() -> &'static Mutex<HashMap<String, u32>> {
+    static COUNTERS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Current number of in-flight dispatches this process has running against a
+/// given backend+model pair. Backed by the same counter `ConcurrencyGuard`
+/// increments/decrements. Process-wide, not persisted, not cross-process --
+/// see `Profile::max_concurrent_per_model` for why that's sufficient.
+pub fn current_concurrent(backend: &str, model: Option<&str>) -> u32 {
+    let key = concurrency_key(backend, model);
+    *concurrency_counters()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .unwrap_or(&0)
+}
+
+/// RAII marker for one in-flight dispatch against a backend+model pair.
+/// Acquire right before the backend call starts; drop releases it -- on
+/// success, error, or panic unwind, since it's a plain `Drop` impl rather
+/// than a manually-called release on specific exit paths (mirrors the intent
+/// of `work_claim::release_work`'s success/error coverage, just via RAII).
+pub struct ConcurrencyGuard {
+    key: String,
+}
+
+impl ConcurrencyGuard {
+    pub fn acquire(backend: &str, model: Option<&str>) -> Self {
+        let key = concurrency_key(backend, model);
+        *concurrency_counters()
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_insert(0) += 1;
+        ConcurrencyGuard { key }
+    }
+}
+
+impl Drop for ConcurrencyGuard {
+    fn drop(&mut self) {
+        let mut counters = concurrency_counters().lock().unwrap();
+        if let Some(count) = counters.get_mut(&self.key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                counters.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Skip a candidate already at its configured `max_concurrent_per_model`
+/// cap. `None` when the pair has no configured cap (unlimited, the default)
+/// or is still under it.
+fn max_concurrent_skip(
+    max_concurrent: &HashMap<String, u32>,
+    backend: &str,
+    model: Option<&str>,
+) -> Option<SkippedBackend> {
+    let cap = *max_concurrent.get(&concurrency_key(backend, model))?;
+    if current_concurrent(backend, model) >= cap {
+        Some(SkippedBackend {
+            backend: backend.to_string(),
+            model: model.map(str::to_string),
+            reason: "max_concurrent_reached".into(),
+            unavailable_until: None,
+        })
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RouteRequest<'a> {
@@ -193,8 +270,13 @@ where
         let (candidates, reorder) = order_candidates(profile, candidates, escalate);
         let preferred = candidates.first().cloned().expect("non-empty list");
         let candidates_for_diagnostics = candidates.clone();
-        let (selected, skipped) =
-            pick_route_candidate(candidates, state_path, now, backend_available)?;
+        let (selected, skipped) = pick_route_candidate(
+            candidates,
+            state_path,
+            &profile.max_concurrent_per_model,
+            now,
+            backend_available,
+        )?;
 
         let mut fallback_used = false;
         let mut confidence_impact = None;
@@ -323,7 +405,13 @@ where
     };
     let candidates = auto_candidates(&effective_routing, req.mode, &primary);
     let candidates_for_diagnostics = candidates.clone();
-    let (selected, skipped) = pick_route_candidate(candidates, state_path, now, backend_available)?;
+    let (selected, skipped) = pick_route_candidate(
+        candidates,
+        state_path,
+        &profile.max_concurrent_per_model,
+        now,
+        backend_available,
+    )?;
 
     if selected.backend != primary.backend || selected.model != primary.model {
         fallback_used = true;
@@ -403,7 +491,13 @@ where
         allow_impl_fallback,
     );
     let candidates_for_diagnostics = candidates.clone();
-    let (selected, skipped) = pick_route_candidate(candidates, state_path, now, backend_available)?;
+    let (selected, skipped) = pick_route_candidate(
+        candidates,
+        state_path,
+        &profile.max_concurrent_per_model,
+        now,
+        backend_available,
+    )?;
 
     if selected.backend == primary.backend && selected.model == primary.model {
         let routing_diagnostics = Some(build_routing_diagnostics(
@@ -521,6 +615,7 @@ fn render_skips(skipped: &[SkippedBackend]) -> String {
 fn pick_route_candidate<F>(
     candidates: Vec<RouteCandidate>,
     state_path: &Path,
+    max_concurrent: &HashMap<String, u32>,
     now: OffsetDateTime,
     backend_available: F,
 ) -> Result<(RouteCandidate, Vec<SkippedBackend>)>
@@ -538,6 +633,7 @@ where
             &candidate.backend,
             candidate.model.as_deref(),
             candidate.quota_pool.as_deref(),
+            max_concurrent,
             now,
             backend_available,
         )? {
@@ -555,11 +651,13 @@ where
     .into())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn skip_reason_for_candidate<F>(
     state_path: &Path,
     backend: &str,
     model: Option<&str>,
     quota_pool: Option<&str>,
+    max_concurrent: &HashMap<String, u32>,
     now: OffsetDateTime,
     backend_available: F,
 ) -> Result<Option<SkippedBackend>>
@@ -573,6 +671,10 @@ where
             reason: "backend CLI not installed".into(),
             unavailable_until: None,
         }));
+    }
+
+    if let Some(skip) = max_concurrent_skip(max_concurrent, backend, model) {
+        return Ok(Some(skip));
     }
 
     let decision = availability::availability_for(state_path, backend, model, quota_pool, now)?;
@@ -1190,7 +1292,9 @@ fn over_cap_reason(
 
 #[cfg(test)]
 mod tests {
-    use super::{decide_with, is_genuine_agent_failure, RouteError, RouteRequest};
+    use super::{
+        decide_with, is_genuine_agent_failure, ConcurrencyGuard, RouteError, RouteRequest,
+    };
     use crate::availability::{Reason, Source};
     use crate::config::{Defaults, Profile, RoutingPolicy};
 
@@ -1277,6 +1381,7 @@ mod tests {
             agy_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds: None,
             opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
+            max_concurrent_per_model: std::collections::HashMap::new(),
             openhands_idle_timeout_seconds: None,
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
@@ -1549,6 +1654,118 @@ mod tests {
         assert_eq!(decision.effective_backend, "codex");
         assert!(decision.fallback_used);
         assert!(decision.routing_reason.contains("quota_exhausted"));
+    }
+
+    #[test]
+    fn preferred_backend_at_max_concurrent_falls_back() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile
+            .max_concurrent_per_model
+            .insert("claude/".to_string(), 1);
+        let _slot = ConcurrencyGuard::acquire("claude", None);
+
+        let decision = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                last_failure_class: None,
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert!(decision.fallback_used);
+        assert!(decision.routing_reason.contains("max_concurrent_reached"));
+    }
+
+    /// TICKET/issue (2026-07-11 hy3-free incident): reproduces the real bug
+    /// with real OS threads and the actual process-wide counter -- one
+    /// thread holds the only slot for a backend/model capped at
+    /// `max_concurrent=1` (standing in for an in-flight dispatch already
+    /// running against it), and a route decision made concurrently on a
+    /// second thread must skip that candidate and fall through to the next
+    /// one, exactly like the existing quota_exhausted/backend_outage skip
+    /// mechanics. Once the slot is released, routing picks the capped
+    /// backend again.
+    #[test]
+    fn concurrent_dispatch_holding_slot_forces_other_thread_to_fall_back() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile
+            .max_concurrent_per_model
+            .insert("claude/".to_string(), 1);
+        let state_path = path(&tmp);
+
+        let (holder_ready_tx, holder_ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _slot = ConcurrencyGuard::acquire("claude", None);
+            holder_ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        holder_ready_rx.recv().unwrap();
+
+        let profile_for_decider = profile.clone();
+        let state_path_for_decider = state_path.clone();
+        let decider = std::thread::spawn(move || {
+            decide_with(
+                &defaults(),
+                &profile_for_decider,
+                RouteRequest {
+                    last_failure_class: None,
+                    mode: "pm",
+                    requested_backend: "auto",
+                    requested_model: None,
+                    recommended_backend: None,
+                    recommended_model: None,
+                    session_id: None,
+                    usage_summary: None,
+                },
+                &state_path_for_decider,
+                OffsetDateTime::now_utc(),
+                backend_available,
+            )
+        });
+        let decision_while_held = decider.join().unwrap().unwrap();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        assert_eq!(decision_while_held.effective_backend, "codex");
+        assert!(decision_while_held
+            .routing_reason
+            .contains("max_concurrent_reached"));
+
+        // Slot released -- the capped backend is eligible again.
+        let decision_after_release = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                last_failure_class: None,
+                mode: "pm",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &state_path,
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(decision_after_release.effective_backend, "claude");
     }
 
     #[test]
