@@ -4,6 +4,28 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::{Child, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const GIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn wait_with_timeout(mut child: Child, context: &str) -> Result<Output> {
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return child
+                .wait_with_output()
+                .with_context(|| format!("collecting {context} output"));
+        }
+        if started.elapsed() >= GIT_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("{context} timed out after {}s", GIT_TIMEOUT.as_secs());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
 
 fn fetch_origin(repo: &Path) -> Result<()> {
     let git_dir = repo.join(".git");
@@ -41,15 +63,17 @@ pub fn git(args: &[&str], cwd: &Path) -> Result<String> {
 
 /// Run git and return raw Output. Does NOT error on non-zero exit.
 pub fn git_raw(args: &[&str], cwd: &Path) -> Result<std::process::Output> {
-    let out = Command::new("git")
+    let child = Command::new("git")
         .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_PAGER", "")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("git {}", args.join(" ")))?;
-    Ok(out)
+    wait_with_timeout(child, &format!("git {}", args.join(" ")))
 }
 
 pub fn create(
@@ -255,13 +279,16 @@ pub fn commit_msg(worktree: &Path, msg: &str) -> Result<()> {
 
 pub fn push_branch(worktree: &Path, branch: &str, push_url: &str, pat: &str) -> Result<()> {
     let askpass = write_askpass(pat)?;
-    let out = Command::new("git")
+    let child = Command::new("git")
         .args(["push", "-q", push_url, branch])
         .env("GIT_ASKPASS", &askpass)
         .env("GIT_TERMINAL_PROMPT", "0")
         .current_dir(worktree)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("git push")?;
+    let out = wait_with_timeout(child, "git push")?;
     let _ = std::fs::remove_file(&askpass);
     if !out.status.success() {
         anyhow::bail!(
