@@ -10,14 +10,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
 
 use tempfile::TempDir;
 
 use super::fake_ledger::TestLedger;
-use super::{FakeBackend, Scenario};
-
-static SERIAL: Mutex<()> = Mutex::new(());
+use super::{ExecGuard, FakeBackend, Scenario};
 
 /// Result of a single subprocess invocation.
 #[derive(Debug)]
@@ -41,7 +38,10 @@ pub struct CommandResult {
 /// Deterministic test harness.
 pub struct ScenarioHarness {
     _temp: TempDir,
-    _lock: MutexGuard<'static, ()>,
+    // Also serializes this harness's `gah` subprocess fork+exec against
+    // any other test in this binary that writes+execs a temp fake-backend
+    // script concurrently -- see `ExecGuard`'s doc comment in `mod.rs`.
+    _lock: ExecGuard,
     pub config_path: PathBuf,
     pub bin_dir: PathBuf,
     pub ledger_path: PathBuf,
@@ -66,10 +66,7 @@ pub struct ScenarioHarness {
 
 impl ScenarioHarness {
     pub fn new(provider: &str) -> Self {
-        let lock = match SERIAL.lock() {
-            Ok(l) => l,
-            Err(e) => e.into_inner(),
-        };
+        let lock = ExecGuard::new();
         let temp = TempDir::new().unwrap();
         let root = temp.path();
 

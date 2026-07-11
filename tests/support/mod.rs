@@ -30,6 +30,48 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+
+/// Process-wide lock serializing "write/chmod a temp binary, then exec it"
+/// against any other fork() in this test binary.
+///
+/// `cargo test` runs the test functions in one integration test binary on
+/// separate threads by default, and `Command::spawn`'s underlying `fork()`
+/// duplicates the *whole process's* fd table into the child -- including
+/// another thread's momentarily-open write fd on a script it just wrote via
+/// `FakeBackend::install`. If that fork happens while this thread is
+/// between writing/chmod'ing and exec'ing its own temp binary, the kernel
+/// can return ETXTBSY ("Text file busy"). Every test (directly, or via
+/// `ScenarioHarness`, which holds this for its whole lifetime) that writes
+/// a temp binary and then spawns it must hold `ExecGuard` for the entire
+/// write-then-exec sequence, so no other thread's fork() can land inside
+/// that window. Mirrors `EXEC_LOCK`/`ExecGuard` in `src/test_support.rs`,
+/// which protects the equivalent pattern in the lib crate's own unit
+/// tests -- that guard isn't reachable from here because it lives behind
+/// `#[cfg(test)]` in the lib crate, which integration tests link against
+/// without `cfg(test)`.
+static EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+pub struct ExecGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl ExecGuard {
+    pub fn new() -> Self {
+        Self {
+            _lock: match EXEC_LOCK.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            },
+        }
+    }
+}
+
+impl Default for ExecGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// One scripted response for a single invocation of a fake backend.
 #[derive(Debug, Clone, Default)]
