@@ -1061,7 +1061,7 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("review".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, action, &args, "review")?;
+            run_dispatch_and_record(cfg, "review", action.work_id(), &args)?;
             Ok(format!("Dispatched review for branch '{branch}'"))
         }
         NextAction::FixMr { branch, .. } => {
@@ -1071,7 +1071,7 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("post_review_repair".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, action, &args, "fix_existing")?;
+            run_dispatch_and_record(cfg, "fix_existing", action.work_id(), &args)?;
             Ok(format!("Dispatched fix for existing branch '{branch}'"))
         }
         NextAction::MergeMr {
@@ -1129,7 +1129,7 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("initial".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, action, &args, "dispatch_ticket")?;
+            run_dispatch_and_record(cfg, "dispatch_ticket", action.work_id(), &args)?;
             Ok(format!("Dispatched ticket '{ticket_path}'"))
         }
         NextAction::Retry { ticket_path, .. } => {
@@ -1138,7 +1138,7 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("initial".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, action, &args, "retry")?;
+            run_dispatch_and_record(cfg, "retry", action.work_id(), &args)?;
             Ok(format!("Retried ticket '{ticket_path}'"))
         }
         NextAction::Escalate { ticket_path, .. } => {
@@ -1148,7 +1148,7 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("initial".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, action, &args, "escalate")?;
+            run_dispatch_and_record(cfg, "escalate", action.work_id(), &args)?;
             Ok(format!("Escalated ticket '{ticket_path}'"))
         }
         NextAction::WaitUntil { until, reason } => Ok(format!("Waiting until {until} ({reason})")),
@@ -1168,11 +1168,19 @@ pub(crate) fn execute_action(
 /// duplicate-work refusal from TICKET-097's `check_duplicate_work`) / a
 /// generic failure note -- so the event log distinguishes "the duplicate
 /// guard correctly refused this" from an ordinary dispatch failure.
-fn run_dispatch_and_record(
+///
+/// Used by both `gah loop --once` (which has a `NextAction`) and the
+/// direct `gah dispatch` command; for the latter `work_id` is `None` until
+/// `dispatch::run` resolves it. Emitting these events from the single
+/// shared entry point is what lets the dashboard's controller-activity
+/// panel observe *every* live dispatch -- including ones the supervisor
+/// launches outside the dashboard -- instead of only dashboard-initiated
+/// sessions (see issue #197).
+pub(crate) fn run_dispatch_and_record(
     cfg: &crate::config::GahConfig,
-    action: &NextAction,
-    args: &crate::dispatch::DispatchArgs,
     label: &str,
+    work_id: Option<&str>,
+    args: &crate::dispatch::DispatchArgs,
 ) -> Result<()> {
     let target_context = args
         .branch
@@ -1185,7 +1193,7 @@ fn run_dispatch_and_record(
         cfg,
         crate::events::EventType::DispatchStarted,
         Some(args.profile.as_str()),
-        action.work_id(),
+        work_id,
         args.run_id.as_deref(),
         start_detail,
     )?;
@@ -1195,7 +1203,7 @@ fn run_dispatch_and_record(
                 cfg,
                 crate::events::EventType::DispatchFinished,
                 Some(args.profile.as_str()),
-                action.work_id(),
+                work_id,
                 args.run_id.as_deref(),
                 format!("{label}: success"),
             )?;
@@ -1211,7 +1219,7 @@ fn run_dispatch_and_record(
                 cfg,
                 event_type,
                 Some(args.profile.as_str()),
-                action.work_id(),
+                work_id,
                 args.run_id.as_deref(),
                 format!("{label}: {e:#}"),
             )?;

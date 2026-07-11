@@ -39,6 +39,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config::Profile;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "gah", about = "git agent harness")]
@@ -890,33 +891,39 @@ fn main() -> Result<()> {
             skip_validation_gate,
         } => {
             let cfg = config::load(config_path.as_deref())?;
-            dispatch::run(
-                &cfg,
-                &dispatch::DispatchArgs {
-                    profile,
-                    mode,
-                    backend,
-                    target,
-                    branch,
-                    mr,
-                    current_branch,
-                    budget,
-                    dry_run,
-                    config_path,
-                    model,
-                    oh_profile,
-                    retries,
-                    allow_draft_fail,
-                    prod,
-                    allow_unknown_red_baseline,
-                    escalate,
-                    existing_branch,
-                    skip_validation_gate,
-                    dispatch_reason: None,
-                    work_id: None,
-                    run_id: None,
-                },
-            )?;
+            // Generate a stable run id so the dispatch_started /
+            // dispatch_finished controller events correlate with each other
+            // and with the on-disk session directory. This is what lets the
+            // dashboard's controller-activity panel observe a live dispatch
+            // launched here (e.g. by the supervisor's parallel workers),
+            // not just sessions started from the dashboard itself -- see
+            // issue #197.
+            let run_id = Uuid::new_v4().to_string();
+            let args = dispatch::DispatchArgs {
+                profile,
+                mode,
+                backend,
+                target,
+                branch,
+                mr,
+                current_branch,
+                budget,
+                dry_run,
+                config_path,
+                model,
+                oh_profile,
+                retries,
+                allow_draft_fail,
+                prod,
+                allow_unknown_red_baseline,
+                escalate,
+                existing_branch,
+                skip_validation_gate,
+                dispatch_reason: None,
+                work_id: None,
+                run_id: Some(run_id),
+            };
+            controller::run_dispatch_and_record(&cfg, "dispatch", None, &args)?;
         }
 
         Commands::Tui {
