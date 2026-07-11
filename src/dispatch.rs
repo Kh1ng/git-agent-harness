@@ -3770,8 +3770,9 @@ mod tests {
         next_ticket_id, parse_pm_plan, parse_review_verdict, parse_ticket_metadata,
         parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
         review_labels, review_preflight, run_backend, scan_available_tickets, strip_terminal_noise,
-        validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
-        MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
+        validation_failure_fingerprint, validation_failure_no_progress_reason,
+        ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewerTier, RouteDecision,
+        TicketMetadata, ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
@@ -6063,6 +6064,57 @@ which lacks a leading boundary check.
         assert!(!progress.unchanged_from_previous_attempt());
     }
 
+    // Real failure text captured live from a TICKET-154 dispatch attempt
+    // (dead_code lint on unwired vibe-quota helper functions) -- see
+    // `/home/khing/workspace/agent-lab/artifacts/gah/sessions/468dc430-48e3-49a9-8429-1875085bc37b/attempt-3/validation-failure.txt`.
+    // The second copy below simulates a later attempt hitting the identical
+    // mistake but with a different worktree path and shifted line numbers,
+    // which is exactly what a raw byte-for-byte comparison would miss.
+    const TICKET_154_ATTEMPT_1: &str = "$ cargo clippy --all-targets --all-features -- -D warnings\n    Checking git-agent-harness v0.1.0 (/home/khing/workspace/agent-lab/worktrees/gah-gah-1783786976)\nerror: function `vibe_admin_api_to_quota_observation` is never used\n   --> src/usage.rs:611:8\n    |\n611 | pub fn vibe_admin_api_to_quota_observation(\n    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |\n    = note: `-D dead-code` implied by `-D warnings`\n\nerror: function `refresh_vibe_quota` is never used\n   --> src/usage.rs:831:8\n    |\n831 | pub fn refresh_vibe_quota(\n    |        ^^^^^^^^^^^^^^^^^^\n\nerror: could not compile `git-agent-harness` (bin \"gah\") due to 2 previous errors\n";
+    const TICKET_154_ATTEMPT_2_SAME_MISTAKE: &str = "$ cargo clippy --all-targets --all-features -- -D warnings\n    Checking git-agent-harness v0.1.0 (/home/khing/workspace/agent-lab/worktrees/gah-gah-1783799102)\nerror: function `vibe_admin_api_to_quota_observation` is never used\n   --> src/usage.rs:648:8\n    |\n648 | pub fn vibe_admin_api_to_quota_observation(\n    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |\n    = note: `-D dead-code` implied by `-D warnings`\n\nerror: function `refresh_vibe_quota` is never used\n   --> src/usage.rs:902:8\n    |\n902 | pub fn refresh_vibe_quota(\n    |        ^^^^^^^^^^^^^^^^^^\n\nerror: could not compile `git-agent-harness` (bin \"gah\") due to 2 previous errors\n";
+    const CARGO_TEST_FAILURE: &str = "$ cargo test\nrunning 1 test\ntest usage::tests::vibe_quota_roundtrip ... FAILED\n\nfailures:\n\n---- usage::tests::vibe_quota_roundtrip stdout ----\nthread 'usage::tests::vibe_quota_roundtrip' panicked at src/usage.rs:900:5:\nassertion `left == right` failed\n  left: 0\n right: 42\n";
+
+    #[test]
+    fn validation_failure_fingerprint_ignores_paths_and_line_numbers() {
+        // Same underlying dead_code mistake, different worktree path and
+        // shifted line numbers -- must still fingerprint identically.
+        assert_eq!(
+            validation_failure_fingerprint(TICKET_154_ATTEMPT_1),
+            validation_failure_fingerprint(TICKET_154_ATTEMPT_2_SAME_MISTAKE)
+        );
+    }
+
+    #[test]
+    fn validation_failure_fingerprint_distinguishes_different_failure_kinds() {
+        assert_ne!(
+            validation_failure_fingerprint(TICKET_154_ATTEMPT_1),
+            validation_failure_fingerprint(CARGO_TEST_FAILURE)
+        );
+    }
+
+    #[test]
+    fn repeated_dead_code_mistake_is_recognized_as_no_progress_despite_shifted_lines() {
+        let progress = classify_validation_failure_progress(
+            None,
+            Some(TICKET_154_ATTEMPT_1),
+            TICKET_154_ATTEMPT_2_SAME_MISTAKE,
+        );
+        assert_eq!(
+            progress,
+            ValidationFailureProgress::UnchangedFromPreviousAttempt
+        );
+    }
+
+    #[test]
+    fn genuinely_different_failure_kind_is_not_treated_as_repeat() {
+        let progress = classify_validation_failure_progress(
+            None,
+            Some(TICKET_154_ATTEMPT_1),
+            CARGO_TEST_FAILURE,
+        );
+        assert_eq!(progress, ValidationFailureProgress::Changed);
+    }
+
     #[test]
     fn validation_failure_reasons_explain_baseline_vs_previous_attempt() {
         assert!(validation_failure_no_progress_reason(
@@ -7297,13 +7349,52 @@ fn dry_run_route(
     .ok()
 }
 
+/// Extracts a stable fingerprint from raw validation failure output (combined
+/// stdout+stderr from `validate()`) for `classify_validation_failure_progress`
+/// to compare instead of the raw text.
+///
+/// Two attempts that hit the exact same mistake can still differ byte-for-byte:
+/// clippy/rustc line:column numbers shift as surrounding code the agent wrote
+/// changes shape, and the `Checking ... (path)` header embeds a worktree path
+/// that can differ between dispatches. Comparing raw text would then miss a
+/// genuine repeat and burn a whole extra attempt on a mistake that was never
+/// going to resolve (observed live: TICKET-154's `dead_code` lint firing on
+/// the same unwired functions across attempts).
+///
+/// Keeps only the diagnostic header lines (`error: ...`, `error[E...]: ...`,
+/// `warning: ...`) that name the actual mistake, dropping `--> file:line:col`
+/// locations, source snippets, and `= note:`/`= help:` lines that vary without
+/// the mistake itself changing. Falls back to the full trimmed text when
+/// nothing matches those markers (e.g. a cargo test panic/assertion failure),
+/// so two dissimilar failures are never conflated into an identical empty
+/// fingerprint.
+fn validation_failure_fingerprint(text: &str) -> String {
+    let diagnostic_lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("error") || line.starts_with("warning:"))
+        .collect();
+    if diagnostic_lines.is_empty() {
+        text.trim().to_string()
+    } else {
+        diagnostic_lines.join("\n")
+    }
+}
+
 fn classify_validation_failure_progress(
     baseline_failure: Option<&str>,
     previous_failure: Option<&str>,
     current_failure: &str,
 ) -> ValidationFailureProgress {
-    let same_as_baseline = baseline_failure == Some(current_failure);
-    let same_as_previous = previous_failure == Some(current_failure);
+    let current_fp = validation_failure_fingerprint(current_failure);
+    let same_as_baseline = baseline_failure
+        .map(validation_failure_fingerprint)
+        .as_deref()
+        == Some(current_fp.as_str());
+    let same_as_previous = previous_failure
+        .map(validation_failure_fingerprint)
+        .as_deref()
+        == Some(current_fp.as_str());
     match (same_as_baseline, same_as_previous) {
         (true, true) => ValidationFailureProgress::UnchangedFromBaselineAndPreviousAttempt,
         (true, false) => ValidationFailureProgress::UnchangedFromBaseline,
