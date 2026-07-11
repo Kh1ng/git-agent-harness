@@ -10,6 +10,30 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+#[cfg(unix)]
+fn prepare_process_group(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn prepare_process_group(_cmd: &mut Command) {}
+
+fn kill_process_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
 /// Parse a KEY=VALUE env file, skipping blank lines and comments.
 pub fn load_env_file(path: &str) -> Vec<(String, String)> {
     let Ok(text) = fs::read_to_string(path) else {
@@ -124,6 +148,7 @@ fn spawn_with_idle_watch(
 ) -> Result<(i32, f64)> {
     let start = Instant::now();
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    prepare_process_group(&mut cmd);
 
     let mut child = cmd.spawn().with_context(|| spawn_context.to_string())?;
     let (progress_tx, progress_rx) = mpsc::channel();
@@ -171,7 +196,7 @@ fn spawn_with_idle_watch(
                     start.elapsed() >= startup_grace
                 };
                 if stalled {
-                    let _ = child.kill();
+                    kill_process_group(&mut child);
                     let _ = child.wait();
                     killed_for_idle = true;
                     break -1;
@@ -182,7 +207,7 @@ fn spawn_with_idle_watch(
                 // try_wait() itself erroring is rare, but the child may
                 // still be alive -- kill and reap rather than risk leaking
                 // it (same pattern as the idle-kill branch above).
-                let _ = child.kill();
+                kill_process_group(&mut child);
                 let _ = child.wait();
                 break -1;
             }
@@ -1084,6 +1109,7 @@ pub fn run_review_backend(
     cmd.current_dir(worktree)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    prepare_process_group(&mut cmd);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
@@ -1130,14 +1156,14 @@ pub fn run_review_backend(
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
+                    kill_process_group(&mut child);
                     let _ = child.wait();
                     break ReviewProcessOutcome::Timeout;
                 }
                 thread::sleep(poll_interval);
             }
             Err(err) => {
-                let _ = child.kill();
+                kill_process_group(&mut child);
                 let _ = child.wait();
                 let mut stderr = read_text_file(&stderr_path);
                 if !stderr.is_empty() {
