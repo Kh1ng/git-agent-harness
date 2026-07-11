@@ -694,6 +694,15 @@ pub fn run_loop(
 ) -> Result<()> {
     let _lock = acquire_profile_lock(profile_name, config_path)?;
 
+    // Holding the exclusive per-profile lock proves no other process can be
+    // concurrently dispatching for this profile, so any `dispatch_started`
+    // left over from before this process started (a prior `gah loop` killed
+    // or crashed mid-dispatch) is provably abandoned, not just slow. Close
+    // those out now so the dashboard's "Controller activity" panel doesn't
+    // count them as running forever (see incident: 50 orphaned events after
+    // repeated restarts).
+    crate::events::reconcile_abandoned_dispatches(cfg, profile_name)?;
+
     loop {
         run_once(cfg, profile_name, json, parallel, skip_validation_gate)?;
         std::thread::sleep(std::time::Duration::from_secs(30));
