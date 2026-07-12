@@ -20,37 +20,43 @@ a summary.
 
 ## 1. Deployment
 
-### Build and symlink convention
+### Deterministic CLI/control-plane update
 
-The binary is built from the repo root (the crate is at the repo root, not in a
-`rust-backend/` subdir):
+Do not assume a `cargo build --release` updates the `gah` command on PATH. A
+host can have a stale Cargo-installed binary at `$CARGO_HOME/bin/gah` while
+`target/release/gah` is current. Use the built-in updater for the CLI and Node
+control plane:
 
 ```bash
-cargo build --release
+gah update --repo /path/to/git-agent-harness --restart-server
 ```
 
-`/usr/local/bin/gah` is a symlink to `target/release/gah`, so a rebuild deploys
-in place — there is no separate copy/install step. Confirm the link and version
-after a build:
+It refuses a dirty or non-default-branch checkout, pulls with `--ff-only`,
+replaces the actual Cargo-installed CLI with `cargo install --path . --force`,
+installs the lockfile-pinned Node dependencies, builds `apps/server`, and
+optionally restarts `gah-server.service`. It does not
+build or deploy web, desktop, TUI, mobile, or other client packages.
+
+`--restart-server` refuses to run while any `gah loop --profile …` process is
+active. A dashboard-started loop remains in the server service's systemd cgroup
+and would otherwise be killed by the service restart. Stop the loop cleanly
+first, then rerun the update. The restart also requires passwordless `sudo`
+permission for `systemctl`; configure that deliberately for unattended hosts.
+
+For a fresh CLI/control-plane host installation:
 
 ```bash
-ls -l /usr/local/bin/gah
-gah --help | head -1
+scripts/install.sh
 ```
 
 ### Upgrade procedure
 
 ```bash
-git pull --ff-only
-cargo build --release
-# restart any long-running units so they pick up the new binary:
-sudo systemctl restart gah-server
-# Restart gah-loop only if you have installed your own loop unit.
+gah update --repo /path/to/git-agent-harness --restart-server
 ```
 
-Because `/usr/local/bin/gah` is a symlink into `target/release`, a `--once`
-invocation started after the build already uses the new code; only long-lived
-processes (the server, a recurring `gah loop`) need a restart.
+The updater never starts or restarts a recurring `gah loop`; with
+`--restart-server` it also refuses to restart the service while one is active.
 
 ### systemd units
 
