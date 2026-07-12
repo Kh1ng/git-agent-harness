@@ -2128,6 +2128,63 @@ fn improve(
             );
         }
 
+        // An exit-0 process that leaves the worktree unchanged did not
+        // complete the ticket. Treating it as success would let a backend
+        // consume quota, pass the repository's unchanged test suite, and
+        // falsely advance the controller with no patch or PR to show for it.
+        // Stop before post-change validation: there is no change to validate.
+        if !worktree::has_changes(&wt, &profile.default_target_branch)? {
+            ledger.attempts.push(crate::ledger::AttemptRecord {
+                attempt_number: attempt + 1,
+                backend: route.effective_backend.clone(),
+                effective_model: Some(llm.model.clone()),
+                exit_code: Some(0),
+                validation_result: Some("not_run_no_changes".into()),
+                failure_class: Some(crate::ledger::FailureClass::AgentNoProgress.as_str().into()),
+                failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
+                duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                diff_path: None,
+                usage: attempt_usage(
+                    &result.log_path,
+                    result.agy_cli_log_delta.as_deref(),
+                    Some(route.effective_backend.as_str()),
+                    Some(&llm.model),
+                    result.transcript_path.as_deref(),
+                    Some(&claude_path),
+                ),
+            });
+            if attempt + 1 < max_attempts {
+                // No progress is recoverable: a fresh attempt can get a
+                // clearer instruction or a transient backend condition may
+                // have cleared. Preserve the failed attempt in the ledger,
+                // but do not stamp the overall dispatch as failed unless all
+                // bounded attempts make no progress.
+                println!(
+                    "Backend made no changes on attempt {}/{}; retrying with explicit no-progress context...",
+                    attempt + 1,
+                    max_attempts
+                );
+                prior_phase_context = Some(task.clone());
+                task = format!(
+                    "{}\n\n## Previous attempt made no progress (attempt {}/{})\n\nThe backend exited successfully but did not change the worktree. Re-read the scoped task, make the required implementation change, and do not stop until a concrete diff exists.",
+                    base_task,
+                    attempt + 1,
+                    max_attempts,
+                );
+                continue;
+            }
+            ledger.validation_result = Some("not_run_no_changes".into());
+            ledger.set_failure(
+                crate::ledger::FailureClass::AgentNoProgress,
+                crate::ledger::FailureStage::AgentRun,
+            );
+            worktree::cleanup(&wt, repo);
+            anyhow::bail!(
+                "backend exited 0 on attempt {} but produced no worktree changes",
+                attempt + 1
+            );
+        }
+
         if profile.validation_commands.is_empty() {
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
@@ -2427,9 +2484,23 @@ fn improve(
 
     let has_changes = worktree::has_changes(&wt, &profile.default_target_branch)?;
     if !has_changes {
-        println!("No changes produced — nothing to push.");
+        // Defensive backstop: auto-fix commands or a future post-validation
+        // transform could remove every change after the normal early check.
+        // Do not let that become a successful no-op dispatch either.
+        ledger.validation_result = Some("passed_no_changes".into());
+        ledger.set_failure(
+            crate::ledger::FailureClass::AgentNoProgress,
+            crate::ledger::FailureStage::AgentRun,
+        );
+        if let Some(last_attempt) = ledger.attempts.last_mut() {
+            last_attempt.validation_result = Some("passed_no_changes".into());
+            last_attempt.failure_class =
+                Some(crate::ledger::FailureClass::AgentNoProgress.as_str().into());
+            last_attempt.failure_stage =
+                Some(crate::ledger::FailureStage::AgentRun.as_str().into());
+        }
         worktree::cleanup(&wt, repo);
-        return Ok(());
+        anyhow::bail!("all worktree changes disappeared before publish");
     }
     let commit_title = if validation_failed {
         format!(

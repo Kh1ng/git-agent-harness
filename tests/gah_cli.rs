@@ -1269,11 +1269,25 @@ fn dispatch_records_effective_model_for_routed_runs() {
         "# Ticket\n\nRecommended backend: claude\nRecommended model: claude-sonnet-4\n",
     )
     .unwrap();
-    let cfg = write_real_repo_config(&tmp, &repo, "github");
+    // This test verifies route attribution, not publication. The fixture
+    // deliberately uses an illustrative GitHub remote, so keep publication
+    // disabled once the backend creates the minimal diff required by the
+    // no-progress guard.
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.publishing]\nallow_pull_request_creation = false\n",
+        "",
+    );
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin(&fake_bin, "claude");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
 
     bin()
         .args([
@@ -2704,6 +2718,115 @@ fn dispatch_fix_validation_never_passes_records_no_push_no_mr() {
     ));
 }
 
+/// TICKET-250: an exit-0 backend that leaves the worktree unchanged has
+/// consumed a real attempt but made no ticket progress. It must be surfaced as
+/// agent_no_progress, never as a successful no-op dispatch.
+#[test]
+fn dispatch_fix_no_change_is_agent_no_progress() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\nexit 0\n");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "0",
+            "--skip-validation-gate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("produced no worktree changes"));
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["failure_class"], "agent_no_progress");
+    assert_eq!(entry["failure_stage"], "agent_run");
+    assert_eq!(entry["validation_result"], "not_run_no_changes");
+    let attempts = entry["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["exit_code"], 0);
+    assert_eq!(attempts[0]["failure_class"], "agent_no_progress");
+    assert_eq!(attempts[0]["validation_result"], "not_run_no_changes");
+}
+
+/// TICKET-250: no-progress uses the same bounded retry policy as other
+/// recoverable agent failures. Every failed no-change attempt remains visible
+/// in the ledger, and only the final one marks the dispatch terminally failed.
+#[test]
+fn dispatch_fix_retries_no_change_before_terminal_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let invocation_log = tmp.path().join("codex-invocations.log");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nprintf 'attempt\\n' >> \"{}\"\nexit 0\n",
+            invocation_log.display()
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "1",
+            "--skip-validation-gate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "attempt 2 but produced no worktree changes",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(&invocation_log).unwrap().lines().count(),
+        2
+    );
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["failure_class"], "agent_no_progress");
+    let attempts = entry["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts.iter().all(|attempt| {
+        attempt["failure_class"] == "agent_no_progress"
+            && attempt["validation_result"] == "not_run_no_changes"
+    }));
+}
+
 /// TICKET-064, test 1: a one-shot success (no validation failures at all)
 /// must record exactly one attempt, started and completed.
 #[test]
@@ -2773,7 +2896,16 @@ fn dispatch_runs_validation_gate_once_per_config_change_then_skips() {
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\nexit 0\n");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nprintf 'https://github.com/owner/real/pull/1\\n'\n",
+    );
 
     let run = || -> assert_cmd::assert::Assert {
         bin()
@@ -2891,7 +3023,16 @@ fn dispatch_skip_validation_gate_bypasses_gate() {
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\nexit 0\n");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nprintf 'https://github.com/owner/real/pull/1\\n'\n",
+    );
 
     bin()
         .args([
@@ -4264,7 +4405,7 @@ fn dispatch_agy_multi_instance_isolated_execution() {
         &fake_bin,
         "agy",
         &format!(
-            "#!/bin/sh\necho \"agy\" | tee -a \"{}\"\nexit 0\n",
+            "#!/bin/sh\necho \"agy\" | tee -a \"{}\"\nprintf 'agent edit\n' >> README.md\nexit 0\n",
             agy_log.display()
         ),
     );
@@ -4272,7 +4413,7 @@ fn dispatch_agy_multi_instance_isolated_execution() {
         &fake_bin,
         "agy-main",
         &format!(
-            "#!/bin/sh\necho \"agy-main\" | tee -a \"{}\"\nexit 0\n",
+            "#!/bin/sh\necho \"agy-main\" | tee -a \"{}\"\nprintf 'agent edit\n' >> README.md\nexit 0\n",
             agy_main_log.display()
         ),
     );
@@ -4280,7 +4421,7 @@ fn dispatch_agy_multi_instance_isolated_execution() {
         &fake_bin,
         "agy-second",
         &format!(
-            "#!/bin/sh\necho \"agy-second\" | tee -a \"{}\"\nexit 0\n",
+            "#!/bin/sh\necho \"agy-second\" | tee -a \"{}\"\nprintf 'agent edit\n' >> README.md\nexit 0\n",
             agy_second_log.display()
         ),
     );
