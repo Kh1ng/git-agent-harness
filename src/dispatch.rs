@@ -1257,6 +1257,7 @@ fn attempt_usage(
     log_path: &str,
     agy_cli_log_delta: Option<&str>,
     backend: Option<&str>,
+    effective_model: Option<&str>,
     transcript_path: Option<&str>,
     claude_path: Option<&str>,
 ) -> crate::ledger::LedgerUsage {
@@ -1279,6 +1280,17 @@ fn attempt_usage(
             Some("agy" | "agy-main" | "agy-second") => Some("google".to_string()),
             _ => usage.provider,
         };
+        // AGY receives this fully-qualified label as an explicit `--model`
+        // argument. Its log exposes quota/reset state but no stable token or
+        // model field on successful executions, so retain the bound model as
+        // the exact invoked model rather than leaving coding attempts
+        // unattributable. Other backends keep `actual_model` unknown unless a
+        // backend-owned artifact reports it.
+        if matches!(backend, Some("agy" | "agy-main" | "agy-second"))
+            && usage.actual_model.is_none()
+        {
+            usage.actual_model = effective_model.map(str::to_string);
+        }
         if usage.requests_count.is_none() {
             // A launched backend invocation is one consumed subscription
             // request even when its CLI exposes no token counters.
@@ -1431,11 +1443,14 @@ fn review_usage(
     effective_model: Option<&str>,
     claude_path: Option<&str>,
 ) -> crate::ledger::LedgerUsage {
-    let mut usage = attempt_usage(log_path, None, Some(backend), None, claude_path);
-    if matches!(backend, "agy" | "agy-main" | "agy-second") && usage.actual_model.is_none() {
-        usage.actual_model = effective_model.map(str::to_string);
-    }
-    usage
+    attempt_usage(
+        log_path,
+        None,
+        Some(backend),
+        effective_model,
+        None,
+        claude_path,
+    )
 }
 
 fn usage_has_observation(usage: &crate::ledger::LedgerUsage) -> bool {
@@ -2017,6 +2032,7 @@ fn improve(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
                     Some(route.effective_backend.as_str()),
+                    Some(&llm.model),
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
@@ -2118,6 +2134,7 @@ fn improve(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
                     Some(route.effective_backend.as_str()),
+                    Some(&llm.model),
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
@@ -2150,6 +2167,7 @@ fn improve(
                         &result.log_path,
                         result.agy_cli_log_delta.as_deref(),
                         Some(route.effective_backend.as_str()),
+                        Some(&llm.model),
                         result.transcript_path.as_deref(),
                         Some(&claude_path),
                     ),
@@ -2213,6 +2231,7 @@ fn improve(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
                             Some(route.effective_backend.as_str()),
+                            Some(&llm.model),
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
@@ -2298,6 +2317,7 @@ fn improve(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
                             Some(route.effective_backend.as_str()),
+                            Some(&llm.model),
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
@@ -2328,6 +2348,7 @@ fn improve(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
                             Some(route.effective_backend.as_str()),
+                            Some(&llm.model),
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
@@ -2354,6 +2375,7 @@ fn improve(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
                             Some(route.effective_backend.as_str()),
+                            Some(&llm.model),
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
@@ -4683,7 +4705,7 @@ which lacks a leading boundary check.
         )
         .unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap(), None, Some("vibe"), None, None);
+        let usage = attempt_usage(path.to_str().unwrap(), None, Some("vibe"), None, None, None);
         assert_eq!(usage.input_tokens, Some(500));
         assert_eq!(usage.output_tokens, Some(120));
         assert_eq!(usage.total_tokens, Some(620));
@@ -4694,6 +4716,7 @@ which lacks a leading boundary check.
         // TICKET-101: unknown must remain unknown, never a fabricated zero.
         let usage = attempt_usage(
             "/definitely/does/not/exist/backend-output.log",
+            None,
             None,
             None,
             None,
@@ -4709,11 +4732,36 @@ which lacks a leading boundary check.
         let path = tmp.path().join("backend-output.log");
         fs::write(&path, "agent made some edits, no usage reported\n").unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap(), None, Some("vibe"), None, None);
+        let usage = attempt_usage(path.to_str().unwrap(), None, Some("vibe"), None, None, None);
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
         assert_eq!(usage.requests_count, Some(1));
         assert_eq!(usage.usage_classification, Some("quota_backed".to_string()));
+    }
+
+    #[test]
+    fn attempt_usage_records_the_bound_agy_model_when_cli_logs_only_quota_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("backend-output.log");
+        fs::write(&path, "completed successfully\n").unwrap();
+
+        let usage = attempt_usage(
+            path.to_str().unwrap(),
+            Some("quotaRefreshLoop: completed"),
+            Some("agy"),
+            Some("Gemini 3.5 Flash (Medium)"),
+            None,
+            None,
+        );
+
+        assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
+        assert_eq!(usage.usage_classification.as_deref(), Some("quota_backed"));
+        assert_eq!(usage.provider.as_deref(), Some("google"));
+        assert_eq!(
+            usage.actual_model.as_deref(),
+            Some("Gemini 3.5 Flash (Medium)")
+        );
+        assert_eq!(usage.requests_count, Some(1));
     }
 
     #[test]
@@ -4753,7 +4801,14 @@ which lacks a leading boundary check.
         )
         .unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap(), None, Some("codex"), None, None);
+        let usage = attempt_usage(
+            path.to_str().unwrap(),
+            None,
+            Some("codex"),
+            None,
+            None,
+            None,
+        );
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.output_tokens, None);
         assert_eq!(usage.requests_count, Some(1));
