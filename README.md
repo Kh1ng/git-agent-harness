@@ -418,6 +418,13 @@ Prune only touches:
 - `artifact_root/sessions/*`
 - worktrees under `defaults.worktree_base` with GAH-owned naming prefixes
 
+## Operating GAH Unattended
+
+For running and repairing GAH as an unattended service (systemd units, token
+scopes, state-file repair commands, notification/manager-wake setup, failure
+triage, and the auto-merge safety model), see the operator runbook:
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
 ## Command Summary
 
 - `gah init`
