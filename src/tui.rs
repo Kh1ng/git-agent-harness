@@ -104,7 +104,7 @@ fn run_confirmed_action(
 
     ratatui::restore();
     println!("\nRunning: {} -- {}\n", action.kind(), action.reason());
-    let outcome = crate::controller::execute_action(cfg, &profile_name, &action, false);
+    let outcome = crate::controller::execute_action(cfg, &profile_name, &action, false, None);
     match &outcome {
         Ok(msg) => println!("\n{msg}"),
         Err(e) => println!("\nError: {e:#}"),

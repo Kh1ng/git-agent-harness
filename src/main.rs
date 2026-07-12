@@ -1024,6 +1024,7 @@ fn main() -> Result<()> {
                 dispatch_reason: None,
                 work_id: None,
                 run_id: Some(run_id),
+                route_ready: None,
             };
             controller::run_dispatch_and_record(&cfg, "dispatch", None, &args)?;
         }

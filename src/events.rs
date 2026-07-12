@@ -157,7 +157,7 @@ pub fn read_events(cfg: &GahConfig) -> Result<Vec<ControllerEvent>> {
 /// by `run_id`, matching the dashboard's `deriveControllerActivity`
 /// (apps/server/src/controllerActivity.ts) so Rust and the dashboard agree
 /// on what "still running" means.
-fn orphaned_dispatch_runs(
+pub(crate) fn orphaned_dispatch_runs(
     events: &[ControllerEvent],
     profile: &str,
 ) -> Vec<(String, Option<String>)> {
@@ -194,6 +194,7 @@ fn orphaned_dispatch_runs(
 /// panel counts every such orphan as running forever.
 ///
 /// Returns the number of orphans reconciled.
+#[allow(dead_code)] // controller reconciliation also persists a ledger record
 pub fn reconcile_abandoned_dispatches(cfg: &GahConfig, profile_name: &str) -> Result<usize> {
     let events = read_events(cfg)?;
     let orphans = orphaned_dispatch_runs(&events, profile_name);

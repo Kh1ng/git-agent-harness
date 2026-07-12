@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// TICKET-078: how many times the controller will automatically
@@ -28,6 +29,60 @@ pub(crate) fn is_genuine_agent_failure(failure_class: &str) -> bool {
         failure_class,
         "agent_no_progress" | "agent_failure" | "context_limit_exceeded"
     )
+}
+
+/// Finish runs left behind by a killed controller with both durable surfaces:
+/// the event stream used for live activity and the normalized ledger used for
+/// routing/usage reports. `run_once` calls this after acquiring the profile
+/// lock, so an open start is provably abandoned rather than merely slow.
+fn reconcile_abandoned_dispatches(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+) -> Result<usize> {
+    let events = crate::events::read_events(cfg)?;
+    let orphans = crate::events::orphaned_dispatch_runs(&events, profile_name);
+    if orphans.is_empty() {
+        return Ok(0);
+    }
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    let existing_sessions: HashSet<String> = crate::ledger::read_entries(cfg)?
+        .into_iter()
+        .filter_map(|entry| entry.session_id)
+        .collect();
+
+    for (run_id, work_id) in &orphans {
+        if !existing_sessions.contains(run_id) {
+            let target = work_id.as_deref().unwrap_or("unknown");
+            let mut entry = crate::ledger::LedgerEntry::new(
+                profile_name,
+                profile,
+                "unknown",
+                "abandoned",
+                target,
+                Some(run_id.clone()),
+                None,
+            );
+            entry.work_id = work_id.clone();
+            entry.dispatch_reason = Some("abandoned_reconciliation".to_string());
+            entry.validation_result = Some("not_run_abandoned".to_string());
+            entry.error_summary =
+                Some("dispatch abandoned before terminal telemetry was persisted".to_string());
+            entry.set_failure(
+                crate::ledger::FailureClass::HarnessError,
+                crate::ledger::FailureStage::AgentRun,
+            );
+            crate::ledger::append(cfg, &entry)?;
+        }
+        crate::events::record_with_run_id(
+            cfg,
+            crate::events::EventType::DispatchFinished,
+            Some(profile_name),
+            work_id.as_deref(),
+            Some(run_id),
+            "abandoned (reconciled before next dispatch)",
+        )?;
+    }
+    Ok(orphans.len())
 }
 
 fn is_infra_failure(failure_class: &str) -> bool {
@@ -738,15 +793,6 @@ pub fn run_loop(
 ) -> Result<()> {
     let _lock = acquire_profile_lock(profile_name, config_path)?;
 
-    // Holding the exclusive per-profile lock proves no other process can be
-    // concurrently dispatching for this profile, so any `dispatch_started`
-    // left over from before this process started (a prior `gah loop` killed
-    // or crashed mid-dispatch) is provably abandoned, not just slow. Close
-    // those out now so the dashboard's "Controller activity" panel doesn't
-    // count them as running forever (see incident: 50 orphaned events after
-    // repeated restarts).
-    crate::events::reconcile_abandoned_dispatches(cfg, profile_name)?;
-
     loop {
         // Transient provider/controller failures must not kill the daemon.
         // A validation-gate failure is different: it proves the safety check
@@ -778,6 +824,7 @@ pub fn run_once(
     parallel: usize,
     skip_validation_gate: bool,
 ) -> Result<()> {
+    reconcile_abandoned_dispatches(cfg, profile_name)?;
     let claim_scope = {
         let profile = crate::config::get_profile(cfg, profile_name)?;
         format!("{profile_name}@{}", profile.repo_id)
@@ -874,7 +921,7 @@ pub fn run_once(
             if !crate::work_claim::try_claim_work(&claim_scope, work_id)? {
                 format!("Skipped already-claimed work '{work_id}'")
             } else {
-                match execute_action(cfg, profile_name, &action, skip_validation_gate) {
+                match execute_action(cfg, profile_name, &action, skip_validation_gate, None) {
                     Ok(outcome) => {
                         crate::work_claim::release_work(&claim_scope, work_id)?;
                         outcome
@@ -886,7 +933,7 @@ pub fn run_once(
                 }
             }
         } else {
-            execute_action(cfg, profile_name, &action, skip_validation_gate)?
+            execute_action(cfg, profile_name, &action, skip_validation_gate, None)?
         };
 
         let stop_event_type = match &action {
@@ -1067,12 +1114,30 @@ fn run_parallel_once(
                     let profile_for_thread = profile_name.to_string();
                     let claim_scope_for_thread = claim_scope.clone();
                     let work_id_for_thread = action_work_id.map(str::to_string);
+                    // A capped backend/model must be reserved before the
+                    // next slot makes its routing decision. The rendezvous
+                    // sender is dropped if dispatch fails before routing, so
+                    // that failure cannot deadlock the batch.
+                    let waits_for_route = matches!(
+                        &action_for_thread,
+                        NextAction::DispatchTicket { .. }
+                            | NextAction::Retry { .. }
+                            | NextAction::Escalate { .. }
+                            | NextAction::FixMr { .. }
+                    );
+                    let (route_ready, route_receiver) = if waits_for_route {
+                        let (sender, receiver) = sync_channel(0);
+                        (Some(sender), Some(receiver))
+                    } else {
+                        (None, None)
+                    };
                     handles.push(scope.spawn(move || {
                         let result = execute_action(
                             cfg,
                             &profile_for_thread,
                             &action_for_thread,
                             skip_validation_gate,
+                            route_ready,
                         );
                         let (outcome, event_outcome) = match result {
                             Ok(outcome) => (outcome.clone(), outcome),
@@ -1097,6 +1162,9 @@ fn run_parallel_once(
                             outcome,
                         }
                     }));
+                    if let Some(receiver) = route_receiver {
+                        let _ = receiver.recv();
+                    }
                 }
             }
         }
@@ -1108,7 +1176,8 @@ fn run_parallel_once(
         if handles.is_empty() {
             if let Some((original_action, action)) = pending_terminal {
                 record_action_events(cfg, profile_name, &original_action, &action)?;
-                let outcome = execute_action(cfg, profile_name, &action, skip_validation_gate)?;
+                let outcome =
+                    execute_action(cfg, profile_name, &action, skip_validation_gate, None)?;
 
                 let stop_event_type = match &action {
                     NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
@@ -1174,6 +1243,7 @@ pub(crate) fn execute_action(
     profile_name: &str,
     action: &NextAction,
     skip_validation_gate: bool,
+    route_ready: Option<SyncSender<()>>,
 ) -> Result<String> {
     let base_args = || crate::dispatch::DispatchArgs {
         profile: profile_name.to_string(),
@@ -1198,6 +1268,7 @@ pub(crate) fn execute_action(
         dispatch_reason: None,
         work_id: action.work_id().map(str::to_string),
         run_id: Some(uuid::Uuid::new_v4().to_string()),
+        route_ready: route_ready.clone(),
     };
 
     match action {
@@ -2870,6 +2941,50 @@ mod tests {
             profiles: HashMap::new(),
         };
         (tmp, cfg)
+    }
+
+    #[test]
+    fn once_reconciliation_writes_terminal_event_and_unknown_ledger_record() {
+        let (_tmp, mut cfg) = event_test_config();
+        let profile: crate::config::Profile = toml::from_str(
+            r#"
+display_name = "Real"
+repo_id = "real"
+provider = "github"
+repo = "owner/real"
+local_path = "/tmp/real"
+artifact_root = "/tmp/real-artifacts"
+default_target_branch = "main"
+"#,
+        )
+        .unwrap();
+        cfg.profiles.insert("real".into(), profile);
+        crate::events::record_with_run_id(
+            &cfg,
+            crate::events::EventType::DispatchStarted,
+            Some("real"),
+            Some("TICKET-500"),
+            Some("orphaned-run"),
+            "dispatch_ticket: 500",
+        )
+        .unwrap();
+
+        assert_eq!(super::reconcile_abandoned_dispatches(&cfg, "real").unwrap(), 1);
+
+        let events = crate::events::read_events(&cfg).unwrap();
+        assert!(events.iter().any(|event| {
+            event.run_id.as_deref() == Some("orphaned-run")
+                && event.event_type == "dispatch_finished"
+                && event.details.contains("abandoned")
+        }));
+        let ledger = crate::ledger::read_entries(&cfg).unwrap();
+        let entry = ledger
+            .iter()
+            .find(|entry| entry.session_id.as_deref() == Some("orphaned-run"))
+            .expect("reconciliation must persist an unknown terminal ledger record");
+        assert_eq!(entry.work_id.as_deref(), Some("TICKET-500"));
+        assert_eq!(entry.failure_class.as_deref(), Some("harness_error"));
+        assert_eq!(entry.validation_result.as_deref(), Some("not_run_abandoned"));
     }
 
     #[test]

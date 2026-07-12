@@ -12,6 +12,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
@@ -124,6 +125,10 @@ pub struct DispatchArgs {
     /// Controller-assigned identity shared by start/finish events and the
     /// resulting ledger entry. Direct CLI dispatches generate one in `run`.
     pub run_id: Option<String>,
+    /// Parallel-controller rendezvous: sent only after the selected coding
+    /// route has reserved its backend/model slot. This prevents a sibling
+    /// from choosing the same capped route before the first worker starts.
+    pub route_ready: Option<SyncSender<()>>,
 }
 
 /// Marks an error as a failed validation-gate self-check rather than a
@@ -925,6 +930,18 @@ fn resolve_llm(
     })
 }
 
+fn reserve_backend_slot(
+    profile: &Profile,
+    backend: &str,
+    effective_model: Option<&str>,
+) -> Result<routing::ConcurrencyGuard> {
+    let concurrency_cap = profile
+        .max_concurrent_per_model
+        .get(&format!("{backend}/{}", effective_model.unwrap_or("")))
+        .copied();
+    routing::ConcurrencyGuard::acquire_shared(backend, effective_model, concurrency_cap)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_backend(
     backend: &str,
@@ -936,17 +953,39 @@ fn run_backend(
     effective_model: Option<&str>,
     env_path: Option<&str>,
 ) -> Result<runner::RunResult> {
+    run_backend_with_reserved_route(
+        backend,
+        profile,
+        wt,
+        task,
+        session_dir,
+        llm,
+        effective_model,
+        env_path,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_backend_with_reserved_route(
+    backend: &str,
+    profile: &Profile,
+    wt: &Path,
+    task: &str,
+    session_dir: &Path,
+    llm: &runner::LlmConfig,
+    effective_model: Option<&str>,
+    env_path: Option<&str>,
+    route_slot_already_reserved: bool,
+) -> Result<runner::RunResult> {
     // Live incident (2026-07-11): concurrent dispatches landing on the same
     // shared free-tier backend+model (opencode/hy3-free) silently rate-limit.
     // Held for the duration of the actual backend call -- dropped on every
     // exit path (success, error, or panic) -- so routing's
     // `max_concurrent_per_model` check sees an accurate live count.
-    let concurrency_cap = profile
-        .max_concurrent_per_model
-        .get(&format!("{backend}/{}", effective_model.unwrap_or("")))
-        .copied();
-    let _concurrency_slot =
-        routing::ConcurrencyGuard::acquire_shared(backend, effective_model, concurrency_cap)?;
+    let _concurrency_slot = (!route_slot_already_reserved)
+        .then(|| reserve_backend_slot(profile, backend, effective_model))
+        .transpose()?;
     let origin_before = worktree::git(&["remote", "get-url", "origin"], wt).ok();
     let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
     if backend == "agy-second" {
@@ -1785,6 +1824,18 @@ fn improve(
     let mut route = decide_route(cfg, profile, route_req.clone(), ledger)?;
     apply_route_to_ledger(ledger, &route);
     preflight(profile, &route.effective_backend)?;
+    // Reserve the selected slot before telling a parallel controller that it
+    // may choose the next action. The reservation stays alive through this
+    // first backend attempt, so a sibling sees the live cap and falls through
+    // to the next configured backend instance (for example agy-second).
+    let mut initial_route_slot = Some(reserve_backend_slot(
+        profile,
+        &route.effective_backend,
+        route.effective_model.as_deref(),
+    )?);
+    if let Some(route_ready) = &args.route_ready {
+        let _ = route_ready.send(());
+    }
     let mut llm = resolve_llm(
         cfg,
         args,
@@ -1970,7 +2021,12 @@ fn improve(
                 return Err(err);
             }
         };
-        let result = run_backend(
+        let reserved_route_slot = if attempt == 0 {
+            initial_route_slot.take()
+        } else {
+            None
+        };
+        let result = run_backend_with_reserved_route(
             &route.effective_backend,
             profile,
             &wt,
@@ -1979,6 +2035,7 @@ fn improve(
             &llm,
             route.effective_model.as_deref(),
             env_path,
+            reserved_route_slot.is_some(),
         );
         let result = match result {
             Ok(r) => r,
@@ -2545,6 +2602,17 @@ fn improve(
         );
         worktree::cleanup(&wt, repo);
         return Ok(());
+    }
+
+    if let Some(issue) = issue_details.as_ref() {
+        if let Err(error) = ensure_issue_open_for_publish(profile, issue) {
+            ledger.set_failure(
+                crate::ledger::FailureClass::HumanBlocked,
+                crate::ledger::FailureStage::Push,
+            );
+            worktree::cleanup(&wt, repo);
+            return Err(error);
+        }
     }
 
     println!("Changes detected. Committing and pushing...");
@@ -6507,6 +6575,7 @@ which lacks a leading boundary check.
             title: "Bound context".to_string(),
             body: "## Problem\n\nFull memory is stale.\n\n## Acceptance Criteria\n\n- Use project brief\n- Record sources\n".to_string(),
             labels: vec!["reliability".to_string()],
+            state: None,
         };
 
         let task = build_task(&prof, &wt, "improve", "#286", Some(&issue));
@@ -6552,6 +6621,7 @@ which lacks a leading boundary check.
             title: "Freeform issue".to_string(),
             body: "The non-structured reproduction and expected outcome live here.".to_string(),
             labels: vec!["bug".to_string()],
+            state: None,
         };
 
         let task = build_task(&prof, &wt, "fix", "#297", Some(&issue));
@@ -6575,6 +6645,7 @@ which lacks a leading boundary check.
                 "x".repeat(LIVE_TASK_ACCEPTANCE_MAX_BYTES * 2)
             ),
             labels: vec![],
+            state: None,
         };
 
         let task = build_task(&prof, &wt, "improve", "#298", Some(&issue));
@@ -7380,6 +7451,7 @@ The parser should retain structured sections.\n\n\
                 "## Problem\n\nSomething is broken\n\n## Acceptance Criteria\n\n- Fix the issue\n- Add tests"
                     .to_string(),
             labels: vec!["bug".to_string()],
+            state: None,
         };
 
         let meta = parse_ticket_metadata_from_issue(&issue);
@@ -7401,6 +7473,7 @@ The parser should retain structured sections.\n\n\
             body: "Difficulty: High\nRisk: Medium\nRecommended backend: agy\nGoal: Fix everything"
                 .to_string(),
             labels: vec![],
+            state: None,
         };
 
         let meta = parse_ticket_metadata_from_issue(&issue);
@@ -7909,6 +7982,7 @@ The parser should retain structured sections.\n\n\
             dispatch_reason: None,
             work_id: None,
             run_id: None,
+            route_ready: None,
         };
 
         // No ledger exists yet.
@@ -8069,6 +8143,7 @@ The parser should retain structured sections.\n\n\
             dispatch_reason: None,
             work_id: None,
             run_id: None,
+            route_ready: None,
         };
 
         // Fresh claim -> blocked.
@@ -10273,6 +10348,7 @@ struct IssueDetails {
     title: String,
     body: String,
     labels: Vec<String>,
+    state: Option<String>,
 }
 
 /// Check if a string looks like an issue number (e.g., "42" or "#42")
@@ -10323,7 +10399,7 @@ fn fetch_github_issue(profile: &Profile, issue_number: &str) -> Result<IssueDeta
         .arg("--repo")
         .arg(&profile.repo)
         .arg("--json")
-        .arg("title,body,labels,author")
+        .arg("title,body,labels,author,state")
         .output()
         .context("gh issue view")?;
 
@@ -10367,12 +10443,14 @@ fn fetch_github_issue(profile: &Profile, issue_number: &str) -> Result<IssueDeta
                 .collect()
         })
         .unwrap_or_default();
+    let state = resp["state"].as_str().map(str::to_string);
 
     Ok(IssueDetails {
         number,
         title,
         body,
         labels,
+        state,
     })
 }
 
@@ -10423,12 +10501,14 @@ fn fetch_gitlab_issue(profile: &Profile, issue_number: &str) -> Result<IssueDeta
                 .collect()
         })
         .unwrap_or_default();
+    let state = resp["state"].as_str().map(str::to_string);
 
     Ok(IssueDetails {
         number,
         title,
         body,
         labels,
+        state,
     })
 }
 
@@ -10442,7 +10522,7 @@ fn list_open_github_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
         .arg("--state")
         .arg("open")
         .arg("--json")
-        .arg("number,title,body,labels,author")
+        .arg("number,title,body,labels,author,state")
         .arg("--limit")
         .arg("1000")
         .output()
@@ -10477,11 +10557,13 @@ fn list_open_github_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let state = resp["state"].as_str().map(str::to_string);
             IssueDetails {
                 number,
                 title,
                 body,
                 labels,
+                state,
             }
         })
         .collect())
@@ -10555,11 +10637,13 @@ fn list_open_gitlab_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let state = resp["state"].as_str().map(str::to_string);
             all.push(IssueDetails {
                 number,
                 title,
                 body,
                 labels,
+                state,
             });
         }
 
@@ -10603,6 +10687,25 @@ fn fetch_issue_details(profile: &Profile, issue_number: &str) -> Result<IssueDet
     };
 
     result
+}
+
+/// A ticket can be closed while an agent is working. Re-fetch immediately
+/// before publication so completed work cannot be resurrected as a duplicate
+/// branch/PR. Missing or unexpected state is fail-closed: publishing is the
+/// destructive boundary and the provider is authoritative there.
+fn ensure_issue_open_for_publish(profile: &Profile, issue: &IssueDetails) -> Result<()> {
+    let fresh = fetch_issue_details(profile, &issue.number)?;
+    match fresh.state.as_deref() {
+        Some(state) if state.eq_ignore_ascii_case("open") => Ok(()),
+        Some(state) => anyhow::bail!(
+            "source issue #{} is {state}; refusing to publish completed or closed work",
+            fresh.number
+        ),
+        None => anyhow::bail!(
+            "source issue #{} did not report its state; refusing to publish without authoritative status",
+            fresh.number
+        ),
+    }
 }
 
 /// This extracts metadata from the issue title and body instead of from a markdown file.
