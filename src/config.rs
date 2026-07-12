@@ -191,9 +191,10 @@ pub struct PublishingPolicy {
     pub allow_source_issue_closure: bool,
     /// GitHub logins allowed to supply issues for automatic discovery and
     /// explicit issue-number dispatch. `None` means the repository owner
-    /// only; `Some([])` denies all GitHub issue intake. This keeps issue text
-    /// from untrusted authors out of worker prompts while still allowing a
-    /// personal account to add named teammates deliberately.
+    /// only; `Some(...)` replaces that default with the exact trusted set, and
+    /// `Some([])` denies all GitHub issue intake. This keeps issue text from
+    /// untrusted authors out of worker prompts while allowing a profile to
+    /// define its trusted team deliberately.
     #[serde(default)]
     pub github_issue_author_allowlist: Option<Vec<String>>,
 }

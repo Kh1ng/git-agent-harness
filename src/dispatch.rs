@@ -5202,6 +5202,8 @@ which lacks a leading boundary check.
         assert!(!github_issue_author_is_allowed(&prof, &outsider));
         assert!(!github_issue_author_is_allowed(&prof, &missing));
 
+        // An explicit allowlist is the complete trusted set, rather than an
+        // additive exception to the owner-only default.
         prof.publishing.github_issue_author_allowlist = Some(vec!["teammate".into()]);
         let teammate = serde_json::json!({"author": {"login": "TEAMMATE"}});
         assert!(github_issue_author_is_allowed(&prof, &teammate));
