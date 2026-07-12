@@ -2969,7 +2969,10 @@ default_target_branch = "main"
         )
         .unwrap();
 
-        assert_eq!(super::reconcile_abandoned_dispatches(&cfg, "real").unwrap(), 1);
+        assert_eq!(
+            super::reconcile_abandoned_dispatches(&cfg, "real").unwrap(),
+            1
+        );
 
         let events = crate::events::read_events(&cfg).unwrap();
         assert!(events.iter().any(|event| {
@@ -2984,7 +2987,10 @@ default_target_branch = "main"
             .expect("reconciliation must persist an unknown terminal ledger record");
         assert_eq!(entry.work_id.as_deref(), Some("TICKET-500"));
         assert_eq!(entry.failure_class.as_deref(), Some("harness_error"));
-        assert_eq!(entry.validation_result.as_deref(), Some("not_run_abandoned"));
+        assert_eq!(
+            entry.validation_result.as_deref(),
+            Some("not_run_abandoned")
+        );
     }
 
     #[test]
