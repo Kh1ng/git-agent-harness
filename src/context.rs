@@ -125,11 +125,22 @@ pub struct ContextBuild {
     pub estimated_tokens_after_reduction: u64,
     pub compacted: bool,
     pub largest_sections: Vec<ContextSectionSize>,
+    /// Every named prompt section that was supplied to the backend before
+    /// compaction. This makes the context artifact an audit record rather
+    /// than just a token counter.
+    pub sources: Vec<ContextSource>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ContextSectionSize {
     pub name: String,
+    pub estimated_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ContextSource {
+    pub name: String,
+    pub bytes: u64,
     pub estimated_tokens: u64,
 }
 
@@ -147,6 +158,7 @@ pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
             estimated_tokens_after_reduction: before,
             compacted: false,
             largest_sections: section_sizes(prompt),
+            sources: context_sources(prompt),
         });
     }
 
@@ -198,6 +210,7 @@ pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
         estimated_tokens_after_reduction: after_tokens,
         compacted: true,
         largest_sections: section_sizes(prompt),
+        sources: context_sources(prompt),
     })
 }
 
@@ -270,6 +283,18 @@ fn section_sizes(prompt: &str) -> Vec<ContextSectionSize> {
     sizes
 }
 
+fn context_sources(prompt: &str) -> Vec<ContextSource> {
+    split_sections(prompt)
+        .into_iter()
+        .filter(|section| section.name != "Preamble")
+        .map(|section| ContextSource {
+            name: section.name,
+            bytes: section.body.len() as u64,
+            estimated_tokens: estimate_tokens(&section.body),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +326,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("context_limit_exceeded"));
+    }
+
+    #[test]
+    fn records_named_context_sources_for_audit() {
+        let result = enforce(
+            "Preamble\n## Project Brief\nstable facts\n## Live Task Pack\nTICKET-1\n## Focus\nfix it\n",
+            &ContextConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result
+                .sources
+                .iter()
+                .map(|source| source.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Project Brief", "Live Task Pack", "Focus"]
+        );
+        assert!(result.sources.iter().all(|source| source.bytes > 0));
     }
 
     #[test]
