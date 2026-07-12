@@ -57,7 +57,7 @@ class SessionManagerImpl {
   
   constructor() {
     // Set up periodic session cleanup
-    setInterval(() => this.cleanupFinishedSessions(), 60000);
+    setInterval(() => this.cleanupFinishedSessions(), 60000).unref();
   }
   
   async startSession(options: SessionOptions): Promise<Session> {
