@@ -7,9 +7,10 @@ state) and `README.md` (which covers CLI basics and first-run setup).
 
 Standing rule that governs everything below: **never hand-edit GAH state files**
 (`availability.json`, `work_claims.json`, holds, the ledger,
-`validation_check.json`). Every repair has a dedicated command that takes the
-same lock and writes atomically; editing the JSON by hand races the running
-loop and corrupts durable trust state. The repair commands are in section 3.
+`validation_check.json`). Use a documented repair command where one exists.
+Editing JSON by hand races the running loop and can corrupt durable trust
+state; if there is no repair command, stop and escalate rather than guessing.
+The repair commands and current limitations are in section 3.
 
 Every command here was checked against `gah --help` on the current binary. When
 in doubt, re-run `gah <command> --help`; that output is truth, this document is
@@ -43,8 +44,8 @@ gah --help | head -1
 git pull --ff-only
 cargo build --release
 # restart any long-running units so they pick up the new binary:
-systemctl --user restart gah-server
-systemctl --user restart gah-loop     # if a recurring-loop unit is installed
+sudo systemctl restart gah-server
+# Restart gah-loop only if you have installed your own loop unit.
 ```
 
 Because `/usr/local/bin/gah` is a symlink into `target/release`, a `--once`
@@ -59,15 +60,29 @@ processes (the server, a recurring `gah loop`) need a restart.
   (Tailscale / Cloudflare Access) is the auth model, there is no app-level
   login. Verify: `gah server --help`.
 - **`gah-loop`** — the recurring bounded controller. Each iteration is one
-  observe → classify → decide → execute-one-action → persist cycle. It is not an
-  unbounded daemon; it repeats bounded iterations. For a single manual cycle
-  (debugging, or driving the loop by hand) use `gah loop --once --profile <p>`.
+  observe → classify → decide → execute-one-action → persist cycle. The repo
+  does not currently ship a `gah-loop.service` template, so only document or
+  operate one after explicitly installing it for the profile. The command is
+  `gah loop --profile <p>`; use `--once` for one debugging cycle.
+
+The checked-in server template is
+`packaging/systemd/gah-server.service`. Before installing it, edit its `User`,
+`WorkingDirectory`, `GAH_CONFIG_PATH`, Node path, and `PATH` values for the
+host; its explicit toolchain `PATH` is required for dashboard-dispatched work.
+Then install it as a system service:
+
+```bash
+sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now gah-server
+```
 
 Inspect and control units with the usual systemd verbs:
 
 ```bash
-systemctl --user status gah-server
-journalctl --user -u gah-server -n 100 --no-pager
+sudo systemctl status gah-server
+sudo journalctl -u gah-server -n 100 --no-pager
+# Only if you installed a gah-loop user unit:
 systemctl --user status gah-loop
 journalctl --user -u gah-loop -f
 ```
@@ -145,9 +160,11 @@ paths writable, backend executables present, and validation commands resolve.
 
 ## 3. State files & repair commands
 
-All GAH durable state lives under `$XDG_STATE_HOME/gah/` (fallback
-`~/.local/state/gah/`), except the ledger, whose path is configurable. **Do not
-edit any of these by hand** — use the command listed.
+Most GAH durable control state lives under `$XDG_STATE_HOME/gah/` (fallback
+`~/.local/state/gah/`). The append-only ledger, reconciliation log, event
+stream, and manager-wake logs instead follow `GAH_*_PATH` overrides or
+`defaults.artifact_root` (falling back to `~/.config/gah/`). **Do not edit any
+of these by hand** — use the command listed.
 
 ### Availability — `$XDG_STATE_HOME/gah/availability.json`
 
@@ -172,10 +189,12 @@ safe against concurrent parallel workers.
 ### Work claims — `$XDG_STATE_HOME/gah/work_claims.json`
 
 Active-ownership records used by the duplicate-work guard. A leaked/stale claim
-blocks a work_id from being re-dispatched. A dedicated claims CLI is tracked in
-issue #234; until it lands, a stale claim is cleared by clearing the ledger
-attempts for that work_id (below), which makes the ticket dispatchable again.
-Still do not hand-edit the file.
+blocks a work_id from being re-dispatched. Claims are normally released when a
+controller process finishes. There is **no operator claims CLI yet** (tracked
+in issue #234), and `gah ledger clear-attempts` does *not* clear a work claim.
+If a work ID remains claimed after confirming no controller/dispatch process is
+running, preserve the state file and escalate it as a harness defect; do not
+hand-edit the file.
 
 ### Review holds
 
