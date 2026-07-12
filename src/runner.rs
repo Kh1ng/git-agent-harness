@@ -458,6 +458,7 @@ pub fn run_claude(
         worktree,
         task,
         session_dir,
+        None,
         extra_args,
         env_vars,
         idle_timeout_seconds,
@@ -470,6 +471,7 @@ pub fn run_claude_with_executable(
     worktree: &Path,
     task: &str,
     session_dir: &Path,
+    effective_model: Option<&str>,
     extra_args: &[String],
     env_vars: &[(String, String)],
     idle_timeout_seconds: u64,
@@ -498,8 +500,11 @@ pub fn run_claude_with_executable(
         "--session-id",
         &session_id,
     ])
-    .args(extra_args)
     .current_dir(worktree);
+    if let Some(model) = effective_model {
+        cmd.args(["--model", model]);
+    }
+    cmd.args(extra_args);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
@@ -528,11 +533,11 @@ pub fn run_claude_with_executable(
 }
 
 /// Run Mistral's Vibe CLI non-interactively via `vibe -p`.
-/// Worker/fix backend only -- not wired into review (see runner::run_review_backend).
+/// Used for both worker/fix and review execution.
 /// extra_args come from profile.vibe_args (e.g. `--max-turns 40 --max-price 2`).
 /// No --model flag exists on this CLI; model selection is config/env-var
 /// driven on vibe's own side (VIBE_ACTIVE_MODEL / ~/.vibe/config.toml),
-/// not a per-invocation argument GAH can pass.
+/// so GAH binds the effective route model through `VIBE_ACTIVE_MODEL`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn run_vibe(
     worktree: &Path,
@@ -547,6 +552,7 @@ pub fn run_vibe(
         worktree,
         task,
         session_dir,
+        None,
         extra_args,
         env_vars,
         idle_timeout_seconds,
@@ -559,6 +565,7 @@ pub fn run_vibe_with_executable(
     worktree: &Path,
     task: &str,
     session_dir: &Path,
+    effective_model: Option<&str>,
     extra_args: &[String],
     env_vars: &[(String, String)],
     idle_timeout_seconds: u64,
@@ -579,6 +586,13 @@ pub fn run_vibe_with_executable(
         .current_dir(worktree);
     for (k, v) in env_vars {
         cmd.env(k, v);
+    }
+    // Vibe has no per-invocation --model flag. Its documented environment
+    // selector must receive the route's effective model so the actual model
+    // and the ledger attribution cannot diverge. Set this after env_file
+    // variables so the route is authoritative for this attempt.
+    if let Some(model) = effective_model {
+        cmd.env("VIBE_ACTIVE_MODEL", model);
     }
 
     let (exit_code, duration_secs) = spawn_with_idle_watch(
@@ -1067,6 +1081,9 @@ pub fn run_review_backend(
     match backend {
         "claude" => {
             cmd.args(["-p", prompt]).args(&profile.claude_args);
+            if let Some(model) = effective_model {
+                cmd.args(["--model", model]);
+            }
         }
         "codex" => {
             cmd.arg("exec")
@@ -1112,6 +1129,11 @@ pub fn run_review_backend(
     prepare_process_group(&mut cmd);
     for (k, v) in env_vars {
         cmd.env(k, v);
+    }
+    if backend == "vibe" {
+        if let Some(model) = effective_model {
+            cmd.env("VIBE_ACTIVE_MODEL", model);
+        }
     }
 
     let mut child = match cmd.spawn() {
@@ -1825,6 +1847,30 @@ mod tests {
     }
 
     #[test]
+    fn run_claude_binds_the_effective_model() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_claude_with_executable(
+            &f.bin_dir.join("claude"),
+            &f.worktree,
+            "the claude task",
+            &f.session_dir,
+            Some("haiku"),
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"haiku".to_string()));
+    }
+
+    #[test]
     fn run_claude_propagates_env_file_vars() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
@@ -1938,6 +1984,33 @@ mod tests {
         assert!(argv.contains(&"--auto-approve".to_string()));
         assert!(argv.contains(&"--max-turns".to_string()));
         assert!(argv.contains(&"40".to_string()));
+    }
+
+    #[test]
+    fn run_vibe_binds_effective_model_through_environment() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            ("VIBE_ACTIVE_MODEL".to_string(), "wrong-default".to_string()),
+        ];
+
+        run_vibe_with_executable(
+            &f.bin_dir.join("vibe"),
+            &f.worktree,
+            "the vibe task",
+            &f.session_dir,
+            Some("devstral-small"),
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        let env = recorded_env(&f.record_dir);
+        assert!(env.contains("VIBE_ACTIVE_MODEL=devstral-small"));
+        assert!(!env.contains("VIBE_ACTIVE_MODEL=wrong-default"));
     }
 
     #[test]
@@ -2516,6 +2589,31 @@ mod tests {
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=vibe-review-env"));
+        assert!(env.contains("VIBE_ACTIVE_MODEL=mistral-medium-3.5"));
+    }
+
+    #[test]
+    fn run_review_backend_binds_claude_model() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
+        let profile = test_profile();
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let result = run_review_backend(
+            &profile,
+            "claude",
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            Some("haiku"),
+            &[],
+        );
+
+        assert_eq!(result.outcome, ReviewProcessOutcome::Success);
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"haiku".to_string()));
     }
 
     #[test]
