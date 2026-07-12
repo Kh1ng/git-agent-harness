@@ -200,8 +200,27 @@ pub struct RoutingCandidateDiagnostic {
     pub unavailable_until: Option<String>,
 }
 
+/// Ledger wire schema version. Bumped whenever a field's semantics change
+/// in a way that affects aggregation or round-tripping.
+///
+/// - `1` (default for entries written before this field existed): the legacy
+///   shape. Attempt counters `attempts_started`/`attempts_completed` were
+///   plain `u32` with a serde default, so pre-attempt-tracking entries
+///   deserialized as literal `0` and were indistinguishable from real zeros
+///   (issue #240).
+/// - `2`: attempt counters became `Option<u32>` so unknown stays unknown
+///   (never coerced to `0`), honoring the standing "unknown remains unknown"
+///   usage rule.
+pub const LEDGER_SCHEMA_VERSION: u32 = 2;
+
+fn default_ledger_schema_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LedgerEntry {
+    #[serde(default = "default_ledger_schema_version")]
+    pub schema_version: u32,
     pub timestamp: String,
     pub session_id: Option<String>,
     pub profile: String,
@@ -276,11 +295,18 @@ pub struct LedgerEntry {
     /// TICKET-064: how many retry-loop iterations were entered vs. ran
     /// their backend to completion (launched and exited, regardless of
     /// whether validation then passed). `#[serde(default)]` for pre-existing
-    /// ledger lines.
+    /// TICKET-064: how many retry-loop iterations were entered vs. ran their
+    /// backend to completion (launched and exited, regardless of whether
+    /// validation then passed). `#[serde(default)]` for pre-existing ledger
+    /// lines. **Issue #240:** now `Option<u32>` instead of `u32` — legacy
+    /// entries whose JSONL line lacks these keys (written before attempt
+    /// tracking existed) deserialize as `None` (unknown) rather than `0`, so
+    /// historical telemetry aggregates can no longer silently mix unknown with
+    /// real zeros. New entries always write `Some(n)`.
     #[serde(default)]
-    pub attempts_started: u32,
+    pub attempts_started: Option<u32>,
     #[serde(default)]
-    pub attempts_completed: u32,
+    pub attempts_completed: Option<u32>,
     #[serde(default)]
     pub attempts: Vec<AttemptRecord>,
     /// Distinguishes the *kind* of dispatch that produced this ledger entry:
@@ -318,6 +344,7 @@ impl LedgerEntry {
             timestamp: OffsetDateTime::now_utc()
                 .format(&Rfc3339)
                 .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
+            schema_version: LEDGER_SCHEMA_VERSION,
             session_id,
             profile: profile_name.to_string(),
             display_name: profile.display_name.clone(),
@@ -364,8 +391,8 @@ impl LedgerEntry {
             error_summary: None,
             failure_class: None,
             failure_stage: None,
-            attempts_started: 0,
-            attempts_completed: 0,
+            attempts_started: Some(0),
+            attempts_completed: Some(0),
             attempts: Vec::new(),
             dispatch_reason: None,
             context_phase: None,
@@ -395,6 +422,7 @@ impl LedgerEntry {
             timestamp: OffsetDateTime::now_utc()
                 .format(&Rfc3339)
                 .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
+            schema_version: LEDGER_SCHEMA_VERSION,
             session_id: None,
             profile: profile_name.to_string(),
             display_name: profile.display_name.clone(),
@@ -441,8 +469,8 @@ impl LedgerEntry {
             error_summary: None,
             failure_class: None,
             failure_stage: None,
-            attempts_started: 0,
-            attempts_completed: 0,
+            attempts_started: Some(0),
+            attempts_completed: Some(0),
             attempts: Vec::new(),
             dispatch_reason: None,
             context_phase: None,
@@ -1519,6 +1547,14 @@ pub mod summary {
         pub group_key: String,
         pub entries: usize,
         pub attempts: usize,
+        /// Issue #240: attempt counters are `Option<u32>` on `LedgerEntry`, so
+        /// an unknown (pre-tracking) entry is excluded from the sum rather than
+        /// counted as `0`. `None` means no entry in this group had a known
+        /// value. Legacy (pre-tracking) entries are counted in `*-unknown`.
+        pub attempts_started: Option<u32>,
+        pub attempts_completed: Option<u32>,
+        pub attempts_started_unknown: usize,
+        pub attempts_completed_unknown: usize,
         pub validation_pass: usize,
         /// Validation success divided by executions in this backend/model
         /// group. `None` means no executions were observed.
@@ -1577,6 +1613,14 @@ pub mod summary {
         pub push_success: usize,
         pub mr_count: usize,
         pub human_required_count: usize,
+        /// Issue #240: attempt counters are `Option<u32>` on `LedgerEntry`, so
+        /// an unknown (pre-tracking) entry is excluded from the sum rather than
+        /// counted as `0`. `None` means no entry had a known value. Legacy
+        /// (pre-tracking) entries are counted in `*-unknown`.
+        pub attempts_started: Option<u32>,
+        pub attempts_completed: Option<u32>,
+        pub attempts_started_unknown: usize,
+        pub attempts_completed_unknown: usize,
         pub average_duration_seconds: Option<f64>,
         pub usage_input_tokens: Option<u64>,
         pub usage_output_tokens: Option<u64>,
@@ -1834,6 +1878,14 @@ pub mod summary {
         let mut requests_count = 0u64;
         let mut estimated_cost = 0.0f64;
         let mut actual_cost = 0.0f64;
+        // Issue #240: attempt counters may be unknown (pre-tracking). Sum known
+        // values and count unknowns separately rather than coercing to 0.
+        let mut attempts_started_sum = 0u32;
+        let mut attempts_completed_sum = 0u32;
+        let mut attempts_started_seen = false;
+        let mut attempts_completed_seen = false;
+        let mut attempts_started_unknown = 0usize;
+        let mut attempts_completed_unknown = 0usize;
         // Track whether we've actually observed each metric (None != 0)
         let mut input_tokens_seen = false;
         let mut output_tokens_seen = false;
@@ -1883,6 +1935,21 @@ pub mod summary {
             if let Some(duration) = entry.duration_seconds {
                 duration_total += duration;
                 duration_count += 1;
+            }
+            // Issue #240: unknown attempt counters must stay unknown.
+            match entry.attempts_started {
+                Some(n) => {
+                    attempts_started_sum += n;
+                    attempts_started_seen = true;
+                }
+                None => attempts_started_unknown += 1,
+            }
+            match entry.attempts_completed {
+                Some(n) => {
+                    attempts_completed_sum += n;
+                    attempts_completed_seen = true;
+                }
+                None => attempts_completed_unknown += 1,
             }
             for observed in canonical_usage_observations(entry) {
                 if let Some(tokens) = observed.usage.input_tokens {
@@ -1981,6 +2048,10 @@ pub mod summary {
             push_success,
             mr_count,
             human_required_count,
+            attempts_started: attempts_started_seen.then_some(attempts_started_sum),
+            attempts_completed: attempts_completed_seen.then_some(attempts_completed_sum),
+            attempts_started_unknown,
+            attempts_completed_unknown,
             average_duration_seconds: (duration_count > 0)
                 .then_some(duration_total / duration_count as f64),
             usage_input_tokens: input_tokens_seen.then_some(input_tokens),
@@ -2077,6 +2148,13 @@ pub mod summary {
             let group_usage = usage_groups.remove(&group_key).unwrap_or_default();
             let group_entry_count = group_entries.len();
             let attempts = attempt_counts.remove(&group_key).unwrap_or(0);
+            // Issue #240: attempt counters may be unknown (pre-tracking).
+            let mut attempts_started_sum = 0u32;
+            let mut attempts_completed_sum = 0u32;
+            let mut attempts_started_seen = false;
+            let mut attempts_completed_seen = false;
+            let mut attempts_started_unknown = 0usize;
+            let mut attempts_completed_unknown = 0usize;
             let mut validation_pass = 0usize;
             let mut review_verdict_distribution: BTreeMap<String, usize> = BTreeMap::new();
             let mut total_cost_usd = 0.0f64;
@@ -2136,6 +2214,22 @@ pub mod summary {
                 if let Some(duration) = entry.duration_seconds {
                     total_duration += duration;
                     duration_count += 1;
+                }
+
+                // Issue #240: unknown attempt counters must stay unknown.
+                match entry.attempts_started {
+                    Some(n) => {
+                        attempts_started_sum += n;
+                        attempts_started_seen = true;
+                    }
+                    None => attempts_started_unknown += 1,
+                }
+                match entry.attempts_completed {
+                    Some(n) => {
+                        attempts_completed_sum += n;
+                        attempts_completed_seen = true;
+                    }
+                    None => attempts_completed_unknown += 1,
                 }
             }
 
@@ -2286,6 +2380,10 @@ pub mod summary {
                 group_key,
                 entries: group_entry_count,
                 attempts,
+                attempts_started: attempts_started_seen.then_some(attempts_started_sum),
+                attempts_completed: attempts_completed_seen.then_some(attempts_completed_sum),
+                attempts_started_unknown,
+                attempts_completed_unknown,
                 validation_pass,
                 success_rate,
                 review_verdict_distribution,
@@ -3449,6 +3547,161 @@ mod tests {
         assert!(grouped.is_none());
     }
 
+    /// Issue #240: a pre-attempt-tracking ledger line (no `schema_version`,
+    /// no `attempts_started`/`attempts_completed` keys) must deserialize with
+    /// those counters as `None` (unknown) and `schema_version` defaulting to 1
+    /// — never as literal `0`.
+    #[test]
+    fn legacy_ledger_line_deserializes_attempts_as_unknown() {
+        let raw = r#"{
+            "timestamp": "2026-07-01T00:00:00Z",
+            "profile": "test",
+            "display_name": "Repo",
+            "repo_id": "repo",
+            "repo": "owner/repo",
+            "local_path": "/tmp/repo",
+            "provider": "github",
+            "backend": "codex",
+            "requested_backend": "codex",
+            "effective_backend": "codex",
+            "mode": "fix",
+            "commit_attempted": false,
+            "commit_created": false,
+            "push_attempted": false,
+            "push_succeeded": false,
+            "mr_attempted": false,
+            "mr_created": false,
+            "fallback_used": false,
+            "human_required": false,
+            "attempts": [],
+            "usage": {}
+        }"#;
+        let entry: LedgerEntry = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            entry.schema_version, 1,
+            "legacy entries default to schema v1"
+        );
+        assert_eq!(
+            entry.attempts_started, None,
+            "pre-tracking attempts_started must be unknown, not 0"
+        );
+        assert_eq!(entry.attempts_completed, None);
+    }
+
+    /// Issue #240: a v1 fixture that explicitly carried `0` attempt counters
+    /// (i.e. the field was present) must round-trip as a *known* zero —
+    /// distinct from the unknown (`None`) case above. This guards against the
+    /// "convert unknown to zero" mistake.
+    #[test]
+    fn v1_ledger_line_with_zero_attempts_stays_known_zero() {
+        let raw = r#"{
+            "schema_version": 1,
+            "timestamp": "2026-07-01T00:00:00Z",
+            "profile": "test",
+            "display_name": "Repo",
+            "repo_id": "repo",
+            "repo": "owner/repo",
+            "local_path": "/tmp/repo",
+            "provider": "github",
+            "backend": "codex",
+            "requested_backend": "codex",
+            "effective_backend": "codex",
+            "mode": "fix",
+            "commit_attempted": false,
+            "commit_created": false,
+            "push_attempted": false,
+            "push_succeeded": false,
+            "mr_attempted": false,
+            "mr_created": false,
+            "fallback_used": false,
+            "human_required": false,
+            "attempts_started": 0,
+            "attempts_completed": 0,
+            "attempts": [],
+            "usage": {}
+        }"#;
+        let entry: LedgerEntry = serde_json::from_str(raw).unwrap();
+        assert_eq!(entry.schema_version, 1);
+        assert_eq!(
+            entry.attempts_started,
+            Some(0),
+            "explicit 0 is a known zero"
+        );
+        assert_eq!(entry.attempts_completed, Some(0));
+    }
+
+    /// Issue #240 acceptance #2: a legacy (pre-tracking) fixture ledger must
+    /// surface attempt counters as *unknown* in the summary JSON, not as 0,
+    /// and must count the unknown entries separately.
+    #[test]
+    fn legacy_fixture_summary_surfaces_attempts_as_unknown() {
+        let (_tmp, cfg) = test_config();
+        let legacy = r#"{"timestamp":"2026-07-10T00:00:00Z","profile":"test","display_name":"R","repo_id":"r","repo":"o/r","local_path":"/tmp","provider":"github","backend":"codex","requested_backend":"codex","effective_backend":"codex","mode":"fix","commit_attempted":false,"commit_created":false,"push_attempted":false,"push_succeeded":false,"mr_attempted":false,"mr_created":false,"fallback_used":false,"human_required":false,"attempts":[],"usage":{}}"#;
+        let known = r#"{"timestamp":"2026-07-10T00:00:01Z","schema_version":2,"profile":"test","display_name":"R","repo_id":"r","repo":"o/r","local_path":"/tmp","provider":"github","backend":"codex","requested_backend":"codex","effective_backend":"codex","mode":"fix","commit_attempted":false,"commit_created":false,"push_attempted":false,"push_succeeded":false,"mr_attempted":false,"mr_created":false,"fallback_used":false,"human_required":false,"attempts_started":2,"attempts_completed":1,"attempts":[],"usage":{}}"#;
+        let path = cfg.defaults.ledger_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{legacy}\n{known}\n")).unwrap();
+
+        let data = super::summary::build_summary(&cfg, "7d", None, GroupBy::None).unwrap();
+        // Unknown (legacy) entry must not be coerced to 0 in the total sum.
+        assert_eq!(
+            data.attempts_started,
+            Some(2),
+            "legacy unknown entry must be excluded from the known sum"
+        );
+        assert_eq!(data.attempts_completed, Some(1));
+        // Exactly one entry (the legacy one) is unknown.
+        assert_eq!(data.attempts_started_unknown, 1);
+        assert_eq!(data.attempts_completed_unknown, 1);
+    }
+
+    /// Issue #240 acceptance #2 (grouped view): unknown attempt counters are
+    /// excluded from the group sum and counted in `*-unknown`, while mixed
+    /// known values still aggregate correctly.
+    #[test]
+    fn legacy_fixture_grouped_summary_separates_unknown() {
+        let legacy: LedgerEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-07-10T00:00:00Z","profile":"test","display_name":"R","repo_id":"r","repo":"o/r","local_path":"/tmp","provider":"github","backend":"codex","requested_backend":"codex","effective_backend":"codex","mode":"fix","commit_attempted":false,"commit_created":false,"push_attempted":false,"push_succeeded":false,"mr_attempted":false,"mr_created":false,"fallback_used":false,"human_required":false,"attempts":[],"usage":{}}"#,
+        )
+        .unwrap();
+        let known: LedgerEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-07-10T00:00:01Z","schema_version":2,"profile":"test","display_name":"R","repo_id":"r","repo":"o/r","local_path":"/tmp","provider":"github","backend":"codex","requested_backend":"codex","effective_backend":"codex","mode":"fix","commit_attempted":false,"commit_created":false,"push_attempted":false,"push_succeeded":false,"mr_attempted":false,"mr_created":false,"fallback_used":false,"human_required":false,"attempts_started":2,"attempts_completed":1,"attempts":[],"usage":{}}"#,
+        )
+        .unwrap();
+
+        let grouped = super::summary::build_grouped_summary(
+            &[legacy, known],
+            |entry| entry.effective_backend.clone(),
+            |observed| observed.backend.to_string(),
+            |backend, _model| backend.to_string(),
+            true,
+        )
+        .unwrap();
+        let group = grouped.iter().find(|g| g.group_key == "codex").unwrap();
+        assert_eq!(group.attempts_started, Some(2));
+        assert_eq!(group.attempts_completed, Some(1));
+        assert_eq!(group.attempts_started_unknown, 1);
+        assert_eq!(group.attempts_completed_unknown, 1);
+    }
+
+    /// Issue #240 acceptance #1: every newly constructed entry carries the
+    /// current `LEDGER_SCHEMA_VERSION`.
+    #[test]
+    fn new_entries_carry_current_schema_version() {
+        let prof = profile();
+        let entry = LedgerEntry::new("test", &prof, "codex", "improve", "t", None, None);
+        assert_eq!(entry.schema_version, super::LEDGER_SCHEMA_VERSION);
+        assert_eq!(entry.attempts_started, Some(0));
+        assert_eq!(entry.attempts_completed, Some(0));
+
+        let claim = LedgerEntry::new_claim("test", &prof, "TICKET-1");
+        assert_eq!(claim.schema_version, super::LEDGER_SCHEMA_VERSION);
+        let hold = LedgerEntry::new_review_hold("test", &prof, "TICKET-1", None);
+        assert_eq!(hold.schema_version, super::LEDGER_SCHEMA_VERSION);
+        let clear = LedgerEntry::new_clear_attempts("test", &prof, "TICKET-1");
+        assert_eq!(clear.schema_version, super::LEDGER_SCHEMA_VERSION);
+    }
+
     // Issue #95: new_clear_attempts creates a valid tombstone entry
     #[test]
     fn new_clear_attempts_creates_valid_tombstone() {
@@ -3460,7 +3713,7 @@ mod tests {
         assert_eq!(entry.repo_id, prof.repo_id);
         assert!(!entry.human_required);
         assert_eq!(entry.failure_class, None);
-        assert_eq!(entry.attempts_started, 0);
+        assert_eq!(entry.attempts_started, Some(0));
         // Must serialize/deserialize cleanly (JSONL round-trip)
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();

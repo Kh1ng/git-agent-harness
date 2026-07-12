@@ -198,10 +198,10 @@ pub struct TaskOutcomeRecord {
 
     /// Dispatch reason
     pub dispatch_reason: Option<String>,
-    /// Number of attempts started
-    pub attempts_started: u32,
-    /// Number of attempts completed
-    pub attempts_completed: u32,
+    /// Number of attempts started (`None` = unknown / pre-tracking entry)
+    pub attempts_started: Option<u32>,
+    /// Number of attempts completed (`None` = unknown / pre-tracking entry)
+    pub attempts_completed: Option<u32>,
     /// Total duration in seconds
     pub duration_seconds: Option<f64>,
     /// Backend exit code
