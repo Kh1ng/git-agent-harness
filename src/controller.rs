@@ -37,6 +37,12 @@ fn is_infra_failure(failure_class: &str) -> bool {
     )
 }
 
+fn is_validation_gate_failure(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<crate::dispatch::ValidationGateError>())
+}
+
 /// Issue #156: produce an RFC3339 timestamp `offset` from "now" for a
 /// `WaitUntil` re-check. Used when a READY_FOR_HUMAN MR's CI is pending so the
 /// controller records a visible, observable deferral instead of a silent no-op.
@@ -736,16 +742,19 @@ pub fn run_loop(
     crate::events::reconcile_abandoned_dispatches(cfg, profile_name)?;
 
     loop {
-        // A failed iteration (validation-gate failure, transient provider
-        // error, ...) must NOT kill the daemon. Incident 2026-07-11: every
-        // respawned loop died ~2s after start on a gate failure, so dispatch
-        // events kept firing from short-lived processes that no `pgrep`/ps
-        // scan could catch ("phantom dispatches" while /api/loop/status
-        // correctly said not-running). The failure is already recorded as a
-        // dispatch_finished event by execute_action's plumbing; log it and
-        // keep the daemon alive.
+        // Transient provider/controller failures must not kill the daemon.
+        // A validation-gate failure is different: it proves the safety check
+        // itself is unhealthy, so pause immediately and require an explicit
+        // operator restart after repair. This avoids a retry/restart storm
+        // while preserving fail-closed dispatch behavior.
         match run_once(cfg, profile_name, json, parallel, skip_validation_gate) {
             Ok(()) => std::thread::sleep(std::time::Duration::from_secs(30)),
+            Err(error) if is_validation_gate_failure(&error) => {
+                eprintln!(
+                    "gah loop: paused because the validation gate failed; repair the gate and explicitly restart the loop: {error:#}"
+                );
+                return Err(error);
+            }
             Err(error) => {
                 eprintln!("gah loop: iteration failed; retrying after backoff: {error:#}");
                 // ponytail: fixed 5-min backoff; make it exponential if a
@@ -1367,7 +1376,23 @@ pub(crate) fn run_dispatch_and_record(
 
 #[cfg(test)]
 mod tests {
-    use super::{acquire_profile_lock, loop_lock_path, NextAction, AUTO_RETRY_CAP};
+    use super::{
+        acquire_profile_lock, is_validation_gate_failure, loop_lock_path, NextAction,
+        AUTO_RETRY_CAP,
+    };
+
+    #[test]
+    fn validation_gate_errors_are_identified_through_anyhow_context() {
+        let error = anyhow::Error::new(crate::dispatch::ValidationGateError)
+            .context("detailed failed command output");
+        assert!(is_validation_gate_failure(&error));
+    }
+
+    #[test]
+    fn ordinary_errors_are_not_misclassified_as_validation_gate_failures() {
+        let error = anyhow::anyhow!("backend command timed out");
+        assert!(!is_validation_gate_failure(&error));
+    }
 
     /// TICKET/incident: an autonomous session ran `gah loop --profile X
     /// --once` as an ad-hoc diagnostic while the real daemon (`gah loop

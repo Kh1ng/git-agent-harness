@@ -117,6 +117,21 @@ pub struct DispatchArgs {
     pub run_id: Option<String>,
 }
 
+/// Marks an error as a failed validation-gate self-check rather than a
+/// ticket, backend, or transient controller failure. The controller uses this
+/// typed boundary to pause a loop instead of repeatedly retrying a gate that
+/// has already proved broken.
+#[derive(Debug)]
+pub struct ValidationGateError;
+
+impl fmt::Display for ValidationGateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("validation gate self-check failed")
+    }
+}
+
+impl std::error::Error for ValidationGateError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValidationFailureProgress {
     Changed,
@@ -1202,7 +1217,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     record_result?;
 
     if let Err(text) = result {
-        anyhow::bail!(
+        return Err(anyhow::Error::new(ValidationGateError).context(format!(
             "VALIDATION GATE FAILED — profile '{}' validation_commands did not pass on a \
              fresh worktree from '{}'. This is a broken gate config, NOT the dispatched \
              ticket's fault. Fix validation_commands (or run with --skip-validation-gate to \
@@ -1213,7 +1228,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
             profile.default_target_branch,
             &hash[..hash.len().min(8)],
             text,
-        );
+        )));
     }
 
     println!(
