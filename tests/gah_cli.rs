@@ -1367,6 +1367,48 @@ fn prune_dry_run_reports_old_sessions_and_worktrees() {
 }
 
 #[test]
+fn prune_retains_dirty_worktree_even_after_retention() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let worktree_root = tmp.path().join("worktrees");
+    fs::create_dir_all(&worktree_root).unwrap();
+    let worktree = worktree_root.join("gah-real-dirty");
+    ProcessCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "gah/real-dirty",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    fs::write(worktree.join("README.md"), "unpublished recovery work\n").unwrap();
+
+    bin()
+        .args([
+            "prune",
+            "--profile",
+            "real",
+            "--older-than",
+            "0",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("retained dirty worktree"));
+
+    assert!(worktree.exists());
+}
+
+#[test]
 fn dispatch_pm_target_parses_structured_plan_and_writes_ticket() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
@@ -4670,6 +4712,56 @@ fn loop_once_reports_noop_when_nothing_actionable() {
     assert!(events_text.contains("observation_completed"));
     assert!(events_text.contains("action_decided"));
     assert!(events_text.contains("loop_stopped"));
+}
+
+#[test]
+fn loop_once_prunes_clean_closed_worktree_before_observing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+
+    let worktree_root = tmp.path().join("worktrees");
+    fs::create_dir_all(&worktree_root).unwrap();
+    let worktree = worktree_root.join("gah-real-no-progress");
+    ProcessCommand::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "gah/real-no-progress",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"TICKET-1\",\"headRefName\":\"gah/real-no-progress\",\"state\":\"CLOSED\",\"mergedAt\":null}]'; exit 0; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MERGED/CLOSED"));
+
+    assert!(!worktree.exists());
 }
 
 /// TICKET-079: an eligible never-dispatched ticket actually gets dispatched

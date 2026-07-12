@@ -832,6 +832,10 @@ pub fn run_once(
     parallel: usize,
     skip_validation_gate: bool,
 ) -> Result<()> {
+    // Housekeeping is part of controller lifecycle, not an operator chore.
+    // It only removes clean GAH-owned worktrees that are terminal upstream or
+    // past retention; an uncommitted fresh worktree is never inferred stale.
+    crate::prune::run_automatic(cfg, profile_name)?;
     reconcile_abandoned_dispatches(cfg, profile_name)?;
     let claim_scope = {
         let profile = crate::config::get_profile(cfg, profile_name)?;

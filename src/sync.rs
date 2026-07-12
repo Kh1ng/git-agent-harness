@@ -360,6 +360,8 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
             &profile.repo,
             "--state",
             "all",
+            "--limit",
+            "1000",
             "--json",
             "title,body,headRefName,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
         ])
