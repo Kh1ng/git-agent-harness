@@ -3,7 +3,7 @@
  * Inspired by t3code architecture but adapted for GAH needs
  */
 
-import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary } from './gah.js';
+import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, StatusSnapshot } from './gah.js';
 
 // Provider types
 export type ProviderKind = 
@@ -109,6 +109,17 @@ export type ServerMessage =
   | {
       type: "provider.listUpdated";
       providers: Record<ProviderInstanceId, ProviderStatus>;
+    }
+  | {
+      type: "server.hostsStatus";
+      hostsStatus: Record<string, {
+        ok: boolean;
+        host_id: string;
+        snapshot?: StatusSnapshot;
+        error?: string;
+        fetched_at: string;
+      }>;
+      timestamp: number;
     }
   | {
       type: "error";

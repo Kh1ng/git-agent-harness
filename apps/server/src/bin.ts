@@ -7,9 +7,50 @@ import { createWebSocketHandler } from './wsServer.js';
 import { isGahCliAvailable } from './gahCli.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { markReadinessCheck } from './serverReadiness.js';
+import { createServerPushBus } from './serverPushBus.js';
+import { getStatusAggregator, createHostsStatusMessage } from './hosts/statusAggregator.js';
+import { getHostRegistry } from './hosts/HostRegistry.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = process.env.HOST || '0.0.0.0';
+
+/**
+ * MS-2: Set up periodic hosts status refresh
+ * Fetches status from all configured hosts every 30 seconds and broadcasts updates
+ */
+function setupHostsStatusRefresh(pushBus: any) {
+  const REFRESH_INTERVAL_MS = 30000; // 30 seconds
+  
+  async function refreshAndBroadcast() {
+    try {
+      const statusAggregator = getStatusAggregator();
+      const hostsStatus = await statusAggregator.refreshAll();
+      
+      // Get the updated merged status
+      const mergedStatus = await statusAggregator.getMergedStatus();
+      
+      // Broadcast to all connected clients
+      const message = createHostsStatusMessage(mergedStatus);
+      pushBus.publish(message);
+      
+      console.log(`Broadcasted hosts status update to ${pushBus.subscriberCount} clients`);
+    } catch (error) {
+      console.error('Failed to refresh hosts status:', error);
+    }
+  }
+  
+  // Initial refresh
+  refreshAndBroadcast();
+  
+  // Set up periodic refresh
+  const intervalId = setInterval(refreshAndBroadcast, REFRESH_INTERVAL_MS);
+  
+  // Clean up on shutdown
+  process.on('SIGINT', () => clearInterval(intervalId));
+  process.on('SIGTERM', () => clearInterval(intervalId));
+  
+  return intervalId;
+}
 
 async function main() {
   console.log('Starting Git Agent Harness server...');
@@ -47,6 +88,12 @@ async function main() {
   // Set up WebSocket handler
   createWebSocketHandler(wss);
   markReadinessCheck('webSocket', true);
+  
+  // Create push bus for broadcasting to all clients
+  const pushBus = createServerPushBus();
+  
+  // MS-2: Set up periodic hosts status refresh
+  setupHostsStatusRefresh(pushBus);
   
   // Start HTTP server
   server.listen(PORT, HOST, () => {

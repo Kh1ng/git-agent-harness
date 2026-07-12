@@ -9,6 +9,8 @@ import { createServerPushBus } from './serverPushBus.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { getSessionManager } from './sessions/SessionManager.js';
 import * as gahCli from './gahCli.js';
+import { getStatusAggregator, createHostsStatusMessage } from './hosts/statusAggregator.js';
+import { getHostRegistry } from './hosts/HostRegistry.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -314,6 +316,9 @@ async function sendWelcomeMessage(ws: WebSocket) {
     // backend name to whether it has a real implementation and is wired
     // for the active profile.
     let backendConfigured: Record<string, boolean> = {};
+    
+    // MS-2: Get aggregated hosts status
+    let hostsStatus: Record<string, any> = {};
     try {
       const status = await gahCli.runStatus(defaultProfile);
       mergeRequests = status.merge_requests;
@@ -323,6 +328,13 @@ async function sendWelcomeMessage(ws: WebSocket) {
       errors = status.errors;
       recentLedger = status.recent_ledger;
       backendConfigured = status.backend_configured ?? {};
+      
+      // Set the profile for the status aggregator
+      const statusAggregator = getStatusAggregator();
+      statusAggregator.setLocalProfile(defaultProfile);
+      
+      // Get merged status from all hosts
+      hostsStatus = await statusAggregator.getMergedStatus();
     } catch (statusError) {
       console.error('Failed to load gah status for welcome message:', statusError);
     }
@@ -336,6 +348,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
       errors?: StatusError[];
       recentLedger?: RecentLedgerSummary | null;
       backendConfigured?: Record<string, boolean>;
+      hostsStatus?: Record<string, any>;
     } = {
       type: 'server.welcome',
       serverVersion: SERVER_VERSION,
@@ -349,10 +362,15 @@ async function sendWelcomeMessage(ws: WebSocket) {
       constraints,
       errors,
       recentLedger,
-      backendConfigured
+      backendConfigured,
+      hostsStatus
     };
 
     ws.send(JSON.stringify(welcomeMessage));
+
+    // Also send a separate hostsStatus message for clients that want to handle it separately
+    const hostsStatusMessage = createHostsStatusMessage(hostsStatus);
+    ws.send(JSON.stringify(hostsStatusMessage));
 
   } catch (error) {
     console.error('Failed to send welcome message:', error);
