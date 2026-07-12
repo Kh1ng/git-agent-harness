@@ -984,4 +984,78 @@ default_target_branch = "main"
         assert_eq!(report_gpt4.failed_attempts, 2);
         assert!((report_gpt4.total_cost_usd - 0.022).abs() < 1e-9);
     }
+
+    #[test]
+    fn test_telemetry_aggregation_date_range_is_strict_and_iso_month_bucketed() {
+        use crate::telemetry::{
+            generate_telemetry_report, AggregationDimension, AggregationParams,
+        };
+        let temp_dir = tempdir().unwrap();
+        let cfg_path = temp_dir.path().join("cfg.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+[profiles.test-profile]
+display_name = "Test Profile"
+repo_id = "test-repo"
+provider = "github"
+repo = "test/repo"
+local_path = "/tmp"
+artifact_root = "/tmp"
+default_target_branch = "main"
+"#,
+        )
+        .unwrap();
+        let mut cfg = crate::config::load(Some(cfg_path.to_str().unwrap())).unwrap();
+        cfg.defaults.artifact_root = temp_dir.path().to_string_lossy().into_owned();
+
+        let valid = create_test_ledger_entry();
+        let mut malformed = create_test_ledger_entry();
+        malformed.timestamp = "not-a-timestamp".to_string();
+        std::fs::write(
+            temp_dir.path().join("ledger.jsonl"),
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&valid).unwrap(),
+                serde_json::to_string(&malformed).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let params = AggregationParams {
+            dimensions: vec![AggregationDimension::DateRange],
+            since: Some("2026-07-10".to_string()),
+            until: Some("2026-07-10T23:59:59Z".to_string()),
+            profile: None,
+            include_failed_attempts: true,
+            include_retried_attempts: true,
+            project: None,
+            ticket: None,
+            execution_type: None,
+            backend_instance: None,
+            provider: None,
+            model: None,
+            account: None,
+        };
+        let report = generate_telemetry_report(&cfg, params).unwrap();
+        assert_eq!(report.total_entries, 1);
+        assert_eq!(report.aggregated_data[0].dimension_value, "2026-07");
+
+        let invalid_since = AggregationParams {
+            dimensions: vec![AggregationDimension::Date],
+            since: Some("2026-july-10".to_string()),
+            until: None,
+            profile: None,
+            include_failed_attempts: true,
+            include_retried_attempts: true,
+            project: None,
+            ticket: None,
+            execution_type: None,
+            backend_instance: None,
+            provider: None,
+            model: None,
+            account: None,
+        };
+        assert!(generate_telemetry_report(&cfg, invalid_since).is_err());
+    }
 }

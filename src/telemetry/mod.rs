@@ -302,32 +302,20 @@ fn filter_entries_for_aggregation(
         filtered.retain(|e| e.profile == *profile_name);
     }
 
-    // Filter by time range
-    if let Some(since_str) = &params.since {
-        let since_time = parse_timestamp(since_str)?;
+    // Filter by time range. An unparseable ledger timestamp has unknown date
+    // provenance and must not silently inflate a bounded cost/usage report.
+    let since_time = params.since.as_deref().map(parse_timestamp).transpose()?;
+    let until_time = params.until.as_deref().map(parse_timestamp).transpose()?;
+    if since_time.is_some() || until_time.is_some() {
         filtered.retain(|entry| {
-            if let Ok(entry_time) = OffsetDateTime::parse(
+            let Ok(entry_time) = OffsetDateTime::parse(
                 &entry.timestamp,
                 &time::format_description::well_known::Rfc3339,
-            ) {
-                entry_time >= since_time
-            } else {
-                true
-            }
-        });
-    }
-
-    if let Some(until_str) = &params.until {
-        let until_time = parse_timestamp(until_str)?;
-        filtered.retain(|entry| {
-            if let Ok(entry_time) = OffsetDateTime::parse(
-                &entry.timestamp,
-                &time::format_description::well_known::Rfc3339,
-            ) {
-                entry_time <= until_time
-            } else {
-                true
-            }
+            ) else {
+                return false;
+            };
+            since_time.is_none_or(|since| entry_time >= since)
+                && until_time.is_none_or(|until| entry_time <= until)
         });
     }
 
@@ -357,11 +345,18 @@ fn parse_timestamp(timestamp_str: &str) -> Result<OffsetDateTime> {
     // Try parsing as date only
     let date_parts: Vec<&str> = timestamp_str.split('-').collect();
     if date_parts.len() == 3 {
-        let year = date_parts[0].parse::<i32>().unwrap_or(2024);
-        let month = date_parts[1].parse::<u8>().unwrap_or(1);
-        let day = date_parts[2].parse::<u8>().unwrap_or(1);
+        let year = date_parts[0]
+            .parse::<i32>()
+            .map_err(|_| anyhow::anyhow!("Invalid year in timestamp: {timestamp_str}"))?;
+        let month = date_parts[1]
+            .parse::<u8>()
+            .map_err(|_| anyhow::anyhow!("Invalid month in timestamp: {timestamp_str}"))?;
+        let day = date_parts[2]
+            .parse::<u8>()
+            .map_err(|_| anyhow::anyhow!("Invalid day in timestamp: {timestamp_str}"))?;
 
-        let month_enum = time::Month::try_from(month).unwrap_or(time::Month::January);
+        let month_enum = time::Month::try_from(month)
+            .map_err(|_| anyhow::anyhow!("Invalid month in timestamp: {timestamp_str}"))?;
         let date = time::Date::from_calendar_date(year, month_enum, day)?;
         let primitive_datetime = date.with_hms_milli(0, 0, 0, 0)?;
         return Ok(primitive_datetime.assume_utc());
@@ -641,7 +636,7 @@ fn get_dimension_value_from_attempt(
                     &entry.timestamp,
                     &time::format_description::well_known::Rfc3339,
                 ) {
-                    format!("{}-{}", entry_time.year(), entry_time.month() as u8)
+                    format!("{}-{:02}", entry_time.year(), entry_time.month() as u8)
                 } else {
                     "unknown".to_string()
                 }
@@ -716,7 +711,7 @@ fn get_dimension_value_from_attempt(
                     &timestamp,
                     &time::format_description::well_known::Rfc3339,
                 ) {
-                    format!("{}-{}", entry_time.year(), entry_time.month() as u8)
+                    format!("{}-{:02}", entry_time.year(), entry_time.month() as u8)
                 } else {
                     "unknown".to_string()
                 }
