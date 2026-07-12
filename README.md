@@ -254,6 +254,24 @@ Doctor checks:
 
 ## First Dispatch
 
+### GitHub issue intake allowlist
+
+GitHub issue bodies are worker-prompt input. By default, GAH accepts issues
+only from the owner in `profile.repo` (for example, `alice/repo` accepts
+`alice`). To define the exact trusted authors for one profile, set the
+allowlist under its publishing policy:
+
+```toml
+[profiles.my_profile.publishing]
+github_issue_author_allowlist = ["alice", "teammate-login"]
+```
+
+Configuring the allowlist replaces the owner-only default, so include `alice`
+when they should remain trusted; add or remove team members by editing this
+list. An explicit empty list disables GitHub issue intake for that profile.
+The same policy applies to loop discovery and an explicit
+`gah dispatch --target #123`.
+
 Start with a dry run:
 
 ```bash
