@@ -24,7 +24,7 @@ class HostRegistryImpl {
   
   private loadFromEnvironment(): void {
     // Look for GAH_REMOTE_HOSTS environment variable
-    // Format: host1:http://host1:3773|host2:http://host2:3773[|auth_token1|auth_token2]
+    // Format: host1:http://host1:3773|host2:http://host2:3773|auth_token1|auth_token2|profile1|profile2
     const remoteHosts = process.env.GAH_REMOTE_HOSTS;
     if (!remoteHosts) {
       return;
@@ -32,29 +32,95 @@ class HostRegistryImpl {
     
     try {
       const hostEntries = remoteHosts.split('|');
+      if (hostEntries.length === 0) {
+        return;
+      }
+      
+      // First pass: count how many host definitions we have (entries with colon and URL)
+      const hosts: { id: string; base_url: string }[] = [];
       for (const entry of hostEntries) {
         if (!entry.trim()) continue;
         
-        const parts = entry.split(':');
-        if (parts.length < 2) {
-          console.warn(`Invalid host entry format: ${entry}`);
+        // Split only on the first colon to handle URLs with colons
+        const colonIndex = entry.indexOf(':');
+        if (colonIndex === -1) {
           continue;
         }
         
-        const id = parts[0];
-        const base_url = parts[1];
-        let auth_token: string | undefined = undefined;
-        let profile: string | undefined = undefined;
+        const id = entry.substring(0, colonIndex);
+        const base_url = entry.substring(colonIndex + 1);
         
-        // Check for optional auth token and profile
-        if (parts.length >= 3 && !parts[2].startsWith('http')) {
-          auth_token = parts[2];
+        if (base_url.startsWith('http://') || base_url.startsWith('https://')) {
+          hosts.push({ id, base_url });
         }
-        if (parts.length >= 4) {
-          profile = parts[3];
+      }
+      
+      if (hosts.length === 0) {
+        console.warn('No valid host definitions found in GAH_REMOTE_HOSTS');
+        return;
+      }
+      
+      // Now parse auth tokens and profiles
+      // Auth tokens and profiles come after host definitions in order
+      const authTokens: (string | undefined)[] = [];
+      const profiles: (string | undefined)[] = [];
+      
+      // Count how many host definitions we have
+      const numHosts = hosts.length;
+      
+      // Auth tokens are the next N non-empty entries after host definitions
+      let authTokenIndex = 0;
+      let profileIndex = 0;
+      let foundHostDefinitions = 0;
+      
+      for (const entry of hostEntries) {
+        if (!entry.trim()) {
+          // Empty entry, add undefined and continue
+          if (authTokenIndex < numHosts) {
+            authTokens.push(undefined);
+            authTokenIndex++;
+          } else if (profileIndex < numHosts) {
+            profiles.push(undefined);
+            profileIndex++;
+          }
+          continue;
         }
         
-        this.hosts.set(id, { id, base_url, auth_token, profile });
+        // Check if this is a host definition
+        const colonIndex = entry.indexOf(':');
+        if (colonIndex !== -1) {
+          const potentialUrl = entry.substring(colonIndex + 1);
+          if (potentialUrl.startsWith('http://') || potentialUrl.startsWith('https://')) {
+            foundHostDefinitions++;
+            continue;
+          }
+        }
+        
+        // This is either an auth token or profile
+        if (authTokenIndex < numHosts) {
+          authTokens.push(entry.trim());
+          authTokenIndex++;
+        } else if (profileIndex < numHosts) {
+          profiles.push(entry.trim());
+          profileIndex++;
+        }
+      }
+      
+      // Fill in any remaining undefined values
+      while (authTokens.length < numHosts) {
+        authTokens.push(undefined);
+      }
+      while (profiles.length < numHosts) {
+        profiles.push(undefined);
+      }
+      
+      // Create host configurations
+      for (let i = 0; i < hosts.length; i++) {
+        const host = hosts[i];
+        const auth_token = authTokens[i] || undefined;
+        const profile = profiles[i] || undefined;
+        
+        this.hosts.set(host.id, { id: host.id, base_url: host.base_url, auth_token, profile });
       }
       
       console.log(`Loaded ${this.hosts.size} remote host(s) from GAH_REMOTE_HOSTS`);
