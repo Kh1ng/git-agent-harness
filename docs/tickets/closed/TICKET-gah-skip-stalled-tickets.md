@@ -127,4 +127,6 @@ All three must exit 0. Do NOT edit `ledger.jsonl` or `events.jsonl`. Do NOT run
 - Per-ticket `human_required` (ledger) still scopes to the work item, not the
   profile (unchanged).
 - A ticket that genuinely exhausted its retry cap is NOT silently redispatched; it
-  is skipped and the human still sees it via `blocked_work_items` / status output.
+   is skipped and the human still sees it via `blocked_work_items` / status output.
+
+<!-- Implemented in PR #133: exhausted-ticket skip logic lives at src/controller.rs:402-449. Moved to docs/tickets/closed/ as resolved. -->
