@@ -65,3 +65,5 @@ cargo test
 - The repo currently has untracked `IMPLEMENTATION_PLAN.md` — leave it alone.
 - Do NOT run `gah loop` or touch running supervisors. This is a source-code fix only.
 - Report: which files changed, the test results (fmt/clippy/test output summary), and the branch name.
+
+<!-- Implemented in PRs #130/#131: work-item-scoped human_required + `blocked_work_items` at src/status.rs:23-30/349-438. Moved to docs/tickets/closed/ as resolved. -->
