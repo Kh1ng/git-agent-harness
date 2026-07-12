@@ -1837,7 +1837,7 @@ fn improve(
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
 
-    let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
+    let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref())?;
 
     // Baseline: run validation once on the pristine worktree BEFORE spending
     // tokens. A failure here is a config error or a pre-existing red repo —
@@ -2630,7 +2630,7 @@ fn experiment(
         "experiment",
         &args.target,
         issue_details.as_ref(),
-    );
+    )?;
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
 
@@ -3707,7 +3707,7 @@ fn build_task(
     mode: &str,
     target: &str,
     issue_details: Option<&IssueDetails>,
-) -> String {
+) -> Result<String> {
     if let Some(issue) = issue_details {
         return build_task_with_issue(profile, wt, mode, issue);
     }
@@ -3718,7 +3718,7 @@ fn build_task(
             if let Ok(text) = fs::read_to_string(p) {
                 if let Ok(artifact) = serde_json::from_str::<CandidateArtifact>(&text) {
                     if let Some(candidate) = artifact.candidates.first() {
-                        return format_candidate_task(profile, wt, mode, candidate);
+                        return Ok(format_candidate_task(profile, wt, mode, candidate));
                     }
                 }
             }
@@ -3740,8 +3740,7 @@ fn build_task(
         }
         _ if !target.is_empty() => {
             "Implement ONLY the specific ticket described in the Focus section below. \
-             Ignore any other backlog items, priorities, or tickets mentioned in Manager \
-             Memory above -- those are background context, not additional work to pick up.\n\
+             Refer to the Project Brief and Live Task Pack for architecture and context.\n\
              Run tests if a test command is available and ensure they pass.\n\
              Do not push or create MRs."
         }
@@ -3768,15 +3767,12 @@ fn build_task(
     // commit+push round-trip through a target-branch worktree to reach a
     // dispatched agent. Optional here (unlike PM mode, which requires it)
     // since not every repo has this file.
-    if let Ok(memory) =
-        fs::read_to_string(Path::new(&profile.local_path).join("docs/MANAGER_MEMORY.md"))
+    if let Ok(project_brief) =
+        fs::read_to_string(Path::new(&profile.local_path).join("docs/PROJECT_BRIEF.md"))
     {
-        task.push_str(
-            "\n## Manager Memory (read this before exploring -- documents known \
-             environment setup, conventions, and known issues)\n\n",
-        );
-        task.push_str(&memory);
-        if !memory.ends_with('\n') {
+        task.push_str("\n## Project Brief (stable architecture, invariants, and conventions)\n\n");
+        task.push_str(&project_brief);
+        if !project_brief.ends_with('\n') {
             task.push('\n');
         }
     }
@@ -3784,7 +3780,7 @@ fn build_task(
     if !target.is_empty() {
         task.push_str(&format!("\n## Focus\n\n{}\n", target));
     }
-    task
+    Ok(task)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3845,8 +3841,54 @@ fn enforce_context_budget(
     Ok(build.prompt)
 }
 
+/// Build live task pack with curated project and task context
+fn build_live_task_pack(task: &mut String, profile: &Profile, issue: &IssueDetails) -> Result<()> {
+    // Add Project Brief (replaces full MANAGER_MEMORY)
+    if let Ok(project_brief) =
+        fs::read_to_string(Path::new(&profile.local_path).join("docs/PROJECT_BRIEF.md"))
+    {
+        task.push_str("\n## Project Brief (stable architecture, invariants, and conventions)\n\n");
+        task.push_str(&project_brief);
+        if !project_brief.ends_with('\n') {
+            task.push('\n');
+        }
+    }
+
+    // Build Live Task Pack from typed state
+    task.push_str("## Live Task Pack\n\n");
+
+    // Current state
+    task.push_str("### Current State\n\n");
+    task.push_str(&format!(
+        "- Repository: {} ({})\n",
+        profile.display_name, profile.repo
+    ));
+    task.push_str(&format!(
+        "- Target branch: {}\n",
+        profile.default_target_branch
+    ));
+    task.push_str(&format!("- Working directory: {}\n", profile.local_path));
+    task.push_str(&format!("- Issue: {} - {}\n", issue.number, issue.title));
+    task.push('\n');
+
+    // Issue body (contains acceptance criteria and other details)
+    task.push_str("### Issue Details\n\n");
+    task.push_str(&issue.body);
+    if !issue.body.ends_with('\n') {
+        task.push('\n');
+    }
+    task.push('\n');
+
+    Ok(())
+}
+
 /// Build task with issue details for the Focus section
-fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &IssueDetails) -> String {
+fn build_task_with_issue(
+    profile: &Profile,
+    wt: &Path,
+    mode: &str,
+    issue: &IssueDetails,
+) -> Result<String> {
     let instruction = match mode {
         "fix" => {
             "Fix the specific issue described in the Focus section below.\n\
@@ -3863,11 +3905,8 @@ fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &Issue
              Do not push or create MRs."
         }
         _ => {
-            "Implement ONLY the specific ticket described in the Focus section below. \
-\
-             Ignore any other backlog items, priorities, or tickets mentioned in Manager \
-\
-             Memory above -- those are background context, not additional work to pick up.\n\
+            "Implement ONLY the specific ticket described in the Focus section below.\n\
+             Refer to the Project Brief and Live Task Pack for architecture and context.\n\
              Run tests if a test command is available and ensure they pass.\n\
              Do not push or create MRs."
         }
@@ -3882,31 +3921,14 @@ fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &Issue
         instruction,
     );
 
-    // Read from the main checkout (profile.local_path), not the worktree --
-    // same source `collect_pm_preflight` already reads for PM mode. Manager
-    // memory is live operational state, not something that should need a
-    // commit+push round-trip through a target-branch worktree to reach a
-    // dispatched agent. Optional here (unlike PM mode, which requires it)
-    // since not every repo has this file.
-    if let Ok(memory) =
-        fs::read_to_string(Path::new(&profile.local_path).join("docs/MANAGER_MEMORY.md"))
-    {
-        task.push_str(
-            "\n## Manager Memory (read this before exploring -- documents known \
-\
-             environment setup, conventions, and known issues)\n\n",
-        );
-        task.push_str(&memory);
-        if !memory.ends_with('\n') {
-            task.push('\n');
-        }
-    }
+    // Build curated context packs instead of injecting full MANAGER_MEMORY
+    build_live_task_pack(&mut task, profile, issue)?;
 
     task.push_str(&format!(
         "\n## Focus\n\n{}\n",
         format_issue_for_focus(issue)
     ));
-    task
+    Ok(task)
 }
 
 fn format_candidate_task(
@@ -5948,34 +5970,35 @@ which lacks a leading boundary check.
     }
 
     #[test]
-    fn build_task_includes_manager_memory_when_present() {
+    fn build_task_includes_manager_memory_when_present() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir().unwrap();
         // profile.local_path == tmp.path() (the main checkout) -- manager
         // memory must be read from there, not the worktree, so it's live
         // operational state rather than something pinned to a git ref.
         fs::create_dir_all(tmp.path().join("docs")).unwrap();
         fs::write(
-            tmp.path().join("docs/MANAGER_MEMORY.md"),
-            "Use .venv/bin/python, do not pip install from scratch.\n",
+            tmp.path().join("docs/PROJECT_BRIEF.md"),
+            "# Project Brief\n\nThis is a test project brief.\n",
         )
         .unwrap();
         let prof = profile(tmp.path());
         let wt = tmp.path().join("worktree");
         fs::create_dir_all(&wt).unwrap();
 
-        let task = build_task(&prof, &wt, "improve", "some ticket text", None);
+        let task = build_task(&prof, &wt, "improve", "some ticket text", None)?;
 
-        assert!(task.contains("Manager Memory"));
-        assert!(task.contains("Use .venv/bin/python, do not pip install from scratch."));
-        // Manager Memory must come before Focus so the agent reads
+        assert!(task.contains("Project Brief"));
+        assert!(!task.contains("Manager Memory"));
+        // Project Brief must come before Focus so the agent reads
         // environment/project context before the specific task.
-        let memory_pos = task.find("Manager Memory").unwrap();
+        let brief_pos = task.find("Project Brief").unwrap();
         let focus_pos = task.find("## Focus").unwrap();
-        assert!(memory_pos < focus_pos);
+        assert!(brief_pos < focus_pos);
+        Ok(())
     }
 
     #[test]
-    fn build_task_omits_manager_memory_section_when_file_absent() {
+    fn build_task_omits_manager_memory_section_when_file_absent() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join("worktree");
         fs::create_dir_all(&wt).unwrap();
@@ -5984,34 +6007,37 @@ which lacks a leading boundary check.
         // Empty target -- the "implement ONLY..." instruction (which itself
         // mentions "Manager Memory" by name) only applies when a target is
         // given, so this isolates the file-injection behavior specifically.
-        let task = build_task(&prof, &wt, "improve", "", None);
+        let task = build_task(&prof, &wt, "improve", "", None)?;
 
         assert!(!task.contains("## Manager Memory"));
+        Ok(())
     }
 
     #[test]
-    fn improve_mode_with_a_target_says_ignore_other_backlog_items() {
+    fn improve_mode_with_a_target_says_ignore_other_backlog_items() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join("worktree");
         fs::create_dir_all(&wt).unwrap();
         let prof = profile(tmp.path());
 
-        let task = build_task(&prof, &wt, "improve", "TICKET-014: boost shots ROI", None);
+        let task = build_task(&prof, &wt, "improve", "TICKET-014: boost shots ROI", None)?;
 
         assert!(task.contains("Implement ONLY the specific ticket"));
         assert!(!task.contains("Select and implement the highest-priority"));
+        Ok(())
     }
 
     #[test]
-    fn improve_mode_without_a_target_still_picks_from_backlog() {
+    fn improve_mode_without_a_target_still_picks_from_backlog() -> anyhow::Result<()> {
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join("worktree");
         fs::create_dir_all(&wt).unwrap();
         let prof = profile(tmp.path());
 
-        let task = build_task(&prof, &wt, "improve", "", None);
+        let task = build_task(&prof, &wt, "improve", "", None)?;
 
         assert!(task.contains("Select and implement the highest-priority"));
+        Ok(())
     }
 
     #[test]
