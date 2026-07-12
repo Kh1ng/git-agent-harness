@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 pub fn run(
@@ -16,16 +17,38 @@ pub fn run(
     let profiles = selected_profiles(&cfg, profile_name)?;
 
     for (name, profile) in profiles {
-        // CLI --older-than overrides the per-profile retention window.
-        let retention =
-            older_than_days.unwrap_or_else(|| profile.effective_prune_older_than_days());
-        let cutoff = SystemTime::now()
-            .checked_sub(Duration::from_secs(retention.saturating_mul(86_400)))
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        println!("[{}] retention={}d", name, retention);
-        prune_sessions(profile, cutoff, dry_run)?;
-        prune_worktrees(&cfg, profile, cutoff, dry_run)?;
+        prune_profile(&cfg, &name, profile, older_than_days, dry_run, true)?;
     }
+    Ok(())
+}
+
+/// Run the same conservative maintenance used by `gah prune` for one
+/// controller profile. The controller calls this before each observation so
+/// merged/closed worktrees cannot accumulate until an operator remembers to
+/// run a separate command.
+pub fn run_automatic(cfg: &GahConfig, profile_name: &str) -> Result<()> {
+    let profile = config::get_profile(cfg, profile_name)?;
+    prune_profile(cfg, profile_name, profile, None, false, false)
+}
+
+fn prune_profile(
+    cfg: &GahConfig,
+    name: &str,
+    profile: &Profile,
+    older_than_days: Option<u64>,
+    dry_run: bool,
+    announce: bool,
+) -> Result<()> {
+    // CLI --older-than overrides the per-profile retention window.
+    let retention = older_than_days.unwrap_or_else(|| profile.effective_prune_older_than_days());
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(retention.saturating_mul(86_400)))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    if announce {
+        println!("[{name}] retention={retention}d");
+    }
+    prune_sessions(profile, cutoff, dry_run)?;
+    prune_worktrees(cfg, profile, cutoff, dry_run)?;
     Ok(())
 }
 
@@ -130,9 +153,21 @@ fn prune_worktrees(
             continue;
         }
         // A worktree tied to a merged/closed PR/MR is safe to prune
-        // immediately, even if it is newer than the retention cutoff.
+        // immediately, even if it is newer than the retention cutoff. Local
+        // branch topology is deliberately not enough: a fresh worktree has a
+        // default-branch tip until its agent makes the first commit, so using
+        // that signal would race an in-flight manual dispatch.
         let is_done = done.contains(name.as_str());
-        if !is_done && !is_older_than(&path, cutoff) {
+        let is_old = is_older_than(&path, cutoff);
+        if !is_done && !is_old {
+            continue;
+        }
+        // Never force-remove a dirty worktree. A terminal PR can still have
+        // local, unpublished recovery work, and a failed worker can leave a
+        // useful patch behind. This is intentionally fail-closed: if Git
+        // cannot establish cleanliness, retain the worktree for inspection.
+        if !worktree_is_clean(&path) {
+            println!("  retained dirty worktree {}", path.display());
             continue;
         }
         if dry_run {
@@ -163,6 +198,15 @@ fn prune_worktrees(
         let _ = crate::worktree::git(&["worktree", "prune"], Path::new(&profile.local_path));
     }
     Ok(())
+}
+
+fn worktree_is_clean(worktree: &Path) -> bool {
+    Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree)
+        .output()
+        .map(|out| out.status.success() && out.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 fn is_older_than(path: &PathBuf, cutoff: SystemTime) -> bool {
