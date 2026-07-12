@@ -3330,12 +3330,8 @@ fn review(
     // escalatory entry is used for the escalation; it is an ordered cascade
     // and the controller re-routes across `review_candidates` on failure.
     let escalation_reason = review_escalation_reason(cfg, &args.profile, &target.source_branch);
-    let escalatory: Vec<CandidateConfig> = profile
-        .routing
-        .effective_escalatory_reviewers()
-        .into_iter()
-        .chain(cfg.defaults.routing.effective_escalatory_reviewers())
-        .collect();
+    let eff_routing = profile.effective_routing(&cfg.defaults);
+    let escalatory: Vec<CandidateConfig> = eff_routing.effective_escalatory_reviewers();
     let (requested_backend, requested_model) = match (escalation_reason, escalatory.first()) {
         (Some(reason), Some(esc)) => {
             println!(
@@ -4404,6 +4400,25 @@ mod tests {
         let mut prof = profile(tmp.path());
         prof.routing.weak_review_backend = Some("codex".into());
         let cfg = gah_config(RoutingPolicy::default());
+
+        let route = route_decision("codex", None, true);
+        assert_eq!(
+            derive_reviewer_tier(&cfg, &prof, &route),
+            ReviewerTier::Weak
+        );
+    }
+
+    #[test]
+    fn reviewer_tier_weak_when_backend_matches_legacy_weak_config_in_defaults() {
+        // Issue #233: legacy single `weak_review_*` entry in defaults (canonical config)
+        // must also be classified as ReviewerTier::Weak, not Escalatory.
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let defaults_routing = RoutingPolicy {
+            weak_review_backend: Some("codex".into()),
+            ..Default::default()
+        };
+        let cfg = gah_config(defaults_routing);
 
         let route = route_decision("codex", None, true);
         assert_eq!(
@@ -9214,22 +9229,14 @@ impl ReviewerTier {
 /// weak reviewer cannot self-promote by returning confident-sounding text
 /// (TICKET-108's core requirement).
 fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecision) -> ReviewerTier {
+    let eff_routing = profile.effective_routing(&cfg.defaults);
     let effective_model = route.effective_model.as_deref();
     let selected = |backend_cfg: Option<&str>, model_cfg: Option<&str>| -> bool {
         backend_cfg.is_some_and(|b| b == route.effective_backend)
             && (model_cfg.is_none() || model_cfg == effective_model)
     };
-    let routine = profile
-        .routing
-        .effective_routine_reviewer()
-        .or_else(|| cfg.defaults.routing.effective_routine_reviewer());
-    let escalatory = profile
-        .routing
-        .escalatory_reviewers
-        .iter()
-        .cloned()
-        .chain(cfg.defaults.routing.escalatory_reviewers.clone())
-        .collect::<Vec<_>>();
+    let routine = eff_routing.effective_routine_reviewer();
+    let escalatory = eff_routing.effective_escalatory_reviewers();
 
     // Issue #233: tier classification must only honor explicitly declared
     // escalatory reviewers. The legacy weak-review keys still feed routing
@@ -9239,9 +9246,9 @@ fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecisio
         if selected(Some(esc.backend.as_str()), esc.model.as_deref()) {
             // Check if this escalatory reviewer is actually a legacy weak review configuration
             // Legacy weak review configs should be treated as Weak tier, not Escalatory
-            let is_legacy_weak_config = profile.routing.escalatory_reviewers.is_empty()
-                && profile.routing.weak_review_backend.as_deref() == Some(esc.backend.as_str())
-                && profile.routing.weak_review_model.as_deref() == esc.model.as_deref();
+            let is_legacy_weak_config = eff_routing.escalatory_reviewers.is_empty()
+                && eff_routing.weak_review_backend.as_deref() == Some(esc.backend.as_str())
+                && eff_routing.weak_review_model.as_deref() == esc.model.as_deref();
 
             if is_legacy_weak_config {
                 return ReviewerTier::Weak;
@@ -9255,26 +9262,10 @@ fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecisio
             return ReviewerTier::Strong;
         }
     }
-    let strong_backend = profile.routing.strong_review_backend.as_deref().or(cfg
-        .defaults
-        .routing
-        .strong_review_backend
-        .as_deref());
-    let strong_model = profile.routing.strong_review_model.as_deref().or(cfg
-        .defaults
-        .routing
-        .strong_review_model
-        .as_deref());
-    let weak_backend = profile.routing.weak_review_backend.as_deref().or(cfg
-        .defaults
-        .routing
-        .weak_review_backend
-        .as_deref());
-    let weak_model = profile.routing.weak_review_model.as_deref().or(cfg
-        .defaults
-        .routing
-        .weak_review_model
-        .as_deref());
+    let strong_backend = eff_routing.strong_review_backend.as_deref();
+    let strong_model = eff_routing.strong_review_model.as_deref();
+    let weak_backend = eff_routing.weak_review_backend.as_deref();
+    let weak_model = eff_routing.weak_review_model.as_deref();
 
     if selected(weak_backend, weak_model) {
         return ReviewerTier::Weak;
@@ -9292,11 +9283,7 @@ fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecisio
     // falling back from agy to agy-second/claude silently downgraded a
     // Sonnet reviewer to "standard" tier). Any candidate not already
     // classified weak above is strong.
-    let candidates = profile.routing.review_candidates.as_ref().or(cfg
-        .defaults
-        .routing
-        .review_candidates
-        .as_ref());
+    let candidates = eff_routing.review_candidates.as_ref();
     if let Some(candidates) = candidates {
         let in_candidates = candidates.iter().any(|c| {
             c.backend == route.effective_backend
