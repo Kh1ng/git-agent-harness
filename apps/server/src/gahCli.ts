@@ -7,7 +7,7 @@
 import { spawn, spawnSync, SpawnOptions } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accessSync, constants, existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import type {
   StatusSnapshot,
   QuotaSnapshot,
@@ -805,6 +805,21 @@ function loopLogFile(profile: string): string {
   return resolve(loopStateDir(), `loop-${profile.replace(/\//g, '_')}.log`);
 }
 
+/** A durable acknowledgement that the operator intentionally stopped this
+ * profile through the control plane. The watchdog reads the same marker so it
+ * does not turn a dashboard Stop into an immediate, invisible restart. */
+function loopManualStopFile(profile: string): string {
+  return resolve(loopStateDir(), `loop-${profile.replace(/\//g, '_')}.manual-stop.json`);
+}
+
+function clearManualStop(profile: string): void {
+  try {
+    unlinkSync(loopManualStopFile(profile));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -927,6 +942,9 @@ export async function startLoop(profile: string, config?: string): Promise<Start
       if (pid !== undefined) {
         writeFileSync(loopPidFile(profile), JSON.stringify({ pid, startedAt: new Date().toISOString() }));
       }
+      // Only a confirmed start clears the marker. A failed spawn must leave
+      // an intentional stop intentional rather than inviting watchdog churn.
+      clearManualStop(profile);
       resolvePromise({ started: true, pid });
     }, LOOP_START_SETTLE_MS);
   });
@@ -937,16 +955,18 @@ export interface StopLoopResult {
   error?: string;
 }
 
-/** Graceful stop: SIGTERM to the PID persisted by `startLoop`, matching how
- * the loop has been stopped manually (`kill -TERM <pid>`). Does not touch
- * the PID file -- the next `getLoopStatus` call naturally reports
- * not-running once the process is actually gone. */
+/** Graceful operator stop. Persist a marker consumed by the watchdog before
+ * signalling the loop, so the control-plane Stop action cannot be undone by
+ * an automatic watchdog restart. The next successful control-plane Start
+ * clears it. */
 export function stopLoop(profile: string): StopLoopResult {
   const status = getLoopStatus(profile);
   if (!status.running || status.pid === undefined) {
     return { stopped: false, error: `No running loop found for profile '${profile}'` };
   }
   try {
+    mkdirSync(loopStateDir(), { recursive: true });
+    writeFileSync(loopManualStopFile(profile), JSON.stringify({ stoppedAt: new Date().toISOString() }));
     process.kill(status.pid, 'SIGTERM');
     return { stopped: true };
   } catch (error) {
