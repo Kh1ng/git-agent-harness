@@ -508,6 +508,31 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             }
         }
     }
+    let mut undispatched: Vec<_> = snapshot
+        .available_tickets
+        .iter()
+        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0)
+        // TICKET-human-required-scoping: skip work-item-scoped
+        // human_required tickets; they await human action, not dispatch.
+        .filter(|t| !t.human_required)
+        .collect();
+    undispatched.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
+    if let Some(ticket) = undispatched.first() {
+        return NextAction::DispatchTicket {
+            ticket_path: ticket.ticket_path.clone(),
+            work_id: ticket.work_id.clone(),
+            recommended_backend: ticket.recommended_backend.clone(),
+            recommended_model: ticket.recommended_model.clone(),
+            reason: "eligible undispatched ticket".into(),
+        };
+    }
+
+    // Infrastructure failures (timeouts, transient backend outages, and
+    // harness/environment faults) are retryable, but must not monopolize the
+    // controller while untouched work exists.  A dispatch already performs its
+    // own bounded backend failover; retrying the same failed ticket again here
+    // before every fresh ticket turns one unavailable provider into a backlog
+    // stall.  Preserve retryability after the fresh queue has made progress.
     for ticket in &failed_tickets {
         if exhausted.contains(ticket.work_id.as_ref().unwrap_or(&ticket.ticket_path)) {
             continue;
@@ -526,25 +551,6 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 };
             }
         }
-    }
-
-    let mut undispatched: Vec<_> = snapshot
-        .available_tickets
-        .iter()
-        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0)
-        // TICKET-human-required-scoping: skip work-item-scoped
-        // human_required tickets; they await human action, not dispatch.
-        .filter(|t| !t.human_required)
-        .collect();
-    undispatched.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
-    if let Some(ticket) = undispatched.first() {
-        return NextAction::DispatchTicket {
-            ticket_path: ticket.ticket_path.clone(),
-            work_id: ticket.work_id.clone(),
-            recommended_backend: ticket.recommended_backend.clone(),
-            recommended_model: ticket.recommended_model.clone(),
-            reason: "eligible undispatched ticket".into(),
-        };
     }
 
     if let Some(scope) = snapshot
@@ -2242,18 +2248,13 @@ mod tests {
             false,
         ));
         let action = decide_next_action(&snapshot);
-        // Should dispatch TICKET-FRESH (undispatched ticket has priority
-        // over retry of failed ticket in the decision tree)
+        // Untouched backlog work must run before retrying an infra-failed
+        // ticket; otherwise one outage can monopolize the loop.
         match action {
             NextAction::DispatchTicket { work_id, .. } => {
                 assert_eq!(work_id.as_deref(), Some("TICKET-FRESH"))
             }
-            NextAction::Retry { work_id, .. } => {
-                // Retry of the infra ticket is also acceptable since
-                // the fresh ticket might be filtered by other rules
-                assert_eq!(work_id, "TICKET-INFRA");
-            }
-            other => panic!("expected DispatchTicket or Retry, got {other:?}"),
+            other => panic!("expected DispatchTicket for fresh work, got {other:?}"),
         }
     }
 
