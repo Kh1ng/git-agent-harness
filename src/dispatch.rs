@@ -635,17 +635,14 @@ pub fn scan_available_tickets(
         // Every issue gets a synthesized work_id (TICKET-<number>) even
         // without a TICKET- prefixed title, so is_authoritative is always
         // true here -- unlike docs/tickets files, there's no way for an
-        // issue to opt out just by lacking metadata. A "blocked" or
-        // "planning" label is the generic signal for "don't auto-dispatch
-        // this" (an owner-blocked infra issue with no code fix available,
-        // or a planning-only issue with no acceptance criteria yet) --
+        // issue to opt out just by lacking metadata. A blocked/planning label
+        // or `exec:owner-decision` is the generic signal for "don't
+        // auto-dispatch this" (an owner-blocked infra issue with no code fix
+        // available, a planning-only issue, or a task whose direction still
+        // needs the owner's decision) --
         // without it, gah loop would burn real dispatch cycles on issues
         // no agent can meaningfully act on before HumanRequired kicks in.
-        if issue
-            .labels
-            .iter()
-            .any(|l| matches!(l.to_lowercase().as_str(), "blocked" | "planning"))
-        {
+        if issue_is_auto_dispatch_blocked(&issue.labels) {
             continue;
         }
         let meta = parse_ticket_metadata_from_issue(&issue);
@@ -693,6 +690,19 @@ pub fn scan_available_tickets(
     }
 
     candidates
+}
+
+/// Labels that explicitly reserve a tracker issue for human action must take
+/// precedence over the automatic issue-intake fallback. GitHub labels are
+/// case-insensitive in practice, so normalize here rather than relying on a
+/// single spelling in every profile.
+fn issue_is_auto_dispatch_blocked(labels: &[String]) -> bool {
+    labels.iter().any(|label| {
+        matches!(
+            label.trim().to_ascii_lowercase().as_str(),
+            "blocked" | "planning" | "exec:owner-decision"
+        )
+    })
 }
 
 /// TICKET-127: execute an auto-merge decided by `controller::decide_next_action`.
@@ -5489,6 +5499,57 @@ which lacks a leading boundary check.
         assert_eq!(candidates[0].recommended_backend.as_deref(), Some("agy"));
         assert_eq!(candidates[0].prior_attempt_count, 0);
         assert!(!candidates[0].has_active_mr);
+    }
+
+    #[test]
+    fn scan_available_tickets_excludes_owner_decision_github_issues() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let issue_json = r#"[{"number":92,"title":"MS-5: Fleet ledger","body":"","labels":[{"name":"EXEC:OWNER-DECISION"}],"author":{"login":"owner"}}]"#;
+        let gh_path = bin_dir.join("gh");
+        fs::write(
+            &gh_path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                issue_json.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&gh_path, perms).unwrap();
+        }
+        let _guard = PathGuard::set(&bin_dir);
+        let cfg = crate::config::GahConfig {
+            context: Default::default(),
+            defaults: crate::config::Defaults {
+                current_manager: None,
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = "github".to_string();
+        prof.repo = "owner/repo".to_string();
+
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
+
+        assert!(candidates.is_empty());
     }
 
     #[test]
