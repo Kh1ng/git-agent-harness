@@ -7,9 +7,62 @@ import {
   Radio,
   Settings,
   Menu,
-  X
+  X,
+  Server,
+  Activity
 } from 'lucide-react';
 import type { Page } from '../App.js';
+import { useWebSocket } from '../ws/WebSocketContext.js';
+
+function HostList() {
+  const { hosts, hostsStatus, sessions } = useWebSocket();
+
+  if (!hosts || hosts.length === 0) return null;
+
+  return (
+    <div className="mt-6 pt-6 border-t border-subtle">
+      <h3 className="px-2 text-xs font-semibold text-muted uppercase tracking-wider mb-2 flex items-center gap-1.5">
+        <Server size={12} />
+        Connected Hosts
+      </h3>
+      <div className="space-y-1">
+        {hosts.map((host) => {
+          const status = hostsStatus[host.id];
+          const isReachable = status?.reachable ?? true;
+          
+          let activeCount = status?.activeSessionCount;
+          if (activeCount === undefined) {
+            activeCount = sessions.filter(s => {
+              const isRunning = s.status === 'running' || s.status === 'starting';
+              if (host.id === 'local') {
+                return isRunning && (!s.hostId || s.hostId === 'local');
+              }
+              return isRunning && s.hostId === host.id;
+            }).length;
+          }
+
+          return (
+            <div
+              key={host.id}
+              className="flex items-center justify-between px-2 py-1.5 rounded-md text-xs hover:bg-muted/50 transition-colors"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className={`h-2 w-2 rounded-full shrink-0 ${isReachable ? 'bg-green-500' : 'bg-red-500'}`} />
+                <span className="font-medium truncate text-primary">{host.name}</span>
+              </div>
+              {activeCount > 0 && (
+                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-accent/10 text-accent font-semibold text-[10px]">
+                  <Activity size={10} />
+                  {activeCount}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 type NavbarProps = {
   currentPage: Page;
@@ -70,6 +123,7 @@ export function Navbar({ currentPage, onPageChange }: NavbarProps) {
           <p className="text-[10px] text-muted mt-1 font-mono" data-testid="frontend-build">{FRONTEND_BUILD}</p>
         </div>
         <NavLinks currentPage={currentPage} onSelect={handleSelect} />
+        <HostList />
       </aside>
 
       {/* Mobile top bar */}
@@ -111,6 +165,7 @@ export function Navbar({ currentPage, onPageChange }: NavbarProps) {
               </button>
             </div>
             <NavLinks currentPage={currentPage} onSelect={handleSelect} />
+            <HostList />
           </div>
         </div>
       )}

@@ -14,7 +14,11 @@ import type {
   Blocker,
   StatusError,
   RecentLedgerSummary,
-  ControllerActivity
+  ControllerActivity,
+  HostConfig,
+  HostStatus,
+  HostId,
+  StatusSnapshot
 } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 
@@ -48,6 +52,8 @@ type WebSocketContextType = {
   errors: StatusError[];
   recentLedger: RecentLedgerSummary | null;
   controllerActivity: ControllerActivity[];
+  hosts: HostConfig[];
+  hostsStatus: Record<HostId, HostStatus>;
   sendMessage: (message: ClientMessage) => void;
   reconnect: () => void;
   disconnect: () => void;
@@ -91,7 +97,31 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [errors, setErrors] = useState<StatusError[]>([]);
   const [recentLedger, setRecentLedger] = useState<RecentLedgerSummary | null>(null);
   const [controllerActivity, setControllerActivity] = useState<ControllerActivity[]>([]);
+  const [hosts, setHosts] = useState<HostConfig[]>([]);
+  const [hostsStatus, setHostsStatus] = useState<Record<HostId, HostStatus>>({});
+  const [wsUrl, setWsUrl] = useState<string>(SERVER_WS_BASE);
   const socketRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    const fetchTauriAggregatorUrl = async () => {
+      if (typeof window !== 'undefined' && (window as any).__TAURI__) {
+        try {
+          const tauri = (window as any).__TAURI__;
+          const invokeFn = tauri.core?.invoke || tauri.invoke;
+          if (invokeFn) {
+            const url = await invokeFn('get_aggregator_url');
+            if (url) {
+              console.log('Using aggregator URL from Tauri:', url);
+              setWsUrl(url);
+            }
+          }
+        } catch (err) {
+          console.error('Failed to get aggregator URL from Tauri:', err);
+        }
+      }
+    };
+    fetchTauriAggregatorUrl();
+  }, []);
 
   const activityProfile = profileOverride ?? profile ?? 'gah';
   useEffect(() => {
@@ -117,7 +147,17 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     setError(null);
 
     try {
-      const newSocket = new WebSocket(getWebSocketUrl(profileOverride));
+      let finalWsUrl = wsUrl;
+      try {
+        const urlObj = new URL(wsUrl);
+        if (profileOverride) {
+          urlObj.searchParams.set('profile', profileOverride);
+        }
+        finalWsUrl = urlObj.toString();
+      } catch (e) {
+        // wsUrl is invalid or relative
+      }
+      const newSocket = new WebSocket(finalWsUrl);
 
       newSocket.onopen = () => {
         setIsConnected(true);
@@ -175,6 +215,61 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               if (message.errors) setErrors(message.errors);
               if (message.recentLedger !== undefined) setRecentLedger(message.recentLedger);
               if (message.backendConfigured) setBackendConfigured(message.backendConfigured);
+
+              if (message.hosts) {
+                setHosts(message.hosts);
+              } else {
+                setHosts([{
+                  id: 'local',
+                  name: 'Local Host',
+                  url: wsUrl
+                }]);
+              }
+
+              if (message.hostsStatus) {
+                setHostsStatus(message.hostsStatus);
+              } else {
+                setHostsStatus({
+                  'local': {
+                    reachable: true,
+                    activeSessionCount: message.sessions ? message.sessions.filter(s => s.status === 'running').length : 0,
+                    snapshot: {
+                      schema_version: 1,
+                      generated_at: new Date().toISOString(),
+                      profile: {
+                        profile: message.profile || 'gah',
+                        display_name: 'Local',
+                        repo_id: 'local',
+                        provider: 'local',
+                        local_path: '',
+                        default_target_branch: 'main',
+                        merge_policy: 'local'
+                      },
+                      observations: {
+                        sync: { status: 'ok' },
+                        availability: { status: 'ok' },
+                        ledger: { status: 'ok' }
+                      },
+                      merge_requests: message.mergeRequests || [],
+                      availability: message.availability || [],
+                      recent_ledger: message.recentLedger || null,
+                      constraints: message.constraints || [],
+                      blockers: message.blockers || [],
+                      blocked_work_items: [],
+                      errors: message.errors || [],
+                      available_tickets: [],
+                      fix_attempt_counts: {},
+                      merge_attempt_counts: {},
+                      publishing_allow_pr: true,
+                      backend_configured: message.backendConfigured || {}
+                    }
+                  }
+                });
+              }
+              break;
+
+            case 'server.hostsStatus':
+              setHostsStatus(message.hostsStatus);
               break;
 
             case 'session.started':
@@ -257,7 +352,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       setError(error instanceof Error ? error.message : String(error));
       setIsConnecting(false);
     }
-  }, [profileOverride]);
+  }, [profileOverride, wsUrl]);
 
   const sendMessage = useCallback((message: ClientMessage) => {
     const current = socketRef.current;
@@ -330,6 +425,8 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     errors,
     recentLedger,
     controllerActivity,
+    hosts,
+    hostsStatus,
     sendMessage,
     reconnect,
     disconnect

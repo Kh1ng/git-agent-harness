@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "lint": "echo 'No web lint'"
   },
   "dependencies": {
     "react": "^18.2.0",

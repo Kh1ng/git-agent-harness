@@ -22,6 +22,7 @@ import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyStat
 import { SessionCard } from '../components/SessionCard.js';
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount } from '../lib/format.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
+import { HostStatusPanels } from '../components/HostStatusPanels.js';
 
 type OverviewPageProps = {
   sessions: Session[];
@@ -146,6 +147,8 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
         />
         <StatTile label="Active work" value={String(activeWorkCount)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
       </div>
+
+      <HostStatusPanels />
 
       {(blockers.length > 0 || blockedWorkItems.length > 0) && (
         <div className="card-padded border-warning/30">

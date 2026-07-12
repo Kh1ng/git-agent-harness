@@ -3,7 +3,23 @@
  * Inspired by t3code architecture but adapted for GAH needs
  */
 
-import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary } from './gah.js';
+import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, StatusSnapshot } from './gah.js';
+
+// Host types
+export type HostId = string;
+
+export interface HostConfig {
+  id: HostId;
+  name: string;
+  url: string;
+}
+
+export interface HostStatus {
+  reachable: boolean;
+  activeSessionCount: number;
+  snapshot?: StatusSnapshot;
+  error?: string;
+}
 
 // Provider types
 export type ProviderKind = 
@@ -49,6 +65,7 @@ export interface Session {
   backend?: string;
   model?: string;
   budget?: number;
+  hostId?: string;
 }
 
 // WebSocket message types
@@ -72,6 +89,12 @@ export type ServerMessage =
       // Maps a backend name (e.g. "codex", "opencode") to whether it has
       // a real implementation and is wired for the active profile.
       backendConfigured?: Record<string, boolean>;
+      hosts?: HostConfig[];
+      hostsStatus?: Record<HostId, HostStatus>;
+    }
+  | {
+      type: "server.hostsStatus";
+      hostsStatus: Record<HostId, HostStatus>;
     }
   | {
       type: "server.ping";
@@ -139,6 +162,8 @@ export type ClientMessage =
       backend?: string;
       model?: string;
       budget?: number;
+      hostId?: string;
+      routingStrategy?: string;
     }
   | {
       type: "session.stop";

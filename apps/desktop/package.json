@@ -8,7 +8,8 @@
     "start": "tauri dev",
     "typecheck": "tsc --noEmit",
     "build": "tauri build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "lint": "echo 'No desktop lint'"
   },
   "dependencies": {
     "@git-agent-harness/contracts": "*",

@@ -11,6 +11,7 @@ import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { SessionCard } from '../components/SessionCard.js';
 import { AttemptTimeline } from '../components/AttemptTimeline.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
+import { HostStatusPanels } from '../components/HostStatusPanels.js';
 
 const DISPATCH_MODES = ['fix', 'improve', 'review', 'pm', 'experiment'] as const;
 const DISPATCH_BACKENDS = ['auto', 'openhands', 'codex', 'claude', 'agy', 'vibe', 'opencode'] as const;
@@ -20,10 +21,12 @@ const DISPATCH_BACKENDS = ['auto', 'openhands', 'codex', 'claude', 'agy', 'vibe'
  * the same `session.start` message the WS contract already defines
  * (apps/server's SessionManager.startSession); no new server-side work. */
 function NewDispatchForm({ profile, repo }: { profile: string; repo: string | null }) {
-  const { sendMessage, isConnected } = useWebSocket();
+  const { sendMessage, isConnected, hosts } = useWebSocket();
   const [mode, setMode] = useState<(typeof DISPATCH_MODES)[number]>('fix');
   const [backend, setBackend] = useState<(typeof DISPATCH_BACKENDS)[number]>('auto');
   const [target, setTarget] = useState('');
+  const [hostId, setHostId] = useState<string>('auto');
+  const [routingStrategy, setRoutingStrategy] = useState<string>('auto');
   const [justSent, setJustSent] = useState(false);
 
   const dispatch = () => {
@@ -37,7 +40,9 @@ function NewDispatchForm({ profile, repo }: { profile: string; repo: string | nu
       repo,
       mode,
       backend,
-      target: target.trim() || undefined
+      target: target.trim() || undefined,
+      hostId: hostId === 'auto' ? undefined : hostId,
+      routingStrategy: routingStrategy === 'auto' ? undefined : routingStrategy
     });
     setJustSent(true);
     setTimeout(() => setJustSent(false), 3000);
@@ -83,6 +88,31 @@ function NewDispatchForm({ profile, repo }: { profile: string; repo: string | nu
             placeholder="e.g. 148"
             className="block mt-1 w-full bg-raised border border-subtle rounded-md px-2 py-1.5 text-sm text-primary placeholder:text-muted"
           />
+        </label>
+        <label className="text-xs text-muted">
+          Target Host
+          <select
+            value={hostId}
+            onChange={(e) => setHostId(e.target.value)}
+            className="block mt-1 bg-raised border border-subtle rounded-md px-2 py-1.5 text-sm text-primary"
+          >
+            <option value="auto">Auto / least-loaded</option>
+            {hosts && hosts.map((h) => (
+              <option key={h.id} value={h.id}>{h.name}</option>
+            ))}
+          </select>
+        </label>
+        <label className="text-xs text-muted">
+          Routing Strategy
+          <select
+            value={routingStrategy}
+            onChange={(e) => setRoutingStrategy(e.target.value)}
+            className="block mt-1 bg-raised border border-subtle rounded-md px-2 py-1.5 text-sm text-primary"
+          >
+            <option value="auto">Auto</option>
+            <option value="least_loaded">Least Loaded</option>
+            <option value="round_robin">Round Robin</option>
+          </select>
         </label>
         <button onClick={dispatch} disabled={!isConnected || !repo} className="btn-primary">
           {justSent ? 'Sent' : 'Dispatch'}
@@ -169,6 +199,8 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
       />
 
       <NewDispatchForm profile={profile ?? 'gah'} repo={activeProfileRepo} />
+
+      <HostStatusPanels />
 
       <section>
         <ControllerActivityCard activity={controllerActivity} />

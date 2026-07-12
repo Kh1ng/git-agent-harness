@@ -17,11 +17,16 @@ fn main() {
     // Get the path to the server executable
     let server_path = get_server_path();
 
-    // Start the server before building the app
-    if let Some(server_path) = server_path {
-        start_server(&server_state, &server_path);
-        // Wait a bit for the server to start
-        std::thread::sleep(Duration::from_secs(2));
+    // Start the server before building the app if GAH_AGGREGATOR_URL / VITE_WS_URL is NOT set
+    let has_aggregator = std::env::var("GAH_AGGREGATOR_URL").is_ok() || std::env::var("VITE_WS_URL").is_ok();
+    if !has_aggregator {
+        if let Some(server_path) = server_path {
+            start_server(&server_state, &server_path);
+            // Wait a bit for the server to start
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    } else {
+        println!("Aggregator server URL env variable is set. Skipping local server launch.");
     }
 
     tauri::Builder::default()
@@ -33,7 +38,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_server_command,
             stop_server_command,
-            is_server_running_command
+            is_server_running_command,
+            get_aggregator_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -147,4 +153,11 @@ fn is_server_running_command(state: tauri::State<'_, Arc<ServerState>>) -> Resul
     Ok(server_guard.as_mut().map_or(false, |child| {
         child.try_wait().map_or(true, |result| result.is_none())
     }))
+}
+
+#[tauri::command]
+fn get_aggregator_url() -> Option<String> {
+    std::env::var("GAH_AGGREGATOR_URL")
+        .ok()
+        .or_else(|| std::env::var("VITE_WS_URL").ok())
 }
