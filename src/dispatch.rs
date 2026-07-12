@@ -2134,11 +2134,6 @@ fn improve(
         // falsely advance the controller with no patch or PR to show for it.
         // Stop before post-change validation: there is no change to validate.
         if !worktree::has_changes(&wt, &profile.default_target_branch)? {
-            ledger.validation_result = Some("not_run_no_changes".into());
-            ledger.set_failure(
-                crate::ledger::FailureClass::AgentNoProgress,
-                crate::ledger::FailureStage::AgentRun,
-            );
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
@@ -2158,6 +2153,31 @@ fn improve(
                     Some(&claude_path),
                 ),
             });
+            if attempt + 1 < max_attempts {
+                // No progress is recoverable: a fresh attempt can get a
+                // clearer instruction or a transient backend condition may
+                // have cleared. Preserve the failed attempt in the ledger,
+                // but do not stamp the overall dispatch as failed unless all
+                // bounded attempts make no progress.
+                println!(
+                    "Backend made no changes on attempt {}/{}; retrying with explicit no-progress context...",
+                    attempt + 1,
+                    max_attempts
+                );
+                prior_phase_context = Some(task.clone());
+                task = format!(
+                    "{}\n\n## Previous attempt made no progress (attempt {}/{})\n\nThe backend exited successfully but did not change the worktree. Re-read the scoped task, make the required implementation change, and do not stop until a concrete diff exists.",
+                    base_task,
+                    attempt + 1,
+                    max_attempts,
+                );
+                continue;
+            }
+            ledger.validation_result = Some("not_run_no_changes".into());
+            ledger.set_failure(
+                crate::ledger::FailureClass::AgentNoProgress,
+                crate::ledger::FailureStage::AgentRun,
+            );
             worktree::cleanup(&wt, repo);
             anyhow::bail!(
                 "backend exited 0 on attempt {} but produced no worktree changes",
