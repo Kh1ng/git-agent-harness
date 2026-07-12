@@ -254,6 +254,22 @@ gah prune --dry-run --older-than 14
 gah prune --profile <profile> --older-than 30
 ```
 
+### Torn final ledger record
+
+If an abrupt stop or full filesystem leaves `ledger.jsonl` with an incomplete
+final line, GAH fails closed rather than treating the missing data as zero.
+Repair only that specific physical failure with the guarded command below:
+
+```bash
+gah ledger repair-tail --dry-run
+gah ledger repair-tail
+```
+
+The command only removes an invalid record that is both final and missing its
+newline terminator. It saves those rejected bytes as a sibling
+`ledger.jsonl.corrupt-tail-*` file before truncating. Newline-terminated or
+mid-file corruption is never altered automatically and requires investigation.
+
 ---
 
 ## 4. Notification & manager-wake setup

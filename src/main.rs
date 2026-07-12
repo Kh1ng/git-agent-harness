@@ -509,6 +509,14 @@ enum ProfileCommands {
 
 #[derive(Subcommand)]
 enum LedgerCommands {
+    /// Back up and remove one torn, unterminated final JSONL record. Refuses
+    /// to alter any mid-file or newline-terminated corruption.
+    RepairTail {
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
     /// Summarize recent ledger entries
     Summary {
         #[arg(long, default_value = "7d")]
@@ -800,6 +808,26 @@ fn main() -> Result<()> {
         )?,
 
         Commands::Ledger { command } => match command {
+            LedgerCommands::RepairTail {
+                config_path,
+                dry_run,
+            } => {
+                let cfg = config::load(config_path.as_deref())?;
+                let repaired = ledger::repair_truncated_tail(&cfg, dry_run)?;
+                match repaired.backup_path {
+                    Some(path) if dry_run => println!(
+                        "Dry run: would back up and remove {} truncated bytes; backup path: {}",
+                        repaired.dropped_bytes,
+                        path.display()
+                    ),
+                    Some(path) => println!(
+                        "Repaired ledger tail: backed up and removed {} truncated bytes at {}",
+                        repaired.dropped_bytes,
+                        path.display()
+                    ),
+                    None => println!("Ledger tail is complete; no repair needed."),
+                }
+            }
             LedgerCommands::Summary {
                 since,
                 profile,
