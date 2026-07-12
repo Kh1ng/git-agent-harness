@@ -11,6 +11,7 @@ import { getSessionManager } from './sessions/SessionManager.js';
 import * as gahCli from './gahCli.js';
 import { getStatusAggregator, createHostsStatusMessage } from './hosts/statusAggregator.js';
 import { getHostRegistry } from './hosts/HostRegistry.js';
+import { chooseHost } from './hosts/dispatchRouter.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -174,22 +175,74 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
   }
 }
 
-async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage, { type: 'session.start' }>, requestId: string) {
+export async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage, { type: 'session.start' }>, requestId: string) {
   const sessionManager = getSessionManager();
+  const hostRegistry = getHostRegistry();
   
   try {
-    const session = await sessionManager.startSession({
-      profile: message.profile,
-      providerKind: message.providerKind,
-      instanceId: message.instanceId,
-      repo: message.repo,
-      branch: message.branch,
-      target: message.target,
-      mode: message.mode,
-      backend: message.backend,
-      model: message.model,
-      budget: message.budget
-    });
+    let hostId = message.hostId;
+    if (!hostId) {
+      const candidates = ['local', ...hostRegistry.getHostIds()];
+      const strategy = message.routingStrategy || 'least_loaded';
+      hostId = chooseHost(candidates, strategy);
+    }
+
+    let session: Session;
+
+    if (hostId === 'local') {
+      session = await sessionManager.startSession({
+        profile: message.profile,
+        providerKind: message.providerKind,
+        instanceId: message.instanceId,
+        repo: message.repo,
+        branch: message.branch,
+        target: message.target,
+        mode: message.mode,
+        backend: message.backend,
+        model: message.model,
+        budget: message.budget,
+        hostId: 'local'
+      });
+    } else {
+      const hostConfig = hostRegistry.getHostConfig(hostId);
+      if (!hostConfig) {
+        throw new GAHError(`Remote host configuration for '${hostId}' not found`, 'HOST_NOT_CONFIGURED');
+      }
+
+      const url = new URL('/api/dispatch', hostConfig.base_url);
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json'
+      };
+      if (hostConfig.auth_token) {
+        headers['Authorization'] = `Bearer ${hostConfig.auth_token}`;
+      }
+
+      const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          profile: hostConfig.profile || message.profile,
+          providerKind: message.providerKind,
+          instanceId: message.instanceId,
+          repo: message.repo,
+          branch: message.branch,
+          target: message.target,
+          mode: message.mode,
+          backend: message.backend,
+          model: message.model,
+          budget: message.budget,
+          hostId: hostId
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to forward dispatch to host '${hostId}' (HTTP ${response.status}): ${errorText}`);
+      }
+
+      session = await response.json() as Session;
+      sessionManager.addRemoteSession(session);
+    }
     
     // Notify all clients about new session
     pushBus.publish({

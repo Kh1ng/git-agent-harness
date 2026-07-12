@@ -14,7 +14,8 @@
     "dev": "tsx --watch src/bin.ts",
     "build": "tsc",
     "start": "node dist/bin.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'No lint needed'"
   },
   "dependencies": {
     "@effect/platform-node": "^0.50.0",

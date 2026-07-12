@@ -37,6 +37,7 @@ type SessionOptions = {
   prod?: boolean;
   allowUnknownRedBaseline?: boolean;
   escalate?: boolean;
+  hostId?: string;
 };
 
 // Active dispatch processes tracked by sessionId
@@ -84,7 +85,8 @@ class SessionManagerImpl {
       mode: options.mode,
       backend: options.backend,
       model: options.model,
-      budget: options.budget
+      budget: options.budget,
+      hostId: options.hostId
     };
     
     this.sessions.set(sessionId, session);
@@ -307,6 +309,10 @@ class SessionManagerImpl {
     }
   }
   
+  addRemoteSession(session: Session): void {
+    this.sessions.set(session.id, session);
+  }
+
   getSession(sessionId: SessionId): Session | undefined {
     return this.sessions.get(sessionId);
   }

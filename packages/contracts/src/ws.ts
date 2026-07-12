@@ -49,6 +49,7 @@ export interface Session {
   backend?: string;
   model?: string;
   budget?: number;
+  hostId?: string;
 }
 
 // WebSocket message types
@@ -150,6 +151,8 @@ export type ClientMessage =
       backend?: string;
       model?: string;
       budget?: number;
+      hostId?: string;
+      routingStrategy?: string;
     }
   | {
       type: "session.stop";

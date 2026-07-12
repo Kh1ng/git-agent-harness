@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { getServerReadiness } from './serverReadiness.js';
+import { getSessionManager } from './sessions/SessionManager.js';
 import { runStatus, runQuota, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, getLoopStatus, startLoop, stopLoop, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
 import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
@@ -268,6 +269,31 @@ export function createServer() {
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load controller activity',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/dispatch', async (req, res) => {
+    try {
+      const sessionManager = getSessionManager();
+      const session = await sessionManager.startSession({
+        profile: req.body.profile,
+        providerKind: req.body.providerKind,
+        instanceId: req.body.instanceId,
+        repo: req.body.repo,
+        branch: req.body.branch,
+        target: req.body.target,
+        mode: req.body.mode,
+        backend: req.body.backend,
+        model: req.body.model,
+        budget: req.body.budget,
+        hostId: req.body.hostId
+      });
+      res.status(201).json(session);
+    } catch (error) {
+      res.status(500).json({
+        error: 'Failed to start remote dispatch session',
         message: error instanceof Error ? error.message : String(error)
       });
     }
