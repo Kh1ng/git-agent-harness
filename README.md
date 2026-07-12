@@ -96,6 +96,81 @@ pm_backend = "claude"
 improve_backend = "codex"
 ```
 
+### Subscription routing setup
+
+For a profile that should use several subscription-backed workers, configure
+explicit backend/model pairs in priority order. Higher `priority` wins; an
+unavailable backend is skipped and the next eligible candidate is selected.
+Do not use `model = "default"` for a route you care about: a backend default
+can resolve through a global alias such as `defaults.llm_model_cloud`.
+
+```toml
+[profiles.my-repo.routing]
+# Scalar fields are the legacy/default route. Keep them explicit too.
+default_backend = "vibe"
+default_model = "devstral-small"
+pm_backend = "vibe"
+pm_model = "devstral-small"
+improve_backend = "vibe"
+improve_model = "devstral-small"
+review_backend = "vibe"
+review_model = "mistral-medium-3.5"
+allow_implementation_fallback = true
+allow_review_fallback = true
+
+# Preferred inexpensive implementation tier.
+[[profiles.my-repo.routing.improve_candidates]]
+backend = "vibe"
+model = "devstral-small"
+priority = 100
+
+[[profiles.my-repo.routing.improve_candidates]]
+backend = "agy"
+model = "Gemini 3.5 Flash (Medium)"
+priority = 100
+
+[[profiles.my-repo.routing.improve_candidates]]
+backend = "agy-second"
+model = "Gemini 3.5 Flash (Medium)"
+priority = 100
+
+# Retained, but used less often than the preferred subscription tier.
+[[profiles.my-repo.routing.improve_candidates]]
+backend = "codex"
+model = "gpt-5.4-mini"
+priority = 50
+
+[[profiles.my-repo.routing.improve_candidates]]
+backend = "claude"
+model = "haiku"
+priority = 25
+
+[[profiles.my-repo.routing.review_candidates]]
+backend = "vibe"
+model = "mistral-medium-3.5"
+priority = 100
+```
+
+Repeat the implementation candidates under `pm_candidates` when planning work
+should use the same worker tier. Give each independent account its own backend
+instance (`agy` and `agy-second`, for example), even when the provider and
+model are identical; this keeps quota, availability, and usage records
+separate.
+
+Routing is currently configured in TOML. Verify the selected config and its
+prerequisites from the CLI before starting a loop:
+
+```bash
+gah profile show my-repo
+gah doctor --profile my-repo --validate
+gah status --profile my-repo --json
+```
+
+The dashboard settings editor and effective-route display are tracked in
+[#149](https://github.com/Kh1ng/git-agent-harness/issues/149). Until that
+lands, inspect the profile's TOML directly and keep every production route's
+model explicit.
+
 ## Auth
 
 - GitHub: set `GITHUB_TOKEN` or `GH_TOKEN`
