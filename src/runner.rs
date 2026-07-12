@@ -128,11 +128,55 @@ fn copy_stream_to_file<R: Read + Send + 'static>(
     })
 }
 
+/// Return a content-sensitive snapshot of a worktree's tracked changes.
+///
+/// Several subscription CLIs perform tool calls without forwarding their
+/// progress to stdout. Treating that silence as a hang kills an agent that is
+/// still editing source. `git diff` makes those edits observable without
+/// walking ignored build output such as `target/` or `node_modules/`.
+fn worktree_progress_snapshot(worktree: &Path) -> Option<Vec<u8>> {
+    let diff = Command::new("git")
+        .args(["diff", "--no-ext-diff", "--binary", "HEAD", "--"])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !diff.status.success() {
+        return None;
+    }
+    let staged = Command::new("git")
+        .args([
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--binary",
+            "HEAD",
+            "--",
+        ])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !staged.status.success() {
+        return None;
+    }
+    let status = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !status.status.success() {
+        return None;
+    }
+
+    let mut snapshot = diff.stdout;
+    snapshot.extend_from_slice(&staged.stdout);
+    snapshot.extend_from_slice(&status.stdout);
+    Some(snapshot)
+}
+
 /// Spawn `cmd` (stdout/stderr are set to piped by this helper) and drive it
-/// to completion, killing it once its log has gone genuinely quiet for
-/// `idle_timeout_seconds` -- never on a flat wall-clock budget, since a
-/// backend that's slow but still producing output is still working, not
-/// hung. Shared by every backend invocation that needs hang protection
+/// to completion, killing it only once both its log and worktree have gone
+/// genuinely quiet for `idle_timeout_seconds` -- never on a flat wall-clock
+/// budget. Shared by every backend invocation that needs hang protection
 /// (agy, opencode, openhands, vibe, codex, claude) -- extracted after the
 /// third copy-paste of this exact loop (issues #170/#87) made the
 /// duplication no longer defensible.
@@ -143,6 +187,7 @@ fn copy_stream_to_file<R: Read + Send + 'static>(
 fn spawn_with_idle_watch(
     mut cmd: Command,
     log_path: &Path,
+    worktree: &Path,
     idle_timeout_seconds: u64,
     spawn_context: &str,
 ) -> Result<(i32, f64)> {
@@ -167,7 +212,10 @@ fn spawn_with_idle_watch(
     // could reroute them.
     let startup_grace = idle_timeout;
     let poll_interval = Duration::from_millis(500);
+    let worktree_poll_interval = Duration::from_secs(1);
     let mut last_seen_len = fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
+    let mut last_worktree_snapshot = worktree_progress_snapshot(worktree);
+    let mut last_worktree_poll = Instant::now();
     let mut last_progress_at = Instant::now();
     let mut saw_progress = false;
     let mut killed_for_idle = false;
@@ -189,6 +237,16 @@ fn spawn_with_idle_watch(
                     last_seen_len = current_len;
                     last_progress_at = Instant::now();
                     saw_progress = true;
+                }
+                if last_worktree_poll.elapsed() >= worktree_poll_interval {
+                    if let Some(snapshot) = worktree_progress_snapshot(worktree) {
+                        if last_worktree_snapshot.as_ref() != Some(&snapshot) {
+                            last_worktree_snapshot = Some(snapshot);
+                            last_progress_at = Instant::now();
+                            saw_progress = true;
+                        }
+                    }
+                    last_worktree_poll = Instant::now();
                 }
                 let stalled = if saw_progress {
                     last_progress_at.elapsed() >= idle_timeout
@@ -225,7 +283,7 @@ fn spawn_with_idle_watch(
         if let Ok(mut file) = fs::OpenOptions::new().append(true).open(log_path) {
             let _ = writeln!(
                 file,
-                "GAH: killed after {idle_timeout_seconds}s with no new output (stalled, not just slow)."
+                "GAH: killed after {idle_timeout_seconds}s with no new backend output or worktree progress (stalled, not just slow)."
             );
         }
     }
@@ -315,6 +373,7 @@ pub fn run_openhands(
     let (exit_code, duration_secs) = spawn_with_idle_watch(
         cmd,
         &log_path,
+        worktree,
         idle_timeout_seconds,
         "launching openhands; is it installed and on PATH?",
     )?;
@@ -383,6 +442,7 @@ pub fn run_codex_with_executable(
     let (exit_code, duration_secs) = spawn_with_idle_watch(
         cmd,
         &log_path,
+        worktree,
         idle_timeout_seconds,
         "launching codex; is it installed and on PATH?",
     )?;
@@ -512,6 +572,7 @@ pub fn run_claude_with_executable(
     let (exit_code, duration_secs) = spawn_with_idle_watch(
         cmd,
         &log_path,
+        worktree,
         idle_timeout_seconds,
         "launching claude; is it installed and on PATH?",
     )?;
@@ -598,6 +659,7 @@ pub fn run_vibe_with_executable(
     let (exit_code, duration_secs) = spawn_with_idle_watch(
         cmd,
         &log_path,
+        worktree,
         idle_timeout_seconds,
         "launching vibe; is it installed and on PATH?",
     )?;
@@ -743,6 +805,7 @@ pub fn run_opencode_with_executable(
     let (exit_code, duration_secs) = spawn_with_idle_watch(
         cmd,
         &log_path,
+        worktree,
         idle_timeout_seconds,
         "launching opencode; is it installed and on PATH?",
     )?;
@@ -917,6 +980,7 @@ pub fn run_agy_with_executable(
     let (exit_code, duration_secs) = spawn_with_idle_watch(
         cmd,
         &log_path,
+        worktree,
         idle_timeout_seconds,
         &format!(
             "launching {}; is it installed and on PATH?",
@@ -1358,6 +1422,23 @@ mod tests {
         }
     }
 
+    fn initialize_git_worktree(worktree: &Path) {
+        let run_git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(worktree)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run_git(&["init", "-q"]);
+        run_git(&["config", "user.email", "gah-test@example.invalid"]);
+        run_git(&["config", "user.name", "GAH test"]);
+        fs::write(worktree.join("progress.txt"), "initial\n").unwrap();
+        run_git(&["add", "progress.txt"]);
+        run_git(&["commit", "-qm", "initial fixture"]);
+    }
+
     fn test_llm() -> LlmConfig {
         LlmConfig {
             base_url: "http://llm.test".into(),
@@ -1604,7 +1685,7 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new output"),
+            log.contains("killed after 1s with no new backend output or worktree progress"),
             "got log: {log}"
         );
     }
@@ -1728,7 +1809,7 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new output"),
+            log.contains("killed after 1s with no new backend output or worktree progress"),
             "got log: {log}"
         );
     }
@@ -1926,7 +2007,7 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new output"),
+            log.contains("killed after 1s with no new backend output or worktree progress"),
             "got log: {log}"
         );
     }
@@ -2068,8 +2149,46 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new output"),
+            log.contains("killed after 1s with no new backend output or worktree progress"),
             "got log: {log}"
+        );
+    }
+
+    #[test]
+    fn run_vibe_allows_silent_backend_that_keeps_changing_worktree() {
+        // Subscription CLIs can make tool calls without printing progress.
+        // Repeated tracked-file edits must keep an otherwise silent process
+        // alive, while the adjacent test proves a truly idle process dies.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        make_fake_bin(
+            &f.bin_dir,
+            "vibe",
+            "#!/bin/sh\nsleep 1\nprintf 'first\\n' > progress.txt\nsleep 1\nprintf 'second\\n' > progress.txt\nsleep 1\nexit 0\n",
+        );
+        let envs = vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )];
+
+        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 2).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.duration_secs >= 3.0,
+            "ran only {}s",
+            result.duration_secs
+        );
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(!log.contains("GAH: killed"), "got log: {log}");
+        assert_eq!(
+            fs::read_to_string(f.worktree.join("progress.txt")).unwrap(),
+            "second\n"
         );
     }
 
@@ -2205,7 +2324,7 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new output"),
+            log.contains("killed after 1s with no new backend output or worktree progress"),
             "got log: {log}"
         );
     }
@@ -2332,7 +2451,7 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new output"),
+            log.contains("killed after 1s with no new backend output or worktree progress"),
             "got log: {log}"
         );
     }
