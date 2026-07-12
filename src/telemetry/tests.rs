@@ -74,6 +74,10 @@ mod telemetry_tests {
 
     #[test]
     fn test_schema_version_in_record() {
+        assert_eq!(
+            SCHEMA_VERSION, 3,
+            "nullable TaskOutcomeRecord attempt counters require a new export schema version"
+        );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
             record_id: "test-123".to_string(),
@@ -166,6 +170,7 @@ mod telemetry_tests {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            review_gate_reason: None,
             commit_attempted: true,
             commit_created: true,
             push_attempted: true,
@@ -589,6 +594,7 @@ mod telemetry_tests {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            review_gate_reason: None,
             commit_attempted: true,
             commit_created: true,
             push_attempted: true,

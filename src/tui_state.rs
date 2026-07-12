@@ -241,6 +241,7 @@ mod tests {
             effective_backend: None,
             effective_model: None,
             review_verdict: None,
+            review_gate_reason: None,
             classification: classification.into(),
             recommended_action: RecommendedAction::from_class(classification),
         }

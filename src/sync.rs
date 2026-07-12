@@ -98,6 +98,8 @@ pub struct SyncMrJson {
     /// TICKET-198: review verdict recorded for the merge, from the ledger.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_verdict: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_gate_reason: Option<String>,
     /// Non-terminal / unknown CI (running/pending/missing) for which there
     /// is no defined next controller action yet. GitHub is never `ci_pending`
     /// (see `SyncMr::ci_pending`); this mirrors the typed field on `SyncMr`.
@@ -218,7 +220,8 @@ pub fn sync_mr_to_json(
     ledger: &crate::ledger::LedgerEntriesByWorkId,
 ) -> SyncMrJson {
     let class = classify(mr);
-    let (effective_backend, effective_model, review_verdict) = ledger_info_for_mr(ledger, mr);
+    let (effective_backend, effective_model, review_verdict, review_gate_reason) =
+        ledger_info_for_mr(ledger, mr);
     SyncMrJson {
         profile,
         branch: mr.branch.clone(),
@@ -236,6 +239,7 @@ pub fn sync_mr_to_json(
         effective_backend,
         effective_model,
         review_verdict,
+        review_gate_reason,
         classification: class.to_string(),
         recommended_action: RecommendedAction::from_class(class),
     }
@@ -248,12 +252,17 @@ pub fn sync_mr_to_json(
 fn ledger_info_for_mr(
     ledger: &crate::ledger::LedgerEntriesByWorkId,
     mr: &SyncMr,
-) -> (Option<String>, Option<String>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let Some(work_id) = mr.work_id.as_ref() else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
     let Some(entries) = ledger.get(work_id) else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
     let chosen = entries
         .iter()
@@ -265,7 +274,7 @@ fn ledger_info_for_mr(
                 .find(|e| !e.effective_backend.is_empty())
         });
     let Some(entry) = chosen else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
     let backend = if entry.effective_backend.is_empty() {
         None
@@ -277,7 +286,12 @@ fn ledger_info_for_mr(
     } else {
         None
     };
-    (backend, model, entry.review_verdict.clone())
+    (
+        backend,
+        model,
+        entry.review_verdict.clone(),
+        entry.review_gate_reason.clone(),
+    )
 }
 
 fn is_closed_unmerged(state: Option<&str>, merged: bool) -> bool {

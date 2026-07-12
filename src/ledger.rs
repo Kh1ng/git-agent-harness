@@ -274,6 +274,9 @@ pub struct LedgerEntry {
     pub reviewer_backend: Option<String>,
     #[serde(default)]
     pub reviewer_model: Option<String>,
+    /// Deterministic reason why GAH made a reviewer output non-mergeable.
+    #[serde(default)]
+    pub review_gate_reason: Option<String>,
     pub commit_attempted: bool,
     pub commit_created: bool,
     pub push_attempted: bool,
@@ -378,6 +381,7 @@ impl LedgerEntry {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            review_gate_reason: None,
             commit_attempted: false,
             commit_created: false,
             push_attempted: false,
@@ -456,6 +460,7 @@ impl LedgerEntry {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            review_gate_reason: None,
             commit_attempted: false,
             commit_created: false,
             push_attempted: false,
@@ -667,6 +672,7 @@ pub fn backfill_review_verdict(
     confidence: &str,
     reviewer_backend: &str,
     reviewer_model: Option<&str>,
+    review_gate_reason: Option<&str>,
 ) -> Result<bool> {
     let path = cfg.defaults.ledger_path();
     let lock_path = path.with_extension("lock");
@@ -700,6 +706,7 @@ pub fn backfill_review_verdict(
     entries[idx].review_confidence = Some(confidence.to_string());
     entries[idx].reviewer_backend = Some(reviewer_backend.to_string());
     entries[idx].reviewer_model = reviewer_model.map(|m| m.to_string());
+    entries[idx].review_gate_reason = review_gate_reason.map(str::to_string);
 
     let mut out = String::new();
     for entry in &entries {
@@ -886,6 +893,7 @@ pub mod sqlite_store {
                 "high",
                 "claude",
                 Some("claude-sonnet-4"),
+                None,
             )
             .unwrap();
 
@@ -3250,6 +3258,7 @@ mod tests {
             "high",
             "claude",
             Some("claude-sonnet-4"),
+            Some("test review evidence gate"),
         )
         .unwrap();
         assert!(found);
@@ -3262,6 +3271,10 @@ mod tests {
         assert_eq!(updated_impl.effective_backend, "vibe");
         assert_eq!(updated_impl.review_verdict.as_deref(), Some("NEEDS_FIX"));
         assert_eq!(updated_impl.reviewer_backend.as_deref(), Some("claude"));
+        assert_eq!(
+            updated_impl.review_gate_reason.as_deref(),
+            Some("test review evidence gate")
+        );
 
         let review_entry_after = entries
             .iter()
@@ -3276,9 +3289,16 @@ mod tests {
     #[test]
     fn backfill_review_verdict_returns_false_when_no_matching_branch() {
         let (_tmp, cfg) = test_config();
-        let found =
-            backfill_review_verdict(&cfg, "gah/no-such-branch", "APPROVE", "high", "codex", None)
-                .unwrap();
+        let found = backfill_review_verdict(
+            &cfg,
+            "gah/no-such-branch",
+            "APPROVE",
+            "high",
+            "codex",
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!found);
     }
 

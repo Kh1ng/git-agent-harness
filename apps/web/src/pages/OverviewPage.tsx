@@ -313,10 +313,17 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                       </td>
                       <td className="text-xs whitespace-nowrap">
                         {mr.review_verdict ? (
-                          <StatusBadge
-                            tone={mr.review_verdict.toLowerCase().includes('approve') ? 'good' : 'warning'}
-                            label={mr.review_verdict}
-                          />
+                          <div className="space-y-1">
+                            <StatusBadge
+                              tone={mr.review_verdict.toLowerCase().includes('approve') ? 'good' : 'warning'}
+                              label={mr.review_verdict}
+                            />
+                            {mr.review_gate_reason && (
+                              <p className="max-w-48 truncate text-[10px] text-warning" title={mr.review_gate_reason}>
+                                {mr.review_gate_reason}
+                              </p>
+                            )}
+                          </div>
                         ) : (
                           <span className="text-muted">—</span>
                         )}

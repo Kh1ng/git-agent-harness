@@ -3245,8 +3245,10 @@ fn review(
         "Review this diff for correctness, test coverage, and safety. \
          Return two sections:\n\
          1. Markdown review notes.\n\
-         2. A JSON object with fields: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes.\n\
-         blocking_findings, non_blocking_findings, and risk_notes must be JSON arrays of strings, even when empty or when only one item exists.\n\
+         2. A JSON object with fields: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes, evidence, compatibility_evidence.\n\
+         blocking_findings, non_blocking_findings, risk_notes, evidence, and compatibility_evidence must be JSON arrays of strings, even when empty or when only one item exists.\n\
+         evidence must cite concrete review facts such as a test/result, changed file/line, or command output. An APPROVE with no evidence is not valid.\n\
+         If you identify a schema, API, persistence, security, or other contract change, do not APPROVE unless compatibility_evidence names the version bump or migration plus the test that proves it.\n\
          Verdict must be one of APPROVE, NEEDS_FIX, REJECT, HUMAN_REVIEW, defined as:\n\
          - APPROVE: you believe the change is correct, safe, and complete enough to merge. Report your ACTUAL confidence honestly in the separate `confidence` field (high/medium/low) -- do not inflate confidence to sound more certain, and do not downgrade to NEEDS_FIX just to hedge when you'd otherwise approve. A low-confidence approval is a real, useful signal (insufficient context, a domain you couldn't fully verify, a partial review) and will correctly route to a human -- it is not a failure to be avoided.\n\
          - NEEDS_FIX: you found a concrete, real problem that should be fixed before merge. Put it in blocking_findings, even if it isn't an immediate crash -- e.g. silent data loss, a hidden failure mode, or anything that would take real effort to diagnose later if left in. Do not downgrade a genuine risk into non_blocking_findings/risk_notes just because it wouldn't break the build today.\n\
@@ -3466,6 +3468,7 @@ fn review(
             ledger.validation_result = Some(verdict.verdict.clone());
             ledger.human_required = verdict.human_required;
             ledger.confidence_impact = Some(verdict.confidence.clone());
+            ledger.review_gate_reason = verdict.safety_gate_reason.clone();
             ledger.usage = review_usage.clone();
             // TICKET-125: attribute this verdict back to the branch's
             // implementation entry (the backend that wrote the code being
@@ -3477,6 +3480,7 @@ fn review(
                 &verdict.confidence,
                 &route.effective_backend,
                 route.effective_model.as_deref(),
+                verdict.safety_gate_reason.as_deref(),
             ) {
                 eprintln!(
                     "warning: failed to backfill review verdict onto ledger: {:#}",
@@ -4491,7 +4495,7 @@ mod tests {
             ReviewerTier::Weak
         );
 
-        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["weak reviewer inspected the diff"]}"#;
         let usage = crate::ledger::LedgerUsage::default();
         let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Weak).unwrap();
 
@@ -4510,7 +4514,7 @@ mod tests {
 
     #[test]
     fn approve_from_strong_tier_is_not_forced_to_human_review() {
-        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["cargo test passed"]}"#;
         let usage = crate::ledger::LedgerUsage::default();
         let route = route_decision("claude", Some("sonnet"), false);
         let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
@@ -4522,12 +4526,106 @@ mod tests {
     }
 
     #[test]
+    fn approve_without_evidence_is_forced_to_human_review() {
+        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("claude", Some("sonnet"), false);
+
+        let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
+
+        assert_eq!(verdict.verdict, "HUMAN_REVIEW");
+        assert!(verdict.human_required);
+        assert_eq!(
+            verdict.safety_gate_reason.as_deref(),
+            Some("APPROVE omitted required concrete review evidence")
+        );
+    }
+
+    #[test]
+    fn schema_break_in_risk_note_without_compatibility_evidence_is_forced_to_human_review() {
+        // Regression for PR #284: the reviewer correctly identified a
+        // schema-breaking TaskOutcomeRecord change, but still emitted
+        // APPROVE/high. The parser, not reviewer obedience, must fail closed.
+        let json = r#"{
+            "verdict":"APPROVE",
+            "confidence":"high",
+            "human_required":false,
+            "blocking_findings":[],
+            "non_blocking_findings":["TaskOutcomeRecord is a downstream schema-breaking change"],
+            "risk_notes":[],
+            "evidence":["cargo test passed"]
+        }"#;
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("agy", Some("Claude Sonnet"), false);
+
+        let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
+
+        assert_eq!(verdict.verdict, "HUMAN_REVIEW");
+        assert!(verdict.human_required);
+        assert!(verdict
+            .safety_gate_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("compatibility risk"));
+        assert!(verdict
+            .blocking_findings
+            .iter()
+            .any(|finding| finding.contains("GAH evidence gate")));
+    }
+
+    #[test]
+    fn versioned_contract_change_with_compatibility_evidence_can_be_approved() {
+        let json = r#"{
+            "verdict":"APPROVE",
+            "confidence":"high",
+            "human_required":false,
+            "blocking_findings":[],
+            "non_blocking_findings":["Task outcome export has a schema-breaking nullable counter change"],
+            "risk_notes":[],
+            "evidence":["telemetry extractor test passed"],
+            "compatibility_evidence":["SCHEMA_VERSION bumped to 3; exporter test asserts v3 records"]
+        }"#;
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("agy", Some("Claude Sonnet"), false);
+
+        let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
+
+        assert_eq!(verdict.verdict, "APPROVE");
+        assert!(!verdict.human_required);
+        assert!(verdict.safety_gate_reason.is_none());
+    }
+
+    #[test]
+    fn approve_with_blocking_findings_is_forced_to_human_review() {
+        let json = r#"{
+            "verdict":"APPROVE",
+            "confidence":"high",
+            "human_required":false,
+            "blocking_findings":["data loss on retry"],
+            "non_blocking_findings":[],
+            "risk_notes":[],
+            "evidence":["reproduced in a unit test"]
+        }"#;
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("agy", Some("Claude Sonnet"), false);
+
+        let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
+
+        assert_eq!(verdict.verdict, "HUMAN_REVIEW");
+        assert!(verdict.human_required);
+        assert_eq!(
+            verdict.safety_gate_reason.as_deref(),
+            Some("APPROVE contradicted non-empty blocking_findings")
+        );
+    }
+
+    #[test]
     fn low_confidence_approve_forces_human_review_regardless_of_tier() {
         // Low self-reported CONFIDENCE (the reviewer's own uncertainty) is a
         // separate signal from reviewer TIER (who reviewed) -- even a
         // strong-tier reviewer returning APPROVE with confidence:"low" must
         // still get human eyes.
-        let json = r#"{"verdict":"APPROVE","confidence":"low","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let json = r#"{"verdict":"APPROVE","confidence":"low","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["cargo test passed"]}"#;
         let usage = crate::ledger::LedgerUsage::default();
         let route = route_decision("claude", Some("sonnet"), false);
         let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Strong).unwrap();
@@ -4544,7 +4642,7 @@ mod tests {
     fn parse_review_verdict_handles_vibe_json_output() {
         // Test parsing of actual Vibe CLI output format
         // Vibe with --output text returns just the content, which should be a ReviewVerdict JSON object
-        let vibe_json_output = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
+        let vibe_json_output = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["vibe inspected the diff"]}"#;
 
         let route = crate::routing::RouteDecision {
             requested_backend: "vibe".to_string(),
@@ -9261,6 +9359,7 @@ fn parse_review_verdict(
     let json = extract_first_json_object(review_text)
         .ok_or_else(|| anyhow::anyhow!("reviewer did not return verdict JSON"))?;
     let mut verdict = serde_json::from_str::<crate::models::ReviewVerdict>(&json)?;
+    enforce_review_evidence_gate(&mut verdict);
     // Reviewer identity (tier) and review outcome (verdict text/confidence)
     // are separate dimensions -- the verdict text itself is never rewritten
     // based on who reviewed it (see review_labels for how tier affects
@@ -9291,6 +9390,67 @@ fn parse_review_verdict(
     verdict.estimated_cost_usd = parsed_usage.estimated_cost_usd;
     verdict.actual_cost_usd = parsed_usage.actual_cost_usd;
     Ok(verdict)
+}
+
+/// A reviewer is advisory; merge safety is deterministic. In particular, an
+/// LLM must not be able to write an apparent APPROVE while its own structured
+/// findings describe a blocking or unversioned contract change (the exact
+/// failure observed in PR #284). The normalized verdict remains visible in
+/// the review artifact, ledger, and status payload.
+fn enforce_review_evidence_gate(verdict: &mut crate::models::ReviewVerdict) {
+    if verdict.verdict != "APPROVE" {
+        return;
+    }
+
+    let reason = if !verdict.blocking_findings.is_empty() {
+        Some("APPROVE contradicted non-empty blocking_findings".to_string())
+    } else if verdict.evidence.is_empty() {
+        Some("APPROVE omitted required concrete review evidence".to_string())
+    } else if review_declares_contract_break(verdict) && verdict.compatibility_evidence.is_empty() {
+        Some(
+            "APPROVE declared a schema/API/persistence/security compatibility risk without explicit compatibility evidence"
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    let Some(reason) = reason else {
+        return;
+    };
+
+    verdict.verdict = "HUMAN_REVIEW".to_string();
+    verdict.human_required = true;
+    verdict.safety_gate_reason = Some(reason.clone());
+    verdict
+        .blocking_findings
+        .push(format!("GAH evidence gate: {reason}"));
+}
+
+fn review_declares_contract_break(verdict: &crate::models::ReviewVerdict) -> bool {
+    let text = verdict
+        .non_blocking_findings
+        .iter()
+        .chain(verdict.risk_notes.iter())
+        .chain(verdict.blocking_findings.iter())
+        .map(|item| item.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    [
+        "schema-breaking",
+        "schema breaking",
+        "breaking change",
+        "contract break",
+        "downstream schema",
+        "fixed schema",
+        "backward compatibility",
+        "compatibility must",
+        "migration required",
+        "security boundary",
+    ]
+    .iter()
+    .any(|signal| text.contains(signal))
 }
 
 fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &Path) -> String {
@@ -9324,6 +9484,21 @@ fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &P
         for item in &verdict.risk_notes {
             out.push_str(&format!("- {}\n", item));
         }
+    }
+    if !verdict.evidence.is_empty() {
+        out.push_str("\nEvidence:\n");
+        for item in &verdict.evidence {
+            out.push_str(&format!("- {}\n", item));
+        }
+    }
+    if !verdict.compatibility_evidence.is_empty() {
+        out.push_str("\nCompatibility evidence:\n");
+        for item in &verdict.compatibility_evidence {
+            out.push_str(&format!("- {}\n", item));
+        }
+    }
+    if let Some(reason) = &verdict.safety_gate_reason {
+        out.push_str(&format!("\nGAH safety gate: {reason}\n"));
     }
     out
 }

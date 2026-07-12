@@ -4,8 +4,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Current schema version for exported telemetry records
-pub const SCHEMA_VERSION: u32 = 2;
+/// Current schema version for exported telemetry records.
+///
+/// Version 3 makes the `TaskOutcomeRecord` attempt counters nullable so a
+/// pre-tracking ledger record can remain unknown rather than being exported as
+/// a false zero. Consumers of the former v2 `u32` fields must explicitly
+/// handle the v3 nullable representation.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -216,6 +221,9 @@ pub struct TaskOutcomeRecord {
     pub reviewer_backend: Option<String>,
     /// Reviewer model
     pub reviewer_model: Option<String>,
+    /// Deterministic reason an apparently approving review was made
+    /// non-mergeable by GAH's evidence gate.
+    pub review_gate_reason: Option<String>,
 
     /// Commit attempted
     pub commit_attempted: bool,

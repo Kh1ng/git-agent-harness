@@ -249,6 +249,22 @@ pub struct ReviewVerdict {
     pub non_blocking_findings: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_list")]
     pub risk_notes: Vec<String>,
+    /// Concrete, reviewable facts supporting an approval (for example a test
+    /// name/result, a changed file/line, or an explicit compatibility check).
+    /// This is supplied by the reviewer; an empty list makes an APPROVE
+    /// non-mergeable in dispatch's evidence gate.
+    #[serde(default, deserialize_with = "deserialize_string_list")]
+    pub evidence: Vec<String>,
+    /// Required when the review identifies a schema/API/persistence contract
+    /// change but still recommends approval. It must state the versioned
+    /// compatibility or migration evidence that makes the change safe.
+    #[serde(default, deserialize_with = "deserialize_string_list")]
+    pub compatibility_evidence: Vec<String>,
+    /// Set only by GAH's deterministic evidence gate, never trusted from the
+    /// reviewer's JSON. Persisted so operators can see why an apparent
+    /// approval was made non-mergeable.
+    #[serde(default)]
+    pub safety_gate_reason: Option<String>,
     #[serde(default)]
     pub reviewer_backend: Option<String>,
     #[serde(default)]

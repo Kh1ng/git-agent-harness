@@ -146,6 +146,8 @@ export interface MergeRequest {
   effective_model?: string | null;
   /** Review verdict recorded for the merge, joined from the ledger (TICKET-198). */
   review_verdict?: string | null;
+  /** Deterministic reason GAH made a reviewer result non-mergeable. */
+  review_gate_reason?: string | null;
   classification: string;
   recommended_action: RecommendedAction;
 }
@@ -436,6 +438,7 @@ export interface LedgerEntry {
   review_confidence?: string | null;
   reviewer_backend?: string | null;
   reviewer_model?: string | null;
+  review_gate_reason?: string | null;
   commit_attempted: boolean;
   commit_created: boolean;
   push_attempted: boolean;
