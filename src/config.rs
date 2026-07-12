@@ -1010,6 +1010,64 @@ fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> Ro
     repo
 }
 
+pub fn check_profile_candidate_model_consistency(
+    defaults: &Defaults,
+    profile: &Profile,
+) -> Result<(), Vec<String>> {
+    let routing = profile.effective_routing(defaults);
+    let mut candidates = Vec::new();
+    if let Some(ref c) = routing.routine_reviewer {
+        candidates.push(("routine_reviewer", c));
+    }
+    for c in &routing.escalatory_reviewers {
+        candidates.push(("escalatory_reviewer", c));
+    }
+    if let Some(ref list) = routing.pm_candidates {
+        for c in list {
+            candidates.push(("pm_candidate", c));
+        }
+    }
+    if let Some(ref list) = routing.improve_candidates {
+        for c in list {
+            candidates.push(("improve_candidate", c));
+        }
+    }
+    if let Some(ref list) = routing.review_candidates {
+        for c in list {
+            candidates.push(("review_candidate", c));
+        }
+    }
+
+    let mut errors = Vec::new();
+    for (label, candidate) in candidates {
+        let args = match candidate.backend.as_str() {
+            "codex" => &profile.codex_args,
+            "opencode" => &profile.opencode_args,
+            "claude" => &profile.claude_args,
+            _ => continue,
+        };
+        if let Some(pinned) =
+            crate::runner::extract_model_from_backend_args(&candidate.backend, args)
+        {
+            if candidate.model.as_deref() != Some(&pinned) {
+                errors.push(format!(
+                    "candidate {} (backend '{}', label '{}') has mismatch with profile backend args model pin '{}'",
+                    label,
+                    candidate.backend,
+                    candidate.model.as_deref().unwrap_or("None"),
+                    pinned
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
     let path = resolve_config_path(config_path);
     if !path.exists() {
@@ -1026,6 +1084,16 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
     if let Some(canonical_routing) = load_canonical_routing()? {
         cfg.defaults.routing = merge_routing_policy(canonical_routing, cfg.defaults.routing);
     }
+
+    // Lint candidate model consistency
+    for (name, profile) in &cfg.profiles {
+        if let Err(mismatches) = check_profile_candidate_model_consistency(&cfg.defaults, profile) {
+            for m in mismatches {
+                eprintln!("WARNING: Profile '{}': {}", name, m);
+            }
+        }
+    }
+
     Ok(cfg)
 }
 

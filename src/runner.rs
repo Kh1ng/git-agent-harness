@@ -463,17 +463,79 @@ fn codex_model_args(model: Option<&str>) -> Vec<String> {
 }
 
 fn filtered_codex_args(extra_args: &[String]) -> Vec<String> {
+    filtered_backend_args("codex", extra_args)
+}
+
+pub fn extract_model_from_backend_args(backend: &str, args: &[String]) -> Option<String> {
+    match backend {
+        "codex" => {
+            let mut i = 0;
+            while i < args.len() {
+                let arg = &args[i];
+                if matches!(arg.as_str(), "-m" | "--model") {
+                    if i + 1 < args.len() {
+                        return Some(args[i + 1].clone());
+                    }
+                    break;
+                }
+                if let Some(val) = arg.strip_prefix("-m=") {
+                    return Some(val.to_string());
+                }
+                if let Some(val) = arg.strip_prefix("--model=") {
+                    return Some(val.to_string());
+                }
+                i += 1;
+            }
+            None
+        }
+        "opencode" | "claude" => {
+            let mut i = 0;
+            while i < args.len() {
+                let arg = &args[i];
+                if arg == "--model" {
+                    if i + 1 < args.len() {
+                        return Some(args[i + 1].clone());
+                    }
+                    break;
+                }
+                if let Some(val) = arg.strip_prefix("--model=") {
+                    return Some(val.to_string());
+                }
+                i += 1;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+pub fn filtered_backend_args(backend: &str, extra_args: &[String]) -> Vec<String> {
     let mut filtered = Vec::with_capacity(extra_args.len());
     let mut i = 0;
     while i < extra_args.len() {
         let arg = &extra_args[i];
-        if matches!(arg.as_str(), "-m" | "--model") {
-            i += 2;
-            continue;
-        }
-        if arg.starts_with("-m=") || arg.starts_with("--model=") {
-            i += 1;
-            continue;
+        match backend {
+            "codex" => {
+                if matches!(arg.as_str(), "-m" | "--model") {
+                    i += 2;
+                    continue;
+                }
+                if arg.starts_with("-m=") || arg.starts_with("--model=") {
+                    i += 1;
+                    continue;
+                }
+            }
+            "opencode" | "claude" => {
+                if arg == "--model" {
+                    i += 2;
+                    continue;
+                }
+                if arg.starts_with("--model=") {
+                    i += 1;
+                    continue;
+                }
+            }
+            _ => {}
         }
         filtered.push(arg.clone());
         i += 1;
@@ -564,7 +626,7 @@ pub fn run_claude_with_executable(
     if let Some(model) = effective_model {
         cmd.args(["--model", model]);
     }
-    cmd.args(extra_args);
+    cmd.args(filtered_backend_args("claude", extra_args));
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
@@ -796,7 +858,7 @@ pub fn run_opencode_with_executable(
     cmd.arg(task);
 
     // Add extra args from profile
-    cmd.args(extra_args);
+    cmd.args(filtered_backend_args("opencode", extra_args));
 
     cmd.current_dir(worktree);
     for (k, v) in env_vars {
@@ -1899,6 +1961,87 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_model_from_backend_args() {
+        // codex: -m or --model
+        assert_eq!(
+            extract_model_from_backend_args(
+                "codex",
+                &[
+                    "--some-flag".to_string(),
+                    "-m".to_string(),
+                    "gpt-5.4-mini".to_string()
+                ]
+            ),
+            Some("gpt-5.4-mini".to_string())
+        );
+        assert_eq!(
+            extract_model_from_backend_args("codex", &["--model=gpt-5.4".to_string()]),
+            Some("gpt-5.4".to_string())
+        );
+        assert_eq!(
+            extract_model_from_backend_args("codex", &["-m=gpt-5.4-mini".to_string()]),
+            Some("gpt-5.4-mini".to_string())
+        );
+
+        // opencode and claude: --model only (not -m)
+        assert_eq!(
+            extract_model_from_backend_args(
+                "opencode",
+                &[
+                    "--some-flag".to_string(),
+                    "-m".to_string(),
+                    "gpt-5.4-mini".to_string()
+                ]
+            ),
+            None
+        );
+        assert_eq!(
+            extract_model_from_backend_args(
+                "opencode",
+                &["--model".to_string(), "gpt-5.4-mini".to_string()]
+            ),
+            Some("gpt-5.4-mini".to_string())
+        );
+        assert_eq!(
+            extract_model_from_backend_args("claude", &["--model=gpt-5.4".to_string()]),
+            Some("gpt-5.4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_filtered_backend_args() {
+        // codex: filters -m and --model
+        let args = vec![
+            "-m".to_string(),
+            "stale-model".to_string(),
+            "--model=another-stale".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+        let filtered = filtered_backend_args("codex", &args);
+        assert_eq!(filtered, vec!["--format".to_string(), "json".to_string()]);
+
+        // opencode: filters --model only, leaves -m intact
+        let args = vec![
+            "-m".to_string(),
+            "stale-model".to_string(),
+            "--model=another-stale".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+        let filtered = filtered_backend_args("opencode", &args);
+        assert_eq!(
+            filtered,
+            vec![
+                "-m".to_string(),
+                "stale-model".to_string(),
+                "--format".to_string(),
+                "json".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn run_codex_route_model_overrides_stale_profile_model_flags() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
@@ -2011,6 +2154,40 @@ mod tests {
         let argv = recorded_argv(&f.record_dir);
         assert!(argv.contains(&"--model".to_string()));
         assert!(argv.contains(&"haiku".to_string()));
+    }
+
+    #[test]
+    fn run_claude_route_model_overrides_stale_profile_model_flags() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_claude_with_executable(
+            &f.bin_dir.join("claude"),
+            &f.worktree,
+            "the claude task",
+            &f.session_dir,
+            Some("haiku"),
+            &[
+                "--allowedTools".to_string(),
+                "Edit".to_string(),
+                "--model".to_string(),
+                "opus".to_string(),
+                "--model=sonnet".to_string(),
+            ],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"haiku".to_string()));
+        assert!(argv.contains(&"--allowedTools".to_string()));
+        assert!(!argv.contains(&"opus".to_string()));
+        assert!(!argv.contains(&"sonnet".to_string()));
+        assert!(!argv.contains(&"--model=sonnet".to_string()));
     }
 
     #[test]
@@ -2284,6 +2461,43 @@ mod tests {
         assert!(argv.contains(&"--format".to_string()));
         assert!(argv.contains(&"json".to_string()));
         assert!(argv.contains(&"the opencode task".to_string()));
+    }
+
+    #[test]
+    fn run_opencode_route_model_overrides_stale_profile_model_flags() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_opencode(
+            &f.worktree,
+            "the opencode task",
+            &f.session_dir,
+            Some("provider/test-model"),
+            &[
+                "--model".to_string(),
+                "stale-model".to_string(),
+                "--model=another-stale".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+            ],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "run");
+        assert!(argv.contains(&"--dir".to_string()));
+        assert!(argv.contains(&"--auto".to_string()));
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"provider/test-model".to_string()));
+        assert!(argv.contains(&"--format".to_string()));
+        assert!(argv.contains(&"json".to_string()));
+        assert!(!argv.contains(&"stale-model".to_string()));
+        assert!(!argv.contains(&"another-stale".to_string()));
+        assert!(!argv.contains(&"--model=another-stale".to_string()));
     }
 
     #[test]
