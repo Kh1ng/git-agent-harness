@@ -5,10 +5,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::{Child, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+// Global lock to serialize git fetch operations across all workers
+// This prevents ref-lock races when multiple workers try to fetch from the same repository
+lazy_static::lazy_static! {
+    static ref GIT_FETCH_LOCK: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+}
 
 fn wait_with_timeout(mut child: Child, context: &str) -> Result<Output> {
     let started = Instant::now();
@@ -28,6 +35,10 @@ fn wait_with_timeout(mut child: Child, context: &str) -> Result<Output> {
 }
 
 fn fetch_origin(repo: &Path) -> Result<()> {
+    // Use a global lock to serialize git fetch operations across all workers
+    // This prevents ref-lock races when multiple workers try to fetch from the same repository
+    let _global_guard = GIT_FETCH_LOCK.lock().unwrap();
+
     let git_dir = repo.join(".git");
     let lock_path = git_dir.join("gah-fetch.lock");
     let lock = std::fs::OpenOptions::new()
@@ -39,6 +50,8 @@ fn fetch_origin(repo: &Path) -> Result<()> {
     lock.lock_exclusive().context("locking shared git fetch")?;
     let result = git(&["fetch", "-q", "origin", "--prune"], repo);
     FileExt::unlock(&lock).ok();
+
+    // The _global_guard will be dropped here, releasing the global lock
     result.map(|_| ())
 }
 
@@ -611,6 +624,104 @@ mod tests {
         assert!(
             log_text.contains("a fix"),
             "the commit must actually reach the remote branch, got: {log_text}"
+        );
+    }
+
+    // ── fetch_origin global lock serialization ─────────────────────────────
+
+    #[test]
+    fn fetch_origin_global_lock_prevents_concurrent_fetches() {
+        // This test verifies that the global lock prevents concurrent git fetch operations
+        // which would cause ref-lock races
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+
+        // Counter to track how many fetches are happening concurrently
+        let concurrent_counter = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+        // Use a longer fetch operation to make concurrency more visible
+        // Modify a file in the origin to force a real fetch
+        let bare_origin = repo.parent().unwrap().join("origin.git");
+        fs::write(bare_origin.join("new_file.txt"), "content").unwrap();
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(&bare_origin)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-q", "-m", "new commit"])
+            .current_dir(&bare_origin)
+            .output()
+            .unwrap();
+
+        let mut handles = vec![];
+
+        // Spawn multiple threads that try to fetch simultaneously
+        for i in 0..5 {
+            let _repo_clone = repo.clone();
+            let counter_clone = concurrent_counter.clone();
+            let max_concurrent_clone = max_concurrent.clone();
+
+            let handle = thread::spawn(move || {
+                println!("Thread {}: About to acquire lock", i);
+
+                // Acquire the global lock first
+                let _guard = GIT_FETCH_LOCK.lock().unwrap();
+
+                // Now increment counter to measure actual concurrency while holding the lock
+                let current = counter_clone.fetch_add(1, Ordering::SeqCst);
+                max_concurrent_clone.fetch_max(current + 1, Ordering::SeqCst);
+
+                println!(
+                    "Thread {}: Acquired lock, concurrent count: {}",
+                    i,
+                    current + 1
+                );
+
+                // Simulate some work while holding the lock
+                thread::sleep(Duration::from_millis(50));
+
+                // Decrement counter when done
+                counter_clone.fetch_sub(1, Ordering::SeqCst);
+
+                println!("Thread {}: Releasing lock", i);
+
+                // The guard will be dropped here, releasing the lock
+                Ok(())
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        let results: Result<Vec<_>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // All operations should succeed
+        assert!(
+            results.is_ok(),
+            "All operations should succeed: {:?}",
+            results
+        );
+
+        // The key assertion: at most one thread should hold the lock at a time
+        let actual_max_concurrent = max_concurrent.load(Ordering::SeqCst);
+        println!(
+            "Maximum concurrent lock holders observed: {}",
+            actual_max_concurrent
+        );
+
+        // With the global lock, we should never see more than 1 concurrent lock holder
+        assert_eq!(
+            actual_max_concurrent, 1,
+            "Global lock should allow only 1 concurrent lock holder, but saw {}",
+            actual_max_concurrent
         );
     }
 }

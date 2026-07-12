@@ -742,6 +742,7 @@ dependencies = [
  "crossterm",
  "fs2",
  "futures-util",
+ "lazy_static",
  "libc",
  "log",
  "predicates",
