@@ -2128,6 +2128,9 @@ fn improve(
             );
         }
 
+        // TICKET-250: If the agent didn't change anything, it's a failure (agent_no_progress).
+        // Check this early before running post-change validation to avoid wasting time and
+        // falsely reporting success on an unchanged repository.
         // An exit-0 process that leaves the worktree unchanged did not
         // complete the ticket. Treating it as success would let a backend
         // consume quota, pass the repository's unchanged test suite, and
@@ -2484,6 +2487,8 @@ fn improve(
 
     let has_changes = worktree::has_changes(&wt, &profile.default_target_branch)?;
     if !has_changes {
+        // TICKET-250: Defensive backstop: if all changes disappeared at the end
+        // (e.g. from auto-fix formatters), it must also be treated as a failure (agent_no_progress).
         // Defensive backstop: auto-fix commands or a future post-validation
         // transform could remove every change after the normal early check.
         // Do not let that become a successful no-op dispatch either.

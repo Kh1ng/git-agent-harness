@@ -2766,6 +2766,54 @@ fn dispatch_fix_no_change_is_agent_no_progress() {
     assert_eq!(attempts[0]["validation_result"], "not_run_no_changes");
 }
 
+/// TICKET-250: an exit-0 backend that leaves the worktree unchanged in improve mode
+/// has consumed a real attempt but made no ticket progress. It must be surfaced as
+/// agent_no_progress, never as a successful no-op dispatch.
+#[test]
+fn dispatch_improve_no_change_is_agent_no_progress() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\nexit 0\n");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "improve",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "improve the thing",
+            "--retries",
+            "0",
+            "--skip-validation-gate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("produced no worktree changes"));
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["failure_class"], "agent_no_progress");
+    assert_eq!(entry["failure_stage"], "agent_run");
+    assert_eq!(entry["validation_result"], "not_run_no_changes");
+    let attempts = entry["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["exit_code"], 0);
+    assert_eq!(attempts[0]["failure_class"], "agent_no_progress");
+    assert_eq!(attempts[0]["validation_result"], "not_run_no_changes");
+}
+
 /// TICKET-250: no-progress uses the same bounded retry policy as other
 /// recoverable agent failures. Every failed no-change attempt remains visible
 /// in the ledger, and only the final one marks the dispatch terminally failed.
