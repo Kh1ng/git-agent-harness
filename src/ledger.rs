@@ -620,6 +620,14 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
         .lock_exclusive()
         .with_context(|| format!("locking ledger {}", lock_path.display()))?;
 
+    if let Some(offset) = truncated_tail_offset(&fs::read(&path).unwrap_or_default()) {
+        anyhow::bail!(
+            "ledger {} has an unterminated invalid final record at byte {}; run `gah ledger repair-tail` before appending",
+            path.display(),
+            offset
+        );
+    }
+
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -637,6 +645,99 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+/// Result of the deliberately narrow JSONL tail-repair operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailRepair {
+    pub backup_path: Option<PathBuf>,
+    pub dropped_bytes: usize,
+}
+
+/// Back up and remove a single unterminated, invalid final JSONL record.
+///
+/// A full disk or abrupt process death can leave the last `write_all` only
+/// partially persisted. We never repair an invalid record followed by a
+/// newline (that is structural corruption, not a torn append), and we never
+/// touch any valid final record. The rejected bytes are retained beside the
+/// ledger before truncation for audit/recovery.
+pub fn repair_truncated_tail(cfg: &GahConfig, dry_run: bool) -> Result<TailRepair> {
+    let path = cfg.defaults.ledger_path();
+    if !path.exists() {
+        return Ok(TailRepair {
+            backup_path: None,
+            dropped_bytes: 0,
+        });
+    }
+    let lock_path = path.with_extension("lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening ledger lock {}", lock_path.display()))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("locking ledger {}", lock_path.display()))?;
+    repair_truncated_tail_at(&path, dry_run)
+}
+
+fn repair_truncated_tail_at(path: &Path, dry_run: bool) -> Result<TailRepair> {
+    let bytes = fs::read(path).with_context(|| format!("reading ledger {}", path.display()))?;
+    let Some(offset) = truncated_tail_offset(&bytes) else {
+        return Ok(TailRepair {
+            backup_path: None,
+            dropped_bytes: 0,
+        });
+    };
+    let tail = &bytes[offset..];
+    let backup_path = path.with_file_name(format!(
+        "{}.corrupt-tail-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("ledger"),
+        OffsetDateTime::now_utc().unix_timestamp_nanos(),
+    ));
+    if !dry_run {
+        fs::write(&backup_path, tail).with_context(|| {
+            format!(
+                "backing up truncated ledger tail to {}",
+                backup_path.display()
+            )
+        })?;
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .with_context(|| format!("opening ledger {} for tail repair", path.display()))?;
+        file.set_len(offset as u64)
+            .with_context(|| format!("truncating ledger {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing repaired ledger {}", path.display()))?;
+    }
+    Ok(TailRepair {
+        backup_path: Some(backup_path),
+        dropped_bytes: tail.len(),
+    })
+}
+
+/// Returns the byte offset of a physically torn final JSONL record. A final
+/// newline means the record was fully framed, so any invalid content is not
+/// safe to discard automatically.
+fn truncated_tail_offset(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() || bytes.ends_with(b"\n") {
+        return None;
+    }
+    let offset = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |idx| idx + 1);
+    let tail = &bytes[offset..];
+    if serde_json::from_slice::<serde_json::Value>(tail).is_err() {
+        Some(offset)
+    } else {
+        None
+    }
 }
 
 pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
@@ -2617,14 +2718,31 @@ mod tests {
     use super::{
         active_review_hold_work_ids, append, backfill_review_verdict, entries_for_work_id,
         index_entries_by_work_id, is_strong_model, read_entries, reconcile,
-        usage_summary_for_backend, FailureClass, FailureStage, GroupBy, LedgerEntry,
-        RoutingCandidateDiagnostic, RoutingDiagnostics,
+        repair_truncated_tail_at, usage_summary_for_backend, FailureClass, FailureStage, GroupBy,
+        LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
     use std::fs;
     use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
+
+    #[test]
+    fn repair_truncated_tail_backs_up_only_an_unterminated_invalid_last_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let valid_prefix = b"{\"record\":1}\n";
+        let torn_tail = b"{\"record\":";
+        let mut bytes = valid_prefix.to_vec();
+        bytes.extend_from_slice(torn_tail);
+        fs::write(&path, bytes).unwrap();
+
+        let repaired = repair_truncated_tail_at(&path, false).unwrap();
+        assert_eq!(repaired.dropped_bytes, torn_tail.len());
+        let backup = repaired.backup_path.expect("torn tail must be backed up");
+        assert_eq!(fs::read(&backup).unwrap(), torn_tail);
+        assert_eq!(fs::read(&path).unwrap(), valid_prefix);
+    }
 
     // pub(crate) so the sqlite_store::tests submodule (a sibling, not a
     // descendant, of this tests module) can reuse the same fixtures rather

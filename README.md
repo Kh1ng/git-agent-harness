@@ -455,6 +455,7 @@ triage, and the auto-merge safety model), see the operator runbook:
 - `gah doctor`
 - `gah dispatch`
 - `gah ledger summary`
+- `gah ledger repair-tail [--dry-run]`
 - `gah prune`
 - `gah sync`
 - `gah profile list`
