@@ -741,11 +741,15 @@ fn dimension_key(dimension: AggregationDimension) -> String {
     }
 }
 
-/// Check if usage is quota-backed (subscription vs API)
+/// Check whether usage belongs to a subscription/quota pool rather than a
+/// metered API account. `quota_backed` is the canonical ledger value; retain
+/// `subscription` for older records written before normalization.
 fn is_quota_backed(usage: &LedgerUsage) -> bool {
-    // Quota-backed usage typically has quota window information
-    // or comes from subscription-backed providers
-    usage.quota_window.is_some() || usage.usage_classification.as_deref() == Some("subscription")
+    usage.quota_window.is_some()
+        || matches!(
+            usage.usage_classification.as_deref(),
+            Some("quota_backed" | "subscription")
+        )
 }
 
 /// Calculate totals across all entries

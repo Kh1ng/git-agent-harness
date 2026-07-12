@@ -650,7 +650,10 @@ default_target_branch = "main"
         entry1.effective_model = Some("gpt-4".to_string());
         entry1.usage = crate::ledger::LedgerUsage {
             usage_source: Some("test".to_string()),
-            usage_classification: Some("subscription".to_string()),
+            // `quota_backed` is the normalized value emitted by live
+            // subscription-backed executions. It must never enter the API
+            // spend total merely because a quota window is unavailable.
+            usage_classification: Some("quota_backed".to_string()),
             backend_instance: Some("instance-1".to_string()),
             provider: Some("openai".to_string()),
             actual_model: Some("gpt-4".to_string()),
