@@ -2,6 +2,7 @@ import { readFile } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
+import os from 'os';
 
 export interface HostConfig {
   id: string;
@@ -30,7 +31,7 @@ export class HostRegistry {
 
   constructor(config?: HostRegistryConfig) {
     this.hosts = config?.hosts || [];
-    this.localHostId = process.env.HOST_ID || require('os').hostname();
+    this.localHostId = process.env.HOST_ID || os.hostname();
     this.localHostName = process.env.HOST_NAME || this.localHostId;
   }
 
