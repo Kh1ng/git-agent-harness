@@ -9060,6 +9060,15 @@ fn derive_reviewer_tier(cfg: &GahConfig, profile: &Profile, route: &RouteDecisio
     // the auto-merge-eligible escalatory tier.
     for esc in &escalatory {
         if selected(Some(esc.backend.as_str()), esc.model.as_deref()) {
+            // Check if this escalatory reviewer is actually a legacy weak review configuration
+            // Legacy weak review configs should be treated as Weak tier, not Escalatory
+            let is_legacy_weak_config = profile.routing.escalatory_reviewers.is_empty()
+                && profile.routing.weak_review_backend.as_deref() == Some(esc.backend.as_str())
+                && profile.routing.weak_review_model.as_deref() == esc.model.as_deref();
+
+            if is_legacy_weak_config {
+                return ReviewerTier::Weak;
+            }
             return ReviewerTier::Escalatory;
         }
     }
