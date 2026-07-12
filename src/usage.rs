@@ -228,6 +228,67 @@ pub fn parse_vibe_session_metadata(metadata_json: &str) -> LedgerUsage {
     }
 }
 
+/// Parse the run-scoped OpenCode session snapshot written by `runner`.
+///
+/// OpenCode's SQLite store contains exact per-session token counters and the
+/// provider/model selected by the CLI. The runner snapshots only the session
+/// matching its worktree and start time, so this parser never attributes a
+/// neighbouring worker's activity to the current attempt.
+pub fn parse_opencode_session_metadata(metadata_json: &str) -> LedgerUsage {
+    let Ok(root) = serde_json::from_str::<Value>(metadata_json) else {
+        return LedgerUsage::default();
+    };
+    let input_tokens = root.get("tokens_input").and_then(Value::as_u64);
+    let output_tokens = root.get("tokens_output").and_then(Value::as_u64);
+    let reasoning_tokens = root.get("tokens_reasoning").and_then(Value::as_u64);
+    let cache_read_tokens = root.get("tokens_cache_read").and_then(Value::as_u64);
+    let cache_write_tokens = root.get("tokens_cache_write").and_then(Value::as_u64);
+    let total_tokens = [
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(u64::saturating_add);
+    let model = root.get("model").unwrap_or(&Value::Null);
+    let actual_model = model.get("id").and_then(Value::as_str).map(str::to_string);
+    let provider = model
+        .get("providerID")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let observed_at = root
+        .get("time_updated")
+        .and_then(Value::as_i64)
+        .map(|milliseconds| milliseconds.to_string());
+
+    if input_tokens.is_none()
+        && output_tokens.is_none()
+        && reasoning_tokens.is_none()
+        && cache_read_tokens.is_none()
+        && cache_write_tokens.is_none()
+        && actual_model.is_none()
+    {
+        return LedgerUsage::default();
+    }
+
+    LedgerUsage {
+        usage_source: Some("opencode_session_database".to_string()),
+        provider,
+        actual_model,
+        observed_at,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        total_tokens,
+        requests_count: Some(1),
+        ..LedgerUsage::default()
+    }
+}
+
 /// #155 (TICKET-066 / #151): parse AGY's own quota/reset messages from a
 /// **run-scoped cli.log delta** (the bytes `runner` captured between the
 /// pre-run byte offset and the post-run position -- never a fresh read of
@@ -608,6 +669,7 @@ mod tests {
     use super::parse_codex_exec_json;
     use super::parse_codex_status_json;
     use super::parse_generic_usage;
+    use super::parse_opencode_session_metadata;
     use super::parse_openhands_usage;
     use super::parse_vibe_session_metadata;
 
@@ -642,6 +704,31 @@ mod tests {
         assert_eq!(usage.requests_count, Some(4));
         assert_eq!(usage.actual_model.as_deref(), Some("mistral-medium-3.5"));
         assert_eq!(usage.usage_source.as_deref(), Some("vibe_session_metadata"));
+    }
+
+    #[test]
+    fn opencode_session_metadata_extracts_model_and_token_categories() {
+        let usage = parse_opencode_session_metadata(
+            r#"{
+              "model":{"id":"hy3-free","providerID":"opencode"},
+              "tokens_input":775,
+              "tokens_output":140,
+              "tokens_reasoning":20,
+              "tokens_cache_read":15360,
+              "tokens_cache_write":0,
+              "time_updated":1783824274016
+            }"#,
+        );
+        assert_eq!(
+            usage.usage_source.as_deref(),
+            Some("opencode_session_database")
+        );
+        assert_eq!(usage.provider.as_deref(), Some("opencode"));
+        assert_eq!(usage.actual_model.as_deref(), Some("hy3-free"));
+        assert_eq!(usage.input_tokens, Some(775));
+        assert_eq!(usage.output_tokens, Some(140));
+        assert_eq!(usage.cache_read_tokens, Some(15360));
+        assert_eq!(usage.total_tokens, Some(16295));
     }
 
     #[test]

@@ -781,6 +781,7 @@ pub fn run_opencode_with_executable(
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
+    let started_at = std::time::SystemTime::now();
 
     let mut cmd = Command::new(executable);
     // opencode run --model <model> --dir <path> --auto "<prompt>"
@@ -809,14 +810,75 @@ pub fn run_opencode_with_executable(
         idle_timeout_seconds,
         "launching opencode; is it installed and on PATH?",
     )?;
+    let transcript_path = snapshot_opencode_session(env_vars, worktree, started_at, session_dir);
 
     Ok(RunResult {
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
-        transcript_path: None,
+        transcript_path,
     })
+}
+
+/// Persist the exact OpenCode session created by this invocation as a small
+/// JSON artifact. Querying by worktree and start time prevents concurrent
+/// workers from attributing each other's SQLite rows.
+fn snapshot_opencode_session(
+    env_vars: &[(String, String)],
+    worktree: &Path,
+    started_at: std::time::SystemTime,
+    session_dir: &Path,
+) -> Option<String> {
+    let value_for = |name: &str| {
+        env_vars
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .or_else(|| env::var(name).ok())
+    };
+    let database = value_for("XDG_DATA_HOME")
+        .map(|path| PathBuf::from(path).join("opencode/opencode.db"))
+        .or_else(|| {
+            value_for("HOME")
+                .map(|home| PathBuf::from(home).join(".local/share/opencode/opencode.db"))
+        })?;
+    let started_at_ms = started_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    let connection =
+        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, model, tokens_input, tokens_output, tokens_reasoning, \
+             tokens_cache_read, tokens_cache_write, time_updated \
+             FROM session WHERE directory = ?1 AND time_created >= ?2 \
+             ORDER BY time_updated DESC LIMIT 1",
+        )
+        .ok()?;
+    let snapshot = statement
+        .query_row(
+            rusqlite::params![worktree.to_string_lossy(), started_at_ms],
+            |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "model": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(1)?)
+                        .unwrap_or(serde_json::Value::Null),
+                    "tokens_input": row.get::<_, i64>(2)? as u64,
+                    "tokens_output": row.get::<_, i64>(3)? as u64,
+                    "tokens_reasoning": row.get::<_, i64>(4)? as u64,
+                    "tokens_cache_read": row.get::<_, i64>(5)? as u64,
+                    "tokens_cache_write": row.get::<_, i64>(6)? as u64,
+                    "time_updated": row.get::<_, i64>(7)?,
+                }))
+            },
+        )
+        .ok()?;
+    let path = session_dir.join("opencode-session.json");
+    fs::write(&path, serde_json::to_vec(&snapshot).ok()?).ok()?;
+    Some(path.to_string_lossy().into_owned())
 }
 
 /// Run Antigravity CLI non-interactively via `agy --print`.
@@ -2269,6 +2331,57 @@ mod tests {
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=opencode-env-value"));
+    }
+
+    #[test]
+    fn snapshot_opencode_session_scopes_metadata_to_worktree_and_start_time() {
+        let f = fixture();
+        let data_dir = f._tmp.path().join(".local/share/opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+        let database = data_dir.join("opencode.db");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    directory TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    tokens_input INTEGER NOT NULL,
+                    tokens_output INTEGER NOT NULL,
+                    tokens_reasoning INTEGER NOT NULL,
+                    tokens_cache_read INTEGER NOT NULL,
+                    tokens_cache_write INTEGER NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        let started_at = std::time::SystemTime::now();
+        let started_at_ms = started_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        connection
+            .execute(
+                "INSERT INTO session VALUES (?1, ?2, ?3, 775, 140, 20, 15360, 0, ?4, ?5)",
+                rusqlite::params![
+                    "session-current",
+                    f.worktree.to_string_lossy(),
+                    r#"{"id":"hy3-free","providerID":"opencode"}"#,
+                    started_at_ms + 1,
+                    started_at_ms + 2,
+                ],
+            )
+            .unwrap();
+        let envs = vec![("HOME".to_string(), f._tmp.path().display().to_string())];
+
+        let snapshot = snapshot_opencode_session(&envs, &f.worktree, started_at, &f.session_dir)
+            .expect("current worktree session should be captured");
+        let usage =
+            crate::usage::parse_opencode_session_metadata(&fs::read_to_string(snapshot).unwrap());
+        assert_eq!(usage.actual_model.as_deref(), Some("hy3-free"));
+        assert_eq!(usage.input_tokens, Some(775));
+        assert_eq!(usage.total_tokens, Some(16295));
     }
 
     #[test]
