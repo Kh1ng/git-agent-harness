@@ -5037,6 +5037,34 @@ mod tests {
     }
 
     #[test]
+    fn agy_execution_trace_does_not_hide_or_block_a_structured_approval() {
+        // Live `agy --print` emits this execution-plan trace before the final
+        // response. It is transport metadata rather than a review finding.
+        let review_text = "I will inspect the diff.\nI will run the focused tests.\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src/dispatch.rs\"]}";
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("agy", Some("Claude Sonnet 4.8 (Thinking)"), false);
+        let context = ReviewGateContext::from_diff_bundle(
+            &ReviewDiffBundle {
+                files: "src/dispatch.rs\n".to_string(),
+                diff: "+fn hardened_review() {}\n".to_string(),
+            },
+            Some("pending"),
+        );
+
+        let verdict = parse_review_verdict_with_context(
+            review_text,
+            &route,
+            &usage,
+            ReviewerTier::Strong,
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(verdict.verdict, "APPROVE");
+        assert!(!verdict.human_required);
+    }
+
+    #[test]
     fn approve_with_blocking_findings_is_forced_to_human_review() {
         let json = r#"{
             "verdict":"APPROVE",
@@ -10100,7 +10128,12 @@ fn parse_review_verdict_with_context(
     let json = extract_first_json_object(review_text)
         .ok_or_else(|| anyhow::anyhow!("reviewer did not return verdict JSON"))?;
     let mut verdict = serde_json::from_str::<crate::models::ReviewVerdict>(&json)?;
-    enforce_review_evidence_gate(&mut verdict, review_text, gate_context);
+    enforce_review_evidence_gate(
+        &mut verdict,
+        review_text,
+        &route.effective_backend,
+        gate_context,
+    );
     // Reviewer identity (tier) and review outcome (verdict text/confidence)
     // are separate dimensions -- the verdict text itself is never rewritten
     // based on who reviewed it (see review_labels for how tier affects
@@ -10141,6 +10174,7 @@ fn parse_review_verdict_with_context(
 fn enforce_review_evidence_gate(
     verdict: &mut crate::models::ReviewVerdict,
     review_text: &str,
+    reviewer_backend: &str,
     gate_context: &ReviewGateContext,
 ) {
     if verdict.verdict != "APPROVE" {
@@ -10149,7 +10183,7 @@ fn enforce_review_evidence_gate(
 
     let reason = if !verdict.blocking_findings.is_empty() {
         Some("APPROVE contradicted non-empty blocking_findings".to_string())
-    } else if review_text_has_substantive_prose(review_text) {
+    } else if review_text_has_substantive_prose(review_text, reviewer_backend) {
         Some(
             "APPROVE included substantive prose; every finding must be represented in the review JSON"
                 .to_string(),
@@ -10188,7 +10222,7 @@ fn enforce_review_evidence_gate(
     verdict.safety_gate_reason = Some(reason);
 }
 
-fn review_text_has_substantive_prose(review_text: &str) -> bool {
+fn review_text_has_substantive_prose(review_text: &str, reviewer_backend: &str) -> bool {
     let Some(json) = extract_first_json_object(review_text) else {
         return true;
     };
@@ -10198,12 +10232,19 @@ fn review_text_has_substantive_prose(review_text: &str) -> bool {
     let mut residue = String::with_capacity(review_text.len().saturating_sub(json.len()));
     residue.push_str(&review_text[..start]);
     residue.push_str(&review_text[start + json.len()..]);
+    let agy_transport_trace = matches!(reviewer_backend, "agy" | "agy-second");
     residue.lines().map(str::trim).any(|line| {
-        !line.is_empty()
-            && !matches!(
+        // `agy --print` writes its execution-plan trace to stdout before
+        // the final answer. Those uniform "I will ..." lines are runner
+        // transport metadata, not reviewer prose. Preserve fail-closed
+        // behavior for every other line, including AGY's final prose.
+        let inert = line.is_empty()
+            || (agy_transport_trace && line.starts_with("I will "))
+            || matches!(
                 line.to_ascii_lowercase().trim_end_matches(':').trim(),
                 "review notes" | "## review notes" | "### review notes" | "```json" | "```"
-            )
+            );
+        !inert
     })
 }
 
