@@ -1365,6 +1365,20 @@ fn attempt_usage(
         }
     }
 
+    // OpenCode persists exact per-session model and token counters in its
+    // local SQLite store. The runner snapshots only this invocation's row
+    // into a JSON artifact, avoiding a racy global "latest session" lookup.
+    if backend == Some("opencode") {
+        if let Some(metadata) = transcript_path {
+            if let Ok(metadata_json) = fs::read_to_string(metadata) {
+                let session_usage = usage::parse_opencode_session_metadata(&metadata_json);
+                if session_usage.usage_source.is_some() {
+                    return normalize(session_usage);
+                }
+            }
+        }
+    }
+
     // Try codex exec --json parser first — handles JSONL output from
     // codex exec --json where the generic regex parser would find nothing.
     let mut usage = if backend == Some("codex") {
