@@ -376,3 +376,46 @@ fn quota_observations_select_latest_timestamp_with_timezone_offsets() {
     assert_eq!(quota_observations[0]["quota_remaining_percent"], 45.0);
     assert_eq!(quota_observations[0]["observed_at"], "2026-01-01T10:00:00Z");
 }
+
+#[test]
+fn successful_agy_execution_captures_quota_telemetry() {
+    let mut harness = ScenarioHarness::new("github").with_config_append(
+        "[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
+    );
+    write_exec(
+        &harness.bin_dir.join("agy"),
+        "#!/bin/sh\necho 'some output'\nprintf 'agent edit\\n' >> README.md\nexit 0\n",
+    );
+    write_exec(
+        &harness.bin_dir.join("gh"),
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/repo/pull/1\\n'; exit 0; fi\nexit 0\n",
+    );
+
+    let result = harness
+        .run_dispatch(&[
+            "--mode",
+            "fix",
+            "--backend",
+            "agy",
+            "--target",
+            "repair this",
+        ])
+        .unwrap();
+    assert_eq!(result.exit_code, Some(0), "stderr was {}", result.stderr);
+
+    let ledger_entries = TestLedger::read_from(&harness.ledger_path).unwrap();
+    let entry = ledger_entries.last().unwrap();
+
+    // Verify attempt usage
+    let attempt_usage = &entry["attempts"][0]["usage"];
+    assert_eq!(attempt_usage["usage_classification"], "quota_backed");
+    assert_eq!(attempt_usage["requests_count"], 1);
+    assert_eq!(attempt_usage["quota_window"], "AGY individual quota");
+    assert_eq!(attempt_usage["usage_source"], "execution_observed");
+
+    // Verify top-level usage
+    let top_usage = &entry["usage"];
+    assert_eq!(top_usage["usage_classification"], serde_json::Value::Null); // top level doesn't aggregate usage_classification
+    assert_eq!(top_usage["requests_count"], 1);
+    assert_eq!(top_usage["quota_window"], "AGY individual quota");
+}

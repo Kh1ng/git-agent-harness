@@ -346,6 +346,10 @@ impl ScenarioHarness {
                 "--json",
                 "--skip-validation-gate",
             ])
+            .env(
+                "XDG_STATE_HOME",
+                self._temp.path().join("xdg-state").to_str().unwrap(),
+            )
             .env("GAH_CONFIG", self.config_path.to_str().unwrap())
             .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
             .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
@@ -418,6 +422,10 @@ impl ScenarioHarness {
         self.install_fakes();
         let out = Command::new(&self.gah_bin)
             .args(["status", "--profile", &self.profile_name, "--json"])
+            .env(
+                "XDG_STATE_HOME",
+                self._temp.path().join("xdg-state").to_str().unwrap(),
+            )
             .env("GAH_CONFIG", self.config_path.to_str().unwrap())
             .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
             .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
@@ -456,6 +464,10 @@ impl ScenarioHarness {
         cmd.args(["dispatch", "--profile", &self.profile_name]);
         cmd.args(args);
         let out = cmd
+            .env(
+                "XDG_STATE_HOME",
+                self._temp.path().join("xdg-state").to_str().unwrap(),
+            )
             .env("GAH_CONFIG", self.config_path.to_str().unwrap())
             .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
             .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
@@ -494,6 +506,10 @@ impl ScenarioHarness {
             cmd.arg("--dry-run");
         }
         let out = cmd
+            .env(
+                "XDG_STATE_HOME",
+                self._temp.path().join("xdg-state").to_str().unwrap(),
+            )
             .env("GAH_CONFIG", self.config_path.to_str().unwrap())
             .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
             .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
@@ -529,6 +545,10 @@ impl ScenarioHarness {
                 "--since",
                 "365d",
             ])
+            .env(
+                "XDG_STATE_HOME",
+                self._temp.path().join("xdg-state").to_str().unwrap(),
+            )
             .env("GAH_CONFIG", self.config_path.to_str().unwrap())
             .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
             .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())

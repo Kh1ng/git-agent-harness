@@ -1300,6 +1300,18 @@ fn attempt_usage(
         {
             usage.actual_model = effective_model.map(str::to_string);
         }
+        if matches!(backend, Some("agy" | "agy-main" | "agy-second")) {
+            if usage.quota_window.is_none() {
+                usage.quota_window = Some("AGY individual quota".to_string());
+            }
+            if usage.observed_at.is_none() {
+                usage.observed_at = Some(
+                    time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                );
+            }
+        }
         if usage.requests_count.is_none() {
             // A launched backend invocation is one consumed subscription
             // request even when its CLI exposes no token counters.
@@ -5233,6 +5245,7 @@ which lacks a leading boundary check.
             Some("Gemini 3.5 Flash (Medium)")
         );
         assert_eq!(usage.requests_count, Some(1));
+        assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
     }
 
     #[test]
@@ -5258,6 +5271,7 @@ which lacks a leading boundary check.
         );
         assert_eq!(usage.requests_count, Some(1));
         assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
     }
 
     #[test]
