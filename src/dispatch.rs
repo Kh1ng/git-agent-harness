@@ -1414,6 +1414,30 @@ fn attempt_usage(
     normalize(usage)
 }
 
+/// Attribute a review invocation even when the reviewer does not expose token
+/// counters. Reviews consume the same subscription/API capacity as coding
+/// attempts, so an empty review-output parser result must not turn a completed
+/// reviewer run into an invisible zero-usage ledger record.
+///
+/// AGY receives its fully-qualified model label as an explicit `--model`
+/// argument. In that case the invoked model is directly observable from the
+/// command contract, so retain it as the actual model when AGY itself did not
+/// emit a more specific observation. Other backends may resolve aliases or
+/// proxy routes after launch; leave their actual model unknown unless their
+/// backend artifact reports it.
+fn review_usage(
+    log_path: &str,
+    backend: &str,
+    effective_model: Option<&str>,
+    claude_path: Option<&str>,
+) -> crate::ledger::LedgerUsage {
+    let mut usage = attempt_usage(log_path, None, Some(backend), None, claude_path);
+    if matches!(backend, "agy" | "agy-main" | "agy-second") && usage.actual_model.is_none() {
+        usage.actual_model = effective_model.map(str::to_string);
+    }
+    usage
+}
+
 fn usage_has_observation(usage: &crate::ledger::LedgerUsage) -> bool {
     usage.usage_source.is_some()
         || usage.input_tokens.is_some()
@@ -3388,14 +3412,13 @@ fn review(
 
     match result.outcome {
         runner::ReviewProcessOutcome::Success => {
-            let mut review_usage = usage::parse_generic_usage(&result.stdout, "review_output_log");
-            if review_usage.usage_source.is_some() {
-                review_usage.observed_at = Some(
-                    time::OffsetDateTime::now_utc()
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_default(),
-                );
-            }
+            let review_output_log = session_dir.join("review-stdout.log");
+            let review_usage = review_usage(
+                &review_output_log.display().to_string(),
+                &route.effective_backend,
+                route.effective_model.as_deref(),
+                profile.claude_path.as_deref(),
+            );
             let reviewer_tier = derive_reviewer_tier(cfg, profile, &route);
             let verdict =
                 match parse_review_verdict(&result.stdout, &route, &review_usage, reviewer_tier) {
@@ -3947,10 +3970,10 @@ mod tests {
         format_issue_for_focus, is_issue_number_reference, mark_backend_unavailable_from_output_at,
         next_ticket_id, parse_pm_plan, parse_review_verdict, parse_ticket_metadata,
         parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
-        review_labels, review_preflight, run_backend, scan_available_tickets, strip_terminal_noise,
-        validation_failure_fingerprint, validation_failure_no_progress_reason,
-        ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewerTier, RouteDecision,
-        TicketMetadata, ValidationFailureProgress,
+        review_labels, review_preflight, review_usage, run_backend, scan_available_tickets,
+        strip_terminal_noise, validation_failure_fingerprint,
+        validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
+        MrRenderContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
@@ -4691,6 +4714,31 @@ which lacks a leading boundary check.
         assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
         assert_eq!(usage.requests_count, Some(1));
         assert_eq!(usage.usage_classification, Some("quota_backed".to_string()));
+    }
+
+    #[test]
+    fn review_usage_records_an_agy_review_without_token_counters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("review-stdout.log");
+        fs::write(&path, "review completed; no token counters exposed\n").unwrap();
+
+        let usage = review_usage(
+            path.to_str().unwrap(),
+            "agy",
+            Some("Claude Sonnet 4.6 (Thinking)"),
+            None,
+        );
+
+        assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
+        assert_eq!(usage.usage_classification.as_deref(), Some("quota_backed"));
+        assert_eq!(usage.backend_instance.as_deref(), Some("agy"));
+        assert_eq!(usage.provider.as_deref(), Some("google"));
+        assert_eq!(
+            usage.actual_model.as_deref(),
+            Some("Claude Sonnet 4.6 (Thinking)")
+        );
+        assert_eq!(usage.requests_count, Some(1));
+        assert_eq!(usage.input_tokens, None);
     }
 
     #[test]
