@@ -116,6 +116,44 @@ pub fn create_existing(
     let worktree_path = worktree_base.join(existing_branch.replace('/', "-"));
     fs::create_dir_all(worktree_path.parent().unwrap_or(worktree_base))?;
 
+    // Detect and release/prune any existing worktree attached to this branch
+    let worktrees = list_worktrees(repo, worktree_base)?;
+    let canonical_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    for wt in worktrees {
+        let canonical_wt = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
+        if canonical_wt == canonical_repo {
+            continue;
+        }
+        if wt
+            .branch
+            .as_deref()
+            .map(|br| {
+                br == existing_branch
+                    || br.strip_prefix("refs/heads/").unwrap_or(br) == existing_branch
+            })
+            .unwrap_or(false)
+        {
+            if wt.is_releasable {
+                println!(
+                    "Removing clean and stale worktree at {} for branch {}",
+                    wt.path.display(),
+                    existing_branch
+                );
+                let _ = git_raw(
+                    &["worktree", "remove", "-f", wt.path.to_str().unwrap_or("")],
+                    repo,
+                );
+                let _ = git_raw(&["worktree", "prune"], repo);
+            } else {
+                anyhow::bail!(
+                    "Cannot reuse branch '{}': attached worktree at '{}' is not releasable (actively owned or external)",
+                    existing_branch,
+                    wt.path.display()
+                );
+            }
+        }
+    }
+
     // If a worktree already exists at this path (from a prior dispatch that
     // left it behind), remove it first — `git worktree add -B` fails with
     // "'<branch>' is already used by worktree at '<path>'" if the path is
@@ -311,6 +349,64 @@ pub fn commit_and_push_msg(
     ensure_staged(worktree)?;
     commit_msg(worktree, msg)?;
     push_branch(worktree, branch, push_url, pat)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub is_clean: bool,
+    pub is_releasable: bool,
+}
+
+pub fn list_worktrees(repo: &Path, worktree_base: &Path) -> Result<Vec<WorktreeInfo>> {
+    let output = git(&["worktree", "list", "--porcelain"], repo)?;
+    let mut worktrees = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+
+    for line in output.lines() {
+        if let Some(stripped) = line.strip_prefix("worktree ") {
+            if let Some(path) = current_path.take() {
+                let info = build_worktree_info(path, current_branch.take(), worktree_base)?;
+                worktrees.push(info);
+            }
+            current_path = Some(PathBuf::from(stripped));
+        } else if let Some(stripped) = line.strip_prefix("branch ") {
+            current_branch = Some(stripped.to_string());
+        }
+    }
+    if let Some(path) = current_path {
+        let info = build_worktree_info(path, current_branch, worktree_base)?;
+        worktrees.push(info);
+    }
+
+    Ok(worktrees)
+}
+
+fn build_worktree_info(
+    path: PathBuf,
+    branch: Option<String>,
+    worktree_base: &Path,
+) -> Result<WorktreeInfo> {
+    let path = path.canonicalize().unwrap_or(path);
+    let is_clean = if path.exists() {
+        has_uncommitted_changes(&path)
+            .map(|dirty| !dirty)
+            .unwrap_or(false)
+    } else {
+        true
+    };
+    let canonical_base = worktree_base
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_base.to_path_buf());
+    let is_releasable = is_clean && path.starts_with(&canonical_base);
+    Ok(WorktreeInfo {
+        path,
+        branch,
+        is_clean,
+        is_releasable,
+    })
 }
 
 pub fn cleanup(worktree: &Path, repo: &Path) {
@@ -612,5 +708,103 @@ mod tests {
             log_text.contains("a fix"),
             "the commit must actually reach the remote branch, got: {log_text}"
         );
+    }
+
+    #[test]
+    fn test_list_worktrees_and_releasable_status() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        // Create a new branch first so we don't checkout 'main'
+        StdCommand::new("git")
+            .args(["checkout", "-b", "test-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["push", "origin", "test-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        // Go back to main
+        StdCommand::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        // 1. Create a worktree under worktree_base. It starts clean.
+        let wt = create_existing(&repo, "test-branch", &worktree_base).unwrap();
+
+        let wts = list_worktrees(&repo, &worktree_base).unwrap();
+        // There should be 2 worktrees: the main repo and the new worktree
+        assert_eq!(wts.len(), 2);
+
+        // The new worktree is under worktree_base and clean, so it should be releasable
+        let wt_info = wts.iter().find(|w| w.path == wt).unwrap();
+        assert!(wt_info.is_clean);
+        assert!(wt_info.is_releasable);
+
+        // 2. Make it dirty (uncommitted changes) -> not clean, not releasable
+        fs::write(wt.join("f.txt"), "dirty content\n").unwrap();
+        let wts = list_worktrees(&repo, &worktree_base).unwrap();
+        let wt_info = wts.iter().find(|w| w.path == wt).unwrap();
+        assert!(!wt_info.is_clean);
+        assert!(!wt_info.is_releasable);
+
+        // Reset changes to clean it up
+        StdCommand::new("git")
+            .args(["checkout", "--", "f.txt"])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+
+        // 3. Create a worktree NOT under worktree_base (external) -> clean, but not releasable
+        let external_wt_base = tmp.path().join("external-worktrees");
+        fs::create_dir_all(&external_wt_base).unwrap();
+        let external_wt = external_wt_base.join("main-ext");
+
+        // Checkout 'main' branch in another worktree at external_wt. But wait, git only allows a branch to be checked out once.
+        // So we create a new branch first.
+        StdCommand::new("git")
+            .args(["checkout", "-b", "external-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["push", "origin", "external-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "external-branch-wt",
+                external_wt.to_str().unwrap(),
+                "origin/external-branch",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let wts = list_worktrees(&repo, &worktree_base).unwrap();
+        let ext_info = wts.iter().find(|w| w.path == external_wt).unwrap();
+        assert!(ext_info.is_clean);
+        assert!(!ext_info.is_releasable); // Not releasable because it is external (not under worktree_base)
+
+        // Clean up external worktree so we don't leak it
+        let _ = git_raw(
+            &["worktree", "remove", "-f", external_wt.to_str().unwrap()],
+            &repo,
+        );
+        let _ = git_raw(&["worktree", "prune"], &repo);
     }
 }

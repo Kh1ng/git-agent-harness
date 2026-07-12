@@ -579,6 +579,146 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
 /// which only gates Retry/Escalate via ledger counts -- this catches any
 /// action kind repeating (e.g. ReviewMr/FixMr selected over and over for a
 /// branch whose classification never changes).
+fn get_action_branch(action: &NextAction) -> Option<&str> {
+    match action {
+        NextAction::ReviewMr { branch, .. }
+        | NextAction::MarkReadyForReview { branch, .. }
+        | NextAction::FixMr { branch, .. }
+        | NextAction::MergeMr { branch, .. } => Some(branch.as_str()),
+        _ => None,
+    }
+}
+
+fn resolve_action_with_filters(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    snapshot: &mut StatusSnapshot,
+    history: &[crate::events::ControllerEvent],
+    skipped_work_ids: &mut std::collections::HashSet<String>,
+) -> Result<NextAction> {
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    let repo = std::path::Path::new(&profile.local_path);
+    let worktree_base = std::path::Path::new(&cfg.defaults.worktree_base);
+
+    let mut stuck_loop_reason = None;
+    let mut stuck_loop_ref = None;
+
+    loop {
+        let candidate = decide_next_action(snapshot);
+
+        // Stuck loop detection
+        if let Some(reason) = detect_stuck_loop(history, profile_name, &candidate) {
+            if let Some(wid) = candidate.work_id() {
+                if !skipped_work_ids.contains(wid) {
+                    skipped_work_ids.insert(wid.to_string());
+                    stuck_loop_reason = Some(reason.clone());
+                    stuck_loop_ref = Some(wid.to_string());
+
+                    // Persist a work-item-scoped durable human gate
+                    let mut gate = crate::ledger::LedgerEntry::new(
+                        profile_name,
+                        profile,
+                        "auto",
+                        "fix",
+                        wid,
+                        None,
+                        None,
+                    );
+                    gate.work_id = Some(wid.to_string());
+                    gate.human_required = true;
+                    gate.dispatch_reason = Some("stuck_loop_gate".to_string());
+                    gate.error_summary = Some(reason.clone());
+                    if let Err(e) = crate::ledger::append(cfg, &gate) {
+                        eprintln!("warning: failed to persist stuck-loop gate: {e:#}");
+                    }
+
+                    // Filter from snapshot and re-decide
+                    snapshot
+                        .merge_requests
+                        .retain(|mr| mr.work_id.as_deref() != Some(wid));
+                    snapshot
+                        .available_tickets
+                        .retain(|t| t.work_id.as_deref() != Some(wid));
+                    continue;
+                }
+            }
+            return Ok(NextAction::HumanRequired {
+                reason,
+                reference: candidate.work_id().map(str::to_string),
+            });
+        }
+
+        // Branch conflict detection
+        if let Some(branch) = get_action_branch(&candidate) {
+            if let Ok(wts) = crate::worktree::list_worktrees(repo, worktree_base) {
+                let conflict = wts.into_iter().find(|wt| {
+                    wt.branch
+                        .as_deref()
+                        .map(|br| {
+                            br == branch || br.strip_prefix("refs/heads/").unwrap_or(br) == branch
+                        })
+                        .unwrap_or(false)
+                });
+                if let Some(wt) = conflict {
+                    if !wt.is_releasable {
+                        // Actively owned worktree! Defer/skip it.
+                        if let Some(wid) = candidate.work_id() {
+                            if !skipped_work_ids.contains(wid) {
+                                skipped_work_ids.insert(wid.to_string());
+
+                                // Record explicit non-terminal defer/skip
+                                let msg = format!(
+                                    "Deferring branch '{}' reuse: attached worktree at '{}' is actively owned",
+                                    branch,
+                                    wt.path.display()
+                                );
+                                println!("{msg}");
+                                if let Err(e) = crate::events::record(
+                                    cfg,
+                                    crate::events::EventType::ActionOverridden,
+                                    Some(profile_name),
+                                    Some(wid),
+                                    msg,
+                                ) {
+                                    eprintln!("warning: failed to record defer event: {e:#}");
+                                }
+
+                                // Filter from snapshot and re-decide
+                                snapshot
+                                    .merge_requests
+                                    .retain(|mr| mr.work_id.as_deref() != Some(wid));
+                                snapshot
+                                    .available_tickets
+                                    .retain(|t| t.work_id.as_deref() != Some(wid));
+                                continue;
+                            }
+                        }
+                        return Ok(NextAction::HumanRequired {
+                            reason: format!(
+                                "Branch '{}' reuse blocked by actively owned worktree at '{}'",
+                                branch,
+                                wt.path.display()
+                            ),
+                            reference: candidate.work_id().map(str::to_string),
+                        });
+                    }
+                }
+            }
+        }
+
+        if candidate.kind() == "no_op" {
+            if let Some(reason) = stuck_loop_reason {
+                return Ok(NextAction::HumanRequired {
+                    reason,
+                    reference: stuck_loop_ref,
+                });
+            }
+        }
+
+        return Ok(candidate);
+    }
+}
+
 const STUCK_LOOP_THRESHOLD: usize = 3;
 
 /// Returns `Some(reason)` if the last `STUCK_LOOP_THRESHOLD` decisions for
@@ -804,63 +944,17 @@ pub fn run_once(
         )?;
     } else {
         // Original single action behavior
-        let original_action = decide_next_action(&snapshot);
         let history = crate::events::read_events(cfg)?;
-        let mut action = original_action.clone();
-        if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
-            // Persist a work-item-scoped durable human gate so that
-            // subsequent loop iterations see human_required=true for this
-            // work_id via ledger_lookup_for_ticket and skip it, rather than
-            // re-selecting DispatchTicket every cycle (the original
-            // trip-without-latch bug).
-            if let Some(wid) = original_action.work_id() {
-                let profile = crate::config::get_profile(cfg, profile_name)?;
-                let mut gate = crate::ledger::LedgerEntry::new(
-                    profile_name,
-                    profile,
-                    "auto",
-                    "fix",
-                    wid,
-                    None,
-                    None,
-                );
-                gate.work_id = Some(wid.to_string());
-                gate.human_required = true;
-                gate.dispatch_reason = Some("stuck_loop_gate".to_string());
-                gate.error_summary = Some(reason.clone());
-                if let Err(e) = crate::ledger::append(cfg, &gate) {
-                    eprintln!("warning: failed to persist stuck-loop gate: {e:#}");
-                }
-            }
-            // TICKET-skip-and-continue: the gate is now persisted as a
-            // work-item-scoped human_required (above). Re-decide with a fresh
-            // snapshot that EXCLUDES the stuck work_id, so the controller
-            // picks the NEXT eligible work item instead of parking the whole
-            // profile. Only if nothing else is actionable do we surface
-            // profile-wide HumanRequired -- that is a genuine profile stall,
-            // not a single blocked ticket.
-            let fresh =
-                crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
-            let mut scoped = fresh;
-            if let Some(stuck_wid) = original_action.work_id() {
-                scoped
-                    .merge_requests
-                    .retain(|mr| mr.work_id.as_deref() != Some(stuck_wid));
-                scoped
-                    .available_tickets
-                    .retain(|t| t.work_id.as_deref() != Some(stuck_wid));
-            }
-            let redispatched = decide_next_action(&scoped);
-            if redispatched.kind() == "no_op" {
-                // Nothing else actionable -> genuine stall, surface it.
-                action = NextAction::HumanRequired {
-                    reason,
-                    reference: original_action.work_id().map(str::to_string),
-                };
-            } else {
-                action = redispatched;
-            }
-        }
+        let mut snapshot_for_decision = snapshot;
+        let mut skipped_work_ids = std::collections::HashSet::new();
+        let original_action = decide_next_action(&snapshot_for_decision);
+        let action = resolve_action_with_filters(
+            cfg,
+            profile_name,
+            &mut snapshot_for_decision,
+            &history,
+            &mut skipped_work_ids,
+        )?;
         record_action_events(cfg, profile_name, &original_action, &action)?;
 
         let outcome = if let Some(work_id) = action.work_id().filter(|_| {
@@ -985,49 +1079,15 @@ fn run_parallel_once(
                     .unwrap_or(true)
             });
 
+            let mut skipped_work_ids = std::collections::HashSet::new();
             let original_action = decide_next_action(&fresh_snapshot);
-            let mut action = original_action.clone();
-
-            // Apply stuck-loop detection (TICKET-skip-and-continue): persist the
-            // work-item-scoped gate, then skip this item and let the loop pick the
-            // next eligible work item rather than parking the whole profile.
-            if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
-                if let Some(wid) = original_action.work_id() {
-                    let profile = crate::config::get_profile(cfg, profile_name)?;
-                    let mut gate = crate::ledger::LedgerEntry::new(
-                        profile_name,
-                        profile,
-                        "auto",
-                        "fix",
-                        wid,
-                        None,
-                        None,
-                    );
-                    gate.work_id = Some(wid.to_string());
-                    gate.human_required = true;
-                    gate.dispatch_reason = Some("stuck_loop_gate".to_string());
-                    gate.error_summary = Some(reason.clone());
-                    let _ = crate::ledger::append(cfg, &gate);
-                }
-                // Re-decide: exclude the stuck work_id, pick the next eligible one.
-                if let Some(stuck_wid) = original_action.work_id() {
-                    fresh_snapshot
-                        .merge_requests
-                        .retain(|mr| mr.work_id.as_deref() != Some(stuck_wid));
-                    fresh_snapshot
-                        .available_tickets
-                        .retain(|t| t.work_id.as_deref() != Some(stuck_wid));
-                }
-                let redispatched = decide_next_action(&fresh_snapshot);
-                if redispatched.kind() == "no_op" {
-                    action = NextAction::HumanRequired {
-                        reason,
-                        reference: original_action.work_id().map(str::to_string),
-                    };
-                } else {
-                    action = redispatched;
-                }
-            }
+            let action = resolve_action_with_filters(
+                cfg,
+                profile_name,
+                &mut fresh_snapshot,
+                &history,
+                &mut skipped_work_ids,
+            )?;
 
             // Check if this action involves a work_id that's already claimed or executed in this batch
             let action_work_id = action.work_id();
@@ -3007,5 +3067,193 @@ mod tests {
                 .count(),
         );
         assert_eq!(effective_parallel_limit, 0);
+    }
+
+    #[test]
+    fn test_resolve_action_with_filters_branch_conflict() {
+        use super::resolve_action_with_filters;
+        use crate::config::{Defaults, GahConfig, RoutingPolicy};
+        use crate::sync::RecommendedAction;
+        use std::collections::HashMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        // Initialize git repo using std::process::Command
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("f.txt"), "content\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        // Create a bare origin
+        let bare = tmp.path().join("origin.git");
+        std::process::Command::new("git")
+            .args(["init", "--bare", "-q", bare.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", bare.to_str().unwrap()])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-q", "-u", "origin", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let worktree_base = tmp.path().join("worktrees");
+
+        // 1. Create a branch and a dirty worktree for it
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "conflict-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "origin", "conflict-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        // Create a dirty (actively owned) worktree under worktree_base for conflict-branch
+        let wt_path = worktree_base.join("conflict-branch");
+        std::fs::create_dir_all(wt_path.parent().unwrap()).unwrap();
+        std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "conflict-branch-wt",
+                wt_path.to_str().unwrap(),
+                "origin/conflict-branch",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        // Make it dirty
+        std::fs::write(wt_path.join("f.txt"), "dirty\n").unwrap();
+
+        // Set up config using the test helper
+        let mut profile = crate::config::tests::test_profile_for_notifications();
+        profile.display_name = "Real".to_string();
+        profile.repo_id = "real".to_string();
+        profile.local_path = repo.to_string_lossy().to_string();
+        profile.artifact_root = tmp.path().to_string_lossy().to_string();
+        profile.default_target_branch = "main".to_string();
+
+        let mut profiles = HashMap::new();
+        profiles.insert("real".to_string(), profile);
+
+        let cfg = GahConfig {
+            context: Default::default(),
+            defaults: Defaults {
+                current_manager: None,
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: worktree_base.to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: RoutingPolicy::default(),
+            },
+            profiles,
+        };
+
+        // Snapshot has two merge requests: one on conflict-branch, one on clean-branch
+        let mut snapshot = empty_snapshot();
+        snapshot.profile.local_path = repo.to_string_lossy().to_string();
+        snapshot.merge_requests = vec![
+            SyncMrJson {
+                profile: None,
+                branch: "conflict-branch-wt".to_string(),
+                work_id: Some("TICKET-229".to_string()),
+                id: None,
+                url: Some("url1".to_string()),
+                state: None,
+                draft: false,
+                merge_status: None,
+                merged: false,
+                ci_passed: false,
+                title: Some("Conflict branch MR".to_string()),
+                merged_at: None,
+                effective_backend: None,
+                effective_model: None,
+                review_verdict: None,
+                ci_pending: false,
+                classification: "NEEDS_FIX".to_string(),
+                recommended_action: RecommendedAction::ReuseBranch,
+            },
+            SyncMrJson {
+                profile: None,
+                branch: "z-clean-branch".to_string(),
+                work_id: Some("TICKET-230".to_string()),
+                id: None,
+                url: Some("url2".to_string()),
+                state: None,
+                draft: false,
+                merge_status: None,
+                merged: false,
+                ci_passed: false,
+                title: Some("Z-Clean branch MR".to_string()),
+                merged_at: None,
+                effective_backend: None,
+                effective_model: None,
+                review_verdict: None,
+                ci_pending: false,
+                classification: "NEEDS_FIX".to_string(),
+                recommended_action: RecommendedAction::ReuseBranch,
+            },
+        ];
+
+        let history = Vec::new();
+        let mut skipped_work_ids = std::collections::HashSet::new();
+
+        // When we resolve the action, it should skip the conflict-branch and pick z-clean-branch!
+        let action = resolve_action_with_filters(
+            &cfg,
+            "real",
+            &mut snapshot,
+            &history,
+            &mut skipped_work_ids,
+        )
+        .unwrap();
+
+        assert_eq!(action.work_id(), Some("TICKET-230"));
+        assert!(skipped_work_ids.contains("TICKET-229"));
+
+        // Clean up worktrees
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "-f", wt_path.to_str().unwrap()])
+            .current_dir(&repo)
+            .output();
     }
 }
