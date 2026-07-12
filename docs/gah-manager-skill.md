@@ -56,6 +56,11 @@ Requires `docs/MANAGER_MEMORY.md` to exist in the target repo (hard failure
 otherwise). Writes validated, deduped tickets to `docs/tickets/TICKET-NNN-<slug>.md`.
 
 ### Fix / improve mode — implementation
+
+Worker prompts use the committed, bounded `docs/PROJECT_BRIEF.md` plus a live
+task pack derived from the assigned ticket or issue. Do not put live controller
+state, retry history, or unrelated backlog into the project brief; that belongs
+in `MANAGER_MEMORY.md` for PM/orchestration only.
 ```bash
 gah dispatch --profile <name> --mode fix --target docs/tickets/TICKET-NNN-<slug>.md --retries 2
 ```

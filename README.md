@@ -308,6 +308,12 @@ PM mode with a target now injects preflight context before the manager runs:
 
 Missing `docs/MANAGER_MEMORY.md` is a hard failure for PM decomposition.
 
+Implementation, fix, and experiment workers instead receive the bounded
+`docs/PROJECT_BRIEF.md` and a task-specific live task pack. This deliberately
+keeps mutable manager state and unrelated backlog out of worker prompts; the
+written `context-built.json` artifact records every prompt section and its
+estimated token size.
+
 With a target, PM mode now asks the manager for structured JSON, validates it, dedupes it against existing tickets/open MRs/recent merged MRs, assigns ticket IDs, and then writes the ticket markdown files itself.
 
 When `improve` or `fix` targets a ticket markdown file, GAH also reads ticket metadata such as difficulty, risk, recommended backend/model, affected files, and verification commands before routing the worker.

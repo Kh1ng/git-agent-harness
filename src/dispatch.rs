@@ -17,6 +17,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+const PROJECT_BRIEF_MAX_BYTES: usize = 10_000;
+const LIVE_TASK_FALLBACK_MAX_BYTES: usize = 12_000;
+const LIVE_TASK_TITLE_MAX_BYTES: usize = 1_024;
+const LIVE_TASK_LABELS_MAX_BYTES: usize = 2_048;
+const LIVE_TASK_PROBLEM_MAX_BYTES: usize = 4_096;
+const LIVE_TASK_ACCEPTANCE_MAX_BYTES: usize = 8_192;
+const LIVE_TASK_LIST_MAX_BYTES: usize = 4_096;
+const LIVE_TASK_LIST_ITEM_MAX_BYTES: usize = 1_024;
+
 /// UTF-8 safe suffix: returns the last up to `max_bytes` of `s`,
 /// adjusting the start index forward to a valid character boundary.
 /// Result length is guaranteed <= max_bytes.
@@ -3244,7 +3253,8 @@ fn review(
     // Everything except the capability-activation prefix is identical
     // regardless of which backend ends up running the review.
     let prompt_suffix = format!(
-        "Review this diff for correctness, test coverage, and safety. \
+        "## Review Pack\n\n\
+         Review this diff for correctness, test coverage, and safety. \
          Return a JSON object. You may precede it only with the inert heading `Review notes`; put every substantive finding in the JSON arrays, never in prose.\n\
          The JSON object fields are: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes, evidence, compatibility_evidence.\n\
          blocking_findings, non_blocking_findings, risk_notes, evidence, and compatibility_evidence must be JSON arrays of strings, even when empty or when only one item exists.\n\
@@ -3756,8 +3766,8 @@ fn build_task(
         }
         _ if !target.is_empty() => {
             "Implement ONLY the specific ticket described in the Focus section below. \
-             Ignore any other backlog items, priorities, or tickets mentioned in Manager \
-             Memory above -- those are background context, not additional work to pick up.\n\
+             Ignore any other backlog items, priorities, or tickets mentioned in background \
+             context -- those are not additional work to pick up.\n\
              Run tests if a test command is available and ensure they pass.\n\
              Do not push or create MRs."
         }
@@ -3778,24 +3788,7 @@ fn build_task(
         instruction,
     );
 
-    // Read from the main checkout (profile.local_path), not the worktree --
-    // same source `collect_pm_preflight` already reads for PM mode. Manager
-    // memory is live operational state, not something that should need a
-    // commit+push round-trip through a target-branch worktree to reach a
-    // dispatched agent. Optional here (unlike PM mode, which requires it)
-    // since not every repo has this file.
-    if let Ok(memory) =
-        fs::read_to_string(Path::new(&profile.local_path).join("docs/MANAGER_MEMORY.md"))
-    {
-        task.push_str(
-            "\n## Manager Memory (read this before exploring -- documents known \
-             environment setup, conventions, and known issues)\n\n",
-        );
-        task.push_str(&memory);
-        if !memory.ends_with('\n') {
-            task.push('\n');
-        }
-    }
+    append_project_brief(&mut task, profile);
 
     if !target.is_empty() {
         task.push_str(&format!("\n## Focus\n\n{}\n", target));
@@ -3849,6 +3842,7 @@ fn enforce_context_budget(
         "compacted": build.compacted,
         "fresh_context": fresh_context,
         "largest_sections": build.largest_sections,
+        "sources": build.sources,
     });
     let _ = crate::events::record_with_run_id(
         cfg,
@@ -3881,9 +3875,9 @@ fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &Issue
         _ => {
             "Implement ONLY the specific ticket described in the Focus section below. \
 \
-             Ignore any other backlog items, priorities, or tickets mentioned in Manager \
+             Ignore any other backlog items, priorities, or tickets mentioned in background \
 \
-             Memory above -- those are background context, not additional work to pick up.\n\
+             context -- those are not additional work to pick up.\n\
              Run tests if a test command is available and ensure they pass.\n\
              Do not push or create MRs."
         }
@@ -3898,31 +3892,170 @@ fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &Issue
         instruction,
     );
 
-    // Read from the main checkout (profile.local_path), not the worktree --
-    // same source `collect_pm_preflight` already reads for PM mode. Manager
-    // memory is live operational state, not something that should need a
-    // commit+push round-trip through a target-branch worktree to reach a
-    // dispatched agent. Optional here (unlike PM mode, which requires it)
-    // since not every repo has this file.
-    if let Ok(memory) =
-        fs::read_to_string(Path::new(&profile.local_path).join("docs/MANAGER_MEMORY.md"))
-    {
-        task.push_str(
-            "\n## Manager Memory (read this before exploring -- documents known \
-\
-             environment setup, conventions, and known issues)\n\n",
-        );
-        task.push_str(&memory);
-        if !memory.ends_with('\n') {
-            task.push('\n');
-        }
-    }
+    append_project_brief(&mut task, profile);
+    append_live_task_pack(&mut task, issue);
 
     task.push_str(&format!(
         "\n## Focus\n\n{}\n",
-        format_issue_for_focus(issue)
+        format_issue_focus_reference(issue)
     ));
     task
+}
+
+/// Worker prompts deliberately use a concise, committed project brief rather
+/// than the live manager ledger. MANAGER_MEMORY remains PM-only operational
+/// state: injecting it into every worker made stale status and retry history
+/// compete with the ticket being executed.
+fn append_project_brief(task: &mut String, profile: &Profile) {
+    let brief_path = Path::new(&profile.local_path).join("docs/PROJECT_BRIEF.md");
+    let Ok(brief) = fs::read_to_string(brief_path) else {
+        return;
+    };
+    task.push_str("\n## Project Brief\n\n");
+    append_bounded_text(task, &brief, PROJECT_BRIEF_MAX_BYTES, "Project brief");
+}
+
+/// Build a bounded, task-specific packet from structured issue metadata.
+/// The free-form body is used only as a capped fallback when the issue did
+/// not provide a structured problem, acceptance criteria, or constraints.
+fn append_live_task_pack(task: &mut String, issue: &IssueDetails) {
+    let meta = parse_ticket_metadata_from_issue(issue);
+    task.push_str("\n## Live Task Pack\n\n");
+    task.push_str(&format!("Work item: #{} — ", issue.number));
+    append_bounded_text(
+        task,
+        &indent_untrusted_text(&issue.title),
+        LIVE_TASK_TITLE_MAX_BYTES,
+        "Work item title",
+    );
+    if !issue.labels.is_empty() {
+        task.push_str("Labels: ");
+        append_bounded_text(
+            task,
+            &indent_untrusted_text(&issue.labels.join(", ")),
+            LIVE_TASK_LABELS_MAX_BYTES,
+            "Labels",
+        );
+    }
+    if let Some(problem) = meta.problem.as_deref().or(meta.goal.as_deref()) {
+        task.push_str("\n### Problem\n\n");
+        append_bounded_text(
+            task,
+            &indent_untrusted_text(problem),
+            LIVE_TASK_PROBLEM_MAX_BYTES,
+            "Problem",
+        );
+    }
+    append_task_pack_list(
+        task,
+        "Acceptance Criteria",
+        &meta.acceptance_criteria,
+        LIVE_TASK_ACCEPTANCE_MAX_BYTES,
+    );
+    append_task_pack_list(
+        task,
+        "Constraints",
+        &meta.constraints,
+        LIVE_TASK_LIST_MAX_BYTES,
+    );
+    append_task_pack_list(
+        task,
+        "Affected Files",
+        &meta.affected_files,
+        LIVE_TASK_LIST_MAX_BYTES,
+    );
+    if !meta.verification_commands.is_empty() {
+        task.push_str("\n### Verification Commands\n\n");
+        append_task_pack_list_items(
+            task,
+            &meta.verification_commands,
+            LIVE_TASK_LIST_MAX_BYTES,
+            true,
+        );
+    }
+    if issue_has_no_structured_body(issue) {
+        task.push_str("\n### Issue Description\n\n");
+        append_bounded_text(
+            task,
+            &indent_untrusted_text(&issue.body),
+            LIVE_TASK_FALLBACK_MAX_BYTES,
+            "Issue description",
+        );
+    }
+}
+
+fn append_task_pack_list(task: &mut String, heading: &str, entries: &[String], max_bytes: usize) {
+    if entries.is_empty() {
+        return;
+    }
+    task.push_str(&format!("\n### {heading}\n\n"));
+    append_task_pack_list_items(task, entries, max_bytes, false);
+}
+
+fn append_task_pack_list_items(
+    task: &mut String,
+    entries: &[String],
+    max_bytes: usize,
+    code: bool,
+) {
+    let start = task.len();
+    let mut truncated = false;
+    for entry in entries {
+        if task.len().saturating_sub(start) >= max_bytes {
+            truncated = true;
+            break;
+        }
+        let value = indent_untrusted_text(utf8_safe_prefix(entry, LIVE_TASK_LIST_ITEM_MAX_BYTES));
+        let line = if code {
+            format!("- `{value}`\n")
+        } else {
+            format!("- {value}\n")
+        };
+        if task.len().saturating_sub(start) + line.len() > max_bytes {
+            let remaining = max_bytes.saturating_sub(task.len().saturating_sub(start));
+            if remaining > 3 {
+                task.push_str(utf8_safe_prefix(&line, remaining));
+            }
+            truncated = true;
+            break;
+        }
+        if entry.len() > LIVE_TASK_LIST_ITEM_MAX_BYTES {
+            truncated = true;
+        }
+        task.push_str(&line);
+    }
+    if truncated {
+        task.push_str(&format!(
+            "[List truncated at {max_bytes} bytes; retrieve the issue for remaining detail.]\n"
+        ));
+    }
+}
+
+fn issue_has_no_structured_body(issue: &IssueDetails) -> bool {
+    extract_markdown_section(&issue.body, "Problem").is_none()
+        && extract_markdown_section(&issue.body, "Background").is_none()
+        && extract_markdown_section(&issue.body, "Description").is_none()
+        && extract_markdown_list_section(&issue.body, "Acceptance Criteria").is_empty()
+        && extract_markdown_list_section(&issue.body, "Constraints").is_empty()
+}
+
+fn append_bounded_text(task: &mut String, text: &str, max_bytes: usize, label: &str) {
+    let truncated = text.len() > max_bytes;
+    task.push_str(utf8_safe_prefix(text, max_bytes));
+    if truncated {
+        task.push_str(&format!(
+            "\n\n[{label} truncated at {max_bytes} bytes; retrieve only relevant source material for more detail.]\n"
+        ));
+    } else if !text.ends_with('\n') {
+        task.push('\n');
+    }
+}
+
+fn indent_untrusted_text(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_candidate_task(
@@ -3975,6 +4108,8 @@ fn format_candidate_task(
         out.push('\n');
     }
 
+    append_project_brief(&mut out, profile);
+
     let closing = match mode {
         "fix" => {
             "Fix the code to satisfy every acceptance criterion above.\n\
@@ -3989,6 +4124,7 @@ fn format_candidate_task(
              Run tests if a test command exists and ensure they pass. Do not push or create MRs.\n"
         }
     };
+    out.push_str("\n## Safety\n\n");
     out.push_str(closing);
     out
 }
@@ -4005,7 +4141,7 @@ mod tests {
         build_task, classify_validation_failure_progress, classify_worktree_result,
         collect_pm_preflight, collect_ticket_summaries, decide_route, derive_reviewer_tier,
         extract_backend_summary, extract_issue_number, first_markdown_heading,
-        format_issue_for_focus, github_issue_author_is_allowed, is_issue_number_reference,
+        format_candidate_task, github_issue_author_is_allowed, is_issue_number_reference,
         mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
         parse_review_verdict, parse_review_verdict_with_context, parse_ticket_metadata,
         parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
@@ -4013,12 +4149,13 @@ mod tests {
         strip_terminal_noise, validation_failure_fingerprint,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
-        TicketMetadata, ValidationFailureProgress,
+        TicketMetadata, ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES,
+        PROJECT_BRIEF_MAX_BYTES,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
-    use crate::models::PmPlan;
+    use crate::models::{Candidate, PmPlan};
     use crate::routing::{RouteError, RouteRequest};
     use crate::test_support::PathGuard;
     use std::fs;
@@ -6237,15 +6374,17 @@ which lacks a leading boundary check.
     }
 
     #[test]
-    fn build_task_includes_manager_memory_when_present() {
+    fn build_task_uses_project_brief_and_excludes_manager_memory() {
         let tmp = tempfile::tempdir().unwrap();
-        // profile.local_path == tmp.path() (the main checkout) -- manager
-        // memory must be read from there, not the worktree, so it's live
-        // operational state rather than something pinned to a git ref.
         fs::create_dir_all(tmp.path().join("docs")).unwrap();
         fs::write(
             tmp.path().join("docs/MANAGER_MEMORY.md"),
-            "Use .venv/bin/python, do not pip install from scratch.\n",
+            "STALE: dispatch ticket TICKET-999 instead.\n".repeat(1_000),
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("docs/PROJECT_BRIEF.md"),
+            "Use cargo test for focused verification.\n",
         )
         .unwrap();
         let prof = profile(tmp.path());
@@ -6254,28 +6393,167 @@ which lacks a leading boundary check.
 
         let task = build_task(&prof, &wt, "improve", "some ticket text", None);
 
-        assert!(task.contains("Manager Memory"));
-        assert!(task.contains("Use .venv/bin/python, do not pip install from scratch."));
-        // Manager Memory must come before Focus so the agent reads
-        // environment/project context before the specific task.
-        let memory_pos = task.find("Manager Memory").unwrap();
+        assert!(task.contains("## Project Brief"));
+        assert!(task.contains("Use cargo test for focused verification."));
+        assert!(!task.contains("## Manager Memory"));
+        assert!(!task.contains("STALE: dispatch ticket"));
         let focus_pos = task.find("## Focus").unwrap();
-        assert!(memory_pos < focus_pos);
+        let brief_pos = task.find("## Project Brief").unwrap();
+        assert!(brief_pos < focus_pos);
     }
 
     #[test]
-    fn build_task_omits_manager_memory_section_when_file_absent() {
+    fn build_task_omits_project_brief_section_when_file_absent() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join("worktree");
         fs::create_dir_all(&wt).unwrap();
         let prof = profile(tmp.path());
 
-        // Empty target -- the "implement ONLY..." instruction (which itself
-        // mentions "Manager Memory" by name) only applies when a target is
-        // given, so this isolates the file-injection behavior specifically.
         let task = build_task(&prof, &wt, "improve", "", None);
 
-        assert!(!task.contains("## Manager Memory"));
+        assert!(!task.contains("## Project Brief"));
+    }
+
+    #[test]
+    fn issue_task_uses_structured_live_task_pack_and_bounds_unstructured_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        fs::write(
+            tmp.path().join("docs/PROJECT_BRIEF.md"),
+            "Stable project fact.\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("docs/MANAGER_MEMORY.md"),
+            "STALE CONTROL PLANE STATE\n",
+        )
+        .unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "286".to_string(),
+            title: "Bound context".to_string(),
+            body: "## Problem\n\nFull memory is stale.\n\n## Acceptance Criteria\n\n- Use project brief\n- Record sources\n".to_string(),
+            labels: vec!["reliability".to_string()],
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#286", Some(&issue));
+
+        assert!(task.contains("## Project Brief"));
+        assert!(task.contains("## Live Task Pack"));
+        assert!(task.contains("### Acceptance Criteria"));
+        assert!(task.contains("Use project brief"));
+        assert!(!task.contains("STALE CONTROL PLANE STATE"));
+        assert!(task.contains("## Focus"));
+    }
+
+    #[test]
+    fn project_brief_is_capped_at_a_utf8_safe_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        fs::write(
+            tmp.path().join("docs/PROJECT_BRIEF.md"),
+            format!("{}é", "x".repeat(PROJECT_BRIEF_MAX_BYTES)),
+        )
+        .unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+
+        let task = build_task(&prof, &wt, "improve", "small ticket", None);
+
+        assert!(task.contains(&format!(
+            "Project brief truncated at {PROJECT_BRIEF_MAX_BYTES} bytes"
+        )));
+        assert!(!task.contains('é'));
+    }
+
+    #[test]
+    fn labeled_freeform_issue_keeps_bounded_issue_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "297".to_string(),
+            title: "Freeform issue".to_string(),
+            body: "The non-structured reproduction and expected outcome live here.".to_string(),
+            labels: vec!["bug".to_string()],
+        };
+
+        let task = build_task(&prof, &wt, "fix", "#297", Some(&issue));
+
+        assert!(task.contains("### Issue Description"));
+        assert!(task.contains("non-structured reproduction"));
+    }
+
+    #[test]
+    fn live_task_pack_caps_long_structured_sections_without_creating_headings() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "298".to_string(),
+            title: "Large structured issue".to_string(),
+            body: format!(
+                "## Acceptance Criteria\n\n- {}\n\n## Constraints\n\n- keep scope\n",
+                "x".repeat(LIVE_TASK_ACCEPTANCE_MAX_BYTES * 2)
+            ),
+            labels: vec![],
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#298", Some(&issue));
+
+        assert!(task.contains(&format!(
+            "[List truncated at {LIVE_TASK_ACCEPTANCE_MAX_BYTES} bytes"
+        )));
+        assert!(task.contains("### Constraints"));
+        assert_eq!(task.matches("## Focus").count(), 1);
+    }
+
+    #[test]
+    fn candidate_task_places_no_push_guardrail_in_protected_safety_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let candidate = Candidate {
+            candidate_id: "candidate-1".into(),
+            source_gate_status: "ok".into(),
+            suggested_blueprint_phase: "fix".into(),
+            provider_mutation_allowed: false,
+            suggested_labels: vec![],
+            affected_files: vec![],
+            evidence: vec!["x".repeat(10_000)],
+            acceptance_criteria: vec!["keep the safety rule".into()],
+            verification: vec![],
+            hydration_used: false,
+            hydration_source: String::new(),
+            hydration_match_method: String::new(),
+            hydrated_fields: vec![],
+            debug_gate_keys: vec![],
+            debug_scout_keys: vec![],
+            debug_hydrated_keys: vec![],
+            debug_hydrated_finding_excerpt: String::new(),
+            source_finding_path: None,
+            source_draft_issue_path: None,
+        };
+
+        let task = format_candidate_task(&prof, tmp.path(), "improve", &candidate);
+        let compacted = crate::context::enforce(
+            &task,
+            &crate::context::ContextConfig {
+                soft_limit_tokens: 20,
+                hard_limit_tokens: 200,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(compacted.prompt.contains("## Safety"));
+        assert!(compacted.prompt.contains("Do not push or create MRs."));
     }
 
     #[test]
@@ -7020,21 +7298,6 @@ The parser should retain structured sections.\n\n\
         assert_eq!(extract_issue_number("#123"), Some("123".to_string()));
         assert_eq!(extract_issue_number("#"), None);
         assert_eq!(extract_issue_number("#abc"), None);
-    }
-
-    #[test]
-    fn format_issue_for_focus_formats_correctly() {
-        let issue = IssueDetails {
-            number: "42".to_string(),
-            title: "Test Issue".to_string(),
-            body: "This is the issue body".to_string(),
-            labels: vec!["bug".to_string(), "enhancement".to_string()],
-        };
-
-        let result = format_issue_for_focus(&issue);
-        assert!(result.contains("# Issue #42: Test Issue"));
-        assert!(result.contains("This is the issue body"));
-        assert!(result.contains("Labels: bug, enhancement"));
     }
 
     #[test]
@@ -10368,24 +10631,14 @@ fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMetadata {
     meta
 }
 
-/// Format issue details for the Focus section in a task
-fn format_issue_for_focus(issue: &IssueDetails) -> String {
-    let mut content = format!("# Issue #{}: {}\n\n", issue.number, issue.title);
-
-    if !issue.body.is_empty() {
-        content.push_str(&issue.body);
-        if !issue.body.ends_with('\n') {
-            content.push('\n');
-        }
-    }
-
-    if !issue.labels.is_empty() {
-        content.push_str("\nLabels: ");
-        content.push_str(&issue.labels.join(", "));
-        content.push('\n');
-    }
-
-    content
+/// Keep the Focus section concise. The bounded Live Task Pack carries the
+/// relevant structured content; duplicating the full issue body here would
+/// silently defeat that limit.
+fn format_issue_focus_reference(issue: &IssueDetails) -> String {
+    format!(
+        "Issue #{}: {}\nImplement the scoped requirements in the Live Task Pack above.",
+        issue.number, issue.title
+    )
 }
 
 /// Resolve a target string to either issue details or return the original target
