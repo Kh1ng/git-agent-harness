@@ -4005,11 +4005,12 @@ mod tests {
         build_task, classify_validation_failure_progress, classify_worktree_result,
         collect_pm_preflight, collect_ticket_summaries, decide_route, derive_reviewer_tier,
         extract_backend_summary, extract_issue_number, first_markdown_heading,
-        format_issue_for_focus, is_issue_number_reference, mark_backend_unavailable_from_output_at,
-        next_ticket_id, parse_pm_plan, parse_review_verdict, parse_review_verdict_with_context,
-        parse_ticket_metadata, parse_ticket_metadata_from_issue, render_review_comment,
-        review_escalation_reason, review_labels, review_preflight, review_usage, run_backend,
-        scan_available_tickets, strip_terminal_noise, validation_failure_fingerprint,
+        format_issue_for_focus, github_issue_author_is_allowed, is_issue_number_reference,
+        mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
+        parse_review_verdict, parse_review_verdict_with_context, parse_ticket_metadata,
+        parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
+        review_labels, review_preflight, review_usage, run_backend, scan_available_tickets,
+        strip_terminal_noise, validation_failure_fingerprint,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
         TicketMetadata, ValidationFailureProgress,
@@ -5127,7 +5128,7 @@ which lacks a leading boundary check.
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
 
-        let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\nRecommended model: Gemini 3.5 Flash (Medium)\n","labels":[]}]"#;
+        let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\nRecommended model: Gemini 3.5 Flash (Medium)\n","labels":[],"author":{"login":"owner"}}]"#;
         let gh_path = bin_dir.join("gh");
         // Uses `printf '%s\n'` rather than `echo` -- dash's `echo` builtin
         // (the usual `/bin/sh` on Debian/Ubuntu) interprets `\n` inside a
@@ -5187,6 +5188,30 @@ which lacks a leading boundary check.
     }
 
     #[test]
+    fn github_issue_intake_author_allowlist_is_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut prof = profile(tmp.path());
+        prof.repo = "Kh1ng/git-agent-harness".into();
+        let owner = serde_json::json!({"author": {"login": "kh1ng"}});
+        let outsider = serde_json::json!({"author": {"login": "untrusted"}});
+        let missing = serde_json::json!({});
+
+        // No explicit configuration is still safe for a personal repo: only
+        // the repository owner is trusted.
+        assert!(github_issue_author_is_allowed(&prof, &owner));
+        assert!(!github_issue_author_is_allowed(&prof, &outsider));
+        assert!(!github_issue_author_is_allowed(&prof, &missing));
+
+        prof.publishing.github_issue_author_allowlist = Some(vec!["teammate".into()]);
+        let teammate = serde_json::json!({"author": {"login": "TEAMMATE"}});
+        assert!(github_issue_author_is_allowed(&prof, &teammate));
+        assert!(!github_issue_author_is_allowed(&prof, &owner));
+
+        prof.publishing.github_issue_author_allowlist = Some(vec![]);
+        assert!(!github_issue_author_is_allowed(&prof, &teammate));
+    }
+
+    #[test]
     fn scan_available_tickets_excludes_issue_already_archived_locally() {
         // Regression: migrating docs/tickets/*.md to native issues (#46)
         // doesn't close the issue when the local file is later archived to
@@ -5197,7 +5222,7 @@ which lacks a leading boundary check.
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
 
-        let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\n","labels":[]}]"#;
+        let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\n","labels":[],"author":{"login":"owner"}}]"#;
         let gh_path = bin_dir.join("gh");
         fs::write(
             &gh_path,
@@ -9962,7 +9987,7 @@ fn fetch_github_issue(profile: &Profile, issue_number: &str) -> Result<IssueDeta
         .arg("--repo")
         .arg(&profile.repo)
         .arg("--json")
-        .arg("title,body,labels")
+        .arg("title,body,labels,author")
         .output()
         .context("gh issue view")?;
 
@@ -9975,6 +10000,12 @@ fn fetch_github_issue(profile: &Profile, issue_number: &str) -> Result<IssueDeta
 
     let resp: serde_json::Value =
         serde_json::from_slice(&out.stdout).context("parsing GitHub issue response")?;
+    if !github_issue_author_is_allowed(profile, &resp) {
+        anyhow::bail!(
+            "GitHub issue #{} author is not allowed by this profile's github_issue_author_allowlist",
+            issue_number
+        );
+    }
 
     let number = resp["number"]
         .as_i64()
@@ -10075,7 +10106,7 @@ fn list_open_github_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
         .arg("--state")
         .arg("open")
         .arg("--json")
-        .arg("number,title,body,labels")
+        .arg("number,title,body,labels,author")
         .arg("--limit")
         .arg("1000")
         .output()
@@ -10093,6 +10124,7 @@ fn list_open_github_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
 
     Ok(items
         .into_iter()
+        .filter(|resp| github_issue_author_is_allowed(profile, resp))
         .map(|resp| {
             let number = resp["number"]
                 .as_i64()
@@ -10117,6 +10149,25 @@ fn list_open_github_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
             }
         })
         .collect())
+}
+
+/// GitHub issue content is prompt input. Only explicitly trusted authors may
+/// reach worker dispatch. Profiles default to their repository owner so a
+/// personal repository is safe without extra configuration; an explicit empty
+/// allowlist intentionally disables GitHub issue intake altogether.
+fn github_issue_author_is_allowed(profile: &Profile, response: &serde_json::Value) -> bool {
+    let Some(author) = response["author"]["login"].as_str() else {
+        return false;
+    };
+    match profile.publishing.github_issue_author_allowlist.as_deref() {
+        Some(allowlist) => allowlist
+            .iter()
+            .any(|login| login.eq_ignore_ascii_case(author)),
+        None => profile
+            .repo
+            .split_once('/')
+            .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(author)),
+    }
 }
 
 /// List open issues from GitLab using glab CLI. Paginates until a
