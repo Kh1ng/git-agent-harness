@@ -74,6 +74,10 @@ mod telemetry_tests {
 
     #[test]
     fn test_schema_version_in_record() {
+        assert_eq!(
+            SCHEMA_VERSION, 4,
+            "review evidence-gate attribution requires telemetry export schema version 4"
+        );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
             record_id: "test-123".to_string(),
@@ -166,6 +170,7 @@ mod telemetry_tests {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            review_gate_reason: None,
             commit_attempted: true,
             commit_created: true,
             push_attempted: true,
@@ -203,6 +208,21 @@ mod telemetry_tests {
         // Check that the work_id is preserved
         assert_eq!(parsed["data"]["work_id"], "work-123");
         assert_eq!(parsed["data"]["mode"], "fix");
+
+        // Historical exports predate the optional gate-reason field. Tagged
+        // enum deserialization must keep accepting them after schema v4.
+        let mut legacy = serde_json::to_value(&exported).unwrap();
+        legacy["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("review_gate_reason");
+        let restored: ExportedTelemetryRecord = serde_json::from_value(legacy).unwrap();
+        match restored {
+            ExportedTelemetryRecord::TaskOutcome(record) => {
+                assert_eq!(record.review_gate_reason, None)
+            }
+            other => panic!("expected task outcome, got {other:?}"),
+        }
     }
 
     #[test]
@@ -589,6 +609,7 @@ mod telemetry_tests {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            review_gate_reason: None,
             commit_attempted: true,
             commit_created: true,
             push_attempted: true,

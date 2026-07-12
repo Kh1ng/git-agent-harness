@@ -312,11 +312,18 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                         {mr.merged_at ? (formatAge(mr.merged_at) ?? formatLocalTime(mr.merged_at) ?? '—') : <span className="text-muted">—</span>}
                       </td>
                       <td className="text-xs whitespace-nowrap">
-                        {mr.review_verdict ? (
-                          <StatusBadge
-                            tone={mr.review_verdict.toLowerCase().includes('approve') ? 'good' : 'warning'}
-                            label={mr.review_verdict}
-                          />
+                        {mr.review_verdict || mr.review_gate_reason ? (
+                          <div className="space-y-1">
+                            <StatusBadge
+                              tone={mr.review_verdict?.toLowerCase().includes('approve') ? 'good' : 'warning'}
+                              label={mr.review_verdict ?? 'HUMAN_REVIEW'}
+                            />
+                            {mr.review_gate_reason && (
+                              <p className="max-w-48 truncate text-[10px] text-warning" title={mr.review_gate_reason}>
+                                {mr.review_gate_reason}
+                              </p>
+                            )}
+                          </div>
                         ) : (
                           <span className="text-muted">—</span>
                         )}

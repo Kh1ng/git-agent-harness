@@ -286,6 +286,7 @@ pub fn extract_task_outcome_records(
         review_confidence: entry.review_confidence.clone(),
         reviewer_backend: entry.reviewer_backend.clone(),
         reviewer_model: entry.reviewer_model.clone(),
+        review_gate_reason: entry.review_gate_reason.clone(),
         commit_attempted: entry.commit_attempted,
         commit_created: entry.commit_created,
         push_attempted: entry.push_attempted,

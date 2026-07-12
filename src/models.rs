@@ -239,6 +239,7 @@ pub struct PmPlan {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReviewVerdict {
+    #[serde(deserialize_with = "deserialize_review_verdict")]
     pub verdict: String,
     #[serde(deserialize_with = "deserialize_flexible_string")]
     pub confidence: String,
@@ -249,6 +250,22 @@ pub struct ReviewVerdict {
     pub non_blocking_findings: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_list")]
     pub risk_notes: Vec<String>,
+    /// Concrete, reviewable facts supporting an approval (for example a test
+    /// name/result, a changed file/line, or an explicit compatibility check).
+    /// This is supplied by the reviewer; an empty list makes an APPROVE
+    /// non-mergeable in dispatch's evidence gate.
+    #[serde(default, deserialize_with = "deserialize_string_list")]
+    pub evidence: Vec<String>,
+    /// Required when the review identifies a schema/API/persistence contract
+    /// change but still recommends approval. It must state the versioned
+    /// compatibility or migration evidence that makes the change safe.
+    #[serde(default, deserialize_with = "deserialize_string_list")]
+    pub compatibility_evidence: Vec<String>,
+    /// Set only by GAH's deterministic evidence gate, never trusted from the
+    /// reviewer's JSON. Persisted so operators can see why an apparent
+    /// approval was made non-mergeable.
+    #[serde(default)]
+    pub safety_gate_reason: Option<String>,
     #[serde(default)]
     pub reviewer_backend: Option<String>,
     #[serde(default)]
@@ -307,6 +324,16 @@ where
     }
 }
 
+/// Verdicts are a closed protocol value. Normalize harmless model casing and
+/// whitespace before dispatch applies its deterministic safety policy.
+fn deserialize_review_verdict<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let verdict = deserialize_flexible_string(deserializer)?;
+    Ok(verdict.trim().to_ascii_uppercase())
+}
+
 fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -355,6 +382,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verdict.confidence, "0.78");
+    }
+
+    #[test]
+    fn review_verdict_normalizes_case_and_whitespace() {
+        let verdict: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":" Approve ","confidence":"high","human_required":false}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict.verdict, "APPROVE");
     }
 
     #[test]
