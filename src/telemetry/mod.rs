@@ -14,8 +14,11 @@ pub mod records;
 // pub use exporter::{ExportFormat, TelemetryConfig, TelemetryExporter, telemetry_repo_exists};
 
 use crate::config::GahConfig;
-use crate::ledger::LedgerEntry;
+use crate::ledger::{read_entries, LedgerEntry, LedgerUsage};
 use anyhow::Result;
+use serde::Serialize;
+use std::collections::BTreeMap;
+use time::OffsetDateTime;
 
 /// GroupBy options for telemetry export (matching existing ledger summary)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +26,78 @@ pub enum GroupBy {
     None,
     Backend,
     Model,
+}
+
+/// Aggregation dimensions for telemetry reports
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregationDimension {
+    Project,
+    Ticket,
+    ExecutionType,
+    Backend,
+    BackendInstance,
+    Provider,
+    Model,
+    Account,
+    Date,
+    DateRange,
+}
+
+/// Telemetry aggregation report structure
+#[derive(Debug, Serialize, Clone)]
+pub struct TelemetryReport {
+    pub report_type: String,
+    pub generated_at: String,
+    pub time_range: Option<String>,
+    pub profile: Option<String>,
+    pub total_entries: usize,
+    pub total_attempts: usize,
+    pub successful_attempts: usize,
+    pub failed_attempts: usize,
+    pub total_cost_usd: f64,
+    pub quota_backed_cost_usd: f64,
+    pub api_cost_usd: f64,
+    pub aggregated_data: Vec<AggregatedTelemetryData>,
+}
+
+/// Aggregated telemetry data for a specific dimension
+#[derive(Debug, Serialize, Clone)]
+pub struct AggregatedTelemetryData {
+    pub dimension_key: String,
+    pub dimension_value: String,
+    pub entries: usize,
+    pub attempts: usize,
+    pub successful_attempts: usize,
+    pub failed_attempts: usize,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub requests_count: u64,
+    pub estimated_cost_usd: f64,
+    pub actual_cost_usd: f64,
+    pub quota_backed_cost_usd: f64,
+    pub api_cost_usd: f64,
+    pub average_cost_per_attempt: f64,
+    pub success_rate: f64,
+    pub failure_details: BTreeMap<String, usize>,
+}
+
+/// Telemetry aggregation parameters
+#[derive(Debug, Clone)]
+pub struct AggregationParams {
+    pub dimensions: Vec<AggregationDimension>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub profile: Option<String>,
+    pub include_failed_attempts: bool,
+    pub include_retried_attempts: bool,
+    pub project: Option<String>,
+    pub ticket: Option<String>,
+    pub execution_type: Option<String>,
+    pub backend_instance: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub account: Option<String>,
 }
 
 impl std::str::FromStr for GroupBy {
@@ -36,6 +111,736 @@ impl std::str::FromStr for GroupBy {
             _ => Err(format!("Unknown group by option: {}", s)),
         }
     }
+}
+
+impl std::str::FromStr for AggregationDimension {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "project" => Ok(AggregationDimension::Project),
+            "ticket" => Ok(AggregationDimension::Ticket),
+            "executiontype" | "execution_type" => Ok(AggregationDimension::ExecutionType),
+            "backend" => Ok(AggregationDimension::Backend),
+            "backendinstance" | "backend_instance" => Ok(AggregationDimension::BackendInstance),
+            "provider" => Ok(AggregationDimension::Provider),
+            "model" => Ok(AggregationDimension::Model),
+            "account" => Ok(AggregationDimension::Account),
+            "date" => Ok(AggregationDimension::Date),
+            "daterange" | "date_range" => Ok(AggregationDimension::DateRange),
+            _ => Err(format!("Unknown aggregation dimension: {}", s)),
+        }
+    }
+}
+
+/// Generate telemetry aggregation report
+pub fn generate_telemetry_report(
+    cfg: &GahConfig,
+    params: AggregationParams,
+) -> Result<TelemetryReport> {
+    let entries = read_entries(cfg)?;
+
+    // Filter entries based on parameters
+    let filtered_entries = filter_entries_for_aggregation(&entries, &params)?;
+
+    if filtered_entries.is_empty() {
+        return Ok(TelemetryReport {
+            report_type: "aggregated".to_string(),
+            generated_at: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| "unknown".to_string()),
+            time_range: None,
+            profile: params.profile.clone(),
+            total_entries: 0,
+            total_attempts: 0,
+            successful_attempts: 0,
+            failed_attempts: 0,
+            total_cost_usd: 0.0,
+            quota_backed_cost_usd: 0.0,
+            api_cost_usd: 0.0,
+            aggregated_data: vec![],
+        });
+    }
+
+    // Generate aggregated data for each dimension
+    let mut aggregated_data = Vec::new();
+
+    for dimension in &params.dimensions {
+        let dimension_data = aggregate_by_dimension(&filtered_entries, *dimension, &params);
+        aggregated_data.extend(dimension_data);
+    }
+
+    // Calculate totals
+    let (
+        total_entries,
+        total_attempts,
+        successful_attempts,
+        failed_attempts,
+        total_cost,
+        quota_backed_cost,
+        api_cost,
+    ) = calculate_totals(&filtered_entries, &params);
+
+    Ok(TelemetryReport {
+        report_type: "aggregated".to_string(),
+        generated_at: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "unknown".to_string()),
+        time_range: build_time_range(&params),
+        profile: params.profile.clone(),
+        total_entries,
+        total_attempts,
+        successful_attempts,
+        failed_attempts,
+        total_cost_usd: total_cost,
+        quota_backed_cost_usd: quota_backed_cost,
+        api_cost_usd: api_cost,
+        aggregated_data,
+    })
+}
+
+/// Helper to check if a filter option matches a value
+fn matches_filter_value(filter: &Option<String>, value: &str) -> bool {
+    match filter {
+        Some(f) => f.to_lowercase() == value.to_lowercase(),
+        None => true,
+    }
+}
+
+/// Determine if the entry/attempt matches the given parameters
+fn matches_filters(
+    entry: &LedgerEntry,
+    attempt: Option<&crate::ledger::AttemptRecord>,
+    params: &AggregationParams,
+) -> bool {
+    let (proj_val, ticket_val, exec_val, instance_val, provider_val, model_val, account_val) =
+        match attempt {
+            None => (
+                entry.repo_id.clone(),
+                entry
+                    .work_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                entry
+                    .task_class
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                entry
+                    .usage
+                    .backend_instance
+                    .clone()
+                    .unwrap_or_else(|| entry.effective_backend.clone()),
+                entry
+                    .usage
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| entry.provider.clone()),
+                entry.effective_model.clone().unwrap_or_else(|| {
+                    entry
+                        .requested_model
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string())
+                }),
+                entry
+                    .usage
+                    .account_label
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ),
+            Some(att) => (
+                entry.repo_id.clone(),
+                entry
+                    .work_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                entry
+                    .task_class
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                att.usage
+                    .backend_instance
+                    .clone()
+                    .or_else(|| Some(att.backend.clone()))
+                    .unwrap_or_else(|| "unknown".to_string()),
+                att.usage
+                    .provider
+                    .clone()
+                    .or_else(|| Some(entry.provider.clone()))
+                    .unwrap_or_else(|| "unknown".to_string()),
+                att.usage
+                    .actual_model
+                    .clone()
+                    .or_else(|| att.effective_model.clone())
+                    .or_else(|| entry.effective_model.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                att.usage
+                    .account_label
+                    .clone()
+                    .or_else(|| entry.usage.account_label.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ),
+        };
+
+    matches_filter_value(&params.project, &proj_val)
+        && matches_filter_value(&params.ticket, &ticket_val)
+        && matches_filter_value(&params.execution_type, &exec_val)
+        && matches_filter_value(&params.backend_instance, &instance_val)
+        && matches_filter_value(&params.provider, &provider_val)
+        && matches_filter_value(&params.model, &model_val)
+        && matches_filter_value(&params.account, &account_val)
+}
+
+/// Filter entries for telemetry aggregation
+fn filter_entries_for_aggregation(
+    entries: &[LedgerEntry],
+    params: &AggregationParams,
+) -> Result<Vec<LedgerEntry>> {
+    let mut filtered = entries.to_vec();
+
+    // Filter by profile
+    if let Some(profile_name) = &params.profile {
+        filtered.retain(|e| e.profile == *profile_name);
+    }
+
+    // Filter by time range. An unparseable ledger timestamp has unknown date
+    // provenance and must not silently inflate a bounded cost/usage report.
+    let since_time = params.since.as_deref().map(parse_timestamp).transpose()?;
+    let until_time = params.until.as_deref().map(parse_timestamp).transpose()?;
+    if since_time.is_some() || until_time.is_some() {
+        filtered.retain(|entry| {
+            let Ok(entry_time) = OffsetDateTime::parse(
+                &entry.timestamp,
+                &time::format_description::well_known::Rfc3339,
+            ) else {
+                return false;
+            };
+            since_time.is_none_or(|since| entry_time >= since)
+                && until_time.is_none_or(|until| entry_time <= until)
+        });
+    }
+
+    // Filter by other dimensions at the entry or attempt level
+    filtered.retain(|entry| {
+        if entry.attempts.is_empty() {
+            matches_filters(entry, None, params)
+        } else {
+            entry
+                .attempts
+                .iter()
+                .any(|att| matches_filters(entry, Some(att), params))
+        }
+    });
+
+    Ok(filtered)
+}
+
+/// Parse timestamp string to OffsetDateTime
+fn parse_timestamp(timestamp_str: &str) -> Result<OffsetDateTime> {
+    use time::format_description::well_known::Rfc3339;
+
+    if let Ok(datetime) = OffsetDateTime::parse(timestamp_str, &Rfc3339) {
+        return Ok(datetime);
+    }
+
+    // Try parsing as date only
+    let date_parts: Vec<&str> = timestamp_str.split('-').collect();
+    if date_parts.len() == 3 {
+        let year = date_parts[0]
+            .parse::<i32>()
+            .map_err(|_| anyhow::anyhow!("Invalid year in timestamp: {timestamp_str}"))?;
+        let month = date_parts[1]
+            .parse::<u8>()
+            .map_err(|_| anyhow::anyhow!("Invalid month in timestamp: {timestamp_str}"))?;
+        let day = date_parts[2]
+            .parse::<u8>()
+            .map_err(|_| anyhow::anyhow!("Invalid day in timestamp: {timestamp_str}"))?;
+
+        let month_enum = time::Month::try_from(month)
+            .map_err(|_| anyhow::anyhow!("Invalid month in timestamp: {timestamp_str}"))?;
+        let date = time::Date::from_calendar_date(year, month_enum, day)?;
+        let primitive_datetime = date.with_hms_milli(0, 0, 0, 0)?;
+        return Ok(primitive_datetime.assume_utc());
+    }
+
+    Err(anyhow::anyhow!(
+        "Invalid timestamp format: {}",
+        timestamp_str
+    ))
+}
+
+/// Build time range string for report
+fn build_time_range(params: &AggregationParams) -> Option<String> {
+    match (&params.since, &params.until) {
+        (Some(since), Some(until)) => Some(format!("{} to {}", since, until)),
+        (Some(since), None) => Some(format!("from {}", since)),
+        (None, Some(until)) => Some(format!("until {}", until)),
+        (None, None) => None,
+    }
+}
+
+/// Helper struct for aggregation to track unique entry counts
+struct AggregationBuilder {
+    pub data: AggregatedTelemetryData,
+    pub seen_entries: std::collections::HashSet<String>,
+}
+
+/// Aggregate data by specific dimension
+fn aggregate_by_dimension(
+    entries: &[LedgerEntry],
+    dimension: AggregationDimension,
+    params: &AggregationParams,
+) -> Vec<AggregatedTelemetryData> {
+    let mut aggregated_map: BTreeMap<String, AggregationBuilder> = BTreeMap::new();
+
+    for entry in entries {
+        let entry_id = format!("{}_{}", entry.timestamp, entry.repo_id);
+
+        if entry.attempts.is_empty() {
+            if matches_filters(entry, None, params) {
+                let is_failed = entry.validation_result.as_deref() == Some("fail")
+                    || entry.failure_class.is_some()
+                    || (entry.backend_exit_code.is_some() && entry.backend_exit_code != Some(0));
+
+                if is_failed && !params.include_failed_attempts {
+                    continue;
+                }
+
+                let dimension_value = get_dimension_value_from_attempt(entry, None, dimension);
+
+                let builder = aggregated_map
+                    .entry(dimension_value.clone())
+                    .or_insert_with(|| AggregationBuilder {
+                        data: AggregatedTelemetryData {
+                            dimension_key: dimension_key(dimension),
+                            dimension_value: dimension_value.clone(),
+                            entries: 0,
+                            attempts: 0,
+                            successful_attempts: 0,
+                            failed_attempts: 0,
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            total_tokens: 0,
+                            requests_count: 0,
+                            estimated_cost_usd: 0.0,
+                            actual_cost_usd: 0.0,
+                            quota_backed_cost_usd: 0.0,
+                            api_cost_usd: 0.0,
+                            average_cost_per_attempt: 0.0,
+                            success_rate: 0.0,
+                            failure_details: BTreeMap::new(),
+                        },
+                        seen_entries: std::collections::HashSet::new(),
+                    });
+
+                if builder.seen_entries.insert(entry_id.clone()) {
+                    builder.data.entries += 1;
+                }
+                builder.data.attempts += 1;
+
+                if entry.validation_result.as_deref() == Some("pass") {
+                    builder.data.successful_attempts += 1;
+                } else if is_failed {
+                    builder.data.failed_attempts += 1;
+                    if let Some(failure_class) = &entry.failure_class {
+                        *builder
+                            .data
+                            .failure_details
+                            .entry(failure_class.clone())
+                            .or_insert(0) += 1;
+                    }
+                }
+
+                // Sum usage metrics from entry
+                let entry_usage = &entry.usage;
+                builder.data.input_tokens += entry_usage.input_tokens.unwrap_or(0);
+                builder.data.output_tokens += entry_usage.output_tokens.unwrap_or(0);
+                builder.data.total_tokens += entry_usage.total_tokens.unwrap_or(0);
+                builder.data.requests_count += entry_usage.requests_count.unwrap_or(0);
+                builder.data.estimated_cost_usd += entry_usage.estimated_cost_usd.unwrap_or(0.0);
+                builder.data.actual_cost_usd += entry_usage.actual_cost_usd.unwrap_or(0.0);
+
+                // Classify entry usage as quota-backed vs API cost
+                if is_quota_backed(entry_usage) {
+                    builder.data.quota_backed_cost_usd +=
+                        entry_usage.actual_cost_usd.unwrap_or(0.0);
+                } else {
+                    builder.data.api_cost_usd += entry_usage.actual_cost_usd.unwrap_or(0.0);
+                }
+            }
+        } else {
+            for (i, attempt) in entry.attempts.iter().enumerate() {
+                if matches_filters(entry, Some(attempt), params) {
+                    let is_retried = i < entry.attempts.len() - 1;
+                    let is_failed = attempt.validation_result.as_deref() == Some("fail")
+                        || attempt.failure_class.is_some()
+                        || (attempt.exit_code.is_some() && attempt.exit_code != Some(0));
+
+                    if is_retried && !params.include_retried_attempts {
+                        continue;
+                    }
+                    if is_failed && !params.include_failed_attempts {
+                        continue;
+                    }
+
+                    let dimension_value =
+                        get_dimension_value_from_attempt(entry, Some(attempt), dimension);
+
+                    let builder = aggregated_map
+                        .entry(dimension_value.clone())
+                        .or_insert_with(|| AggregationBuilder {
+                            data: AggregatedTelemetryData {
+                                dimension_key: dimension_key(dimension),
+                                dimension_value: dimension_value.clone(),
+                                entries: 0,
+                                attempts: 0,
+                                successful_attempts: 0,
+                                failed_attempts: 0,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                total_tokens: 0,
+                                requests_count: 0,
+                                estimated_cost_usd: 0.0,
+                                actual_cost_usd: 0.0,
+                                quota_backed_cost_usd: 0.0,
+                                api_cost_usd: 0.0,
+                                average_cost_per_attempt: 0.0,
+                                success_rate: 0.0,
+                                failure_details: BTreeMap::new(),
+                            },
+                            seen_entries: std::collections::HashSet::new(),
+                        });
+
+                    if builder.seen_entries.insert(entry_id.clone()) {
+                        builder.data.entries += 1;
+                    }
+                    builder.data.attempts += 1;
+
+                    if attempt.validation_result.as_deref() == Some("pass") {
+                        builder.data.successful_attempts += 1;
+                    } else if is_failed || is_retried {
+                        builder.data.failed_attempts += 1;
+                        if let Some(failure_class) = &attempt.failure_class {
+                            *builder
+                                .data
+                                .failure_details
+                                .entry(failure_class.clone())
+                                .or_insert(0) += 1;
+                        } else if is_retried {
+                            *builder
+                                .data
+                                .failure_details
+                                .entry("retried".to_string())
+                                .or_insert(0) += 1;
+                        } else {
+                            *builder
+                                .data
+                                .failure_details
+                                .entry("unknown_failure".to_string())
+                                .or_insert(0) += 1;
+                        }
+                    }
+
+                    // Sum attempt usage
+                    let attempt_usage = &attempt.usage;
+                    builder.data.input_tokens += attempt_usage.input_tokens.unwrap_or(0);
+                    builder.data.output_tokens += attempt_usage.output_tokens.unwrap_or(0);
+                    builder.data.total_tokens += attempt_usage.total_tokens.unwrap_or(0);
+                    builder.data.requests_count += attempt_usage.requests_count.unwrap_or(0);
+                    builder.data.estimated_cost_usd +=
+                        attempt_usage.estimated_cost_usd.unwrap_or(0.0);
+                    builder.data.actual_cost_usd += attempt_usage.actual_cost_usd.unwrap_or(0.0);
+
+                    // Classify attempt usage
+                    if is_quota_backed(attempt_usage) {
+                        builder.data.quota_backed_cost_usd +=
+                            attempt_usage.actual_cost_usd.unwrap_or(0.0);
+                    } else {
+                        builder.data.api_cost_usd += attempt_usage.actual_cost_usd.unwrap_or(0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    // Calculate derived metrics
+    let mut result = Vec::new();
+    for builder in aggregated_map.into_values() {
+        let mut data = builder.data;
+        if data.attempts > 0 {
+            data.average_cost_per_attempt = data.actual_cost_usd / data.attempts as f64;
+            data.success_rate = data.successful_attempts as f64 / data.attempts as f64;
+        }
+        result.push(data);
+    }
+
+    result
+}
+
+/// Get dimension value from ledger entry or attempt
+fn get_dimension_value_from_attempt(
+    entry: &LedgerEntry,
+    attempt: Option<&crate::ledger::AttemptRecord>,
+    dimension: AggregationDimension,
+) -> String {
+    match attempt {
+        None => match dimension {
+            AggregationDimension::Project => entry.repo_id.clone(),
+            AggregationDimension::Ticket => entry
+                .work_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::ExecutionType => entry
+                .task_class
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::Backend => entry.effective_backend.clone(),
+            AggregationDimension::BackendInstance => entry
+                .usage
+                .backend_instance
+                .clone()
+                .unwrap_or_else(|| entry.effective_backend.clone()),
+            AggregationDimension::Provider => entry
+                .usage
+                .provider
+                .clone()
+                .unwrap_or_else(|| entry.provider.clone()),
+            AggregationDimension::Model => entry.effective_model.clone().unwrap_or_else(|| {
+                entry
+                    .requested_model
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
+            }),
+            AggregationDimension::Account => entry
+                .usage
+                .account_label
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::Date => {
+                if let Ok(entry_time) = OffsetDateTime::parse(
+                    &entry.timestamp,
+                    &time::format_description::well_known::Rfc3339,
+                ) {
+                    entry_time
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_else(|_| "unknown".to_string())
+                        .split('T')
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string()
+                } else {
+                    "unknown".to_string()
+                }
+            }
+            AggregationDimension::DateRange => {
+                if let Ok(entry_time) = OffsetDateTime::parse(
+                    &entry.timestamp,
+                    &time::format_description::well_known::Rfc3339,
+                ) {
+                    format!("{}-{:02}", entry_time.year(), entry_time.month() as u8)
+                } else {
+                    "unknown".to_string()
+                }
+            }
+        },
+        Some(att) => match dimension {
+            AggregationDimension::Project => entry.repo_id.clone(),
+            AggregationDimension::Ticket => entry
+                .work_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::ExecutionType => entry
+                .task_class
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::Backend => att.backend.clone(),
+            AggregationDimension::BackendInstance => att
+                .usage
+                .backend_instance
+                .clone()
+                .or_else(|| Some(att.backend.clone()))
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::Provider => att
+                .usage
+                .provider
+                .clone()
+                .or_else(|| Some(entry.provider.clone()))
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::Model => att
+                .usage
+                .actual_model
+                .clone()
+                .or_else(|| att.effective_model.clone())
+                .or_else(|| entry.effective_model.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::Account => att
+                .usage
+                .account_label
+                .clone()
+                .or_else(|| entry.usage.account_label.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::Date => {
+                let timestamp = att
+                    .usage
+                    .observed_at
+                    .clone()
+                    .or_else(|| Some(entry.timestamp.clone()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                if let Ok(entry_time) = OffsetDateTime::parse(
+                    &timestamp,
+                    &time::format_description::well_known::Rfc3339,
+                ) {
+                    entry_time
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_else(|_| "unknown".to_string())
+                        .split('T')
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string()
+                } else {
+                    "unknown".to_string()
+                }
+            }
+            AggregationDimension::DateRange => {
+                let timestamp = att
+                    .usage
+                    .observed_at
+                    .clone()
+                    .or_else(|| Some(entry.timestamp.clone()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                if let Ok(entry_time) = OffsetDateTime::parse(
+                    &timestamp,
+                    &time::format_description::well_known::Rfc3339,
+                ) {
+                    format!("{}-{:02}", entry_time.year(), entry_time.month() as u8)
+                } else {
+                    "unknown".to_string()
+                }
+            }
+        },
+    }
+}
+
+/// Get dimension key name
+fn dimension_key(dimension: AggregationDimension) -> String {
+    match dimension {
+        AggregationDimension::Project => "project".to_string(),
+        AggregationDimension::Ticket => "ticket".to_string(),
+        AggregationDimension::ExecutionType => "execution_type".to_string(),
+        AggregationDimension::Backend => "backend".to_string(),
+        AggregationDimension::BackendInstance => "backend_instance".to_string(),
+        AggregationDimension::Provider => "provider".to_string(),
+        AggregationDimension::Model => "model".to_string(),
+        AggregationDimension::Account => "account".to_string(),
+        AggregationDimension::Date => "date".to_string(),
+        AggregationDimension::DateRange => "date_range".to_string(),
+    }
+}
+
+/// Check whether usage belongs to a subscription/quota pool rather than a
+/// metered API account. `quota_backed` is the canonical ledger value; retain
+/// `subscription` for older records written before normalization.
+fn is_quota_backed(usage: &LedgerUsage) -> bool {
+    usage.quota_window.is_some()
+        || matches!(
+            usage.usage_classification.as_deref(),
+            Some("quota_backed" | "subscription")
+        )
+}
+
+/// Calculate totals across all entries
+fn calculate_totals(
+    entries: &[LedgerEntry],
+    params: &AggregationParams,
+) -> (usize, usize, usize, usize, f64, f64, f64) {
+    let mut total_entries = 0;
+    let mut total_attempts = 0;
+    let mut successful_attempts = 0;
+    let mut failed_attempts = 0;
+    let mut total_cost = 0.0;
+    let mut quota_backed_cost = 0.0;
+    let mut api_cost = 0.0;
+
+    for entry in entries {
+        let mut entry_matched = false;
+
+        if entry.attempts.is_empty() {
+            if matches_filters(entry, None, params) {
+                let is_failed = entry.validation_result.as_deref() == Some("fail")
+                    || entry.failure_class.is_some()
+                    || (entry.backend_exit_code.is_some() && entry.backend_exit_code != Some(0));
+
+                if is_failed && !params.include_failed_attempts {
+                    continue;
+                }
+
+                entry_matched = true;
+                total_attempts += 1;
+
+                if entry.validation_result.as_deref() == Some("pass") {
+                    successful_attempts += 1;
+                } else if is_failed {
+                    failed_attempts += 1;
+                }
+
+                let entry_usage = &entry.usage;
+                let actual = entry_usage.actual_cost_usd.unwrap_or(0.0);
+                total_cost += actual;
+                if is_quota_backed(entry_usage) {
+                    quota_backed_cost += actual;
+                } else {
+                    api_cost += actual;
+                }
+            }
+        } else {
+            for (i, attempt) in entry.attempts.iter().enumerate() {
+                if matches_filters(entry, Some(attempt), params) {
+                    let is_retried = i < entry.attempts.len() - 1;
+                    let is_failed = attempt.validation_result.as_deref() == Some("fail")
+                        || attempt.failure_class.is_some()
+                        || (attempt.exit_code.is_some() && attempt.exit_code != Some(0));
+
+                    if is_retried && !params.include_retried_attempts {
+                        continue;
+                    }
+                    if is_failed && !params.include_failed_attempts {
+                        continue;
+                    }
+
+                    entry_matched = true;
+                    total_attempts += 1;
+
+                    if attempt.validation_result.as_deref() == Some("pass") {
+                        successful_attempts += 1;
+                    } else if is_failed || is_retried {
+                        failed_attempts += 1;
+                    }
+
+                    let attempt_usage = &attempt.usage;
+                    let actual = attempt_usage.actual_cost_usd.unwrap_or(0.0);
+                    total_cost += actual;
+                    if is_quota_backed(attempt_usage) {
+                        quota_backed_cost += actual;
+                    } else {
+                        api_cost += actual;
+                    }
+                }
+            }
+        }
+
+        if entry_matched {
+            total_entries += 1;
+        }
+    }
+
+    (
+        total_entries,
+        total_attempts,
+        successful_attempts,
+        failed_attempts,
+        total_cost,
+        quota_backed_cost,
+        api_cost,
+    )
 }
 
 /// Main telemetry export function that handles the full workflow
@@ -229,6 +1034,125 @@ pub mod cli {
 
         log::info!("Telemetry export completed successfully");
         Ok(())
+    }
+
+    /// Run telemetry aggregation report command
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_aggregate(
+        dimensions: Vec<AggregationDimension>,
+        since: Option<&str>,
+        until: Option<&str>,
+        profile: Option<&str>,
+        include_failed: bool,
+        include_retried: bool,
+        json: bool,
+        config_path: Option<&str>,
+        project: Option<&str>,
+        ticket: Option<&str>,
+        execution_type: Option<&str>,
+        backend_instance: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<()> {
+        let cfg = crate::config::load(config_path)?;
+
+        let params = AggregationParams {
+            dimensions,
+            since: since.map(|s| s.to_string()),
+            until: until.map(|s| s.to_string()),
+            profile: profile.map(|s| s.to_string()),
+            include_failed_attempts: include_failed,
+            include_retried_attempts: include_retried,
+            project: project.map(|s| s.to_string()),
+            ticket: ticket.map(|s| s.to_string()),
+            execution_type: execution_type.map(|s| s.to_string()),
+            backend_instance: backend_instance.map(|s| s.to_string()),
+            provider: provider.map(|s| s.to_string()),
+            model: model.map(|s| s.to_string()),
+            account: account.map(|s| s.to_string()),
+        };
+
+        let report = generate_telemetry_report(&cfg, params)?;
+
+        if json {
+            let json_output = serde_json::to_string_pretty(&report)?;
+            println!("{}", json_output);
+        } else {
+            print_telemetry_report(&report);
+        }
+
+        Ok(())
+    }
+
+    /// Print telemetry report in human-readable format
+    fn print_telemetry_report(report: &TelemetryReport) {
+        println!("Telemetry Aggregation Report");
+        println!("=============================");
+        println!("Generated: {}", report.generated_at);
+        if let Some(time_range) = &report.time_range {
+            println!("Time Range: {}", time_range);
+        }
+        println!(
+            "Profile: {}",
+            report.profile.clone().unwrap_or_else(|| "all".to_string())
+        );
+        println!();
+
+        println!("Summary:");
+        println!("  Total Entries: {}", report.total_entries);
+        println!("  Total Attempts: {}", report.total_attempts);
+        println!("  Successful Attempts: {}", report.successful_attempts);
+        println!("  Failed Attempts: {}", report.failed_attempts);
+        println!("  Total Cost: ${:.2}", report.total_cost_usd);
+        println!("  Quota-Backed Cost: ${:.2}", report.quota_backed_cost_usd);
+        println!("  API Cost: ${:.2}", report.api_cost_usd);
+        println!();
+
+        if !report.aggregated_data.is_empty() {
+            println!("Detailed Breakdown:");
+            println!();
+
+            // Group by dimension for display
+            let mut grouped_data: BTreeMap<String, Vec<&AggregatedTelemetryData>> = BTreeMap::new();
+            for data in &report.aggregated_data {
+                grouped_data
+                    .entry(data.dimension_key.clone())
+                    .or_default()
+                    .push(data);
+            }
+
+            for (dimension_key, data_list) in &grouped_data {
+                println!("By {}:", dimension_key);
+                println!(
+                    "{:<30} {:<15} {:<15} {:<15} {:<15} {:<15}",
+                    "Value", "Attempts", "Success Rate", "Total Cost", "Quota Cost", "API Cost"
+                );
+                println!(
+                    "{:<30} {:<15} {:<15} {:<15} {:<15} {:<15}",
+                    "-".repeat(30),
+                    "-".repeat(15),
+                    "-".repeat(15),
+                    "-".repeat(15),
+                    "-".repeat(15),
+                    "-".repeat(15)
+                );
+
+                for data in data_list {
+                    let success_rate_pct = (data.success_rate * 100.0).round();
+                    println!(
+                        "{:<30} {:<15} {:<15.1}% {:<15.2} {:<15.2} {:<15.2}",
+                        data.dimension_value,
+                        data.attempts,
+                        success_rate_pct,
+                        data.actual_cost_usd,
+                        data.quota_backed_cost_usd,
+                        data.api_cost_usd
+                    );
+                }
+                println!();
+            }
+        }
     }
 
     /// Run telemetry status command
