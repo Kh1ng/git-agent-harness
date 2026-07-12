@@ -5,10 +5,28 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+
+/// Set by the loop/dispatch process's SIGINT/SIGTERM handler. Backend runners
+/// poll it and terminate their dedicated process group, allowing the caller to
+/// write the normal terminal event and ledger record before exiting.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub fn install_shutdown_handler() -> Result<()> {
+    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+    ctrlc::set_handler(|| {
+        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    })
+    .context("installing graceful shutdown handler")
+}
+
+pub fn shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+}
 
 #[cfg(unix)]
 fn prepare_process_group(cmd: &mut Command) {
@@ -185,11 +203,29 @@ fn worktree_progress_snapshot(worktree: &Path) -> Option<Vec<u8>> {
 /// installed and on PATH?"). Returns `(exit_code, duration_secs)`; on an
 /// idle kill, exit_code is -1 and a trailing note is appended to the log.
 fn spawn_with_idle_watch(
+    cmd: Command,
+    log_path: &Path,
+    worktree: &Path,
+    idle_timeout_seconds: u64,
+    spawn_context: &str,
+) -> Result<(i32, f64)> {
+    spawn_with_idle_watch_with_shutdown(
+        cmd,
+        log_path,
+        worktree,
+        idle_timeout_seconds,
+        spawn_context,
+        &SHUTDOWN_REQUESTED,
+    )
+}
+
+fn spawn_with_idle_watch_with_shutdown(
     mut cmd: Command,
     log_path: &Path,
     worktree: &Path,
     idle_timeout_seconds: u64,
     spawn_context: &str,
+    shutdown_requested: &AtomicBool,
 ) -> Result<(i32, f64)> {
     let start = Instant::now();
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -219,10 +255,17 @@ fn spawn_with_idle_watch(
     let mut last_progress_at = Instant::now();
     let mut saw_progress = false;
     let mut killed_for_idle = false;
+    let mut killed_for_shutdown = false;
     let exit_code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code().unwrap_or(-1),
             Ok(None) => {
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    kill_process_group(&mut child);
+                    let _ = child.wait();
+                    killed_for_shutdown = true;
+                    break -2;
+                }
                 while progress_rx.try_recv().is_ok() {
                     last_seen_len = fs::metadata(log_path)
                         .map(|m| m.len())
@@ -284,6 +327,14 @@ fn spawn_with_idle_watch(
             let _ = writeln!(
                 file,
                 "GAH: killed after {idle_timeout_seconds}s with no new backend output or worktree progress (stalled, not just slow)."
+            );
+        }
+    }
+    if killed_for_shutdown {
+        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(log_path) {
+            let _ = writeln!(
+                file,
+                "GAH: shutdown requested; terminated backend process group."
             );
         }
     }
@@ -1365,6 +1416,11 @@ pub fn run_review_backend(
                 break ReviewProcessOutcome::SpawnFailure;
             }
             Ok(None) => {
+                if shutdown_requested() {
+                    kill_process_group(&mut child);
+                    let _ = child.wait();
+                    break ReviewProcessOutcome::SignalTermination(libc::SIGTERM);
+                }
                 if start.elapsed() >= timeout {
                     kill_process_group(&mut child);
                     let _ = child.wait();
@@ -2781,6 +2837,41 @@ mod tests {
             log.contains("killed after 1s with no new backend output or worktree progress"),
             "got log: {log}"
         );
+    }
+
+    #[test]
+    fn idle_watch_terminates_process_group_on_shutdown_request() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "backend",
+            "#!/bin/sh\necho 'started'\nsleep 30\necho 'should not complete'\n",
+        );
+        let shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let trigger = std::sync::Arc::clone(&shutdown);
+        let trigger_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let log_path = f.session_dir.join("backend-output.log");
+
+        let result = spawn_with_idle_watch_with_shutdown(
+            Command::new(f.bin_dir.join("backend")),
+            &log_path,
+            &f.worktree,
+            60,
+            "launching test backend",
+            &shutdown,
+        )
+        .unwrap();
+
+        trigger_thread.join().unwrap();
+        assert_eq!(result.0, -2);
+        let log = fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("started"));
+        assert!(!log.contains("should not complete"));
+        assert!(log.contains("shutdown requested; terminated backend process group"));
     }
 
     #[test]

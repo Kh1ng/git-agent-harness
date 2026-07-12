@@ -794,6 +794,10 @@ pub fn run_loop(
     let _lock = acquire_profile_lock(profile_name, config_path)?;
 
     loop {
+        if crate::runner::shutdown_requested() {
+            eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
+            return Ok(());
+        }
         // Transient provider/controller failures must not kill the daemon.
         // A validation-gate failure is different: it proves the safety check
         // itself is unhealthy, so pause immediately and require an explicit
@@ -801,6 +805,10 @@ pub fn run_loop(
         // while preserving fail-closed dispatch behavior.
         match run_once(cfg, profile_name, json, parallel, skip_validation_gate) {
             Ok(()) => std::thread::sleep(std::time::Duration::from_secs(30)),
+            Err(_) if crate::runner::shutdown_requested() => {
+                eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
+                return Ok(());
+            }
             Err(error) if is_validation_gate_failure(&error) => {
                 eprintln!(
                     "gah loop: paused because the validation gate failed; repair the gate and explicitly restart the loop: {error:#}"

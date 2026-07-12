@@ -906,6 +906,7 @@ fn main() -> Result<()> {
             parallel,
             skip_validation_gate,
         } => {
+            runner::install_shutdown_handler()?;
             let cfg = config::load(config_path.as_deref())?;
             let resolved_config_path = config::resolve_config_path(config_path.as_deref());
             let parallel = if parallel == 0 {
@@ -984,6 +985,7 @@ fn main() -> Result<()> {
             existing_branch,
             skip_validation_gate,
         } => {
+            runner::install_shutdown_handler()?;
             let cfg = config::load(config_path.as_deref())?;
             // Generate a stable run id so the dispatch_started /
             // dispatch_finished controller events correlate with each other
