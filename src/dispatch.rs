@@ -1991,6 +1991,7 @@ fn improve(
                     failure_stage: Some(crate::ledger::FailureStage::BackendLaunch.as_str().into()),
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    agy_version: None,
                     usage: crate::ledger::LedgerUsage::default(),
                 });
                 worktree::cleanup(&wt, repo);
@@ -2028,6 +2029,7 @@ fn improve(
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                agy_version: result.agy_version.clone(),
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
@@ -2038,6 +2040,24 @@ fn improve(
                 ),
             });
             let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+
+            // TICKET-242: surface AGY cli.log-format drift the moment it is
+            // detected, so a silent classification regression is visible the
+            // day an upstream AGY release moves/renames the log.
+            if result.agy_log_drift_suspected {
+                let _ = crate::events::record(
+                    cfg,
+                    crate::events::EventType::AgyLogFormatUnrecognized,
+                    Some(args.profile.as_str()),
+                    ledger.work_id.as_deref(),
+                    format!(
+                        "AGY run failed with empty output; run-scoped cli.log delta ({} bytes) matched no known quota/auth signature. AGY version: {}. Upstream cli.log format/path may have changed -- quota/auth classification is silently disabled and routing may burn retries against a dead account.",
+                        result.agy_cli_log_delta.as_ref().map_or(0, |d| d.trim().len()),
+                        result.agy_version.as_deref().unwrap_or("unknown"),
+                    ),
+                );
+            }
+
             let stalled = log_text.contains("GAH: killed after ")
                 && log_text.contains(
                     " with no new backend output or worktree progress (stalled, not just slow).",
@@ -2130,6 +2150,7 @@ fn improve(
                 failure_stage: None,
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                agy_version: result.agy_version.clone(),
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
@@ -2163,6 +2184,7 @@ fn improve(
                     failure_stage: None,
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    agy_version: result.agy_version.clone(),
                     usage: attempt_usage(
                         &result.log_path,
                         result.agy_cli_log_delta.as_deref(),
@@ -2227,6 +2249,7 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path,
+                        agy_version: result.agy_version.clone(),
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -2313,6 +2336,7 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        agy_version: result.agy_version.clone(),
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -2344,6 +2368,7 @@ fn improve(
                         failure_stage: None,
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        agy_version: result.agy_version.clone(),
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -2371,6 +2396,7 @@ fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        agy_version: result.agy_version.clone(),
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -2659,6 +2685,8 @@ fn experiment(
                 duration_secs: 0.0,
                 log_path: log_path.to_string_lossy().into_owned(),
                 agy_cli_log_delta: None,
+                agy_version: None,
+                agy_log_drift_suspected: false,
                 transcript_path: None,
             }
         }
@@ -2979,6 +3007,21 @@ fn pm(
             crate::ledger::FailureClass::BackendError,
             crate::ledger::FailureStage::AgentRun,
         );
+
+        // TICKET-242: surface AGY cli.log-format drift on the PM path too.
+        if result.agy_log_drift_suspected {
+            let _ = crate::events::record(
+                cfg,
+                crate::events::EventType::AgyLogFormatUnrecognized,
+                Some(args.profile.as_str()),
+                ledger.work_id.as_deref(),
+                format!(
+                    "AGY PM run failed with empty output; run-scoped cli.log delta matched no known quota/auth signature. AGY version: {}. Upstream cli.log format/path may have changed -- quota/auth classification is silently disabled.",
+                    result.agy_version.as_deref().unwrap_or("unknown"),
+                ),
+            );
+        }
+
         let route_key = route_identity(
             &plan_route.effective_backend,
             plan_route.effective_model.as_deref(),
@@ -3425,6 +3468,20 @@ fn review(
     }
     let result = result.expect("loop always runs at least one attempt (MAX_REVIEW_ATTEMPTS > 0)");
     println!("Review backend duration: {:.1}s", result.duration_secs);
+
+    // TICKET-242: surface AGY cli.log-format drift on the review path too.
+    if result.agy_log_drift_suspected {
+        let _ = crate::events::record(
+            cfg,
+            crate::events::EventType::AgyLogFormatUnrecognized,
+            Some(args.profile.as_str()),
+            ledger.work_id.as_deref(),
+            format!(
+                "AGY review run failed with empty output; run-scoped cli.log delta matched no known quota/auth signature. AGY version: {}. Upstream cli.log format/path may have changed -- quota/auth classification is silently disabled.",
+                result.agy_version.as_deref().unwrap_or("unknown"),
+            ),
+        );
+    }
     let report_path = session_dir.join("review-report.md");
     let verdict_path = session_dir.join("review-verdict.json");
     fs::write(&report_path, &result.stdout)?;

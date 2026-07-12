@@ -308,6 +308,25 @@ pub fn parse_opencode_session_metadata(metadata_json: &str) -> LedgerUsage {
 ///
 /// An empty/absent delta yields an all-`None` `LedgerUsage` (unknown,
 /// never fabricated zero) so the caller can merge it safely.
+/// TICKET-242: the set of cli.log signatures GAH currently understands. A
+/// run-scoped delta that matches none of these (yet is non-empty) is the
+/// canary signal for upstream AGY log-format drift -- see
+/// `runner::run_agy_with_executable`'s `agy_log_drift_suspected` flag.
+///
+/// Keep this in lockstep with `parse_agy_cli_log_delta` and
+/// `agy_empty_output_diagnosis`: any signature added to or removed from
+/// quota/auth classification here must be reflected there too.
+pub fn agy_cli_log_delta_has_known_signature(delta: &str) -> bool {
+    delta.contains("RESOURCE_EXHAUSTED")
+        || delta.contains("Individual quota reached")
+        || delta.contains("Quota exceeded")
+        || delta.contains("quota has been reached")
+        || delta.contains("quota reached")
+        || delta.contains("429")
+        || delta.contains("not logged into Antigravity")
+        || delta.contains("not logged in")
+}
+
 pub fn parse_agy_cli_log_delta(delta: &str, source_hint: &str) -> LedgerUsage {
     let mut usage = LedgerUsage::default();
 

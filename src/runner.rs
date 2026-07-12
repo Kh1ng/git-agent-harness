@@ -64,6 +64,17 @@ pub struct RunResult {
     /// whole log — is what usage/quota parsing consumes, so a single
     /// attempt's usage is never polluted by prior runs.
     pub agy_cli_log_delta: Option<String>,
+    /// TICKET-242: the AGY CLI version for this attempt (`agy --version`),
+    /// captured once per run and recorded in the ledger for attribution.
+    /// `None` for non-AGY backends and for AGY runs where the version could
+    /// not be captured (e.g. an unresponsive executable).
+    pub agy_version: Option<String>,
+    /// TICKET-242: the run failed with empty output AND the run-scoped cli.log
+    /// delta was non-empty yet matched none of the known quota/auth
+    /// signatures. This is the canary for upstream AGY log-format/path drift
+    /// (which silently disables classification); the caller surfaces it as a
+    /// distinct `agy_log_format_unrecognized` controller event.
+    pub agy_log_drift_suspected: bool,
     /// Backend-owned structured usage artifact. Claude uses its transcript
     /// JSONL; Vibe uses its session `meta.json`. `None` when the backend did
     /// not produce a discoverable artifact.
@@ -101,6 +112,14 @@ pub struct ReviewRunResult {
     pub duration_secs: f64,
     pub stdout: String,
     pub stderr: String,
+    /// TICKET-242: the AGY CLI version for this review run (`agy --version`),
+    /// captured for attribution. `None` for non-AGY backends and for runs
+    /// where the version could not be captured.
+    pub agy_version: Option<String>,
+    /// TICKET-242: same canary meaning as `RunResult::agy_log_drift_suspected`
+    /// -- an empty-output AGY review run whose cli.log delta matched no known
+    /// signature.
+    pub agy_log_drift_suspected: bool,
 }
 
 fn copy_stream_to_file<R: Read + Send + 'static>(
@@ -383,6 +402,8 @@ pub fn run_openhands(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        agy_version: None,
+        agy_log_drift_suspected: false,
         transcript_path: None,
     })
 }
@@ -452,6 +473,8 @@ pub fn run_codex_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        agy_version: None,
+        agy_log_drift_suspected: false,
         transcript_path: None,
     })
 }
@@ -589,6 +612,8 @@ pub fn run_claude_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        agy_version: None,
+        agy_log_drift_suspected: false,
         transcript_path,
     })
 }
@@ -671,6 +696,8 @@ pub fn run_vibe_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        agy_version: None,
+        agy_log_drift_suspected: false,
         transcript_path: metadata_path,
     })
 }
@@ -817,6 +844,8 @@ pub fn run_opencode_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        agy_version: None,
+        agy_log_drift_suspected: false,
         transcript_path,
     })
 }
@@ -946,17 +975,25 @@ fn agy_empty_output_diagnosis(env_vars: &[(String, String)], executable: &Path) 
     }
 }
 
-/// Resolve AGY's cli.log path from the HOME that the run actually uses
-/// (the per-call `env_vars` win over process `HOME`, matching how the run's
-/// effective HOME is resolved elsewhere). Returns `None` only when no HOME
-/// is discoverable -- in which case there is no cli.log to delta against.
-fn agy_cli_log_path(env_vars: &[(String, String)], _executable: &Path) -> Option<PathBuf> {
-    let home = env_vars
-        .iter()
-        .find(|(k, _)| k == "HOME")
-        .map(|(_, v)| v.clone())
-        .or_else(|| std::env::var("HOME").ok())?;
-    let root = PathBuf::from(home).join(".gemini/antigravity-cli");
+/// TICKET-242: a known AGY cli.log layout, scoped to the version range it
+/// applies to. `resolve` turns the antigravity home dir
+/// (`~/.gemini/antigravity-cli`) into the cli.log path to delta against for
+/// the run.
+///
+/// A future AGY release that relocates or renames the log is a *new row
+/// here*, not a code archaeology session through the failure-classification
+/// path -- add an entry with its `min` version and a `resolve` fn, and the
+/// drift canary keeps working against the new location.
+struct AgyLogLayout {
+    /// Inclusive lowest `(major, minor, patch)` this layout applies to.
+    min: (u16, u16, u16),
+    resolve: fn(&Path) -> Option<PathBuf>,
+}
+
+/// Current layout: `cli.log` at the antigravity home root, or the newest
+/// `log/cli-*.log` under it for rotated layouts. Matches observed AGY
+/// 1.0.16 and its recent rotation behavior.
+fn agy_log_layout_v1(root: &Path) -> Option<PathBuf> {
     let legacy = root.join("cli.log");
     if legacy.exists() {
         return Some(legacy);
@@ -979,6 +1016,84 @@ fn agy_cli_log_path(env_vars: &[(String, String)], _executable: &Path) -> Option
         }
     }
     newest.map(|(_, path)| path)
+}
+
+const AGY_LOG_LAYOUTS: &[AgyLogLayout] = &[AgyLogLayout {
+    min: (1, 0, 0),
+    resolve: agy_log_layout_v1,
+}];
+
+/// Parse a dotted `major.minor.patch` (optionally with pre-release/build
+/// suffixes) into a comparable triple. Returns `None` if the leading
+/// component isn't numeric (e.g. "dev" builds), which callers treat as
+/// "unknown version -> use the latest known layout".
+fn parse_version_triple(v: &str) -> Option<(u16, u16, u16)> {
+    let digits: Vec<&str> = v.split(['.', '-', '+']).collect();
+    let major = digits.first()?.parse::<u16>().ok()?;
+    let minor = digits
+        .get(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let patch = digits
+        .get(2)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Pick the newest known layout whose `min` version is satisfied by
+/// `version`. An unknown/`None` version resolves to the latest known layout
+/// (index 0 of the sorted table), which is the safe default when AGY's
+/// `--version` couldn't be read.
+fn agy_log_layout_for_version(version: Option<&str>) -> &'static AgyLogLayout {
+    let vt = version.and_then(parse_version_triple);
+    let mut best: &'static AgyLogLayout = &AGY_LOG_LAYOUTS[0];
+    for layout in AGY_LOG_LAYOUTS {
+        if let Some(v) = vt {
+            if v >= layout.min && layout.min >= best.min {
+                best = layout;
+            }
+        }
+    }
+    best
+}
+
+/// Capture AGY's CLI version once per run via `agy --version`. Cheap (a
+/// single short-lived process) and useful both for ledger attribution and
+/// for selecting the right cli.log layout. Returns `None` when the
+/// executable can't be queried (unresponsive, missing) rather than failing
+/// the run.
+fn agy_detect_version(executable: &Path) -> Option<String> {
+    let Ok(out) = Command::new(executable).arg("--version").output() else {
+        return None;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Accept forms like "agy 1.0.16", "agy 1.0.16 (...)", or a bare
+    // "1.0.16". Take the first whitespace-delimited token that starts with
+    // a digit.
+    text.split_whitespace()
+        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(|t| t.to_string())
+}
+
+/// Resolve AGY's cli.log path from the HOME that the run actually uses
+/// (the per-call `env_vars` win over process `HOME`, matching how the run's
+/// effective HOME is resolved elsewhere) and the resolved AGY `version`
+/// (which selects the layout). Returns `None` only when no HOME is
+/// discoverable -- in which case there is no cli.log to delta against.
+fn agy_cli_log_path(
+    env_vars: &[(String, String)],
+    _executable: &Path,
+    version: Option<&str>,
+) -> Option<PathBuf> {
+    let home = env_vars
+        .iter()
+        .find(|(k, _)| k == "HOME")
+        .map(|(_, v)| v.clone())
+        .or_else(|| std::env::var("HOME").ok())?;
+    let root = PathBuf::from(home).join(".gemini/antigravity-cli");
+    let layout = agy_log_layout_for_version(version);
+    (layout.resolve)(&root)
 }
 
 /// #155: read only the bytes appended to AGY's cli.log after `pre_offset`,
@@ -1017,13 +1132,17 @@ pub fn run_agy_with_executable(
         cmd.args(["--print-timeout", &format!("{secs}s")]);
     }
 
+    // TICKET-242: capture the AGY CLI version once (cheap) for ledger
+    // attribution and cli.log layout selection.
+    let agy_version = agy_detect_version(executable);
+
     // #155: scope AGY's cli.log to just the bytes this run appends. Capture
     // the pre-run byte offset up front so that, after the run, we read the
     // new tail only (not the whole log, which may contain unrelated
     // history or concurrent appends from other AGY instances). `None` when
     // the cli.log isn't readable yet is fine -- the delta stays `None` and
     // usage/quota parsing simply has nothing to draw from for this attempt.
-    let agy_cli_log = agy_cli_log_path(env_vars, executable);
+    let agy_cli_log = agy_cli_log_path(env_vars, executable, agy_version.as_deref());
     let agy_cli_log_pre_offset = agy_cli_log
         .as_ref()
         .and_then(|p| fs::metadata(p).ok().map(|m| m.len()))
@@ -1062,6 +1181,16 @@ pub fn run_agy_with_executable(
     if trimmed.is_empty() && exit_code == 0 {
         let err_msg = agy_empty_output_diagnosis(env_vars, executable);
 
+        // TICKET-242: canary. An empty-output failure whose run-scoped delta
+        // is non-empty yet matches *no* known quota/auth signature strongly
+        // implies an upstream AGY log-format/path change that silently
+        // disabled classification. Surface it via `agy_log_drift_suspected`
+        // so the caller can emit a distinct event the same day it happens.
+        let delta = agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset);
+        let drift_suspected = delta.as_ref().is_some_and(|d| {
+            !d.trim().is_empty() && !crate::usage::agy_cli_log_delta_has_known_signature(d)
+        });
+
         if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
             let _ = writeln!(file, "{}", err_msg);
         }
@@ -1070,7 +1199,9 @@ pub fn run_agy_with_executable(
             exit_code: -1,
             duration_secs,
             log_path: log_path.to_string_lossy().into_owned(),
-            agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+            agy_cli_log_delta: delta,
+            agy_version: agy_version.clone(),
+            agy_log_drift_suspected: drift_suspected,
             transcript_path: None,
         });
     }
@@ -1080,6 +1211,8 @@ pub fn run_agy_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+        agy_version,
+        agy_log_drift_suspected: false,
         transcript_path: None,
     })
 }
@@ -1173,6 +1306,8 @@ pub fn run_review_backend(
                 outcome: ReviewProcessOutcome::ExecutableUnavailable,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
+                agy_version: None,
+                agy_log_drift_suspected: false,
                 stderr: String::new(),
             };
         }
@@ -1181,6 +1316,8 @@ pub fn run_review_backend(
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
+                agy_version: None,
+                agy_log_drift_suspected: false,
                 stderr: format!("unsupported review backend: {backend}"),
             };
         }
@@ -1191,6 +1328,8 @@ pub fn run_review_backend(
             outcome: ReviewProcessOutcome::SpawnFailure,
             duration_secs: start.elapsed().as_secs_f64(),
             stdout: String::new(),
+            agy_version: None,
+            agy_log_drift_suspected: false,
             stderr: format!("creating {}: {err}", stdout_path.display()),
         };
     }
@@ -1199,6 +1338,8 @@ pub fn run_review_backend(
             outcome: ReviewProcessOutcome::SpawnFailure,
             duration_secs: start.elapsed().as_secs_f64(),
             stdout: String::new(),
+            agy_version: None,
+            agy_log_drift_suspected: false,
             stderr: format!("creating {}: {err}", stderr_path.display()),
         };
     }
@@ -1245,6 +1386,8 @@ pub fn run_review_backend(
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
+                agy_version: None,
+                agy_log_drift_suspected: false,
                 stderr: format!("unsupported review backend: {backend}"),
             };
         }
@@ -1256,6 +1399,27 @@ pub fn run_review_backend(
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
+
+    // TICKET-242: for AGY review runs, capture the CLI version and the
+    // run-scoped cli.log offset up front so the empty-output canary can
+    // detect log-format drift the same way the worker path does.
+    let agy_is_review_backend = matches!(backend, "agy" | "agy-main" | "agy-second");
+    let agy_version = if agy_is_review_backend {
+        agy_detect_version(&executable)
+    } else {
+        None
+    };
+    let agy_cli_log = if agy_is_review_backend {
+        agy_cli_log_path(env_vars, &executable, agy_version.as_deref())
+    } else {
+        None
+    };
+    let agy_cli_log_pre_offset = agy_cli_log
+        .as_ref()
+        .and_then(|p| fs::metadata(p).ok().map(|m| m.len()))
+        .unwrap_or(0);
+    let mut agy_log_drift_suspected = false;
+
     if backend == "vibe" {
         if let Some(model) = effective_model {
             cmd.env("VIBE_ACTIVE_MODEL", model);
@@ -1269,6 +1433,8 @@ pub fn run_review_backend(
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
+                agy_version: None,
+                agy_log_drift_suspected: false,
                 stderr: err.to_string(),
             };
         }
@@ -1323,6 +1489,8 @@ pub fn run_review_backend(
                     duration_secs: start.elapsed().as_secs_f64(),
                     stdout: read_text_file(&stdout_path),
                     stderr,
+                    agy_version: None,
+                    agy_log_drift_suspected: false,
                 };
             }
         }
@@ -1349,6 +1517,11 @@ pub fn run_review_backend(
         && stdout.trim().is_empty()
     {
         stdout = agy_empty_output_diagnosis(env_vars, &executable);
+        // TICKET-242: canary for review-path empty-output failures.
+        let delta = agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset);
+        agy_log_drift_suspected = delta.as_ref().is_some_and(|d| {
+            !d.trim().is_empty() && !crate::usage::agy_cli_log_delta_has_known_signature(d)
+        });
         ReviewProcessOutcome::NonZeroExit(-1)
     } else {
         outcome
@@ -1359,6 +1532,8 @@ pub fn run_review_backend(
         duration_secs: start.elapsed().as_secs_f64(),
         stdout,
         stderr: read_text_file(&stderr_path),
+        agy_version,
+        agy_log_drift_suspected,
     }
 }
 

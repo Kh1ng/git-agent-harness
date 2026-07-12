@@ -817,6 +817,7 @@ mod tests {
             failure_stage: None,
             duration_seconds: None,
             diff_path: None,
+            agy_version: None,
             usage: crate::ledger::LedgerUsage {
                 total_tokens: Some(total_tokens),
                 actual_cost_usd: Some(actual_cost_usd),

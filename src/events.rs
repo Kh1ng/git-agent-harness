@@ -33,6 +33,13 @@ pub enum EventType {
     HumanRequired,
     DuplicateGuardTriggered,
     LoopStopped,
+    /// TICKET-242: AGY exited 0 with empty output and its run-scoped cli.log
+    /// delta was non-empty yet matched *none* of the known quota/auth
+    /// signatures. Strongly implies an upstream AGY log-format/path change
+    /// that silently disabled failure classification. Emitted the moment the
+    /// drift is detected so it is visible the same day it happens, instead
+    /// of burning retries against a dead account.
+    AgyLogFormatUnrecognized,
 }
 
 impl EventType {
@@ -49,6 +56,7 @@ impl EventType {
             Self::HumanRequired => "human_required",
             Self::DuplicateGuardTriggered => "duplicate_guard_triggered",
             Self::LoopStopped => "loop_stopped",
+            Self::AgyLogFormatUnrecognized => "agy_log_format_unrecognized",
         }
     }
 }
