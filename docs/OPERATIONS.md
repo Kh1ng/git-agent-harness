@@ -37,6 +37,12 @@ installs the lockfile-pinned Node dependencies, builds `apps/server`, and
 optionally restarts `gah-server.service`. It does not
 build or deploy web, desktop, TUI, mobile, or other client packages.
 
+`--restart-server` refuses to run while any `gah loop --profile …` process is
+active. A dashboard-started loop remains in the server service's systemd cgroup
+and would otherwise be killed by the service restart. Stop the loop cleanly
+first, then rerun the update. The restart also requires passwordless `sudo`
+permission for `systemctl`; configure that deliberately for unattended hosts.
+
 For a fresh CLI/control-plane host installation:
 
 ```bash
@@ -49,7 +55,8 @@ scripts/install.sh
 gah update --repo /path/to/git-agent-harness --restart-server
 ```
 
-The updater never starts or restarts a recurring `gah loop`.
+The updater never starts or restarts a recurring `gah loop`; with
+`--restart-server` it also refuses to restart the service while one is active.
 
 ### systemd units
 

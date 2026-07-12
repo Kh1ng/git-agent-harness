@@ -5,7 +5,9 @@
 //! build can silently leave the control plane on old behavior.
 
 use anyhow::{bail, Context, Result};
+use fs2::FileExt;
 use std::env;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,8 +19,12 @@ pub struct UpdateArgs {
 
 pub fn run(args: UpdateArgs) -> Result<()> {
     let repo = resolve_repo(args.repo.as_deref())?;
+    let _update_lock = acquire_update_lock(&repo)?;
     ensure_default_branch_checkout(&repo)?;
     ensure_clean(&repo)?;
+    if args.restart_server {
+        ensure_no_running_loop_before_server_restart()?;
+    }
 
     println!("Updating GAH CLI/control plane from {}", repo.display());
     run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
@@ -112,7 +118,13 @@ fn ensure_default_branch_checkout(repo: &Path) -> Result<()> {
         repo,
         "git",
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    )?;
+    )
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "cannot determine origin's default branch; run `git remote set-head origin -a` in {} before updating",
+            repo.display()
+        )
+    })?;
     let default_branch = default_ref.strip_prefix("origin/").unwrap_or(&default_ref);
     if branch != default_branch {
         bail!(
@@ -120,6 +132,53 @@ fn ensure_default_branch_checkout(repo: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Serialize all mutable update steps (`git pull`, `cargo install`, and `npm
+/// ci`) for one checkout. Unlike a profile lock this is deliberately repo-wide:
+/// two operators updating the same source tree would otherwise race on Git and
+/// dependency state before any GAH profile exists.
+fn acquire_update_lock(repo: &Path) -> Result<File> {
+    let git_dir = captured(repo, "git", &["rev-parse", "--absolute-git-dir"])?;
+    let lock_path = PathBuf::from(git_dir).join("gah-update.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening update lock {}", lock_path.display()))?;
+    lock.try_lock_exclusive().map_err(|_| {
+        anyhow::anyhow!(
+            "another `gah update` is already running for {}; wait for it to finish",
+            repo.display()
+        )
+    })?;
+    Ok(lock)
+}
+
+/// A dashboard-started loop remains in `gah-server.service`'s cgroup even
+/// though Node detaches it. Restarting that service would kill the loop, so
+/// fail closed before mutating the installation. The server itself uses the
+/// same `gah loop --profile …` process shape for its status fallback.
+fn ensure_no_running_loop_before_server_restart() -> Result<()> {
+    let output = Command::new("pgrep")
+        .args(["-af", "gah loop --profile"])
+        .output()
+        .context("checking for active gah loops before server restart")?;
+    if output.status.code() == Some(1) {
+        return Ok(());
+    }
+    if !output.status.success() {
+        bail!(
+            "could not determine whether a gah loop is active before restarting the server: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let processes = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    bail!(
+        "refusing to restart gah-server.service while a gah loop is active:\n{processes}\nStop the loop cleanly from the dashboard or `gah loop` owner, then rerun `gah update --restart-server`."
+    );
 }
 
 fn ensure_clean(repo: &Path) -> Result<()> {
@@ -176,8 +235,46 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::installed_binary_path;
-    use std::path::Path;
+    use super::{ensure_clean, ensure_default_branch_checkout, installed_binary_path};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn repository_with_origin_head() -> (TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("README.md"), "test\n").unwrap();
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "initial"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        (tmp, repo)
+    }
 
     #[test]
     fn installed_binary_lives_in_cargo_bin() {
@@ -189,5 +286,31 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("bin")
         );
+    }
+
+    #[test]
+    fn default_branch_check_accepts_origin_default_and_rejects_feature_branch() {
+        let (_tmp, repo) = repository_with_origin_head();
+        ensure_default_branch_checkout(&repo).unwrap();
+        git(&repo, &["checkout", "-b", "feature"]);
+        let err = ensure_default_branch_checkout(&repo).unwrap_err();
+        assert!(err.to_string().contains("non-default branch 'feature'"));
+    }
+
+    #[test]
+    fn default_branch_check_explains_missing_origin_head() {
+        let (_tmp, repo) = repository_with_origin_head();
+        git(&repo, &["symbolic-ref", "-d", "refs/remotes/origin/HEAD"]);
+        let err = ensure_default_branch_checkout(&repo).unwrap_err();
+        assert!(err.to_string().contains("git remote set-head origin -a"));
+    }
+
+    #[test]
+    fn clean_check_rejects_uncommitted_changes() {
+        let (_tmp, repo) = repository_with_origin_head();
+        ensure_clean(&repo).unwrap();
+        std::fs::write(repo.join("dirty.txt"), "dirty\n").unwrap();
+        let err = ensure_clean(&repo).unwrap_err();
+        assert!(err.to_string().contains("dirty.txt"));
     }
 }
