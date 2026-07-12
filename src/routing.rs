@@ -1358,6 +1358,7 @@ mod tests {
     };
     use crate::availability::{Reason, Source};
     use crate::config::{Defaults, Profile, RoutingPolicy};
+    use std::sync::Mutex;
 
     #[allow(clippy::too_many_arguments)]
     fn record_unavailable(
@@ -1395,6 +1396,11 @@ mod tests {
     use tempfile::TempDir;
     use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
+
+    // These tests deliberately mutate the process-global live-slot counter.
+    // Keep them out of parallel test execution so one test cannot make the
+    // other's post-release assertion observe a still-held Claude slot.
+    static CONCURRENCY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn defaults() -> Defaults {
         Defaults {
@@ -1719,6 +1725,7 @@ mod tests {
 
     #[test]
     fn preferred_backend_at_max_concurrent_falls_back() {
+        let _lock = CONCURRENCY_TEST_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let mut profile = profile();
         profile
@@ -1761,6 +1768,7 @@ mod tests {
     /// backend again.
     #[test]
     fn concurrent_dispatch_holding_slot_forces_other_thread_to_fall_back() {
+        let _lock = CONCURRENCY_TEST_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         let mut profile = profile();
         profile
