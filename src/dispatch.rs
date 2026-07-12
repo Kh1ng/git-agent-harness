@@ -3245,10 +3245,10 @@ fn review(
     // regardless of which backend ends up running the review.
     let prompt_suffix = format!(
         "Review this diff for correctness, test coverage, and safety. \
-         Return exactly one JSON object and no Markdown, prose, code fence, or other text outside it.\n\
+         Return a JSON object. You may precede it only with the inert heading `Review notes`; put every substantive finding in the JSON arrays, never in prose.\n\
          The JSON object fields are: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes, evidence, compatibility_evidence.\n\
          blocking_findings, non_blocking_findings, risk_notes, evidence, and compatibility_evidence must be JSON arrays of strings, even when empty or when only one item exists.\n\
-         For an APPROVE, evidence must include exactly one or more file:<changed-path> entries copied from Changed files below and ci:passed only when the displayed control-plane CI status is passed. An APPROVE without those grounded facts is invalid.\n\
+         For an APPROVE, evidence must include exactly one or more file:<changed-path> entries copied from Changed files below. You may include ci:passed only when the displayed control-plane CI status is passed. An APPROVE without grounded file evidence is invalid.\n\
          If a contract surface is changed, do not APPROVE unless compatibility_evidence includes file:<changed-contract-path> and mechanism:<schema-version|backward-compatible-default|migration> that is actually present in the diff.\n\
          Verdict must be one of APPROVE, NEEDS_FIX, REJECT, HUMAN_REVIEW, defined as:\n\
          - APPROVE: you believe the change is correct, safe, and complete enough to merge. Report your ACTUAL confidence honestly in the separate `confidence` field (high/medium/low) -- do not inflate confidence to sound more certain, and do not downgrade to NEEDS_FIX just to hedge when you'd otherwise approve. A low-confidence approval is a real, useful signal (insufficient context, a domain you couldn't fully verify, a partial review) and will correctly route to a human -- it is not a failure to be avoided.\n\
@@ -4659,7 +4659,28 @@ mod tests {
     }
 
     #[test]
-    fn production_approval_is_held_until_control_plane_ci_passes() {
+    fn production_approval_does_not_require_ci_before_review() {
+        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["file:src/internal.rs"]}"#;
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("claude", Some("sonnet"), false);
+        let context = ReviewGateContext::from_diff_bundle(
+            &ReviewDiffBundle {
+                files: "src/internal.rs\n".to_string(),
+                diff: "+fn internal_only() {}\n".to_string(),
+            },
+            Some("pending"),
+        );
+
+        let verdict =
+            parse_review_verdict_with_context(json, &route, &usage, ReviewerTier::Strong, &context)
+                .unwrap();
+
+        assert_eq!(verdict.verdict, "APPROVE");
+        assert!(!verdict.human_required);
+    }
+
+    #[test]
+    fn production_approval_cannot_falsely_claim_ci_passed_before_ci_finishes() {
         let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["file:src/internal.rs","ci:passed"]}"#;
         let usage = crate::ledger::LedgerUsage::default();
         let route = route_decision("claude", Some("sonnet"), false);
@@ -4680,7 +4701,7 @@ mod tests {
             .safety_gate_reason
             .as_deref()
             .unwrap_or_default()
-            .contains("CI status is passed"));
+            .contains("claimed passed CI"));
     }
 
     #[test]
@@ -4710,7 +4731,32 @@ mod tests {
             .safety_gate_reason
             .as_deref()
             .unwrap_or_default()
-            .contains("unstructured prose"));
+            .contains("substantive prose"));
+    }
+
+    #[test]
+    fn inert_review_notes_header_does_not_hide_or_block_a_structured_approval() {
+        let review_text = "Review notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src/dispatch.rs\"]}";
+        let usage = crate::ledger::LedgerUsage::default();
+        let route = route_decision("claude", Some("sonnet"), false);
+        let context = ReviewGateContext::from_diff_bundle(
+            &ReviewDiffBundle {
+                files: "src/dispatch.rs\n".to_string(),
+                diff: "+fn hardened_review() {}\n".to_string(),
+            },
+            Some("pending"),
+        );
+
+        let verdict = parse_review_verdict_with_context(
+            review_text,
+            &route,
+            &usage,
+            ReviewerTier::Strong,
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(verdict.verdict, "APPROVE");
     }
 
     #[test]
@@ -8378,15 +8424,18 @@ impl ReviewGateContext {
     }
 
     fn evidence_is_grounded(&self, evidence: &[String]) -> bool {
-        self.ci_passed
-            && evidence.iter().any(|item| {
-                let Some(path) = item.trim().strip_prefix("file:") else {
-                    return false;
-                };
-                self.changed_files
-                    .iter()
-                    .any(|candidate| candidate == path.trim())
-            })
+        evidence.iter().any(|item| {
+            let Some(path) = item.trim().strip_prefix("file:") else {
+                return false;
+            };
+            self.changed_files
+                .iter()
+                .any(|candidate| candidate == path.trim())
+        })
+    }
+
+    fn falsely_claims_passed_ci(&self, evidence: &[String]) -> bool {
+        !self.ci_passed
             && evidence
                 .iter()
                 .any(|item| item.trim().eq_ignore_ascii_case("ci:passed"))
@@ -9664,20 +9713,22 @@ fn enforce_review_evidence_gate(
 
     let reason = if !verdict.blocking_findings.is_empty() {
         Some("APPROVE contradicted non-empty blocking_findings".to_string())
-    } else if !review_text_is_json_only(review_text) {
+    } else if review_text_has_substantive_prose(review_text) {
         Some(
-            "APPROVE included unstructured prose; approval evidence must be entirely in the review JSON"
+            "APPROVE included substantive prose; every finding must be represented in the review JSON"
                 .to_string(),
         )
     } else if verdict.evidence.is_empty() {
         Some("APPROVE omitted required concrete review evidence".to_string())
-    } else if gate_context.enforce_grounding && !gate_context.ci_passed {
-        Some("APPROVE cannot be accepted until control-plane CI status is passed".to_string())
+    } else if gate_context.enforce_grounding
+        && gate_context.falsely_claims_passed_ci(&verdict.evidence)
+    {
+        Some("APPROVE claimed passed CI while the control plane did not report it".to_string())
     } else if gate_context.enforce_grounding
         && !gate_context.evidence_is_grounded(&verdict.evidence)
     {
         Some(
-            "APPROVE evidence was not grounded in an exact changed file and passed CI from the control plane"
+            "APPROVE evidence was not grounded in an exact changed file from the control plane"
                 .to_string(),
         )
     } else if gate_context.has_contract_surface_change()
@@ -9701,9 +9752,23 @@ fn enforce_review_evidence_gate(
     verdict.safety_gate_reason = Some(reason);
 }
 
-fn review_text_is_json_only(review_text: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(review_text.trim())
-        .is_ok_and(|value| value.is_object())
+fn review_text_has_substantive_prose(review_text: &str) -> bool {
+    let Some(json) = extract_first_json_object(review_text) else {
+        return true;
+    };
+    let Some(start) = review_text.find(&json) else {
+        return true;
+    };
+    let mut residue = String::with_capacity(review_text.len().saturating_sub(json.len()));
+    residue.push_str(&review_text[..start]);
+    residue.push_str(&review_text[start + json.len()..]);
+    residue.lines().map(str::trim).any(|line| {
+        !line.is_empty()
+            && !matches!(
+                line.to_ascii_lowercase().trim_end_matches(':').trim(),
+                "review notes" | "## review notes" | "### review notes" | "```json" | "```"
+            )
+    })
 }
 
 fn render_review_comment(verdict: &crate::models::ReviewVerdict, session_dir: &Path) -> String {
