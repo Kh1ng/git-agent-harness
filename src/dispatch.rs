@@ -1985,7 +1985,9 @@ fn improve(
             });
             let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
             let stalled = log_text.contains("GAH: killed after ")
-                && log_text.contains(" with no new output (stalled, not just slow).");
+                && log_text.contains(
+                    " with no new backend output or worktree progress (stalled, not just slow).",
+                );
             if stalled {
                 notify_event(
                     cfg,
@@ -5704,7 +5706,7 @@ which lacks a leading boundary check.
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(
-            log.contains("killed after 1s with no new output"),
+            log.contains("killed after 1s with no new backend output or worktree progress"),
             "got: {log}"
         );
     }
@@ -5762,7 +5764,7 @@ which lacks a leading boundary check.
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(
-            log.contains("killed after 1s with no new output"),
+            log.contains("killed after 1s with no new backend output or worktree progress"),
             "got: {log}"
         );
     }
@@ -8341,7 +8343,8 @@ fn mark_backend_unavailable_from_output_at(
     // cooldown so the next attempt can use another backend/model instead of
     // burning the same five-minute stall again.
     if log_text.contains("GAH: killed after ")
-        && log_text.contains(" with no new output (stalled, not just slow).")
+        && log_text
+            .contains(" with no new backend output or worktree progress (stalled, not just slow).")
     {
         let cooldown = now + time::Duration::minutes(15);
         crate::availability::record_unavailable(
