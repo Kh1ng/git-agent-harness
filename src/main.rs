@@ -32,6 +32,7 @@ mod telemetry;
 mod test_support;
 mod tui;
 mod tui_state;
+mod update;
 mod usage;
 mod validation_check;
 mod work_claim;
@@ -112,6 +113,18 @@ enum Commands {
         /// declared env files exist, backend executables are present.
         #[arg(long)]
         validate: bool,
+    },
+    /// Update the installed CLI and control-plane server deterministically.
+    Update {
+        /// Repository checkout to update (defaults to the current checkout).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Restart the system-wide control-plane service after a successful build.
+        #[arg(long, default_value_t = false)]
+        restart_server: bool,
+        /// systemd service restarted by --restart-server.
+        #[arg(long, default_value = "gah-server.service")]
+        server_service: String,
     },
     /// Create or print a starter GAH config/profile
     Init {
@@ -733,6 +746,16 @@ fn main() -> Result<()> {
             config_path,
             validate,
         } => doctor::run_with_validate(profile.as_deref(), config_path.as_deref(), validate)?,
+
+        Commands::Update {
+            repo,
+            restart_server,
+            server_service,
+        } => update::run(update::UpdateArgs {
+            repo,
+            restart_server,
+            server_service,
+        })?,
 
         Commands::Init {
             profile,
