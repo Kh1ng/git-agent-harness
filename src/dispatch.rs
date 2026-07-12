@@ -19,6 +19,12 @@ use time::OffsetDateTime;
 
 const PROJECT_BRIEF_MAX_BYTES: usize = 10_000;
 const LIVE_TASK_FALLBACK_MAX_BYTES: usize = 12_000;
+const LIVE_TASK_TITLE_MAX_BYTES: usize = 1_024;
+const LIVE_TASK_LABELS_MAX_BYTES: usize = 2_048;
+const LIVE_TASK_PROBLEM_MAX_BYTES: usize = 4_096;
+const LIVE_TASK_ACCEPTANCE_MAX_BYTES: usize = 8_192;
+const LIVE_TASK_LIST_MAX_BYTES: usize = 4_096;
+const LIVE_TASK_LIST_ITEM_MAX_BYTES: usize = 1_024;
 
 /// UTF-8 safe suffix: returns the last up to `max_bytes` of `s`,
 /// adjusting the start index forward to a valid character boundary.
@@ -3904,16 +3910,8 @@ fn append_project_brief(task: &mut String, profile: &Profile) {
     let Ok(brief) = fs::read_to_string(brief_path) else {
         return;
     };
-    let truncated = brief.len() > PROJECT_BRIEF_MAX_BYTES;
     task.push_str("\n## Project Brief\n\n");
-    task.push_str(utf8_safe_prefix(&brief, PROJECT_BRIEF_MAX_BYTES));
-    if truncated {
-        task.push_str(
-            "\n\n[Project brief truncated at 10,000 bytes; retrieve only relevant repository files for more detail.]\n",
-        );
-    } else if !brief.ends_with('\n') {
-        task.push('\n');
-    }
+    append_bounded_text(task, &brief, PROJECT_BRIEF_MAX_BYTES, "Project brief");
 }
 
 /// Build a bounded, task-specific packet from structured issue metadata.
@@ -3922,48 +3920,141 @@ fn append_project_brief(task: &mut String, profile: &Profile) {
 fn append_live_task_pack(task: &mut String, issue: &IssueDetails) {
     let meta = parse_ticket_metadata_from_issue(issue);
     task.push_str("\n## Live Task Pack\n\n");
-    task.push_str(&format!("Work item: #{} — {}\n", issue.number, issue.title));
+    task.push_str(&format!("Work item: #{} — ", issue.number));
+    append_bounded_text(
+        task,
+        &indent_untrusted_text(&issue.title),
+        LIVE_TASK_TITLE_MAX_BYTES,
+        "Work item title",
+    );
     if !issue.labels.is_empty() {
-        task.push_str(&format!("Labels: {}\n", issue.labels.join(", ")));
+        task.push_str("Labels: ");
+        append_bounded_text(
+            task,
+            &indent_untrusted_text(&issue.labels.join(", ")),
+            LIVE_TASK_LABELS_MAX_BYTES,
+            "Labels",
+        );
     }
     if let Some(problem) = meta.problem.as_deref().or(meta.goal.as_deref()) {
         task.push_str("\n### Problem\n\n");
-        task.push_str(problem);
-        task.push('\n');
+        append_bounded_text(
+            task,
+            &indent_untrusted_text(problem),
+            LIVE_TASK_PROBLEM_MAX_BYTES,
+            "Problem",
+        );
     }
-    append_task_pack_list(task, "Acceptance Criteria", &meta.acceptance_criteria);
-    append_task_pack_list(task, "Constraints", &meta.constraints);
-    append_task_pack_list(task, "Affected Files", &meta.affected_files);
+    append_task_pack_list(
+        task,
+        "Acceptance Criteria",
+        &meta.acceptance_criteria,
+        LIVE_TASK_ACCEPTANCE_MAX_BYTES,
+    );
+    append_task_pack_list(
+        task,
+        "Constraints",
+        &meta.constraints,
+        LIVE_TASK_LIST_MAX_BYTES,
+    );
+    append_task_pack_list(
+        task,
+        "Affected Files",
+        &meta.affected_files,
+        LIVE_TASK_LIST_MAX_BYTES,
+    );
     if !meta.verification_commands.is_empty() {
         task.push_str("\n### Verification Commands\n\n");
-        for command in &meta.verification_commands {
-            task.push_str(&format!("- `{command}`\n"));
-        }
+        append_task_pack_list_items(
+            task,
+            &meta.verification_commands,
+            LIVE_TASK_LIST_MAX_BYTES,
+            true,
+        );
     }
-    if meta.problem.is_none()
-        && meta.goal.is_none()
-        && meta.acceptance_criteria.is_empty()
-        && meta.constraints.is_empty()
-    {
-        let truncated = issue.body.len() > LIVE_TASK_FALLBACK_MAX_BYTES;
+    if issue_has_no_structured_body(issue) {
         task.push_str("\n### Issue Description\n\n");
-        task.push_str(utf8_safe_prefix(&issue.body, LIVE_TASK_FALLBACK_MAX_BYTES));
-        if truncated {
-            task.push_str("\n\n[Issue description truncated at 12,000 bytes.]\n");
-        } else if !issue.body.ends_with('\n') {
-            task.push('\n');
-        }
+        append_bounded_text(
+            task,
+            &indent_untrusted_text(&issue.body),
+            LIVE_TASK_FALLBACK_MAX_BYTES,
+            "Issue description",
+        );
     }
 }
 
-fn append_task_pack_list(task: &mut String, heading: &str, entries: &[String]) {
+fn append_task_pack_list(task: &mut String, heading: &str, entries: &[String], max_bytes: usize) {
     if entries.is_empty() {
         return;
     }
     task.push_str(&format!("\n### {heading}\n\n"));
+    append_task_pack_list_items(task, entries, max_bytes, false);
+}
+
+fn append_task_pack_list_items(
+    task: &mut String,
+    entries: &[String],
+    max_bytes: usize,
+    code: bool,
+) {
+    let start = task.len();
+    let mut truncated = false;
     for entry in entries {
-        task.push_str(&format!("- {entry}\n"));
+        if task.len().saturating_sub(start) >= max_bytes {
+            truncated = true;
+            break;
+        }
+        let value = indent_untrusted_text(utf8_safe_prefix(entry, LIVE_TASK_LIST_ITEM_MAX_BYTES));
+        let line = if code {
+            format!("- `{value}`\n")
+        } else {
+            format!("- {value}\n")
+        };
+        if task.len().saturating_sub(start) + line.len() > max_bytes {
+            let remaining = max_bytes.saturating_sub(task.len().saturating_sub(start));
+            if remaining > 3 {
+                task.push_str(utf8_safe_prefix(&line, remaining));
+            }
+            truncated = true;
+            break;
+        }
+        if entry.len() > LIVE_TASK_LIST_ITEM_MAX_BYTES {
+            truncated = true;
+        }
+        task.push_str(&line);
     }
+    if truncated {
+        task.push_str(&format!(
+            "[List truncated at {max_bytes} bytes; retrieve the issue for remaining detail.]\n"
+        ));
+    }
+}
+
+fn issue_has_no_structured_body(issue: &IssueDetails) -> bool {
+    extract_markdown_section(&issue.body, "Problem").is_none()
+        && extract_markdown_section(&issue.body, "Background").is_none()
+        && extract_markdown_section(&issue.body, "Description").is_none()
+        && extract_markdown_list_section(&issue.body, "Acceptance Criteria").is_empty()
+        && extract_markdown_list_section(&issue.body, "Constraints").is_empty()
+}
+
+fn append_bounded_text(task: &mut String, text: &str, max_bytes: usize, label: &str) {
+    let truncated = text.len() > max_bytes;
+    task.push_str(utf8_safe_prefix(text, max_bytes));
+    if truncated {
+        task.push_str(&format!(
+            "\n\n[{label} truncated at {max_bytes} bytes; retrieve only relevant source material for more detail.]\n"
+        ));
+    } else if !text.ends_with('\n') {
+        task.push('\n');
+    }
+}
+
+fn indent_untrusted_text(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_candidate_task(
@@ -4032,6 +4123,7 @@ fn format_candidate_task(
              Run tests if a test command exists and ensure they pass. Do not push or create MRs.\n"
         }
     };
+    out.push_str("\n## Safety\n\n");
     out.push_str(closing);
     out
 }
@@ -4048,19 +4140,21 @@ mod tests {
         build_task, classify_validation_failure_progress, classify_worktree_result,
         collect_pm_preflight, collect_ticket_summaries, decide_route, derive_reviewer_tier,
         extract_backend_summary, extract_issue_number, first_markdown_heading,
-        format_issue_for_focus, is_issue_number_reference, mark_backend_unavailable_from_output_at,
-        next_ticket_id, parse_pm_plan, parse_review_verdict, parse_review_verdict_with_context,
-        parse_ticket_metadata, parse_ticket_metadata_from_issue, render_review_comment,
-        review_escalation_reason, review_labels, review_preflight, review_usage, run_backend,
-        scan_available_tickets, strip_terminal_noise, validation_failure_fingerprint,
+        format_candidate_task, format_issue_for_focus, is_issue_number_reference,
+        mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
+        parse_review_verdict, parse_review_verdict_with_context, parse_ticket_metadata,
+        parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
+        review_labels, review_preflight, review_usage, run_backend, scan_available_tickets,
+        strip_terminal_noise, validation_failure_fingerprint,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
-        TicketMetadata, ValidationFailureProgress, PROJECT_BRIEF_MAX_BYTES,
+        TicketMetadata, ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES,
+        PROJECT_BRIEF_MAX_BYTES,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
-    use crate::models::PmPlan;
+    use crate::models::{Candidate, PmPlan};
     use crate::routing::{RouteError, RouteRequest};
     use crate::test_support::PathGuard;
     use std::fs;
@@ -6322,7 +6416,7 @@ which lacks a leading boundary check.
         assert!(task.contains("## Project Brief"));
         assert!(task.contains("## Live Task Pack"));
         assert!(task.contains("### Acceptance Criteria"));
-        assert!(task.contains("- Use project brief"));
+        assert!(task.contains("Use project brief"));
         assert!(!task.contains("STALE CONTROL PLANE STATE"));
         assert!(task.contains("## Focus"));
     }
@@ -6342,8 +6436,97 @@ which lacks a leading boundary check.
 
         let task = build_task(&prof, &wt, "improve", "small ticket", None);
 
-        assert!(task.contains("Project brief truncated at 10,000 bytes"));
+        assert!(task.contains(&format!(
+            "Project brief truncated at {PROJECT_BRIEF_MAX_BYTES} bytes"
+        )));
         assert!(!task.contains('é'));
+    }
+
+    #[test]
+    fn labeled_freeform_issue_keeps_bounded_issue_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "297".to_string(),
+            title: "Freeform issue".to_string(),
+            body: "The non-structured reproduction and expected outcome live here.".to_string(),
+            labels: vec!["bug".to_string()],
+        };
+
+        let task = build_task(&prof, &wt, "fix", "#297", Some(&issue));
+
+        assert!(task.contains("### Issue Description"));
+        assert!(task.contains("non-structured reproduction"));
+    }
+
+    #[test]
+    fn live_task_pack_caps_long_structured_sections_without_creating_headings() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "298".to_string(),
+            title: "Large structured issue".to_string(),
+            body: format!(
+                "## Acceptance Criteria\n\n- {}\n\n## Constraints\n\n- keep scope\n",
+                "x".repeat(LIVE_TASK_ACCEPTANCE_MAX_BYTES * 2)
+            ),
+            labels: vec![],
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#298", Some(&issue));
+
+        assert!(task.contains(&format!(
+            "[List truncated at {LIVE_TASK_ACCEPTANCE_MAX_BYTES} bytes"
+        )));
+        assert!(task.contains("### Constraints"));
+        assert_eq!(task.matches("## Focus").count(), 1);
+    }
+
+    #[test]
+    fn candidate_task_places_no_push_guardrail_in_protected_safety_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let candidate = Candidate {
+            candidate_id: "candidate-1".into(),
+            source_gate_status: "ok".into(),
+            suggested_blueprint_phase: "fix".into(),
+            provider_mutation_allowed: false,
+            suggested_labels: vec![],
+            affected_files: vec![],
+            evidence: vec!["x".repeat(10_000)],
+            acceptance_criteria: vec!["keep the safety rule".into()],
+            verification: vec![],
+            hydration_used: false,
+            hydration_source: String::new(),
+            hydration_match_method: String::new(),
+            hydrated_fields: vec![],
+            debug_gate_keys: vec![],
+            debug_scout_keys: vec![],
+            debug_hydrated_keys: vec![],
+            debug_hydrated_finding_excerpt: String::new(),
+            source_finding_path: None,
+            source_draft_issue_path: None,
+        };
+
+        let task = format_candidate_task(&prof, tmp.path(), "improve", &candidate);
+        let compacted = crate::context::enforce(
+            &task,
+            &crate::context::ContextConfig {
+                soft_limit_tokens: 20,
+                hard_limit_tokens: 200,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(compacted.prompt.contains("## Safety"));
+        assert!(compacted.prompt.contains("Do not push or create MRs."));
     }
 
     #[test]

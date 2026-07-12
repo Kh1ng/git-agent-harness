@@ -125,9 +125,9 @@ pub struct ContextBuild {
     pub estimated_tokens_after_reduction: u64,
     pub compacted: bool,
     pub largest_sections: Vec<ContextSectionSize>,
-    /// Every named prompt section that was supplied to the backend before
-    /// compaction. This makes the context artifact an audit record rather
-    /// than just a token counter.
+    /// Every named prompt section in the prompt actually supplied to the
+    /// backend after compaction. This makes the context artifact an audit
+    /// record rather than just a token counter.
     pub sources: Vec<ContextSource>,
 }
 
@@ -204,13 +204,17 @@ pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
             cfg.hard_limit_tokens
         );
     }
+    let largest_sections = section_sizes(&after);
+    let sources = context_sources(&after);
     Ok(ContextBuild {
         prompt: after,
         estimated_tokens_before_reduction: before,
         estimated_tokens_after_reduction: after_tokens,
         compacted: true,
-        largest_sections: section_sizes(prompt),
-        sources: context_sources(prompt),
+        // These are an audit of the prompt that is actually sent, not the
+        // pre-compaction prompt that was merely considered.
+        largest_sections,
+        sources,
     })
 }
 
@@ -233,6 +237,8 @@ fn split_sections(prompt: &str) -> Vec<Section> {
             sections.push(current);
             let protected = [
                 "Focus",
+                "Live Task Pack",
+                "Safety",
                 "Acceptance Criteria",
                 "Verification Commands",
                 "Warning",
@@ -345,6 +351,53 @@ mod tests {
             vec!["Project Brief", "Live Task Pack", "Focus"]
         );
         assert!(result.sources.iter().all(|source| source.bytes > 0));
+    }
+
+    #[test]
+    fn preserves_live_task_pack_and_reports_post_compaction_sources() {
+        let cfg = ContextConfig {
+            soft_limit_tokens: 45,
+            hard_limit_tokens: 100,
+            ..Default::default()
+        };
+        let prompt = "## Project Brief\nvery old context very old context very old context very old context very old context very old context\n## Live Task Pack\nAcceptance: preserve this requirement\nVerification: cargo test\n## Focus\nSee the Live Task Pack above.\n";
+
+        let result = enforce(prompt, &cfg).unwrap();
+
+        assert!(result.compacted);
+        assert!(result
+            .prompt
+            .contains("Acceptance: preserve this requirement"));
+        assert!(result.prompt.contains("Verification: cargo test"));
+        let project_brief = result
+            .sources
+            .iter()
+            .find(|source| source.name == "Project Brief")
+            .unwrap();
+        assert!(project_brief.estimated_tokens < 10);
+        assert!(result
+            .sources
+            .iter()
+            .any(|source| source.name == "Live Task Pack"));
+    }
+
+    #[test]
+    fn refuses_to_silently_compact_oversized_live_task_pack() {
+        let cfg = ContextConfig {
+            soft_limit_tokens: 10,
+            hard_limit_tokens: 20,
+            ..Default::default()
+        };
+        let err = enforce(
+            &format!(
+                "## Live Task Pack\n{}\n## Focus\nSee pack\n",
+                "x".repeat(200)
+            ),
+            &cfg,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("context_limit_exceeded"));
     }
 
     #[test]
