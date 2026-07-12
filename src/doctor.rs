@@ -59,6 +59,7 @@ fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
         failed |= !check_writable_path("worktree_base", Path::new(&defaults.worktree_base));
     }
     failed |= !check_manager_memory(profile);
+    failed |= !check_candidate_model_consistency(defaults, profile);
     !failed
 }
 
@@ -446,6 +447,27 @@ fn configured_backends(defaults: &Defaults, profile: &Profile) -> Vec<String> {
     backends.into_iter().collect()
 }
 
+fn check_candidate_model_consistency(defaults: &Defaults, profile: &Profile) -> bool {
+    match config::check_profile_candidate_model_consistency(defaults, profile) {
+        Ok(()) => {
+            print_check(
+                CheckStatus::Pass,
+                "candidate model",
+                "all candidate model labels consistent with profile backend args pins",
+            );
+            true
+        }
+        Err(errors) => {
+            let mut failed = false;
+            for err in &errors {
+                print_check(CheckStatus::Fail, "candidate model", err);
+                failed = true;
+            }
+            !failed
+        }
+    }
+}
+
 fn which(bin: &str) -> bool {
     Command::new("which")
         .arg(bin)
@@ -556,6 +578,47 @@ mod tests {
         let mut github = github_profile();
         github.routing.merge_policy = Some(crate::config::MergePolicy::StopForHuman);
         assert!(crate::doctor::check_merge_policy(&github));
+    }
+
+    #[test]
+    fn doctor_check_candidate_model_consistency() {
+        let defaults = crate::config::Defaults::default();
+
+        // 1. Mismatch case: reproducing the gpt-5.6-luna/-m gpt-5.4-mini incident.
+        let mut profile = github_profile();
+        profile.codex_args = vec!["-m".to_string(), "gpt-5.4-mini".to_string()];
+        profile.routing.pm_candidates = Some(vec![crate::config::CandidateConfig {
+            backend: "codex".to_string(),
+            model: Some("gpt-5.6-luna".to_string()),
+            ..Default::default()
+        }]);
+        assert!(!super::check_candidate_model_consistency(
+            &defaults, &profile
+        ));
+
+        // 2. Match case: label and pin agree.
+        let mut profile = github_profile();
+        profile.codex_args = vec!["-m".to_string(), "gpt-5.4-mini".to_string()];
+        profile.routing.pm_candidates = Some(vec![crate::config::CandidateConfig {
+            backend: "codex".to_string(),
+            model: Some("gpt-5.4-mini".to_string()),
+            ..Default::default()
+        }]);
+        assert!(super::check_candidate_model_consistency(
+            &defaults, &profile
+        ));
+
+        // 3. No-pin case.
+        let mut profile = github_profile();
+        profile.codex_args = vec![];
+        profile.routing.pm_candidates = Some(vec![crate::config::CandidateConfig {
+            backend: "codex".to_string(),
+            model: Some("gpt-5.6-luna".to_string()),
+            ..Default::default()
+        }]);
+        assert!(super::check_candidate_model_consistency(
+            &defaults, &profile
+        ));
     }
 
     fn github_profile() -> Profile {
