@@ -564,9 +564,10 @@ pub fn count_merge_attempts_per_branch(
     let mut counts = HashMap::new();
 
     for entry in entries {
-        if entry.mode == "merge" && entry.attempts_started > 0 {
+        if entry.mode == "merge" && entry.attempts_started.is_some_and(|n| n > 0) {
             if let Some(branch) = &entry.branch {
-                *counts.entry(branch.clone()).or_insert(0) += entry.attempts_started as usize;
+                *counts.entry(branch.clone()).or_insert(0) +=
+                    entry.attempts_started.unwrap_or(0) as usize;
             }
         }
     }
@@ -781,7 +782,7 @@ mod tests {
         mode: &str,
         branch: &str,
         dispatch_reason: Option<&str>,
-        attempts_started: u32,
+        attempts_started: Option<u32>,
     ) -> crate::ledger::LedgerEntry {
         let tmp = tempfile::tempdir().unwrap();
         let prof = crate::config::Profile {
@@ -847,7 +848,7 @@ mod tests {
     #[test]
     fn internal_retries_in_initial_dispatch_count_zero() {
         let (cfg, _tmp) =
-            test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", Some("initial"), 2)]);
+            test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", Some("initial"), Some(2))]);
         let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
             counts.get("branch-A").copied().unwrap_or(0),
@@ -861,8 +862,8 @@ mod tests {
     #[test]
     fn one_repair_dispatch_counts_one() {
         let (cfg, _tmp) = test_cfg_with_ledger(&[
-            ledger_entry("fix", "branch-A", Some("initial"), 2),
-            ledger_entry("fix", "branch-A", Some("post_review_repair"), 3),
+            ledger_entry("fix", "branch-A", Some("initial"), Some(2)),
+            ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(3)),
         ]);
         let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
@@ -880,7 +881,7 @@ mod tests {
             "fix",
             "branch-A",
             Some("post_review_repair"),
-            5,
+            Some(5),
         )]);
         let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
@@ -895,9 +896,9 @@ mod tests {
     #[test]
     fn two_repair_dispatches_hit_cap() {
         let (cfg, _tmp) = test_cfg_with_ledger(&[
-            ledger_entry("fix", "branch-A", Some("initial"), 2),
-            ledger_entry("fix", "branch-A", Some("post_review_repair"), 1),
-            ledger_entry("fix", "branch-A", Some("post_review_repair"), 1),
+            ledger_entry("fix", "branch-A", Some("initial"), Some(2)),
+            ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(1)),
+            ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(1)),
         ]);
         let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
@@ -911,8 +912,8 @@ mod tests {
     #[test]
     fn review_and_merge_entries_never_count() {
         let (cfg, _tmp) = test_cfg_with_ledger(&[
-            ledger_entry("review", "branch-A", Some("review"), 1),
-            ledger_entry("merge", "branch-A", None, 1),
+            ledger_entry("review", "branch-A", Some("review"), Some(1)),
+            ledger_entry("merge", "branch-A", None, Some(1)),
         ]);
         let counts = super::count_fix_attempts_per_branch(&cfg);
         assert!(
@@ -925,7 +926,7 @@ mod tests {
     /// count — they cannot be proven to be post-review repairs.
     #[test]
     fn legacy_entries_without_dispatch_reason_do_not_count() {
-        let (cfg, _tmp) = test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", None, 2)]);
+        let (cfg, _tmp) = test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", None, Some(2))]);
         let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
             counts.get("branch-A").copied().unwrap_or(0),

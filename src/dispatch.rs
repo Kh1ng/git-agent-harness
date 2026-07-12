@@ -706,12 +706,12 @@ pub fn merge_branch(
     entry.branch = Some(branch.to_string());
     entry.work_id = work_id.clone();
     entry.mr_url = mr_url.clone();
-    entry.attempts_started = 1;
+    entry.attempts_started = Some(1);
 
     let result = provider::merge_mr(profile, branch);
     match &result {
         Ok(()) => {
-            entry.attempts_completed = 1;
+            entry.attempts_completed = Some(1);
             notify_event(
                 cfg,
                 profile,
@@ -1923,7 +1923,7 @@ fn improve(
         );
         let attempt_session = session_dir.join(format!("attempt-{}", attempt + 1));
         fs::create_dir_all(&attempt_session)?;
-        ledger.attempts_started += 1;
+        ledger.attempts_started = Some(ledger.attempts_started.unwrap_or(0) + 1);
         let attempt_start = std::time::Instant::now();
 
         let env_path = if !resolved_env.is_empty() {
@@ -2000,7 +2000,7 @@ fn improve(
         // The backend process launched and ran to an exit code, regardless
         // of what that code was — "completed" tracks whether the attempt
         // got a fair shot, not whether it succeeded.
-        ledger.attempts_completed += 1;
+        ledger.attempts_completed = Some(ledger.attempts_completed.unwrap_or(0) + 1);
 
         println!(
             "Backend finished: exit={} duration={:.0}s log={}",
@@ -7033,8 +7033,8 @@ The parser should retain structured sections.\n\n\
         ledger.files_changed = Some(2);
         ledger.insertions = Some(14);
         ledger.deletions = Some(3);
-        ledger.attempts_started = 2;
-        ledger.attempts_completed = 2;
+        ledger.attempts_started = Some(2);
+        ledger.attempts_completed = Some(2);
         ledger.fallback_used = true;
 
         let validation_commands = vec!["cargo test".into(), "cargo fmt --check".into()];
@@ -8992,8 +8992,8 @@ fn build_metadata_rich_mr_body(
     ));
     sections.push(format!(
         "## Attempts\n\nStarted: {}\nCompleted: {}\nFallback used: {}",
-        ctx.ledger.attempts_started,
-        ctx.ledger.attempts_completed,
+        ctx.ledger.attempts_started.unwrap_or(0),
+        ctx.ledger.attempts_completed.unwrap_or(0),
         if ctx.ledger.fallback_used {
             "yes"
         } else {

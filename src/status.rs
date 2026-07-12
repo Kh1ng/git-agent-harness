@@ -298,8 +298,8 @@ pub fn build_snapshot(
                     most_recent_failure_stage: entry.failure_stage.clone(),
                     most_recent_branch: entry.branch.clone(),
                     most_recent_mr_url: entry.mr_url.clone(),
-                    attempts_started: Some(entry.attempts_started),
-                    attempts_completed: Some(entry.attempts_completed),
+                    attempts_started: entry.attempts_started,
+                    attempts_completed: entry.attempts_completed,
                     human_required: entry.human_required,
                     routing_diagnostics: entry.routing_diagnostics.clone(),
                 });
@@ -755,8 +755,8 @@ default_target_branch = "main"
         );
         entry.failure_class = Some("backend_error".into());
         entry.failure_stage = Some("agent_run".into());
-        entry.attempts_started = 3;
-        entry.attempts_completed = 2;
+        entry.attempts_started = Some(3);
+        entry.attempts_completed = Some(2);
         entry.timestamp = "2026-07-04T00:00:00Z".into();
         fs::write(&ledger_path, serde_json::to_string(&entry).unwrap() + "\n").unwrap();
 

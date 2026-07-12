@@ -157,8 +157,8 @@ mod telemetry_tests {
             mode: "fix".to_string(),
             branch: Some("main".to_string()),
             dispatch_reason: None,
-            attempts_started: 1,
-            attempts_completed: 1,
+            attempts_started: Some(1),
+            attempts_completed: Some(1),
             duration_seconds: Some(100.0),
             backend_exit_code: Some(0),
             validation_result: Some("pass".to_string()),
@@ -555,6 +555,7 @@ mod telemetry_tests {
     fn create_test_ledger_entry() -> LedgerEntry {
         LedgerEntry {
             timestamp: "2026-07-10T12:00:00Z".to_string(),
+            schema_version: crate::ledger::LEDGER_SCHEMA_VERSION,
             session_id: None,
             profile: "test-profile".to_string(),
             display_name: "Test Profile".to_string(),
@@ -601,8 +602,8 @@ mod telemetry_tests {
             error_summary: None,
             failure_class: None,
             failure_stage: None,
-            attempts_started: 1,
-            attempts_completed: 1,
+            attempts_started: Some(1),
+            attempts_completed: Some(1),
             attempts: vec![],
             dispatch_reason: None,
             context_phase: None,
@@ -895,8 +896,8 @@ default_target_branch = "main"
         entry.effective_backend = "claude".to_string();
         entry.effective_model = Some("claude-3-5".to_string());
         entry.attempts = vec![attempt1, attempt2, attempt3];
-        entry.attempts_started = 3;
-        entry.attempts_completed = 3;
+        entry.attempts_started = Some(3);
+        entry.attempts_completed = Some(3);
         // top-level usage would normally be aggregated sum of attempts
         entry.usage = crate::ledger::LedgerUsage {
             input_tokens: Some(420),
@@ -1057,5 +1058,51 @@ default_target_branch = "main"
             account: None,
         };
         assert!(generate_telemetry_report(&cfg, invalid_since).is_err());
+    }
+
+    /// Issue #240 acceptance #3: when a ledger entry lacks attempt counters
+    /// (pre-tracking), the extracted telemetry `TaskOutcomeRecord` carries
+    /// `None` (unknown) rather than `0` — so the telemetry export separates
+    /// unknown from a real zero.
+    #[test]
+    fn telemetry_extract_separates_unknown_attempts_from_zero() {
+        let raw_legacy = r#"{
+            "timestamp": "2026-07-10T00:00:00Z",
+            "profile": "test-profile",
+            "display_name": "Test Profile",
+            "repo_id": "test-repo",
+            "repo": "test/repo",
+            "local_path": "/tmp",
+            "provider": "github",
+            "backend": "codex",
+            "requested_backend": "codex",
+            "effective_backend": "codex",
+            "mode": "fix",
+            "commit_attempted": false,
+            "commit_created": false,
+            "push_attempted": false,
+            "push_succeeded": false,
+            "mr_attempted": false,
+            "mr_created": false,
+            "fallback_used": false,
+            "human_required": false,
+            "attempts": [],
+            "usage": {}
+        }"#;
+        let legacy: LedgerEntry = serde_json::from_str(raw_legacy).unwrap();
+        let legacy_records = extract_task_outcome_records(&legacy, "2026-07-10T00:00:00Z");
+        assert_eq!(legacy_records.len(), 1);
+        assert_eq!(
+            legacy_records[0].attempts_started, None,
+            "pre-tracking entry must extract as unknown, not 0"
+        );
+        assert_eq!(legacy_records[0].attempts_completed, None);
+
+        let mut known = create_test_ledger_entry();
+        known.attempts_started = Some(2);
+        known.attempts_completed = Some(1);
+        let known_records = extract_task_outcome_records(&known, "2026-07-10T00:00:00Z");
+        assert_eq!(known_records[0].attempts_started, Some(2));
+        assert_eq!(known_records[0].attempts_completed, Some(1));
     }
 }
