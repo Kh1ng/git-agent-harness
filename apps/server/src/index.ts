@@ -14,5 +14,8 @@ export * from './provider/index.js';
 // Re-export session modules  
 export * from './sessions/SessionManager.js';
 
+// Re-export host registry modules
+export * from './hosts/HostRegistry.js';
+
 // Re-export contracts
 export * from '@git-agent-harness/contracts';

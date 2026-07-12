@@ -21,6 +21,7 @@ class ServerReadinessImpl {
     this.addCheck('rustBackend', 'Rust backend connection');
     this.addCheck('providerRegistry', 'Provider registry initialization');
     this.addCheck('webSocket', 'WebSocket server initialization');
+    this.addCheck('hostRegistry', 'Host registry initialization');
   }
   
   private addCheck(name: string, description: string) {

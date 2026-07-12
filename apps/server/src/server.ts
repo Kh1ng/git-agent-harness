@@ -4,12 +4,21 @@ import { getServerReadiness } from './serverReadiness.js';
 import { runStatus, runQuota, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, getLoopStatus, startLoop, stopLoop, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
 import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
+import { HostRegistry } from './hosts/HostRegistry.js';
+import { getReadinessTracker } from './serverReadiness.js';
 
 const SERVER_VERSION = '0.1.0';
 
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
 const DEFAULT_PROFILE = 'gah';
+
+// Host registry will be initialized during server startup
+let hostRegistry: HostRegistry | null = null;
+
+export function setHostRegistry(registry: HostRegistry) {
+  hostRegistry = registry;
+}
 
 export function createServer() {
   const app = express();
@@ -37,6 +46,8 @@ export function createServer() {
       name: 'Git Agent Harness',
       version: SERVER_VERSION,
       description: 'A WebSocket server for managing Git Agent Harness sessions and providers',
+      host_id: hostRegistry?.getLocalHostId() || 'unknown',
+      host_name: hostRegistry?.getLocalHostName() || 'unknown',
       endpoints: {
         health: '/health',
         info: '/api/info',
@@ -50,13 +61,16 @@ export function createServer() {
         loopStatus: '/api/loop/status',
         loopStart: '/api/loop/start',
         loopStop: '/api/loop/stop',
+        hosts: '/api/hosts',
+        hostHealth: '/api/hosts/:id/health',
         websocket: '/ws'
       },
       features: {
         webSocket: true,
         providerManagement: true,
         sessionManagement: true,
-        rustBackendProxy: true
+        rustBackendProxy: true,
+        multiHostRegistry: !!hostRegistry
       }
     });
   });
@@ -268,6 +282,68 @@ export function createServer() {
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load controller activity',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Host registry endpoints for multi-host support
+  app.get('/api/hosts', async (req, res) => {
+    try {
+      if (!hostRegistry) {
+        res.status(503).json({
+          error: 'Host registry not initialized'
+        });
+        return;
+      }
+      
+      const hosts = hostRegistry.getAllHosts();
+      const healthStatuses = await hostRegistry.checkAllHostsHealth();
+      
+      // Merge host config with health status
+      const result = hosts.map(host => {
+        const health = healthStatuses.find(h => h.host_id === host.id);
+        return {
+          id: host.id,
+          name: host.name,
+          base_url: host.base_url,
+          profile: host.profile,
+          reachable: health?.reachable || false,
+          latency_ms: health?.latency_ms,
+          status: health?.status,
+          error: health?.error
+        };
+      });
+      
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load host registry',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/hosts/:id/health', async (req, res) => {
+    try {
+      if (!hostRegistry) {
+        res.status(503).json({
+          error: 'Host registry not initialized'
+        });
+        return;
+      }
+      
+      const hostId = req.params.id;
+      const health = await hostRegistry.checkHostHealth(hostId);
+      
+      if (!health.reachable && health.error === 'Host not found in registry') {
+        res.status(404).json(health);
+      } else {
+        res.json(health);
+      }
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to check host health',
         message: error instanceof Error ? error.message : String(error)
       });
     }

@@ -1,0 +1,17 @@
+{
+  "hosts": [
+    {
+      "id": "host1",
+      "name": "Primary Host",
+      "base_url": "http://localhost:3773",
+      "profile": "gah"
+    },
+    {
+      "id": "host2",
+      "name": "Secondary Host",
+      "base_url": "http://backup-server:3773",
+      "auth_token": "optional-auth-token",
+      "profile": "worldcup"
+    }
+  ]
+}

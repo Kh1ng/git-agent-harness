@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
-import { createServer as createExpressServer } from './server.js';
+import { createServer as createExpressServer, setHostRegistry } from './server.js';
 import { createServer as createHttpServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
 import { isGahCliAvailable } from './gahCli.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { markReadinessCheck } from './serverReadiness.js';
+import { HostRegistry } from './hosts/HostRegistry.js';
+import { getReadinessTracker } from './serverReadiness.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = process.env.HOST || '0.0.0.0';
@@ -37,6 +39,22 @@ async function main() {
     cliAvailable,
     cliAvailable ? undefined : 'gah CLI not found'
   );
+
+  // Initialize host registry
+  let hostRegistry: HostRegistry;
+  try {
+    hostRegistry = await HostRegistry.loadFromFile();
+    markReadinessCheck('hostRegistry', true);
+    console.log('Host registry initialized successfully');
+  } catch (error) {
+    console.error('Failed to initialize host registry:', error);
+    markReadinessCheck('hostRegistry', false, error instanceof Error ? error.message : String(error));
+    // Continue startup even if host registry fails - it's not critical
+    hostRegistry = new HostRegistry();
+  }
+  
+  // Set the host registry in the server module
+  setHostRegistry(hostRegistry);
 
   // Initialize provider registry with default profile
   const providerRegistry = getProviderRegistry();
