@@ -2096,6 +2096,42 @@ fn improve(
         );
         ledger.backend_exit_code = Some(result.exit_code);
 
+        // SIGINT/SIGTERM is an operator lifecycle event, not a backend
+        // failure to retry. The runner already killed and reaped the backend
+        // process group; return so the controller can write the matching
+        // terminal dispatch event.
+        if crate::runner::shutdown_requested() {
+            ledger.set_failure(
+                crate::ledger::FailureClass::HarnessError,
+                crate::ledger::FailureStage::AgentRun,
+            );
+            ledger.validation_result = Some("cancelled_shutdown".into());
+            ledger.attempts.push(crate::ledger::AttemptRecord {
+                attempt_number: attempt + 1,
+                backend: route.effective_backend.clone(),
+                effective_model: Some(llm.model.clone()),
+                exit_code: Some(result.exit_code),
+                validation_result: Some("cancelled_shutdown".into()),
+                failure_class: Some(crate::ledger::FailureClass::HarnessError.as_str().into()),
+                failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
+                duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                diff_path: None,
+                usage: attempt_usage(
+                    &result.log_path,
+                    result.agy_cli_log_delta.as_deref(),
+                    Some(route.effective_backend.as_str()),
+                    Some(&llm.model),
+                    result.transcript_path.as_deref(),
+                    Some(&claude_path),
+                ),
+            });
+            worktree::cleanup(&wt, repo);
+            anyhow::bail!(
+                "shutdown requested while {} was running",
+                route.effective_backend
+            );
+        }
+
         // Extract backend summary from the tail of the log
         backend_summary = extract_backend_summary(&result.log_path);
 
