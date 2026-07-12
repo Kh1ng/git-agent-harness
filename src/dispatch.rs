@@ -1229,11 +1229,21 @@ fn ensure_minimum_free_space(path: &Path, label: &str) -> Result<()> {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
 
-        let path_c = CString::new(path.as_os_str().as_bytes())?;
+        // Dispatch creates the worktree directory after this preflight.  A
+        // configured worktree base therefore commonly does not exist yet;
+        // stat the nearest existing ancestor to measure the same filesystem
+        // without making a harmless first dispatch fail with ENOENT.
+        let filesystem_path = nearest_existing_ancestor(path)?;
+        let path_c = CString::new(filesystem_path.as_os_str().as_bytes())?;
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statvfs(path_c.as_ptr(), &mut stat) } != 0 {
             return Err(std::io::Error::last_os_error()).with_context(|| {
-                format!("checking free space for {} ({})", label, path.display())
+                format!(
+                    "checking free space for {} (configured path {}; filesystem path {})",
+                    label,
+                    path.display(),
+                    filesystem_path.display(),
+                )
             });
         }
         let available = (stat.f_bavail as u128).saturating_mul(stat.f_frsize as u128);
@@ -1250,6 +1260,12 @@ fn ensure_minimum_free_space(path: &Path, label: &str) -> Result<()> {
     #[cfg(not(unix))]
     let _ = (path, label);
     Ok(())
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Result<&Path> {
+    path.ancestors()
+        .find(|ancestor| ancestor.exists())
+        .ok_or_else(|| anyhow::anyhow!("no existing ancestor for path {}", path.display()))
 }
 
 /// TICKET-073: verify a profile's `validation_commands` against a genuinely
@@ -4420,11 +4436,11 @@ mod tests {
         collect_pm_preflight, collect_ticket_summaries, decide_route, derive_reviewer_tier,
         extract_backend_summary, extract_issue_number, first_markdown_heading,
         format_candidate_task, github_issue_author_is_allowed, is_issue_number_reference,
-        mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
-        parse_review_verdict, parse_review_verdict_with_context, parse_ticket_metadata,
-        parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
-        review_labels, review_preflight, review_usage, run_backend, scan_available_tickets,
-        strip_terminal_noise, validation_failure_fingerprint,
+        mark_backend_unavailable_from_output_at, nearest_existing_ancestor, next_ticket_id,
+        parse_pm_plan, parse_review_verdict, parse_review_verdict_with_context,
+        parse_ticket_metadata, parse_ticket_metadata_from_issue, render_review_comment,
+        review_escalation_reason, review_labels, review_preflight, review_usage, run_backend,
+        scan_available_tickets, strip_terminal_noise, validation_failure_fingerprint,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
         TicketMetadata, ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES,
@@ -8108,6 +8124,18 @@ The parser should retain structured sections.\n\n\
         assert_eq!(
             std::fs::read_to_string(observed).unwrap(),
             expected.display().to_string()
+        );
+    }
+
+    #[test]
+    fn capacity_preflight_uses_existing_parent_for_new_worktree_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_base = tmp.path().join("worktrees");
+
+        assert!(!worktree_base.exists());
+        assert_eq!(
+            nearest_existing_ancestor(&worktree_base).unwrap(),
+            tmp.path()
         );
     }
 
