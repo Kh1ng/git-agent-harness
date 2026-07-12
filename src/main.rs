@@ -599,6 +599,53 @@ enum TelemetryCommands {
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },
+    /// Generate aggregated telemetry reports by routing dimensions
+    Aggregate {
+        /// Aggregation dimensions (can specify multiple: project, ticket, backend, model, etc.)
+        #[arg(long, value_delimiter = ',', required = true)]
+        dimensions: Vec<String>,
+        /// Start of time range (RFC3339 timestamp or YYYY-MM-DD date)
+        #[arg(long)]
+        since: Option<String>,
+        /// End of time range (RFC3339 timestamp or YYYY-MM-DD date)
+        #[arg(long)]
+        until: Option<String>,
+        /// Filter by profile
+        #[arg(long)]
+        profile: Option<String>,
+        /// Include failed attempts in aggregation
+        #[arg(long, default_value_t = true)]
+        include_failed: bool,
+        /// Include retried attempts in aggregation
+        #[arg(long, default_value_t = true)]
+        include_retried: bool,
+        /// Output in JSON format
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        /// Filter by project/repo ID
+        #[arg(long)]
+        project: Option<String>,
+        /// Filter by ticket/work ID
+        #[arg(long)]
+        ticket: Option<String>,
+        /// Filter by execution/task type (e.g. improve, fix, review)
+        #[arg(long)]
+        execution_type: Option<String>,
+        /// Filter by backend instance
+        #[arg(long)]
+        backend_instance: Option<String>,
+        /// Filter by provider
+        #[arg(long)]
+        provider: Option<String>,
+        /// Filter by model
+        #[arg(long)]
+        model: Option<String>,
+        /// Filter by account label
+        #[arg(long)]
+        account: Option<String>,
+    },
 }
 
 /// Quota/usage observation management (issue #151 / #166).
@@ -1416,6 +1463,48 @@ fn main() -> Result<()> {
                 config_path,
             } => {
                 telemetry::cli::run_status(telemetry_repo_path.as_deref(), config_path.as_deref())?;
+            }
+            TelemetryCommands::Aggregate {
+                dimensions,
+                since,
+                until,
+                profile,
+                include_failed,
+                include_retried,
+                json,
+                config_path,
+                project,
+                ticket,
+                execution_type,
+                backend_instance,
+                provider,
+                model,
+                account,
+            } => {
+                // Parse dimensions from strings to AggregationDimension enum
+                let parsed_dimensions = dimensions
+                    .iter()
+                    .map(|dim| dim.parse::<telemetry::AggregationDimension>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("Invalid dimension: {}", e))?;
+
+                telemetry::cli::run_aggregate(
+                    parsed_dimensions,
+                    since.as_deref(),
+                    until.as_deref(),
+                    profile.as_deref(),
+                    include_failed,
+                    include_retried,
+                    json,
+                    config_path.as_deref(),
+                    project.as_deref(),
+                    ticket.as_deref(),
+                    execution_type.as_deref(),
+                    backend_instance.as_deref(),
+                    provider.as_deref(),
+                    model.as_deref(),
+                    account.as_deref(),
+                )?;
             }
         },
         Commands::Quota { command } => match command {
