@@ -1269,7 +1269,17 @@ fn dispatch_records_effective_model_for_routed_runs() {
         "# Ticket\n\nRecommended backend: claude\nRecommended model: claude-sonnet-4\n",
     )
     .unwrap();
-    let cfg = write_real_repo_config(&tmp, &repo, "github");
+    // This test verifies route attribution, not publication. The fixture
+    // deliberately uses an illustrative GitHub remote, so keep publication
+    // disabled once the backend creates the minimal diff required by the
+    // no-progress guard.
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.publishing]\nallow_pull_request_creation = false\n",
+        "",
+    );
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
@@ -2732,6 +2742,8 @@ fn dispatch_fix_no_change_is_agent_no_progress() {
             cfg.to_str().unwrap(),
             "--target",
             "fix the thing",
+            "--retries",
+            "0",
             "--skip-validation-gate",
         ])
         .env("PATH", prepend_path(&fake_bin))
@@ -2889,6 +2901,11 @@ fn dispatch_runs_validation_gate_once_per_config_change_then_skips() {
         "codex",
         "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
     );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nprintf 'https://github.com/owner/real/pull/1\\n'\n",
+    );
 
     let run = || -> assert_cmd::assert::Assert {
         bin()
@@ -3010,6 +3027,11 @@ fn dispatch_skip_validation_gate_bypasses_gate() {
         &fake_bin,
         "codex",
         "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nprintf 'https://github.com/owner/real/pull/1\\n'\n",
     );
 
     bin()
