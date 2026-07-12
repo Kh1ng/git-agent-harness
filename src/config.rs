@@ -189,6 +189,14 @@ pub struct PublishingPolicy {
     /// Defaults to false so this new remote-write path is opt-in.
     #[serde(default)]
     pub allow_source_issue_closure: bool,
+    /// GitHub logins allowed to supply issues for automatic discovery and
+    /// explicit issue-number dispatch. `None` means the repository owner
+    /// only; `Some(...)` replaces that default with the exact trusted set, and
+    /// `Some([])` denies all GitHub issue intake. This keeps issue text from
+    /// untrusted authors out of worker prompts while allowing a profile to
+    /// define its trusted team deliberately.
+    #[serde(default)]
+    pub github_issue_author_allowlist: Option<Vec<String>>,
 }
 
 impl Default for PublishingPolicy {
@@ -198,6 +206,7 @@ impl Default for PublishingPolicy {
             allow_commit_message_generation: true,
             allow_issue_comments: true,
             allow_source_issue_closure: false,
+            github_issue_author_allowlist: None,
         }
     }
 }
