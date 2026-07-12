@@ -665,14 +665,18 @@ pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
 /// in place (the ledger has no other mutation path today; this is the one
 /// exception, and it's rare enough -- once per review completion -- not to
 /// need more than a full read-modify-write of the file).
+pub struct ReviewVerdictBackfill<'a> {
+    pub verdict: &'a str,
+    pub confidence: &'a str,
+    pub reviewer_backend: &'a str,
+    pub reviewer_model: Option<&'a str>,
+    pub review_gate_reason: Option<&'a str>,
+}
+
 pub fn backfill_review_verdict(
     cfg: &GahConfig,
     branch: &str,
-    verdict: &str,
-    confidence: &str,
-    reviewer_backend: &str,
-    reviewer_model: Option<&str>,
-    review_gate_reason: Option<&str>,
+    backfill: ReviewVerdictBackfill<'_>,
 ) -> Result<bool> {
     let path = cfg.defaults.ledger_path();
     let lock_path = path.with_extension("lock");
@@ -702,11 +706,11 @@ pub fn backfill_review_verdict(
     let Some(idx) = target_idx else {
         return Ok(false);
     };
-    entries[idx].review_verdict = Some(verdict.to_string());
-    entries[idx].review_confidence = Some(confidence.to_string());
-    entries[idx].reviewer_backend = Some(reviewer_backend.to_string());
-    entries[idx].reviewer_model = reviewer_model.map(|m| m.to_string());
-    entries[idx].review_gate_reason = review_gate_reason.map(str::to_string);
+    entries[idx].review_verdict = Some(backfill.verdict.to_string());
+    entries[idx].review_confidence = Some(backfill.confidence.to_string());
+    entries[idx].reviewer_backend = Some(backfill.reviewer_backend.to_string());
+    entries[idx].reviewer_model = backfill.reviewer_model.map(str::to_string);
+    entries[idx].review_gate_reason = backfill.review_gate_reason.map(str::to_string);
 
     let mut out = String::new();
     for entry in &entries {
@@ -889,11 +893,13 @@ pub mod sqlite_store {
             super::super::backfill_review_verdict(
                 &cfg,
                 "gah/test-1",
-                "APPROVE",
-                "high",
-                "claude",
-                Some("claude-sonnet-4"),
-                None,
+                super::super::ReviewVerdictBackfill {
+                    verdict: "APPROVE",
+                    confidence: "high",
+                    reviewer_backend: "claude",
+                    reviewer_model: Some("claude-sonnet-4"),
+                    review_gate_reason: None,
+                },
             )
             .unwrap();
 
@@ -3254,11 +3260,13 @@ mod tests {
         let found = backfill_review_verdict(
             &cfg,
             "gah/gah-123",
-            "NEEDS_FIX",
-            "high",
-            "claude",
-            Some("claude-sonnet-4"),
-            Some("test review evidence gate"),
+            super::ReviewVerdictBackfill {
+                verdict: "NEEDS_FIX",
+                confidence: "high",
+                reviewer_backend: "claude",
+                reviewer_model: Some("claude-sonnet-4"),
+                review_gate_reason: Some("test review evidence gate"),
+            },
         )
         .unwrap();
         assert!(found);
@@ -3292,11 +3300,13 @@ mod tests {
         let found = backfill_review_verdict(
             &cfg,
             "gah/no-such-branch",
-            "APPROVE",
-            "high",
-            "codex",
-            None,
-            None,
+            super::ReviewVerdictBackfill {
+                verdict: "APPROVE",
+                confidence: "high",
+                reviewer_backend: "codex",
+                reviewer_model: None,
+                review_gate_reason: None,
+            },
         )
         .unwrap();
         assert!(!found);

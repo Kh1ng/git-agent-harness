@@ -239,6 +239,7 @@ pub struct PmPlan {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReviewVerdict {
+    #[serde(deserialize_with = "deserialize_review_verdict")]
     pub verdict: String,
     #[serde(deserialize_with = "deserialize_flexible_string")]
     pub confidence: String,
@@ -323,6 +324,16 @@ where
     }
 }
 
+/// Verdicts are a closed protocol value. Normalize harmless model casing and
+/// whitespace before dispatch applies its deterministic safety policy.
+fn deserialize_review_verdict<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let verdict = deserialize_flexible_string(deserializer)?;
+    Ok(verdict.trim().to_ascii_uppercase())
+}
+
 fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -371,6 +382,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verdict.confidence, "0.78");
+    }
+
+    #[test]
+    fn review_verdict_normalizes_case_and_whitespace() {
+        let verdict: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":" Approve ","confidence":"high","human_required":false}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict.verdict, "APPROVE");
     }
 
     #[test]

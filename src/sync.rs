@@ -744,6 +744,27 @@ mod tests {
     }
 
     #[test]
+    fn sync_row_exposes_gate_reason_even_when_it_comes_from_review_entry() {
+        let mut mr = base_mr();
+        mr.work_id = Some("TICKET-295".into());
+        let mut review = ledger_entry("review", "gah/test", Some("review"), Some(1));
+        review.work_id = Some("TICKET-295".into());
+        review.effective_backend = "claude".into();
+        review.review_verdict = Some("HUMAN_REVIEW".into());
+        review.review_gate_reason = Some("APPROVE omitted grounded evidence".into());
+        let mut ledger = crate::ledger::LedgerEntriesByWorkId::new();
+        ledger.insert("TICKET-295".into(), vec![review]);
+
+        let row = super::sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.review_verdict.as_deref(), Some("HUMAN_REVIEW"));
+        assert_eq!(
+            row.review_gate_reason.as_deref(),
+            Some("APPROVE omitted grounded evidence")
+        );
+    }
+
+    #[test]
     fn closed_unmerged_takes_precedence_over_labels_and_other_state() {
         let mut mr = base_mr();
         mr.state = Some("closed".into());
