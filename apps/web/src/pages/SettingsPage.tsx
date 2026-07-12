@@ -1,8 +1,9 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Sun, Moon, Info, ExternalLink } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
+import { gahApi } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
@@ -15,10 +16,39 @@ export function SettingsPage() {
   const { theme, setTheme, profileOverride, setProfileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
+  
+  const [settings, setSettings] = useState<{
+    max_parallel_workers: number;
+    current_manager: string | null;
+    manager_wake_autonomy: string | null;
+  }>({
+    max_parallel_workers: 1,
+    current_manager: null,
+    manager_wake_autonomy: null
+  });
+  const [loadingSettings, setLoadingSettings] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchProfiles();
   }, [fetchProfiles]);
+
+  useEffect(() => {
+    const loadSettings = async () => {
+      try {
+        setLoadingSettings(true);
+        const loadedSettings = await gahApi.getSettings();
+        setSettings(loadedSettings);
+        setError(null);
+      } catch (err) {
+        console.error('Failed to load settings:', err);
+        setError(err instanceof Error ? err.message : 'Failed to load settings');
+      } finally {
+        setLoadingSettings(false);
+      }
+    };
+    loadSettings();
+  }, []);
 
   const configuredProfiles = profiles.data ?? [];
   const selectedName = profileOverride ?? profile ?? '';
@@ -107,6 +137,109 @@ export function SettingsPage() {
 
       <section>
         <ProfileEditor />
+      </section>
+
+      <section className="card-padded max-w-md">
+        <h3 className="text-sm font-semibold text-primary mb-3">Controller Settings</h3>
+        <p className="text-xs text-muted mb-4">
+          Configure global controller behavior and parallelism
+        </p>
+        
+        {error && (
+          <div className="mb-4 p-3 bg-critical/10 border border-critical/20 rounded-md">
+            <p className="text-sm text-critical">Error loading settings: {error}</p>
+          </div>
+        )}
+        
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-primary mb-1">
+              Max Parallel Workers
+            </label>
+            <input
+              type="number"
+              min="1"
+              max="10"
+              className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+              value={settings.max_parallel_workers || 1}
+              onChange={async (e) => {
+                const value = parseInt(e.target.value) || 1;
+                try {
+                  await gahApi.updateSettings({ max_parallel_workers: value });
+                  setSettings(prev => ({ ...prev, max_parallel_workers: value }));
+                } catch (err) {
+                  console.error('Failed to update max_parallel_workers:', err);
+                }
+              }}
+              disabled={loadingSettings}
+            />
+            <p className="text-xs text-muted mt-1">
+              How many tickets may execute concurrently (default: 1)
+            </p>
+          </div>
+          
+          <div>
+            <label className="block text-sm font-medium text-primary mb-1">
+              Current Manager
+            </label>
+            <select
+              className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+              value={settings.current_manager || ''}
+              onChange={async (e) => {
+                const value = e.target.value === '' ? null : e.target.value;
+                try {
+                  await gahApi.updateSettings({ current_manager: value });
+                  setSettings(prev => ({ ...prev, current_manager: value }));
+                } catch (err) {
+                  console.error('Failed to update current_manager:', err);
+                }
+              }}
+              disabled={loadingSettings}
+            >
+              <option value="">None (disabled)</option>
+              <option value="claude">Claude</option>
+              <option value="codex">Codex</option>
+              <option value="vibe">Vibe</option>
+              <option value="agy">AGY</option>
+            </select>
+            <p className="text-xs text-muted mt-1">
+              Which agent CLI is currently acting as manager
+            </p>
+          </div>
+          
+          <div>
+            <label className="block text-sm font-medium text-primary mb-1">
+              Manager Wake Autonomy
+            </label>
+            <select
+              className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+              value={settings.manager_wake_autonomy || 'off'}
+              onChange={async (e) => {
+                const value = e.target.value === 'off' ? null : e.target.value;
+                try {
+                  await gahApi.updateSettings({ manager_wake_autonomy: value });
+                  setSettings(prev => ({ ...prev, manager_wake_autonomy: value }));
+                } catch (err) {
+                  console.error('Failed to update manager_wake_autonomy:', err);
+                }
+              }}
+              disabled={loadingSettings}
+            >
+              <option value="off">Off</option>
+              <option value="review_only">Review Only</option>
+              <option value="full">Full</option>
+            </select>
+            <p className="text-xs text-muted mt-1">
+              How much autonomy the woken manager agent has
+            </p>
+          </div>
+        </div>
+        
+        {loadingSettings && (
+          <div className="mt-4 p-3 bg-subtle/10 border border-subtle/20 rounded-md">
+            <p className="text-sm text-muted">Loading settings...</p>
+          </div>
+        )}
       </section>
 
       <section>

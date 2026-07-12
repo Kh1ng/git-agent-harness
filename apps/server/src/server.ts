@@ -273,6 +273,40 @@ export function createServer() {
     }
   });
 
+  // Settings endpoints for controller configuration
+  app.get('/api/settings', async (req, res) => {
+    try {
+      // TODO: Implement actual config reading from gah CLI
+      // For now, return default values
+      const settings = {
+        max_parallel_workers: 1,
+        current_manager: null,
+        manager_wake_autonomy: null
+      };
+      res.json(settings);
+    } catch (error) {
+      res.status(500).json({
+        error: 'Failed to load settings',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/settings', async (req, res) => {
+    try {
+      const settings = req.body;
+      // TODO: Implement actual config writing to gah CLI
+      // For now, just log and return success
+      console.log('Settings update requested:', settings);
+      res.json({ success: true, message: 'Settings updated successfully' });
+    } catch (error) {
+      res.status(500).json({
+        error: 'Failed to update settings',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
   // 404 handler
   app.use((req, res) => {
     res.status(404).json({

@@ -155,6 +155,12 @@ export interface StopLoopResult {
   error?: string;
 }
 
+export interface SettingsConfig {
+  max_parallel_workers: number;
+  current_manager: string | null;
+  manager_wake_autonomy: string | null;
+}
+
 export interface GahDataSource {
   getStatus(profile?: string): Promise<StatusSnapshot>;
   getQuota(params?: { profile?: string; since?: string }): Promise<QuotaSnapshot>;
@@ -170,6 +176,8 @@ export interface GahDataSource {
   getLoopStatus(profile?: string): Promise<LoopStatus>;
   startLoop(profile: string): Promise<StartLoopResult>;
   stopLoop(profile: string): Promise<StopLoopResult>;
+  getSettings(): Promise<SettingsConfig>;
+  updateSettings(settings: Partial<SettingsConfig>): Promise<{ success: boolean; message: string }>;
 }
 
 async function postJson<T, U>(path: string, body: U): Promise<T> {
@@ -308,5 +316,13 @@ export const gahApi: GahDataSource = {
       body: JSON.stringify({ profile })
     });
     return (await res.json()) as StopLoopResult;
+  },
+  
+  getSettings() {
+    return getJson<SettingsConfig>('/api/settings');
+  },
+  
+  updateSettings(settings) {
+    return postJson<{ success: boolean; message: string }, Partial<SettingsConfig>>('/api/settings', settings);
   }
 };

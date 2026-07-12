@@ -111,6 +111,19 @@ export type ServerMessage =
       providers: Record<ProviderInstanceId, ProviderStatus>;
     }
   | {
+      type: "settings.current";
+      requestId: string;
+      max_parallel_workers: number;
+      current_manager: string | null;
+      manager_wake_autonomy: string | null;
+    }
+  | {
+      type: "settings.updated";
+      requestId: string;
+      success: boolean;
+      error?: string;
+    }
+  | {
       type: "error";
       error: string;
       requestId: string;
@@ -158,6 +171,17 @@ export type ClientMessage =
     }
   | {
       type: "provider.list";
+      requestId: string;
+    }
+  | {
+      type: "settings.update";
+      requestId: string;
+      max_parallel_workers?: number;
+      current_manager?: string | null;
+      manager_wake_autonomy?: string | null;
+    }
+  | {
+      type: "settings.get";
       requestId: string;
     }
   | {
