@@ -3860,6 +3860,7 @@ fn review(
             ledger.validation_result = Some("not_run".into());
             println!("Review backend is unavailable.");
             println!("Review bundle written to: {}", bundle.display());
+            anyhow::bail!("review backend is unavailable")
         }
         runner::ReviewProcessOutcome::SpawnFailure => {
             ledger.set_failure(
@@ -3869,6 +3870,7 @@ fn review(
             ledger.validation_result = Some("not_run".into());
             println!("Review backend failed to launch.");
             println!("Review bundle written to: {}", bundle.display());
+            anyhow::bail!("review backend failed to launch: {}", result.stderr.trim())
         }
         runner::ReviewProcessOutcome::NonZeroExit(code) => {
             ledger.set_failure(
@@ -3879,6 +3881,7 @@ fn review(
             ledger.validation_result = Some("not_run".into());
             println!("Review backend exited with status {}.", code);
             println!("Review bundle written to: {}", bundle.display());
+            anyhow::bail!("review backend exited with status {code}")
         }
         runner::ReviewProcessOutcome::SignalTermination(signal) => {
             ledger.set_failure(
@@ -3889,6 +3892,7 @@ fn review(
             ledger.validation_result = Some("not_run".into());
             println!("Review backend terminated by signal {}.", signal);
             println!("Review bundle written to: {}", bundle.display());
+            anyhow::bail!("review backend terminated by signal {signal}")
         }
         runner::ReviewProcessOutcome::Timeout => {
             ledger.set_failure(
@@ -3901,6 +3905,10 @@ fn review(
                 profile.review_timeout_seconds()
             );
             println!("Review bundle written to: {}", bundle.display());
+            anyhow::bail!(
+                "review backend timed out after {} seconds",
+                profile.review_timeout_seconds()
+            )
         }
     }
     Ok(())

@@ -2205,6 +2205,74 @@ fn review_parse_failure_preserves_raw_report() {
     assert!(!session.join("review-verdict.json").exists());
 }
 
+/// A review backend failure must propagate through the controller-facing
+/// dispatch path.  Otherwise `gah loop --once` records `review: success`
+/// even though the ledger correctly says backend_error, which can conceal a
+/// failed review from the operator and the next controller observation.
+#[test]
+fn loop_reports_nonzero_review_backend_as_failure_not_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    ProcessCommand::new("git")
+        .args(["branch", "gah/real-review", "feature/review"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "origin", "gah/real-review"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    checkout_branch(&repo, "main");
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+        "",
+    );
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\nprintf 'subscription quota exhausted\\n' >&2\nexit 23\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"headRefName\":\"gah/real-review\",\"url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"OPEN\",\"isDraft\":true,\"mergeStateStatus\":\"BLOCKED\",\"mergedAt\":null,\"updatedAt\":\"2026-07-04T17:22:35-05:00\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"headRefName\":\"gah/real-review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nexit 0\n",
+    );
+
+    let events_path = tmp.path().join("events.jsonl");
+    bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_EVENTS_PATH", &events_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "review backend exited with status 23",
+        ));
+
+    let events_text = fs::read_to_string(events_path).unwrap();
+    assert!(events_text.contains("dispatch_started"));
+    assert!(events_text.contains("review backend exited with status 23"));
+    assert!(!events_text.contains("review: success"));
+}
+
 #[test]
 fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
     let tmp = tempfile::tempdir().unwrap();
