@@ -1,0 +1,57 @@
+# gah-loop@.service
+#
+# One systemd user unit owns one profile's recurring GAH controller. Start it
+# as `systemctl --user start gah-loop@<profile>` (the dashboard uses this
+# command too). Do not wrap `gah loop` in another supervisor: systemd owns the
+# complete cgroup, so stopping this unit terminates every worker it spawned.
+#
+# This template assumes the standard `cargo install` location and config path.
+# Override individual settings with:
+#   systemctl --user edit gah-loop@<profile>
+#
+# IMPORTANT: the PATH below is required, not cosmetic -- same reasoning as
+# gah-server.service. `gah loop` dispatches tickets whose `validation_commands`
+# typically include `cargo fmt/clippy/test`, `npm ci`, `npx tsc`, etc. A
+# systemd unit's default PATH does not include a rustup/nvm-managed
+# toolchain's bin directories, so dispatch would silently fail baseline
+# validation with `cargo: not found` (or the npm/npx equivalent) unless PATH
+# is set explicitly here. Adjust the cargo/node paths below to match your
+# actual toolchain install.
+#
+# The old dashboard-spawned loop inherited the server process's full
+# environment, so provider tokens (GITHUB_TOKEN/GH_TOKEN, GITLAB_PAT) and LLM
+# proxy config (LLM_API_KEY, LLM_BASE_URL, LLM_MODEL) came along for free. A
+# systemd unit starts with a deliberately empty environment instead, so any
+# profile that does NOT set its own `env_file` in gah's config (which `gah`
+# loads into its own process before each dispatch) must have those values
+# supplied here. EnvironmentFile is optional (`-` prefix) so a profile relying
+# solely on `env_file` is unaffected; create the file only if you need it:
+#   mkdir -p ~/.config/gah && printf 'GITHUB_TOKEN=...\n' > ~/.config/gah/gah-loop.env
+#   chmod 600 ~/.config/gah/gah-loop.env
+[Unit]
+Description=GAH recurring controller (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=HOME=%h
+Environment=GAH_CONFIG=%h/.config/gah/config.toml
+Environment=XDG_STATE_HOME=%h/.local/state
+Environment=PATH=%h/.nvm/versions/node/v22.23.1/bin:%h/.opencode/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-%h/.config/gah/gah-loop.env
+ExecStart=%h/.cargo/bin/gah loop --profile %i
+# The operator/dashboard starts work explicitly. Never silently respawn after
+# a crash or Stop, where an automatic restart could duplicate dispatches.
+Restart=no
+KillSignal=SIGTERM
+# This is the lifecycle invariant: a parent stop/failure kills the loop and
+# all of its concurrent backend children together.
+KillMode=control-group
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

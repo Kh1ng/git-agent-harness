@@ -163,7 +163,10 @@ pub paid_review_count: u32,  // Increment each time a paid backend is used for r
 ```rust
 // Add to RoutingPolicy
 #[serde(default)]
-pub max_review_cycles_per_ticket: Option<u32>,  // Default: 2
+pub max_review_cycles_per_ticket: Option<u32>,  // Default: max_fix_attempts_per_mr + 1
+
+#[serde(default)]
+pub max_fix_attempts_per_mr: Option<u32>,  // Default: 2
 
 #[serde(default)]  
 pub max_paid_reviews_per_ticket: Option<u32>,  // Default: 3
@@ -176,7 +179,8 @@ pub max_paid_reviews_per_ticket: Option<u32>,  // Default: 3
 ```rust
 // Add to dispatch::review()
 fn check_review_budget(cfg: &GahConfig, ledger_entries: &[LedgerEntry], work_id: &str) -> Result<()> {
-    let max_cycles = profile.routing.max_review_cycles_per_ticket.unwrap_or(2);
+    let max_repairs = profile.routing.max_fix_attempts_per_mr.unwrap_or(2);
+    let max_cycles = profile.routing.max_review_cycles_per_ticket.unwrap_or(max_repairs + 1);
     let max_paid = profile.routing.max_paid_reviews_per_ticket.unwrap_or(3);
     
     let recent_reviews = ledger_entries.iter()
@@ -572,7 +576,10 @@ No migration needed:
 ### Review Budget Configuration
 ```toml
 [routing]
-max_review_cycles_per_ticket = 2
+# Initial review + one review after each permitted repair. The implicit
+# max_review_cycles_per_ticket is therefore 3; set it explicitly only to
+# override that relationship.
+max_fix_attempts_per_mr = 2
 max_paid_reviews_per_ticket = 3
 
 # Per-backend overrides possible

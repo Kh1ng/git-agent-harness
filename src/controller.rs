@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, SyncSender};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// TICKET-078: how many times the controller will automatically
 /// Retry/Escalate the same work_id before giving up and requiring a human.
@@ -298,6 +298,16 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut fix_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut merge_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut human_blocked_mrs: Vec<&crate::sync::SyncMrJson> = Vec::new();
+    // A final review handoff is recorded against a work item in the ledger.
+    // The provider label deliberately still classifies the MR as NEEDS_REVIEW
+    // so provisional escalations can continue, but a *final* ledger handoff
+    // must not cause the loop to re-run the same review every tick.
+    let final_review_holds: HashSet<&str> = snapshot
+        .blocked_work_items
+        .iter()
+        .filter(|blocker| blocker.kind == "human_required")
+        .filter_map(|blocker| blocker.source_reference.as_deref())
+        .collect();
     // Issue #156: READY_FOR_HUMAN MRs whose CI is non-terminal / unknown
     // (GitLab head_pipeline gap). They wait for CI to resolve and are not
     // silently dropped.
@@ -305,14 +315,24 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
 
     for mr in &mrs {
         match mr.classification.as_str() {
-            "NEEDS_REVIEW" => review_candidates.push(mr),
+            "NEEDS_REVIEW" => {
+                if mr
+                    .work_id
+                    .as_deref()
+                    .is_some_and(|work_id| final_review_holds.contains(work_id))
+                {
+                    human_blocked_mrs.push(mr);
+                } else {
+                    review_candidates.push(mr);
+                }
+            }
             "CI_FAILED" | "NEEDS_FIX" => {
                 let fix_attempts = snapshot
                     .fix_attempt_counts
                     .get(&mr.branch)
                     .copied()
                     .unwrap_or(0);
-                if fix_attempts >= AUTO_RETRY_CAP {
+                if fix_attempts >= snapshot.profile.max_fix_attempts_per_mr as usize {
                     // Exhausted fix attempts -> work-item block, not a profile freeze.
                     human_blocked_mrs.push(mr);
                 } else {
@@ -719,18 +739,20 @@ pub struct LoopOnceResult {
 /// independent and must not block each other. Two invocations against the
 /// same config file (the real-world incident this guards against: the
 /// daemon and an ad-hoc `--once` both using the default
-/// `~/.config/gah/config.toml`) hash to the same lock file.
+/// `~/.config/gah/config.toml`) hash to the same lock file. The lock must
+/// not live under `XDG_STATE_HOME`: backend wrappers and service managers may
+/// use different XDG environments while still operating the same profile.
 fn loop_lock_path(profile_name: &str, config_path: &std::path::Path) -> PathBuf {
     use std::hash::{Hash, Hasher};
-    let state_root = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
     let canonical_config =
         std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canonical_config.hash(&mut hasher);
-    state_root.join("gah").join(format!(
+    let lock_dir = canonical_config
+        .parent()
+        .map(|parent| parent.join(".gah-locks"))
+        .unwrap_or_else(|| PathBuf::from(".gah-locks"));
+    lock_dir.join(format!(
         "loop-{}-{:x}.lock",
         profile_name.replace('/', "_"),
         hasher.finish()
@@ -804,7 +826,11 @@ pub fn run_loop(
         // operator restart after repair. This avoids a retry/restart storm
         // while preserving fail-closed dispatch behavior.
         match run_once(cfg, profile_name, json, parallel, skip_validation_gate) {
-            Ok(()) => std::thread::sleep(std::time::Duration::from_secs(30)),
+            Ok(()) if !wait_for_loop_interval(Duration::from_secs(30)) => {
+                eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
+                return Ok(());
+            }
+            Ok(()) => {}
             Err(_) if crate::runner::shutdown_requested() => {
                 eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
                 return Ok(());
@@ -817,11 +843,33 @@ pub fn run_loop(
             }
             Err(error) => {
                 eprintln!("gah loop: iteration failed; retrying after backoff: {error:#}");
-                // ponytail: fixed 5-min backoff; make it exponential if a
-                // hot failure ever burns real quota.
-                std::thread::sleep(std::time::Duration::from_secs(300));
+                // Keep shutdown responsive even while backing off: a stopped
+                // service must never leave a detached controller running.
+                if !wait_for_loop_interval(Duration::from_secs(300)) {
+                    eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
+                    return Ok(());
+                }
             }
         }
+    }
+}
+
+fn wait_for_loop_interval(delay: Duration) -> bool {
+    wait_interruptibly(delay, crate::runner::shutdown_requested)
+}
+
+fn wait_interruptibly(delay: Duration, shutdown_requested: impl Fn() -> bool) -> bool {
+    const POLL_INTERVAL: Duration = Duration::from_millis(250);
+    let deadline = Instant::now() + delay;
+    loop {
+        if shutdown_requested() {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(POLL_INTERVAL));
     }
 }
 
@@ -1468,8 +1516,8 @@ pub(crate) fn run_dispatch_and_record(
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_profile_lock, is_validation_gate_failure, loop_lock_path, NextAction,
-        AUTO_RETRY_CAP,
+        acquire_profile_lock, is_validation_gate_failure, loop_lock_path, wait_interruptibly,
+        NextAction, AUTO_RETRY_CAP,
     };
 
     #[test]
@@ -1532,6 +1580,24 @@ mod tests {
 
         drop(daemon_lock);
         let _ = std::fs::remove_file(&lock_path);
+    }
+
+    #[test]
+    fn profile_lock_is_adjacent_to_config_not_xdg_state() {
+        let config_file = tempfile::NamedTempFile::new().unwrap();
+        let lock_path = loop_lock_path("test-profile", config_file.path());
+        let expected_dir = config_file.path().parent().unwrap().join(".gah-locks");
+        assert_eq!(lock_path.parent(), Some(expected_dir.as_path()));
+    }
+
+    #[test]
+    fn interruptible_wait_stops_during_backoff() {
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let completed = wait_interruptibly(std::time::Duration::from_secs(300), || {
+            checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+        });
+        assert!(!completed);
+        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -1633,6 +1699,7 @@ mod tests {
                 local_path: "/tmp/repo".into(),
                 default_target_branch: "main".into(),
                 merge_policy: crate::config::MergePolicy::default(),
+                max_fix_attempts_per_mr: 2,
             },
             observations: Observations {
                 sync: ObservationStatus { status: "ok" },
@@ -2419,6 +2486,23 @@ mod tests {
     }
 
     #[test]
+    fn final_review_handoff_is_not_re_reviewed_each_loop_tick() {
+        let mut snapshot = empty_snapshot();
+        snapshot.merge_requests.push(mr("gah/42", "NEEDS_REVIEW"));
+        snapshot.blocked_work_items.push(Blocker {
+            kind: "human_required".into(),
+            reason: Some("review_escalation_exhausted".into()),
+            message: Some("all configured reviewers were tried".into()),
+            backend: None,
+            model: None,
+            until: None,
+            source_reference: Some("TICKET-gah/42".into()),
+        });
+
+        assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
+    }
+
+    #[test]
     fn never_dispatched_ticket_is_eligible() {
         let mut snapshot = empty_snapshot();
         snapshot.available_tickets.push(ticket(
@@ -2717,6 +2801,23 @@ mod tests {
             NextAction::FixMr { .. } => {}
             other => panic!("expected FixMr after 1 repair (cap=2), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn configured_fix_cap_allows_requested_number_of_repairs() {
+        let mut snapshot = empty_snapshot();
+        snapshot.profile.max_fix_attempts_per_mr = 4;
+        snapshot.fix_attempt_counts.insert("branch-A".into(), 3);
+        snapshot
+            .merge_requests
+            .push(needs_fix_mr("branch-A", "TICKET-A"));
+        assert!(matches!(
+            decide_next_action(&snapshot),
+            NextAction::FixMr { .. }
+        ));
+
+        snapshot.fix_attempt_counts.insert("branch-A".into(), 4);
+        assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
     }
 
     // ===== Bug 2: stuck-loop gate persists to ledger and skips ticket =====

@@ -233,6 +233,7 @@ pub fn build_snapshot(
             local_path: profile.local_path.clone(),
             default_target_branch: profile.default_target_branch.clone(),
             merge_policy: resolved_routing.merge_policy.unwrap_or_default(),
+            max_fix_attempts_per_mr: resolved_routing.max_fix_attempts_per_mr(),
         },
         since: since.to_string(),
         usage,

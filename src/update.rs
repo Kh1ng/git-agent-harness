@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use std::env;
-use std::fs::{File, OpenOptions};
+use std::fs::{copy, create_dir_all, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -60,12 +60,14 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         bail!("server build did not produce apps/server/dist/bin.js");
     }
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
+    let loop_unit = install_loop_unit_template(&repo)?;
 
     println!("Installed CLI: {}", binary.display());
     println!(
         "Built server:  {}",
         repo.join("apps/server/dist/bin.js").display()
     );
+    println!("Installed loop unit: {}", loop_unit.display());
 
     if args.restart_server {
         run_command(&repo, "sudo", &["systemctl", "daemon-reload"])?;
@@ -157,10 +159,9 @@ fn acquire_update_lock(repo: &Path) -> Result<File> {
     Ok(lock)
 }
 
-/// A dashboard-started loop remains in `gah-server.service`'s cgroup even
-/// though Node detaches it. Restarting that service would kill the loop, so
-/// fail closed before mutating the installation. The server itself uses the
-/// same `gah loop --profile …` process shape for its status fallback.
+/// The loop is an independent systemd user unit. Refuse a server restart
+/// while one is active so an update cannot change the control plane beneath
+/// ongoing work; the operator must intentionally stop it first.
 fn ensure_no_running_loop_before_server_restart() -> Result<()> {
     let output = Command::new("pgrep")
         .args(["-af", "gah loop --profile"])
@@ -179,6 +180,43 @@ fn ensure_no_running_loop_before_server_restart() -> Result<()> {
     bail!(
         "refusing to restart gah-server.service while a gah loop is active:\n{processes}\nStop the loop cleanly from the dashboard or `gah loop` owner, then rerun `gah update --restart-server`."
     );
+}
+
+/// Keep the dashboard's lifecycle unit in lockstep with the installed CLI and
+/// control plane. Local operator customization belongs in `systemctl --user
+/// edit gah-loop@<profile>` drop-ins, so replacing this base template on every
+/// deterministic update is safe and prevents source/runtime ownership drift.
+fn install_loop_unit_template(repo: &Path) -> Result<PathBuf> {
+    let source = repo.join("packaging/systemd/gah-loop@.service");
+    if !source.is_file() {
+        bail!(
+            "loop systemd unit template is missing: {}",
+            source.display()
+        );
+    }
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .context("HOME or XDG_CONFIG_HOME is required to install the loop systemd unit")?;
+    let target = config_home.join("systemd/user/gah-loop@.service");
+    let parent = target.parent().expect("systemd unit target has a parent");
+    create_dir_all(parent)
+        .with_context(|| format!("creating systemd user-unit directory {}", parent.display()))?;
+    copy(&source, &target).with_context(|| {
+        format!(
+            "installing loop systemd unit from {} to {}",
+            source.display(),
+            target.display()
+        )
+    })?;
+    let status = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status()
+        .context("reloading the user systemd manager after installing gah-loop@.service")?;
+    if !status.success() {
+        bail!("systemctl --user daemon-reload exited with {status}");
+    }
+    Ok(target)
 }
 
 fn ensure_clean(repo: &Path) -> Result<()> {
