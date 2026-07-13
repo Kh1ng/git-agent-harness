@@ -609,6 +609,8 @@ mod telemetry_tests {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            review_source_sha: None,
+            reviewer_class: None,
             review_gate_reason: None,
             commit_attempted: true,
             commit_created: true,
