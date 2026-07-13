@@ -710,12 +710,12 @@ export async function runProfileSet(options: ProfileSetOptions): Promise<void> {
   }
   if (options.max_parallel_workers !== undefined && options.max_parallel_workers !== null) {
     args.push('--max-parallel-workers', String(options.max_parallel_workers));
-  } else if (options.max_parallel_workers === null && options.clear?.includes('max_parallel_workers')) {
+  } else if (options.clear?.includes('max_parallel_workers')) {
     args.push('--clear', 'max_parallel_workers');
   }
   if (options.manager_wake_autonomy !== undefined && options.manager_wake_autonomy !== null) {
     args.push('--manager-wake-autonomy', options.manager_wake_autonomy);
-  } else if (options.manager_wake_autonomy === null && options.clear?.includes('manager_wake_autonomy')) {
+  } else if (options.clear?.includes('manager_wake_autonomy')) {
     args.push('--clear', 'manager_wake_autonomy');
   }
   if (options.clear?.length) {
@@ -812,7 +812,7 @@ export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
 
   if (options.current_manager !== undefined && options.current_manager !== null) {
     args.push('--current-manager', options.current_manager);
-  } else if (options.current_manager === null && options.clear?.includes('current_manager')) {
+  } else if (options.clear?.includes('current_manager')) {
     args.push('--clear', 'current_manager');
   }
 
