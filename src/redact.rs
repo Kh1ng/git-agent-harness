@@ -90,7 +90,19 @@ pub fn redact_with_known_secrets(text: &str, secrets: &[(String, String)]) -> St
     // Longest-first prevents a prefix secret from leaving the suffix behind.
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.1.len()));
     for (name, value) in secrets {
-        output = output.replace(value, &format!("[REDACTED:{name}]"));
+        // A raw substring replace corrupts unrelated text whenever a short
+        // secret value (e.g. a test harness's `GITHUB_TOKEN=token`, or any
+        // real value that is coincidentally a short common word) also
+        // appears inside a longer, unrelated word -- "token" inside
+        // "input_tokens" being the concrete case that surfaced this. Anchor
+        // on word boundaries so only a standalone occurrence of the value is
+        // redacted, never a substring of a different identifier.
+        let Ok(pattern) = Regex::new(&format!(r"\b{}\b", regex::escape(value))) else {
+            continue;
+        };
+        output = pattern
+            .replace_all(&output, format!("[REDACTED:{name}]"))
+            .into_owned();
     }
     output = github_token_re()
         .replace_all(&output, "[REDACTED:GITHUB_TOKEN]")
@@ -139,6 +151,28 @@ mod tests {
             text,
             &[("DEMO_TOKEN".to_string(), "s3cr3t-value-123".to_string())],
         )
+    }
+
+    #[test]
+    fn short_known_secret_value_does_not_corrupt_a_longer_unrelated_word() {
+        // Regression: a test harness (or a real deployment) can set a short
+        // *_TOKEN env value like "token". A raw substring replace turned
+        // "input_tokens: 500" into "input_[REDACTED:...]s: 500", silently
+        // destroying the field name and losing real usage data downstream.
+        let result = redact_with_known_secrets(
+            "input_tokens: 500\noutput_tokens: 120",
+            &[("GITHUB_TOKEN".to_string(), "token".to_string())],
+        );
+        assert_eq!(result, "input_tokens: 500\noutput_tokens: 120");
+    }
+
+    #[test]
+    fn short_known_secret_value_is_still_redacted_as_a_standalone_word() {
+        let result = redact_with_known_secrets(
+            "auth failed: token invalid",
+            &[("GITHUB_TOKEN".to_string(), "token".to_string())],
+        );
+        assert_eq!(result, "auth failed: [REDACTED:GITHUB_TOKEN] invalid");
     }
 
     #[test]
