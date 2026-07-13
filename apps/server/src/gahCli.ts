@@ -968,10 +968,14 @@ export function stopLoop(profile: string): StopLoopResult {
     };
   }
   try {
-    mkdirSync(loopStateDir(), { recursive: true });
-    writeFileSync(loopManualStopFile(profile), JSON.stringify({ stoppedAt: new Date().toISOString() }));
     const result = runSystemctlUser('stop', profile);
     if (!result.ok) return { stopped: false, error: result.error };
+    // Only a confirmed stop persists the marker. Writing it before the
+    // systemctl call succeeds would leave the watchdog believing a still-
+    // running loop (e.g. a bus-connection error, or linger not enabled) was
+    // intentionally stopped, suppressing any respawn/alerting for it.
+    mkdirSync(loopStateDir(), { recursive: true });
+    writeFileSync(loopManualStopFile(profile), JSON.stringify({ stoppedAt: new Date().toISOString() }));
     return { stopped: true };
   } catch (error) {
     return { stopped: false, error: error instanceof Error ? error.message : String(error) };

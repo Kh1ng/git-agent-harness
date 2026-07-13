@@ -43,6 +43,14 @@ active. The loop has its own systemd user cgroup and must be stopped cleanly
 first, then rerun the update. The restart also requires passwordless `sudo`
 permission for `systemctl`; configure that deliberately for unattended hosts.
 
+Run `gah update` itself as the operator user, not via `sudo` — it installs the
+loop's systemd *user* unit under that user's own `$HOME`/`$XDG_CONFIG_HOME`.
+Only the two `--restart-server` sub-steps that touch the system-level
+`gah-server.service` need root, and `gah update` escalates those internally
+via its own `sudo systemctl …` calls. Running the whole command under `sudo`
+would resolve `HOME` to root's and silently install/reload the loop unit for
+root's systemd instance instead of yours.
+
 For a fresh CLI/control-plane host installation:
 
 ```bash
@@ -84,6 +92,17 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now gah-server
 ```
 
+`gah-server` (and hence the dashboard's Start/Stop buttons) drives `systemctl
+--user` for the loop, which requires that user's systemd *user* manager to be
+running even without an active login session. If `gah-server` runs as a
+system service under `User=…` (the documented setup above), enable linger for
+that user once, or every `systemctl --user` call fails with an opaque "Failed
+to connect to bus":
+
+```bash
+sudo loginctl enable-linger <user>
+```
+
 Install the loop template once for the user that runs GAH, then the dashboard
 Start/Stop buttons manage `gah-loop@<profile>` rather than creating a detached
 process:
@@ -96,6 +115,15 @@ systemctl --user start gah-loop@gah
 The template reads the profile's configured `max_parallel_workers`; do not
 add another supervisor or a second worker count at the service layer. Inspect
 the entire process tree with `systemd-cgls --user` when validating a run.
+
+Unlike the old dashboard-spawned loop, this unit does not inherit
+`gah-server`'s process environment, so provider tokens (`GITHUB_TOKEN`/
+`GH_TOKEN`, `GITLAB_PAT`) and LLM proxy config (`LLM_API_KEY`, `LLM_BASE_URL`,
+`LLM_MODEL`, section 2) are not automatically present unless the profile sets
+its own `env_file` in `gah`'s config. For any profile that doesn't, create
+`~/.config/gah/gah-loop.env` (picked up automatically, `chmod 600` it) with
+those values, or edit the unit's `Environment=`/`PATH` lines directly via
+`systemctl --user edit gah-loop@<profile>` for a host-specific toolchain path.
 
 Inspect and control units with the usual systemd verbs:
 
