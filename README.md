@@ -523,3 +523,15 @@ tests — implement until they pass, then remove the ignore.
   config is caught at setup time, not inside a paid dispatch loop. Doctor
   passing should mean "dispatch will not waste money on config errors".
 - **Smart MR titles from ticket**: Parse `Suggested MR Title:` field from the ticket file and use it as the MR title instead of the generic `[GAH] improve: <repo>`. Fall back to generic if field not present.
+agent edit
+agent edit
+agent edit
+agent edit
+agent edit
+agent edit
+agent edit
+agent edit
+agent edit
+agent edit
+agent edit
+agent edit

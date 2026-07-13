@@ -2228,6 +2228,7 @@ fn improve(
                     failure_stage: Some(crate::ledger::FailureStage::BackendLaunch.as_str().into()),
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    cli_version: None,
                     usage: crate::ledger::LedgerUsage::default(),
                 });
                 worktree::cleanup(&wt, repo);
@@ -2273,6 +2274,7 @@ fn improve(
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
+                cli_version: result.agy_version.clone(),
             });
             worktree::preserve_wip(
                 &wt,
@@ -2327,6 +2329,7 @@ fn improve(
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
+                cli_version: result.agy_version.clone(),
             });
             let stalled = log_text.contains("GAH: killed after ")
                 && log_text.contains("(stalled, not just slow).");
@@ -2488,6 +2491,7 @@ fn improve(
                         result.transcript_path.as_deref(),
                         Some(&claude_path),
                     ),
+                    cli_version: result.agy_version.clone(),
                 });
                 if attempt + 1 < max_attempts {
                     let rerouted = decide_route(
@@ -2546,6 +2550,7 @@ fn improve(
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
+                cli_version: result.agy_version.clone(),
             });
             if attempt + 1 < max_attempts {
                 // No progress is recoverable: a fresh attempt can get a
@@ -2598,6 +2603,7 @@ fn improve(
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
+                cli_version: result.agy_version.clone(),
             });
             break;
         }
@@ -2632,6 +2638,7 @@ fn improve(
                         result.transcript_path.as_deref(),
                         Some(&claude_path),
                     ),
+                    cli_version: result.agy_version.clone(),
                 });
                 break;
             }
@@ -2708,6 +2715,7 @@ fn improve(
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
+                        cli_version: result.agy_version.clone(),
                     });
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
@@ -2801,6 +2809,7 @@ fn improve(
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
+                        cli_version: result.agy_version.clone(),
                     });
                     worktree::preserve_wip(
                         &wt,
@@ -2837,6 +2846,7 @@ fn improve(
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
+                        cli_version: result.agy_version.clone(),
                     });
                     break;
                 } else {
@@ -2864,6 +2874,7 @@ fn improve(
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
+                        cli_version: result.agy_version.clone(),
                     });
                     worktree::preserve_wip(
                         &wt,
@@ -3194,6 +3205,7 @@ fn experiment(
                 internal_log_delta: None,
                 internal_log_path: None,
                 transcript_path: None,
+                agy_version: None,
             }
         }
     };

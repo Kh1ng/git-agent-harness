@@ -96,6 +96,11 @@ pub struct RunResult {
     /// JSONL; Vibe uses its session `meta.json`. `None` when the backend did
     /// not produce a discoverable artifact.
     pub transcript_path: Option<String>,
+    /// AGY CLI version for this run (e.g. "1.0.16"), captured via
+    /// `agy --version`. `None` for non-AGY backends and for runs where version
+    /// detection fails. Used for log-path resolution and upstream log-format
+    /// drift detection (TICKET-242).
+    pub agy_version: Option<String>,
 }
 
 pub struct LlmConfig {
@@ -500,6 +505,7 @@ pub fn run_openhands(
         internal_log_delta: None,
         internal_log_path: None,
         transcript_path: None,
+        agy_version: None,
     })
 }
 
@@ -571,6 +577,7 @@ pub fn run_codex_with_executable(
         internal_log_delta: None,
         internal_log_path: None,
         transcript_path: None,
+        agy_version: None,
     })
 }
 
@@ -772,6 +779,7 @@ pub fn run_claude_with_executable(
         internal_log_delta: None,
         internal_log_path: None,
         transcript_path,
+        agy_version: None,
     })
 }
 
@@ -861,6 +869,7 @@ pub fn run_vibe_with_executable(
         internal_log_delta: None,
         internal_log_path: None,
         transcript_path: metadata_path,
+        agy_version: None,
     })
 }
 
@@ -1040,6 +1049,7 @@ pub fn run_opencode_with_executable(
         internal_log_delta: log_delta(&opencode_log, opencode_log_pre_offset),
         internal_log_path: opencode_log.map(|path| path.to_string_lossy().into_owned()),
         transcript_path,
+        agy_version: None,
     })
 }
 
@@ -1188,25 +1198,121 @@ fn agy_empty_output_diagnosis(env_vars: &[(String, String)], executable: &Path) 
     }
 }
 
+/// Detect AGY CLI version by running `agy --version`. Returns `None` on any
+/// failure (missing binary, non-zero exit, unparseable output). Cheap and used
+/// for log-path selection and upstream log-format drift detection (TICKET-242).
+fn detect_agy_version(executable: &Path, env_vars: &[(String, String)]) -> Option<String> {
+    let mut cmd = Command::new(executable);
+    cmd.arg("--version");
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Accept "antigravity-cli version 1.0.16" or a bare "1.0.16" (an optional
+    // leading `v`/`V` is tolerated). AGY versions are `MAJOR.MINOR.PATCH`, so
+    // take the last whitespace-separated token that looks like a dotted-numeric
+    // version.
+    version_str
+        .split_whitespace()
+        .rev()
+        .find(|tok| {
+            let t = tok.strip_prefix(['v', 'V']).unwrap_or(tok);
+            t.split('.').count() >= 2 && t.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+        .map(|s| s.strip_prefix(['v', 'V']).unwrap_or(s).to_string())
+}
+
+/// AGY cli.log layout, keyed by the first upstream version that introduced it
+/// (TICKET-242). A future upstream log relocation is a new table row here, not
+/// a code archaeology session in `agy_cli_log_path`.
+///
+/// Each entry is `(first_version, candidate_paths)`: `first_version` is the
+/// semver-style lower bound (inclusive) at which the layout appeared, and
+/// `candidate_paths` are resolved relative to `~/.gemini/antigravity-cli` (a
+/// file is used directly; a directory is scanned for the newest `cli-*` file).
+const AGY_LOG_PATHS: &[(&str, &[&str])] = &[
+    // Earliest releases: a single `cli.log` file.
+    ("0.0.0", &["cli.log"]),
+    // v1.0.0+: logs are rotated under `log/` as `cli-*.log`.
+    ("1.0.0", &["log"]),
+];
+
+/// Compare two dotted-numeric version strings (e.g. "1.0.16" vs "1.0.0").
+/// Returns the [`std::cmp::Ordering`] of `a` relative to `b`. Non-numeric
+/// components compare as `0`, which is fine for the `MAJOR.MINOR.PATCH`
+/// versions AGY emits.
+fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let ap: Vec<u64> = a.split('.').filter_map(|p| p.parse().ok()).collect();
+    let bp: Vec<u64> = b.split('.').filter_map(|p| p.parse().ok()).collect();
+    let max = ap.len().max(bp.len());
+    for i in 0..max {
+        let av = *ap.get(i).unwrap_or(&0);
+        let bv = *bp.get(i).unwrap_or(&0);
+        match av.cmp(&bv) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// Candidate cli.log locations (relative to the AGY root) for the detected
+/// version. When the version is unknown we consider every layout ever seen, so
+/// resolution still works against an unrecognized/old CLI.
+fn agy_log_candidates(version: Option<&str>) -> Vec<&'static str> {
+    match version {
+        Some(v) => AGY_LOG_PATHS
+            .iter()
+            .filter(|(first, _)| version_cmp(v, first) != std::cmp::Ordering::Less)
+            .flat_map(|(_, cands)| cands.iter().copied())
+            .collect(),
+        None => AGY_LOG_PATHS
+            .iter()
+            .flat_map(|(_, cands)| cands.iter().copied())
+            .collect(),
+    }
+}
+
 /// Resolve AGY's cli.log path from the HOME that the run actually uses
 /// (the per-call `env_vars` win over process `HOME`, matching how the run's
-/// effective HOME is resolved elsewhere). Returns `None` only when no HOME
-/// is discoverable -- in which case there is no cli.log to delta against.
-fn agy_cli_log_path(env_vars: &[(String, String)], _executable: &Path) -> Option<PathBuf> {
+/// effective HOME is resolved elsewhere). `version` selects the candidate
+/// layout(s) from `AGY_LOG_PATHS` (keyed by version range); when `None` every
+/// known layout is tried. Returns `None` only when no HOME is discoverable or
+/// no candidate log exists -- in which case there is no cli.log to delta
+/// against.
+fn agy_cli_log_path(
+    env_vars: &[(String, String)],
+    _executable: &Path,
+    version: Option<&str>,
+) -> Option<PathBuf> {
     let home = env_vars
         .iter()
         .find(|(k, _)| k == "HOME")
         .map(|(_, v)| v.clone())
         .or_else(|| std::env::var("HOME").ok())?;
     let root = PathBuf::from(home).join(".gemini/antigravity-cli");
-    let legacy = root.join("cli.log");
-    if legacy.exists() {
-        return Some(legacy);
+    for rel in agy_log_candidates(version) {
+        let cand = root.join(rel);
+        if cand.is_file() {
+            return Some(cand);
+        }
+        if cand.is_dir() {
+            if let Some(newest) = newest_cli_in(&cand) {
+                return Some(newest);
+            }
+        }
     }
-    // Recent AGY releases rotate logs under `log/cli-*.log`; use the newest
-    // file so the run-scoped offset still works with the installed layout.
+    None
+}
+
+/// Newest `cli-*` file inside `dir`, used for rotated AGY log layouts.
+fn newest_cli_in(dir: &Path) -> Option<PathBuf> {
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(root.join("log")).ok()?.flatten() {
+    for entry in fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if !path.is_file() || !path.file_name()?.to_string_lossy().starts_with("cli-") {
             continue;
@@ -1221,6 +1327,31 @@ fn agy_cli_log_path(env_vars: &[(String, String)], _executable: &Path) -> Option
         }
     }
     newest.map(|(_, path)| path)
+}
+
+/// Returns `true` when `delta` is non-empty yet contains none of the known AGY
+/// cli.log signatures. That is the TICKET-242 drift canary: an AGY run failed
+/// with empty output, the current-run log delta matched zero known signatures,
+/// and the delta is non-empty -- so upstream has silently changed its log
+/// format/path and classification has degraded.
+fn is_agy_log_format_unrecognized(delta: &str) -> bool {
+    if delta.trim().is_empty() {
+        return false;
+    }
+    const KNOWN_SIGNATURES: &[&str] = &[
+        "RESOURCE_EXHAUSTED",
+        "Individual quota reached",
+        "Quota exceeded",
+        "quota has been reached",
+        "quota reached",
+        "not logged into Antigravity",
+        "not logged in",
+        "AGY not authenticated",
+        "Resets in ",
+        "resets at ",
+        "Your quota resets at",
+    ];
+    !KNOWN_SIGNATURES.iter().any(|sig| delta.contains(sig))
 }
 
 /// Read only bytes appended to a backend-owned log after `pre_offset`.
@@ -1250,6 +1381,11 @@ pub fn run_agy_with_executable(
     let log_path = session_dir.join("backend-output.log");
     write_redacted_task(session_dir, task)?;
 
+    // TICKET-242: detect the AGY CLI version up front. It is cheap, good
+    // attribution, and drives log-path resolution plus upstream log-format
+    // drift detection below.
+    let agy_version = detect_agy_version(executable, env_vars);
+
     let mut cmd = Command::new(executable);
     cmd.arg("--print");
     cmd.arg(task);
@@ -1264,7 +1400,8 @@ pub fn run_agy_with_executable(
     // history or concurrent appends from other AGY instances). `None` when
     // the cli.log isn't readable yet is fine -- the delta stays `None` and
     // usage/quota parsing simply has nothing to draw from for this attempt.
-    let agy_cli_log = agy_cli_log_path(env_vars, executable);
+    // The path is resolved via the version-keyed `AGY_LOG_PATHS` table.
+    let agy_cli_log = agy_cli_log_path(env_vars, executable, agy_version.as_deref());
     let agy_cli_log_pre_offset = agy_cli_log
         .as_ref()
         .and_then(|p| fs::metadata(p).ok().map(|m| m.len()))
@@ -1301,6 +1438,21 @@ pub fn run_agy_with_executable(
     // auth has expired.  Treat empty output at exit 0 as a failure and
     // try to classify the real cause from AGY's own log.
     if trimmed.is_empty() && exit_code == 0 {
+        // TICKET-242 drift canary: if the run-scoped log delta is non-empty
+        // but matches zero known signatures, upstream has silently changed its
+        // log format/path. Emit a distinct note so the degradation is visible
+        // the day it happens, instead of being silently classified unknown.
+        let agy_cli_log_delta = log_delta(&agy_cli_log, agy_cli_log_pre_offset);
+        if is_agy_log_format_unrecognized(agy_cli_log_delta.as_deref().unwrap_or("")) {
+            let drift_msg = format!(
+                "[agy_log_format_unrecognized] AGY produced no output with an unrecognized cli.log delta (agy_version={}). Upstream log format/path may have changed; quota/auth classification is degraded.",
+                agy_version.as_deref().unwrap_or("unknown"),
+            );
+            if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
+                let _ = writeln!(file, "{}", drift_msg);
+            }
+        }
+
         let err_msg = agy_empty_output_diagnosis(env_vars, executable);
 
         if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
@@ -1311,10 +1463,11 @@ pub fn run_agy_with_executable(
             exit_code: -1,
             duration_secs,
             log_path: log_path.to_string_lossy().into_owned(),
-            agy_cli_log_delta: log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+            agy_cli_log_delta,
             internal_log_delta: None,
             internal_log_path: None,
             transcript_path: None,
+            agy_version: agy_version.clone(),
         });
     }
 
@@ -1326,6 +1479,7 @@ pub fn run_agy_with_executable(
         internal_log_delta: None,
         internal_log_path: None,
         transcript_path: None,
+        agy_version,
     })
 }
 
@@ -3651,5 +3805,189 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("stdout-marker-agy"), "normal output preserved");
+    }
+
+    // ── TICKET-242: AGY version + log-format drift detection ───────────────
+
+    #[test]
+    fn detect_agy_version_parses_version_output() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        make_fake_bin(
+            tmp.path(),
+            "agy",
+            "#!/bin/sh\necho 'antigravity-cli version 1.0.16'\n",
+        );
+        assert_eq!(
+            detect_agy_version(&tmp.path().join("agy"), &[]).as_deref(),
+            Some("1.0.16")
+        );
+    }
+
+    #[test]
+    fn detect_agy_version_handles_bare_version_token() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        make_fake_bin(tmp.path(), "agy", "#!/bin/sh\necho 'v2.3.4'\n");
+        assert_eq!(
+            detect_agy_version(&tmp.path().join("agy"), &[]).as_deref(),
+            Some("2.3.4")
+        );
+    }
+
+    #[test]
+    fn detect_agy_version_returns_none_on_failure() {
+        let tmp = TempDir::new().unwrap();
+        make_fake_bin(
+            tmp.path(),
+            "agy",
+            "#!/bin/sh\necho 'not a version'\nexit 1\n",
+        );
+        assert_eq!(detect_agy_version(&tmp.path().join("agy"), &[]), None);
+    }
+
+    #[test]
+    fn is_agy_log_format_unrecognized_classifies_correctly() {
+        // Empty delta is never "unrecognized".
+        assert!(!is_agy_log_format_unrecognized(""));
+        // A non-empty, unrecognized shape trips the canary.
+        assert!(is_agy_log_format_unrecognized(
+            "[NEW FORMAT] upstream reshaped this line; no known signature"
+        ));
+        // Every known signature keeps classification on the recognized path.
+        assert!(!is_agy_log_format_unrecognized(
+            "RESOURCE_EXHAUSTED: quota exhausted"
+        ));
+        assert!(!is_agy_log_format_unrecognized(
+            "not logged into Antigravity"
+        ));
+        assert!(!is_agy_log_format_unrecognized("Resets in 15m30s"));
+    }
+
+    #[test]
+    fn agy_log_path_table_resolves_by_version() {
+        // Unknown version falls back to every known layout's candidate.
+        let cands = agy_log_candidates(None);
+        assert!(cands.contains(&"cli.log"));
+        assert!(cands.contains(&"log"));
+
+        // A pre-1.0.0 version predates the rotated `log/` layout.
+        let cands_old = agy_log_candidates(Some("0.9.0"));
+        assert!(cands_old.contains(&"cli.log"));
+        assert!(!cands_old.contains(&"log"));
+
+        // A current version includes both layouts.
+        let cands_new = agy_log_candidates(Some("1.0.16"));
+        assert!(cands_new.contains(&"cli.log"));
+        assert!(cands_new.contains(&"log"));
+    }
+
+    #[test]
+    fn run_agy_captures_cli_version_in_result() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "agy",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'antigravity-cli version 1.0.16'; else echo 'stdout-marker-agy'; fi\n",
+        );
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+        let result = run_agy(
+            &f.worktree,
+            "test task",
+            &f.session_dir,
+            &test_llm(),
+            &envs,
+            "agy",
+        )
+        .unwrap();
+        assert_eq!(result.agy_version.as_deref(), Some("1.0.16"));
+    }
+
+    #[test]
+    fn run_agy_empty_output_with_unrecognized_log_emits_drift_note() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+
+        // Fake AGY that reports a future version via `--version`, and on
+        // `--print` exits 0 with no stdout but appends an *unrecognized* line
+        // to its cli.log -- exactly the silent upstream log-format change
+        // TICKET-242 defends against.
+        let home = f._tmp.path().join("home");
+        let cli_log = home.join(".gemini/antigravity-cli/cli.log");
+        fs::create_dir_all(cli_log.parent().unwrap()).unwrap();
+        fs::write(&cli_log, "").unwrap();
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'antigravity-cli version 2.0.0'; elif [ \"$1\" = \"--print\" ]; then printf '[NEW FORMAT] upstream reshaped this line; no known signature\\n' >> '{}'; exit 0; else exit 1; fi\n",
+            cli_log.display(),
+        );
+        make_fake_bin(&f.bin_dir, "agy", &body);
+
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            ("HOME".to_string(), home.to_str().unwrap().to_string()),
+        ];
+
+        let result = run_agy(
+            &f.worktree,
+            "test task",
+            &f.session_dir,
+            &test_llm(),
+            &envs,
+            "agy",
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, -1, "empty output must be a failure");
+        assert_eq!(result.agy_version.as_deref(), Some("2.0.0"));
+
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            log.contains("agy_log_format_unrecognized"),
+            "drift canary note must be present; log was:\n{log}"
+        );
+    }
+
+    #[test]
+    fn run_agy_empty_output_with_recognized_log_emits_no_drift_note() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+
+        // Fake AGY that appends a *recognized* quota signature to its cli.log.
+        let home = f._tmp.path().join("home");
+        let cli_log = home.join(".gemini/antigravity-cli/cli.log");
+        fs::create_dir_all(cli_log.parent().unwrap()).unwrap();
+        fs::write(&cli_log, "").unwrap();
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'antigravity-cli version 1.0.16'; elif [ \"$1\" = \"--print\" ]; then printf 'RESOURCE_EXHAUSTED: quota exhausted\\n' >> '{}'; exit 0; else exit 1; fi\n",
+            cli_log.display(),
+        );
+        make_fake_bin(&f.bin_dir, "agy", &body);
+
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            ("HOME".to_string(), home.to_str().unwrap().to_string()),
+        ];
+
+        let result = run_agy(
+            &f.worktree,
+            "test task",
+            &f.session_dir,
+            &test_llm(),
+            &envs,
+            "agy",
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            !log.contains("agy_log_format_unrecognized"),
+            "recognized signature must not trip the drift canary; log was:\n{log}"
+        );
+        assert!(
+            log.contains("AGY quota exhausted"),
+            "the recognized quota signature is still classified normally; log was:\n{log}"
+        );
     }
 }
