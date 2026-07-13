@@ -835,7 +835,7 @@ pub fn run_loop(
 }
 
 fn wait_for_loop_interval(delay: Duration) -> bool {
-    wait_interruptibly(delay, || crate::runner::shutdown_requested())
+    wait_interruptibly(delay, crate::runner::shutdown_requested)
 }
 
 fn wait_interruptibly(delay: Duration, shutdown_requested: impl Fn() -> bool) -> bool {
