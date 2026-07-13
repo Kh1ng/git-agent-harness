@@ -274,6 +274,13 @@ pub struct LedgerEntry {
     pub reviewer_backend: Option<String>,
     #[serde(default)]
     pub reviewer_model: Option<String>,
+    /// Immutable source commit reviewed by this ledger record. Missing on
+    /// historical records, which must never be considered duplicates.
+    #[serde(default)]
+    pub review_source_sha: Option<String>,
+    /// Authority class (strong/standard/weak/escalatory) of the reviewer.
+    #[serde(default)]
+    pub reviewer_class: Option<String>,
     /// Deterministic reason why GAH made a reviewer output non-mergeable.
     #[serde(default)]
     pub review_gate_reason: Option<String>,
@@ -381,6 +388,8 @@ impl LedgerEntry {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            review_source_sha: None,
+            reviewer_class: None,
             review_gate_reason: None,
             commit_attempted: false,
             commit_created: false,
@@ -460,6 +469,8 @@ impl LedgerEntry {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            review_source_sha: None,
+            reviewer_class: None,
             review_gate_reason: None,
             commit_attempted: false,
             commit_created: false,
@@ -842,6 +853,28 @@ pub fn entries_for_work_id(cfg: &GahConfig, work_id: &str) -> Result<Vec<LedgerE
                 .is_some_and(|entry_id| aliases.iter().any(|alias| alias == entry_id))
         })
         .collect())
+}
+
+/// True only when this exact work item and immutable source commit already
+/// received a completed review from the same authority class. Missing legacy
+/// attribution fails open: it may cost a review, but never suppresses one.
+pub fn review_already_exists(
+    cfg: &GahConfig,
+    work_id: &str,
+    source_sha: &str,
+    reviewer_class: &str,
+) -> Result<bool> {
+    let aliases = work_id_aliases(work_id);
+    Ok(read_entries(cfg)?.into_iter().any(|entry| {
+        entry.mode == "review"
+            && entry
+                .work_id
+                .as_deref()
+                .is_some_and(|id| aliases.iter().any(|alias| alias == id))
+            && entry.review_source_sha.as_deref() == Some(source_sha)
+            && entry.reviewer_class.as_deref() == Some(reviewer_class)
+            && entry.review_verdict.is_some()
+    }))
 }
 
 pub type LedgerEntriesByWorkId = BTreeMap<String, Vec<LedgerEntry>>;
@@ -2748,8 +2781,8 @@ mod tests {
     use super::{
         active_review_hold_work_ids, append, backfill_review_verdict, entries_for_work_id,
         index_entries_by_work_id, is_strong_model, read_entries, reconcile,
-        repair_truncated_tail_at, usage_summary_for_backend, FailureClass, FailureStage, GroupBy,
-        LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
+        repair_truncated_tail_at, review_already_exists, usage_summary_for_backend, FailureClass,
+        FailureStage, GroupBy, LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
     use std::collections::HashMap;
@@ -2897,6 +2930,22 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(!text.contains("abcdefghijklmnopqrstuvwxyz"));
         assert!(text.contains("[REDACTED:TOKEN]"));
+    }
+
+    #[test]
+    fn review_dedup_requires_exact_work_sha_and_reviewer_class() {
+        let (_tmp, cfg) = test_config();
+        let mut entry = LedgerEntry::new("test", &profile(), "claude", "review", "x", None, None);
+        entry.work_id = Some("#109".into());
+        entry.review_source_sha = Some("abc123".into());
+        entry.reviewer_class = Some("strong".into());
+        entry.review_verdict = Some("APPROVE".into());
+        append(&cfg, &entry).unwrap();
+
+        assert!(review_already_exists(&cfg, "#109", "abc123", "strong").unwrap());
+        assert!(!review_already_exists(&cfg, "#109", "def456", "strong").unwrap());
+        assert!(!review_already_exists(&cfg, "#109", "abc123", "weak").unwrap());
+        assert!(!review_already_exists(&cfg, "#110", "abc123", "strong").unwrap());
     }
 
     #[test]

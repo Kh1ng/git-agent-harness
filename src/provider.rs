@@ -66,6 +66,13 @@ pub struct ReviewTarget {
     pub title: Option<String>,
     pub body: Option<String>,
     pub ci_status: Option<String>,
+    /// Immutable source commit that the reviewer inspected. Optional so
+    /// older provider responses and local/fallback targets remain valid.
+    #[allow(dead_code)] // consumed by SHA review deduplication (#109)
+    pub source_sha: Option<String>,
+    /// Immutable target/base commit used to construct the reviewed diff.
+    #[allow(dead_code)] // consumed by SHA review deduplication (#109)
+    pub target_sha: Option<String>,
 }
 
 pub fn create_draft_mr(
@@ -646,7 +653,7 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
             "--repo",
             &profile.repo,
             "--json",
-            "number,url,title,body,headRefName,baseRefName,statusCheckRollup",
+            "number,url,title,body,headRefName,baseRefName,headRefOid,baseRefOid,statusCheckRollup",
         ])
         .output()
         .context("gh pr view")?;
@@ -674,6 +681,8 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
         title: resp["title"].as_str().map(str::to_string),
         body: resp["body"].as_str().map(str::to_string),
         ci_status,
+        source_sha: resp["headRefOid"].as_str().map(str::to_string),
+        target_sha: resp["baseRefOid"].as_str().map(str::to_string),
     })
 }
 
@@ -705,6 +714,8 @@ fn gitlab_target_from_value(value: &serde_json::Value) -> Result<ReviewTarget> {
         title: value["title"].as_str().map(str::to_string),
         body: value["description"].as_str().map(str::to_string),
         ci_status,
+        source_sha: value["sha"].as_str().map(str::to_string),
+        target_sha: value["diff_refs"]["base_sha"].as_str().map(str::to_string),
     })
 }
 
@@ -722,8 +733,8 @@ fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_draft_mr, find_review_target_by_mr, mark_ready_for_review, merge_mr,
-        TEST_PATH_OVERRIDE,
+        create_draft_mr, find_review_target_by_mr, github_review_target_by_number,
+        gitlab_target_from_value, mark_ready_for_review, merge_mr, TEST_PATH_OVERRIDE,
     };
     use crate::config::{Profile, RoutingPolicy};
     use std::fs;
@@ -940,6 +951,47 @@ mod tests {
         let err = find_review_target_by_mr(&gitlab_profile(), "235").unwrap_err();
 
         assert!(format!("{:#}", err).contains("did not return a merge request"));
+    }
+
+    #[test]
+    fn review_targets_capture_provider_source_and_target_shas() {
+        let gitlab = serde_json::json!({
+            "iid": 42,
+            "web_url": "https://gitlab.test/group/repo/-/merge_requests/42",
+            "source_branch": "gah/42",
+            "target_branch": "main",
+            "sha": "source-gitlab-sha",
+            "diff_refs": { "base_sha": "target-gitlab-sha" }
+        });
+        let gitlab_target = gitlab_target_from_value(&gitlab).unwrap();
+        assert_eq!(
+            gitlab_target.source_sha.as_deref(),
+            Some("source-gitlab-sha")
+        );
+        assert_eq!(
+            gitlab_target.target_sha.as_deref(),
+            Some("target-gitlab-sha")
+        );
+
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            "#!/bin/sh\nprintf '%s\\n' '{\"number\":7,\"url\":\"https://github.test/owner/repo/pull/7\",\"headRefName\":\"gah/7\",\"baseRefName\":\"main\",\"headRefOid\":\"source-github-sha\",\"baseRefOid\":\"target-github-sha\",\"statusCheckRollup\":[]}'\n",
+        );
+        let _guard = PathOverride::set(bin_dir.to_string_lossy().into_owned());
+        let github_target = github_review_target_by_number(&github_profile(), "7").unwrap();
+        assert_eq!(
+            github_target.source_sha.as_deref(),
+            Some("source-github-sha")
+        );
+        assert_eq!(
+            github_target.target_sha.as_deref(),
+            Some("target-github-sha")
+        );
     }
 
     #[test]
