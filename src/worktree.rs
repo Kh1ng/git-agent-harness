@@ -55,10 +55,12 @@ pub fn git(args: &[&str], cwd: &Path) -> Result<String> {
         anyhow::bail!(
             "git {}: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
+            crate::redact::redact(&String::from_utf8_lossy(&out.stderr)).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(crate::redact::redact(&String::from_utf8_lossy(&out.stdout))
+        .trim()
+        .to_string())
 }
 
 /// Run git and return raw Output. Does NOT error on non-zero exit.

@@ -31,6 +31,11 @@ pub enum EventType {
     BackendMarkedUnavailable,
     WaitSelected,
     HumanRequired,
+    /// A review was deliberately not launched because its ticket exhausted a
+    /// configured review-cycle or paid-review budget. This is terminal for
+    /// the controller run (not an in-flight dispatch) and is intentionally
+    /// distinct from a backend failure.
+    ReviewBudgetExhausted,
     DuplicateGuardTriggered,
     LoopStopped,
 }
@@ -47,6 +52,7 @@ impl EventType {
             Self::BackendMarkedUnavailable => "backend_marked_unavailable",
             Self::WaitSelected => "wait_selected",
             Self::HumanRequired => "human_required",
+            Self::ReviewBudgetExhausted => "review_budget_exhausted",
             Self::DuplicateGuardTriggered => "duplicate_guard_triggered",
             Self::LoopStopped => "loop_stopped",
         }
@@ -92,7 +98,9 @@ pub fn append(cfg: &GahConfig, event: &ControllerEvent) -> Result<()> {
         .append(true)
         .open(&path)
         .with_context(|| format!("opening events log {}", path.display()))?;
-    let mut line = serde_json::to_vec(event).context("serializing controller event")?;
+    let mut value = serde_json::to_value(event).context("serializing controller event")?;
+    crate::redact::redact_json_value(&mut value);
+    let mut line = serde_json::to_vec(&value).context("serializing controller event")?;
     line.push(b'\n');
     file.write_all(&line).context("writing controller event")?;
     Ok(())
@@ -172,7 +180,7 @@ pub(crate) fn orphaned_dispatch_runs(
         }
         match event.event_type.as_str() {
             "dispatch_started" => started.push((run_id.to_string(), event.work_id.clone())),
-            "dispatch_finished" | "duplicate_guard_triggered" => {
+            "dispatch_finished" | "duplicate_guard_triggered" | "review_budget_exhausted" => {
                 finished.insert(run_id.to_string());
             }
             _ => {}
@@ -290,6 +298,10 @@ mod tests {
         assert_eq!(EventType::WaitSelected.as_str(), "wait_selected");
         assert_eq!(EventType::HumanRequired.as_str(), "human_required");
         assert_eq!(
+            EventType::ReviewBudgetExhausted.as_str(),
+            "review_budget_exhausted"
+        );
+        assert_eq!(
             EventType::DuplicateGuardTriggered.as_str(),
             "duplicate_guard_triggered"
         );
@@ -356,6 +368,22 @@ mod tests {
     }
 
     #[test]
+    fn append_redacts_secret_like_event_details_before_persisting() {
+        let (_tmp, cfg) = test_config();
+        super::record(
+            &cfg,
+            EventType::DispatchFinished,
+            Some("real"),
+            None,
+            "backend said Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(cfg.defaults.events_path()).unwrap();
+        assert!(!text.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(text.contains("[REDACTED:TOKEN]"));
+    }
+
+    #[test]
     fn run_id_round_trips_for_correlated_dispatch_events() {
         let (_tmp, cfg) = test_config();
         record_with_run_id(
@@ -371,6 +399,32 @@ mod tests {
         let events = read_events(&cfg).unwrap();
         assert_eq!(events[0].run_id.as_deref(), Some("run-123"));
         assert_eq!(events[0].work_id.as_deref(), Some("TICKET-140"));
+    }
+
+    #[test]
+    fn review_budget_exhausted_is_terminal_for_controller_activity() {
+        let (_tmp, cfg) = test_config();
+        record_with_run_id(
+            &cfg,
+            EventType::DispatchStarted,
+            Some("real"),
+            Some("#113"),
+            Some("run-budget"),
+            "review",
+        )
+        .unwrap();
+        record_with_run_id(
+            &cfg,
+            EventType::ReviewBudgetExhausted,
+            Some("real"),
+            Some("#113"),
+            Some("run-budget"),
+            "review budget exhausted",
+        )
+        .unwrap();
+
+        let events = read_events(&cfg).unwrap();
+        assert!(orphaned_dispatch_runs(&events, "real").is_empty());
     }
 
     /// Incident: a `gah loop` process gets killed/restarted mid-dispatch,

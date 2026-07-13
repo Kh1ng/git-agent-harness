@@ -252,7 +252,9 @@ where
     let mut state = load_state(state_path)?;
     mutate(&mut state);
 
-    let json = serde_json::to_string_pretty(&state).context("serializing availability state")?;
+    let mut value = serde_json::to_value(&state).context("serializing availability state")?;
+    crate::redact::redact_json_value(&mut value);
+    let json = serde_json::to_string_pretty(&value).context("serializing availability state")?;
     let tmp_path = dir.join(format!(
         "{}.tmp.{}",
         state_path

@@ -1,6 +1,12 @@
 use crate::config::Profile;
 use anyhow::{Context, Result};
-use std::process::Command;
+use std::process::{Command, Output};
+
+fn redacted_stderr(out: &Output) -> String {
+    crate::redact::redact(&String::from_utf8_lossy(&out.stderr))
+        .trim()
+        .to_string()
+}
 
 #[cfg(test)]
 thread_local! {
@@ -60,6 +66,13 @@ pub struct ReviewTarget {
     pub title: Option<String>,
     pub body: Option<String>,
     pub ci_status: Option<String>,
+    /// Immutable source commit that the reviewer inspected. Optional so
+    /// older provider responses and local/fallback targets remain valid.
+    #[allow(dead_code)] // consumed by SHA review deduplication (#109)
+    pub source_sha: Option<String>,
+    /// Immutable target/base commit used to construct the reviewed diff.
+    #[allow(dead_code)] // consumed by SHA review deduplication (#109)
+    pub target_sha: Option<String>,
 }
 
 pub fn create_draft_mr(
@@ -68,9 +81,10 @@ pub fn create_draft_mr(
     title: &str,
     body: &str,
 ) -> Result<MrResult> {
+    let body = crate::redact::redact(body);
     match profile.provider.as_str() {
-        "gitlab" => gitlab_mr(profile, branch, title, body),
-        "github" => github_mr(profile, branch, title, body),
+        "gitlab" => gitlab_mr(profile, branch, title, &body),
+        "github" => github_mr(profile, branch, title, &body),
         other => anyhow::bail!("unsupported provider: {}", other),
     }
 }
@@ -81,9 +95,10 @@ pub fn post_review_comment(
     body: &str,
     labels: &[&str],
 ) -> Result<()> {
+    let body = crate::redact::redact(body);
     match profile.provider.as_str() {
-        "gitlab" => gitlab_post_review_comment(profile, branch, body, labels),
-        "github" => github_post_review_comment(profile, branch, body, labels),
+        "gitlab" => gitlab_post_review_comment(profile, branch, &body, labels),
+        "github" => github_post_review_comment(profile, branch, &body, labels),
         other => anyhow::bail!("unsupported provider: {}", other),
     }
 }
@@ -167,10 +182,7 @@ fn github_mr(profile: &Profile, branch: &str, title: &str, body: &str) -> Result
         .context("gh pr create")?;
 
     if !out.status.success() {
-        anyhow::bail!(
-            "gh pr create failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        anyhow::bail!("gh pr create failed: {}", redacted_stderr(&out));
     }
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Ok(MrResult {
@@ -255,10 +267,7 @@ fn github_post_review_comment(
         .output()
         .context("gh pr comment")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "gh pr comment failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        anyhow::bail!("gh pr comment failed: {}", redacted_stderr(&out));
     }
     if !labels.is_empty() {
         // ponytail: `gh pr edit --add-label` mutates via a GraphQL path that
@@ -283,7 +292,7 @@ fn github_post_review_comment(
             anyhow::bail!(
                 "applying review labels to PR {} failed: {}",
                 pr_number,
-                String::from_utf8_lossy(&out.stderr).trim()
+                redacted_stderr(&out)
             );
         }
     }
@@ -403,10 +412,7 @@ pub fn github_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
         .context("gh issue close")?;
 
     if !out.status.success() {
-        anyhow::bail!(
-            "gh issue close failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        anyhow::bail!("gh issue close failed: {}", redacted_stderr(&out));
     }
     Ok(())
 }
@@ -622,10 +628,7 @@ fn github_find_pr_number_by_branch(profile: &Profile, branch: &str) -> Result<St
         .output()
         .context("gh pr list")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "gh pr list failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        anyhow::bail!("gh pr list failed: {}", redacted_stderr(&out));
     }
     let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let number = resp
@@ -650,15 +653,12 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
             "--repo",
             &profile.repo,
             "--json",
-            "number,url,title,body,headRefName,baseRefName,statusCheckRollup",
+            "number,url,title,body,headRefName,baseRefName,headRefOid,baseRefOid,statusCheckRollup",
         ])
         .output()
         .context("gh pr view")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "gh pr view failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        anyhow::bail!("gh pr view failed: {}", redacted_stderr(&out));
     }
     let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let ci_status = resp["statusCheckRollup"]
@@ -681,6 +681,8 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
         title: resp["title"].as_str().map(str::to_string),
         body: resp["body"].as_str().map(str::to_string),
         ci_status,
+        source_sha: resp["headRefOid"].as_str().map(str::to_string),
+        target_sha: resp["baseRefOid"].as_str().map(str::to_string),
     })
 }
 
@@ -712,6 +714,8 @@ fn gitlab_target_from_value(value: &serde_json::Value) -> Result<ReviewTarget> {
         title: value["title"].as_str().map(str::to_string),
         body: value["description"].as_str().map(str::to_string),
         ci_status,
+        source_sha: value["sha"].as_str().map(str::to_string),
+        target_sha: value["diff_refs"]["base_sha"].as_str().map(str::to_string),
     })
 }
 
@@ -721,10 +725,7 @@ fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
         .output()
         .context("curl request")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "curl failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        anyhow::bail!("curl failed: {}", redacted_stderr(&out));
     }
     Ok(out)
 }
@@ -732,8 +733,8 @@ fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_draft_mr, find_review_target_by_mr, mark_ready_for_review, merge_mr,
-        TEST_PATH_OVERRIDE,
+        create_draft_mr, find_review_target_by_mr, github_review_target_by_number,
+        gitlab_target_from_value, mark_ready_for_review, merge_mr, TEST_PATH_OVERRIDE,
     };
     use crate::config::{Profile, RoutingPolicy};
     use std::fs;
@@ -869,6 +870,36 @@ mod tests {
     }
 
     #[test]
+    fn github_mr_body_is_redacted_before_it_reaches_provider_cli() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let args_path = bin_dir.join("gh-args.txt");
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho 'https://github.test/owner/repo/pull/1'\n",
+                args_path.display()
+            ),
+        );
+        let _guard = PathOverride::set(bin_dir.to_string_lossy().into_owned());
+
+        create_draft_mr(
+            &github_profile(),
+            "gah/test",
+            "title",
+            "summary Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+        )
+        .unwrap();
+
+        let args = fs::read_to_string(args_path).unwrap();
+        assert!(!args.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(args.contains("[REDACTED:TOKEN]"));
+    }
+
+    #[test]
     fn gitlab_mr_malformed_curl_response_fails_to_parse() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let tmp = TempDir::new().unwrap();
@@ -920,6 +951,47 @@ mod tests {
         let err = find_review_target_by_mr(&gitlab_profile(), "235").unwrap_err();
 
         assert!(format!("{:#}", err).contains("did not return a merge request"));
+    }
+
+    #[test]
+    fn review_targets_capture_provider_source_and_target_shas() {
+        let gitlab = serde_json::json!({
+            "iid": 42,
+            "web_url": "https://gitlab.test/group/repo/-/merge_requests/42",
+            "source_branch": "gah/42",
+            "target_branch": "main",
+            "sha": "source-gitlab-sha",
+            "diff_refs": { "base_sha": "target-gitlab-sha" }
+        });
+        let gitlab_target = gitlab_target_from_value(&gitlab).unwrap();
+        assert_eq!(
+            gitlab_target.source_sha.as_deref(),
+            Some("source-gitlab-sha")
+        );
+        assert_eq!(
+            gitlab_target.target_sha.as_deref(),
+            Some("target-gitlab-sha")
+        );
+
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            "#!/bin/sh\nprintf '%s\\n' '{\"number\":7,\"url\":\"https://github.test/owner/repo/pull/7\",\"headRefName\":\"gah/7\",\"baseRefName\":\"main\",\"headRefOid\":\"source-github-sha\",\"baseRefOid\":\"target-github-sha\",\"statusCheckRollup\":[]}'\n",
+        );
+        let _guard = PathOverride::set(bin_dir.to_string_lossy().into_owned());
+        let github_target = github_review_target_by_number(&github_profile(), "7").unwrap();
+        assert_eq!(
+            github_target.source_sha.as_deref(),
+            Some("source-github-sha")
+        );
+        assert_eq!(
+            github_target.target_sha.as_deref(),
+            Some("target-github-sha")
+        );
     }
 
     #[test]
