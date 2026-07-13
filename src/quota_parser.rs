@@ -416,6 +416,8 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/claude_transient_throttle.json");
     const AGY_AUTH_NOT_LOGGED_IN: &str =
         include_str!("../tests/fixtures/quota-logs/agy_auth_not_logged_in.txt");
+    const OPENCODE_HY3_RATE_LIMIT: &str =
+        include_str!("../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
 
     // ── Codex: full date+time, no timezone (openai/codex #12299) ───────────
 
@@ -543,6 +545,19 @@ mod tests {
         assert_ne!(parsed.kind, FailureKind::QuotaExhausted);
         assert!(parsed.retryable);
         assert_eq!(parsed.reset_at, None);
+    }
+
+    #[test]
+    fn opencode_internal_hy3_rate_limit_is_classified_without_a_fabricated_reset() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("opencode", OPENCODE_HY3_RATE_LIMIT, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::RateLimited);
+        assert_eq!(parsed.reset_at, None);
+        assert_eq!(
+            parsed.retry_after_seconds,
+            Some(CONSERVATIVE_RATE_LIMIT_COOLDOWN_SECONDS)
+        );
+        assert!(parsed.matched_evidence.contains("Rate limit exceeded"));
     }
 
     // ── Required negative tests ──────────────────────────────────────────

@@ -2942,6 +2942,91 @@ fn dispatch_fix_no_change_is_agent_no_progress() {
     assert_eq!(attempts[0]["validation_result"], "not_run_no_changes");
 }
 
+/// TICKET-237: OpenCode can report provider rate limits only in its own
+/// internal log while returning exit 0 and leaving no diff. That must be
+/// classified as a backend availability failure, not agent_no_progress, and
+/// the bounded retry must select the configured fallback in the same dispatch.
+#[test]
+fn dispatch_fix_opencode_internal_rate_limit_marks_unavailable_and_reroutes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let config = fs::read_to_string(&cfg).unwrap().replace(
+        "improve_backend = \"codex\"",
+        "improve_backend = \"opencode\"\nimprove_candidates = [{ backend = \"opencode\", model = \"opencode/hy3-free\" }, { backend = \"codex\", model = \"gpt-5.4-mini\" }]",
+    );
+    fs::write(&cfg, config).unwrap();
+
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let availability_path = tmp.path().join("availability.json");
+    let data_home = tmp.path().join("xdg-data");
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "opencode",
+        "#!/bin/sh\nmkdir -p \"$XDG_DATA_HOME/opencode/log\"\nprintf '%s\\n' 'timestamp=now level=ERROR message=\"AI_APICallError: Rate limit exceeded. Please try again later.\"' >> \"$XDG_DATA_HOME/opencode/log/opencode.log\"\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nprintf 'fallback edit\\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nprintf 'https://github.com/owner/real/pull/1\\n'\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "1",
+            "--skip-validation-gate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Backend unavailable after no-progress result; retrying next attempt with codex instead of opencode",
+        ));
+
+    let availability: Value =
+        serde_json::from_str(&fs::read_to_string(&availability_path).unwrap()).unwrap();
+    let records = availability["records"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["backend"], "opencode");
+    assert_eq!(records[0]["model"], "opencode/hy3-free");
+    assert_eq!(records[0]["reason"], "rate_limited");
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["effective_backend"], "codex");
+    let attempts = entry["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["backend"], "opencode");
+    assert_eq!(attempts[0]["failure_class"], "backend_error");
+    assert_eq!(
+        attempts[0]["validation_result"],
+        "not_run_backend_unavailable"
+    );
+    assert_eq!(attempts[1]["backend"], "codex");
+    assert_eq!(attempts[1]["validation_result"], "passed");
+}
+
 /// TICKET-250: no-progress uses the same bounded retry policy as other
 /// recoverable agent failures. Every failed no-change attempt remains visible
 /// in the ledger, and only the final one marks the dispatch terminally failed.

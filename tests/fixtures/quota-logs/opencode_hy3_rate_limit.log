@@ -1,0 +1,1 @@
+timestamp=2026-07-12T22:43:15.657Z level=ERROR run=7b8ddccf message="stream error" providerID=opencode modelID=hy3-free session.id=ses_0a78040e8ffeEpAd5eV5Qtn6Az small=false agent=build mode=primary error.error="AI_APICallError: Rate limit exceeded. Please try again later."
