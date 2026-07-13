@@ -318,7 +318,7 @@ function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalMa
       </p>
 
       {config.error && (
-        <p className="mt-3 text-xs text-critical">Failed to save: {config.error}</p>
+        <p className="mt-3 text-xs text-critical">Error: {config.error}</p>
       )}
 
       <button
