@@ -217,6 +217,29 @@ fn spawn_with_idle_watch(
         idle_timeout_seconds,
         spawn_context,
         &SHUTDOWN_REQUESTED,
+        true,
+    )
+}
+
+/// Run a backend under a semantic-progress watch. Unlike the generic idle
+/// watch, arbitrary stdout/stderr does not reset this window: only a durable
+/// worktree change does. This is for CLIs such as OpenCode that can stream
+/// malformed tool-call chatter indefinitely without actually executing work.
+fn spawn_with_worktree_progress_watch(
+    cmd: Command,
+    log_path: &Path,
+    worktree: &Path,
+    idle_timeout_seconds: u64,
+    spawn_context: &str,
+) -> Result<(i32, f64)> {
+    spawn_with_idle_watch_with_shutdown(
+        cmd,
+        log_path,
+        worktree,
+        idle_timeout_seconds,
+        spawn_context,
+        &SHUTDOWN_REQUESTED,
+        false,
     )
 }
 
@@ -227,6 +250,7 @@ fn spawn_with_idle_watch_with_shutdown(
     idle_timeout_seconds: u64,
     spawn_context: &str,
     shutdown_requested: &AtomicBool,
+    output_counts_as_progress: bool,
 ) -> Result<(i32, f64)> {
     let start = Instant::now();
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -268,19 +292,24 @@ fn spawn_with_idle_watch_with_shutdown(
                     break -2;
                 }
                 while progress_rx.try_recv().is_ok() {
-                    last_seen_len = fs::metadata(log_path)
+                    let current_len = fs::metadata(log_path)
                         .map(|m| m.len())
                         .unwrap_or(last_seen_len);
-                    last_progress_at = Instant::now();
-                    saw_progress = true;
+                    if output_counts_as_progress {
+                        last_progress_at = Instant::now();
+                        saw_progress = true;
+                    }
+                    last_seen_len = current_len;
                 }
                 let current_len = fs::metadata(log_path)
                     .map(|m| m.len())
                     .unwrap_or(last_seen_len);
                 if current_len != last_seen_len {
                     last_seen_len = current_len;
-                    last_progress_at = Instant::now();
-                    saw_progress = true;
+                    if output_counts_as_progress {
+                        last_progress_at = Instant::now();
+                        saw_progress = true;
+                    }
                 }
                 if last_worktree_poll.elapsed() >= worktree_poll_interval {
                     if let Some(snapshot) = worktree_progress_snapshot(worktree) {
@@ -325,9 +354,14 @@ fn spawn_with_idle_watch_with_shutdown(
 
     if killed_for_idle {
         if let Ok(mut file) = fs::OpenOptions::new().append(true).open(log_path) {
+            let progress_description = if output_counts_as_progress {
+                "backend output or worktree progress"
+            } else {
+                "worktree progress"
+            };
             let _ = writeln!(
                 file,
-                "GAH: killed after {idle_timeout_seconds}s with no new backend output or worktree progress (stalled, not just slow)."
+                "GAH: killed after {idle_timeout_seconds}s with no new {progress_description} (stalled, not just slow)."
             );
         }
     }
@@ -907,8 +941,8 @@ pub fn run_opencode(
 /// implementation used a plain blocking `cmd.status()`). Now uses the same
 /// idle-detection approach as `run_agy_with_executable`: kill only when the
 /// log has genuinely gone quiet for `idle_timeout_seconds`, never on a flat
-/// wall-clock budget (opencode's own multi-step sub-agent orchestration can
-/// legitimately pause between visible output while still working).
+/// wall-clock budget. OpenCode's own narration is not trusted as progress:
+/// only a durable worktree change resets this backend's window.
 #[allow(clippy::too_many_arguments)]
 pub fn run_opencode_with_executable(
     executable: &Path,
@@ -944,7 +978,7 @@ pub fn run_opencode_with_executable(
         cmd.env(k, v);
     }
 
-    let (exit_code, duration_secs) = spawn_with_idle_watch(
+    let (exit_code, duration_secs) = spawn_with_worktree_progress_watch(
         cmd,
         &log_path,
         worktree,
@@ -2777,8 +2811,84 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new backend output or worktree progress"),
+            log.contains("killed after 1s with no new worktree progress"),
             "got log: {log}"
+        );
+    }
+
+    #[test]
+    fn run_opencode_kills_chatty_backend_without_worktree_progress() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "opencode",
+            "#!/bin/sh\nwhile true; do echo 'tool chatter with no successful edit'; sleep 1; done\n",
+        );
+        let envs = vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )];
+
+        let result = run_opencode_with_executable(
+            &f.bin_dir.join("opencode"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("tool chatter with no successful edit"));
+        assert!(
+            log.contains("killed after 1s with no new worktree progress"),
+            "got log: {log}"
+        );
+    }
+
+    #[test]
+    fn run_opencode_allows_real_worktree_progress_despite_chatty_output() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "opencode",
+            "#!/bin/sh\necho 'starting edit'; sleep 1; printf 'first\\n' > progress.txt; echo 'editing'; sleep 1; printf 'second\\n' > progress.txt; echo 'done'\n",
+        );
+        let envs = vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )];
+
+        let result = run_opencode_with_executable(
+            &f.bin_dir.join("opencode"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(f.worktree.join("progress.txt")).unwrap(),
+            "second\n"
         );
     }
 
@@ -2933,6 +3043,7 @@ mod tests {
             60,
             "launching test backend",
             &shutdown,
+            true,
         )
         .unwrap();
 
