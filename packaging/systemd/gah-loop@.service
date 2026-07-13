@@ -1,0 +1,36 @@
+# gah-loop@.service
+#
+# One systemd user unit owns one profile's recurring GAH controller. Start it
+# as `systemctl --user start gah-loop@<profile>` (the dashboard uses this
+# command too). Do not wrap `gah loop` in another supervisor: systemd owns the
+# complete cgroup, so stopping this unit terminates every worker it spawned.
+#
+# This template assumes the standard `cargo install` location and config path.
+# Override individual settings with:
+#   systemctl --user edit gah-loop@<profile>
+[Unit]
+Description=GAH recurring controller (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=HOME=%h
+Environment=GAH_CONFIG=%h/.config/gah/config.toml
+Environment=XDG_STATE_HOME=%h/.local/state
+Environment=PATH=%h/.opencode/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/.cargo/bin/gah loop --profile %i
+# The operator/dashboard starts work explicitly. Never silently respawn after
+# a crash or Stop, where an automatic restart could duplicate dispatches.
+Restart=no
+KillSignal=SIGTERM
+# This is the lifecycle invariant: a parent stop/failure kills the loop and
+# all of its concurrent backend children together.
+KillMode=control-group
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

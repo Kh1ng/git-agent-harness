@@ -5,9 +5,10 @@
  */
 
 import { spawn, spawnSync, SpawnOptions } from 'node:child_process';
+import { userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accessSync, constants, existsSync, mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import type {
   StatusSnapshot,
   QuotaSnapshot,
@@ -770,22 +771,12 @@ export async function runProfileRemove(options: ProfileRemoveOptions): Promise<v
 }
 
 // ---------------------------------------------------------------------------
-// `gah loop --profile <p>` start/stop/status from the dashboard (Issue: web
-// UI start/stop switch for the loop daemon, so an operator doesn't have to
-// SSH in to kill a stuck loop).
-//
-// Conflict detection is deliberately NOT reimplemented here: `gah` itself
-// already owns the per-profile flock at `acquire_profile_lock`
-// (src/controller.rs) and fails fast with "gah already running for
-// profile ..." if a second process (this one, a terminal, or another `gah
-// loop`) tries to start concurrently. Duplicating that check in Node would
-// be a second, potentially-inconsistent source of truth over the same OS
-// lock. Instead: spawn, and if the child exits almost immediately with a
-// non-zero code, treat it as "already running" rather than "started".
-//
-// The PID *is* tracked here (not by `gah`), because "is it alive" and "stop
-// it" need a PID, and it must survive the Node server itself restarting --
-// so it's persisted to a small JSON file rather than kept in memory only.
+// `gah loop --profile <p>` start/stop/status from the dashboard. The
+// dashboard deliberately controls a systemd *user* unit rather than spawning
+// a detached loop itself. That gives every profile one lifecycle owner:
+// systemd owns the loop and its whole cgroup, so Stop or a parent failure
+// terminates every concurrent worker with it. Direct detached spawning here
+// previously allowed a server restart to leave an unobservable orphan loop.
 // ---------------------------------------------------------------------------
 
 /** Same state-dir fallback chain as `loop_lock_path` in src/controller.rs,
@@ -795,14 +786,6 @@ function loopStateDir(): string {
     process.env.XDG_STATE_HOME ||
     (process.env.HOME ? resolve(process.env.HOME, '.local/state') : '/tmp');
   return resolve(base, 'gah');
-}
-
-function loopPidFile(profile: string): string {
-  return resolve(loopStateDir(), `loop-${profile.replace(/\//g, '_')}.pid.json`);
-}
-
-function loopLogFile(profile: string): string {
-  return resolve(loopStateDir(), `loop-${profile.replace(/\//g, '_')}.log`);
 }
 
 /** A durable acknowledgement that the operator intentionally stopped this
@@ -820,29 +803,18 @@ function clearManualStop(profile: string): void {
   }
 }
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM means the process exists but is owned by someone else -- still
-    // alive. Any other error (ESRCH, etc.) means it's gone.
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
 export interface LoopStatus {
   running: boolean;
   pid?: number;
   startedAt?: string;
+  /** Which process manager owns this loop. `external` is a diagnostic-only
+   * state; the dashboard never signals a process it does not own. */
+  owner?: 'systemd' | 'external';
 }
 
-/** A `gah loop` for this profile started OUTSIDE this server (terminal,
- * watchdog/supervisor respawn) never gets a PID file, so the PID-file check
- * alone reports running:false while dispatches visibly continue (incident
- * 2026-07-11: gah-watchdog.timer respawned the loop every 10 minutes while
- * /api/loop/status said not-running). pgrep is the fallback source of
- * truth. Matches both `gah loop --profile p` and full-binary-path spawns. */
+/** A diagnostic for loops that were not started by the systemd unit. It is
+ * intentionally never used as a stop target: killing arbitrary PIDs recreates
+ * the split ownership that this module is designed to prevent. */
 export function findExternalLoopPid(profile: string): number | undefined {
   const escaped = profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const result = spawnSync('pgrep', ['-f', `gah loop --profile ${escaped}( |$)`], {
@@ -852,28 +824,90 @@ export function findExternalLoopPid(profile: string): number | undefined {
   return first;
 }
 
-/** Whether `gah loop --profile <profile>` is currently running: first per
- * the PID file written at spawn time by `startLoop` (a stale file left
- * behind by a crashed process correctly reports not-running once the PID is
- * dead), then falling back to a process scan for loops started outside the
- * web UI. */
+function loopServiceName(profile: string): string {
+  // This is an instance name, not a shell argument. Keep it deliberately
+  // narrow so an HTTP caller cannot address an unrelated systemd unit.
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(profile)) {
+    throw new Error(`Invalid profile name for systemd loop unit: '${profile}'`);
+  }
+  return `gah-loop@${profile}.service`;
+}
+
+function systemdUserEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  // A server installed as a system service under User=... does not inherit a
+  // login shell's user-bus variables. Point systemctl at that user's lingering
+  // systemd manager explicitly so dashboard controls work in both deployments.
+  const runtimeDir = env.XDG_RUNTIME_DIR || `/run/user/${userInfo().uid}`;
+  env.XDG_RUNTIME_DIR = runtimeDir;
+  env.DBUS_SESSION_BUS_ADDRESS ||= `unix:path=${runtimeDir}/bus`;
+  return env;
+}
+
+interface SystemdUnitStatus {
+  activeState?: string;
+  loadState?: string;
+  mainPid?: number;
+  startedAt?: string;
+}
+
+function readSystemdLoopStatus(profile: string): SystemdUnitStatus | undefined {
+  const service = loopServiceName(profile);
+  const result = spawnSync(
+    'systemctl',
+    ['--user', 'show', service, '--property=LoadState', '--property=ActiveState', '--property=MainPID', '--property=ActiveEnterTimestamp', '--no-pager'],
+    { encoding: 'utf8', env: systemdUserEnv() }
+  );
+  if (result.error || result.status !== 0) return undefined;
+
+  const values = new Map<string, string>();
+  for (const line of (result.stdout ?? '').split('\n')) {
+    const separator = line.indexOf('=');
+    if (separator > 0) values.set(line.slice(0, separator), line.slice(separator + 1));
+  }
+  const mainPid = Number.parseInt(values.get('MainPID') ?? '', 10);
+  return {
+    loadState: values.get('LoadState'),
+    activeState: values.get('ActiveState'),
+    mainPid: Number.isFinite(mainPid) && mainPid > 0 ? mainPid : undefined,
+    startedAt: values.get('ActiveEnterTimestamp') || undefined
+  };
+}
+
+function runSystemctlUser(action: 'start' | 'stop', profile: string): { ok: boolean; error?: string } {
+  const service = loopServiceName(profile);
+  const result = spawnSync('systemctl', ['--user', action, service, '--no-pager'], {
+    encoding: 'utf8',
+    env: systemdUserEnv()
+  });
+  if (!result.error && result.status === 0) return { ok: true };
+  const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
+  return {
+    ok: false,
+    error:
+      detail ||
+      result.error?.message ||
+      `systemctl --user ${action} ${service} exited with status ${result.status ?? 'unknown'}`
+  };
+}
+
+/** The systemd unit is authoritative. An externally-found loop is surfaced
+ * for incident diagnosis, but cannot be mistaken for a dashboard-owned one. */
 export function getLoopStatus(profile: string): LoopStatus {
-  const pidFile = loopPidFile(profile);
-  if (existsSync(pidFile)) {
-    try {
-      const record = JSON.parse(readFileSync(pidFile, 'utf8')) as { pid: number; startedAt: string };
-      if (isProcessAlive(record.pid)) {
-        return { running: true, pid: record.pid, startedAt: record.startedAt };
-      }
-    } catch {
-      // fall through to the process scan
-    }
+  const systemd = readSystemdLoopStatus(profile);
+  if (systemd && ['active', 'activating', 'deactivating'].includes(systemd.activeState ?? '')) {
+    return {
+      running: true,
+      pid: systemd.mainPid,
+      startedAt: systemd.startedAt,
+      owner: 'systemd'
+    };
   }
   const externalPid = findExternalLoopPid(profile);
   if (externalPid !== undefined) {
-    return { running: true, pid: externalPid };
+    return { running: true, pid: externalPid, owner: 'external' };
   }
-  return { running: false };
+  return { running: false, owner: 'systemd' };
 }
 
 export interface StartLoopResult {
@@ -883,71 +917,34 @@ export interface StartLoopResult {
   error?: string;
 }
 
-/** How long to wait after spawning before deciding the child "stuck around"
- * (i.e. really started, as opposed to failing fast on the profile lock or a
- * config error). `acquire_profile_lock` is attempted within the first
- * instant of the process's life, so this only needs to be comfortably
- * longer than process-startup jitter. */
-const LOOP_START_SETTLE_MS = 1000;
-
-export async function startLoop(profile: string, config?: string): Promise<StartLoopResult> {
+export async function startLoop(profile: string): Promise<StartLoopResult> {
   const existing = getLoopStatus(profile);
   if (existing.running) {
-    return { started: false, alreadyRunning: true, pid: existing.pid };
+    return {
+      started: false,
+      alreadyRunning: true,
+      pid: existing.pid,
+      error:
+        existing.owner === 'external'
+          ? `An unmanaged gah loop is already running for profile '${profile}'. Stop its owning service before starting ${loopServiceName(profile)}.`
+          : undefined
+    };
   }
 
-  const stateDir = loopStateDir();
-  mkdirSync(stateDir, { recursive: true });
-  const logFd = openSync(loopLogFile(profile), 'a');
+  const result = runSystemctlUser('start', profile);
+  if (!result.ok) return { started: false, error: result.error };
 
-  const args = ['loop', '--profile', profile];
-  if (config) {
-    args.push('--config-path', config);
+  const status = getLoopStatus(profile);
+  if (!status.running || status.owner !== 'systemd') {
+    return {
+      started: false,
+      error: `${loopServiceName(profile)} accepted the start request but is not active; inspect it with systemctl --user status ${loopServiceName(profile)}.`
+    };
   }
-
-  const child = spawn(GAH_BINARY, args, {
-    ...getSpawnOptions(config),
-    detached: true,
-    stdio: ['ignore', logFd, logFd]
-  });
-  closeSync(logFd); // the child holds its own copy of the fd; ours can close
-
-  return new Promise((resolvePromise) => {
-    let settled = false;
-
-    child.once('error', (error) => {
-      if (settled) return;
-      settled = true;
-      resolvePromise({ started: false, error: `Failed to spawn gah: ${error.message}` });
-    });
-
-    child.once('exit', (code) => {
-      if (settled) return;
-      settled = true;
-      resolvePromise({
-        started: false,
-        error:
-          `gah loop exited immediately (code ${code}) -- likely already running for this ` +
-          `profile from outside the web UI, or a config error. Check ${loopLogFile(profile)}.`
-      });
-    });
-
-    setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.removeAllListeners('exit');
-      child.removeAllListeners('error');
-      child.unref();
-      const pid = child.pid;
-      if (pid !== undefined) {
-        writeFileSync(loopPidFile(profile), JSON.stringify({ pid, startedAt: new Date().toISOString() }));
-      }
-      // Only a confirmed start clears the marker. A failed spawn must leave
-      // an intentional stop intentional rather than inviting watchdog churn.
-      clearManualStop(profile);
-      resolvePromise({ started: true, pid });
-    }, LOOP_START_SETTLE_MS);
-  });
+  // Only a confirmed systemd start clears the marker. A failed request must
+  // leave an intentional stop intentional rather than inviting watchdog churn.
+  clearManualStop(profile);
+  return { started: true, pid: status.pid };
 }
 
 export interface StopLoopResult {
@@ -961,13 +958,20 @@ export interface StopLoopResult {
  * clears it. */
 export function stopLoop(profile: string): StopLoopResult {
   const status = getLoopStatus(profile);
-  if (!status.running || status.pid === undefined) {
+  if (!status.running) {
     return { stopped: false, error: `No running loop found for profile '${profile}'` };
+  }
+  if (status.owner !== 'systemd') {
+    return {
+      stopped: false,
+      error: `Refusing to signal unmanaged loop PID ${status.pid ?? 'unknown'}; stop its owning service, then use ${loopServiceName(profile)}.`
+    };
   }
   try {
     mkdirSync(loopStateDir(), { recursive: true });
     writeFileSync(loopManualStopFile(profile), JSON.stringify({ stoppedAt: new Date().toISOString() }));
-    process.kill(status.pid, 'SIGTERM');
+    const result = runSystemctlUser('stop', profile);
+    if (!result.ok) return { stopped: false, error: result.error };
     return { stopped: true };
   } catch (error) {
     return { stopped: false, error: error instanceof Error ? error.message : String(error) };

@@ -34,12 +34,12 @@ gah update --repo /path/to/git-agent-harness --restart-server
 It refuses a dirty or non-default-branch checkout, pulls with `--ff-only`,
 replaces the actual Cargo-installed CLI with `cargo install --path . --force`,
 installs the lockfile-pinned Node dependencies, builds `apps/server`, and
-optionally restarts `gah-server.service`. It does not
+installs/reloads the `gah-loop@.service` user-unit template, and optionally
+restarts `gah-server.service`. It does not
 build or deploy web, desktop, TUI, mobile, or other client packages.
 
 `--restart-server` refuses to run while any `gah loop --profile …` process is
-active. A dashboard-started loop remains in the server service's systemd cgroup
-and would otherwise be killed by the service restart. Stop the loop cleanly
+active. The loop has its own systemd user cgroup and must be stopped cleanly
 first, then rerun the update. The restart also requires passwordless `sudo`
 permission for `systemctl`; configure that deliberately for unattended hosts.
 
@@ -65,11 +65,12 @@ The updater never starts or restarts a recurring `gah loop`; with
   to loopback (or a Tailscale interface); network-layer access control
   (Tailscale / Cloudflare Access) is the auth model, there is no app-level
   login. Verify: `gah server --help`.
-- **`gah-loop`** — the recurring bounded controller. Each iteration is one
-  observe → classify → decide → execute-one-action → persist cycle. The repo
-  does not currently ship a `gah-loop.service` template, so only document or
-  operate one after explicitly installing it for the profile. The command is
-  `gah loop --profile <p>`; use `--once` for one debugging cycle.
+- **`gah-loop@<profile>`** — the recurring bounded controller. Each iteration
+  is one observe → classify → decide → execute-one-action → persist cycle.
+  It is a systemd *user* unit, and is the sole parent of that profile's worker
+  pool. `KillMode=control-group` ensures an operator stop or parent failure
+  kills every concurrent backend child; do not wrap it in a shell supervisor
+  or start a detached `gah loop` by hand.
 
 The checked-in server template is
 `packaging/systemd/gah-server.service`. Before installing it, edit its `User`,
@@ -83,14 +84,26 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now gah-server
 ```
 
+Install the loop template once for the user that runs GAH, then the dashboard
+Start/Stop buttons manage `gah-loop@<profile>` rather than creating a detached
+process:
+
+```bash
+gah update --repo /path/to/git-agent-harness
+systemctl --user start gah-loop@gah
+```
+
+The template reads the profile's configured `max_parallel_workers`; do not
+add another supervisor or a second worker count at the service layer. Inspect
+the entire process tree with `systemd-cgls --user` when validating a run.
+
 Inspect and control units with the usual systemd verbs:
 
 ```bash
 sudo systemctl status gah-server
 sudo journalctl -u gah-server -n 100 --no-pager
-# Only if you installed a gah-loop user unit:
-systemctl --user status gah-loop
-journalctl --user -u gah-loop -f
+systemctl --user status gah-loop@gah
+journalctl --user -u gah-loop@gah -f
 ```
 
 If the loop needs to be paused for a human (e.g. while triaging), stopping the
