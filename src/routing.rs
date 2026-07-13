@@ -917,7 +917,24 @@ fn explicit_candidates(
 ) -> Vec<RouteCandidate> {
     let mut candidates = vec![primary.clone()];
     if mode == "review" && allow_review_fallback {
-        if let Some(weak_backend) = review_fallback_backend {
+        // An explicit review request is still a request for a *reviewer*, not
+        // permission to fall through to an arbitrary implementation backend.
+        // When the requested reviewer belongs to the declared review pool,
+        // preserve the remainder of that ordered pool.  This matters for an
+        // escalated review: Claude -> GLM must not fall back to AGY again and
+        // silently lose the intended second opinion.
+        let configured_remainder = routing.review_candidates.as_ref().and_then(|configured| {
+            configured
+                .iter()
+                .position(|candidate| {
+                    candidate.backend == primary.backend
+                        && (candidate.model.is_none() || candidate.model == primary.model)
+                })
+                .map(|position| route_candidates(&configured[position + 1..]))
+        });
+        if let Some(remainder) = configured_remainder {
+            candidates.extend(remainder);
+        } else if let Some(weak_backend) = review_fallback_backend {
             let weak_model = review_fallback_model(routing)
                 .map(str::to_string)
                 .or_else(|| primary.model.clone());
@@ -1618,7 +1635,7 @@ mod tests {
     fn backend_available(name: &str) -> bool {
         matches!(
             name,
-            "claude" | "codex" | "openhands" | "agy" | "agy-main" | "agy-second"
+            "claude" | "codex" | "openhands" | "agy" | "agy-main" | "agy-second" | "opencode"
         )
     }
 
@@ -2407,6 +2424,100 @@ mod tests {
         assert!(decision.routing_reason.contains("backend_outage"));
         assert!(decision.human_required);
         assert_eq!(decision.confidence_impact.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn explicit_review_fallback_preserves_the_remaining_review_order() {
+        let tmp = TempDir::new().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let mut profile = profile();
+        profile.routing.review_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "agy".into(),
+                model: Some("sonnet".into()),
+                ..Default::default()
+            },
+            crate::config::CandidateConfig {
+                backend: "agy-second".into(),
+                model: Some("sonnet".into()),
+                ..Default::default()
+            },
+            crate::config::CandidateConfig {
+                backend: "claude".into(),
+                model: Some("sonnet-5".into()),
+                ..Default::default()
+            },
+            crate::config::CandidateConfig {
+                backend: "opencode".into(),
+                model: Some("nous-portal/z-ai/glm-5.2".into()),
+                ..Default::default()
+            },
+        ]);
+        record_unavailable(
+            &path(&tmp),
+            "agy",
+            Some("sonnet"),
+            Reason::BackendOutage,
+            Source::BackendError,
+            None,
+            None,
+            now,
+        )
+        .unwrap();
+        let via_agy = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                last_failure_class: None,
+                mode: "review",
+                requested_backend: "agy",
+                requested_model: Some("sonnet"),
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            now,
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(via_agy.effective_backend, "agy-second");
+
+        record_unavailable(
+            &path(&tmp),
+            "claude",
+            Some("sonnet-5"),
+            Reason::BackendOutage,
+            Source::BackendError,
+            None,
+            None,
+            now,
+        )
+        .unwrap();
+        let via_claude = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                last_failure_class: None,
+                mode: "review",
+                requested_backend: "claude",
+                requested_model: Some("sonnet-5"),
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            now,
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(via_claude.effective_backend, "opencode");
+        assert_eq!(
+            via_claude.effective_model.as_deref(),
+            Some("nous-portal/z-ai/glm-5.2")
+        );
     }
 
     #[test]
