@@ -343,6 +343,11 @@ enum Commands {
         #[command(subcommand)]
         command: QuotaCommands,
     },
+    /// Inspect and manage work claims (issue #234)
+    Claims {
+        #[command(subcommand)]
+        command: ClaimsCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -710,6 +715,32 @@ enum QuotaCommands {
         json: bool,
         #[arg(long, name = "config")]
         config_path: Option<String>,
+    },
+}
+
+/// Work claim management (issue #234).
+#[derive(Subcommand)]
+enum ClaimsCommands {
+    /// List all active work claims across profiles
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Clear a specific work claim
+    Clear {
+        #[arg(long)]
+        work_id: String,
+        #[arg(long)]
+        profile: String,
+    },
+    /// Reclaim all stale claims for a profile
+    Reclaim {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, default_value = "3600")]
+        max_age_secs: u64,
     },
 }
 
@@ -1633,6 +1664,34 @@ fn main() -> Result<()> {
             } => {
                 let cfg = config::load(config_path.as_deref())?;
                 quota_snapshot::run(&cfg, &profile, &since, json)?;
+            }
+        },
+        Commands::Claims { command } => match command {
+            ClaimsCommands::List { json, profile } => {
+                work_claim::handle_claims_list(profile.as_deref(), json)?;
+            }
+            ClaimsCommands::Clear { work_id, profile } => {
+                work_claim::handle_claims_clear(&profile, &work_id)?;
+                println!(
+                    "Cleared claim for work_id {} on profile {}",
+                    work_id, profile
+                );
+            }
+            ClaimsCommands::Reclaim {
+                profile,
+                max_age_secs,
+            } => {
+                let reclaimed = work_claim::handle_claims_reclaim(&profile, max_age_secs)?;
+                if reclaimed.is_empty() {
+                    println!("No stale claims to reclaim for profile {}", profile);
+                } else {
+                    println!(
+                        "Reclaimed {} stale claim(s) for profile {}: {}",
+                        reclaimed.len(),
+                        profile,
+                        reclaimed.join(", ")
+                    );
+                }
             }
         },
     }
