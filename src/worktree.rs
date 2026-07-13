@@ -9,6 +9,64 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(300);
+const GIT_NETWORK_ATTEMPTS: u8 = 2;
+#[cfg(not(test))]
+const GIT_NETWORK_RETRY_BACKOFF: Duration = Duration::from_secs(10);
+
+/// Return true only for transport failures that are normally transient.
+///
+/// Authentication, authorization, non-fast-forward, and ordinary git errors
+/// deliberately do not match: retrying them would hide a real configuration
+/// or repository problem behind a pointless delay.
+pub fn is_transient_network_error(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "connection timed out",
+        "connection reset",
+        "could not resolve host",
+        "early eof",
+        "ssh_exchange_identification",
+    ]
+    .iter()
+    .any(|signature| text.contains(signature))
+}
+
+fn git_network_retry_backoff() -> Duration {
+    #[cfg(test)]
+    {
+        Duration::ZERO
+    }
+    #[cfg(not(test))]
+    {
+        GIT_NETWORK_RETRY_BACKOFF
+    }
+}
+
+fn retry_transient_git_network<T>(
+    operation: &str,
+    mut attempt: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    for number in 1..=GIT_NETWORK_ATTEMPTS {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(err)
+                if number < GIT_NETWORK_ATTEMPTS
+                    && is_transient_network_error(&format!("{err:#}")) =>
+            {
+                eprintln!(
+                    "transient git network failure during {operation}; retrying {}/{} after {}s: {:#}",
+                    number + 1,
+                    GIT_NETWORK_ATTEMPTS,
+                    git_network_retry_backoff().as_secs(),
+                    err
+                );
+                thread::sleep(git_network_retry_backoff());
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("bounded git retry loop always returns")
+}
 
 fn wait_with_timeout(mut child: Child, context: &str) -> Result<Output> {
     let started = Instant::now();
@@ -37,7 +95,8 @@ fn fetch_origin(repo: &Path) -> Result<()> {
         .open(&lock_path)
         .with_context(|| format!("opening fetch lock {}", lock_path.display()))?;
     lock.lock_exclusive().context("locking shared git fetch")?;
-    let result = git(&["fetch", "-q", "origin", "--prune"], repo);
+    let result =
+        retry_transient_git_network("fetch", || git(&["fetch", "-q", "origin", "--prune"], repo));
     FileExt::unlock(&lock).ok();
     result.map(|_| ())
 }
@@ -327,25 +386,38 @@ pub fn delete_local_branch(repo: &Path, branch: &str) -> Result<()> {
 }
 
 pub fn push_branch(worktree: &Path, branch: &str, push_url: &str, pat: &str) -> Result<()> {
+    push_branch_with_executable(Path::new("git"), worktree, branch, push_url, pat)
+}
+
+fn push_branch_with_executable(
+    executable: &Path,
+    worktree: &Path,
+    branch: &str,
+    push_url: &str,
+    pat: &str,
+) -> Result<()> {
     let askpass = write_askpass(pat)?;
-    let child = Command::new("git")
-        .args(["push", "-q", push_url, branch])
-        .env("GIT_ASKPASS", &askpass)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .current_dir(worktree)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("git push")?;
-    let out = wait_with_timeout(child, "git push")?;
+    let result = retry_transient_git_network("push", || {
+        let child = Command::new(executable)
+            .args(["push", "-q", push_url, branch])
+            .env("GIT_ASKPASS", &askpass)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .current_dir(worktree)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("git push")?;
+        let out = wait_with_timeout(child, "git push")?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "push failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    });
     let _ = std::fs::remove_file(&askpass);
-    if !out.status.success() {
-        anyhow::bail!(
-            "push failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(())
+    result
 }
 
 #[allow(dead_code)]
@@ -373,6 +445,7 @@ pub fn cleanup(worktree: &Path, repo: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
@@ -539,6 +612,80 @@ mod tests {
     }
 
     // ── push_branch() ────────────────────────────────────────────────────
+
+    #[test]
+    fn transient_network_classifier_matches_only_transport_weather() {
+        for text in [
+            "ssh: connect to host github.com port 22: Connection timed out",
+            "fatal: the remote end hung up unexpectedly: Connection reset by peer",
+            "fatal: could not resolve host: github.com",
+            "fatal: early EOF",
+            "ssh_exchange_identification: Connection closed by remote host",
+        ] {
+            assert!(
+                is_transient_network_error(text),
+                "expected transient: {text}"
+            );
+        }
+        for text in [
+            "remote: Permission to owner/repo denied to user",
+            "fatal: Authentication failed for 'https://github.com/owner/repo.git/'",
+            "! [rejected] main -> main (non-fast-forward)",
+        ] {
+            assert!(
+                !is_transient_network_error(text),
+                "unexpected transient: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_network_operation_retries_once_then_succeeds() {
+        let mut attempts = 0;
+        let result = retry_transient_git_network("test push", || {
+            attempts += 1;
+            if attempts == 1 {
+                anyhow::bail!("ssh: connect to host github.com port 22: Connection timed out");
+            }
+            Ok("pushed")
+        });
+        assert_eq!(result.unwrap(), "pushed");
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn push_retries_fake_git_timeout_once_then_completes() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let count_path = tmp.path().join("push-count");
+        let fake_git = tmp.path().join("git");
+        fs::write(
+            &fake_git,
+            format!(
+                "#!/bin/sh\ncount=0\n[ -f '{count}' ] && count=$(cat '{count}')\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{count}'\nif [ \"$count\" -eq 1 ]; then echo 'ssh: connect to host github.com port 22: Connection timed out' >&2; exit 1; fi\nexit 0\n",
+                count = count_path.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&fake_git).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_git, perms).unwrap();
+
+        push_branch_with_executable(&fake_git, tmp.path(), "main", "origin", "").unwrap();
+
+        assert_eq!(fs::read_to_string(count_path).unwrap(), "2");
+    }
+
+    #[test]
+    fn non_transient_network_operation_does_not_retry() {
+        let mut attempts = 0;
+        let result: Result<()> = retry_transient_git_network("test push", || {
+            attempts += 1;
+            anyhow::bail!("fatal: Authentication failed")
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
 
     #[test]
     fn push_branch_fails_loudly_for_unreachable_remote() {
