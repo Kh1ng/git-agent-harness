@@ -200,6 +200,7 @@ mod tests {
                 local_path: "/tmp/repo".into(),
                 default_target_branch: "main".into(),
                 merge_policy: crate::config::MergePolicy::default(),
+                max_fix_attempts_per_mr: 2,
             },
             observations: Observations {
                 sync: ObservationStatus { status: "ok" },

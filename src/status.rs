@@ -76,6 +76,9 @@ pub struct ProfileIdentity {
     /// Resolved per-repo merge policy (Issue #124 / TICKET-127). Inherits the
     /// canonical/defaults policy when the profile doesn't set its own.
     pub merge_policy: crate::config::MergePolicy,
+    /// Effective cap for automatic post-review repair runs. Kept in the
+    /// snapshot so controller decisions and dashboard blockers agree.
+    pub max_fix_attempts_per_mr: u32,
 }
 
 #[derive(Serialize)]
@@ -156,10 +159,8 @@ pub fn build_snapshot(
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let generated_at = now.format(&Rfc3339).unwrap_or_default();
 
-    let resolved_merge_policy = profile
-        .effective_routing(&cfg.defaults)
-        .merge_policy
-        .unwrap_or_default();
+    let effective_routing = profile.effective_routing(&cfg.defaults);
+    let resolved_merge_policy = effective_routing.merge_policy.unwrap_or_default();
     let profile_identity = ProfileIdentity {
         profile: profile_name.to_string(),
         display_name: profile.display_name.clone(),
@@ -168,6 +169,7 @@ pub fn build_snapshot(
         local_path: profile.local_path.clone(),
         default_target_branch: profile.default_target_branch.clone(),
         merge_policy: resolved_merge_policy,
+        max_fix_attempts_per_mr: effective_routing.max_fix_attempts_per_mr(),
     };
 
     let mut errors = Vec::new();
@@ -373,21 +375,21 @@ pub fn build_snapshot(
     }
 
     // Project retry-cap-blocked MRs into blocked_work_items. An MR classified
-    // NEEDS_FIX whose fix_attempt_counts >= AUTO_RETRY_CAP will be returned as
+    // NEEDS_FIX whose fix_attempt_counts reach the effective repair cap will be returned as
     // HumanRequired by decide_next_action, but this is a controller decision
     // not a ledger human_required flag — without this projection, gah status
     // shows no blockers while the supervisor pings human_required every cycle.
-    const AUTO_RETRY_CAP: usize = 2;
+    let fix_retry_cap = profile_identity.max_fix_attempts_per_mr as usize;
     for mr in &merge_requests {
         if matches!(mr.classification.as_str(), "CI_FAILED" | "NEEDS_FIX") {
             let attempts = fix_attempt_counts.get(&mr.branch).copied().unwrap_or(0);
-            if attempts >= AUTO_RETRY_CAP {
+            if attempts >= fix_retry_cap {
                 blocked_work_items.push(Blocker {
                     kind: "human_required".into(),
                     reason: Some("fix_retry_cap_exceeded".into()),
                     message: Some(format!(
                         "MR on branch '{}' classified {} but fix retry cap ({}) exceeded",
-                        mr.branch, mr.classification, AUTO_RETRY_CAP
+                        mr.branch, mr.classification, fix_retry_cap
                     )),
                     backend: None,
                     model: None,

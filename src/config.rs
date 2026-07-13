@@ -550,9 +550,15 @@ pub struct RoutingPolicy {
     #[serde(default)]
     pub max_known_actual_cost_per_week: Option<f64>,
     /// Maximum completed reviews for one work item before human escalation.
-    /// Unset retains the safe default of two cycles.
+    /// When unset, this is derived from `max_fix_attempts_per_mr + 1`, so a
+    /// configured repair budget can be exercised and followed by a review.
     #[serde(default)]
     pub max_review_cycles_per_ticket: Option<u32>,
+    /// Maximum post-review repair dispatches for one MR before a human must
+    /// intervene. A `NEEDS_FIX` verdict always gets this repair budget before
+    /// it can become a human-required state. Unset defaults to two repairs.
+    #[serde(default)]
+    pub max_fix_attempts_per_mr: Option<u32>,
     /// Maximum paid/API-backed reviews for one work item. Unset defaults to
     /// three; quota-backed and local reviews do not consume this cap.
     #[serde(default)]
@@ -669,6 +675,9 @@ impl RoutingPolicy {
             max_review_cycles_per_ticket: self
                 .max_review_cycles_per_ticket
                 .or(defaults.max_review_cycles_per_ticket),
+            max_fix_attempts_per_mr: self
+                .max_fix_attempts_per_mr
+                .or(defaults.max_fix_attempts_per_mr),
             max_paid_reviews_per_ticket: self
                 .max_paid_reviews_per_ticket
                 .or(defaults.max_paid_reviews_per_ticket),
@@ -718,7 +727,12 @@ impl RoutingPolicy {
 
     #[allow(dead_code)] // enforced by dispatch review budget checks (#113)
     pub fn max_review_cycles_per_ticket(&self) -> u32 {
-        self.max_review_cycles_per_ticket.unwrap_or(2)
+        self.max_review_cycles_per_ticket
+            .unwrap_or_else(|| self.max_fix_attempts_per_mr().saturating_add(1))
+    }
+
+    pub fn max_fix_attempts_per_mr(&self) -> u32 {
+        self.max_fix_attempts_per_mr.unwrap_or(2)
     }
 
     #[allow(dead_code)] // enforced by dispatch review budget checks (#113)
@@ -1068,6 +1082,9 @@ fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> Ro
     repo.max_review_cycles_per_ticket = repo
         .max_review_cycles_per_ticket
         .or(canonical.max_review_cycles_per_ticket);
+    repo.max_fix_attempts_per_mr = repo
+        .max_fix_attempts_per_mr
+        .or(canonical.max_fix_attempts_per_mr);
     repo.max_paid_reviews_per_ticket = repo
         .max_paid_reviews_per_ticket
         .or(canonical.max_paid_reviews_per_ticket);
@@ -1926,21 +1943,31 @@ pub mod tests {
     #[test]
     fn review_budget_defaults_and_profile_override_are_deterministic() {
         let defaults = RoutingPolicy::default();
-        assert_eq!(defaults.max_review_cycles_per_ticket(), 2);
+        assert_eq!(defaults.max_review_cycles_per_ticket(), 3);
+        assert_eq!(defaults.max_fix_attempts_per_mr(), 2);
         assert_eq!(defaults.max_paid_reviews_per_ticket(), 3);
 
         let global = RoutingPolicy {
             max_review_cycles_per_ticket: Some(4),
+            max_fix_attempts_per_mr: Some(3),
             max_paid_reviews_per_ticket: Some(5),
             ..RoutingPolicy::default()
         };
         let profile = RoutingPolicy {
             max_review_cycles_per_ticket: Some(1),
+            max_fix_attempts_per_mr: Some(4),
             ..RoutingPolicy::default()
         };
         let effective = profile.merged_with_defaults(&global);
         assert_eq!(effective.max_review_cycles_per_ticket(), 1);
+        assert_eq!(effective.max_fix_attempts_per_mr(), 4);
         assert_eq!(effective.max_paid_reviews_per_ticket(), 5);
+
+        let repair_budget_only = RoutingPolicy {
+            max_fix_attempts_per_mr: Some(4),
+            ..RoutingPolicy::default()
+        };
+        assert_eq!(repair_budget_only.max_review_cycles_per_ticket(), 5);
     }
 
     #[test]

@@ -1815,7 +1815,7 @@ fn review_routes_to_agy_candidate_and_writes_verdict() {
         &fake_bin,
         "agy",
         &format!(
-            "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"],\"evidence\":[\"file:src.txt\"]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -1854,6 +1854,7 @@ fn review_routes_to_agy_candidate_and_writes_verdict() {
     let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(report.contains("Review notes"));
+    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
     assert!(verdict.contains("\"reviewer_backend\": \"agy\""));
     assert!(verdict.contains("\"reviewer_model\": \"Claude Sonnet 4.6 (Thinking)\""));
     assert!(prompt.contains("--print"));
@@ -1893,7 +1894,7 @@ fn review_falls_back_to_next_candidate_on_agy_empty_output() {
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
-        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}\nEOF\n",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src.txt\"]}\nEOF\n",
     );
     make_fake_bin_with_body(
         &fake_bin,
@@ -1935,6 +1936,7 @@ fn review_falls_back_to_next_candidate_on_agy_empty_output() {
     let sessions = tmp.path().join("artifacts/real/sessions");
     let session = latest_child_dir(&sessions);
     let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
+    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
     assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
 }
 
@@ -2022,7 +2024,7 @@ fn review_uses_explicit_claude_path() {
         explicit_claude.parent().unwrap(),
         "claude-explicit",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src.txt\"]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -2060,6 +2062,10 @@ fn review_uses_explicit_claude_path() {
 
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(prompt.contains("Source: feature/review"));
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    let verdict = fs::read_to_string(session_dir.join("review-verdict.json")).unwrap();
+    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
 }
 
 fn setup_review_repo_and_gh(
@@ -2138,7 +2144,7 @@ fn review_activates_and_records_capability_when_installed() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src.txt\"]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -2173,6 +2179,7 @@ fn review_activates_and_records_capability_when_installed() {
     let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
     let verdict_text = fs::read_to_string(session_dir.join("review-verdict.json")).unwrap();
     let verdict: Value = serde_json::from_str(&verdict_text).unwrap();
+    assert_eq!(verdict["verdict"], serde_json::json!("APPROVE"));
     assert_eq!(
         verdict["applied_capabilities"],
         serde_json::json!(["ponytail"])
@@ -2437,7 +2444,7 @@ fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
-        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}\nEOF\n",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src.txt\"]}\nEOF\n",
     );
     make_fake_bin_with_body(
         &fake_bin,
@@ -2471,6 +2478,10 @@ fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
 
     let curl_log = fs::read_to_string(curl_log).unwrap();
     assert!(curl_log.contains("PRIVATE-TOKEN: from-env-file-secret"));
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    let verdict = fs::read_to_string(session_dir.join("review-verdict.json")).unwrap();
+    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
 }
 
 #[test]
@@ -2496,7 +2507,7 @@ fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src.txt\"]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -2529,6 +2540,10 @@ fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
     assert!(prompt.contains("Target: main"));
     assert!(prompt.contains("MR title: Draft: [GAH] Fix"));
     assert!(prompt.contains("MR body:\nMR body"));
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    let verdict = fs::read_to_string(session_dir.join("review-verdict.json")).unwrap();
+    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
 }
 
 #[test]
@@ -2565,7 +2580,7 @@ fn review_uses_profile_repo_not_current_worktree() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[]}}\nEOF\n",
+            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src.txt\"]}}\nEOF\n",
             prompt_log.display()
         ),
     );
@@ -2594,6 +2609,10 @@ fn review_uses_profile_repo_not_current_worktree() {
 
     let prompt = fs::read_to_string(prompt_log).unwrap();
     assert!(prompt.contains("Source: feature/review"));
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    let verdict = fs::read_to_string(session_dir.join("review-verdict.json")).unwrap();
+    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
 }
 
 #[test]
