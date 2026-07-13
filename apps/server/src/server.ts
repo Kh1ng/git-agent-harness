@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { getServerReadiness } from './serverReadiness.js';
-import { runStatus, runQuota, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, getLoopStatus, startLoop, stopLoop, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions } from './gahCli.js';
+import { runStatus, runQuota, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, runConfigSet, runConfigShow, getLoopStatus, startLoop, stopLoop, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions, type ConfigSetOptions } from './gahCli.js';
 import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
 
@@ -47,6 +47,7 @@ export function createServer() {
         events: '/api/events',
         controllerActivity: '/api/controller-activity',
         profiles: '/api/profiles',
+        config: '/api/config',
         loopStatus: '/api/loop/status',
         loopStart: '/api/loop/start',
         loopStop: '/api/loop/stop',
@@ -203,6 +204,38 @@ export function createServer() {
     } catch (error) {
       res.status(502).json({
         error: 'Failed to remove profile',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Global config defaults (current_manager, etc.) -- Issue #194. Read-only
+  // GET plus a PATCH/POST that shells out to `gah config set` so the TOML
+  // config stays the single source of truth and the running loop picks the
+  // change up on its next iteration without a restart.
+  app.get('/api/config', async (_req, res) => {
+    try {
+      const config = await runConfigShow();
+      res.json(config);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to read global config',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/config', async (req, res) => {
+    try {
+      const options: ConfigSetOptions = {
+        current_manager: req.body.current_manager,
+        clear: req.body.clear,
+      };
+      await runConfigSet(options);
+      res.json({ success: true, message: 'Global config updated' });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to update global config',
         message: error instanceof Error ? error.message : String(error)
       });
     }

@@ -320,6 +320,10 @@ export interface ReportSeriesData {
 // gah profile list --json (src/main.rs)
 // ---------------------------------------------------------------------------
 
+/** Values accepted for a profile's `manager_wake_autonomy`. Mirrors
+ * `WakeAutonomy` in src/config.rs (serde snake_case). */
+export type WakeAutonomyValue = 'off' | 'review_only' | 'full';
+
 export interface ProfileSummary {
   name: string;
   display_name: string;
@@ -330,6 +334,29 @@ export interface ProfileSummary {
    * the provider isn't recognized or a self-hosted gitlab is missing
    * provider_api_base. */
   web_url: string | null;
+  /** Max concurrent tickets `gah loop` may run for this profile (null =
+   * unset, which the harness treats as 1). */
+  max_parallel_workers: number | null;
+  /** Manager-wake autonomy for this profile (null = unset -> off). */
+  manager_wake_autonomy: WakeAutonomyValue | null;
+}
+
+// ---------------------------------------------------------------------------
+// gah config show --json (src/main.rs) -- global defaults
+// ---------------------------------------------------------------------------
+
+export interface ConfigSummary {
+  /** Which agent CLI is currently acting as the operator's manager across
+   * all profiles/projects (null = unset, so no manager wake happens). */
+  current_manager: string | null;
+}
+
+/** Payload for `gah config set` (POST /api/config). `current_manager: null`
+ * clears the field. */
+export interface ConfigSetData {
+  current_manager?: string | null;
+  /** Field names to clear (e.g. "current_manager"). */
+  clear?: string[];
 }
 
 // ---------------------------------------------------------------------------

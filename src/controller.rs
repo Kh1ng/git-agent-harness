@@ -802,24 +802,83 @@ pub fn acquire_profile_lock(
     Ok(ProfileLock(lock))
 }
 
+/// Reload the config from disk for `run_loop`'s per-iteration hot-reload,
+/// validating that `profile_name` is still resolvable in the freshly loaded
+/// config. A parse-clean reload that dropped or renamed this exact profile
+/// (e.g. an operator edit mid-run) is just as unsafe to dispatch against as a
+/// read failure -- callers must treat both errors identically (fall back to
+/// the last-known-good config) rather than adopting a config the running
+/// profile no longer resolves against.
+fn reload_config_for_profile(
+    config_path: &std::path::Path,
+    profile_name: &str,
+) -> Result<crate::config::GahConfig> {
+    let loaded = crate::config::load(config_path.to_str())?;
+    crate::config::get_profile(&loaded, profile_name)?;
+    Ok(loaded)
+}
+
 /// Run the controller continuously in one process. The process lock is held
 /// for the lifetime of the loop so a second manager for the same profile
 /// cannot create a competing worker pool.
 pub fn run_loop(
-    cfg: &crate::config::GahConfig,
+    initial_cfg: &crate::config::GahConfig,
     profile_name: &str,
     json: bool,
-    parallel: usize,
+    parallel_arg: usize,
     skip_validation_gate: bool,
     config_path: &std::path::Path,
 ) -> Result<()> {
     let _lock = acquire_profile_lock(profile_name, config_path)?;
+
+    // The dashboard Settings UI can change max_parallel_workers,
+    // manager_wake_autonomy (per-profile) and current_manager (global) at
+    // runtime. Reload the config from disk on every iteration so those
+    // changes take effect on the next loop iteration without restarting the
+    // daemon. We keep the last successfully-loaded config as a fallback so a
+    // transient read failure (e.g. the config file is mid-write) can't kill
+    // the loop.
+    let mut last_cfg: Option<crate::config::GahConfig> = Some(initial_cfg.clone());
 
     loop {
         if crate::runner::shutdown_requested() {
             eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
             return Ok(());
         }
+
+        let cfg: &crate::config::GahConfig = match reload_config_for_profile(
+            config_path,
+            profile_name,
+        ) {
+            Ok(loaded) => {
+                last_cfg = Some(loaded);
+                last_cfg.as_ref().expect("just assigned")
+            }
+            Err(error) => {
+                eprintln!(
+                    "gah loop: failed to reload config ({}); reusing last known config for this iteration",
+                    error
+                );
+                match last_cfg.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        // We never loaded a config successfully; there's no
+                        // safe baseline to continue from, so surface the error
+                        // instead of dispatching against a phantom config.
+                        return Err(error);
+                    }
+                }
+            }
+        };
+
+        // The explicit `--parallel` flag (parallel_arg > 0) wins; otherwise
+        // derive the worker pool size from the freshly-reloaded profile.
+        let parallel = if parallel_arg == 0 {
+            crate::config::get_profile(cfg, profile_name)?.max_parallel_workers() as usize
+        } else {
+            parallel_arg
+        };
+
         // Transient provider/controller failures must not kill the daemon.
         // A validation-gate failure is different: it proves the safety check
         // itself is unhealthy, so pause immediately and require an explicit
@@ -1516,8 +1575,8 @@ pub(crate) fn run_dispatch_and_record(
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_profile_lock, is_validation_gate_failure, loop_lock_path, wait_interruptibly,
-        NextAction, AUTO_RETRY_CAP,
+        acquire_profile_lock, is_validation_gate_failure, loop_lock_path,
+        reload_config_for_profile, wait_interruptibly, NextAction, AUTO_RETRY_CAP,
     };
 
     #[test]
@@ -1588,6 +1647,59 @@ mod tests {
         let lock_path = loop_lock_path("test-profile", config_file.path());
         let expected_dir = config_file.path().parent().unwrap().join(".gah-locks");
         assert_eq!(lock_path.parent(), Some(expected_dir.as_path()));
+    }
+
+    #[test]
+    fn reload_config_for_profile_succeeds_when_profile_still_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cfg.toml");
+        std::fs::write(
+            &path,
+            r#"
+[profiles.test]
+display_name = "Test"
+repo_id = "test/test"
+provider = "github"
+repo = "test/test"
+local_path = "/tmp"
+artifact_root = "/tmp"
+default_target_branch = "main"
+"#,
+        )
+        .unwrap();
+
+        let cfg = reload_config_for_profile(&path, "test").expect("profile is present");
+        assert!(crate::config::get_profile(&cfg, "test").is_ok());
+    }
+
+    #[test]
+    fn reload_config_for_profile_errs_when_profile_renamed_or_removed() {
+        // A parse-clean reload that no longer resolves the running profile
+        // (renamed/removed mid-run, e.g. via the dashboard Settings UI) must
+        // report an error rather than silently handing back a config the
+        // daemon can't dispatch against -- the caller (`run_loop`) relies on
+        // this to fall back to its last-known-good config instead of
+        // hard-erroring out of the whole loop.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cfg.toml");
+        std::fs::write(
+            &path,
+            r#"
+[profiles.renamed]
+display_name = "Test"
+repo_id = "test/test"
+provider = "github"
+repo = "test/test"
+local_path = "/tmp"
+artifact_root = "/tmp"
+default_target_branch = "main"
+"#,
+        )
+        .unwrap();
+
+        let error = reload_config_for_profile(&path, "test")
+            .expect_err("profile no longer exists in the reloaded config");
+        assert!(error.to_string().contains("test"));
     }
 
     #[test]
