@@ -526,6 +526,14 @@ pub struct RoutingPolicy {
     pub max_known_estimated_cost_per_week: Option<f64>,
     #[serde(default)]
     pub max_known_actual_cost_per_week: Option<f64>,
+    /// Maximum completed reviews for one work item before human escalation.
+    /// Unset retains the safe default of two cycles.
+    #[serde(default)]
+    pub max_review_cycles_per_ticket: Option<u32>,
+    /// Maximum paid/API-backed reviews for one work item. Unset defaults to
+    /// three; quota-backed and local reviews do not consume this cap.
+    #[serde(default)]
+    pub max_paid_reviews_per_ticket: Option<u32>,
     /// TICKET-127/Issue #124: per-repo merge policy gating what the
     /// controller does for a `READY_FOR_HUMAN` MR whose CI has been evaluated.
     /// `None` inherits the canonical/defaults policy (resolved to `Auto`).
@@ -630,6 +638,12 @@ impl RoutingPolicy {
             max_known_actual_cost_per_week: self
                 .max_known_actual_cost_per_week
                 .or(defaults.max_known_actual_cost_per_week),
+            max_review_cycles_per_ticket: self
+                .max_review_cycles_per_ticket
+                .or(defaults.max_review_cycles_per_ticket),
+            max_paid_reviews_per_ticket: self
+                .max_paid_reviews_per_ticket
+                .or(defaults.max_paid_reviews_per_ticket),
             merge_policy: self.merge_policy.or(defaults.merge_policy),
         }
     }
@@ -672,6 +686,16 @@ impl RoutingPolicy {
             }],
             _ => vec![],
         }
+    }
+
+    #[allow(dead_code)] // enforced by dispatch review budget checks (#113)
+    pub fn max_review_cycles_per_ticket(&self) -> u32 {
+        self.max_review_cycles_per_ticket.unwrap_or(2)
+    }
+
+    #[allow(dead_code)] // enforced by dispatch review budget checks (#113)
+    pub fn max_paid_reviews_per_ticket(&self) -> u32 {
+        self.max_paid_reviews_per_ticket.unwrap_or(3)
     }
 
     pub fn find_quota_pool(
@@ -1010,6 +1034,12 @@ fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> Ro
     repo.max_known_actual_cost_per_week = repo
         .max_known_actual_cost_per_week
         .or(canonical.max_known_actual_cost_per_week);
+    repo.max_review_cycles_per_ticket = repo
+        .max_review_cycles_per_ticket
+        .or(canonical.max_review_cycles_per_ticket);
+    repo.max_paid_reviews_per_ticket = repo
+        .max_paid_reviews_per_ticket
+        .or(canonical.max_paid_reviews_per_ticket);
     let mut capabilities = canonical.review_required_capabilities;
     capabilities.extend(repo.review_required_capabilities);
     repo.review_required_capabilities = capabilities;
@@ -1813,6 +1843,26 @@ pub mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].backend, "codex");
         assert_eq!(candidates[0].model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn review_budget_defaults_and_profile_override_are_deterministic() {
+        let defaults = RoutingPolicy::default();
+        assert_eq!(defaults.max_review_cycles_per_ticket(), 2);
+        assert_eq!(defaults.max_paid_reviews_per_ticket(), 3);
+
+        let global = RoutingPolicy {
+            max_review_cycles_per_ticket: Some(4),
+            max_paid_reviews_per_ticket: Some(5),
+            ..RoutingPolicy::default()
+        };
+        let profile = RoutingPolicy {
+            max_review_cycles_per_ticket: Some(1),
+            ..RoutingPolicy::default()
+        };
+        let effective = profile.merged_with_defaults(&global);
+        assert_eq!(effective.max_review_cycles_per_ticket(), 1);
+        assert_eq!(effective.max_paid_reviews_per_ticket(), 5);
     }
 
     #[test]
