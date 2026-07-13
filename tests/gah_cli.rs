@@ -1938,6 +1938,72 @@ fn review_falls_back_to_next_candidate_on_agy_empty_output() {
     assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
 }
 
+/// AGY's subscription CLI may emit quota exhaustion only on stderr with a
+/// nonzero exit.  That failure must make the exact review route unavailable
+/// before selecting the fallback; otherwise every loop cycle repeats AGY.
+#[test]
+fn review_falls_back_when_agy_quota_is_only_on_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    add_origin_and_feature_commit(&repo);
+    checkout_branch(&repo, "main");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "agy",
+        "#!/bin/sh\nprintf 'Individual quota reached. Resets in 2h 15m.\\n' >&2\nexit 23\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src.txt\"]}\nEOF\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
+    );
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_candidates = [{ backend = \"agy\", model = \"Claude Sonnet 4.6 (Thinking)\" }, { backend = \"claude\" }]\n",
+        "",
+    );
+    let availability_path = tmp.path().join("availability.json");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Backend unavailable; retrying review with claude instead of agy",
+        ));
+
+    let availability = fs::read_to_string(availability_path).unwrap();
+    assert!(availability.contains("Claude Sonnet 4.6 (Thinking)"));
+    assert!(availability.contains("quota_exhausted"));
+    let session = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
+    assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
+}
+
 #[test]
 fn review_uses_explicit_claude_path() {
     let tmp = tempfile::tempdir().unwrap();
