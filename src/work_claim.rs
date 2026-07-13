@@ -259,11 +259,17 @@ pub struct ClaimDetail {
 fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
+        // `Command::status()` returns `Ok` as long as `kill` itself launched
+        // and ran to completion -- that is true whether the signalled PID
+        // exists or not. The actual liveness answer is the child's own exit
+        // code: `kill -0 <pid>` exits 0 only when the process exists and is
+        // signalable, and nonzero (commonly "No such process") otherwise.
         std::process::Command::new("kill")
             .arg("-0")
             .arg(pid.to_string())
             .status()
-            .is_ok()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 
     #[cfg(not(unix))]
@@ -669,5 +675,30 @@ mod tests {
 
         // Should be detected as stale due to age
         assert!(state.is_claim_stale("test_profile2", "work_2", 3600));
+    }
+
+    #[test]
+    fn test_dead_pid_is_stale_regardless_of_age() {
+        let mut state = WorkClaimState::new();
+
+        // A claim from a PID that does not exist, made moments ago -- must
+        // be detected as stale via the process-liveness check alone, not
+        // because it's old. Regression test for a bug where the liveness
+        // check used Command::status().is_ok() (true whenever `kill` itself
+        // ran, regardless of its exit code) instead of `.success()` (true
+        // only when the signalled PID actually exists), which meant no PID
+        // was ever detected as dead until the age-based fallback fired.
+        state.claims.insert(
+            "test_profile".to_string(),
+            vec![WorkClaimStateEntry::V2(WorkClaim {
+                work_id: "work_dead_pid".to_string(),
+                pid: 999_999, // Extremely unlikely to be a live PID
+                hostname: "test-host".to_string(),
+                claimed_at: Utc::now(),
+            })],
+        );
+
+        assert!(!is_process_alive(999_999));
+        assert!(state.is_claim_stale("test_profile", "work_dead_pid", 3600));
     }
 }
