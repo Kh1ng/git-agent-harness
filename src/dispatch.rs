@@ -3697,11 +3697,13 @@ fn review(
     fs::write(
         bundle.join("mr-description.md"),
         format!(
-            "MR: {}\nURL: {}\nSource: {}\nTarget: {}\nRepo: {}\nTitle: {}\nCI: {}",
+            "MR: {}\nURL: {}\nSource: {}\nTarget: {}\nSource SHA: {}\nTarget SHA: {}\nRepo: {}\nTitle: {}\nCI: {}",
             target.mr_id.as_deref().unwrap_or("n/a"),
             target.mr_url.as_deref().unwrap_or("n/a"),
             target.source_branch,
             target.target_branch,
+            target.source_sha.as_deref().unwrap_or("unknown"),
+            target.target_sha.as_deref().unwrap_or("unknown"),
             profile.repo,
             target.mr_title.as_deref().unwrap_or("n/a"),
             target.ci_status.as_deref().unwrap_or("unknown"),
@@ -3803,6 +3805,21 @@ fn review(
         },
         ledger,
     )?;
+
+    let reviewer_class = derive_reviewer_tier(cfg, profile, &route).as_str();
+    if let (Some(work_id), Some(source_sha)) =
+        (ledger.work_id.as_deref(), target.source_sha.as_deref())
+    {
+        if crate::ledger::review_already_exists(cfg, work_id, source_sha, reviewer_class)? {
+            ledger.validation_result = Some("skipped_duplicate_review".into());
+            ledger.review_source_sha = Some(source_sha.to_string());
+            ledger.reviewer_class = Some(reviewer_class.to_string());
+            println!("Skipping duplicate {reviewer_class} review for {work_id} at {source_sha}");
+            return Ok(());
+        }
+    }
+    ledger.review_source_sha = target.source_sha.clone();
+    ledger.reviewer_class = Some(reviewer_class.to_string());
 
     // Bounded retry across review_candidates: an empty/unavailable-backend
     // outcome (e.g. AGY quota exhaustion -- see agy_empty_output_diagnosis)
@@ -9032,6 +9049,8 @@ fn resolve_review_target(
             mr_title: mr_target.title,
             mr_body: mr_target.body,
             ci_status: mr_target.ci_status,
+            source_sha: mr_target.source_sha,
+            target_sha: mr_target.target_sha,
             source_branch: mr_target.source_branch.clone(),
             target_branch: fallback_target_branch(
                 &profile.default_target_branch,
@@ -9090,6 +9109,8 @@ fn review_target_from_branch(profile: &Profile, branch: &str) -> Result<ReviewTa
             mr_title: mr_target.title,
             mr_body: mr_target.body,
             ci_status: mr_target.ci_status,
+            source_sha: mr_target.source_sha,
+            target_sha: mr_target.target_sha,
             prior_state: None,
         }),
         Err(_) => Ok(ReviewTarget {
@@ -9098,6 +9119,8 @@ fn review_target_from_branch(profile: &Profile, branch: &str) -> Result<ReviewTa
             mr_title: None,
             mr_body: None,
             ci_status: None,
+            source_sha: None,
+            target_sha: None,
             source_branch: branch.to_string(),
             target_branch: profile.default_target_branch.clone(),
             prior_state: None,
@@ -9153,6 +9176,8 @@ fn lookup_review_state(
             mr_title: None,
             mr_body: None,
             ci_status: None,
+            source_sha: None,
+            target_sha: None,
             source_branch: entry.branch.clone().unwrap_or_default(),
             target_branch: profile.default_target_branch.clone(),
             prior_state: Some(render_prior_ledger_state(&entry)),
@@ -9345,6 +9370,8 @@ struct ReviewTarget {
     mr_title: Option<String>,
     mr_body: Option<String>,
     ci_status: Option<String>,
+    source_sha: Option<String>,
+    target_sha: Option<String>,
     source_branch: String,
     target_branch: String,
     prior_state: Option<String>,
