@@ -4,7 +4,7 @@ use crate::models::CandidateArtifact;
 use crate::models::{AvailableTicket, PmPlan, WorkMetadata};
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::provider::provider_command;
-use crate::routing::{self, RouteDecision, RouteError, RouteRequest};
+use crate::routing::{self, RouteDecision, RouteError, RouteRequest, TaskRoutingContext};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
@@ -1981,7 +1981,13 @@ fn improve(
             None
         },
     };
-    let mut route = decide_route(cfg, profile, route_req.clone(), ledger)?;
+    let mut route = decide_route(
+        cfg,
+        profile,
+        route_req.clone(),
+        ticket_meta.as_ref(),
+        ledger,
+    )?;
     apply_route_to_ledger(ledger, &route);
     preflight(profile, &route.effective_backend)?;
     // Reserve the selected slot before telling a parallel controller that it
@@ -2357,7 +2363,13 @@ fn improve(
                     &log_text,
                     failure_log_path,
                 )? {
-                    let rerouted = decide_route(cfg, profile, route_req.clone(), ledger)?;
+                    let rerouted = decide_route(
+                        cfg,
+                        profile,
+                        route_req.clone(),
+                        ticket_meta.as_ref(),
+                        ledger,
+                    )?;
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
                     let rerouted_identity = route_identity(
@@ -2478,7 +2490,13 @@ fn improve(
                     ),
                 });
                 if attempt + 1 < max_attempts {
-                    let rerouted = decide_route(cfg, profile, route_req.clone(), ledger)?;
+                    let rerouted = decide_route(
+                        cfg,
+                        profile,
+                        route_req.clone(),
+                        ticket_meta.as_ref(),
+                        ledger,
+                    )?;
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
                     let rerouted_identity = route_identity(
@@ -2709,7 +2727,8 @@ fn improve(
                     let mut escalation_req = route_req.clone();
                     escalation_req.last_failure_class =
                         Some(crate::ledger::FailureClass::ValidationFailure.as_str());
-                    let rerouted = decide_route(cfg, profile, escalation_req, ledger)?;
+                    let rerouted =
+                        decide_route(cfg, profile, escalation_req, ticket_meta.as_ref(), ledger)?;
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
                     let rerouted_identity = route_identity(
@@ -3089,6 +3108,7 @@ fn experiment(
             session_id: session_dir.file_name().and_then(|s| s.to_str()),
             usage_summary: None,
         },
+        None,
         ledger,
     )?;
     apply_route_to_ledger(ledger, &route);
@@ -3439,7 +3459,7 @@ fn pm(
         usage_summary: None,
         last_failure_class: None,
     };
-    let mut plan_route = decide_route(cfg, profile, route_req.clone(), ledger)?;
+    let mut plan_route = decide_route(cfg, profile, route_req.clone(), None, ledger)?;
     apply_route_to_ledger(ledger, &plan_route);
     preflight(profile, &plan_route.effective_backend)?;
     let mut llm = resolve_llm(
@@ -3517,7 +3537,7 @@ fn pm(
             );
         };
 
-        let rerouted = decide_route(cfg, profile, route_req.clone(), ledger)?;
+        let rerouted = decide_route(cfg, profile, route_req.clone(), None, ledger)?;
         let rerouted_key = route_identity(
             &rerouted.effective_backend,
             rerouted.effective_model.as_deref(),
@@ -3844,6 +3864,7 @@ fn review(
             session_id: session_dir.file_name().and_then(|s| s.to_str()),
             usage_summary: None,
         },
+        None,
         ledger,
     )?;
 
@@ -3980,6 +4001,7 @@ fn review(
                             session_id: session_dir.file_name().and_then(|s| s.to_str()),
                             usage_summary: None,
                         },
+                        None,
                         ledger,
                     )?;
                     let current_identity =
@@ -7597,7 +7619,7 @@ which lacks a leading boundary check.
             last_failure_class: None,
         };
 
-        let err = decide_route(&cfg, &prof, req, &mut ledger).unwrap_err();
+        let err = decide_route(&cfg, &prof, req, None, &mut ledger).unwrap_err();
         assert!(err.downcast_ref::<RouteError>().is_some());
         assert_eq!(ledger.failure_class.as_deref(), Some("backend_error"));
     }
@@ -9180,7 +9202,7 @@ fn dry_run_route(
     } else {
         None
     };
-    routing::decide(
+    routing::decide_for_task(
         &cfg.defaults,
         profile,
         RouteRequest {
@@ -9196,6 +9218,15 @@ fn dry_run_route(
                 .and_then(|m| m.recommended_model.as_deref()),
             session_id: None,
             usage_summary: None,
+        },
+        TaskRoutingContext {
+            task_class: ticket_meta
+                .as_ref()
+                .and_then(|meta| meta.task_class.as_deref()),
+            difficulty: ticket_meta
+                .as_ref()
+                .and_then(|meta| meta.difficulty.as_deref()),
+            risk: ticket_meta.as_ref().and_then(|meta| meta.risk.as_deref()),
         },
     )
     .ok()
@@ -10101,9 +10132,24 @@ fn decide_route(
     cfg: &GahConfig,
     profile: &Profile,
     req: RouteRequest<'_>,
+    task: Option<&WorkMetadata>,
     ledger: &mut LedgerEntry,
 ) -> Result<RouteDecision> {
-    match routing::decide(&cfg.defaults, profile, req) {
+    let decision = if let Some(task) = task {
+        routing::decide_for_task(
+            &cfg.defaults,
+            profile,
+            req,
+            TaskRoutingContext {
+                task_class: task.task_class.as_deref(),
+                difficulty: task.difficulty.as_deref(),
+                risk: task.risk.as_deref(),
+            },
+        )
+    } else {
+        routing::decide(&cfg.defaults, profile, req)
+    };
+    match decision {
         Ok(route) => Ok(route),
         Err(err) => {
             if let Some(route_err) = err.downcast_ref::<RouteError>() {

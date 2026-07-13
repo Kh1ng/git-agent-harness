@@ -1,5 +1,5 @@
 use crate::availability::{self, AvailabilityDecision, BlockScope};
-use crate::config::{Defaults, Profile, RoutingPolicy};
+use crate::config::{Defaults, Profile, RoutingPolicy, TaskRoutingRule};
 use crate::ledger::{BackendUsageSummary, RoutingCandidateDiagnostic, RoutingDiagnostics};
 use crate::quota::{self, PaceBand};
 use crate::runner;
@@ -167,6 +167,17 @@ pub struct RouteRequest<'a> {
     pub last_failure_class: Option<&'a str>,
 }
 
+/// Trusted ticket metadata used only to choose an operator-configured
+/// implementation candidate list. This is intentionally separate from
+/// `RouteRequest`: ordinary routing callers (reviews, PM, CLI overrides) keep
+/// their current behavior unless they explicitly opt into task routing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskRoutingContext<'a> {
+    pub task_class: Option<&'a str>,
+    pub difficulty: Option<&'a str>,
+    pub risk: Option<&'a str>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RouteDecision {
     pub requested_backend: String,
@@ -261,6 +272,27 @@ pub fn decide(
     )
 }
 
+/// Route an implementation request with deterministic task-class rules. A
+/// matching rule wins over the generic implementation candidate list, but
+/// unavailable or saturated entries still fall through to the next candidate
+/// in that same rule. Callers without trusted metadata should use `decide`.
+pub fn decide_for_task(
+    defaults: &Defaults,
+    profile: &Profile,
+    req: RouteRequest<'_>,
+    task: TaskRoutingContext<'_>,
+) -> Result<RouteDecision> {
+    decide_with_task(
+        defaults,
+        profile,
+        req,
+        Some(task),
+        &availability::resolve_state_path(),
+        OffsetDateTime::now_utc(),
+        |backend| runner::backend_available_for_profile(profile, backend),
+    )
+}
+
 fn decide_with<F>(
     defaults: &Defaults,
     profile: &Profile,
@@ -272,8 +304,38 @@ fn decide_with<F>(
 where
     F: Fn(&str) -> bool + Copy,
 {
-    let mut decision =
-        decide_with_inner(defaults, profile, req, state_path, now, backend_available)?;
+    decide_with_task(
+        defaults,
+        profile,
+        req,
+        None,
+        state_path,
+        now,
+        backend_available,
+    )
+}
+
+fn decide_with_task<F>(
+    defaults: &Defaults,
+    profile: &Profile,
+    req: RouteRequest<'_>,
+    task: Option<TaskRoutingContext<'_>>,
+    state_path: &Path,
+    now: OffsetDateTime,
+    backend_available: F,
+) -> Result<RouteDecision>
+where
+    F: Fn(&str) -> bool + Copy,
+{
+    let mut decision = decide_with_inner(
+        defaults,
+        profile,
+        req,
+        task,
+        state_path,
+        now,
+        backend_available,
+    )?;
     if decision.effective_backend == "codex" && decision.effective_model.is_none() {
         if let Some(model) = runner::extract_model_from_args(&profile.codex_args) {
             decision.effective_model = Some(model);
@@ -286,6 +348,7 @@ fn decide_with_inner<F>(
     defaults: &Defaults,
     profile: &Profile,
     req: RouteRequest<'_>,
+    task: Option<TaskRoutingContext<'_>>,
     state_path: &Path,
     now: OffsetDateTime,
     backend_available: F,
@@ -309,6 +372,47 @@ where
             now,
             backend_available,
         );
+    }
+
+    if let Some((rule_index, candidates)) = task_rule_candidates(&effective_routing, req.mode, task)
+        .filter(|(_, list)| !list.is_empty())
+    {
+        let preferred = candidates
+            .first()
+            .cloned()
+            .expect("non-empty task routing rule");
+        let candidates_for_diagnostics = candidates.clone();
+        let (selected, skipped) = pick_route_candidate(
+            candidates,
+            state_path,
+            &profile.max_concurrent_per_model,
+            now,
+            backend_available,
+        )?;
+        let fallback_used =
+            selected.backend != preferred.backend || selected.model != preferred.model;
+        let mut reason = format!("task routing rule #{}", rule_index + 1);
+        if fallback_used {
+            reason = append_availability_reason(reason, &skipped, &selected.backend, false);
+        }
+        return Ok(RouteDecision {
+            requested_backend,
+            effective_backend: selected.backend.clone(),
+            requested_model,
+            effective_model: selected.model.clone(),
+            effective_quota_pool: selected.quota_pool.clone(),
+            routing_reason: reason,
+            fallback_used,
+            confidence_impact: None,
+            human_required: false,
+            routing_diagnostics: Some(build_routing_diagnostics(
+                &candidates_for_diagnostics,
+                &selected,
+                &skipped,
+                None,
+                &profile.pacing,
+            )),
+        });
     }
 
     let mut is_profile_policy = false;
@@ -1186,22 +1290,53 @@ fn policy_candidates(policy: &RoutingPolicy, mode: &str) -> Option<Vec<RouteCand
         "improve" | "fix" | "experiment" => policy.improve_candidates.as_ref(),
         _ => None,
     };
-    raw.map(|list| {
-        list.iter()
-            .enumerate()
-            .map(|(idx, c)| RouteCandidate {
-                backend: c.backend.clone(),
-                model: c.model.clone(),
-                quota_pool: c.quota_pool.clone(),
-                priority: c.priority,
-                included_in_quota: c.included_in_quota,
-                marginal_cost_usd: c.marginal_cost_usd,
-                quota_usage_percent: c.quota_usage_percent,
-                quota_days_remaining: c.quota_days_remaining,
-                original_order: idx,
-            })
-            .collect()
-    })
+    raw.map(|list| route_candidates(list))
+}
+
+fn task_rule_candidates(
+    routing: &RoutingPolicy,
+    mode: &str,
+    task: Option<TaskRoutingContext<'_>>,
+) -> Option<(usize, Vec<RouteCandidate>)> {
+    if !matches!(mode, "improve" | "fix" | "experiment") {
+        return None;
+    }
+    let task = task?;
+    routing
+        .task_routing_rules
+        .iter()
+        .enumerate()
+        .find(|(_, rule)| task_rule_matches(rule, mode, task))
+        .map(|(idx, rule)| (idx, route_candidates(&rule.candidates)))
+}
+
+fn task_rule_matches(rule: &TaskRoutingRule, mode: &str, task: TaskRoutingContext<'_>) -> bool {
+    task_rule_dimension_matches(&rule.modes, Some(mode))
+        && task_rule_dimension_matches(&rule.task_classes, task.task_class)
+        && task_rule_dimension_matches(&rule.difficulties, task.difficulty)
+        && task_rule_dimension_matches(&rule.risks, task.risk)
+}
+
+fn task_rule_dimension_matches(values: &[String], value: Option<&str>) -> bool {
+    values.is_empty()
+        || value.is_some_and(|value| values.iter().any(|item| item.eq_ignore_ascii_case(value)))
+}
+
+fn route_candidates(raw: &[crate::config::CandidateConfig]) -> Vec<RouteCandidate> {
+    raw.iter()
+        .enumerate()
+        .map(|(idx, c)| RouteCandidate {
+            backend: c.backend.clone(),
+            model: c.model.clone(),
+            quota_pool: c.quota_pool.clone(),
+            priority: c.priority,
+            included_in_quota: c.included_in_quota,
+            marginal_cost_usd: c.marginal_cost_usd,
+            quota_usage_percent: c.quota_usage_percent,
+            quota_days_remaining: c.quota_days_remaining,
+            original_order: idx,
+        })
+        .collect()
 }
 
 impl RouteCandidate {
@@ -1354,10 +1489,11 @@ fn over_cap_reason(
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_with, is_genuine_agent_failure, ConcurrencyGuard, RouteError, RouteRequest,
+        decide_with, decide_with_task, is_genuine_agent_failure, ConcurrencyGuard, RouteError,
+        RouteRequest, TaskRoutingContext,
     };
     use crate::availability::{Reason, Source};
-    use crate::config::{Defaults, Profile, RoutingPolicy};
+    use crate::config::{Defaults, Profile, RoutingPolicy, TaskRoutingRule};
     use std::sync::Mutex;
 
     #[allow(clippy::too_many_arguments)]
@@ -1501,6 +1637,145 @@ mod tests {
             quota_usage_percent: None,
             quota_days_remaining: None,
         }
+    }
+
+    fn implementation_request() -> RouteRequest<'static> {
+        RouteRequest {
+            last_failure_class: None,
+            mode: "improve",
+            requested_backend: "auto",
+            requested_model: None,
+            recommended_backend: Some("codex"),
+            recommended_model: Some("strong"),
+            session_id: None,
+            usage_summary: None,
+        }
+    }
+
+    fn easy_docs_rule(candidates: Vec<crate::config::CandidateConfig>) -> TaskRoutingRule {
+        TaskRoutingRule {
+            modes: vec!["improve".into(), "fix".into()],
+            task_classes: vec!["documentation".into()],
+            difficulties: vec!["easy".into()],
+            risks: vec!["low".into()],
+            candidates,
+        }
+    }
+
+    #[test]
+    fn task_rule_precedes_generic_candidates_for_matching_implementation() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.improve_candidates =
+            Some(vec![candidate_config("codex", Some("strong"), None)]);
+        profile.routing.task_routing_rules = vec![easy_docs_rule(vec![candidate_config(
+            "agy",
+            Some("cheap"),
+            None,
+        )])];
+
+        let decision = decide_with_task(
+            &defaults(),
+            &profile,
+            implementation_request(),
+            Some(TaskRoutingContext {
+                task_class: Some("Documentation"),
+                difficulty: Some("EASY"),
+                risk: Some("low"),
+            }),
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "agy");
+        assert_eq!(decision.effective_model.as_deref(), Some("cheap"));
+        assert_eq!(decision.routing_reason, "task routing rule #1");
+    }
+
+    #[test]
+    fn task_rule_falls_through_when_its_first_candidate_is_unavailable() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.task_routing_rules = vec![easy_docs_rule(vec![
+            candidate_config("agy", Some("cheap"), None),
+            candidate_config("codex", Some("fallback"), None),
+        ])];
+        record_unavailable(
+            &path(&tmp),
+            "agy",
+            Some("cheap"),
+            Reason::QuotaExhausted,
+            Source::BackendError,
+            Some(OffsetDateTime::now_utc() + time::Duration::hours(1)),
+            None,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let decision = decide_with_task(
+            &defaults(),
+            &profile,
+            implementation_request(),
+            Some(TaskRoutingContext {
+                task_class: Some("documentation"),
+                difficulty: Some("easy"),
+                risk: Some("low"),
+            }),
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert!(decision.fallback_used);
+        assert!(decision.routing_reason.contains("quota_exhausted"));
+    }
+
+    #[test]
+    fn missing_or_unmatched_task_metadata_preserves_generic_routing() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.improve_candidates =
+            Some(vec![candidate_config("codex", Some("strong"), None)]);
+        profile.routing.task_routing_rules = vec![easy_docs_rule(vec![candidate_config(
+            "agy",
+            Some("cheap"),
+            None,
+        )])];
+
+        let missing = decide_with_task(
+            &defaults(),
+            &profile,
+            implementation_request(),
+            Some(TaskRoutingContext::default()),
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(missing.effective_backend, "codex");
+
+        let review = decide_with_task(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                mode: "review",
+                ..implementation_request()
+            },
+            Some(TaskRoutingContext {
+                task_class: Some("documentation"),
+                difficulty: Some("easy"),
+                risk: Some("low"),
+            }),
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+        assert_ne!(review.routing_reason, "task routing rule #1");
     }
 
     #[test]
