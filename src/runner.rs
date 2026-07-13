@@ -141,19 +141,38 @@ fn copy_stream_to_file<R: Read + Send + 'static>(
             return;
         };
         let mut buf = [0_u8; 8192];
+        let mut pending = Vec::new();
         while let Ok(read) = reader.read(&mut buf) {
             if read == 0 {
                 break;
             }
-            if file.write_all(&buf[..read]).is_err() {
-                break;
+            pending.extend_from_slice(&buf[..read]);
+            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<_> = pending.drain(..=newline).collect();
+                let text = String::from_utf8_lossy(&line);
+                if file
+                    .write_all(crate::redact::redact(&text).as_bytes())
+                    .is_err()
+                {
+                    return;
+                }
             }
             let _ = file.flush();
             if let Some(tx) = &progress_tx {
                 let _ = tx.send(());
             }
         }
+        if !pending.is_empty() {
+            let text = String::from_utf8_lossy(&pending);
+            let _ = file.write_all(crate::redact::redact(&text).as_bytes());
+            let _ = file.flush();
+        }
     })
+}
+
+fn write_redacted_task(session_dir: &Path, task: &str) -> Result<()> {
+    fs::write(session_dir.join("task.md"), crate::redact::redact(task))
+        .context("writing redacted task artifact")
 }
 
 /// Return a content-sensitive snapshot of a worktree's tracked changes.
@@ -443,7 +462,7 @@ pub fn run_openhands(
     idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
-    fs::write(session_dir.join("task.md"), task)?;
+    write_redacted_task(session_dir, task)?;
 
     let mut cmd = Command::new("openhands");
     cmd.args([
@@ -521,7 +540,7 @@ pub fn run_codex_with_executable(
     idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
-    fs::write(session_dir.join("task.md"), task)?;
+    write_redacted_task(session_dir, task)?;
 
     let mut cmd = Command::new(executable);
     // Issue #152: --json produces structured JSONL output for programmatic
@@ -698,7 +717,7 @@ pub fn run_claude_with_executable(
     idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
-    fs::write(session_dir.join("task.md"), task)?;
+    write_redacted_task(session_dir, task)?;
 
     // Issue #153: pin a stable session id so we can locate the exact
     // transcript `.jsonl` Claude Code writes afterwards (the source of real
@@ -795,7 +814,7 @@ pub fn run_vibe_with_executable(
     idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
-    fs::write(session_dir.join("task.md"), task)?;
+    write_redacted_task(session_dir, task)?;
     let started_at = std::time::SystemTime::now();
     // Vibe can retain old session directories for the same worktree. Capture
     // them before launch so a reused or concurrently-updated metadata file is
@@ -972,7 +991,7 @@ pub fn run_opencode_with_executable(
     idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
-    fs::write(session_dir.join("task.md"), task)?;
+    write_redacted_task(session_dir, task)?;
     let started_at = std::time::SystemTime::now();
     // OpenCode emits provider-side failures (including the observed Hy3
     // rate-limit response) to this internal log, not reliably to stdout or
@@ -1229,7 +1248,7 @@ pub fn run_agy_with_executable(
     idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
-    fs::write(session_dir.join("task.md"), task)?;
+    write_redacted_task(session_dir, task)?;
 
     let mut cmd = Command::new(executable);
     cmd.arg("--print");
@@ -1390,7 +1409,7 @@ pub fn run_review_backend(
     let start = Instant::now();
     let stdout_path = session_dir.join("review-stdout.log");
     let stderr_path = session_dir.join("review-stderr.log");
-    let _ = fs::write(session_dir.join("task.md"), prompt);
+    let _ = write_redacted_task(session_dir, prompt);
 
     let executable = match resolve_backend_executable(profile, backend) {
         ExecutableResolution::Found(path) => path,
@@ -1825,6 +1844,42 @@ mod tests {
         );
         let task = fs::read_to_string(f.session_dir.join("task.md")).unwrap();
         assert_eq!(task, "my task");
+    }
+
+    #[test]
+    fn backend_output_and_task_artifacts_are_redacted_before_persisting() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "openhands",
+            "#!/bin/sh\necho 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz'\necho 'glpat-abcdefghijklmnopqrstuv' >&2\n",
+        );
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_string_lossy().into_owned())];
+
+        let result = run_openhands(
+            &f.worktree,
+            "task includes ghp_abcdefghijklmnopqrstuvwxyz",
+            &f.session_dir,
+            &test_llm(),
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        let log = fs::read_to_string(result.log_path).unwrap();
+        let task = fs::read_to_string(f.session_dir.join("task.md")).unwrap();
+        for raw in [
+            "abcdefghijklmnopqrstuvwxyz",
+            "glpat-abcdefghijklmnopqrstuv",
+            "ghp_abcdefghijklmnopqrstuvwxyz",
+        ] {
+            assert!(!log.contains(raw), "raw secret persisted in log: {raw}");
+            assert!(!task.contains(raw), "raw secret persisted in task: {raw}");
+        }
+        assert!(log.contains("[REDACTED:TOKEN]"));
+        assert!(task.contains("[REDACTED:GITHUB_TOKEN]"));
     }
 
     #[test]

@@ -216,8 +216,35 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
 /// Any failure to spawn is logged to stderr and swallowed, exactly like
 /// `run_notify_command`: this must never fail the caller's dispatch/loop.
 fn spawn_manager_wake(manager: &str, instruction: &str, log_dir: &std::path::Path) {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+
+    fn copy_redacted_manager_output<R: Read>(mut reader: R, log: Arc<Mutex<std::fs::File>>) {
+        let mut buf = [0_u8; 8192];
+        let mut pending = Vec::new();
+        while let Ok(read) = reader.read(&mut buf) {
+            if read == 0 {
+                break;
+            }
+            pending.extend_from_slice(&buf[..read]);
+            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<_> = pending.drain(..=newline).collect();
+                if let Ok(mut file) = log.lock() {
+                    let _ = file.write_all(
+                        crate::redact::redact(&String::from_utf8_lossy(&line)).as_bytes(),
+                    );
+                }
+            }
+        }
+        if !pending.is_empty() {
+            if let Ok(mut file) = log.lock() {
+                let _ = file.write_all(
+                    crate::redact::redact(&String::from_utf8_lossy(&pending)).as_bytes(),
+                );
+            }
+        }
+    }
 
     let mut cmd = match manager {
         "claude" => {
@@ -255,25 +282,24 @@ fn spawn_manager_wake(manager: &str, instruction: &str, log_dir: &std::path::Pat
     let ts = time::OffsetDateTime::now_utc().unix_timestamp();
     let log_path = log_dir.join(format!("{ts}-{}-{manager}.log", std::process::id()));
 
-    cmd.stdin(Stdio::null());
-    match std::fs::File::create(&log_path) {
+    let log_file = match std::fs::File::create(&log_path) {
         Ok(mut log_file) => {
             let _ = writeln!(log_file, "instruction: {instruction}\n---");
-            let log_err = log_file.try_clone().ok();
-            cmd.stdout(Stdio::from(log_file));
-            if let Some(log_err) = log_err {
-                cmd.stderr(Stdio::from(log_err));
-            } else {
-                cmd.stderr(Stdio::null());
-            }
+            Some(Arc::new(Mutex::new(log_file)))
         }
         Err(err) => {
             eprintln!(
                 "[gah] manager_wake: failed to open log file {} (swallowed, output will be discarded): {err:#}",
                 log_path.display()
             );
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            None
         }
+    };
+    cmd.stdin(Stdio::null());
+    if log_file.is_some() {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
     // Deliberately fire-and-forget: this must not block the dispatch/loop
@@ -287,8 +313,28 @@ fn spawn_manager_wake(manager: &str, instruction: &str, log_dir: &std::path::Pat
     // the caller while still reaping the child whenever it finishes.
     match cmd.spawn() {
         Ok(mut child) => {
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
             std::thread::spawn(move || {
+                let stdout_thread = stdout.and_then(|stream| {
+                    log_file.as_ref().map(|log| {
+                        let log = Arc::clone(log);
+                        std::thread::spawn(move || copy_redacted_manager_output(stream, log))
+                    })
+                });
+                let stderr_thread = stderr.and_then(|stream| {
+                    log_file.as_ref().map(|log| {
+                        let log = Arc::clone(log);
+                        std::thread::spawn(move || copy_redacted_manager_output(stream, log))
+                    })
+                });
                 let _ = child.wait();
+                if let Some(thread) = stdout_thread {
+                    let _ = thread.join();
+                }
+                if let Some(thread) = stderr_thread {
+                    let _ = thread.join();
+                }
             });
         }
         Err(err) => {
@@ -307,13 +353,14 @@ fn spawn_manager_wake(manager: &str, instruction: &str, log_dir: &std::path::Pat
 /// caller's flow continues exactly as if no hook existed.
 pub fn notify_event(cfg: &GahConfig, profile: &Profile, event: NotifyEvent) {
     if let Some(command) = &profile.notify_command {
-        let message = format_message(&event);
+        let message = crate::redact::redact(&format_message(&event));
         if let Err(err) = run_notify_command(command, &message) {
             eprintln!("[gah] notify_command failed (swallowed): {err:#}");
         }
     }
 
     if let Some(instruction) = format_wake_instruction(&event, profile.manager_wake_autonomy) {
+        let instruction = crate::redact::redact(&instruction);
         if let Some(manager) = cfg.defaults.current_manager.as_deref() {
             spawn_manager_wake(manager, &instruction, &cfg.defaults.manager_wake_log_dir());
         }
