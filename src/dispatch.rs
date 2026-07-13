@@ -2994,7 +2994,11 @@ fn improve(
     // reported "0 file(s) changed, +0, -0" in the MR body.
     apply_diff_stats(ledger, &wt, &profile.default_target_branch);
     ledger.push_attempted = true;
-    worktree::push_branch(&wt, &branch, &push_url, &push_pat)?;
+    classify_git_operation_result(
+        ledger,
+        crate::ledger::FailureStage::Push,
+        worktree::push_branch(&wt, &branch, &push_url, &push_pat),
+    )?;
     ledger.push_succeeded = true;
 
     let mr_title = build_mr_title(
@@ -3273,7 +3277,11 @@ fn experiment(
     // Must run after the commit above -- see the fix mode call site for why.
     apply_diff_stats(ledger, &wt, &profile.default_target_branch);
     ledger.push_attempted = true;
-    worktree::push_branch(&wt, &branch, &push_url, &push_pat)?;
+    classify_git_operation_result(
+        ledger,
+        crate::ledger::FailureStage::Push,
+        worktree::push_branch(&wt, &branch, &push_url, &push_pat),
+    )?;
     ledger.push_succeeded = true;
 
     let mr_ctx = ExperimentMrRenderContext {
@@ -4704,19 +4712,20 @@ mod tests {
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
         attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body,
         build_metadata_rich_mr_body, build_mr_title, build_pm_plan_task, build_standard_mr_body,
-        build_task, check_review_budget, classify_validation_failure_progress,
-        classify_worktree_result, collect_pm_preflight, collect_ticket_summaries, decide_route,
-        derive_reviewer_tier, extract_backend_summary, extract_issue_number,
-        first_markdown_heading, format_candidate_task, github_issue_author_is_allowed,
-        is_issue_number_reference, mark_backend_unavailable_from_output_at,
-        nearest_existing_ancestor, next_ticket_id, parse_pm_plan, parse_review_verdict,
-        parse_review_verdict_with_context, parse_ticket_metadata, parse_ticket_metadata_from_issue,
-        render_review_comment, review_escalation_reason, review_labels, review_preflight,
-        review_usage, run_backend, scan_available_tickets, strip_terminal_noise,
-        validation_failure_fingerprint, validation_failure_no_progress_reason,
-        ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewDiffBundle,
-        ReviewGateContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
-        LIVE_TASK_ACCEPTANCE_MAX_BYTES, PROJECT_BRIEF_MAX_BYTES,
+        build_task, check_review_budget, classify_git_operation_result,
+        classify_validation_failure_progress, classify_worktree_result, collect_pm_preflight,
+        collect_ticket_summaries, decide_route, derive_reviewer_tier, extract_backend_summary,
+        extract_issue_number, first_markdown_heading, format_candidate_task,
+        github_issue_author_is_allowed, is_issue_number_reference,
+        mark_backend_unavailable_from_output_at, nearest_existing_ancestor, next_ticket_id,
+        parse_pm_plan, parse_review_verdict, parse_review_verdict_with_context,
+        parse_ticket_metadata, parse_ticket_metadata_from_issue, render_review_comment,
+        review_escalation_reason, review_labels, review_preflight, review_usage, run_backend,
+        scan_available_tickets, strip_terminal_noise, validation_failure_fingerprint,
+        validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
+        MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
+        TicketMetadata, ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES,
+        PROJECT_BRIEF_MAX_BYTES,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
@@ -7508,6 +7517,34 @@ which lacks a leading boundary check.
     }
 
     #[test]
+    fn transient_git_failure_is_environment_error_without_backend_side_effects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+        let result: anyhow::Result<()> = Err(anyhow::anyhow!(
+            "push failed: ssh: connect to host github.com port 22: Connection timed out"
+        ));
+
+        let classified =
+            classify_git_operation_result(&mut entry, crate::ledger::FailureStage::Push, result);
+
+        assert!(classified.is_err());
+        assert_eq!(entry.failure_class.as_deref(), Some("environment_error"));
+        assert_eq!(entry.failure_stage.as_deref(), Some("push"));
+        assert!(
+            entry.attempts.is_empty(),
+            "git weather must not look like an agent attempt"
+        );
+    }
+
+    #[test]
     fn classify_worktree_result_leaves_ledger_untouched_on_success() {
         let tmp = tempfile::tempdir().unwrap();
         let mut entry = LedgerEntry::new(
@@ -10041,11 +10078,21 @@ fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecision) {
 /// reasoning as the `BackendLaunch` classification below -- so classify it
 /// the same way before propagating.
 fn classify_worktree_result<T>(ledger: &mut LedgerEntry, result: Result<T>) -> Result<T> {
-    if result.is_err() {
-        ledger.set_failure(
-            crate::ledger::FailureClass::HarnessError,
-            crate::ledger::FailureStage::Preflight,
-        );
+    classify_git_operation_result(ledger, crate::ledger::FailureStage::Preflight, result)
+}
+
+fn classify_git_operation_result<T>(
+    ledger: &mut LedgerEntry,
+    stage: crate::ledger::FailureStage,
+    result: Result<T>,
+) -> Result<T> {
+    if let Err(err) = &result {
+        let class = if worktree::is_transient_network_error(&format!("{err:#}")) {
+            crate::ledger::FailureClass::EnvironmentError
+        } else {
+            crate::ledger::FailureClass::HarnessError
+        };
+        ledger.set_failure(class, stage);
     }
     result
 }
