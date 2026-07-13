@@ -470,11 +470,10 @@ fn ledger_lookup_for_ticket(
     let mut has_active_mr = false;
     let mut has_merged_mr = false;
     let mut has_active_claim = false;
-    // TICKET-human-required-scoping: effective human_required for this work
-    // item is the most recent of its own (non-stale, repo-scoped) ledger
-    // entries that carry a `human_required` flag. This is the canonical,
-    // work-item-scoped derivation -- it must NOT read the single most-recent
-    // profile-wide entry, which is what previously froze the whole profile.
+    // TICKET-human-required-scoping: effective human_required is the most
+    // recent state for this work item. A later review escalation explicitly
+    // clears an earlier provisional human handoff; OR-ing historical flags
+    // would leave the dashboard permanently blocked after automation recovers.
     let mut human_required = false;
     for e in entries.into_iter().flatten() {
         // The ledger is a single global file shared by every profile
@@ -527,7 +526,16 @@ fn ledger_lookup_for_ticket(
             }
         }
         last_failure_class = e.failure_class.clone().or(last_failure_class);
-        if e.human_required {
+        // Only a review entry may CLEAR a prior human_required hold -- that is
+        // the bounded escalation chain deliberately superseding its own earlier
+        // provisional hold. Any other mode can still latch it true (e.g. a
+        // fix/improve dispatch that hit "no eligible backend"), but must never
+        // silently clear an existing hold set by something else: a racing
+        // parallel worker's unrelated completion entry must not un-block a
+        // ticket that a review already gave up on.
+        if e.mode == "review" {
+            human_required = e.human_required;
+        } else if e.human_required {
             human_required = true;
         }
         let matching_mr = all_mrs.iter().find(|mr| {
@@ -3820,23 +3828,16 @@ fn review(
         runner::load_env_file(resolved_env)
     };
 
-    // Escalate to the escalatory reviewer (ESCALATORY_REVIEW list, Issue #123)
-    // for THIS review call only, before routing sees the request -- a
-    // genuinely stuck or low-confidence routine review shouldn't get another
-    // rubber stamp from the same tier. Fails open (falls through to the normal
-    // requested backend/model) if no escalatory reviewer is configured,
-    // matching `derive_reviewer_tier`'s fallback-chain lookup. The first
-    // escalatory entry is used for the escalation; it is an ordered cascade
-    // and the controller re-routes across `review_candidates` on failure.
+    // Escalate to the next untried reviewer in the ordered
+    // ESCALATORY_REVIEW list. A routine reviewer may legitimately request
+    // human help or fail the deterministic evidence gate; that is an input to
+    // this bounded second-opinion chain, not an immediate terminal handoff.
     let escalation_reason =
         review_escalation_reason(cfg, profile, &args.profile, &target.source_branch);
-    let escalatory: Vec<CandidateConfig> = profile
-        .routing
-        .effective_escalatory_reviewers()
-        .into_iter()
-        .chain(cfg.defaults.routing.effective_escalatory_reviewers())
-        .collect();
-    let (requested_backend, requested_model) = match (escalation_reason, escalatory.first()) {
+    let next_escalatory = escalation_reason.and_then(|_| {
+        next_escalatory_reviewer(cfg, profile, &args.profile, &target.source_branch, None)
+    });
+    let (requested_backend, requested_model) = match (escalation_reason, next_escalatory.as_ref()) {
         (Some(reason), Some(esc)) => {
             println!(
                 "Escalating review to {}/{} ({reason}) for branch {}",
@@ -3845,6 +3846,9 @@ fn review(
                 target.source_branch
             );
             (esc.backend.as_str(), esc.model.as_deref())
+        }
+        (Some(reason), None) => {
+            return stop_for_exhausted_review_escalation(cfg, profile, ledger, &target, reason);
         }
         _ => (
             config::canonical_backend_name(&args.backend),
@@ -3873,11 +3877,11 @@ fn review(
     // has changed since the last completed review of the same tier, that is
     // the operator-relevant reason to skip, not a budget refusal, and it must
     // not consume any part of the review-cycle budget below.
-    let reviewer_class = derive_reviewer_tier(cfg, profile, &route).as_str();
+    let reviewer_class = reviewer_dedup_class(derive_reviewer_tier(cfg, profile, &route), &route);
     if let (Some(work_id), Some(source_sha)) =
         (ledger.work_id.as_deref(), target.source_sha.as_deref())
     {
-        if crate::ledger::review_already_exists(cfg, work_id, source_sha, reviewer_class)? {
+        if crate::ledger::review_already_exists(cfg, work_id, source_sha, &reviewer_class)? {
             ledger.validation_result = Some("skipped_duplicate_review".into());
             ledger.review_source_sha = Some(source_sha.to_string());
             ledger.reviewer_class = Some(reviewer_class.to_string());
@@ -4044,7 +4048,7 @@ fn review(
                 profile.claude_path.as_deref(),
             );
             let reviewer_tier = derive_reviewer_tier(cfg, profile, &route);
-            let verdict = match parse_review_verdict_with_context(
+            let mut verdict = match parse_review_verdict_with_context(
                 &result.stdout,
                 &route,
                 &review_usage,
@@ -4065,6 +4069,22 @@ fn review(
                     return Err(err);
                 }
             };
+            // A reviewer asking for human attention (including an APPROVE
+            // held by the deterministic evidence gate) gets the next
+            // configured second opinion first. Human notification and the
+            // dashboard block are reserved for the final, exhausted handoff.
+            if verdict.human_required
+                && next_escalatory_reviewer(
+                    cfg,
+                    profile,
+                    &args.profile,
+                    &target.source_branch,
+                    Some((&route.effective_backend, route.effective_model.as_deref())),
+                )
+                .is_some()
+            {
+                verdict.human_required = false;
+            }
             fs::write(&verdict_path, serde_json::to_string_pretty(&verdict)?)?;
             println!("{}", result.stdout);
             println!("Written: {}", report_path.display());
@@ -4740,18 +4760,19 @@ mod tests {
         collect_ticket_summaries, decide_route, derive_reviewer_tier, extract_backend_summary,
         extract_issue_number, first_markdown_heading, format_candidate_task,
         github_issue_author_is_allowed, is_issue_number_reference,
-        mark_backend_unavailable_from_output_at, nearest_existing_ancestor, next_ticket_id,
-        parse_pm_plan, parse_review_verdict, parse_review_verdict_with_context,
-        parse_ticket_metadata, parse_ticket_metadata_from_issue, render_review_comment,
-        review_escalation_reason, review_labels, review_preflight, review_usage, run_backend,
-        scan_available_tickets, strip_terminal_noise, validation_failure_fingerprint,
+        mark_backend_unavailable_from_output_at, nearest_existing_ancestor,
+        next_escalatory_reviewer, next_ticket_id, parse_pm_plan, parse_review_verdict,
+        parse_review_verdict_with_context, parse_ticket_metadata, parse_ticket_metadata_from_issue,
+        render_review_comment, review_escalation_reason, review_labels, review_preflight,
+        review_usage, reviewer_dedup_class, run_backend, scan_available_tickets,
+        strip_terminal_noise, validation_failure_fingerprint,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
         TicketMetadata, ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES,
         PROJECT_BRIEF_MAX_BYTES,
     };
     use crate::availability::{availability_for, load_state, Reason};
-    use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
+    use crate::config::{CandidateConfig, Defaults, GahConfig, Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
     use crate::models::{Candidate, PmPlan};
     use crate::routing::{RouteError, RouteRequest};
@@ -5089,6 +5110,126 @@ mod tests {
         assert_eq!(
             review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
             None
+        );
+    }
+
+    #[test]
+    fn human_review_starts_the_bounded_second_opinion_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let prof = profile(tmp.path());
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "HUMAN_REVIEW", "high"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+            Some("human_review")
+        );
+    }
+
+    #[test]
+    fn escalation_uses_each_configured_backend_model_once_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let mut prof = profile(tmp.path());
+        prof.routing.escalatory_reviewers = vec![
+            CandidateConfig {
+                backend: "claude".into(),
+                model: Some("sonnet".into()),
+                ..Default::default()
+            },
+            CandidateConfig {
+                backend: "opencode".into(),
+                model: Some("nous-portal/z-ai/glm-5.2".into()),
+                ..Default::default()
+            },
+        ];
+        let mut prior = review_ledger_entry("test", &prof, "gah/branch-1", "HUMAN_REVIEW", "high");
+        prior.effective_backend = "agy".into();
+        prior.effective_model = Some("Claude Sonnet 4.6 (Thinking)".into());
+        crate::ledger::append(&cfg, &prior).unwrap();
+
+        let first = next_escalatory_reviewer(&cfg, &prof, "test", "gah/branch-1", None)
+            .expect("first second opinion");
+        assert_eq!(
+            (first.backend.as_str(), first.model.as_deref()),
+            ("claude", Some("sonnet"))
+        );
+
+        let second = next_escalatory_reviewer(
+            &cfg,
+            &prof,
+            "test",
+            "gah/branch-1",
+            Some(("claude", Some("sonnet"))),
+        )
+        .expect("second second opinion");
+        assert_eq!(
+            (second.backend.as_str(), second.model.as_deref()),
+            ("opencode", Some("nous-portal/z-ai/glm-5.2"))
+        );
+
+        let mut claude = review_ledger_entry("test", &prof, "gah/branch-1", "HUMAN_REVIEW", "high");
+        claude.effective_backend = "claude".into();
+        claude.effective_model = Some("sonnet".into());
+        crate::ledger::append(&cfg, &claude).unwrap();
+        assert!(next_escalatory_reviewer(
+            &cfg,
+            &prof,
+            "test",
+            "gah/branch-1",
+            Some(("opencode", Some("nous-portal/z-ai/glm-5.2"))),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn escalation_recognizes_codex_config_default_model_as_tried() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let mut prof = profile(tmp.path());
+        prof.codex_args = vec!["--model".into(), "gpt-5-codex".into()];
+        prof.routing.escalatory_reviewers = vec![
+            CandidateConfig {
+                backend: "codex".into(),
+                model: None,
+                ..Default::default()
+            },
+            CandidateConfig {
+                backend: "opencode".into(),
+                model: Some("nous-portal/z-ai/glm-5.2".into()),
+                ..Default::default()
+            },
+        ];
+
+        let first = next_escalatory_reviewer(&cfg, &prof, "test", "gah/branch-1", None)
+            .expect("first second opinion");
+        assert_eq!(
+            (first.backend.as_str(), first.model.as_deref()),
+            ("codex", None)
+        );
+
+        // The ledger records whatever model routing actually backfilled for
+        // codex (its config-file default), not the unset config value.
+        let mut prior = review_ledger_entry("test", &prof, "gah/branch-1", "HUMAN_REVIEW", "high");
+        prior.effective_backend = "codex".into();
+        prior.effective_model = Some("gpt-5-codex".into());
+        crate::ledger::append(&cfg, &prior).unwrap();
+
+        let second = next_escalatory_reviewer(
+            &cfg,
+            &prof,
+            "test",
+            "gah/branch-1",
+            Some(("codex", Some("gpt-5-codex"))),
+        )
+        .expect("codex must be recognized as already tried, advancing the chain");
+        assert_eq!(
+            (second.backend.as_str(), second.model.as_deref()),
+            ("opencode", Some("nous-portal/z-ai/glm-5.2"))
         );
     }
 
@@ -5445,6 +5586,34 @@ mod tests {
         assert_eq!(
             review_labels(&verdict),
             vec!["gah-review-weak", "gah-human-review"]
+        );
+    }
+
+    #[test]
+    fn provisional_human_review_is_labeled_for_escalation_not_handoff() {
+        let route = route_decision("agy", Some("Claude Sonnet 4.6 (Thinking)"), false);
+        let json = r#"{"verdict":"HUMAN_REVIEW","confidence":"high","human_required":true,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":[]}"#;
+        let mut verdict = parse_review_verdict(
+            json,
+            &route,
+            &crate::ledger::LedgerUsage::default(),
+            ReviewerTier::Strong,
+        )
+        .unwrap();
+
+        // This is exactly the state after the next configured reviewer was
+        // found. It must remain controller-actionable without a human alert.
+        verdict.human_required = false;
+        assert_eq!(review_labels(&verdict), vec!["gah-review-escalating"]);
+    }
+
+    #[test]
+    fn escalatory_dedup_identity_keeps_distinct_second_opinions() {
+        let claude = route_decision("claude", Some("sonnet"), false);
+        let glm = route_decision("opencode", Some("nous-portal/z-ai/glm-5.2"), false);
+        assert_ne!(
+            reviewer_dedup_class(ReviewerTier::Escalatory, &claude),
+            reviewer_dedup_class(ReviewerTier::Escalatory, &glm),
         );
     }
 
@@ -6400,6 +6569,59 @@ which lacks a leading boundary check.
             Some("agent_no_progress")
         );
         assert!(!candidates[0].has_active_mr);
+    }
+
+    #[test]
+    fn human_required_is_not_cleared_by_a_later_non_review_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-300-test.md"),
+            "# TICKET-300: Test ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+        let cfg = crate::config::GahConfig {
+            context: Default::default(),
+            defaults: crate::config::Defaults {
+                current_manager: None,
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
+
+        // A review escalation exhausted its chain and gave up on a human.
+        let mut exhausted = LedgerEntry::new("test", &prof, "claude", "review", "x", None, None);
+        exhausted.work_id = Some("TICKET-300".into());
+        exhausted.human_required = true;
+        crate::ledger::append(&cfg, &exhausted).unwrap();
+
+        // A racing worker's unrelated fix dispatch completes afterward with a
+        // normal (non-human-required) outcome. It must not silently un-block
+        // a ticket a review already gave up on.
+        let mut racing_fix = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        racing_fix.work_id = Some("TICKET-300".into());
+        racing_fix.human_required = false;
+        crate::ledger::append(&cfg, &racing_fix).unwrap();
+
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(
+            candidates[0].human_required,
+            "a later non-review entry must not clear a human_required hold"
+        );
     }
 
     #[test]
@@ -9643,6 +9865,16 @@ fn review_escalation_reason(
         .take(repeated_failure_threshold)
         .collect();
 
+    // A real HUMAN_REVIEW verdict and a deterministic evidence-gate hold both
+    // use this persisted result. Neither is a reason to abandon automation
+    // while a configured second-opinion reviewer remains.
+    if recent
+        .first()
+        .is_some_and(|e| e.validation_result.as_deref() == Some("HUMAN_REVIEW"))
+    {
+        return Some("human_review");
+    }
+
     if recent
         .first()
         .is_some_and(|e| e.confidence_impact.as_deref() == Some("low"))
@@ -9662,6 +9894,105 @@ fn review_escalation_reason(
     }
 
     None
+}
+
+/// Select the next unused reviewer from the explicitly ordered escalation
+/// chain. The identity includes both backend instance and model: AGY account
+/// 1, AGY account 2, and a paid gateway must remain independently observable
+/// and independently eligible for a second opinion.
+fn next_escalatory_reviewer(
+    cfg: &GahConfig,
+    profile: &Profile,
+    profile_name: &str,
+    branch: &str,
+    current: Option<(&str, Option<&str>)>,
+) -> Option<CandidateConfig> {
+    let mut attempted: HashSet<(String, Option<String>)> = ledger::read_entries(cfg)
+        .ok()?
+        .into_iter()
+        .filter(|entry| {
+            entry.profile == profile_name
+                && entry.mode == "review"
+                && entry.branch.as_deref() == Some(branch)
+                && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
+        })
+        .map(|entry| (entry.effective_backend, entry.effective_model))
+        .collect();
+    if let Some((backend, model)) = current {
+        attempted.insert((backend.to_string(), model.map(str::to_string)));
+    }
+
+    profile
+        .effective_routing(&cfg.defaults)
+        .effective_escalatory_reviewers()
+        .into_iter()
+        .find(|candidate| {
+            // A candidate left without an explicit model is recorded in the
+            // ledger under whatever effective model routing backfilled for it
+            // (e.g. codex's config-file default, mirroring routing.rs's own
+            // decide_route backfill) -- compare against that, not the raw
+            // config value, or a once-tried backfilled candidate looks
+            // perpetually untried and the chain never advances past it.
+            let effective_model = if candidate.backend == "codex" && candidate.model.is_none() {
+                crate::runner::extract_model_from_args(&profile.codex_args)
+            } else {
+                candidate.model.clone()
+            };
+            !attempted.contains(&(candidate.backend.clone(), effective_model))
+        })
+}
+
+/// Review deduplication normally works at the authority-tier level. An
+/// ordered escalation chain deliberately contains several distinct second
+/// opinions, so each escalatory backend/model pair gets one review of a
+/// source commit rather than the first escalatory reviewer suppressing every
+/// later one.
+fn reviewer_dedup_class(tier: ReviewerTier, route: &RouteDecision) -> String {
+    match tier {
+        ReviewerTier::Escalatory => format!(
+            "escalatory:{}/{}",
+            route.effective_backend,
+            route.effective_model.as_deref().unwrap_or("default")
+        ),
+        _ => tier.as_str().to_string(),
+    }
+}
+
+fn stop_for_exhausted_review_escalation(
+    cfg: &GahConfig,
+    profile: &Profile,
+    ledger: &mut LedgerEntry,
+    target: &ReviewTarget,
+    reason: &str,
+) -> Result<()> {
+    let message = format!(
+        "review escalation exhausted after {reason}; no untried escalatory reviewer remains"
+    );
+    ledger.set_failure(
+        crate::ledger::FailureClass::HumanBlocked,
+        crate::ledger::FailureStage::Review,
+    );
+    ledger.validation_result = Some("review_escalation_exhausted".into());
+    ledger.review_verdict = Some("HUMAN_REVIEW".into());
+    ledger.human_required = true;
+    ledger.error_summary = Some(message.clone());
+    notify_event(
+        cfg,
+        profile,
+        NotifyEvent::HumanRequired {
+            reason: "review escalation exhausted",
+            reference: target.mr_url.as_deref(),
+        },
+    );
+    if profile.publishing.allow_issue_comments {
+        provider::post_review_comment(
+            profile,
+            &target.source_branch,
+            &format!("GAH review handoff: `{message}`"),
+            &["gah-human-review"],
+        )?;
+    }
+    bail!("{message}")
 }
 
 fn render_prior_ledger_state(entry: &LedgerEntry) -> String {
@@ -11340,13 +11671,21 @@ fn review_labels(verdict: &crate::models::ReviewVerdict) -> Vec<&'static str> {
     // conflated into a single rewritten verdict string.
     let is_weak_tier = verdict.reviewer_tier.as_deref() == Some("weak");
     let is_low_confidence = verdict.confidence == "low";
-    match verdict.verdict.as_str() {
-        "APPROVE" if is_weak_tier || is_low_confidence => {
-            vec!["gah-review-weak", "gah-human-review"]
+    // A `HUMAN_REVIEW` text verdict can be a safety-gated APPROVE, an
+    // uncertain reviewer, or an actual human handoff. `human_required` is
+    // the controller decision after the bounded escalation chain has been
+    // considered, so it is the authoritative distinction here.
+    if verdict.human_required {
+        if is_weak_tier || is_low_confidence {
+            return vec!["gah-review-weak", "gah-human-review"];
         }
+        return vec!["gah-human-review"];
+    }
+    match verdict.verdict.as_str() {
+        "APPROVE" if is_weak_tier || is_low_confidence => vec!["gah-review-escalating"],
         "APPROVE" => vec!["gah-ready-for-human"],
         "NEEDS_FIX" | "REJECT" => vec!["gah-needs-fix"],
-        "HUMAN_REVIEW" => vec!["gah-human-review"],
+        "HUMAN_REVIEW" => vec!["gah-review-escalating"],
         _ => vec![],
     }
 }

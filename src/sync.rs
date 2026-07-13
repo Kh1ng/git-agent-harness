@@ -192,7 +192,7 @@ pub fn classify(mr: &SyncMr) -> &'static str {
     if mr
         .labels
         .iter()
-        .any(|l| l == "gah-human-review" || l == "gah-review-weak")
+        .any(|l| l == "gah-human-review" || l == "gah-review-weak" || l == "gah-review-escalating")
     {
         return "NEEDS_REVIEW";
     }
@@ -759,6 +759,13 @@ mod tests {
         let mut mr = base_mr();
         mr.labels = vec!["gah-ready-for-human".into()];
         assert_eq!(classify(&mr), "READY_FOR_HUMAN");
+    }
+
+    #[test]
+    fn provisional_review_escalation_label_maps_to_needs_review() {
+        let mut mr = base_mr();
+        mr.labels = vec!["gah-review-escalating".into()];
+        assert_eq!(classify(&mr), "NEEDS_REVIEW");
     }
 
     #[test]

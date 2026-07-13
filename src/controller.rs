@@ -298,6 +298,16 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut fix_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut merge_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut human_blocked_mrs: Vec<&crate::sync::SyncMrJson> = Vec::new();
+    // A final review handoff is recorded against a work item in the ledger.
+    // The provider label deliberately still classifies the MR as NEEDS_REVIEW
+    // so provisional escalations can continue, but a *final* ledger handoff
+    // must not cause the loop to re-run the same review every tick.
+    let final_review_holds: HashSet<&str> = snapshot
+        .blocked_work_items
+        .iter()
+        .filter(|blocker| blocker.kind == "human_required")
+        .filter_map(|blocker| blocker.source_reference.as_deref())
+        .collect();
     // Issue #156: READY_FOR_HUMAN MRs whose CI is non-terminal / unknown
     // (GitLab head_pipeline gap). They wait for CI to resolve and are not
     // silently dropped.
@@ -305,7 +315,17 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
 
     for mr in &mrs {
         match mr.classification.as_str() {
-            "NEEDS_REVIEW" => review_candidates.push(mr),
+            "NEEDS_REVIEW" => {
+                if mr
+                    .work_id
+                    .as_deref()
+                    .is_some_and(|work_id| final_review_holds.contains(work_id))
+                {
+                    human_blocked_mrs.push(mr);
+                } else {
+                    review_candidates.push(mr);
+                }
+            }
             "CI_FAILED" | "NEEDS_FIX" => {
                 let fix_attempts = snapshot
                     .fix_attempt_counts
@@ -2463,6 +2483,23 @@ mod tests {
         snapshot.merge_requests.push(mr("gah/stuck-1", "NEEDS_FIX"));
         let action = decide_next_action(&snapshot);
         assert_eq!(action.kind(), "no_op");
+    }
+
+    #[test]
+    fn final_review_handoff_is_not_re_reviewed_each_loop_tick() {
+        let mut snapshot = empty_snapshot();
+        snapshot.merge_requests.push(mr("gah/42", "NEEDS_REVIEW"));
+        snapshot.blocked_work_items.push(Blocker {
+            kind: "human_required".into(),
+            reason: Some("review_escalation_exhausted".into()),
+            message: Some("all configured reviewers were tried".into()),
+            backend: None,
+            model: None,
+            until: None,
+            source_reference: Some("TICKET-gah/42".into()),
+        });
+
+        assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
     }
 
     #[test]
