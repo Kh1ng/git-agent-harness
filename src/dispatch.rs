@@ -3828,7 +3828,8 @@ fn review(
     // matching `derive_reviewer_tier`'s fallback-chain lookup. The first
     // escalatory entry is used for the escalation; it is an ordered cascade
     // and the controller re-routes across `review_candidates` on failure.
-    let escalation_reason = review_escalation_reason(cfg, &args.profile, &target.source_branch);
+    let escalation_reason =
+        review_escalation_reason(cfg, profile, &args.profile, &target.source_branch);
     let escalatory: Vec<CandidateConfig> = profile
         .routing
         .effective_escalatory_reviewers()
@@ -5068,7 +5069,11 @@ mod tests {
     fn review_escalation_reason_none_when_no_prior_entries() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
-        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
+        let prof = profile(tmp.path());
+        assert_eq!(
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+            None
+        );
     }
 
     #[test]
@@ -5081,7 +5086,10 @@ mod tests {
             &review_ledger_entry("test", &prof, "gah/branch-1", "NEEDS_FIX", "high"),
         )
         .unwrap();
-        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
+        assert_eq!(
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+            None
+        );
     }
 
     #[test]
@@ -5100,7 +5108,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            review_escalation_reason(&cfg, "test", "gah/branch-1"),
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
             Some("repeated_needs_fix")
         );
     }
@@ -5120,7 +5128,10 @@ mod tests {
             &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "high"),
         )
         .unwrap();
-        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
+        assert_eq!(
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+            None
+        );
     }
 
     #[test]
@@ -5139,7 +5150,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            review_escalation_reason(&cfg, "test", "gah/branch-1"),
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
             Some("low_confidence")
         );
     }
@@ -5154,7 +5165,10 @@ mod tests {
             &review_ledger_entry("test", &prof, "gah/branch-1", "APPROVE", "medium"),
         )
         .unwrap();
-        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
+        assert_eq!(
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+            None
+        );
     }
 
     #[test]
@@ -5182,7 +5196,43 @@ mod tests {
             &review_ledger_entry("other-profile", &prof, "gah/branch-1", "REJECT", "high"),
         )
         .unwrap();
-        assert_eq!(review_escalation_reason(&cfg, "test", "gah/branch-1"), None);
+        assert_eq!(
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+            None
+        );
+    }
+
+    #[test]
+    fn review_escalation_reason_respects_configured_fix_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(
+            tmp.path(),
+            RoutingPolicy {
+                max_fix_attempts_per_mr: Some(3),
+                ..RoutingPolicy::default()
+            },
+        );
+        let prof = profile(tmp.path());
+        for _ in 0..2 {
+            crate::ledger::append(
+                &cfg,
+                &review_ledger_entry("test", &prof, "gah/branch-1", "NEEDS_FIX", "high"),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+            None
+        );
+        crate::ledger::append(
+            &cfg,
+            &review_ledger_entry("test", &prof, "gah/branch-1", "REJECT", "high"),
+        )
+        .unwrap();
+        assert_eq!(
+            review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+            Some("repeated_needs_fix")
+        );
     }
 
     fn route_decision(backend: &str, model: Option<&str>, fallback_used: bool) -> RouteDecision {
@@ -5352,12 +5402,9 @@ mod tests {
     }
 
     #[test]
-    fn approve_from_weak_tier_still_forces_human_review_and_label() {
-        // TICKET-108: this is the case the old fallback_used-based rewrite
-        // used to handle by corrupting the verdict string. Now the verdict
-        // text is untouched and reviewer_tier carries the distrust signal.
-        // Issue #233: legacy weak-only configs must still force the human
-        // gate and weak-review labels.
+    fn weak_needs_fix_uses_repair_budget_before_human_escalation() {
+        // Weak review remains visible and cannot auto-approve, but a concrete
+        // NEEDS_FIX result must flow into the configured repair budget.
         let tmp = tempfile::tempdir().unwrap();
         let mut prof = profile(tmp.path());
         prof.routing.weak_review_backend = Some("codex".into());
@@ -5368,21 +5415,53 @@ mod tests {
             ReviewerTier::Weak
         );
 
-        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["weak reviewer inspected the diff"]}"#;
+        let json = r#"{"verdict":"NEEDS_FIX","confidence":"high","human_required":false,"blocking_findings":["src/lib.rs: missing guard"],"non_blocking_findings":[],"risk_notes":[],"evidence":["file:src/lib.rs"]}"#;
         let usage = crate::ledger::LedgerUsage::default();
         let verdict = parse_review_verdict(json, &route, &usage, ReviewerTier::Weak).unwrap();
 
         assert_eq!(
-            verdict.verdict, "APPROVE",
+            verdict.verdict, "NEEDS_FIX",
             "verdict text is never rewritten"
         );
         assert_eq!(verdict.reviewer_tier.as_deref(), Some("weak"));
+        assert!(!verdict.human_required);
+        assert_eq!(verdict.confidence, "medium");
+        assert_eq!(review_labels(&verdict), vec!["gah-needs-fix"]);
+    }
+
+    #[test]
+    fn approve_from_weak_tier_still_requires_human_review() {
+        let route = route_decision("codex", None, true);
+        let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["file:src/lib.rs"]}"#;
+        let verdict = parse_review_verdict(
+            json,
+            &route,
+            &crate::ledger::LedgerUsage::default(),
+            ReviewerTier::Weak,
+        )
+        .unwrap();
         assert!(verdict.human_required);
         assert_eq!(verdict.confidence, "medium");
         assert_eq!(
             review_labels(&verdict),
             vec!["gah-review-weak", "gah-human-review"]
         );
+    }
+
+    #[test]
+    fn reject_from_weak_tier_uses_repair_budget_before_human_escalation() {
+        let route = route_decision("codex", None, true);
+        let json = r#"{"verdict":"REJECT","confidence":"high","human_required":false,"blocking_findings":["src/lib.rs: invalid state transition"],"non_blocking_findings":[],"risk_notes":[],"evidence":["file:src/lib.rs"]}"#;
+        let verdict = parse_review_verdict(
+            json,
+            &route,
+            &crate::ledger::LedgerUsage::default(),
+            ReviewerTier::Weak,
+        )
+        .unwrap();
+        assert!(!verdict.human_required);
+        assert_eq!(verdict.confidence, "medium");
+        assert_eq!(review_labels(&verdict), vec!["gah-needs-fix"]);
     }
 
     #[test]
@@ -9529,8 +9608,8 @@ fn check_review_budget(
 
 /// The routine reviewer (`review_backend`, e.g. Vibe/Mistral) is fast and
 /// cheap but was never meant to be the last word on a genuinely hard or
-/// repeatedly-failing review. Mirrors `AUTO_RETRY_CAP`'s fix/merge-attempt
-/// convention (controller.rs) for the "repeated failure" trigger; adds an
+/// repeatedly-failing review. The repeated-failure trigger follows the
+/// configured post-review repair budget; adds an
 /// immediate-escalate path for a reviewer that itself reported low
 /// confidence, since forcing 2 low-confidence rubber stamps before getting
 /// a second opinion defeats the point of tracking confidence at all.
@@ -9546,11 +9625,13 @@ fn check_review_budget(
 /// `validation_result`/`confidence_impact` (set directly in `review()`).
 fn review_escalation_reason(
     cfg: &GahConfig,
+    profile: &Profile,
     profile_name: &str,
     branch: &str,
 ) -> Option<&'static str> {
-    // Mirrors controller.rs's AUTO_RETRY_CAP convention for fix/merge attempts.
-    const REPEATED_FAILURE_THRESHOLD: usize = 2;
+    let repeated_failure_threshold = profile
+        .effective_routing(&cfg.defaults)
+        .max_fix_attempts_per_mr() as usize;
 
     let entries = ledger::read_entries(cfg).ok()?;
     let recent: Vec<&LedgerEntry> = entries
@@ -9559,7 +9640,7 @@ fn review_escalation_reason(
         .filter(|e| {
             e.profile == profile_name && e.mode == "review" && e.branch.as_deref() == Some(branch)
         })
-        .take(REPEATED_FAILURE_THRESHOLD)
+        .take(repeated_failure_threshold)
         .collect();
 
     if recent
@@ -9569,7 +9650,7 @@ fn review_escalation_reason(
         return Some("low_confidence");
     }
 
-    if recent.len() == REPEATED_FAILURE_THRESHOLD
+    if recent.len() == repeated_failure_threshold
         && recent.iter().all(|e| {
             matches!(
                 e.validation_result.as_deref(),
@@ -11089,11 +11170,14 @@ fn parse_review_verdict_with_context(
     // are separate dimensions -- the verdict text itself is never rewritten
     // based on who reviewed it (see review_labels for how tier affects
     // labeling instead).
-    if tier == ReviewerTier::Weak {
+    if tier == ReviewerTier::Weak && verdict.confidence == "high" {
+        // Weak approval is deliberately not auto-merge authority. A weak
+        // reviewer finding a defect is actionable input for the normal
+        // post-review repair budget and must not skip straight to a human.
+        verdict.confidence = "medium".into();
+    }
+    if tier == ReviewerTier::Weak && verdict.verdict == "APPROVE" {
         verdict.human_required = true;
-        if verdict.confidence == "high" {
-            verdict.confidence = "medium".into();
-        }
     }
     if verdict.verdict == "HUMAN_REVIEW"
         || (verdict.verdict == "APPROVE" && verdict.confidence == "low")

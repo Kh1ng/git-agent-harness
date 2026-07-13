@@ -312,7 +312,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     .get(&mr.branch)
                     .copied()
                     .unwrap_or(0);
-                if fix_attempts >= AUTO_RETRY_CAP {
+                if fix_attempts >= snapshot.profile.max_fix_attempts_per_mr as usize {
                     // Exhausted fix attempts -> work-item block, not a profile freeze.
                     human_blocked_mrs.push(mr);
                 } else {
@@ -1633,6 +1633,7 @@ mod tests {
                 local_path: "/tmp/repo".into(),
                 default_target_branch: "main".into(),
                 merge_policy: crate::config::MergePolicy::default(),
+                max_fix_attempts_per_mr: 2,
             },
             observations: Observations {
                 sync: ObservationStatus { status: "ok" },
@@ -2717,6 +2718,23 @@ mod tests {
             NextAction::FixMr { .. } => {}
             other => panic!("expected FixMr after 1 repair (cap=2), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn configured_fix_cap_allows_requested_number_of_repairs() {
+        let mut snapshot = empty_snapshot();
+        snapshot.profile.max_fix_attempts_per_mr = 4;
+        snapshot.fix_attempt_counts.insert("branch-A".into(), 3);
+        snapshot
+            .merge_requests
+            .push(needs_fix_mr("branch-A", "TICKET-A"));
+        assert!(matches!(
+            decide_next_action(&snapshot),
+            NextAction::FixMr { .. }
+        ));
+
+        snapshot.fix_attempt_counts.insert("branch-A".into(), 4);
+        assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
     }
 
     // ===== Bug 2: stuck-loop gate persists to ledger and skips ticket =====
