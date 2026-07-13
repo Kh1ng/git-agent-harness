@@ -143,18 +143,26 @@ pub struct SyncMr {
     pub work_id: Option<String>,
 }
 
-/// TICKET-096 AC2: extract a `TICKET-NNN` work ID from a PR/MR title where
-/// one is present. No attempt to disambiguate authoritative vs stale IDs
-/// here -- that check already happened when the title was generated.
+/// Extract the canonical provider issue identity (`#NNN`) from new PR/MR
+/// titles, while continuing to read legacy `TICKET-NNN` titles. No attempt
+/// to disambiguate authoritative vs stale IDs happens here -- that check
+/// already happened when the title was generated.
 fn extract_work_id_from_title(title: &str) -> Option<String> {
-    let idx = title.find("TICKET-")?;
-    let rest = &title[idx + "TICKET-".len()..];
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        None
-    } else {
-        Some(format!("TICKET-{digits}"))
+    if let Some(issue_id) = title.split('#').skip(1).find_map(|rest| {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        (!digits.is_empty()).then(|| format!("#{digits}"))
+    }) {
+        return Some(issue_id);
     }
+
+    if let Some(idx) = title.find("TICKET-") {
+        let rest = &title[idx + "TICKET-".len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return Some(format!("TICKET-{digits}"));
+        }
+    }
+    None
 }
 
 pub fn fetch_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
@@ -730,6 +738,14 @@ mod tests {
         assert_eq!(
             extract_work_id_from_title("[GAH] Fix: TICKET-093 Derive PR titles"),
             Some("TICKET-093".to_string())
+        );
+    }
+
+    #[test]
+    fn work_id_extracted_from_native_issue_title() {
+        assert_eq!(
+            extract_work_id_from_title("[GAH] Fix: #319 Use native issue numbers"),
+            Some("#319".to_string())
         );
     }
 

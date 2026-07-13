@@ -831,22 +831,48 @@ pub fn backfill_review_verdict(
 /// `SyncMr.work_id` (extracted from a PR/MR title) back to the ledger
 /// entries that dispatched it. No new sync-side structure required.
 pub fn entries_for_work_id(cfg: &GahConfig, work_id: &str) -> Result<Vec<LedgerEntry>> {
+    let aliases = work_id_aliases(work_id);
     Ok(read_entries(cfg)?
         .into_iter()
-        .filter(|e| e.work_id.as_deref() == Some(work_id))
+        .filter(|e| {
+            e.work_id
+                .as_deref()
+                .is_some_and(|entry_id| aliases.iter().any(|alias| alias == entry_id))
+        })
         .collect())
 }
 
 pub type LedgerEntriesByWorkId = BTreeMap<String, Vec<LedgerEntry>>;
 
+/// Native tracker issues use their provider-visible `#123` identity. Older
+/// GAH records used `TICKET-123`; retain that as a read alias so migrating to
+/// the tracker identity never forks history or re-dispatches completed work.
+pub fn work_id_aliases(work_id: &str) -> Vec<String> {
+    let legacy_number = work_id.strip_prefix("TICKET-").and_then(|rest| {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        (!digits.is_empty()).then_some(digits)
+    });
+    let issue_number = work_id
+        .strip_prefix('#')
+        .filter(|number| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()));
+
+    match (legacy_number.as_deref(), issue_number) {
+        (Some(number), _) => vec![work_id.to_string(), format!("#{number}")],
+        (_, Some(number)) => vec![work_id.to_string(), format!("TICKET-{number}")],
+        _ => vec![work_id.to_string()],
+    }
+}
+
 pub fn index_entries_by_work_id(entries: &[LedgerEntry]) -> LedgerEntriesByWorkId {
     let mut index = BTreeMap::new();
     for entry in entries {
         if let Some(work_id) = entry.work_id.as_ref() {
-            index
-                .entry(work_id.clone())
-                .or_insert_with(Vec::new)
-                .push(entry.clone());
+            for alias in work_id_aliases(work_id) {
+                index
+                    .entry(alias)
+                    .or_insert_with(Vec::new)
+                    .push(entry.clone());
+            }
         }
     }
     index
@@ -2851,9 +2877,9 @@ mod tests {
     }
 
     #[test]
-    fn entries_for_work_id_filters_by_exact_match() {
-        // TICKET-096: this is the query sync/reconciliation uses to match
-        // a SyncMr.work_id back to the ledger entries that dispatched it.
+    fn entries_for_work_id_reads_legacy_ticket_alias_for_native_issue() {
+        // Sync/reconciliation can migrate from an old TICKET-NNN title to a
+        // native #NNN issue title without losing its existing ledger history.
         let (_tmp, cfg) = test_config();
         let mut matching = LedgerEntry::new("test", &profile(), "claude", "pm", "x", None, None);
         matching.work_id = Some("TICKET-096".into());
@@ -2863,7 +2889,7 @@ mod tests {
         other.work_id = Some("TICKET-097".into());
         append(&cfg, &other).unwrap();
 
-        let found = entries_for_work_id(&cfg, "TICKET-096").unwrap();
+        let found = entries_for_work_id(&cfg, "#096").unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].work_id.as_deref(), Some("TICKET-096"));
     }
@@ -2877,8 +2903,9 @@ mod tests {
         let untagged = LedgerEntry::new("test", &profile(), "claude", "pm", "z", None, None);
 
         let index = index_entries_by_work_id(&[first, second, untagged]);
-        assert_eq!(index.len(), 1);
+        assert_eq!(index.len(), 2);
         assert_eq!(index["TICKET-096"].len(), 2);
+        assert_eq!(index["#096"].len(), 2);
     }
 
     #[test]
