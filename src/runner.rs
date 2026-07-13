@@ -1,5 +1,6 @@
 use crate::config::Profile;
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -747,6 +748,10 @@ pub fn run_vibe_with_executable(
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
     let started_at = std::time::SystemTime::now();
+    // Vibe can retain old session directories for the same worktree. Capture
+    // them before launch so a reused or concurrently-updated metadata file is
+    // never misreported as this attempt's token consumption.
+    let sessions_before = snapshot_vibe_session_metadata_paths(env_vars);
 
     let mut cmd = Command::new(executable);
     // --trust: automation-only, not persisted to trusted_folders.toml --
@@ -777,7 +782,8 @@ pub fn run_vibe_with_executable(
         "launching vibe; is it installed and on PATH?",
     )?;
 
-    let metadata_path = find_vibe_session_metadata(env_vars, worktree, started_at);
+    let metadata_path =
+        find_vibe_session_metadata(env_vars, worktree, started_at, &sessions_before);
 
     Ok(RunResult {
         exit_code,
@@ -788,14 +794,7 @@ pub fn run_vibe_with_executable(
     })
 }
 
-/// Locate the Vibe session created by this invocation without relying on a
-/// global "latest session" guess. Matching both working directory and start
-/// time prevents concurrent workers from attributing each other's usage.
-fn find_vibe_session_metadata(
-    env_vars: &[(String, String)],
-    worktree: &Path,
-    started_at: std::time::SystemTime,
-) -> Option<String> {
+fn vibe_sessions_dir(env_vars: &[(String, String)]) -> Option<PathBuf> {
     let home = env_vars
         .iter()
         .find(|(key, _)| key == "VIBE_HOME")
@@ -808,7 +807,33 @@ fn find_vibe_session_metadata(
         })
         .or_else(|| env::var_os("VIBE_HOME").map(PathBuf::from))
         .or_else(|| env::var_os("HOME").map(|value| PathBuf::from(value).join(".vibe")))?;
-    let sessions = home.join("logs/session");
+    Some(home.join("logs/session"))
+}
+
+fn snapshot_vibe_session_metadata_paths(env_vars: &[(String, String)]) -> HashSet<PathBuf> {
+    let Some(sessions) = vibe_sessions_dir(env_vars) else {
+        return HashSet::new();
+    };
+    fs::read_dir(sessions)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join("meta.json"))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+/// Locate a *new* Vibe session created by this invocation. Merely matching a
+/// worktree and recent mtime is insufficient: Vibe can update a pre-existing
+/// session whose counters are cumulative. If no new metadata file appears,
+/// usage is deliberately left unknown rather than attributed incorrectly.
+fn find_vibe_session_metadata(
+    env_vars: &[(String, String)],
+    worktree: &Path,
+    started_at: std::time::SystemTime,
+    sessions_before: &HashSet<PathBuf>,
+) -> Option<String> {
+    let sessions = vibe_sessions_dir(env_vars)?;
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     let worktree_string = worktree.to_string_lossy().into_owned();
     for entry in fs::read_dir(sessions).ok()?.flatten() {
@@ -817,6 +842,9 @@ fn find_vibe_session_metadata(
             continue;
         }
         let metadata_path = dir.join("meta.json");
+        if sessions_before.contains(&metadata_path) {
+            continue;
+        }
         let Ok(modified) = fs::metadata(&metadata_path).and_then(|metadata| metadata.modified())
         else {
             continue;
@@ -2322,6 +2350,48 @@ mod tests {
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("stdout-marker-vibe"));
         assert!(log.contains("stderr-marker-vibe"));
+    }
+
+    #[test]
+    fn vibe_usage_metadata_ignores_preexisting_cumulative_session() {
+        let f = fixture();
+        let vibe_home = f._tmp.path().join("vibe-home");
+        let sessions = vibe_home.join("logs/session");
+        let old = sessions.join("old-session");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(
+            old.join("meta.json"),
+            format!(
+                r#"{{"environment":{{"working_directory":"{}"}},"stats":{{"session_total_llm_tokens":999999}}}}"#,
+                f.worktree.display()
+            ),
+        )
+        .unwrap();
+        let envs = vec![("VIBE_HOME".to_string(), vibe_home.display().to_string())];
+        let sessions_before = snapshot_vibe_session_metadata_paths(&envs);
+        let started_at = std::time::SystemTime::now() - Duration::from_secs(1);
+
+        let current = sessions.join("this-attempt");
+        fs::create_dir_all(&current).unwrap();
+        fs::write(
+            current.join("meta.json"),
+            format!(
+                r#"{{"environment":{{"working_directory":"{}"}},"stats":{{"session_total_llm_tokens":1200}}}}"#,
+                f.worktree.display()
+            ),
+        )
+        .unwrap();
+
+        let selected =
+            find_vibe_session_metadata(&envs, &f.worktree, started_at, &sessions_before).unwrap();
+        assert_eq!(PathBuf::from(selected), current.join("meta.json"));
+        let usage = crate::usage::parse_vibe_session_metadata(
+            &fs::read_to_string(current.join("meta.json")).unwrap(),
+        );
+        assert_eq!(usage.total_tokens, Some(1200));
+
+        let after = snapshot_vibe_session_metadata_paths(&envs);
+        assert!(find_vibe_session_metadata(&envs, &f.worktree, started_at, &after).is_none());
     }
 
     #[test]
