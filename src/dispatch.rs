@@ -2242,7 +2242,15 @@ fn improve(
         if result.exit_code != 0 {
             // The backend launched but exited nonzero — the backend itself
             // failed at its job, distinct from it never starting at all.
-            let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+            let output_log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+            let log_text = failure_text_with_internal_log(
+                &output_log_text,
+                result.internal_log_delta.as_deref(),
+            );
+            let failure_log_path = result
+                .internal_log_path
+                .as_deref()
+                .unwrap_or(&result.log_path);
             let semantic_no_progress = log_text.contains("GAH: killed after ")
                 && log_text.contains("with no new worktree progress (stalled, not just slow).");
             let failure_class = if semantic_no_progress {
@@ -2298,7 +2306,7 @@ fn improve(
                     route.effective_model.as_deref(),
                     route.effective_quota_pool.as_deref(),
                     &log_text,
-                    &result.log_path,
+                    failure_log_path,
                 )? {
                     let rerouted = decide_route(cfg, profile, route_req.clone(), ledger)?;
                     let current_identity =
@@ -2363,6 +2371,82 @@ fn improve(
         // falsely advance the controller with no patch or PR to show for it.
         // Stop before post-change validation: there is no change to validate.
         if !worktree::has_changes(&wt, &profile.default_target_branch)? {
+            // OpenCode can exit successfully after a provider rejection and
+            // put the useful diagnostic only in its internal log. Inspect
+            // that run-scoped tail before treating this as generic no-progress
+            // so the next route cannot select the unavailable model again.
+            let output_log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+            let failure_text = failure_text_with_internal_log(
+                &output_log_text,
+                result.internal_log_delta.as_deref(),
+            );
+            let failure_log_path = result
+                .internal_log_path
+                .as_deref()
+                .unwrap_or(&result.log_path);
+            if let Some(parsed) = mark_backend_unavailable_from_output(
+                &route.effective_backend,
+                route.effective_model.as_deref(),
+                route.effective_quota_pool.as_deref(),
+                &failure_text,
+                failure_log_path,
+            )? {
+                ledger.set_failure(
+                    crate::ledger::FailureClass::BackendError,
+                    crate::ledger::FailureStage::AgentRun,
+                );
+                ledger.attempts.push(crate::ledger::AttemptRecord {
+                    attempt_number: attempt + 1,
+                    backend: route.effective_backend.clone(),
+                    effective_model: Some(llm.model.clone()),
+                    exit_code: Some(0),
+                    validation_result: Some("not_run_backend_unavailable".into()),
+                    failure_class: Some(crate::ledger::FailureClass::BackendError.as_str().into()),
+                    failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
+                    duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                    diff_path: None,
+                    usage: attempt_usage(
+                        &result.log_path,
+                        result.agy_cli_log_delta.as_deref(),
+                        Some(route.effective_backend.as_str()),
+                        Some(&llm.model),
+                        result.transcript_path.as_deref(),
+                        Some(&claude_path),
+                    ),
+                });
+                if attempt + 1 < max_attempts {
+                    let rerouted = decide_route(cfg, profile, route_req.clone(), ledger)?;
+                    let current_identity =
+                        route_identity(&route.effective_backend, route.effective_model.as_deref());
+                    let rerouted_identity = route_identity(
+                        &rerouted.effective_backend,
+                        rerouted.effective_model.as_deref(),
+                    );
+                    if rerouted_identity != current_identity {
+                        println!(
+                            "Backend unavailable after no-progress result; retrying next attempt with {} instead of {} ({:?})",
+                            rerouted.effective_backend, route.effective_backend, parsed.kind
+                        );
+                        route = rerouted;
+                        apply_route_to_ledger(ledger, &route);
+                        preflight(profile, &route.effective_backend)?;
+                        llm = resolve_llm(
+                            cfg,
+                            args,
+                            profile.oh_profile.as_deref(),
+                            route.effective_model.as_deref(),
+                        )?;
+                        continue;
+                    }
+                }
+                worktree::cleanup(&wt, repo);
+                anyhow::bail!(
+                    "{} reported {:?} after attempt {} made no worktree changes",
+                    route.effective_backend,
+                    parsed.kind,
+                    attempt + 1
+                );
+            }
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
@@ -2980,6 +3064,8 @@ fn experiment(
                 duration_secs: 0.0,
                 log_path: log_path.to_string_lossy().into_owned(),
                 agy_cli_log_delta: None,
+                internal_log_delta: None,
+                internal_log_path: None,
                 transcript_path: None,
             }
         }
@@ -4501,6 +4587,8 @@ mod tests {
 
     const CODEX_FULL_RESET: &str =
         include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
+    const OPENCODE_HY3_RATE_LIMIT: &str =
+        include_str!("../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
 
     #[test]
     fn strip_terminal_noise_removes_ansi_codes_and_openhands_exit_banner() {
@@ -7269,6 +7357,34 @@ which lacks a leading boundary check.
     }
 
     #[test]
+    fn opencode_internal_rate_limit_marks_the_model_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("availability.json");
+        let parsed = mark_backend_unavailable_from_output_at(
+            &state,
+            "opencode",
+            Some("opencode/hy3-free"),
+            None,
+            OPENCODE_HY3_RATE_LIMIT,
+            "/tmp/opencode.log",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(parsed.kind, crate::quota_parser::FailureKind::RateLimited);
+        let decision = availability_for(
+            &state,
+            "opencode",
+            Some("opencode/hy3-free"),
+            None,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        assert!(!decision.eligible);
+        assert_eq!(decision.reason, Some(Reason::RateLimited));
+    }
+
+    #[test]
     fn unrecognized_backend_failure_does_not_invent_unavailability() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("availability.json");
@@ -9650,6 +9766,19 @@ fn mark_backend_unavailable_from_output(
         log_text,
         log_path,
     )
+}
+
+/// Combine CLI output with the run-scoped diagnostic tail captured from a
+/// backend-owned internal log. Missing internal logs intentionally preserve
+/// existing output-only behavior.
+fn failure_text_with_internal_log(output: &str, internal_log_delta: Option<&str>) -> String {
+    let Some(delta) = internal_log_delta.filter(|delta| !delta.trim().is_empty()) else {
+        return output.to_string();
+    };
+    if output.trim().is_empty() {
+        return format!("[backend internal log]\n{delta}");
+    }
+    format!("{output}\n\n[backend internal log]\n{delta}")
 }
 
 fn mark_backend_unavailable_from_output_at(

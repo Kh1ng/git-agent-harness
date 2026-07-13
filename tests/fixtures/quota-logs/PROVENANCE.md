@@ -19,6 +19,7 @@ Captured into this repo: 2026-07-04.
 | `claude_generic_rate_limit_zero_tokens.json` | github.com/anthropics/claude-code issues #41583, #33840 | Same family as above; some captured examples report zero input/output tokens alongside the error. |
 | `claude_transient_throttle.json` | github.com/anthropics/claude-code issue #64030 | Explicit server-side throttling, explicitly NOT account usage-limit exhaustion. |
 | `agy_auth_not_logged_in.txt` | Local capture, `/tmp/agy-debug.log`, 2026-07-04 | AGY/Antigravity has no public issue tracker to cite; captured directly from a real local `agy` process log during an unauthenticated run on this host. |
+| `opencode_hy3_rate_limit.log` | Local capture, `~/.local/share/opencode/log/opencode.log`, 2026-07-12 | OpenCode's Hy3-free provider error is written to OpenCode's internal log rather than GAH's captured stdout/stderr. |
 
 AGY quota-exhaustion text (`RESOURCE_EXHAUSTED`, `Individual quota reached`, `code 429`)
 matched by `agy_quota_re` in `src/quota_parser.rs` predates this provenance file and has no

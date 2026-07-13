@@ -83,6 +83,15 @@ pub struct RunResult {
     /// whole log — is what usage/quota parsing consumes, so a single
     /// attempt's usage is never polluted by prior runs.
     pub agy_cli_log_delta: Option<String>,
+    /// A run-scoped tail of a backend-owned diagnostic log. Unlike
+    /// `log_path`, this is not CLI stdout/stderr: some backends (notably
+    /// OpenCode) write provider failures only to their own internal log.
+    /// The tail begins at the pre-run byte offset, so old failures and other
+    /// runs cannot poison routing for this attempt.
+    pub internal_log_delta: Option<String>,
+    /// Source path for `internal_log_delta`, retained for availability
+    /// diagnostics. Missing/unreadable logs leave both fields `None`.
+    pub internal_log_path: Option<String>,
     /// Backend-owned structured usage artifact. Claude uses its transcript
     /// JSONL; Vibe uses its session `meta.json`. `None` when the backend did
     /// not produce a discoverable artifact.
@@ -469,6 +478,8 @@ pub fn run_openhands(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        internal_log_delta: None,
+        internal_log_path: None,
         transcript_path: None,
     })
 }
@@ -538,6 +549,8 @@ pub fn run_codex_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        internal_log_delta: None,
+        internal_log_path: None,
         transcript_path: None,
     })
 }
@@ -737,6 +750,8 @@ pub fn run_claude_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        internal_log_delta: None,
+        internal_log_path: None,
         transcript_path,
     })
 }
@@ -824,6 +839,8 @@ pub fn run_vibe_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        internal_log_delta: None,
+        internal_log_path: None,
         transcript_path: metadata_path,
     })
 }
@@ -957,6 +974,15 @@ pub fn run_opencode_with_executable(
     let log_path = session_dir.join("backend-output.log");
     fs::write(session_dir.join("task.md"), task)?;
     let started_at = std::time::SystemTime::now();
+    // OpenCode emits provider-side failures (including the observed Hy3
+    // rate-limit response) to this internal log, not reliably to stdout or
+    // stderr. Snapshot its byte length before launch so only this attempt's
+    // appended evidence can influence availability/routing.
+    let opencode_log = opencode_log_path(env_vars);
+    let opencode_log_pre_offset = opencode_log
+        .as_ref()
+        .and_then(|path| fs::metadata(path).ok().map(|metadata| metadata.len()))
+        .unwrap_or(0);
 
     let mut cmd = Command::new(executable);
     // opencode run --model <model> --dir <path> --auto "<prompt>"
@@ -992,8 +1018,30 @@ pub fn run_opencode_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agy_cli_log_delta: None,
+        internal_log_delta: log_delta(&opencode_log, opencode_log_pre_offset),
+        internal_log_path: opencode_log.map(|path| path.to_string_lossy().into_owned()),
         transcript_path,
     })
+}
+
+/// Locate OpenCode's process-wide diagnostic log using the same data-home
+/// resolution as its SQLite session store. The configured per-run HOME/XDG
+/// environment wins over the parent process, which keeps isolated backend
+/// instances from reading each other's diagnostics.
+fn opencode_log_path(env_vars: &[(String, String)]) -> Option<PathBuf> {
+    let value_for = |name: &str| {
+        env_vars
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .or_else(|| env::var(name).ok())
+    };
+    value_for("XDG_DATA_HOME")
+        .map(|path| PathBuf::from(path).join("opencode/log/opencode.log"))
+        .or_else(|| {
+            value_for("HOME")
+                .map(|home| PathBuf::from(home).join(".local/share/opencode/log/opencode.log"))
+        })
 }
 
 /// Persist the exact OpenCode session created by this invocation as a small
@@ -1156,18 +1204,17 @@ fn agy_cli_log_path(env_vars: &[(String, String)], _executable: &Path) -> Option
     newest.map(|(_, path)| path)
 }
 
-/// #155: read only the bytes appended to AGY's cli.log after `pre_offset`,
-/// i.e. the delta this run produced. Returns `None` if the log can't be
-/// read (never fabricates data -- an unreadable log means "unknown", not
-/// "empty").
-fn agy_cli_log_delta(cli_log: &Option<PathBuf>, pre_offset: u64) -> Option<String> {
-    let path = cli_log.as_ref()?;
-    let contents = fs::read_to_string(path).ok()?;
-    let bytes = contents.as_bytes();
+/// Read only bytes appended to a backend-owned log after `pre_offset`.
+/// Returns `None` on missing/unreadable logs and treats a truncated/unchanged
+/// log as no delta. Lossy decoding deliberately preserves diagnostic text
+/// even if a backend left a partial UTF-8 write while exiting.
+fn log_delta(log: &Option<PathBuf>, pre_offset: u64) -> Option<String> {
+    let path = log.as_ref()?;
+    let bytes = fs::read(path).ok()?;
     if (pre_offset as usize) >= bytes.len() {
         return None;
     }
-    Some(contents[pre_offset as usize..].to_string())
+    Some(String::from_utf8_lossy(&bytes[pre_offset as usize..]).into_owned())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1245,7 +1292,9 @@ pub fn run_agy_with_executable(
             exit_code: -1,
             duration_secs,
             log_path: log_path.to_string_lossy().into_owned(),
-            agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+            agy_cli_log_delta: log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+            internal_log_delta: None,
+            internal_log_path: None,
             transcript_path: None,
         });
     }
@@ -1254,7 +1303,9 @@ pub fn run_agy_with_executable(
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
-        agy_cli_log_delta: agy_cli_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+        agy_cli_log_delta: log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+        internal_log_delta: None,
+        internal_log_path: None,
         transcript_path: None,
     })
 }
@@ -2890,6 +2941,57 @@ mod tests {
             fs::read_to_string(f.worktree.join("progress.txt")).unwrap(),
             "second\n"
         );
+    }
+
+    #[test]
+    fn run_opencode_captures_only_its_internal_log_delta() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        let data_home = f._tmp.path().join("xdg-data");
+        let internal_log = data_home.join("opencode/log/opencode.log");
+        fs::create_dir_all(internal_log.parent().unwrap()).unwrap();
+        fs::write(
+            &internal_log,
+            "old run: AI_APICallError: Rate limit exceeded. Please try again later.\n",
+        )
+        .unwrap();
+        make_fake_bin(
+            &f.bin_dir,
+            "opencode",
+            "#!/bin/sh\nprintf '%s\\n' 'timestamp=now level=ERROR message=\"AI_APICallError: Rate limit exceeded. Please try again later.\"' >> \"$XDG_DATA_HOME/opencode/log/opencode.log\"\nexit 0\n",
+        );
+        let envs = vec![
+            (
+                "PATH".to_string(),
+                format!(
+                    "{}:{}",
+                    f.bin_dir.to_str().unwrap(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            ),
+            ("XDG_DATA_HOME".to_string(), data_home.display().to_string()),
+        ];
+
+        let result = run_opencode_with_executable(
+            &f.bin_dir.join("opencode"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            Some("opencode/hy3-free"),
+            &[],
+            &envs,
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.internal_log_path.as_deref(),
+            Some(internal_log.to_str().unwrap())
+        );
+        let delta = result.internal_log_delta.as_deref().unwrap();
+        assert!(delta.contains("Rate limit exceeded"));
+        assert!(!delta.contains("old run"), "delta was {delta:?}");
     }
 
     // ── run_agy ─────────────────────────────────────────────────────────
