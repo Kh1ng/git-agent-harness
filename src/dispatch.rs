@@ -2242,17 +2242,22 @@ fn improve(
         if result.exit_code != 0 {
             // The backend launched but exited nonzero — the backend itself
             // failed at its job, distinct from it never starting at all.
-            ledger.set_failure(
-                crate::ledger::FailureClass::BackendError,
-                crate::ledger::FailureStage::AgentRun,
-            );
+            let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+            let semantic_no_progress = log_text.contains("GAH: killed after ")
+                && log_text.contains("with no new worktree progress (stalled, not just slow).");
+            let failure_class = if semantic_no_progress {
+                crate::ledger::FailureClass::AgentNoProgress
+            } else {
+                crate::ledger::FailureClass::BackendError
+            };
+            ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
                 effective_model: Some(llm.model.clone()),
                 exit_code: Some(result.exit_code),
                 validation_result: None,
-                failure_class: Some(crate::ledger::FailureClass::BackendError.as_str().into()),
+                failure_class: Some(failure_class.as_str().into()),
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
@@ -2265,11 +2270,8 @@ fn improve(
                     Some(&claude_path),
                 ),
             });
-            let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
             let stalled = log_text.contains("GAH: killed after ")
-                && log_text.contains(
-                    " with no new backend output or worktree progress (stalled, not just slow).",
-                );
+                && log_text.contains("(stalled, not just slow).");
             if stalled {
                 notify_event(
                     cfg,
@@ -2280,6 +2282,14 @@ fn improve(
                         model: route.effective_model.as_deref().unwrap_or(&llm.model),
                         duration_seconds: result.duration_secs,
                     },
+                );
+            }
+            if semantic_no_progress {
+                worktree::cleanup(&wt, repo);
+                anyhow::bail!(
+                    "{} made no repository progress on attempt {}; not retrying blindly",
+                    route.effective_backend,
+                    attempt + 1
                 );
             }
             if attempt + 1 < max_attempts {
@@ -6710,7 +6720,7 @@ which lacks a leading boundary check.
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(
-            log.contains("killed after 1s with no new backend output or worktree progress"),
+            log.contains("killed after 1s with no new worktree progress"),
             "got: {log}"
         );
     }
@@ -6768,7 +6778,7 @@ which lacks a leading boundary check.
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(
-            log.contains("killed after 1s with no new backend output or worktree progress"),
+            log.contains("killed after 1s with no new worktree progress"),
             "got: {log}"
         );
     }

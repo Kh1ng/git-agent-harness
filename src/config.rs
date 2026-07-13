@@ -263,14 +263,12 @@ pub struct Profile {
     /// Optional absolute/relative path to the OpenCode CLI executable.
     #[serde(default)]
     pub opencode_path: Option<String>,
-    /// How long OpenCode's own log output can go quiet before GAH considers
-    /// it stalled and kills it, in seconds. Same rationale as
-    /// `agy_idle_timeout_seconds` (opencode's own multi-step sub-agent
-    /// orchestration can legitimately pause longer between visible output
-    /// than a single-shot backend, hence the more generous default) --
-    /// added after a live dispatch hung for 3+ hours with zero output and
-    /// no supervision at all (opencode had no timeout of any kind before
-    /// this). Defaults to 300s when unset.
+    /// How long OpenCode can go without a durable worktree change before GAH
+    /// considers it stalled and kills it, in seconds. OpenCode's narration
+    /// and malformed tool-call output deliberately do not reset this window:
+    /// only repository progress does. This retains an activity-based guard
+    /// rather than imposing a flat dispatch deadline. Defaults to 300s when
+    /// unset.
     #[serde(default)]
     pub opencode_idle_timeout_seconds: Option<u64>,
     /// Per-model override for `opencode_idle_timeout_seconds`, keyed by the
