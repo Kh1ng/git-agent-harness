@@ -3461,7 +3461,7 @@ fn pm(
         let attempt_index = attempted_routes.len() + 1;
         let attempt_dir = session_dir.join(format!("pm-run-{attempt_index}"));
         fs::create_dir_all(&attempt_dir)?;
-        fs::write(attempt_dir.join("task.md"), &task)?;
+        fs::write(attempt_dir.join("task.md"), crate::redact::redact(&task))?;
 
         let result = run_backend(
             &plan_route.effective_backend,

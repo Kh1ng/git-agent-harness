@@ -21,6 +21,7 @@ mod quota;
 mod quota_parser;
 mod quota_snapshot;
 mod quota_store;
+mod redact;
 mod report;
 mod routing;
 mod runner;

@@ -644,7 +644,9 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
         .append(true)
         .open(&path)
         .with_context(|| format!("opening ledger {}", path.display()))?;
-    serde_json::to_writer(&mut file, entry).context("serializing ledger entry")?;
+    let mut value = serde_json::to_value(entry).context("serializing ledger entry")?;
+    crate::redact::redact_json_value(&mut value);
+    serde_json::to_writer(&mut file, &value).context("serializing ledger entry")?;
     file.write_all(b"\n").context("writing ledger newline")?;
     drop(file);
 
@@ -1204,7 +1206,9 @@ pub mod reconcile {
             .append(true)
             .open(&path)
             .with_context(|| format!("opening reconciliation log {}", path.display()))?;
-        serde_json::to_writer(&mut file, entry).context("serializing reconciliation entry")?;
+        let mut value = serde_json::to_value(entry).context("serializing reconciliation entry")?;
+        crate::redact::redact_json_value(&mut value);
+        serde_json::to_writer(&mut file, &value).context("serializing reconciliation entry")?;
         file.write_all(b"\n")
             .context("writing reconciliation newline")?;
         Ok(())
@@ -2907,6 +2911,25 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(text.contains("\"profile\":\"test\""));
         assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn ledger_append_redacts_secret_like_strings_before_persisting() {
+        let (_tmp, cfg) = test_config();
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile(),
+            "claude",
+            "pm",
+            "hello",
+            Some("123".into()),
+            None,
+        );
+        entry.error_summary = Some("Authorization: Bearer abcdefghijklmnopqrstuvwxyz".into());
+        let path = append(&cfg, &entry).unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(!text.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(text.contains("[REDACTED:TOKEN]"));
     }
 
     #[test]

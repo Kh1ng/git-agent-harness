@@ -98,7 +98,9 @@ pub fn append(cfg: &GahConfig, event: &ControllerEvent) -> Result<()> {
         .append(true)
         .open(&path)
         .with_context(|| format!("opening events log {}", path.display()))?;
-    let mut line = serde_json::to_vec(event).context("serializing controller event")?;
+    let mut value = serde_json::to_value(event).context("serializing controller event")?;
+    crate::redact::redact_json_value(&mut value);
+    let mut line = serde_json::to_vec(&value).context("serializing controller event")?;
     line.push(b'\n');
     file.write_all(&line).context("writing controller event")?;
     Ok(())
@@ -363,6 +365,22 @@ mod tests {
         let text = std::fs::read_to_string(cfg.defaults.events_path()).unwrap();
         assert_eq!(text.lines().count(), 2);
         assert_eq!(text.lines().next(), text.lines().nth(1));
+    }
+
+    #[test]
+    fn append_redacts_secret_like_event_details_before_persisting() {
+        let (_tmp, cfg) = test_config();
+        super::record(
+            &cfg,
+            EventType::DispatchFinished,
+            Some("real"),
+            None,
+            "backend said Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(cfg.defaults.events_path()).unwrap();
+        assert!(!text.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(text.contains("[REDACTED:TOKEN]"));
     }
 
     #[test]
