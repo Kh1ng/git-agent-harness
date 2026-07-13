@@ -277,6 +277,55 @@ pub fn commit_msg(worktree: &Path, msg: &str) -> Result<()> {
     Ok(())
 }
 
+/// Make the current changed tree durable before a dispatch discards or
+/// replaces it. Backends sometimes commit themselves; otherwise this creates
+/// a local WIP commit. The dispatch branch remains the recovery point for a
+/// terminal failure, while retry callers may additionally retain `HEAD` on a
+/// checkpoint branch before resetting the working branch to its target.
+pub fn preserve_wip(worktree: &Path, target_branch: &str, message: &str) -> Result<bool> {
+    if !has_changes(worktree, target_branch)? {
+        return Ok(false);
+    }
+    if has_uncommitted_changes(worktree)? {
+        stage_all(worktree)?;
+        ensure_staged(worktree)?;
+        commit_msg(worktree, message)?;
+    }
+    Ok(true)
+}
+
+/// Preserve changed work under a dedicated checkpoint branch, then let a
+/// retry start from the clean target. The checkpoint is local and is removed
+/// only after the overall dispatch publishes successfully.
+pub fn checkpoint_wip(
+    worktree: &Path,
+    target_branch: &str,
+    checkpoint_branch: &str,
+    message: &str,
+) -> Result<bool> {
+    if !preserve_wip(worktree, target_branch, message)? {
+        return Ok(false);
+    }
+    git(&["branch", "-f", checkpoint_branch, "HEAD"], worktree)?;
+    Ok(true)
+}
+
+/// Return a retry worktree to the configured target without moving any WIP
+/// checkpoint ref created by `checkpoint_wip`.
+pub fn reset_to_target(worktree: &Path, target_branch: &str) -> Result<()> {
+    let target = format!("origin/{target_branch}");
+    git(&["reset", "--hard", &target], worktree)?;
+    git(&["clean", "-fd"], worktree)?;
+    Ok(())
+}
+
+/// Best-effort removal of local, successful-dispatch-only WIP checkpoint
+/// refs. Never use this for terminal failures: those refs are recovery data.
+pub fn delete_local_branch(repo: &Path, branch: &str) -> Result<()> {
+    git(&["branch", "-D", branch], repo)?;
+    Ok(())
+}
+
 pub fn push_branch(worktree: &Path, branch: &str, push_url: &str, pat: &str) -> Result<()> {
     let askpass = write_askpass(pat)?;
     let child = Command::new("git")

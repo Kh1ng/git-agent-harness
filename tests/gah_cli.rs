@@ -2892,6 +2892,18 @@ fn dispatch_fix_validation_never_passes_records_no_push_no_mr() {
         &repo.parent().unwrap().join("github-root"),
         branch
     ));
+    // TICKET-172: validation failure must leave the generated patch on the
+    // local dispatch branch for recovery, even though no push/MR occurred.
+    let recovered = ProcessCommand::new("git")
+        .args(["show", &format!("{branch}:README.md")])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(recovered.status.success(), "WIP branch {branch} was lost");
+    assert!(
+        String::from_utf8_lossy(&recovered.stdout).contains("agent edit"),
+        "terminal validation failure should retain the agent's patch"
+    );
 }
 
 /// TICKET-250: an exit-0 backend that leaves the worktree unchanged has
@@ -3086,6 +3098,96 @@ fn dispatch_fix_retries_no_change_before_terminal_failure() {
         attempt["failure_class"] == "agent_no_progress"
             && attempt["validation_result"] == "not_run_no_changes"
     }));
+}
+
+/// TICKET-172: retry cleanup must not destroy a failed attempt's patch. The
+/// retry starts clean, so its final WIP belongs on the dispatch branch while
+/// the previous attempt remains reachable from a dedicated local checkpoint.
+#[test]
+fn dispatch_fix_validation_retry_retains_each_failed_wip_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        r#"validation_commands = ["sh -c 'if grep -q \"first attempt\" README.md; then echo first; false; elif grep -q \"second attempt\" README.md; then echo second; false; else echo baseline; false; fi'"]
+"#,
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let fake_bin = tmp.path().join("bin");
+    let invocation_marker = tmp.path().join("agent-ran-once");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nif test -f '{marker}'; then printf 'second attempt\\n' >> README.md; else touch '{marker}'; printf 'first attempt\\n' >> README.md; fi\nexit 0\n",
+            marker = invocation_marker.display(),
+        ),
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+            "--retries",
+            "1",
+            "--skip-validation-gate",
+            "--allow-unknown-red-baseline",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "validation failed after 2 attempt",
+        ));
+
+    let entry: Value = serde_json::from_str(
+        fs::read_to_string(&ledger_path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    let dispatch_branch = entry["branch"].as_str().unwrap();
+    let dispatch_tree = ProcessCommand::new("git")
+        .args(["show", &format!("{dispatch_branch}:README.md")])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(dispatch_tree.status.success());
+    assert!(String::from_utf8_lossy(&dispatch_tree.stdout).contains("second attempt"));
+
+    let checkpoints = ProcessCommand::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/gah-wip",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let checkpoint = String::from_utf8_lossy(&checkpoints.stdout)
+        .lines()
+        .next()
+        .expect("first failed retry should leave a WIP checkpoint")
+        .to_string();
+    let checkpoint_tree = ProcessCommand::new("git")
+        .args(["show", &format!("{checkpoint}:README.md")])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(checkpoint_tree.status.success());
+    assert!(String::from_utf8_lossy(&checkpoint_tree.stdout).contains("first attempt"));
 }
 
 /// TICKET-064, test 1: a one-shot success (no validation failures at all)

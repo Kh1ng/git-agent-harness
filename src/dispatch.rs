@@ -2100,6 +2100,10 @@ fn improve(
     let mut prev_failure: Option<String> = None;
     let mut prior_phase_context: Option<String> = None;
     let mut backend_summary = String::new();
+    // Retry checkpoints are temporary recovery refs. They are deliberately
+    // retained on any terminal failure, then removed only after a successful
+    // publish so real partial work is never silently discarded.
+    let mut wip_checkpoints = Vec::new();
     for attempt in 0..max_attempts {
         println!(
             "\nAttempt {}/{}: running {} backend...",
@@ -2229,6 +2233,11 @@ fn improve(
                     Some(&claude_path),
                 ),
             });
+            worktree::preserve_wip(
+                &wt,
+                &profile.default_target_branch,
+                &format!("gah: WIP interrupted {} attempt {}", args.mode, attempt + 1),
+            )?;
             worktree::cleanup(&wt, repo);
             anyhow::bail!(
                 "shutdown requested while {} was running",
@@ -2293,6 +2302,11 @@ fn improve(
                 );
             }
             if semantic_no_progress {
+                worktree::preserve_wip(
+                    &wt,
+                    &profile.default_target_branch,
+                    &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
+                )?;
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!(
                     "{} made no repository progress on attempt {}; not retrying blindly",
@@ -2345,8 +2359,17 @@ fn improve(
                     "Backend error (exit {}) on attempt {}/{}, not a recognized quota/rate-limit signal -- retrying with the same backend...",
                     result.exit_code, attempt + 1, max_attempts
                 );
-                let _ = worktree::git(&["reset", "--hard", "HEAD"], &wt);
-                let _ = worktree::git(&["clean", "-fd"], &wt);
+                let checkpoint = wip_checkpoint_branch(&branch, attempt + 1);
+                if worktree::checkpoint_wip(
+                    &wt,
+                    &profile.default_target_branch,
+                    &checkpoint,
+                    &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
+                )? {
+                    println!("Preserved failed attempt on local branch {checkpoint}");
+                    wip_checkpoints.push(checkpoint);
+                }
+                worktree::reset_to_target(&wt, &profile.default_target_branch)?;
                 prior_phase_context = Some(task.clone());
                 task = format!(
                     "{}\n\n## Previous attempt did not complete (attempt {}/{})\n\nThe backend exited with code {} before finishing (not a validation failure -- it errored, crashed, or was killed for producing no output). The worktree has been reset clean. Please try again.",
@@ -2357,6 +2380,11 @@ fn improve(
                 );
                 continue;
             }
+            worktree::preserve_wip(
+                &wt,
+                &profile.default_target_branch,
+                &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
+            )?;
             worktree::cleanup(&wt, repo);
             anyhow::bail!(
                 "backend exited {} on attempt {}",
@@ -2587,9 +2615,21 @@ fn improve(
                             diff_path = Some(path.display().to_string());
                         }
                     }
-                    // Wipe bad code so next attempt starts clean
-                    let _ = worktree::git(&["reset", "--hard", "HEAD"], &wt);
-                    let _ = worktree::git(&["clean", "-fd"], &wt);
+                    // Checkpoint the actual failed tree before the clean
+                    // retry. The old implementation reset it in place and
+                    // permanently lost substantial, often nearly-correct
+                    // work whenever later attempts also failed.
+                    let checkpoint = wip_checkpoint_branch(&branch, attempt + 1);
+                    if worktree::checkpoint_wip(
+                        &wt,
+                        &profile.default_target_branch,
+                        &checkpoint,
+                        &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
+                    )? {
+                        println!("Preserved failed attempt on local branch {checkpoint}");
+                        wip_checkpoints.push(checkpoint.clone());
+                    }
+                    worktree::reset_to_target(&wt, &profile.default_target_branch)?;
                     println!("Retrying with failure context...");
                     ledger.attempts.push(crate::ledger::AttemptRecord {
                         attempt_number: attempt + 1,
@@ -2619,10 +2659,11 @@ fn improve(
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
                     task = format!(
-                        "{}\n\n## Previous attempt failed validation (attempt {}/{})\n\nYour previous attempt was discarded. The worktree is clean again.\nFix the following before completing the task:\n\n```\n{}\n```",
+                        "{}\n\n## Previous attempt failed validation (attempt {}/{})\n\nThe previous tree was checkpointed locally as `{}`. This retry starts from a clean target branch. Fix the following before completing the task:\n\n```\n{}\n```",
                         base_task,
                         attempt + 1,
                         max_attempts,
+                        checkpoint,
                         utf8_safe_prefix(&failure_output, 8_000),
                     );
                     // TICKET-089 AC7: made real (if imperfect) progress and
@@ -2665,6 +2706,11 @@ fn improve(
                 } else if attempt + 1 < max_attempts && !args.allow_draft_fail {
                     let Some(reason) = validation_failure_no_progress_reason(failure_progress)
                     else {
+                        worktree::preserve_wip(
+                            &wt,
+                            &profile.default_target_branch,
+                            &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
+                        )?;
                         worktree::cleanup(&wt, repo);
                         anyhow::bail!(
                             "validation failed after {} attempt(s). Use --allow-draft-fail to push anyway.\n\n{}",
@@ -2702,6 +2748,11 @@ fn improve(
                             Some(&claude_path),
                         ),
                     });
+                    worktree::preserve_wip(
+                        &wt,
+                        &profile.default_target_branch,
+                        &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
+                    )?;
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
                         "{} Aborting early after attempt {}.\n\n{}",
@@ -2760,6 +2811,11 @@ fn improve(
                             Some(&claude_path),
                         ),
                     });
+                    worktree::preserve_wip(
+                        &wt,
+                        &profile.default_target_branch,
+                        &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
+                    )?;
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!(
                         "validation failed after {} attempt(s). Use --allow-draft-fail to push anyway.\n\n{}",
@@ -2857,6 +2913,12 @@ fn improve(
             &branch,
             "PR/MR creation or commit-message generation disabled by publishing policy",
         );
+        clear_wip_checkpoints(repo, &wip_checkpoints);
+        worktree::preserve_wip(
+            &wt,
+            &profile.default_target_branch,
+            &format!("gah: WIP handoff {}", args.mode),
+        )?;
         worktree::cleanup(&wt, repo);
         return Ok(());
     }
@@ -2867,6 +2929,11 @@ fn improve(
                 crate::ledger::FailureClass::HumanBlocked,
                 crate::ledger::FailureStage::Push,
             );
+            worktree::preserve_wip(
+                &wt,
+                &profile.default_target_branch,
+                &format!("gah: WIP blocked {}", args.mode),
+            )?;
             worktree::cleanup(&wt, repo);
             return Err(error);
         }
@@ -2932,6 +2999,7 @@ fn improve(
         },
     );
 
+    clear_wip_checkpoints(repo, &wip_checkpoints);
     worktree::cleanup(&wt, repo);
     Ok(())
 }
@@ -9733,6 +9801,26 @@ fn decide_route(
 
 fn route_identity(backend: &str, model: Option<&str>) -> String {
     format!("{backend}\u{0}{}", model.unwrap_or(""))
+}
+
+/// Local-only recovery refs for discarded retry attempts. Keep the prefix
+/// separate from normal dispatch branches so pruning/inspection can identify
+/// them unambiguously without inventing a second user-facing ticket ID.
+fn wip_checkpoint_branch(dispatch_branch: &str, attempt: u32) -> String {
+    format!(
+        "gah-wip/{}-attempt-{attempt}",
+        dispatch_branch.trim_start_matches("gah/").replace('/', "-")
+    )
+}
+
+fn clear_wip_checkpoints(repo: &Path, checkpoints: &[String]) {
+    for checkpoint in checkpoints {
+        if let Err(error) = worktree::delete_local_branch(repo, checkpoint) {
+            eprintln!(
+                "warning: could not remove successful WIP checkpoint {checkpoint}: {error:#}"
+            );
+        }
+    }
 }
 
 /// Current instant, but with the *local* UTC offset attached rather than
