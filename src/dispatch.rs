@@ -527,13 +527,12 @@ fn ledger_lookup_for_ticket(
     ))
 }
 
-/// Leading `TICKET-<digits>` numeric id out of a work_id string, e.g.
-/// `"TICKET-101-fail-closed-version-drift"` -> `"101"`. Issue-derived
-/// work_ids carry the rest of the title, not just the bare number, so
-/// comparisons against `docs/tickets/closed/` filenames must key on this
-/// numeric prefix rather than exact string equality.
+/// Numeric ID from either a legacy `TICKET-<digits>` work ID or the native
+/// provider `#<digits>` identity.
 fn ticket_number_prefix(work_id: &str) -> Option<&str> {
-    let rest = work_id.strip_prefix("TICKET-")?;
+    let rest = work_id
+        .strip_prefix("TICKET-")
+        .or_else(|| work_id.strip_prefix('#'))?;
     let end = rest
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());
@@ -623,7 +622,7 @@ pub fn scan_available_tickets(
     }
 
     // Native issue tracker (GitHub/GitLab): the migration from docs/tickets
-    // to real issues (TICKET-116/#46) only wired up manual `--target
+    // to real issues only wired up manual `--target
     // <issue-number>` dispatch -- `gah loop`'s own automatic ticket
     // discovery never learned to look here, so a fully-migrated profile's
     // backlog was invisible to `decide_next_action` (it saw 0-1 leftover
@@ -632,8 +631,8 @@ pub fn scan_available_tickets(
     // it straight through as `--target`, and `resolve_target_to_issue_or_string`
     // already treats a numeric target as an issue reference.
     for issue in list_open_issues(profile) {
-        // Every issue gets a synthesized work_id (TICKET-<number>) even
-        // without a TICKET- prefixed title, so is_authoritative is always
+        // Every issue uses its provider-visible `#<number>` identity even
+        // without a structured title, so is_authoritative is always
         // true here -- unlike docs/tickets files, there's no way for an
         // issue to opt out just by lacking metadata. A blocked/planning label
         // or `exec:owner-decision` is the generic signal for "don't
@@ -650,10 +649,19 @@ pub fn scan_available_tickets(
             continue;
         }
         let work_id = meta.work_id.clone();
+        // Some tracker issues were migrated from differently-numbered local
+        // TICKET files (for example GitHub #118 from TICKET-101). Keep that
+        // legacy title token only as a closed-work compatibility lookup; the
+        // native issue identity remains `#118` everywhere else.
+        let legacy_ticket_number = issue
+            .title
+            .find("TICKET-")
+            .and_then(|idx| ticket_number_prefix(&issue.title[idx..]));
         if work_id
             .as_deref()
             .and_then(ticket_number_prefix)
             .is_some_and(|n| closed_ids.contains(n))
+            || legacy_ticket_number.is_some_and(|n| closed_ids.contains(n))
         {
             continue;
         }
@@ -5663,13 +5671,67 @@ which lacks a leading boundary check.
         );
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].ticket_path, "118");
-        assert_eq!(
-            candidates[0].work_id.as_deref(),
-            Some("TICKET-101-fail-closed-version-drift")
-        );
+        assert_eq!(candidates[0].work_id.as_deref(), Some("#118"));
         assert_eq!(candidates[0].recommended_backend.as_deref(), Some("agy"));
         assert_eq!(candidates[0].prior_attempt_count, 0);
         assert!(!candidates[0].has_active_mr);
+    }
+
+    #[test]
+    fn scan_available_tickets_uses_native_identity_for_gitlab_issues() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let issue_json = r#"[{"iid":77,"title":"TICKET-9: Legacy title must not become identity","description":"Work ID: TICKET-9\nRecommended backend: codex","labels":[],"state":"opened"}]"#;
+        let glab_path = bin_dir.join("glab");
+        fs::write(
+            &glab_path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                issue_json.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&glab_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&glab_path, perms).unwrap();
+        }
+        let _guard = PathGuard::set(&bin_dir);
+
+        let cfg = crate::config::GahConfig {
+            context: Default::default(),
+            defaults: crate::config::Defaults {
+                current_manager: None,
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = "gitlab".to_string();
+        prof.repo = "group/project".to_string();
+
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].ticket_path, "77");
+        assert_eq!(candidates[0].work_id.as_deref(), Some("#77"));
+        assert_eq!(
+            candidates[0].title.as_deref(),
+            Some("Legacy title must not become identity")
+        );
     }
 
     #[test]
@@ -7602,6 +7664,23 @@ The parser should retain structured sections.\n\n\
     }
 
     #[test]
+    fn mr_title_uses_native_issue_identity_without_ticket_alias() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("#319".into()),
+            work_id: Some("#319".into()),
+            title: Some("Use native issue numbers".into()),
+            issue_number: Some("319".into()),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+
+        assert_eq!(
+            build_mr_title("fix", "real", false, Some(&ticket)),
+            "[GAH] Fix: #319 Use native issue numbers"
+        );
+    }
+
+    #[test]
     fn mr_title_collision_detection_prevents_stale_id_in_title() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
@@ -7715,9 +7794,10 @@ The parser should retain structured sections.\n\n\
         };
 
         let meta = parse_ticket_metadata_from_issue(&issue);
-        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-42"));
-        assert_eq!(meta.work_id.as_deref(), Some("TICKET-42"));
+        assert_eq!(meta.ticket_id.as_deref(), Some("#42"));
+        assert_eq!(meta.work_id.as_deref(), Some("#42"));
         assert_eq!(meta.issue_number.as_deref(), Some("42"));
+        assert_eq!(meta.title.as_deref(), Some("Fix the bug"));
         assert!(meta.is_authoritative);
         assert!(meta
             .acceptance_criteria
@@ -7730,7 +7810,7 @@ The parser should retain structured sections.\n\n\
         let issue = IssueDetails {
             number: "42".to_string(),
             title: "Test Issue".to_string(),
-            body: "Difficulty: High\nRisk: Medium\nRecommended backend: agy\nGoal: Fix everything"
+            body: "Difficulty: High\nRisk: Medium\nRecommended backend: agy\nWork ID: TICKET-999\nGoal: Fix everything"
                 .to_string(),
             labels: vec![],
             state: None,
@@ -7741,6 +7821,7 @@ The parser should retain structured sections.\n\n\
         assert_eq!(meta.risk.as_deref(), Some("Medium"));
         assert_eq!(meta.recommended_backend.as_deref(), Some("agy"));
         assert_eq!(meta.goal.as_deref(), Some("Fix everything"));
+        assert_eq!(meta.work_id.as_deref(), Some("#42"));
     }
 
     #[test]
@@ -11016,24 +11097,13 @@ fn ensure_issue_open_for_publish(profile: &Profile, issue: &IssueDetails) -> Res
 
 /// This extracts metadata from the issue title and body instead of from a markdown file.
 fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMetadata {
+    let issue_identity = format!("#{}", issue.number);
     let mut meta = TicketMetadata {
+        ticket_id: Some(issue_identity.clone()),
+        work_id: Some(issue_identity),
         issue_number: Some(issue.number.clone()),
         ..TicketMetadata::default()
     };
-
-    // Extract ticket ID from title if it follows the TICKET-N pattern
-    let title = issue.title.trim();
-    if title.starts_with("TICKET-") {
-        if let Some((id, _)) = title.split_once(':').or_else(|| title.split_once(" — ")) {
-            meta.ticket_id = Some(id.trim().to_string());
-            meta.work_id = Some(id.trim().to_string());
-        }
-    }
-
-    // Use the issue number as a fallback work_id
-    if meta.work_id.is_none() {
-        meta.work_id = Some(format!("TICKET-{}", issue.number));
-    }
 
     // Parse the issue body for metadata fields
     // This mimics the existing markdown parsing but works on plain text
@@ -11067,8 +11137,6 @@ fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMetadata {
             }
         } else if let Some(value) = line.strip_prefix("Suggested MR Title:") {
             meta.suggested_mr_title = Some(value.trim().to_string());
-        } else if let Some(value) = line.strip_prefix("Work ID:") {
-            meta.work_id = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Source:") {
             meta.source = Some(value.trim().to_string());
         }
@@ -11104,7 +11172,7 @@ fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMetadata {
 
     // Set title from the issue title if not already set
     if meta.title.is_none() {
-        meta.title = Some(issue.title.trim().to_string());
+        meta.title = Some(normalize_ticket_title(issue.title.trim().to_string()));
     }
     meta.summary = meta.title.clone();
 
