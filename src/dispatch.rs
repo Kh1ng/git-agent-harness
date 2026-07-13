@@ -3688,12 +3688,28 @@ fn review(
         let is_last_attempt = attempt_number + 1 == MAX_REVIEW_ATTEMPTS;
         if !is_last_attempt {
             if let runner::ReviewProcessOutcome::NonZeroExit(_) = attempt.outcome {
+                // Provider CLIs commonly put quota/auth diagnostics on stderr
+                // while keeping stdout empty.  Routing availability must see
+                // both streams or a failed reviewer remains eligible and is
+                // selected again on the next loop cycle.
+                let failure_output = if attempt.stderr.trim().is_empty() {
+                    attempt.stdout.clone()
+                } else if attempt.stdout.trim().is_empty() {
+                    attempt.stderr.clone()
+                } else {
+                    format!("{}\n{}", attempt.stdout, attempt.stderr)
+                };
+                let failure_log = if attempt.stdout.trim().is_empty() {
+                    session_dir.join("review-stderr.log")
+                } else {
+                    session_dir.join("review-stdout.log")
+                };
                 if let Some(parsed) = mark_backend_unavailable_from_output(
                     &route.effective_backend,
                     route.effective_model.as_deref(),
                     None,
-                    &attempt.stdout,
-                    &session_dir.join("review-stdout.log").display().to_string(),
+                    &failure_output,
+                    &failure_log.display().to_string(),
                 )? {
                     let rerouted = decide_route(
                         cfg,
