@@ -6,7 +6,7 @@
 #
 # Merge precedence: compiled defaults < this file < repo config < CLI override.
 # Repo config wins per-field; unset fields inherit from here. Candidate
-# lists (pm_candidates/improve_candidates/review_candidates) replace
+# lists (pm_candidates/improve_candidates/review_candidates/task_routing_rules) replace
 # wholesale when a repo sets them, they never concatenate. Missing this
 # file entirely is fully backward compatible -- repos behave exactly as
 # they did before this file existed.
@@ -28,3 +28,18 @@ escalatory_reviewers = [
 
 [routing.review_required_capabilities]
 claude = ["ponytail"]
+
+# Deterministic implementation routing from trusted ticket metadata. Rules
+# are evaluated top-to-bottom; non-empty match lists are ANDed, and a matching
+# rule's candidate order is used until availability/concurrency requires a
+# fallback. Replace these candidates to swap providers/models -- no code is
+# model-specific. Rules apply only to improve/fix/experiment work.
+[[routing.task_routing_rules]]
+modes = ["improve", "fix"]
+task_classes = ["documentation", "test", "mechanical"]
+difficulties = ["easy"]
+risks = ["low"]
+candidates = [
+  { backend = "opencode", model = "your-cheap-model", included_in_quota = true },
+  { backend = "agy", model = "your-fallback-model", included_in_quota = true },
+]

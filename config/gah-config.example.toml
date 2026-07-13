@@ -29,6 +29,20 @@ escalatory_reviewers = [
 ]
 allow_review_fallback = true
 
+# Optional deterministic implementation routing. The first rule whose
+# mode/task_classes/difficulties/risks all match wins. A profile's non-empty
+# task_routing_rules replaces the defaults list, so repositories can choose
+# their own capacity policy without changing the binary.
+[[defaults.routing.task_routing_rules]]
+modes = ["improve", "fix"]
+task_classes = ["documentation", "test", "mechanical"]
+difficulties = ["easy"]
+risks = ["low"]
+candidates = [
+  { backend = "opencode", model = "your-cheap-model", included_in_quota = true },
+  { backend = "agy", model = "your-fallback-model", included_in_quota = true },
+]
+
 [profiles.my-repo]
 display_name = "My Repo"
 repo_id = "my-repo"

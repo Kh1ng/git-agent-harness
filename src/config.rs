@@ -458,6 +458,25 @@ pub struct CandidateConfig {
     pub quota_days_remaining: Option<f64>,
 }
 
+/// A deterministic implementation-routing override selected from trusted
+/// ticket metadata. Empty match lists are wildcards; every non-empty list
+/// must match. Rules are evaluated in declaration order, so the first match
+/// wins and its candidate order is preserved except when a candidate is
+/// unavailable or at its concurrency limit.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct TaskRoutingRule {
+    #[serde(default)]
+    pub modes: Vec<String>,
+    #[serde(default)]
+    pub task_classes: Vec<String>,
+    #[serde(default)]
+    pub difficulties: Vec<String>,
+    #[serde(default)]
+    pub risks: Vec<String>,
+    #[serde(default)]
+    pub candidates: Vec<CandidateConfig>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct RoutingPolicy {
     #[serde(default)]
@@ -508,6 +527,10 @@ pub struct RoutingPolicy {
     pub pm_candidates: Option<Vec<CandidateConfig>>,
     #[serde(default)]
     pub improve_candidates: Option<Vec<CandidateConfig>>,
+    /// Ordered deterministic overrides for implementation work classified by
+    /// trusted ticket metadata. Empty means no class-specific override.
+    #[serde(default)]
+    pub task_routing_rules: Vec<TaskRoutingRule>,
     #[serde(default)]
     pub review_candidates: Option<Vec<CandidateConfig>>,
     #[serde(default)]
@@ -598,6 +621,11 @@ impl RoutingPolicy {
                 .improve_candidates
                 .clone()
                 .or_else(|| defaults.improve_candidates.clone()),
+            task_routing_rules: if !self.task_routing_rules.is_empty() {
+                self.task_routing_rules.clone()
+            } else {
+                defaults.task_routing_rules.clone()
+            },
             review_candidates: self
                 .review_candidates
                 .clone()
@@ -988,6 +1016,9 @@ fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> Ro
     }
     repo.pm_candidates = repo.pm_candidates.or(canonical.pm_candidates);
     repo.improve_candidates = repo.improve_candidates.or(canonical.improve_candidates);
+    if repo.task_routing_rules.is_empty() {
+        repo.task_routing_rules = canonical.task_routing_rules.clone();
+    }
     repo.review_candidates = repo.review_candidates.or(canonical.review_candidates);
     repo.allow_review_fallback = repo.allow_review_fallback || canonical.allow_review_fallback;
     repo.allow_implementation_fallback =
@@ -1037,6 +1068,11 @@ pub fn check_profile_candidate_model_consistency(
     if let Some(ref list) = routing.improve_candidates {
         for c in list {
             candidates.push(("improve_candidate", c));
+        }
+    }
+    for rule in &routing.task_routing_rules {
+        for candidate in &rule.candidates {
+            candidates.push(("task_routing_rule", candidate));
         }
     }
     if let Some(ref list) = routing.review_candidates {
@@ -1759,6 +1795,17 @@ pub mod tests {
                 quota_usage_percent: Some(25.0),
                 quota_days_remaining: Some(5.0),
             }]),
+            task_routing_rules: vec![super::TaskRoutingRule {
+                modes: vec!["improve".into()],
+                task_classes: vec!["documentation".into()],
+                difficulties: vec!["easy".into()],
+                risks: vec!["low".into()],
+                candidates: vec![super::CandidateConfig {
+                    backend: "agy".into(),
+                    model: Some("cheap".into()),
+                    ..super::CandidateConfig::default()
+                }],
+            }],
             allow_review_fallback: true,
             max_runs_per_backend_per_week: Some(3),
             ..RoutingPolicy::default()
@@ -1776,6 +1823,11 @@ pub mod tests {
         assert_eq!(merged.pm_candidates.as_ref().map(Vec::len), Some(1));
         assert!(merged.allow_review_fallback);
         assert_eq!(merged.max_runs_per_backend_per_week, Some(3));
+        assert_eq!(merged.task_routing_rules.len(), 1);
+        assert_eq!(
+            merged.task_routing_rules[0].candidates[0].model.as_deref(),
+            Some("cheap")
+        );
     }
 
     #[test]
@@ -1813,6 +1865,32 @@ pub mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].backend, "codex");
         assert_eq!(candidates[0].model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn task_routing_rules_are_profile_overridable_as_one_ordered_policy() {
+        let rule = |backend: &str| super::TaskRoutingRule {
+            modes: vec!["improve".into()],
+            task_classes: vec!["documentation".into()],
+            difficulties: vec!["easy".into()],
+            risks: vec!["low".into()],
+            candidates: vec![super::CandidateConfig {
+                backend: backend.into(),
+                ..super::CandidateConfig::default()
+            }],
+        };
+        let defaults = RoutingPolicy {
+            task_routing_rules: vec![rule("agy")],
+            ..RoutingPolicy::default()
+        };
+        let profile = RoutingPolicy {
+            task_routing_rules: vec![rule("codex")],
+            ..RoutingPolicy::default()
+        };
+
+        let merged = profile.merged_with_defaults(&defaults);
+        assert_eq!(merged.task_routing_rules.len(), 1);
+        assert_eq!(merged.task_routing_rules[0].candidates[0].backend, "codex");
     }
 
     #[test]
