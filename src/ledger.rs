@@ -107,6 +107,13 @@ pub struct AttemptRecord {
     pub failure_stage: Option<String>,
     pub duration_seconds: Option<f64>,
     pub diff_path: Option<String>,
+    /// TICKET-242: AGY CLI version for this attempt (e.g. "1.0.16"), captured
+    /// via `agy --version` when an AGY backend ran. `None` for non-AGY
+    /// backends and for runs where version detection failed. `#[serde(default)]`
+    /// keeps historical ledger entries (written before this field existed)
+    /// deserializing.
+    #[serde(default)]
+    pub cli_version: Option<String>,
     /// TICKET-101: provider-reported usage for exactly this attempt, not
     /// the whole dispatch. Same "unknown stays unknown, never zero"
     /// discipline as `LedgerEntry.usage` -- an empty `LedgerUsage` (all
