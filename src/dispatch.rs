@@ -526,7 +526,18 @@ fn ledger_lookup_for_ticket(
             }
         }
         last_failure_class = e.failure_class.clone().or(last_failure_class);
-        human_required = e.human_required;
+        // Only a review entry may CLEAR a prior human_required hold -- that is
+        // the bounded escalation chain deliberately superseding its own earlier
+        // provisional hold. Any other mode can still latch it true (e.g. a
+        // fix/improve dispatch that hit "no eligible backend"), but must never
+        // silently clear an existing hold set by something else: a racing
+        // parallel worker's unrelated completion entry must not un-block a
+        // ticket that a review already gave up on.
+        if e.mode == "review" {
+            human_required = e.human_required;
+        } else if e.human_required {
+            human_required = true;
+        }
         let matching_mr = all_mrs.iter().find(|mr| {
             e.branch.as_deref().is_some_and(|b| b == mr.branch)
                 || (e.mr_url.is_some() && e.mr_url.as_deref() == mr.url.as_deref())
@@ -5176,6 +5187,53 @@ mod tests {
     }
 
     #[test]
+    fn escalation_recognizes_codex_config_default_model_as_tried() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let mut prof = profile(tmp.path());
+        prof.codex_args = vec!["--model".into(), "gpt-5-codex".into()];
+        prof.routing.escalatory_reviewers = vec![
+            CandidateConfig {
+                backend: "codex".into(),
+                model: None,
+                ..Default::default()
+            },
+            CandidateConfig {
+                backend: "opencode".into(),
+                model: Some("nous-portal/z-ai/glm-5.2".into()),
+                ..Default::default()
+            },
+        ];
+
+        let first = next_escalatory_reviewer(&cfg, &prof, "test", "gah/branch-1", None)
+            .expect("first second opinion");
+        assert_eq!(
+            (first.backend.as_str(), first.model.as_deref()),
+            ("codex", None)
+        );
+
+        // The ledger records whatever model routing actually backfilled for
+        // codex (its config-file default), not the unset config value.
+        let mut prior = review_ledger_entry("test", &prof, "gah/branch-1", "HUMAN_REVIEW", "high");
+        prior.effective_backend = "codex".into();
+        prior.effective_model = Some("gpt-5-codex".into());
+        crate::ledger::append(&cfg, &prior).unwrap();
+
+        let second = next_escalatory_reviewer(
+            &cfg,
+            &prof,
+            "test",
+            "gah/branch-1",
+            Some(("codex", Some("gpt-5-codex"))),
+        )
+        .expect("codex must be recognized as already tried, advancing the chain");
+        assert_eq!(
+            (second.backend.as_str(), second.model.as_deref()),
+            ("opencode", Some("nous-portal/z-ai/glm-5.2"))
+        );
+    }
+
+    #[test]
     fn review_escalation_reason_repeated_failure_on_two_consecutive_needs_fix() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
@@ -6511,6 +6569,59 @@ which lacks a leading boundary check.
             Some("agent_no_progress")
         );
         assert!(!candidates[0].has_active_mr);
+    }
+
+    #[test]
+    fn human_required_is_not_cleared_by_a_later_non_review_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-300-test.md"),
+            "# TICKET-300: Test ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+        let cfg = crate::config::GahConfig {
+            context: Default::default(),
+            defaults: crate::config::Defaults {
+                current_manager: None,
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
+
+        // A review escalation exhausted its chain and gave up on a human.
+        let mut exhausted = LedgerEntry::new("test", &prof, "claude", "review", "x", None, None);
+        exhausted.work_id = Some("TICKET-300".into());
+        exhausted.human_required = true;
+        crate::ledger::append(&cfg, &exhausted).unwrap();
+
+        // A racing worker's unrelated fix dispatch completes afterward with a
+        // normal (non-human-required) outcome. It must not silently un-block
+        // a ticket a review already gave up on.
+        let mut racing_fix = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+        racing_fix.work_id = Some("TICKET-300".into());
+        racing_fix.human_required = false;
+        crate::ledger::append(&cfg, &racing_fix).unwrap();
+
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(
+            candidates[0].human_required,
+            "a later non-review entry must not clear a human_required hold"
+        );
     }
 
     #[test]
@@ -9816,7 +9927,18 @@ fn next_escalatory_reviewer(
         .effective_escalatory_reviewers()
         .into_iter()
         .find(|candidate| {
-            !attempted.contains(&(candidate.backend.clone(), candidate.model.clone()))
+            // A candidate left without an explicit model is recorded in the
+            // ledger under whatever effective model routing backfilled for it
+            // (e.g. codex's config-file default, mirroring routing.rs's own
+            // decide_route backfill) -- compare against that, not the raw
+            // config value, or a once-tried backfilled candidate looks
+            // perpetually untried and the chain never advances past it.
+            let effective_model = if candidate.backend == "codex" && candidate.model.is_none() {
+                crate::runner::extract_model_from_args(&profile.codex_args)
+            } else {
+                candidate.model.clone()
+            };
+            !attempted.contains(&(candidate.backend.clone(), effective_model))
         })
 }
 

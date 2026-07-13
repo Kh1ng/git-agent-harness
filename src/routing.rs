@@ -928,7 +928,9 @@ fn explicit_candidates(
                 .iter()
                 .position(|candidate| {
                     candidate.backend == primary.backend
-                        && (candidate.model.is_none() || candidate.model == primary.model)
+                        && (candidate.model.is_none()
+                            || primary.model.is_none()
+                            || candidate.model == primary.model)
                 })
                 .map(|position| route_candidates(&configured[position + 1..]))
         });
@@ -2518,6 +2520,59 @@ mod tests {
             via_claude.effective_model.as_deref(),
             Some("nous-portal/z-ai/glm-5.2")
         );
+    }
+
+    #[test]
+    fn explicit_review_fallback_preserves_order_when_request_omits_model() {
+        let tmp = TempDir::new().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let mut profile = profile();
+        profile.routing.review_candidates = Some(vec![
+            crate::config::CandidateConfig {
+                backend: "agy".into(),
+                model: Some("sonnet".into()),
+                ..Default::default()
+            },
+            crate::config::CandidateConfig {
+                backend: "claude".into(),
+                model: Some("sonnet-5".into()),
+                ..Default::default()
+            },
+        ]);
+        record_unavailable(
+            &path(&tmp),
+            "agy",
+            None,
+            Reason::BackendOutage,
+            Source::BackendError,
+            None,
+            None,
+            now,
+        )
+        .unwrap();
+        // A manual/escalated review request that names the backend but not a
+        // model must still locate its position in the configured pool and
+        // preserve the remainder, not fall through to weak_review_backend.
+        let via_agy = decide_with(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                last_failure_class: None,
+                mode: "review",
+                requested_backend: "agy",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &path(&tmp),
+            now,
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(via_agy.effective_backend, "claude");
+        assert_eq!(via_agy.effective_model.as_deref(), Some("sonnet-5"));
     }
 
     #[test]
