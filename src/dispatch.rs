@@ -3731,11 +3731,13 @@ fn review(
     fs::write(
         bundle.join("mr-description.md"),
         format!(
-            "MR: {}\nURL: {}\nSource: {}\nTarget: {}\nRepo: {}\nTitle: {}\nCI: {}",
+            "MR: {}\nURL: {}\nSource: {}\nTarget: {}\nSource SHA: {}\nTarget SHA: {}\nRepo: {}\nTitle: {}\nCI: {}",
             target.mr_id.as_deref().unwrap_or("n/a"),
             target.mr_url.as_deref().unwrap_or("n/a"),
             target.source_branch,
             target.target_branch,
+            target.source_sha.as_deref().unwrap_or("unknown"),
+            target.target_sha.as_deref().unwrap_or("unknown"),
             profile.repo,
             target.mr_title.as_deref().unwrap_or("n/a"),
             target.ci_status.as_deref().unwrap_or("unknown"),
@@ -3836,6 +3838,25 @@ fn review(
         },
         ledger,
     )?;
+
+    // Duplicate-review short-circuit runs before the budget check: if nothing
+    // has changed since the last completed review of the same tier, that is
+    // the operator-relevant reason to skip, not a budget refusal, and it must
+    // not consume any part of the review-cycle budget below.
+    let reviewer_class = derive_reviewer_tier(cfg, profile, &route).as_str();
+    if let (Some(work_id), Some(source_sha)) =
+        (ledger.work_id.as_deref(), target.source_sha.as_deref())
+    {
+        if crate::ledger::review_already_exists(cfg, work_id, source_sha, reviewer_class)? {
+            ledger.validation_result = Some("skipped_duplicate_review".into());
+            ledger.review_source_sha = Some(source_sha.to_string());
+            ledger.reviewer_class = Some(reviewer_class.to_string());
+            println!("Skipping duplicate {reviewer_class} review for {work_id} at {source_sha}");
+            return Ok(());
+        }
+    }
+    ledger.review_source_sha = target.source_sha.clone();
+    ledger.reviewer_class = Some(reviewer_class.to_string());
 
     if let Some(block) =
         check_review_budget(cfg, profile, &args.profile, args.work_id.as_deref(), &route)?
@@ -4925,6 +4946,46 @@ mod tests {
         .unwrap()
         .expect("two completed review cycles must block a third");
         assert!(block.reason.contains("2/2 review cycles"));
+    }
+
+    #[test]
+    fn skipped_duplicate_reviews_do_not_consume_the_cycle_budget() {
+        // Regression: a duplicate-review short-circuit (#109) launches no
+        // reviewer and must not be indistinguishable from a real cycle when
+        // counted by the review budget (#113) -- otherwise a ticket that is
+        // re-observed several times without any new commits could exhaust its
+        // budget purely from free, already-skipped reviews.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(
+            tmp.path(),
+            RoutingPolicy {
+                max_review_cycles_per_ticket: Some(2),
+                ..RoutingPolicy::default()
+            },
+        );
+        let prof = profile(tmp.path());
+        let mut real = review_ledger_entry("test", &prof, "gah/44", "NEEDS_FIX", "high");
+        real.work_id = Some("#44".into());
+        crate::ledger::append(&cfg, &real).unwrap();
+        for _ in 0..5 {
+            let mut skipped =
+                review_ledger_entry("test", &prof, "gah/44", "skipped_duplicate_review", "high");
+            skipped.work_id = Some("#44".into());
+            crate::ledger::append(&cfg, &skipped).unwrap();
+        }
+
+        let block = check_review_budget(
+            &cfg,
+            &prof,
+            "test",
+            Some("#44"),
+            &route_decision("vibe", Some("reviewer"), false),
+        )
+        .unwrap();
+        assert!(
+            block.is_none(),
+            "five free skipped-duplicate reviews must not exhaust a 2-cycle budget"
+        );
     }
 
     #[test]
@@ -9170,6 +9231,8 @@ fn resolve_review_target(
             mr_title: mr_target.title,
             mr_body: mr_target.body,
             ci_status: mr_target.ci_status,
+            source_sha: mr_target.source_sha,
+            target_sha: mr_target.target_sha,
             source_branch: mr_target.source_branch.clone(),
             target_branch: fallback_target_branch(
                 &profile.default_target_branch,
@@ -9228,6 +9291,8 @@ fn review_target_from_branch(profile: &Profile, branch: &str) -> Result<ReviewTa
             mr_title: mr_target.title,
             mr_body: mr_target.body,
             ci_status: mr_target.ci_status,
+            source_sha: mr_target.source_sha,
+            target_sha: mr_target.target_sha,
             prior_state: None,
         }),
         Err(_) => Ok(ReviewTarget {
@@ -9236,6 +9301,8 @@ fn review_target_from_branch(profile: &Profile, branch: &str) -> Result<ReviewTa
             mr_title: None,
             mr_body: None,
             ci_status: None,
+            source_sha: None,
+            target_sha: None,
             source_branch: branch.to_string(),
             target_branch: profile.default_target_branch.clone(),
             prior_state: None,
@@ -9291,6 +9358,8 @@ fn lookup_review_state(
             mr_title: None,
             mr_body: None,
             ci_status: None,
+            source_sha: None,
+            target_sha: None,
             source_branch: entry.branch.clone().unwrap_or_default(),
             target_branch: profile.default_target_branch.clone(),
             prior_state: Some(render_prior_ledger_state(&entry)),
@@ -9320,13 +9389,16 @@ struct ReviewBudgetBlock {
 }
 
 /// Return a deterministic ticket-scoped review budget block before a reviewer
-/// is launched. A cycle is a prior review dispatch that was not itself a
-/// budget refusal; it includes failed and timed-out reviews because those can
-/// still consume quota. Paid usage is counted only from an explicit recorded
-/// `api_key_backed` classification, never inferred from a provider name or
-/// silently from unknown data. The paid cap applies only when routing has
-/// explicitly selected a candidate configured as paid; quota-backed, local,
-/// and unknown-cost routes remain eligible until the cycle cap is reached.
+/// is launched. A cycle is a prior review dispatch that consumed a real
+/// reviewer call; it includes failed and timed-out reviews because those can
+/// still consume quota, but excludes both a prior budget refusal and a
+/// duplicate-review short-circuit (same source SHA/tier already reviewed),
+/// since neither launched a reviewer. Paid usage is counted only from an
+/// explicit recorded `api_key_backed` classification, never inferred from a
+/// provider name or silently from unknown data. The paid cap applies only
+/// when routing has explicitly selected a candidate configured as paid;
+/// quota-backed, local, and unknown-cost routes remain eligible until the
+/// cycle cap is reached.
 fn check_review_budget(
     cfg: &GahConfig,
     profile: &Profile,
@@ -9347,7 +9419,10 @@ fn check_review_budget(
         .filter(|entry| {
             entry.profile == profile_name
                 && entry.mode == "review"
-                && entry.validation_result.as_deref() != Some("review_budget_exhausted")
+                && !matches!(
+                    entry.validation_result.as_deref(),
+                    Some("review_budget_exhausted") | Some("skipped_duplicate_review")
+                )
         })
         .collect();
 
@@ -9553,6 +9628,8 @@ struct ReviewTarget {
     mr_title: Option<String>,
     mr_body: Option<String>,
     ci_status: Option<String>,
+    source_sha: Option<String>,
+    target_sha: Option<String>,
     source_branch: String,
     target_branch: String,
     prior_state: Option<String>,
