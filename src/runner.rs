@@ -1264,14 +1264,24 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 /// version. When the version is unknown we consider every layout ever seen, so
 /// resolution still works against an unrecognized/old CLI.
 fn agy_log_candidates(version: Option<&str>) -> Vec<&'static str> {
+    // AGY_LOG_PATHS is defined oldest-first, but candidates must be tried
+    // newest-first: a version at or above multiple thresholds (the common
+    // case, since thresholds are cumulative lower bounds) would otherwise
+    // resolve the OLDEST matching layout first. A stale `cli.log` left over
+    // from a pre-1.0.0 install, sitting alongside a freshly-populated `log/`
+    // directory the upgraded CLI is actually writing to, would then win --
+    // silently reading a dead log file for exactly the upgrade-transition
+    // window this table exists to handle correctly.
     match version {
         Some(v) => AGY_LOG_PATHS
             .iter()
+            .rev()
             .filter(|(first, _)| version_cmp(v, first) != std::cmp::Ordering::Less)
             .flat_map(|(_, cands)| cands.iter().copied())
             .collect(),
         None => AGY_LOG_PATHS
             .iter()
+            .rev()
             .flat_map(|(_, cands)| cands.iter().copied())
             .collect(),
     }
@@ -3880,6 +3890,33 @@ mod tests {
         let cands_new = agy_log_candidates(Some("1.0.16"));
         assert!(cands_new.contains(&"cli.log"));
         assert!(cands_new.contains(&"log"));
+
+        // Candidates must be tried NEWEST-first: a version satisfying
+        // multiple thresholds must not resolve the oldest matching layout
+        // ahead of a newer one that's also a valid match.
+        let cli_log_pos = cands_new.iter().position(|c| *c == "cli.log").unwrap();
+        let log_dir_pos = cands_new.iter().position(|c| *c == "log").unwrap();
+        assert!(
+            log_dir_pos < cli_log_pos,
+            "newer `log/` layout must be tried before the older flat `cli.log`, got {cands_new:?}"
+        );
+    }
+
+    #[test]
+    fn agy_cli_log_path_prefers_rotated_log_over_stale_flat_file() {
+        // A stale `cli.log` left over from a pre-upgrade install, coexisting
+        // with a freshly-populated `log/` directory the upgraded CLI is
+        // actually writing to -- the resolved path must be the one inside
+        // `log/`, not the dead flat file.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join(".gemini/antigravity-cli");
+        fs::create_dir_all(root.join("log")).unwrap();
+        fs::write(root.join("cli.log"), "stale pre-upgrade content").unwrap();
+        fs::write(root.join("log/cli-1.log"), "current rotated content").unwrap();
+
+        let envs = vec![("HOME".to_string(), tmp.path().to_str().unwrap().to_string())];
+        let resolved = agy_cli_log_path(&envs, Path::new("agy"), Some("1.0.16")).unwrap();
+        assert_eq!(resolved, root.join("log/cli-1.log"));
     }
 
     #[test]
