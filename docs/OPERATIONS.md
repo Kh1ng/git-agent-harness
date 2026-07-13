@@ -254,6 +254,19 @@ gah prune --dry-run --older-than 14
 gah prune --profile <profile> --older-than 30
 ```
 
+### Concurrent Rust workers and disk capacity
+
+GAH sets `CARGO_TARGET_DIR` to
+`<profile.artifact_root>/build-cache/cargo-target` for every backend,
+auto-fix command, validation command, and validation-gate check. Concurrent
+worktrees therefore share Cargo's lock-safe artifact cache instead of each
+creating multi-gigabyte `target/` directories.
+
+Before creating a worktree, GAH also requires at least 10 GiB free on both the
+worktree filesystem and the temporary filesystem. It fails before spending an
+agent attempt when that floor is not met; reclaim terminal worktrees with
+`gah prune` and inspect temporary files before retrying.
+
 ### Torn final ledger record
 
 If an abrupt stop or full filesystem leaves `ledger.jsonl` with an incomplete

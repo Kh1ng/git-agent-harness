@@ -998,6 +998,16 @@ fn run_backend_with_reserved_route(
         .transpose()?;
     let origin_before = worktree::git(&["remote", "get-url", "origin"], wt).ok();
     let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
+    // Every agent and any test command it launches inherit this repository-
+    // scoped target directory. Cargo safely serializes concurrent builds in a
+    // shared target dir, while separate worktree-local `target/` directories
+    // otherwise multiply multi-gigabyte artifacts until the host fills.
+    env_vars.push((
+        "CARGO_TARGET_DIR".to_string(),
+        shared_cargo_target_dir(profile)
+            .to_string_lossy()
+            .into_owned(),
+    ));
     if backend == "agy-second" {
         if let Some(home) = profile.agy_second_home.as_deref().filter(|h| !h.is_empty()) {
             // Appended last so it overrides any HOME the env_file may have
@@ -1092,16 +1102,17 @@ fn run_backend_with_reserved_route(
 /// `validate()`. A formatter failing to run (missing binary, whatever) must
 /// never block the dispatch -- it's a convenience, not a gate -- so every
 /// failure is logged and swallowed rather than propagated.
-fn run_auto_fix_commands(commands: &[String], wt: &Path) {
+fn run_auto_fix_commands(commands: &[String], wt: &Path, env_vars: &[(String, String)]) {
     for cmd_str in commands {
         if cmd_str.trim().is_empty() {
             continue;
         }
-        match Command::new("sh")
-            .args(["-c", cmd_str])
-            .current_dir(wt)
-            .output()
-        {
+        let mut command = Command::new("sh");
+        command.args(["-c", cmd_str]).current_dir(wt);
+        for (key, value) in env_vars {
+            command.env(key, value);
+        }
+        match command.output() {
             Ok(out) if !out.status.success() => {
                 eprintln!(
                     "warning: auto_fix command '{cmd_str}' exited {}: {}",
@@ -1118,7 +1129,7 @@ fn run_auto_fix_commands(commands: &[String], wt: &Path) {
 }
 
 /// Run validation_commands in the worktree. Returns Err(combined output) on first failure.
-fn validate(commands: &[String], wt: &Path) -> Result<()> {
+fn validate(commands: &[String], wt: &Path, env_vars: &[(String, String)]) -> Result<()> {
     for cmd_str in commands {
         if cmd_str.trim().is_empty() {
             continue;
@@ -1126,9 +1137,12 @@ fn validate(commands: &[String], wt: &Path) -> Result<()> {
         println!("  Validating: {}", cmd_str);
         // Run through the shell: validation commands routinely use `cd x && y`,
         // pipes, and env vars, which Command::new(bin) cannot execute.
-        let out = Command::new("sh")
-            .args(["-c", cmd_str])
-            .current_dir(wt)
+        let mut command = Command::new("sh");
+        command.args(["-c", cmd_str]).current_dir(wt);
+        for (key, value) in env_vars {
+            command.env(key, value);
+        }
+        let out = command
             .output()
             .with_context(|| format!("failed to run '{}'", cmd_str))?;
         if !out.status.success() {
@@ -1147,15 +1161,22 @@ fn validate(commands: &[String], wt: &Path) -> Result<()> {
 /// TICKET-110: like `validate()`, but also surfaces the failing command's
 /// exit code so baseline classification can key on POSIX shell conventions
 /// (127/126) rather than string-matching stdout.
-fn validate_with_exit_code(commands: &[String], wt: &Path) -> Result<(), (String, Option<i32>)> {
+fn validate_with_exit_code(
+    commands: &[String],
+    wt: &Path,
+    env_vars: &[(String, String)],
+) -> Result<(), (String, Option<i32>)> {
     for cmd_str in commands {
         if cmd_str.trim().is_empty() {
             continue;
         }
         println!("  Validating: {}", cmd_str);
-        let out = Command::new("sh")
-            .args(["-c", cmd_str])
-            .current_dir(wt)
+        let mut command = Command::new("sh");
+        command.args(["-c", cmd_str]).current_dir(wt);
+        for (key, value) in env_vars {
+            command.env(key, value);
+        }
+        let out = command
             .output()
             .map_err(|e| (format!("failed to run '{}': {:#}", cmd_str, e), None))?;
         if !out.status.success() {
@@ -1171,6 +1192,80 @@ fn validate_with_exit_code(commands: &[String], wt: &Path) -> Result<(), (String
         }
     }
     Ok(())
+}
+
+const MIN_DISPATCH_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Build artifacts must outlive individual worktrees, but stay scoped to one
+/// profile so unrelated repositories never share Cargo fingerprints.
+fn shared_cargo_target_dir(profile: &Profile) -> PathBuf {
+    PathBuf::from(&profile.artifact_root)
+        .join("build-cache")
+        .join("cargo-target")
+}
+
+fn validation_env(profile: &Profile) -> Vec<(String, String)> {
+    vec![(
+        "CARGO_TARGET_DIR".to_string(),
+        shared_cargo_target_dir(profile)
+            .to_string_lossy()
+            .into_owned(),
+    )]
+}
+
+fn ensure_dispatch_capacity(profile: &Profile, worktree_base: &Path) -> Result<()> {
+    ensure_minimum_free_space(worktree_base, "worktree filesystem")?;
+    ensure_minimum_free_space(&std::env::temp_dir(), "temporary filesystem")?;
+    // Ensure the shared cache parent exists before the first backend inherits
+    // it; this also proves the configured artifact root is writable early.
+    std::fs::create_dir_all(shared_cargo_target_dir(profile))
+        .context("creating shared Cargo target directory")?;
+    Ok(())
+}
+
+fn ensure_minimum_free_space(path: &Path, label: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        // Dispatch creates the worktree directory after this preflight.  A
+        // configured worktree base therefore commonly does not exist yet;
+        // stat the nearest existing ancestor to measure the same filesystem
+        // without making a harmless first dispatch fail with ENOENT.
+        let filesystem_path = nearest_existing_ancestor(path)?;
+        let path_c = CString::new(filesystem_path.as_os_str().as_bytes())?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(path_c.as_ptr(), &mut stat) } != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "checking free space for {} (configured path {}; filesystem path {})",
+                    label,
+                    path.display(),
+                    filesystem_path.display(),
+                )
+            });
+        }
+        let available = (stat.f_bavail as u128).saturating_mul(stat.f_frsize as u128);
+        if available < MIN_DISPATCH_FREE_BYTES as u128 {
+            anyhow::bail!(
+                "insufficient free space on {} ({}): {} GiB available; require at least {} GiB before dispatch",
+                label,
+                path.display(),
+                available / (1024 * 1024 * 1024),
+                MIN_DISPATCH_FREE_BYTES / (1024 * 1024 * 1024),
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, label);
+    Ok(())
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Result<&Path> {
+    path.ancestors()
+        .find(|ancestor| ancestor.exists())
+        .ok_or_else(|| anyhow::anyhow!("no existing ancestor for path {}", path.display()))
 }
 
 /// TICKET-073: verify a profile's `validation_commands` against a genuinely
@@ -1260,7 +1355,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
         &worktree_base,
     )?;
     let verified_at = vc::now_rfc3339(OffsetDateTime::now_utc());
-    let result = validate(&profile.validation_commands, &wt);
+    let result = validate(&profile.validation_commands, &wt, &validation_env(profile));
     let ok = result.is_ok();
 
     // Always clean up, regardless of pass/fail — a leftover validation-gate
@@ -1886,6 +1981,7 @@ fn improve(
     };
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
     let repo = Path::new(&profile.local_path);
+    ensure_dispatch_capacity(profile, &worktree_base)?;
 
     // TICKET-118: Handle existing branch for FixMr action
     let (branch, wt) = if let Some(ref existing_branch) = args.existing_branch {
@@ -1929,7 +2025,7 @@ fn improve(
         (None, None)
     } else {
         println!("Baseline validation on pristine worktree...");
-        match validate_with_exit_code(&profile.validation_commands, &wt) {
+        match validate_with_exit_code(&profile.validation_commands, &wt, &validation_env(profile)) {
             Ok(()) => {
                 println!("Baseline validation passed.");
                 (None, None)
@@ -2323,13 +2419,14 @@ fn improve(
             break;
         }
 
-        run_auto_fix_commands(&profile.auto_fix_commands, &wt);
+        let validation_env = validation_env(profile);
+        run_auto_fix_commands(&profile.auto_fix_commands, &wt, &validation_env);
 
         println!(
             "Running validation ({} commands)...",
             profile.validation_commands.len()
         );
-        match validate(&profile.validation_commands, &wt) {
+        match validate(&profile.validation_commands, &wt, &validation_env) {
             Ok(()) => {
                 println!("Validation passed.");
                 validation_failed = false;
@@ -4339,11 +4436,11 @@ mod tests {
         collect_pm_preflight, collect_ticket_summaries, decide_route, derive_reviewer_tier,
         extract_backend_summary, extract_issue_number, first_markdown_heading,
         format_candidate_task, github_issue_author_is_allowed, is_issue_number_reference,
-        mark_backend_unavailable_from_output_at, next_ticket_id, parse_pm_plan,
-        parse_review_verdict, parse_review_verdict_with_context, parse_ticket_metadata,
-        parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
-        review_labels, review_preflight, review_usage, run_backend, scan_available_tickets,
-        strip_terminal_noise, validation_failure_fingerprint,
+        mark_backend_unavailable_from_output_at, nearest_existing_ancestor, next_ticket_id,
+        parse_pm_plan, parse_review_verdict, parse_review_verdict_with_context,
+        parse_ticket_metadata, parse_ticket_metadata_from_issue, render_review_comment,
+        review_escalation_reason, review_labels, review_preflight, review_usage, run_backend,
+        scan_available_tickets, strip_terminal_noise, validation_failure_fingerprint,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
         TicketMetadata, ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES,
@@ -7998,15 +8095,48 @@ The parser should retain structured sections.\n\n\
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
         // `cd x && y` requires a shell — this was silently impossible before
         let cmds = vec!["cd sub && true".to_string()];
-        assert!(validate(&cmds, tmp.path()).is_ok());
+        assert!(validate(&cmds, tmp.path(), &[]).is_ok());
     }
 
     #[test]
     fn validate_reports_failing_command_output() {
         let tmp = tempfile::tempdir().unwrap();
         let cmds = vec!["echo oops >&2 && false".to_string()];
-        let err = validate(&cmds, tmp.path()).unwrap_err();
+        let err = validate(&cmds, tmp.path(), &[]).unwrap_err();
         assert!(format!("{:#}", err).contains("oops"));
+    }
+
+    #[test]
+    fn validate_propagates_shared_cargo_target_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let observed = tmp.path().join("observed-target");
+        let commands = vec![format!(
+            "printf '%s' \"$CARGO_TARGET_DIR\" > {}",
+            observed.display()
+        )];
+        let expected = tmp.path().join("shared-cargo-target");
+        let env = vec![(
+            "CARGO_TARGET_DIR".to_string(),
+            expected.to_string_lossy().into_owned(),
+        )];
+
+        validate(&commands, tmp.path(), &env).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(observed).unwrap(),
+            expected.display().to_string()
+        );
+    }
+
+    #[test]
+    fn capacity_preflight_uses_existing_parent_for_new_worktree_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_base = tmp.path().join("worktrees");
+
+        assert!(!worktree_base.exists());
+        assert_eq!(
+            nearest_existing_ancestor(&worktree_base).unwrap(),
+            tmp.path()
+        );
     }
 
     #[test]
@@ -8017,7 +8147,7 @@ The parser should retain structured sections.\n\n\
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("f.txt"), "unformatted\n").unwrap();
         let fix_cmds = vec!["printf 'fixed\\n' > f.txt".to_string()];
-        run_auto_fix_commands(&fix_cmds, tmp.path());
+        run_auto_fix_commands(&fix_cmds, tmp.path(), &[]);
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("f.txt")).unwrap(),
             "fixed\n"
@@ -8031,7 +8161,7 @@ The parser should retain structured sections.\n\n\
         // best-effort convenience, not a validation gate.
         let tmp = tempfile::tempdir().unwrap();
         let cmds = vec!["exit 1".to_string()];
-        run_auto_fix_commands(&cmds, tmp.path()); // must not panic
+        run_auto_fix_commands(&cmds, tmp.path(), &[]); // must not panic
     }
 
     fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
