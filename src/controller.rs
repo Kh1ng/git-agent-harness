@@ -1447,6 +1447,8 @@ pub(crate) fn run_dispatch_and_record(
         Err(e) => {
             let event_type = if crate::dispatch::duplicate_work_error(&e).is_some() {
                 crate::events::EventType::DuplicateGuardTriggered
+            } else if crate::dispatch::review_budget_exhausted_error(&e).is_some() {
+                crate::events::EventType::ReviewBudgetExhausted
             } else {
                 crate::events::EventType::DispatchFinished
             };
