@@ -484,6 +484,8 @@ export interface ProfileAddOptions {
   env_file_prod?: string;
   validation_commands?: string[];
   auto_fix_commands?: string[];
+  max_parallel_workers?: number;
+  manager_wake_autonomy?: string;
   config?: string;
 }
 
@@ -557,6 +559,12 @@ export async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
   if (options.auto_fix_commands?.length) {
     args.push('--auto-fix-commands', options.auto_fix_commands.join(','));
   }
+  if (options.max_parallel_workers !== undefined && options.max_parallel_workers !== null) {
+    args.push('--max-parallel-workers', String(options.max_parallel_workers));
+  }
+  if (options.manager_wake_autonomy) {
+    args.push('--manager-wake-autonomy', options.manager_wake_autonomy);
+  }
   
   if (options.config) {
     args.push('--config-path', options.config);
@@ -613,6 +621,8 @@ export interface ProfileSetOptions {
   env_file_prod?: string | null;
   validation_commands?: string[];
   auto_fix_commands?: string[];
+  max_parallel_workers?: number | null;
+  manager_wake_autonomy?: string | null;
   clear?: string[];
   config?: string;
 }
@@ -698,8 +708,23 @@ export async function runProfileSet(options: ProfileSetOptions): Promise<void> {
   if (options.auto_fix_commands?.length) {
     args.push('--auto-fix-commands', options.auto_fix_commands.join(','));
   }
+  if (options.max_parallel_workers !== undefined && options.max_parallel_workers !== null) {
+    args.push('--max-parallel-workers', String(options.max_parallel_workers));
+  } else if (options.max_parallel_workers === null && options.clear?.includes('max_parallel_workers')) {
+    args.push('--clear', 'max_parallel_workers');
+  }
+  if (options.manager_wake_autonomy !== undefined && options.manager_wake_autonomy !== null) {
+    args.push('--manager-wake-autonomy', options.manager_wake_autonomy);
+  } else if (options.manager_wake_autonomy === null && options.clear?.includes('manager_wake_autonomy')) {
+    args.push('--clear', 'manager_wake_autonomy');
+  }
   if (options.clear?.length) {
-    args.push('--clear', options.clear.join(','));
+    // Only forward generic clear entries that aren't already handled above.
+    const already = new Set(['max_parallel_workers', 'manager_wake_autonomy']);
+    const remaining = options.clear.filter((c) => !already.has(c));
+    if (remaining.length) {
+      args.push('--clear', remaining.join(','));
+    }
   }
   
   if (options.config) {
@@ -767,6 +792,71 @@ export async function runProfileRemove(options: ProfileRemoveOptions): Promise<v
       reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// `gah config set` / `gah config show --json` (Issue #194): global defaults
+// such as `current_manager`, editable from the dashboard Settings UI. Like
+// the profile CRUD above, these shell out to the real `gah` CLI so the
+// canonical TOML config stays the single source of truth.
+// ---------------------------------------------------------------------------
+
+export interface ConfigSetOptions {
+  current_manager?: string | null;
+  clear?: string[];
+  config?: string;
+}
+
+export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
+  const args = ['config', 'set'];
+
+  if (options.current_manager !== undefined && options.current_manager !== null) {
+    args.push('--current-manager', options.current_manager);
+  } else if (options.current_manager === null && options.clear?.includes('current_manager')) {
+    args.push('--clear', 'current_manager');
+  }
+
+  if (options.clear?.length) {
+    const already = new Set(['current_manager']);
+    const remaining = options.clear.filter((c) => !already.has(c));
+    if (remaining.length) {
+      args.push('--clear', remaining.join(','));
+    }
+  }
+
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
+
+    let stderr = '';
+
+    child.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`gah config set failed with exit code ${code}: ${stderr}`));
+        return;
+      }
+      resolve(undefined);
+    });
+
+    child.on('error', (error) => {
+      reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
+    });
+  });
+}
+
+export async function runConfigShow(config?: string): Promise<{ current_manager: string | null }> {
+  const args = ['config', 'show', '--json'];
+  if (config) {
+    args.push('--config-path', config);
+  }
+  return runJsonCommand<{ current_manager: string | null }>(args, config);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import { create } from 'zustand';
 import { gahApi, GahApiError } from '../api/client.js';
 import type { StatusSnapshot, QuotaSnapshot, ReportData, ReportSeriesData, ReportGroupBy, LedgerEntry, ControllerEvent, ProfileSummary } from '@git-agent-harness/contracts';
 import type { ProfileAddData, ProfileUpdateData, ProfileRemoveParams, LoopStatus } from '../api/client.js';
+import type { ConfigSummary, ConfigSetData } from '@git-agent-harness/contracts';
 
 interface Resource<T> {
   data: T | null;
@@ -51,9 +52,13 @@ interface GahStoreState {
   workTimelines: Record<string, Resource<LedgerEntry[]>>;
   profiles: Resource<ProfileSummary[]>;
   profileCrud: ProfileCrudState;
+  config: Resource<ConfigSummary>;
   loopStatus: Resource<LoopStatus>;
   loopAction: { pending: boolean; error: string | null };
 
+  fetchConfig: (opts?: { force?: boolean }) => Promise<void>;
+  setConfig: (data: ConfigSetData) => Promise<void>;
+  clearConfigErrors: () => void;
   fetchStatus: (profile?: string, opts?: { force?: boolean }) => Promise<void>;
   fetchQuota: (params?: { profile?: string; since?: string }, opts?: { force?: boolean }) => Promise<void>;
   fetchReport: (params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }, opts?: { force?: boolean }) => Promise<void>;
@@ -93,6 +98,7 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
   events: emptyResource(),
   workTimelines: {},
   profiles: emptyResource(),
+  config: emptyResource(),
   loopStatus: emptyResource(),
   loopAction: { pending: false, error: null },
   profileCrud: {
@@ -341,6 +347,33 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
         lastRemoveSuccess: false
       }
     });
+  },
+
+  async fetchConfig(opts) {
+    const current = get().config;
+    if (current.loading || (!opts?.force && isFresh(current, ''))) return;
+    set({ config: { ...current, loading: true, error: null } });
+    try {
+      const data = await gahApi.getConfig();
+      set({ config: { data, loading: false, error: null, fetchedAt: Date.now(), key: '' } });
+    } catch (error) {
+      set({ config: { ...get().config, loading: false, error: errorMessage(error), key: '' } });
+    }
+  },
+
+  async setConfig(data) {
+    set({ config: { ...get().config, loading: true, error: null } });
+    try {
+      await gahApi.setConfig(data);
+      set({ config: { ...get().config, loading: false } });
+      await get().fetchConfig({ force: true });
+    } catch (error) {
+      set({ config: { ...get().config, loading: false, error: errorMessage(error) } });
+    }
+  },
+
+  clearConfigErrors() {
+    set({ config: { ...get().config, error: null } });
   },
 
   async fetchLoopStatus(profile, opts) {

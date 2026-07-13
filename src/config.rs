@@ -57,7 +57,7 @@ pub enum WakeAutonomy {
     Full,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GahConfig {
     #[serde(default)]
     pub defaults: Defaults,
@@ -67,7 +67,7 @@ pub struct GahConfig {
     pub context: crate::context::ContextConfig,
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct Defaults {
     #[serde(default)]
     pub artifact_root: String,

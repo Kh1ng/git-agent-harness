@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { Sun, Moon, Info, ExternalLink } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Sun, Moon, Info, ExternalLink, Save, Loader2 } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -7,18 +7,29 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
+import type { WakeAutonomyValue } from '@git-agent-harness/contracts';
 
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
+const WAKE_AUTONOMY_OPTIONS: { value: WakeAutonomyValue; label: string }[] = [
+  { value: 'off', label: 'Off' },
+  { value: 'review_only', label: 'Review only' },
+  { value: 'full', label: 'Full' },
+];
 
 export function SettingsPage() {
   const { providers, providerStatuses, backendConfigured, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
   const { theme, setTheme, profileOverride, setProfileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
+  const config = useGahStore((s) => s.config);
+  const fetchConfig = useGahStore((s) => s.fetchConfig);
+  const setConfig = useGahStore((s) => s.setConfig);
+  const clearConfigErrors = useGahStore((s) => s.clearConfigErrors);
 
   useEffect(() => {
     fetchProfiles();
-  }, [fetchProfiles]);
+    fetchConfig();
+  }, [fetchProfiles, fetchConfig]);
 
   const configuredProfiles = profiles.data ?? [];
   const selectedName = profileOverride ?? profile ?? '';
@@ -37,7 +48,7 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Settings" description="Appearance, profile, and provider authentication" />
+      <PageHeader title="Settings" description="Appearance, profile, dispatch, and manager configuration" />
 
       <section className="card-padded max-w-md">
         <h3 className="text-sm font-semibold text-primary mb-3">Appearance</h3>
@@ -105,6 +116,19 @@ export function SettingsPage() {
         )}
       </section>
 
+      <DispatchSettingsSection
+        selectedName={selectedName}
+        selected={selected}
+        profileLoading={profiles.loading}
+        profileError={profiles.error}
+      />
+
+      <GlobalManagerSection
+        config={config}
+        setConfig={setConfig}
+        clearConfigErrors={clearConfigErrors}
+      />
+
       <section>
         <ProfileEditor />
       </section>
@@ -128,5 +152,183 @@ export function SettingsPage() {
         )}
       </section>
     </div>
+  );
+}
+
+interface DispatchSettingsSectionProps {
+  selectedName: string;
+  selected?: { max_parallel_workers: number | null; manager_wake_autonomy: WakeAutonomyValue | null };
+  profileLoading: boolean;
+  profileError: string | null;
+}
+
+function DispatchSettingsSection({
+  selectedName,
+  selected,
+  profileLoading,
+  profileError,
+}: DispatchSettingsSectionProps) {
+  const updateProfile = useGahStore((s) => s.updateProfile);
+  const profileCrud = useGahStore((s) => s.profileCrud);
+
+  const [parallel, setParallel] = useState<string>('');
+  const [autonomy, setAutonomy] = useState<WakeAutonomyValue>('off');
+
+  // Re-seed the form whenever the selected profile changes or its values load.
+  useEffect(() => {
+    setParallel(selected?.max_parallel_workers != null ? String(selected.max_parallel_workers) : '');
+    setAutonomy(selected?.manager_wake_autonomy ?? 'off');
+  }, [selectedName, selected?.max_parallel_workers, selected?.manager_wake_autonomy]);
+
+  if (profileLoading && !selected) {
+    return (
+      <section className="card-padded max-w-md">
+        <h3 className="text-sm font-semibold text-primary mb-3">Dispatch settings</h3>
+        <p className="text-xs text-muted">Loading profiles…</p>
+      </section>
+    );
+  }
+
+  if (profileError || !selected) {
+    return (
+      <section className="card-padded max-w-md">
+        <h3 className="text-sm font-semibold text-primary mb-3">Dispatch settings</h3>
+        <p className="text-xs text-muted">
+          {profileError ? `Failed to load profiles: ${profileError}` : 'Select a profile to edit its dispatch settings.'}
+        </p>
+      </section>
+    );
+  }
+
+  const handleSave = async () => {
+    const parsed = parallel.trim() === '' ? undefined : Math.max(1, parseInt(parallel, 10) || 1);
+    await updateProfile(selectedName, {
+      max_parallel_workers: parsed,
+      manager_wake_autonomy: autonomy,
+    });
+  };
+
+  const saveError = profileCrud.updateError;
+  const saving = profileCrud.updating;
+
+  return (
+    <section className="card-padded max-w-md">
+      <h3 className="text-sm font-semibold text-primary mb-1">Dispatch settings</h3>
+      <p className="text-xs text-muted mb-3">
+        Per-profile loop behavior for <span className="font-mono text-secondary">{selectedName}</span>.
+        Changes apply on the next loop iteration — no restart needed.
+      </p>
+
+      <div className="space-y-3">
+        <div>
+          <label className="block text-xs font-medium text-secondary mb-1">
+            Max parallel workers
+          </label>
+          <input
+            type="number"
+            min={1}
+            value={parallel}
+            onChange={(e) => setParallel(e.target.value)}
+            placeholder="1"
+            className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+          />
+          <p className="text-xs text-muted mt-1">
+            How many tickets <code>gah loop</code> may execute concurrently (default 1).
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-secondary mb-1">
+            Manager wake autonomy
+          </label>
+          <select
+            value={autonomy}
+            onChange={(e) => setAutonomy(e.target.value as WakeAutonomyValue)}
+            className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+          >
+            {WAKE_AUTONOMY_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-muted mt-1">
+            What a woken manager agent may do when a notify-worthy event fires.
+          </p>
+        </div>
+      </div>
+
+      {saveError && (
+        <p className="mt-3 text-xs text-critical">Failed to save: {saveError}</p>
+      )}
+      {profileCrud.lastUpdateSuccess && !saveError && (
+        <p className="mt-3 text-xs text-green-600">Dispatch settings saved.</p>
+      )}
+
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {saving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
+        {saving ? 'Saving…' : 'Save dispatch settings'}
+      </button>
+    </section>
+  );
+}
+
+interface GlobalManagerSectionProps {
+  config: { data: { current_manager: string | null } | null; loading: boolean; error: string | null };
+  setConfig: (data: { current_manager?: string | null; clear?: string[] }) => Promise<void>;
+  clearConfigErrors: () => void;
+}
+
+function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {
+  const [manager, setManager] = useState<string>('');
+
+  useEffect(() => {
+    setManager(config.data?.current_manager ?? '');
+  }, [config.data?.current_manager]);
+
+  const handleSave = async () => {
+    const value = manager.trim();
+    await setConfig(value === '' ? { clear: ['current_manager'] } : { current_manager: value });
+  };
+
+  return (
+    <section className="card-padded max-w-md">
+      <h3 className="text-sm font-semibold text-primary mb-1">Global manager</h3>
+      <p className="text-xs text-muted mb-3">
+        Which agent CLI is currently on call as the operator's manager across all
+        profiles/projects (the manager-wake "who's on call"). Global, not per-profile.
+      </p>
+
+      <label className="block text-xs font-medium text-secondary mb-1">
+        Current manager
+      </label>
+      <input
+        type="text"
+        value={manager}
+        onChange={(e) => setManager(e.target.value)}
+        placeholder="e.g. claude, codex, hermes"
+        className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+      />
+      <p className="text-xs text-muted mt-1">
+        Leave blank and save to clear it. Changes apply to the next loop iteration without a restart.
+      </p>
+
+      {config.error && (
+        <p className="mt-3 text-xs text-critical">Failed to save: {config.error}</p>
+      )}
+
+      <button
+        onClick={handleSave}
+        disabled={config.loading}
+        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {config.loading ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
+        {config.loading ? 'Saving…' : 'Save global manager'}
+      </button>
+    </section>
   );
 }

@@ -784,20 +784,60 @@ pub fn acquire_profile_lock(
 /// for the lifetime of the loop so a second manager for the same profile
 /// cannot create a competing worker pool.
 pub fn run_loop(
-    cfg: &crate::config::GahConfig,
+    initial_cfg: &crate::config::GahConfig,
     profile_name: &str,
     json: bool,
-    parallel: usize,
+    parallel_arg: usize,
     skip_validation_gate: bool,
     config_path: &std::path::Path,
 ) -> Result<()> {
     let _lock = acquire_profile_lock(profile_name, config_path)?;
+
+    // The dashboard Settings UI can change max_parallel_workers,
+    // manager_wake_autonomy (per-profile) and current_manager (global) at
+    // runtime. Reload the config from disk on every iteration so those
+    // changes take effect on the next loop iteration without restarting the
+    // daemon. We keep the last successfully-loaded config as a fallback so a
+    // transient read failure (e.g. the config file is mid-write) can't kill
+    // the loop.
+    let mut last_cfg: Option<crate::config::GahConfig> = Some(initial_cfg.clone());
 
     loop {
         if crate::runner::shutdown_requested() {
             eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
             return Ok(());
         }
+
+        let cfg: &crate::config::GahConfig = match crate::config::load(config_path.to_str()) {
+            Ok(loaded) => {
+                last_cfg = Some(loaded);
+                last_cfg.as_ref().expect("just assigned")
+            }
+            Err(error) => {
+                eprintln!(
+                    "gah loop: failed to reload config ({}); reusing last known config for this iteration",
+                    error
+                );
+                match last_cfg.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        // We never loaded a config successfully; there's no
+                        // safe baseline to continue from, so surface the error
+                        // instead of dispatching against a phantom config.
+                        return Err(error);
+                    }
+                }
+            }
+        };
+
+        // The explicit `--parallel` flag (parallel_arg > 0) wins; otherwise
+        // derive the worker pool size from the freshly-reloaded profile.
+        let parallel = if parallel_arg == 0 {
+            crate::config::get_profile(cfg, profile_name)?.max_parallel_workers() as usize
+        } else {
+            parallel_arg
+        };
+
         // Transient provider/controller failures must not kill the daemon.
         // A validation-gate failure is different: it proves the safety check
         // itself is unhealthy, so pause immediately and require an explicit

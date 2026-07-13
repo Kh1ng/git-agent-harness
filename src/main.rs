@@ -74,6 +74,12 @@ enum AvailabilityAction {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Inspect or set global GAH config defaults (cross-profile facts such as
+    /// `current_manager`). Per-profile settings live under `profile set`.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     /// Show durable backend/model availability state (global, not per-profile)
     Availability {
         #[arg(long, default_value_t = false)]
@@ -352,6 +358,30 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum ConfigCommands {
+    /// Show global defaults (e.g. current_manager). Use --json for machine
+    /// output consumed by the dashboard Settings UI.
+    Show {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
+    /// Set one or more global default values.
+    Set {
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        /// Which agent CLI is currently acting as the operator's manager
+        /// across all profiles/projects (the manager-wake "who's on call").
+        #[arg(long)]
+        current_manager: Option<String>,
+        /// Clear the specified field(s).
+        #[arg(long, value_delimiter = ',')]
+        clear: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum ProfileCommands {
     /// List all profiles in config
     List {
@@ -441,6 +471,14 @@ enum ProfileCommands {
         /// Auto-fix commands
         #[arg(long, value_delimiter = ',')]
         auto_fix_commands: Vec<String>,
+        /// How many tickets `gah loop` may execute concurrently for this
+        /// profile (defaults to 1). Exposed in the dashboard Settings UI.
+        #[arg(long)]
+        max_parallel_workers: Option<u32>,
+        /// Manager-wake autonomy for this profile: off | review_only | full.
+        /// Exposed in the dashboard Settings UI.
+        #[arg(long)]
+        manager_wake_autonomy: Option<String>,
     },
     /// Set/Update fields of an existing profile
     Set {
@@ -499,6 +537,14 @@ enum ProfileCommands {
         validation_commands: Vec<String>,
         #[arg(long, value_delimiter = ',')]
         auto_fix_commands: Vec<String>,
+        /// How many tickets `gah loop` may execute concurrently for this
+        /// profile (defaults to 1). Exposed in the dashboard Settings UI.
+        #[arg(long)]
+        max_parallel_workers: Option<u32>,
+        /// Manager-wake autonomy for this profile: off | review_only | full.
+        /// Exposed in the dashboard Settings UI.
+        #[arg(long)]
+        manager_wake_autonomy: Option<String>,
         /// Clear the specified field(s) - for fields that support it
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,
@@ -743,6 +789,21 @@ enum ClaimsCommands {
         #[arg(long, default_value = "3600")]
         max_age_secs: u64,
     },
+}
+
+/// Parse a `manager_wake_autonomy` value from CLI text (snake_case, matching
+/// the TOML/serde spelling) into the typed enum. Kept as a manual mapping so
+/// the CLI error message can name the accepted values precisely.
+fn parse_wake_autonomy(value: &str) -> anyhow::Result<config::WakeAutonomy> {
+    match value.to_ascii_lowercase().as_str() {
+        "off" | "none" => Ok(config::WakeAutonomy::Off),
+        "review_only" | "reviewonly" | "review" => Ok(config::WakeAutonomy::ReviewOnly),
+        "full" => Ok(config::WakeAutonomy::Full),
+        other => anyhow::bail!(
+            "invalid manager_wake_autonomy '{}' (expected off | review_only | full)",
+            other
+        ),
+    }
 }
 
 fn main() -> Result<()> {
@@ -1122,6 +1183,43 @@ fn main() -> Result<()> {
             tui::run(&cfg, profile.as_deref())?;
         }
 
+        Commands::Config { command } => match command {
+            ConfigCommands::Show { json, config_path } => {
+                let cfg = config::load(config_path.as_deref())?;
+                if json {
+                    #[derive(serde::Serialize)]
+                    struct ConfigShow {
+                        current_manager: Option<String>,
+                    }
+                    println!(
+                        "{}",
+                        serde_json::to_string(&ConfigShow {
+                            current_manager: cfg.defaults.current_manager.clone()
+                        })?
+                    );
+                } else {
+                    println!(
+                        "current_manager: {}",
+                        cfg.defaults.current_manager.as_deref().unwrap_or("(unset)")
+                    );
+                }
+            }
+            ConfigCommands::Set {
+                config_path,
+                current_manager,
+                clear,
+            } => {
+                let mut cfg = config::load(config_path.as_deref())?;
+                if let Some(v) = current_manager {
+                    cfg.defaults.current_manager = Some(v);
+                } else if clear.contains(&"current_manager".to_string()) {
+                    cfg.defaults.current_manager = None;
+                }
+                config::save(&cfg, config_path.as_deref())?;
+                println!("Updated global config");
+            }
+        },
+
         Commands::Profile { command } => match *command {
             ProfileCommands::List { config, json } => {
                 let cfg = config::load(config.as_deref())?;
@@ -1136,6 +1234,8 @@ fn main() -> Result<()> {
                         repo: &'a str,
                         local_path: &'a str,
                         web_url: Option<String>,
+                        max_parallel_workers: Option<u32>,
+                        manager_wake_autonomy: &'a str,
                     }
                     let summaries: Vec<ProfileSummary> = names
                         .iter()
@@ -1148,6 +1248,12 @@ fn main() -> Result<()> {
                                 repo: &p.repo,
                                 local_path: &p.local_path,
                                 web_url: p.web_url(),
+                                max_parallel_workers: p.max_parallel_workers,
+                                manager_wake_autonomy: match p.manager_wake_autonomy {
+                                    config::WakeAutonomy::Off => "off",
+                                    config::WakeAutonomy::ReviewOnly => "review_only",
+                                    config::WakeAutonomy::Full => "full",
+                                },
                             }
                         })
                         .collect();
@@ -1221,6 +1327,8 @@ fn main() -> Result<()> {
                 env_file_prod,
                 validation_commands,
                 auto_fix_commands,
+                max_parallel_workers,
+                manager_wake_autonomy,
             } => {
                 let mut cfg = config::load(config_path.as_deref())?;
                 let profile = Profile {
@@ -1254,9 +1362,12 @@ fn main() -> Result<()> {
                     vibe_idle_timeout_seconds: None,
                     codex_idle_timeout_seconds: None,
                     claude_idle_timeout_seconds: None,
-                    max_parallel_workers: None,
+                    max_parallel_workers,
                     notify_command,
-                    manager_wake_autonomy: config::WakeAutonomy::default(),
+                    manager_wake_autonomy: match &manager_wake_autonomy {
+                        Some(v) => parse_wake_autonomy(v)?,
+                        None => config::WakeAutonomy::default(),
+                    },
                     policy_path,
                     env_file,
                     env_file_prod,
@@ -1306,6 +1417,8 @@ fn main() -> Result<()> {
                 env_file_prod,
                 validation_commands,
                 auto_fix_commands,
+                max_parallel_workers,
+                manager_wake_autonomy,
                 clear,
             } => {
                 let mut cfg = config::load(config_path.as_deref())?;
@@ -1471,6 +1584,18 @@ fn main() -> Result<()> {
                     existing.auto_fix_commands = auto_fix_commands;
                 } else if should_clear("auto_fix_commands", &clear) {
                     existing.auto_fix_commands.clear();
+                }
+
+                if let Some(v) = max_parallel_workers {
+                    existing.max_parallel_workers = Some(v);
+                } else if should_clear("max_parallel_workers", &clear) {
+                    existing.max_parallel_workers = None;
+                }
+
+                if let Some(v) = &manager_wake_autonomy {
+                    existing.manager_wake_autonomy = parse_wake_autonomy(v)?;
+                } else if should_clear("manager_wake_autonomy", &clear) {
+                    existing.manager_wake_autonomy = config::WakeAutonomy::default();
                 }
 
                 config::save(&cfg, config_path.as_deref())?;

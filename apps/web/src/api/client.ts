@@ -25,7 +25,10 @@ import type {
   LedgerEntry,
   ControllerEvent,
   ControllerActivity,
-  ProfileSummary
+  ProfileSummary,
+  WakeAutonomyValue,
+  ConfigSummary,
+  ConfigSetData
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -92,6 +95,10 @@ export interface ProfileAddData {
   env_file_prod?: string;
   validation_commands?: string[];
   auto_fix_commands?: string[];
+  /** Max concurrent tickets `gah loop` may run for this profile. */
+  max_parallel_workers?: number;
+  /** Manager-wake autonomy: 'off' | 'review_only' | 'full'. */
+  manager_wake_autonomy?: WakeAutonomyValue;
 }
 
 export interface ProfileUpdateData {
@@ -121,6 +128,8 @@ export interface ProfileUpdateData {
   env_file_prod?: string | null;
   validation_commands?: string[];
   auto_fix_commands?: string[];
+  max_parallel_workers?: number;
+  manager_wake_autonomy?: WakeAutonomyValue;
   clear?: string[];
 }
 
@@ -170,6 +179,8 @@ export interface GahDataSource {
   getLoopStatus(profile?: string): Promise<LoopStatus>;
   startLoop(profile: string): Promise<StartLoopResult>;
   stopLoop(profile: string): Promise<StopLoopResult>;
+  getConfig(): Promise<ConfigSummary>;
+  setConfig(data: ConfigSetData): Promise<{ success: boolean; message: string }>;
 }
 
 async function postJson<T, U>(path: string, body: U): Promise<T> {
@@ -308,5 +319,11 @@ export const gahApi: GahDataSource = {
       body: JSON.stringify({ profile })
     });
     return (await res.json()) as StopLoopResult;
+  },
+  async getConfig() {
+    return getJson<ConfigSummary>('/api/config');
+  },
+  async setConfig(data) {
+    return postJson<{ success: boolean; message: string }, ConfigSetData>('/api/config', data);
   }
 };
