@@ -131,6 +131,35 @@ pub struct DispatchArgs {
     pub route_ready: Option<SyncSender<()>>,
 }
 
+/// Typed, terminal refusal used when a ticket has exhausted its configured
+/// review budget. Keeping this distinct from backend failures lets the
+/// controller close the run cleanly and makes the operator-visible event
+/// stream explain that no reviewer was launched and no extra quota was spent.
+#[derive(Debug)]
+pub struct ReviewBudgetExhausted {
+    reason: String,
+}
+
+impl ReviewBudgetExhausted {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl fmt::Display for ReviewBudgetExhausted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for ReviewBudgetExhausted {}
+
+pub fn review_budget_exhausted_error(err: &anyhow::Error) -> Option<&ReviewBudgetExhausted> {
+    err.downcast_ref::<ReviewBudgetExhausted>()
+}
+
 /// Marks an error as a failed validation-gate self-check rather than a
 /// ticket, backend, or transient controller failure. The controller uses this
 /// typed boundary to pause a loop instead of repeatedly retrying a gate that
@@ -839,7 +868,13 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     if let Err(err) = crate::ledger::append(cfg, &ledger) {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
     }
-    if result.is_err() {
+    if result.is_err()
+        && result
+            .as_ref()
+            .err()
+            .and_then(review_budget_exhausted_error)
+            .is_none()
+    {
         notify_event(
             cfg,
             profile,
@@ -3689,7 +3724,6 @@ fn review(
             lookup_review_state_by_branch(cfg, &args.profile, &target.source_branch);
     }
     let diff_bundle = prepare_review_diff(repo, profile, &target)?;
-
     let bundle = session_dir.join("review-bundle");
     fs::create_dir_all(&bundle)?;
     fs::write(bundle.join("diff.patch"), &diff_bundle.diff)?;
@@ -3707,7 +3741,6 @@ fn review(
             target.ci_status.as_deref().unwrap_or("unknown"),
         ),
     )?;
-
     println!(
         "Diff: {} bytes, files: {}",
         diff_bundle.diff.len(),
@@ -3803,6 +3836,28 @@ fn review(
         },
         ledger,
     )?;
+
+    if let Some(block) =
+        check_review_budget(cfg, profile, &args.profile, args.work_id.as_deref(), &route)?
+    {
+        ledger.set_failure(
+            crate::ledger::FailureClass::HumanBlocked,
+            crate::ledger::FailureStage::Review,
+        );
+        ledger.validation_result = Some("review_budget_exhausted".into());
+        ledger.human_required = true;
+        ledger.error_summary = Some(block.reason.clone());
+        apply_route_to_ledger(ledger, &route);
+        notify_event(
+            cfg,
+            profile,
+            NotifyEvent::HumanRequired {
+                reason: "review budget exhausted",
+                reference: target.mr_url.as_deref(),
+            },
+        );
+        return Err(ReviewBudgetExhausted::new(block.reason).into());
+    }
 
     // Bounded retry across review_candidates: an empty/unavailable-backend
     // outcome (e.g. AGY quota exhaustion -- see agy_empty_output_diagnosis)
@@ -4628,19 +4683,19 @@ mod tests {
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
         attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body,
         build_metadata_rich_mr_body, build_mr_title, build_pm_plan_task, build_standard_mr_body,
-        build_task, classify_validation_failure_progress, classify_worktree_result,
-        collect_pm_preflight, collect_ticket_summaries, decide_route, derive_reviewer_tier,
-        extract_backend_summary, extract_issue_number, first_markdown_heading,
-        format_candidate_task, github_issue_author_is_allowed, is_issue_number_reference,
-        mark_backend_unavailable_from_output_at, nearest_existing_ancestor, next_ticket_id,
-        parse_pm_plan, parse_review_verdict, parse_review_verdict_with_context,
-        parse_ticket_metadata, parse_ticket_metadata_from_issue, render_review_comment,
-        review_escalation_reason, review_labels, review_preflight, review_usage, run_backend,
-        scan_available_tickets, strip_terminal_noise, validation_failure_fingerprint,
-        validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
-        MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
-        TicketMetadata, ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES,
-        PROJECT_BRIEF_MAX_BYTES,
+        build_task, check_review_budget, classify_validation_failure_progress,
+        classify_worktree_result, collect_pm_preflight, collect_ticket_summaries, decide_route,
+        derive_reviewer_tier, extract_backend_summary, extract_issue_number,
+        first_markdown_heading, format_candidate_task, github_issue_author_is_allowed,
+        is_issue_number_reference, mark_backend_unavailable_from_output_at,
+        nearest_existing_ancestor, next_ticket_id, parse_pm_plan, parse_review_verdict,
+        parse_review_verdict_with_context, parse_ticket_metadata, parse_ticket_metadata_from_issue,
+        render_review_comment, review_escalation_reason, review_labels, review_preflight,
+        review_usage, run_backend, scan_available_tickets, strip_terminal_noise,
+        validation_failure_fingerprint, validation_failure_no_progress_reason,
+        ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewDiffBundle,
+        ReviewGateContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
+        LIVE_TASK_ACCEPTANCE_MAX_BYTES, PROJECT_BRIEF_MAX_BYTES,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
@@ -4832,6 +4887,89 @@ mod tests {
         entry.validation_result = Some(verdict.to_string());
         entry.confidence_impact = Some(confidence.to_string());
         entry
+    }
+
+    fn paid_route_decision() -> RouteDecision {
+        let mut route = route_decision("api-reviewer", Some("api-model"), false);
+        route.routing_diagnostics = Some(crate::ledger::RoutingDiagnostics {
+            selected_cost_class: Some("paid".into()),
+            ..Default::default()
+        });
+        route
+    }
+
+    #[test]
+    fn review_budget_counts_review_cycles_across_ticket_id_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(
+            tmp.path(),
+            RoutingPolicy {
+                max_review_cycles_per_ticket: Some(2),
+                ..RoutingPolicy::default()
+            },
+        );
+        let prof = profile(tmp.path());
+        for work_id in ["TICKET-42", "#42"] {
+            let mut entry = review_ledger_entry("test", &prof, "gah/42", "NEEDS_FIX", "high");
+            entry.work_id = Some(work_id.into());
+            crate::ledger::append(&cfg, &entry).unwrap();
+        }
+
+        let block = check_review_budget(
+            &cfg,
+            &prof,
+            "test",
+            Some("#42"),
+            &route_decision("vibe", Some("reviewer"), false),
+        )
+        .unwrap()
+        .expect("two completed review cycles must block a third");
+        assert!(block.reason.contains("2/2 review cycles"));
+    }
+
+    #[test]
+    fn paid_review_budget_only_blocks_explicitly_paid_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(
+            tmp.path(),
+            RoutingPolicy {
+                max_review_cycles_per_ticket: Some(3),
+                max_paid_reviews_per_ticket: Some(1),
+                ..RoutingPolicy::default()
+            },
+        );
+        let prof = profile(tmp.path());
+        let mut entry = review_ledger_entry("test", &prof, "gah/43", "APPROVE", "high");
+        entry.work_id = Some("#43".into());
+        entry.usage.usage_classification = Some("api_key_backed".into());
+        crate::ledger::append(&cfg, &entry).unwrap();
+
+        let paid = check_review_budget(&cfg, &prof, "test", Some("#43"), &paid_route_decision())
+            .unwrap()
+            .expect("paid cap must block another configured paid reviewer");
+        assert!(paid.reason.contains("1/1 API-backed reviews"));
+
+        let quota = check_review_budget(
+            &cfg,
+            &prof,
+            "test",
+            Some("#43"),
+            &route_decision("agy", Some("sonnet"), false),
+        )
+        .unwrap();
+        assert!(quota.is_none(), "paid history must not block a quota route");
+    }
+
+    #[test]
+    fn review_budget_fails_open_without_ticket_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let prof = profile(tmp.path());
+        assert!(
+            check_review_budget(&cfg, &prof, "test", None, &paid_route_decision(),)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -9174,6 +9312,76 @@ fn lookup_review_state_by_branch(
                 && entry.branch.as_deref() == Some(branch)
         })
         .map(|entry| render_prior_ledger_state(&entry))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewBudgetBlock {
+    reason: String,
+}
+
+/// Return a deterministic ticket-scoped review budget block before a reviewer
+/// is launched. A cycle is a prior review dispatch that was not itself a
+/// budget refusal; it includes failed and timed-out reviews because those can
+/// still consume quota. Paid usage is counted only from an explicit recorded
+/// `api_key_backed` classification, never inferred from a provider name or
+/// silently from unknown data. The paid cap applies only when routing has
+/// explicitly selected a candidate configured as paid; quota-backed, local,
+/// and unknown-cost routes remain eligible until the cycle cap is reached.
+fn check_review_budget(
+    cfg: &GahConfig,
+    profile: &Profile,
+    profile_name: &str,
+    work_id: Option<&str>,
+    route: &RouteDecision,
+) -> Result<Option<ReviewBudgetBlock>> {
+    // Direct branch/MR reviews without a controller-provided ticket identity
+    // cannot be attributed safely to a per-ticket budget. Fail open rather
+    // than accidentally merging unrelated branches into one accounting bucket.
+    let Some(work_id) = work_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let routing = profile.effective_routing(&cfg.defaults);
+    let entries = ledger::entries_for_work_id(cfg, work_id)?;
+    let reviews: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry.profile == profile_name
+                && entry.mode == "review"
+                && entry.validation_result.as_deref() != Some("review_budget_exhausted")
+        })
+        .collect();
+
+    let cycle_count = reviews.len() as u32;
+    let cycle_cap = routing.max_review_cycles_per_ticket();
+    if cycle_count >= cycle_cap {
+        return Ok(Some(ReviewBudgetBlock {
+            reason: format!(
+                "review budget exhausted for {work_id}: {cycle_count}/{cycle_cap} review cycles used"
+            ),
+        }));
+    }
+
+    let selected_paid = route
+        .routing_diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.selected_cost_class.as_deref())
+        == Some("paid");
+    if selected_paid {
+        let paid_count = reviews
+            .iter()
+            .filter(|entry| entry.usage.usage_classification.as_deref() == Some("api_key_backed"))
+            .count() as u32;
+        let paid_cap = routing.max_paid_reviews_per_ticket();
+        if paid_count >= paid_cap {
+            return Ok(Some(ReviewBudgetBlock {
+                reason: format!(
+                    "paid review budget exhausted for {work_id}: {paid_count}/{paid_cap} API-backed reviews used"
+                ),
+            }));
+        }
+    }
+
+    Ok(None)
 }
 
 /// The routine reviewer (`review_backend`, e.g. Vibe/Mistral) is fast and
