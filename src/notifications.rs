@@ -427,6 +427,10 @@ fn format_attempt_count(attempt_count: Option<u32>) -> String {
 fn summarize_error_summary(summary: Option<&str>) -> Option<String> {
     summary.and_then(|summary| {
         let sanitized = crate::redact::redact(&strip_ansi(summary));
+        // Notification hooks promise one logical line. Backend errors often
+        // contain command output with newlines/tabs; collapse all whitespace
+        // before truncation so one failure cannot forge extra alert lines.
+        let sanitized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
         let sanitized = sanitized.trim();
         if sanitized.is_empty() {
             return None;
@@ -587,7 +591,10 @@ mod tests {
 
     #[test]
     fn dispatch_failed_truncates_and_strips_ansi_from_summary() {
-        let long_summary = format!("\u{1b}[31m{}\u{1b}[0m", "x".repeat(400));
+        let long_summary = format!(
+            "\u{1b}[31m{}\nsecond\tline\rthird\u{1b}[0m",
+            "x".repeat(400)
+        );
         let msg = format_message(&NotifyEvent::DispatchFailed {
             failure_class: "validation_failure",
             failure_stage: Some("agent_run"),
@@ -601,6 +608,7 @@ mod tests {
             .nth(1)
             .expect("summary field should be present");
         assert!(!summary.contains('\u{1b}'));
+        assert!(!summary.contains(['\n', '\r', '\t']));
         assert!(summary.len() <= 300);
     }
 
