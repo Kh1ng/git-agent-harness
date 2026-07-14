@@ -1,4 +1,4 @@
-use super::super::issues::{parse_ticket_metadata, TicketMetadata};
+use super::super::issues::{parse_ticket_metadata_for_target, TicketMetadata};
 use super::super::text::normalize_match;
 use super::super::DispatchArgs;
 use crate::config::{GahConfig, Profile};
@@ -41,8 +41,7 @@ pub(in crate::dispatch) fn resolve_review_target(
     }
 
     if !args.target.is_empty() {
-        let target_path = Path::new(&args.target);
-        if let Some(ticket) = parse_ticket_metadata(target_path)? {
+        if let Some(ticket) = parse_ticket_metadata_for_target(profile, &args.target)? {
             if let Some(state) =
                 lookup_review_state(cfg, profile, &args.profile, &args.target, &ticket)
             {
@@ -60,7 +59,7 @@ pub(in crate::dispatch) fn resolve_review_target(
     }
 
     anyhow::bail!(
-        "review target required: pass --mr, --branch, a ticket path in --target, or --current-branch"
+        "review target required: pass --mr, --branch, a ticket path or issue reference in --target, or --current-branch"
     )
 }
 

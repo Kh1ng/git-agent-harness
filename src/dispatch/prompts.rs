@@ -187,7 +187,7 @@ fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &Issue
 
     task.push_str(&format!(
         "\n## Focus\n\n{}\n",
-        format_issue_focus_reference(issue)
+        format_issue_focus_text(issue)
     ));
     task
 }
@@ -423,14 +423,19 @@ pub(super) fn format_candidate_task(
     out
 }
 
-/// Keep the Focus section concise. The bounded Live Task Pack carries the
-/// relevant structured content; duplicating the full issue body here would
-/// silently defeat that limit.
-fn format_issue_focus_reference(issue: &IssueDetails) -> String {
-    format!(
-        "Issue #{}: {}\nImplement the scoped requirements in the Live Task Pack above.",
-        issue.number, issue.title
-    )
+/// Keep the Focus section literal so the worker sees the same source text a
+/// human would read on the issue page, while the Live Task Pack carries the
+/// bounded structured summary.
+fn format_issue_focus_text(issue: &IssueDetails) -> String {
+    let mut focus = issue.title.trim().to_string();
+    let body = issue.body.trim_end();
+    if !body.is_empty() {
+        if !focus.is_empty() {
+            focus.push_str("\n\n");
+        }
+        focus.push_str(body);
+    }
+    focus
 }
 
 #[cfg(test)]
@@ -569,10 +574,12 @@ mod tests {
 
         assert!(task.contains("## Project Brief"));
         assert!(task.contains("## Live Task Pack"));
+        assert!(task.contains("## Focus"));
+        assert!(task.contains("Bound context"));
+        assert!(task.contains("Full memory is stale."));
         assert!(task.contains("### Acceptance Criteria"));
         assert!(task.contains("Use project brief"));
         assert!(!task.contains("STALE CONTROL PLANE STATE"));
-        assert!(task.contains("## Focus"));
     }
 
     #[test]
@@ -669,7 +676,8 @@ mod tests {
 
         assert!(task.contains("### Problem"));
         assert!(task.contains("Preserve this goal."));
-        assert!(!task.contains("Fallback scope."));
+        assert!(task.contains("## Focus\n\nPreserve explicit goals"));
+        assert!(task.contains("Fallback scope."));
         assert!(task.contains("Keep behavior stable."));
         assert!(!task.contains("### Issue Description"));
     }

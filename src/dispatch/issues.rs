@@ -583,6 +583,20 @@ pub(super) fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata
     Ok(Some(meta))
 }
 
+pub(super) fn parse_ticket_metadata_for_target(
+    profile: &Profile,
+    target: &str,
+) -> Result<Option<TicketMetadata>> {
+    if is_issue_number_reference(target) {
+        if let Some(issue_number) = extract_issue_number(target) {
+            let issue = fetch_issue_details(profile, &issue_number)?;
+            return Ok(Some(parse_ticket_metadata_from_issue(&issue)));
+        }
+    }
+
+    parse_ticket_metadata(Path::new(target))
+}
+
 pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMetadata {
     let issue_identity = format!("#{}", issue.number);
     let mut meta = TicketMetadata {
@@ -1101,6 +1115,55 @@ The parser should retain structured sections.\n\n\
         assert!(meta
             .constraints
             .contains(&"Must remain fail-closed at all times.".to_string()));
+    }
+
+    #[test]
+    fn parse_ticket_metadata_for_target_resolves_issue_number_targets() {
+        let _exec_guard = ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        let issue_json = r#"{"number":42,"title":"TICKET-42: Fix the routing","body":"Difficulty: high\nRecommended backend: codex\nRecommended model: gpt-5\n\n## Goal\nResolve issue target parsing.\n\n## Acceptance Criteria\n- Parse issue-number targets\n\n## Constraints\n- keep file path support\n","labels":[{"name":"src/dispatch.rs"},{"name":"needs-tests"}],"author":{"login":"owner"},"state":"OPEN"}"#;
+        let gh_path = bin_dir.join("gh");
+        fs::write(
+            &gh_path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ] && [ \"$3\" = \"42\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                issue_json.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&gh_path, perms).unwrap();
+        }
+        let _guard = PathGuard::set(&bin_dir);
+
+        let mut prof = profile(tmp.path());
+        prof.provider = "github".to_string();
+        prof.repo = "owner/repo".to_string();
+
+        let meta = parse_ticket_metadata_for_target(&prof, "#42")
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.ticket_id.as_deref(), Some("#42"));
+        assert_eq!(meta.work_id.as_deref(), Some("#42"));
+        assert_eq!(meta.issue_number.as_deref(), Some("42"));
+        assert_eq!(meta.title.as_deref(), Some("Fix the routing"));
+        assert_eq!(meta.recommended_backend.as_deref(), Some("codex"));
+        assert_eq!(meta.recommended_model.as_deref(), Some("gpt-5"));
+        assert_eq!(meta.goal.as_deref(), Some("Resolve issue target parsing."));
+        assert!(meta
+            .acceptance_criteria
+            .contains(&"Parse issue-number targets".to_string()));
+        assert!(meta
+            .constraints
+            .contains(&"keep file path support".to_string()));
+        assert!(meta.affected_files.contains(&"src/dispatch.rs".to_string()));
     }
 
     #[test]

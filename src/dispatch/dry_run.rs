@@ -1,6 +1,6 @@
 use super::attempts::routing_runtime_state;
 use super::identity::timestamp;
-use super::issues::parse_ticket_metadata;
+use super::issues::parse_ticket_metadata_for_target;
 use super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
@@ -146,7 +146,7 @@ fn dry_run_route(
     args: &DispatchArgs,
 ) -> Option<RouteDecision> {
     let ticket_meta = if matches!(mode, "improve" | "fix") && !args.target.is_empty() {
-        parse_ticket_metadata(Path::new(&args.target))
+        parse_ticket_metadata_for_target(profile, &args.target)
             .ok()
             .flatten()
     } else {
