@@ -30,7 +30,7 @@ use crate::routing::RouteRequest;
 use crate::usage_attribution::{normalize_attempt_usage, UsageAttribution};
 use crate::validation_runner::{validate, validate_with_exit_code};
 use crate::{provider, runner, worktree};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1231,21 +1231,32 @@ pub(crate) fn improve(
         &mr_ctx,
         !validation_failed,
     );
-    ledger.mr_attempted = true;
-    let mr = provider::create_draft_mr(profile, &branch, &mr_title, &mr_body)?;
-    ledger.mr_created = true;
-    ledger.mr_url = Some(mr.url.clone());
-    println!("Draft MR: {}", mr.url);
-    notify_event(
-        cfg,
-        profile,
-        NotifyEvent::MrCreated {
-            url: &mr.url,
-            work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
-            backend: &route.effective_backend,
-            model: route.effective_model.as_deref().unwrap_or("unknown"),
-        },
-    );
+    if args.existing_branch.is_some() {
+        // FixMr is repairing a provider MR that the controller already
+        // observed. The pushed branch is the publication; trying to create a
+        // second MR converts a successful repair into a false dispatch
+        // failure (and GitHub/GitLab correctly reject the duplicate).
+        let existing = provider::find_review_target_by_branch(profile, &branch)
+            .with_context(|| format!("resolving existing PR/MR for repaired branch '{branch}'"))?;
+        ledger.mr_url = Some(existing.url.clone());
+        println!("Updated existing MR: {}", existing.url);
+    } else {
+        ledger.mr_attempted = true;
+        let mr = provider::create_draft_mr(profile, &branch, &mr_title, &mr_body)?;
+        ledger.mr_created = true;
+        ledger.mr_url = Some(mr.url.clone());
+        println!("Draft MR: {}", mr.url);
+        notify_event(
+            cfg,
+            profile,
+            NotifyEvent::MrCreated {
+                url: &mr.url,
+                work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
+                backend: &route.effective_backend,
+                model: route.effective_model.as_deref().unwrap_or("unknown"),
+            },
+        );
+    }
 
     clear_wip_checkpoints(repo, &wip_checkpoints);
     worktree::cleanup(&wt, repo);
