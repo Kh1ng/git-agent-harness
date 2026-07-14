@@ -132,7 +132,6 @@ enum Commands {
         /// Restart the system-wide control-plane service after a successful build.
         #[arg(long, default_value_t = false)]
         restart_server: bool,
-        /// systemd service restarted by --restart-server.
         #[arg(long, default_value = "gah-server.service")]
         server_service: String,
     },
@@ -1455,6 +1454,7 @@ fn main() -> Result<()> {
                     model_pm: None,
                     model_review: None,
                     review_timeout_seconds: None,
+                    validation_timeout_seconds: None,
                     routing: config::RoutingPolicy::default(),
                     publishing: Default::default(),
                     pacing: Default::default(),
