@@ -20,6 +20,10 @@ fn runner_adapter_facade_preserves_public_call_paths() {
     public(git_agent_harness::runner::list_oh_profiles);
     public(git_agent_harness::runner::load_oh_profile);
     public(git_agent_harness::runner::run_openhands);
+    public(git_agent_harness::runner::run_opencode);
+    public(git_agent_harness::runner::run_opencode_with_executable);
+    public(git_agent_harness::runner::run_vibe);
+    public(git_agent_harness::runner::run_vibe_with_executable);
 }
 
 #[derive(Debug, Deserialize)]
