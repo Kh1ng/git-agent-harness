@@ -33,6 +33,8 @@
 
 use crate::config::{GahConfig, Profile, WakeAutonomy};
 
+const NOTIFICATION_ERROR_SUMMARY_MAX_BYTES: usize = 300;
+
 /// A notification-worthy controller/dispatch event. All fields are borrowed
 /// from the live dispatch/controller state to avoid cloning.
 pub enum NotifyEvent<'a> {
@@ -40,6 +42,11 @@ pub enum NotifyEvent<'a> {
     HumanRequired {
         reason: &'a str,
         reference: Option<&'a str>,
+        failure_class: &'a str,
+        failure_stage: Option<&'a str>,
+        error_summary: Option<&'a str>,
+        attempt_count: Option<u32>,
+        mr_url: Option<&'a str>,
     },
     /// A draft MR/PR was created/pushed.
     MrCreated {
@@ -55,7 +62,11 @@ pub enum NotifyEvent<'a> {
     /// A dispatch failed terminally (retries exhausted).
     DispatchFailed {
         failure_class: &'a str,
+        failure_stage: Option<&'a str>,
         work_id: &'a str,
+        attempt_count: Option<u32>,
+        error_summary: Option<&'a str>,
+        mr_url: Option<&'a str>,
     },
     /// A backend was killed by GAH's idle watchdog. This is actionable even
     /// when the dispatch still has another route to try.
@@ -85,9 +96,27 @@ fn route_label(backend: &str, model: &str) -> String {
 /// `notify_command`. Pure and allocation-light; unit-tested below.
 pub fn format_message(event: &NotifyEvent) -> String {
     match event {
-        NotifyEvent::HumanRequired { reason, reference } => {
-            let ref_suffix = reference.map(|r| format!(" ({r})")).unwrap_or_default();
-            format!("[gah] human required: {reason}{ref_suffix}")
+        NotifyEvent::HumanRequired {
+            reason,
+            reference,
+            failure_class,
+            failure_stage,
+            error_summary,
+            attempt_count,
+            mr_url,
+        } => {
+            let mut msg = format!(
+                "[gah] human required: {reason} [class={failure_class}] [stage={}] [attempts={}]",
+                failure_stage.unwrap_or("unknown"),
+                format_attempt_count(*attempt_count),
+            );
+            if let Some(reference) = reference.or(*mr_url) {
+                msg.push_str(&format!(" ({reference})"));
+            }
+            if let Some(summary) = summarize_error_summary(*error_summary) {
+                msg.push_str(&format!(" summary={summary}"));
+            }
+            msg
         }
         NotifyEvent::MrCreated {
             url,
@@ -108,9 +137,24 @@ pub fn format_message(event: &NotifyEvent) -> String {
         }
         NotifyEvent::DispatchFailed {
             failure_class,
+            failure_stage,
             work_id,
+            attempt_count,
+            error_summary,
+            mr_url,
         } => {
-            format!("[gah] dispatch failed [{failure_class}] work_id={work_id}")
+            let mut msg = format!(
+                "[gah] dispatch failed [class={failure_class}] [stage={}] [attempts={}] work_id={work_id}",
+                failure_stage.unwrap_or("unknown"),
+                format_attempt_count(*attempt_count),
+            );
+            if let Some(mr_url) = mr_url {
+                msg.push_str(&format!(" ref={mr_url}"));
+            }
+            if let Some(summary) = summarize_error_summary(*error_summary) {
+                msg.push_str(&format!(" summary={summary}"));
+            }
+            msg
         }
         NotifyEvent::BackendStalled {
             work_id,
@@ -174,19 +218,52 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
             "A draft PR/MR is ready: {url} (work_id={work_id}, dispatched via {}).",
             route_label(backend, model)
         ),
-        NotifyEvent::HumanRequired { reason, reference } => {
-            let reference_suffix = reference
-                .map(|r| format!(" Reference: {r}."))
-                .unwrap_or_default();
-            format!("gah loop is blocked and needs judgment: {reason}.{reference_suffix}")
+        NotifyEvent::HumanRequired {
+            reason,
+            reference,
+            failure_class,
+            failure_stage,
+            error_summary,
+            attempt_count,
+            mr_url,
+        } => {
+            let mut context = format!(
+                "gah loop is blocked and needs judgment: [class={failure_class}] [stage={}] [attempts={}] {reason}.",
+                failure_stage.unwrap_or("unknown"),
+                format_attempt_count(*attempt_count),
+            );
+            if let Some(reference) = reference.or(*mr_url) {
+                context.push_str(&format!(" Reference: {reference}."));
+            }
+            if let Some(summary) = summarize_error_summary(*error_summary) {
+                context.push_str(&format!(" summary={summary}"));
+            }
+            context
         }
         NotifyEvent::ReviewVerdict { verdict, mr_url } => {
             format!("A review verdict was recorded: {verdict} on {mr_url}.")
         }
         NotifyEvent::DispatchFailed {
             failure_class,
+            failure_stage,
             work_id,
-        } => format!("A dispatch failed terminally: [{failure_class}] work_id={work_id}."),
+            attempt_count,
+            error_summary,
+            mr_url,
+        } => {
+            let mut context = format!(
+                "A dispatch failed terminally: [class={failure_class}] [stage={}] [attempts={}] work_id={work_id}.",
+                failure_stage.unwrap_or("unknown"),
+                format_attempt_count(*attempt_count),
+            );
+            if let Some(mr_url) = mr_url {
+                context.push_str(&format!(" ref={mr_url}"));
+            }
+            if let Some(summary) = summarize_error_summary(*error_summary) {
+                context.push_str(&format!(" summary={summary}"));
+            }
+            context
+        }
         NotifyEvent::BackendStalled {
             work_id,
             backend,
@@ -343,6 +420,35 @@ fn spawn_manager_wake(manager: &str, instruction: &str, log_dir: &std::path::Pat
     }
 }
 
+fn format_attempt_count(attempt_count: Option<u32>) -> String {
+    attempt_count.map_or_else(|| "unknown".to_string(), |count| count.to_string())
+}
+
+fn summarize_error_summary(summary: Option<&str>) -> Option<String> {
+    summary.and_then(|summary| {
+        let sanitized = crate::redact::redact(&strip_ansi(summary));
+        let sanitized = sanitized.trim();
+        if sanitized.is_empty() {
+            return None;
+        }
+        let truncated =
+            crate::dispatch::utf8_safe_prefix(sanitized, NOTIFICATION_ERROR_SUMMARY_MAX_BYTES);
+        let truncated = truncated.trim();
+        if truncated.is_empty() {
+            None
+        } else {
+            Some(truncated.to_string())
+        }
+    })
+}
+
+fn strip_ansi(text: &str) -> String {
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
+    let osc = regex::Regex::new(r"\x1b\].*?(?:\x07|\x1b\\)").unwrap();
+    let ansi_text = ansi.replace_all(text, "");
+    osc.replace_all(&ansi_text, "").into_owned()
+}
+
 /// Fire a notification for `event`: the existing `notify_command` hook (if
 /// the profile defines one), and additionally wake the configured manager
 /// agent (if the profile opts in via `manager_wake_autonomy` and
@@ -376,10 +482,15 @@ mod tests {
         let msg = format_message(&NotifyEvent::HumanRequired {
             reason: "MR ready for human decision",
             reference: Some("https://github.com/owner/repo/pull/7"),
+            failure_class: "human_blocked",
+            failure_stage: Some("review"),
+            error_summary: None,
+            attempt_count: Some(2),
+            mr_url: None,
         });
         assert_eq!(
             msg,
-            "[gah] human required: MR ready for human decision (https://github.com/owner/repo/pull/7)"
+            "[gah] human required: MR ready for human decision [class=human_blocked] [stage=review] [attempts=2] (https://github.com/owner/repo/pull/7)"
         );
     }
 
@@ -388,8 +499,16 @@ mod tests {
         let msg = format_message(&NotifyEvent::HumanRequired {
             reason: "waiting on operator",
             reference: None,
+            failure_class: "human_blocked",
+            failure_stage: Some("review"),
+            error_summary: None,
+            attempt_count: Some(2),
+            mr_url: Some("https://github.com/owner/repo/branch/feature"),
         });
-        assert_eq!(msg, "[gah] human required: waiting on operator");
+        assert_eq!(
+            msg,
+            "[gah] human required: waiting on operator [class=human_blocked] [stage=review] [attempts=2] (https://github.com/owner/repo/branch/feature)"
+        );
     }
 
     #[test]
@@ -437,12 +556,52 @@ mod tests {
     fn dispatch_failed_includes_failure_class_and_work_id() {
         let msg = format_message(&NotifyEvent::DispatchFailed {
             failure_class: "validation_failure",
+            failure_stage: Some("agent_run"),
             work_id: "WORK-Y",
+            attempt_count: Some(3),
+            error_summary: None,
+            mr_url: Some("https://example.com/mr/4"),
         });
         assert_eq!(
             msg,
-            "[gah] dispatch failed [validation_failure] work_id=WORK-Y"
+            "[gah] dispatch failed [class=validation_failure] [stage=agent_run] [attempts=3] work_id=WORK-Y ref=https://example.com/mr/4"
         );
+    }
+
+    #[test]
+    fn dispatch_failed_without_summary_renders_without_none() {
+        let msg = format_message(&NotifyEvent::DispatchFailed {
+            failure_class: "unknown",
+            failure_stage: None,
+            work_id: "WORK-Z",
+            attempt_count: None,
+            error_summary: None,
+            mr_url: None,
+        });
+        assert_eq!(
+            msg,
+            "[gah] dispatch failed [class=unknown] [stage=unknown] [attempts=unknown] work_id=WORK-Z"
+        );
+        assert!(!msg.contains("None"));
+    }
+
+    #[test]
+    fn dispatch_failed_truncates_and_strips_ansi_from_summary() {
+        let long_summary = format!("\u{1b}[31m{}\u{1b}[0m", "x".repeat(400));
+        let msg = format_message(&NotifyEvent::DispatchFailed {
+            failure_class: "validation_failure",
+            failure_stage: Some("agent_run"),
+            work_id: "WORK-Y",
+            attempt_count: None,
+            error_summary: Some(&long_summary),
+            mr_url: None,
+        });
+        let summary = msg
+            .split(" summary=")
+            .nth(1)
+            .expect("summary field should be present");
+        assert!(!summary.contains('\u{1b}'));
+        assert!(summary.len() <= 300);
     }
 
     fn test_gah_config(current_manager: Option<&str>) -> GahConfig {
@@ -467,6 +626,11 @@ mod tests {
             NotifyEvent::HumanRequired {
                 reason: "x",
                 reference: None,
+                failure_class: "human_blocked",
+                failure_stage: Some("review"),
+                error_summary: None,
+                attempt_count: None,
+                mr_url: None,
             },
         );
     }
@@ -506,6 +670,11 @@ mod tests {
             NotifyEvent::HumanRequired {
                 reason: "x",
                 reference: None,
+                failure_class: "human_blocked",
+                failure_stage: Some("review"),
+                error_summary: None,
+                attempt_count: None,
+                mr_url: None,
             },
             NotifyEvent::MrCreated {
                 url: "u",
@@ -519,7 +688,11 @@ mod tests {
             },
             NotifyEvent::DispatchFailed {
                 failure_class: "c",
+                failure_stage: Some("agent_run"),
                 work_id: "w",
+                attempt_count: Some(1),
+                error_summary: None,
+                mr_url: None,
             },
         ] {
             assert!(format_wake_instruction(&event, WakeAutonomy::Off).is_none());
@@ -580,6 +753,11 @@ mod tests {
         let event = NotifyEvent::HumanRequired {
             reason: "MR ready for human decision",
             reference: Some("https://example.com/mr/7"),
+            failure_class: "human_blocked",
+            failure_stage: Some("review"),
+            error_summary: None,
+            attempt_count: Some(1),
+            mr_url: None,
         };
         let instruction = format_wake_instruction(&event, WakeAutonomy::Full).unwrap();
         assert!(instruction.contains("MR ready for human decision"));

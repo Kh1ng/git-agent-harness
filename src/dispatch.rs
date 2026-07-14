@@ -57,7 +57,7 @@ fn utf8_safe_suffix(s: &str, max_bytes: usize) -> &str {
 /// adjusting the end index backward to a valid character boundary.
 /// Result length is guaranteed <= max_bytes.
 /// Never panics on valid UTF-8 input.
-fn utf8_safe_prefix(s: &str, max_bytes: usize) -> &str {
+pub(crate) fn utf8_safe_prefix(s: &str, max_bytes: usize) -> &str {
     if s.is_empty() || max_bytes == 0 {
         return "";
     }
@@ -906,6 +906,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
             profile,
             NotifyEvent::DispatchFailed {
                 failure_class: ledger.failure_class.as_deref().unwrap_or("unknown"),
+                failure_stage: ledger.failure_stage.as_deref(),
                 // Live-observed: a review dispatch that fails before
                 // resolving its target has no work_id (review targets a
                 // branch/MR, not a ticket) -- fall back to the branch so
@@ -917,6 +918,9 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
                     .as_deref()
                     .or(ledger.branch.as_deref())
                     .unwrap_or("unknown"),
+                attempt_count: ledger.attempts_started,
+                error_summary: ledger.error_summary.as_deref(),
+                mr_url: ledger.mr_url.as_deref().or(ledger.branch.as_deref()),
             },
         );
     }
@@ -3914,6 +3918,14 @@ fn review(
             NotifyEvent::HumanRequired {
                 reason: "review budget exhausted",
                 reference: target.mr_url.as_deref(),
+                failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
+                failure_stage: ledger.failure_stage.as_deref(),
+                error_summary: ledger.error_summary.as_deref(),
+                attempt_count: ledger.attempts_started,
+                mr_url: target
+                    .mr_url
+                    .as_deref()
+                    .or(Some(target.source_branch.as_str())),
             },
         );
         return Err(ReviewBudgetExhausted::new(block.reason).into());
@@ -4143,6 +4155,11 @@ fn review(
                     NotifyEvent::HumanRequired {
                         reason: "review verdict requires human attention",
                         reference: mr_url.as_deref(),
+                        failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
+                        failure_stage: ledger.failure_stage.as_deref(),
+                        error_summary: ledger.error_summary.as_deref(),
+                        attempt_count: ledger.attempts_started,
+                        mr_url: mr_url.as_deref().or(Some(target.source_branch.as_str())),
                     },
                 );
             }
@@ -10152,6 +10169,14 @@ fn stop_for_exhausted_review_escalation(
         NotifyEvent::HumanRequired {
             reason: "review escalation exhausted",
             reference: target.mr_url.as_deref(),
+            failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
+            failure_stage: ledger.failure_stage.as_deref(),
+            error_summary: ledger.error_summary.as_deref(),
+            attempt_count: ledger.attempts_started,
+            mr_url: target
+                .mr_url
+                .as_deref()
+                .or(Some(target.source_branch.as_str())),
         },
     );
     if profile.publishing.allow_issue_comments {
