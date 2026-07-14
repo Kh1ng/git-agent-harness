@@ -69,3 +69,21 @@ pub(super) fn gah_config(routing: RoutingPolicy) -> GahConfig {
         profiles: std::collections::HashMap::new(),
     }
 }
+
+/// Like `gah_config`, but with `artifact_root` pointed at a real tempdir so
+/// ledger-backed tests have somewhere to persist their fixtures.
+pub(super) fn gah_config_with_ledger(tmp: &Path, routing: RoutingPolicy) -> GahConfig {
+    GahConfig {
+        context: Default::default(),
+        defaults: Defaults {
+            current_manager: None,
+            artifact_root: tmp.display().to_string(),
+            worktree_base: String::new(),
+            llm_base_url: String::new(),
+            llm_model_local: String::new(),
+            llm_model_cloud: String::new(),
+            routing,
+        },
+        profiles: std::collections::HashMap::new(),
+    }
+}
