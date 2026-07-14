@@ -6,8 +6,14 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::{LazyLock, Mutex};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+#[cfg(test)]
+static READ_ENTRIES_CALLS: LazyLock<Mutex<std::collections::HashMap<PathBuf, usize>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Coarse attribution for why a dispatch failed. Deliberately not
 /// exhaustively wired everywhere yet (TICKET-063): only the least ambiguous
@@ -600,8 +606,21 @@ pub fn active_paid_route_approvals(
     profile_name: &str,
     work_id: &str,
 ) -> Result<HashSet<(String, Option<String>)>> {
+    let entries = read_entries(cfg)?;
+    Ok(active_paid_route_approvals_from_entries(
+        &entries,
+        profile_name,
+        work_id,
+    ))
+}
+
+pub fn active_paid_route_approvals_from_entries(
+    entries: &[LedgerEntry],
+    profile_name: &str,
+    work_id: &str,
+) -> HashSet<(String, Option<String>)> {
     let mut active = HashSet::new();
-    for entry in read_entries(cfg)? {
+    for entry in entries {
         if entry.profile != profile_name || entry.work_id.as_deref() != Some(work_id) {
             continue;
         }
@@ -619,7 +638,7 @@ pub fn active_paid_route_approvals(
             _ => {}
         }
     }
-    Ok(active)
+    active
 }
 
 /// A manager review is a much shorter-lived action than a full dispatch
@@ -655,6 +674,7 @@ fn is_review_hold_stale(entry: &LedgerEntry) -> bool {
 /// actively reviewing out of band. Entries are appended in chronological
 /// order, so a single forward pass where each hold/release overwrites the
 /// previous verdict for its work_id naturally lands on the latest one.
+#[allow(dead_code)]
 pub fn active_review_hold_work_ids(
     cfg: &GahConfig,
     profile_name: &str,
@@ -663,7 +683,13 @@ pub fn active_review_hold_work_ids(
         Ok(entries) => entries,
         Err(_) => return std::collections::HashSet::new(),
     };
+    active_review_hold_work_ids_from_entries(&entries, profile_name)
+}
 
+pub fn active_review_hold_work_ids_from_entries(
+    entries: &[LedgerEntry],
+    profile_name: &str,
+) -> std::collections::HashSet<String> {
     let mut held: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     for entry in entries.iter().filter(|e| e.profile == profile_name) {
         let Some(work_id) = entry.work_id.as_deref() else {
@@ -828,22 +854,57 @@ fn truncated_tail_offset(bytes: &[u8]) -> Option<usize> {
     }
 }
 
-pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
-    let path = cfg.defaults.ledger_path();
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+fn parse_jsonl_entries(text: &str, path: &Path, starting_line: usize) -> Result<Vec<LedgerEntry>> {
     let mut entries = vec![];
     for (idx, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let entry = serde_json::from_str::<LedgerEntry>(line)
-            .with_context(|| format!("parsing ledger entry {} from {}", idx + 1, path.display()))?;
+        let entry = serde_json::from_str::<LedgerEntry>(line).with_context(|| {
+            format!(
+                "parsing ledger entry {} from {}",
+                starting_line + idx + 1,
+                path.display()
+            )
+        })?;
         entries.push(entry);
     }
     Ok(entries)
+}
+
+pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
+    let path = cfg.defaults.ledger_path();
+    #[cfg(test)]
+    {
+        *READ_ENTRIES_CALLS
+            .lock()
+            .expect("ledger read counter lock poisoned")
+            .entry(path.clone())
+            .or_default() += 1;
+    }
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    parse_jsonl_entries(&text, &path, 0)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_read_entries_call_count(cfg: &GahConfig) {
+    READ_ENTRIES_CALLS
+        .lock()
+        .expect("ledger read counter lock poisoned")
+        .remove(&cfg.defaults.ledger_path());
+}
+
+#[cfg(test)]
+pub(crate) fn read_entries_call_count(cfg: &GahConfig) -> usize {
+    READ_ENTRIES_CALLS
+        .lock()
+        .expect("ledger read counter lock poisoned")
+        .get(&cfg.defaults.ledger_path())
+        .copied()
+        .unwrap_or(0)
 }
 
 /// TICKET-125: review mode's own ledger entry records the reviewer's
@@ -910,7 +971,7 @@ pub fn backfill_review_verdict(
     }
     fs::write(&path, out).with_context(|| format!("rewriting ledger {}", path.display()))?;
 
-    if let Err(err) = sqlite_store::sync_from_jsonl(cfg) {
+    if let Err(err) = sqlite_store::rebuild_from_jsonl(cfg) {
         eprintln!("warning: failed to sync sqlite ledger mirror: {err:#}");
     }
 
@@ -996,10 +1057,12 @@ pub fn index_entries_by_work_id(entries: &[LedgerEntry]) -> LedgerEntriesByWorkI
 /// committing to a migration yet -- see the module's `sync_from_jsonl` doc
 /// for the tradeoff this makes.
 pub mod sqlite_store {
-    use super::{read_entries, LedgerEntry};
+    use super::{parse_jsonl_entries, read_entries, LedgerEntry};
     use crate::config::GahConfig;
     use anyhow::{Context, Result};
     use rusqlite::{params, Connection};
+    use std::fs::{self, File};
+    use std::io::{Read, Seek, SeekFrom};
     use std::path::PathBuf;
 
     pub fn db_path(cfg: &GahConfig) -> PathBuf {
@@ -1028,11 +1091,135 @@ pub mod sqlite_store {
                 estimated_cost_usd REAL,
                 raw_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS ledger_sync_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                synced_byte_len INTEGER NOT NULL,
+                synced_entry_count INTEGER NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_ledger_entries_profile_ts
                 ON ledger_entries(profile, timestamp);
             CREATE INDEX IF NOT EXISTS idx_ledger_entries_work_id
                 ON ledger_entries(work_id);",
         )?;
+        Ok(())
+    }
+
+    fn load_sync_state(conn: &Connection) -> Result<Option<(u64, u64)>> {
+        let mut stmt = conn.prepare(
+            "SELECT synced_byte_len, synced_entry_count FROM ledger_sync_state WHERE id = 1",
+        )?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn store_sync_state(
+        tx: &rusqlite::Transaction,
+        synced_byte_len: u64,
+        synced_entry_count: u64,
+    ) -> Result<()> {
+        tx.execute(
+            "INSERT INTO ledger_sync_state (id, synced_byte_len, synced_entry_count)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET
+                 synced_byte_len=excluded.synced_byte_len,
+                 synced_entry_count=excluded.synced_entry_count",
+            params![synced_byte_len as i64, synced_entry_count as i64],
+        )?;
+        Ok(())
+    }
+
+    fn sync_full_from_entries(cfg: &GahConfig, entries: &[LedgerEntry]) -> Result<()> {
+        let db_path = db_path(cfg);
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        let mut conn = Connection::open(&db_path)
+            .with_context(|| format!("opening sqlite ledger {}", db_path.display()))?;
+        ensure_schema(&conn)?;
+        let synced_byte_len = fs::metadata(cfg.defaults.ledger_path())
+            .with_context(|| {
+                format!(
+                    "reading metadata for {}",
+                    cfg.defaults.ledger_path().display()
+                )
+            })?
+            .len();
+        let tx = conn.transaction().context("opening sqlite transaction")?;
+        tx.execute("DELETE FROM ledger_entries", [])
+            .context("clearing sqlite ledger mirror before resync")?;
+        for entry in entries {
+            insert_entry(&tx, entry)?;
+        }
+        store_sync_state(&tx, synced_byte_len, entries.len() as u64)?;
+        tx.commit().context("committing sqlite ledger mirror")?;
+        Ok(())
+    }
+
+    fn sync_incremental_from_jsonl(cfg: &GahConfig) -> Result<()> {
+        let ledger_path = cfg.defaults.ledger_path();
+        let db_path = db_path(cfg);
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        let mut conn = Connection::open(&db_path)
+            .with_context(|| format!("opening sqlite ledger {}", db_path.display()))?;
+        ensure_schema(&conn)?;
+
+        let ledger_meta = match fs::metadata(&ledger_path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let tx = conn.transaction().context("opening sqlite transaction")?;
+                tx.execute("DELETE FROM ledger_entries", [])
+                    .context("clearing sqlite ledger mirror before resync")?;
+                store_sync_state(&tx, 0, 0)?;
+                tx.commit().context("committing sqlite ledger mirror")?;
+                return Ok(());
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("reading {}", ledger_path.display()))
+            }
+        };
+
+        let ledger_len = ledger_meta.len();
+        let sync_state = load_sync_state(&conn)?;
+        let Some((synced_byte_len, synced_entry_count)) = sync_state else {
+            let entries = read_entries(cfg)?;
+            return sync_full_from_entries(cfg, &entries);
+        };
+
+        if ledger_len < synced_byte_len {
+            let entries = read_entries(cfg)?;
+            return sync_full_from_entries(cfg, &entries);
+        }
+
+        if ledger_len == synced_byte_len {
+            return Ok(());
+        }
+
+        let mut file = File::open(&ledger_path)
+            .with_context(|| format!("opening {}", ledger_path.display()))?;
+        file.seek(SeekFrom::Start(synced_byte_len))
+            .with_context(|| format!("seeking {}", ledger_path.display()))?;
+        let mut tail = String::new();
+        file.read_to_string(&mut tail)
+            .with_context(|| format!("reading {}", ledger_path.display()))?;
+        if tail.trim().is_empty() {
+            return Ok(());
+        }
+
+        let entries = parse_jsonl_entries(&tail, &ledger_path, synced_entry_count as usize)?;
+
+        let mut conn = conn;
+        let tx = conn.transaction().context("opening sqlite transaction")?;
+        for entry in &entries {
+            insert_entry(&tx, entry)?;
+        }
+        store_sync_state(&tx, ledger_len, synced_entry_count + entries.len() as u64)?;
+        tx.commit().context("committing sqlite ledger mirror")?;
         Ok(())
     }
 
@@ -1074,28 +1261,13 @@ pub mod sqlite_store {
     /// trivially can't drift from the JSONL it's derived from, which an
     /// incremental dual-write easily could (e.g. `backfill_review_verdict`
     /// rewrites an arbitrary earlier line, not just the latest one).
-    /// ponytail: O(entries) per call -- fine at today's ledger size
-    /// (hundreds of lines, sub-second); once the JSONL file is large
-    /// enough for this to show up in dispatch latency, switch to keyed
-    /// incremental upserts (e.g. by rowid keyed to line number, or a real
-    /// per-entry id added to LedgerEntry) instead of a full rebuild.
     pub fn sync_from_jsonl(cfg: &GahConfig) -> Result<()> {
+        sync_incremental_from_jsonl(cfg)
+    }
+
+    pub fn rebuild_from_jsonl(cfg: &GahConfig) -> Result<()> {
         let entries = read_entries(cfg)?;
-        let db_path = db_path(cfg);
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let mut conn = Connection::open(&db_path)
-            .with_context(|| format!("opening sqlite ledger {}", db_path.display()))?;
-        ensure_schema(&conn)?;
-        conn.execute("DELETE FROM ledger_entries", [])
-            .context("clearing sqlite ledger mirror before resync")?;
-        let tx = conn.transaction().context("opening sqlite transaction")?;
-        for entry in &entries {
-            insert_entry(&tx, entry)?;
-        }
-        tx.commit().context("committing sqlite ledger mirror")?;
-        Ok(())
+        sync_full_from_entries(cfg, &entries)
     }
 
     #[cfg(test)]
@@ -1151,6 +1323,112 @@ pub mod sqlite_store {
                 )
                 .unwrap();
             assert_eq!(review_verdict.as_deref(), Some("APPROVE"));
+        }
+
+        #[test]
+        fn sync_incrementally_appends_without_rereading_the_full_ledger() {
+            let (_tmp, cfg) = test_config();
+            crate::ledger::reset_read_entries_call_count(&cfg);
+
+            let mut first = LedgerEntry::new(
+                "test",
+                &profile(),
+                "codex",
+                "improve",
+                "target-a",
+                None,
+                None,
+            );
+            first.branch = Some("gah/test-1".to_string());
+            append(&cfg, &first).unwrap();
+            assert_eq!(crate::ledger::read_entries_call_count(&cfg), 1);
+
+            let db_path = db_path(&cfg);
+            let conn = Connection::open(&db_path).unwrap();
+            let count_after_first: i64 = conn
+                .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count_after_first, 1);
+
+            let mut second = LedgerEntry::new(
+                "test",
+                &profile(),
+                "codex",
+                "improve",
+                "target-b",
+                None,
+                None,
+            );
+            second.branch = Some("gah/test-2".to_string());
+            append(&cfg, &second).unwrap();
+            assert_eq!(crate::ledger::read_entries_call_count(&cfg), 1);
+
+            let count_after_second: i64 = conn
+                .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count_after_second, 2);
+        }
+
+        #[test]
+        fn failed_full_rebuild_preserves_previous_rows_and_sync_state() {
+            let (_tmp, cfg) = test_config();
+            let first = LedgerEntry::new(
+                "test",
+                &profile(),
+                "codex",
+                "improve",
+                "original",
+                None,
+                None,
+            );
+            append(&cfg, &first).unwrap();
+
+            let db_path = db_path(&cfg);
+            let conn = Connection::open(&db_path).unwrap();
+            let state_before: (i64, i64) = conn
+                .query_row(
+                    "SELECT synced_byte_len, synced_entry_count FROM ledger_sync_state WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER reject_rebuild BEFORE INSERT ON ledger_entries
+                 BEGIN SELECT RAISE(FAIL, 'injected rebuild failure'); END;",
+            )
+            .unwrap();
+            drop(conn);
+
+            let replacement = LedgerEntry::new(
+                "test",
+                &profile(),
+                "codex",
+                "improve",
+                "replacement",
+                None,
+                None,
+            );
+            let error = sync_full_from_entries(&cfg, &[replacement]).unwrap_err();
+            assert!(error.to_string().contains("injected rebuild failure"));
+
+            let conn = Connection::open(&db_path).unwrap();
+            let rows: Vec<String> = conn
+                .prepare("SELECT raw_json FROM ledger_entries ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].contains("original"));
+            let state_after: (i64, i64) = conn
+                .query_row(
+                    "SELECT synced_byte_len, synced_entry_count FROM ledger_sync_state WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state_after, state_before);
         }
     }
 }
