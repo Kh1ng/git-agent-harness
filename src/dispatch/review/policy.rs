@@ -1,0 +1,639 @@
+use super::super::text::extract_first_json_object;
+use super::super::ReviewDiffBundle;
+use crate::config::{CandidateConfig, GahConfig, Profile};
+use crate::ledger::{self, LedgerEntry};
+use crate::routing::RouteDecision;
+use anyhow::Result;
+use std::collections::HashSet;
+use std::fmt;
+
+/// Typed, terminal refusal used when a ticket has exhausted its configured
+/// review budget. Keeping this distinct from backend failures lets the
+/// controller close the run cleanly and makes the operator-visible event
+/// stream explain that no reviewer was launched and no extra quota was spent.
+#[derive(Debug)]
+pub struct ReviewBudgetExhausted {
+    pub(in crate::dispatch) reason: String,
+}
+
+impl ReviewBudgetExhausted {
+    pub(in crate::dispatch) fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl fmt::Display for ReviewBudgetExhausted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for ReviewBudgetExhausted {}
+
+pub fn review_budget_exhausted_error(err: &anyhow::Error) -> Option<&ReviewBudgetExhausted> {
+    err.downcast_ref::<ReviewBudgetExhausted>()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::dispatch) struct ReviewBudgetBlock {
+    pub(in crate::dispatch) reason: String,
+}
+
+/// Return a deterministic ticket-scoped review budget block before a reviewer
+/// is launched. A cycle is a prior review dispatch that consumed a real
+/// reviewer call; it includes failed and timed-out reviews because those can
+/// still consume quota, but excludes both a prior budget refusal and a
+/// duplicate-review short-circuit (same source SHA/tier already reviewed),
+/// since neither launched a reviewer. Paid usage is counted only from an
+/// explicit recorded `api_key_backed` classification, never inferred from a
+/// provider name or silently from unknown data. The paid cap applies only
+/// when routing has explicitly selected a candidate configured as paid;
+/// quota-backed, local, and unknown-cost routes remain eligible until the
+/// cycle cap is reached.
+pub(in crate::dispatch) fn check_review_budget(
+    cfg: &GahConfig,
+    profile: &Profile,
+    profile_name: &str,
+    work_id: Option<&str>,
+    route: &RouteDecision,
+) -> Result<Option<ReviewBudgetBlock>> {
+    // Direct branch/MR reviews without a controller-provided ticket identity
+    // cannot be attributed safely to a per-ticket budget. Fail open rather
+    // than accidentally merging unrelated branches into one accounting bucket.
+    let Some(work_id) = work_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let routing = profile.effective_routing(&cfg.defaults);
+    let entries = ledger::entries_for_work_id(cfg, work_id)?;
+    let reviews: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry.profile == profile_name
+                && entry.mode == "review"
+                && !matches!(
+                    entry.validation_result.as_deref(),
+                    Some("review_budget_exhausted") | Some("skipped_duplicate_review")
+                )
+        })
+        .collect();
+
+    let cycle_count = reviews.len() as u32;
+    let cycle_cap = routing.max_review_cycles_per_ticket();
+    if cycle_count >= cycle_cap {
+        return Ok(Some(ReviewBudgetBlock {
+            reason: format!(
+                "review budget exhausted for {work_id}: {cycle_count}/{cycle_cap} review cycles used"
+            ),
+        }));
+    }
+
+    let selected_paid = route
+        .routing_diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.selected_cost_class.as_deref())
+        == Some("paid");
+    if selected_paid {
+        let paid_count = reviews
+            .iter()
+            .filter(|entry| entry.usage.usage_classification.as_deref() == Some("api_key_backed"))
+            .count() as u32;
+        let paid_cap = routing.max_paid_reviews_per_ticket();
+        if paid_count >= paid_cap {
+            return Ok(Some(ReviewBudgetBlock {
+                reason: format!(
+                    "paid review budget exhausted for {work_id}: {paid_count}/{paid_cap} API-backed reviews used"
+                ),
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+/// The routine reviewer (`review_backend`, e.g. Vibe/Mistral) is fast and
+/// cheap but was never meant to be the last word on a genuinely hard or
+/// repeatedly-failing review. The repeated-failure trigger follows the
+/// configured post-review repair budget; adds an
+/// immediate-escalate path for a reviewer that itself reported low
+/// confidence, since forcing 2 low-confidence rubber stamps before getting
+/// a second opinion defeats the point of tracking confidence at all.
+///
+/// Reads `validation_result`/`confidence_impact` off this branch's own
+/// `mode == "review"` entries -- NOT `review_verdict`/`review_confidence`.
+/// Those two fields are written by `backfill_review_verdict` (ledger.rs,
+/// TICKET-125) onto the *implementation* (fix/improve) entry instead, by
+/// design (see `backfill_review_verdict_attributes_to_implementation_entry_not_reviewer`).
+/// A review dispatch's own entry never carries a `review_verdict`, so
+/// checking that field here would make this permanently a no-op; the
+/// verdict/confidence a review entry actually records about itself live in
+/// `validation_result`/`confidence_impact` (set directly in `review()`).
+pub(in crate::dispatch) fn review_escalation_reason(
+    cfg: &GahConfig,
+    profile: &Profile,
+    profile_name: &str,
+    branch: &str,
+) -> Option<&'static str> {
+    let repeated_failure_threshold = profile
+        .effective_routing(&cfg.defaults)
+        .max_fix_attempts_per_mr() as usize;
+
+    let entries = ledger::read_entries(cfg).ok()?;
+    let recent: Vec<&LedgerEntry> = entries
+        .iter()
+        .rev()
+        .filter(|e| {
+            e.profile == profile_name && e.mode == "review" && e.branch.as_deref() == Some(branch)
+        })
+        .take(repeated_failure_threshold)
+        .collect();
+
+    // A real HUMAN_REVIEW verdict and a deterministic evidence-gate hold both
+    // use this persisted result. Neither is a reason to abandon automation
+    // while a configured second-opinion reviewer remains.
+    if recent
+        .first()
+        .is_some_and(|e| e.validation_result.as_deref() == Some("HUMAN_REVIEW"))
+    {
+        return Some("human_review");
+    }
+
+    if recent
+        .first()
+        .is_some_and(|e| e.confidence_impact.as_deref() == Some("low"))
+    {
+        return Some("low_confidence");
+    }
+
+    if recent.len() == repeated_failure_threshold
+        && recent.iter().all(|e| {
+            matches!(
+                e.validation_result.as_deref(),
+                Some("NEEDS_FIX") | Some("REJECT")
+            )
+        })
+    {
+        return Some("repeated_needs_fix");
+    }
+
+    None
+}
+
+/// Select the next unused reviewer from the explicitly ordered escalation
+/// chain. The identity includes both backend instance and model: AGY account
+/// 1, AGY account 2, and a paid gateway must remain independently observable
+/// and independently eligible for a second opinion.
+pub(in crate::dispatch) fn next_escalatory_reviewer(
+    cfg: &GahConfig,
+    profile: &Profile,
+    profile_name: &str,
+    branch: &str,
+    current: Option<(&str, Option<&str>)>,
+) -> Option<CandidateConfig> {
+    let mut attempted: HashSet<(String, Option<String>)> = ledger::read_entries(cfg)
+        .ok()?
+        .into_iter()
+        .filter(|entry| {
+            entry.profile == profile_name
+                && entry.mode == "review"
+                && entry.branch.as_deref() == Some(branch)
+                && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
+        })
+        .map(|entry| (entry.effective_backend, entry.effective_model))
+        .collect();
+    if let Some((backend, model)) = current {
+        attempted.insert((backend.to_string(), model.map(str::to_string)));
+    }
+
+    profile
+        .effective_routing(&cfg.defaults)
+        .effective_escalatory_reviewers()
+        .into_iter()
+        .find(|candidate| {
+            // A candidate left without an explicit model is recorded in the
+            // ledger under whatever effective model routing backfilled for it
+            // (e.g. codex's config-file default, mirroring routing.rs's own
+            // decide_route backfill) -- compare against that, not the raw
+            // config value, or a once-tried backfilled candidate looks
+            // perpetually untried and the chain never advances past it.
+            let effective_model = if candidate.backend == "codex" && candidate.model.is_none() {
+                crate::runner::extract_model_from_args(&profile.codex_args)
+            } else {
+                candidate.model.clone()
+            };
+            !attempted.contains(&(candidate.backend.clone(), effective_model))
+        })
+}
+
+/// Review deduplication normally works at the authority-tier level. An
+/// ordered escalation chain deliberately contains several distinct second
+/// opinions, so each escalatory backend/model pair gets one review of a
+/// source commit rather than the first escalatory reviewer suppressing every
+/// later one.
+pub(in crate::dispatch) fn reviewer_dedup_class(
+    tier: ReviewerTier,
+    route: &RouteDecision,
+) -> String {
+    match tier {
+        ReviewerTier::Escalatory => format!(
+            "escalatory:{}/{}",
+            route.effective_backend,
+            route.effective_model.as_deref().unwrap_or("default")
+        ),
+        _ => tier.as_str().to_string(),
+    }
+}
+
+/// Facts supplied by the control plane, not the reviewer. An approval must
+/// cite these exact facts; free-form reviewer claims alone never make a change
+/// safe to merge.
+#[derive(Debug, Clone, Default)]
+pub(in crate::dispatch) struct ReviewGateContext {
+    changed_files: Vec<String>,
+    ci_passed: bool,
+    contract_files: Vec<String>,
+    compatibility_mechanisms: Vec<&'static str>,
+    enforce_grounding: bool,
+}
+
+impl ReviewGateContext {
+    pub(in crate::dispatch) fn from_diff_bundle(
+        bundle: &ReviewDiffBundle,
+        ci_status: Option<&str>,
+    ) -> Self {
+        let changed_files: Vec<String> = bundle
+            .files
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect();
+        let diff_lower = bundle.diff.to_ascii_lowercase();
+        let public_api_change = bundle.diff.lines().any(|line| {
+            let line = line.trim_start_matches(['+', '-']);
+            line.trim_start().starts_with("pub struct ")
+                || line.trim_start().starts_with("pub enum ")
+                || line.trim_start().starts_with("pub type ")
+                || line.trim_start().starts_with("pub fn ")
+        });
+        let contract_files: Vec<String> = changed_files
+            .iter()
+            .filter(|path| {
+                path.starts_with("packages/contracts/")
+                    || path.starts_with("src/telemetry/")
+                    || path == &"src/ledger.rs"
+                    || path.starts_with("migrations/")
+                    || path.contains("/api/")
+                    || path.starts_with("apps/server/src/")
+                    || (public_api_change && path.starts_with("src/"))
+            })
+            .cloned()
+            .collect();
+        let mut compatibility_mechanisms = Vec::new();
+        if diff_lower.contains("schema_version") {
+            compatibility_mechanisms.push("schema-version");
+        }
+        if diff_lower.contains("serde(default)") {
+            compatibility_mechanisms.push("backward-compatible-default");
+        }
+        if diff_lower.contains("migrat") {
+            compatibility_mechanisms.push("migration");
+        }
+
+        Self {
+            changed_files,
+            ci_passed: ci_status.is_some_and(|status| {
+                matches!(
+                    status.trim().to_ascii_lowercase().as_str(),
+                    "passed" | "success" | "green"
+                )
+            }),
+            contract_files,
+            compatibility_mechanisms,
+            enforce_grounding: true,
+        }
+    }
+
+    fn has_contract_surface_change(&self) -> bool {
+        !self.contract_files.is_empty()
+    }
+
+    fn evidence_is_grounded(&self, evidence: &[String]) -> bool {
+        evidence.iter().any(|item| {
+            let Some(path) = item.trim().strip_prefix("file:") else {
+                return false;
+            };
+            self.changed_files
+                .iter()
+                .any(|candidate| candidate == path.trim())
+        })
+    }
+
+    fn falsely_claims_passed_ci(&self, evidence: &[String]) -> bool {
+        !self.ci_passed
+            && evidence
+                .iter()
+                .any(|item| item.trim().eq_ignore_ascii_case("ci:passed"))
+    }
+
+    fn compatibility_is_grounded(&self, evidence: &[String]) -> bool {
+        evidence.iter().any(|item| {
+            let Some(path) = item.trim().strip_prefix("file:") else {
+                return false;
+            };
+            self.contract_files
+                .iter()
+                .any(|candidate| candidate == path.trim())
+        }) && evidence.iter().any(|item| {
+            let Some(mechanism) = item.trim().strip_prefix("mechanism:") else {
+                return false;
+            };
+            self.compatibility_mechanisms
+                .iter()
+                .any(|candidate| candidate == &mechanism.trim())
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// TICKET-108: reviewer authority (who is reviewing) kept as a dimension
+/// separate from review outcome (verdict/confidence, what they said).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::dispatch) enum ReviewerTier {
+    Strong,
+    Standard,
+    Weak,
+    /// Issue #123: an escalatory reviewer (a more-capable model from the
+    /// ESCALATORY_REVIEW list) the pipeline escalated to and continued with.
+    /// Auto-merge eligible like `Strong`, but recorded distinctly so the
+    /// cascade origin is observable.
+    Escalatory,
+}
+
+impl ReviewerTier {
+    pub(in crate::dispatch) fn as_str(self) -> &'static str {
+        match self {
+            Self::Strong => "strong",
+            Self::Standard => "standard",
+            Self::Weak => "weak",
+            Self::Escalatory => "escalatory",
+        }
+    }
+}
+
+/// Derived from which configured routing field actually selected this
+/// backend/model, not from anything the reviewer says about itself -- a
+/// weak reviewer cannot self-promote by returning confident-sounding text
+/// (TICKET-108's core requirement).
+pub(in crate::dispatch) fn derive_reviewer_tier(
+    cfg: &GahConfig,
+    profile: &Profile,
+    route: &RouteDecision,
+) -> ReviewerTier {
+    let effective_model = route.effective_model.as_deref();
+    let selected = |backend_cfg: Option<&str>, model_cfg: Option<&str>| -> bool {
+        backend_cfg.is_some_and(|b| b == route.effective_backend)
+            && (model_cfg.is_none() || model_cfg == effective_model)
+    };
+    let routine = profile
+        .routing
+        .effective_routine_reviewer()
+        .or_else(|| cfg.defaults.routing.effective_routine_reviewer());
+    let escalatory = profile
+        .routing
+        .escalatory_reviewers
+        .iter()
+        .cloned()
+        .chain(cfg.defaults.routing.escalatory_reviewers.clone())
+        .collect::<Vec<_>>();
+
+    // Issue #233: tier classification must only honor explicitly declared
+    // escalatory reviewers. The legacy weak-review keys still feed routing
+    // backfill via `effective_escalatory_reviewers()`, but they do not imply
+    // the auto-merge-eligible escalatory tier.
+    for esc in &escalatory {
+        if selected(Some(esc.backend.as_str()), esc.model.as_deref()) {
+            // Check if this escalatory reviewer is actually a legacy weak review configuration
+            // Legacy weak review configs should be treated as Weak tier, not Escalatory
+            let is_legacy_weak_config = profile.routing.escalatory_reviewers.is_empty()
+                && profile.routing.weak_review_backend.as_deref() == Some(esc.backend.as_str())
+                && profile.routing.weak_review_model.as_deref() == esc.model.as_deref();
+
+            if is_legacy_weak_config {
+                return ReviewerTier::Weak;
+            }
+            return ReviewerTier::Escalatory;
+        }
+    }
+    // Routine reviewer is the STRONG first-line authority.
+    if let Some(routine) = &routine {
+        if selected(Some(routine.backend.as_str()), routine.model.as_deref()) {
+            return ReviewerTier::Strong;
+        }
+    }
+    let strong_backend = profile.routing.strong_review_backend.as_deref().or(cfg
+        .defaults
+        .routing
+        .strong_review_backend
+        .as_deref());
+    let strong_model = profile.routing.strong_review_model.as_deref().or(cfg
+        .defaults
+        .routing
+        .strong_review_model
+        .as_deref());
+    let weak_backend = profile.routing.weak_review_backend.as_deref().or(cfg
+        .defaults
+        .routing
+        .weak_review_backend
+        .as_deref());
+    let weak_model = profile.routing.weak_review_model.as_deref().or(cfg
+        .defaults
+        .routing
+        .weak_review_model
+        .as_deref());
+
+    if selected(weak_backend, weak_model) {
+        return ReviewerTier::Weak;
+    }
+    if selected(strong_backend, strong_model) {
+        return ReviewerTier::Strong;
+    }
+    // review_candidates is the operator's actual declared pool of reviewers
+    // they consider trustworthy (agy/agy-second/claude serving the same
+    // Sonnet-class model are routinely interchangeable fallbacks for each
+    // other, not different capability tiers). Requiring strong_review_backend/
+    // model to be manually kept in sync with every review_candidates entry
+    // is exactly the kind of drift that already produced two real bugs
+    // tonight (gah's own strong_review_backend pointed at codex-mini; here,
+    // falling back from agy to agy-second/claude silently downgraded a
+    // Sonnet reviewer to "standard" tier). Any candidate not already
+    // classified weak above is strong.
+    let candidates = profile.routing.review_candidates.as_ref().or(cfg
+        .defaults
+        .routing
+        .review_candidates
+        .as_ref());
+    if let Some(candidates) = candidates {
+        let in_candidates = candidates.iter().any(|c| {
+            c.backend == route.effective_backend
+                && (c.model.is_none() || c.model.as_deref() == effective_model)
+        });
+        if in_candidates {
+            return ReviewerTier::Strong;
+        }
+    }
+    ReviewerTier::Standard
+}
+
+#[cfg(test)]
+fn parse_review_verdict(
+    review_text: &str,
+    route: &RouteDecision,
+    parsed_usage: &crate::ledger::LedgerUsage,
+    tier: ReviewerTier,
+) -> Result<crate::models::ReviewVerdict> {
+    parse_review_verdict_with_context(
+        review_text,
+        route,
+        parsed_usage,
+        tier,
+        &ReviewGateContext::default(),
+    )
+}
+
+pub(in crate::dispatch) fn parse_review_verdict_with_context(
+    review_text: &str,
+    route: &RouteDecision,
+    parsed_usage: &crate::ledger::LedgerUsage,
+    tier: ReviewerTier,
+    gate_context: &ReviewGateContext,
+) -> Result<crate::models::ReviewVerdict> {
+    let json = extract_first_json_object(review_text)
+        .ok_or_else(|| anyhow::anyhow!("reviewer did not return verdict JSON"))?;
+    let mut verdict = serde_json::from_str::<crate::models::ReviewVerdict>(&json)?;
+    enforce_review_evidence_gate(
+        &mut verdict,
+        review_text,
+        &route.effective_backend,
+        gate_context,
+    );
+    // Reviewer identity (tier) and review outcome (verdict text/confidence)
+    // are separate dimensions -- the verdict text itself is never rewritten
+    // based on who reviewed it (see review_labels for how tier affects
+    // labeling instead).
+    if tier == ReviewerTier::Weak && verdict.confidence == "high" {
+        // Weak approval is deliberately not auto-merge authority. A weak
+        // reviewer finding a defect is actionable input for the normal
+        // post-review repair budget and must not skip straight to a human.
+        verdict.confidence = "medium".into();
+    }
+    if tier == ReviewerTier::Weak && verdict.verdict == "APPROVE" {
+        verdict.human_required = true;
+    }
+    if verdict.verdict == "HUMAN_REVIEW"
+        || (verdict.verdict == "APPROVE" && verdict.confidence == "low")
+    {
+        verdict.human_required = true;
+    }
+    verdict.reviewer_tier = Some(tier.as_str().to_string());
+    verdict.reviewer_backend = Some(route.effective_backend.clone());
+    verdict.reviewer_model = route.effective_model.clone();
+    verdict.requested_backend = Some(route.requested_backend.clone());
+    verdict.effective_backend = Some(route.effective_backend.clone());
+    verdict.requested_model = route.requested_model.clone();
+    verdict.effective_model = route.effective_model.clone();
+    verdict.fallback_used = Some(route.fallback_used);
+    verdict.usage_source = parsed_usage.usage_source.clone();
+    verdict.input_tokens = parsed_usage.input_tokens;
+    verdict.output_tokens = parsed_usage.output_tokens;
+    verdict.total_tokens = parsed_usage.total_tokens;
+    verdict.estimated_cost_usd = parsed_usage.estimated_cost_usd;
+    verdict.actual_cost_usd = parsed_usage.actual_cost_usd;
+    Ok(verdict)
+}
+
+/// A reviewer is advisory; merge safety is deterministic. In particular, an
+/// LLM must not be able to write an apparent APPROVE while its own structured
+/// findings describe a blocking or unversioned contract change (the exact
+/// failure observed in PR #284). The normalized verdict remains visible in
+/// the review artifact, ledger, and status payload.
+fn enforce_review_evidence_gate(
+    verdict: &mut crate::models::ReviewVerdict,
+    review_text: &str,
+    reviewer_backend: &str,
+    gate_context: &ReviewGateContext,
+) {
+    if verdict.verdict != "APPROVE" {
+        return;
+    }
+
+    let reason = if !verdict.blocking_findings.is_empty() {
+        Some("APPROVE contradicted non-empty blocking_findings".to_string())
+    } else if review_text_has_substantive_prose(review_text, reviewer_backend) {
+        Some(
+            "APPROVE included substantive prose; every finding must be represented in the review JSON"
+                .to_string(),
+        )
+    } else if verdict.evidence.is_empty() {
+        Some("APPROVE omitted required concrete review evidence".to_string())
+    } else if gate_context.enforce_grounding
+        && gate_context.falsely_claims_passed_ci(&verdict.evidence)
+    {
+        Some("APPROVE claimed passed CI while the control plane did not report it".to_string())
+    } else if gate_context.enforce_grounding
+        && !gate_context.evidence_is_grounded(&verdict.evidence)
+    {
+        Some(
+            "APPROVE evidence was not grounded in an exact changed file from the control plane"
+                .to_string(),
+        )
+    } else if gate_context.has_contract_surface_change()
+        && (gate_context.compatibility_mechanisms.is_empty()
+            || !gate_context.compatibility_is_grounded(&verdict.compatibility_evidence))
+    {
+        Some(
+            "APPROVE changed a contract surface without a control-plane-verifiable compatibility mechanism and evidence"
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    let Some(reason) = reason else {
+        return;
+    };
+
+    verdict.verdict = "HUMAN_REVIEW".to_string();
+    verdict.human_required = true;
+    verdict.safety_gate_reason = Some(reason);
+}
+
+fn review_text_has_substantive_prose(review_text: &str, reviewer_backend: &str) -> bool {
+    let Some(json) = extract_first_json_object(review_text) else {
+        return true;
+    };
+    let Some(start) = review_text.find(&json) else {
+        return true;
+    };
+    let mut residue = String::with_capacity(review_text.len().saturating_sub(json.len()));
+    residue.push_str(&review_text[..start]);
+    residue.push_str(&review_text[start + json.len()..]);
+    let agy_transport_trace = matches!(reviewer_backend, "agy" | "agy-second");
+    residue.lines().map(str::trim).any(|line| {
+        // `agy --print` writes its execution-plan trace to stdout before
+        // the final answer. Those uniform "I will ..." lines are runner
+        // transport metadata, not reviewer prose. Preserve fail-closed
+        // behavior for every other line, including AGY's final prose.
+        let inert = line.is_empty()
+            || (agy_transport_trace && line.starts_with("I will "))
+            || matches!(
+                line.to_ascii_lowercase().trim_end_matches(':').trim(),
+                "review notes" | "## review notes" | "### review notes" | "```json" | "```"
+            );
+        !inert
+    })
+}
+
+#[cfg(test)]
+mod tests;
