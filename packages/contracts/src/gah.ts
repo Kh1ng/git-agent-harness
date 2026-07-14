@@ -402,6 +402,18 @@ export interface ControllerActivity {
 
 export interface LedgerUsage {
   usage_source: string | null;
+  usage_classification?: 'quota_backed' | 'api_key_backed' | 'local_unmetered' | 'unknown' | 'mixed' | 'mixed_or_unknown' | null;
+  /** Safe logical execution instance, optionally qualified by quota pool. */
+  backend_instance?: string | null;
+  /** Model provider; distinct from LedgerEntry.provider (GitHub/GitLab). */
+  provider?: string | null;
+  actual_model?: string | null;
+  actual_model_unknown_reason?: string | null;
+  provider_unknown_reason?: string | null;
+  account_label?: string | null;
+  pricing_source?: string | null;
+  pricing_version?: string | null;
+  cost_unknown_reason?: string | null;
   observed_at?: string | null;
   input_tokens: number | null;
   output_tokens: number | null;

@@ -146,6 +146,14 @@ pub struct LedgerUsage {
     /// requested/effective model when an alias or fallback substituted it.
     #[serde(default)]
     pub actual_model: Option<String>,
+    /// Why `actual_model` is unknown. Kept separate from the requested and
+    /// effective route model so consumers never have to infer whether a null
+    /// means missing telemetry, an alias, or a mixed-attempt aggregate.
+    #[serde(default)]
+    pub actual_model_unknown_reason: Option<String>,
+    /// Why the model provider is unknown when `provider` is absent.
+    #[serde(default)]
+    pub provider_unknown_reason: Option<String>,
     #[serde(default)]
     pub account_label: Option<String>,
     #[serde(default)]

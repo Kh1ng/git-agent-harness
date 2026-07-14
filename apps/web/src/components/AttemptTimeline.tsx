@@ -1,5 +1,5 @@
 import { GitBranch, GitPullRequest, Eye, RotateCw, ShieldAlert, CircleDot } from 'lucide-react';
-import type { LedgerEntry } from '@git-agent-harness/contracts';
+import type { LedgerEntry, LedgerUsage } from '@git-agent-harness/contracts';
 import { StatusBadge, type StatusTone } from './ui/StatusBadge.js';
 import { formatCost, formatDuration, formatTokens } from '../lib/format.js';
 
@@ -38,6 +38,16 @@ function reviewTone(verdict: string | null | undefined): StatusTone {
     default:
       return 'unknown';
   }
+}
+
+function attributionLabel(usage: LedgerUsage, effectiveModel: string | null): string {
+  const provider = usage.provider ?? 'Unknown provider';
+  const model = usage.actual_model ?? effectiveModel ?? 'Unknown model';
+  return `${provider}/${model}`;
+}
+
+function attributionUnknownReason(usage: LedgerUsage): string | null {
+  return usage.actual_model_unknown_reason ?? usage.provider_unknown_reason ?? null;
 }
 
 /**
@@ -108,6 +118,15 @@ export function AttemptTimeline({ entries }: { entries: LedgerEntry[] }) {
                 </div>
               </div>
 
+              <p className="mt-2 text-xs text-secondary">
+                Repository: {entry.provider} · Model usage: {attributionLabel(entry.usage, entry.effective_model)}
+                {entry.usage.backend_instance ? ` · ${entry.usage.backend_instance}` : ''}
+                {entry.usage.usage_classification ? ` · ${entry.usage.usage_classification}` : ''}
+              </p>
+              {attributionUnknownReason(entry.usage) && (
+                <p className="mt-1 text-xs text-muted">Attribution: {attributionUnknownReason(entry.usage)}</p>
+              )}
+
               {entry.failure_class && (
                 <p className="mt-2 text-xs text-critical">
                   Failure: {entry.failure_class}
@@ -118,16 +137,22 @@ export function AttemptTimeline({ entries }: { entries: LedgerEntry[] }) {
               {entry.attempts && entry.attempts.length > 0 && (
                 <div className="mt-3 pt-3 border-t border-subtle space-y-2">
                   {entry.attempts.map((attempt) => (
-                    <div key={attempt.attempt_number} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                      <span className="text-muted">#{attempt.attempt_number}</span>
-                      <span className="text-secondary">
-                        {attempt.backend}
-                        {attempt.effective_model ? `/${attempt.effective_model}` : ''}
-                      </span>
-                      <StatusBadge tone={validationTone(attempt.validation_result)} label={attempt.validation_result ?? 'not run'} />
-                      <span className="text-muted">{formatDuration(attempt.duration_seconds)}</span>
-                      <span className="text-muted">{formatCost(attempt.usage.actual_cost_usd ?? attempt.usage.estimated_cost_usd)}</span>
-                      {attempt.failure_class && <span className="text-critical">{attempt.failure_class}</span>}
+                    <div key={attempt.attempt_number} className="text-xs">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span className="text-muted">#{attempt.attempt_number}</span>
+                        <span className="text-secondary">
+                          {attributionLabel(attempt.usage, attempt.effective_model)}
+                          {attempt.usage.backend_instance ? ` · ${attempt.usage.backend_instance}` : ''}
+                        </span>
+                        <StatusBadge tone={validationTone(attempt.validation_result)} label={attempt.validation_result ?? 'not run'} />
+                        <span className="text-muted">{attempt.usage.usage_classification ?? 'unknown usage'}</span>
+                        <span className="text-muted">{formatDuration(attempt.duration_seconds)}</span>
+                        <span className="text-muted">{formatCost(attempt.usage.actual_cost_usd ?? attempt.usage.estimated_cost_usd)}</span>
+                        {attempt.failure_class && <span className="text-critical">{attempt.failure_class}</span>}
+                      </div>
+                      {attributionUnknownReason(attempt.usage) && (
+                        <p className="mt-1 text-muted">Attribution: {attributionUnknownReason(attempt.usage)}</p>
+                      )}
                     </div>
                   ))}
                 </div>
