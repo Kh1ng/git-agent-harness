@@ -1272,6 +1272,13 @@ fn apply_authoritative_work_identity(
             ledger.source_issue_number = ticket.issue_number.clone();
             ledger.work_title = ticket.title.clone();
         }
+        // FixMr receives an authoritative work ID from the controller while
+        // its target is the existing branch, not an issue number. Preserve
+        // that identity instead of replacing it with the branch fallback.
+        _ if ledger
+            .work_id
+            .as_deref()
+            .is_some_and(|work_id| !work_id.trim().is_empty()) => {}
         _ => {
             ledger.work_id = Some(fallback_work_id.to_string());
         }

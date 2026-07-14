@@ -75,3 +75,22 @@ fn no_ticket_falls_back_to_synthetic_work_id() {
 
     assert_eq!(ledger.work_id.as_deref(), Some("gah/real-456"));
 }
+
+#[test]
+fn controller_work_id_survives_existing_branch_resolution() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ledger = LedgerEntry::new(
+        "real",
+        &profile(tmp.path()),
+        "codex",
+        "fix",
+        "gah/existing-branch",
+        Some("session-1".into()),
+        None,
+    );
+    ledger.work_id = Some("#437".into());
+
+    apply_authoritative_work_identity(&mut ledger, None, "gah/existing-branch");
+
+    assert_eq!(ledger.work_id.as_deref(), Some("#437"));
+}
