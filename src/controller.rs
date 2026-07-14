@@ -1690,6 +1690,10 @@ pub(crate) fn run_dispatch_and_record(
 mod worktree_deferral_tests;
 
 #[cfg(test)]
+#[path = "controller/ledger_read_tests.rs"]
+mod ledger_read_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{
         acquire_profile_lock, is_validation_gate_failure, loop_lock_path,

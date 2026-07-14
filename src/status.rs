@@ -159,8 +159,10 @@ pub fn build_snapshot(
     profile_name: &str,
     now: OffsetDateTime,
 ) -> Result<StatusSnapshot> {
-    let entries = ledger::read_entries(cfg)?;
-    build_snapshot_from_entries(cfg, profile_name, now, &entries)
+    match ledger::read_entries(cfg) {
+        Ok(entries) => build_snapshot_inner(cfg, profile_name, now, &entries, None),
+        Err(error) => build_snapshot_inner(cfg, profile_name, now, &[], Some(format!("{error:#}"))),
+    }
 }
 
 pub fn build_snapshot_from_entries(
@@ -168,6 +170,16 @@ pub fn build_snapshot_from_entries(
     profile_name: &str,
     now: OffsetDateTime,
     entries: &[LedgerEntry],
+) -> Result<StatusSnapshot> {
+    build_snapshot_inner(cfg, profile_name, now, entries, None)
+}
+
+fn build_snapshot_inner(
+    cfg: &GahConfig,
+    profile_name: &str,
+    now: OffsetDateTime,
+    entries: &[LedgerEntry],
+    ledger_error: Option<String>,
 ) -> Result<StatusSnapshot> {
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let generated_at = now.format(&Rfc3339).unwrap_or_default();
@@ -274,7 +286,15 @@ pub fn build_snapshot_from_entries(
 
     // 3. Ledger State
     let mut recent_ledger = None;
-    let ledger_obs = ObservationStatus { status: "ok" };
+    let mut ledger_obs = ObservationStatus { status: "ok" };
+    if let Some(message) = ledger_error {
+        ledger_obs.status = "error";
+        errors.push(StatusError {
+            subsystem: "ledger".into(),
+            message,
+            incomplete_snapshot: true,
+        });
+    }
     {
         let mut latest: Option<&LedgerEntry> = None;
         let mut max_ts: Option<OffsetDateTime> = None;
@@ -594,10 +614,28 @@ default_target_branch = "main"
         let _availability_guard =
             crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
 
-        crate::ledger::reset_read_entries_call_count();
+        crate::ledger::reset_read_entries_call_count(&cfg);
         let snap = build_snapshot(&cfg, "test", OffsetDateTime::now_utc()).unwrap();
-        assert_eq!(crate::ledger::read_entries_call_count(), 1);
+        assert_eq!(crate::ledger::read_entries_call_count(&cfg), 1);
         assert!(snap.blockers.is_empty());
+    }
+
+    #[test]
+    fn malformed_ledger_is_reported_in_a_partial_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_test_cfg(&tmp);
+        let _availability_guard =
+            crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
+        fs::write(cfg.defaults.ledger_path(), "not valid json\n").unwrap();
+
+        let snap = build_snapshot(&cfg, "test", OffsetDateTime::now_utc()).unwrap();
+
+        assert_eq!(snap.observations.ledger.status, "error");
+        assert!(snap.errors.iter().any(|error| {
+            error.subsystem == "ledger"
+                && error.incomplete_snapshot
+                && error.message.contains("parsing ledger entry 1")
+        }));
     }
 
     #[test]

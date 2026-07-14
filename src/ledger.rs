@@ -7,12 +7,13 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 #[cfg(test)]
-static READ_ENTRIES_CALLS: AtomicUsize = AtomicUsize::new(0);
+static READ_ENTRIES_CALLS: LazyLock<Mutex<std::collections::HashMap<PathBuf, usize>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Coarse attribution for why a dispatch failed. Deliberately not
 /// exhaustively wired everywhere yet (TICKET-063): only the least ambiguous
@@ -872,11 +873,15 @@ fn parse_jsonl_entries(text: &str, path: &Path, starting_line: usize) -> Result<
 }
 
 pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
+    let path = cfg.defaults.ledger_path();
     #[cfg(test)]
     {
-        READ_ENTRIES_CALLS.fetch_add(1, Ordering::SeqCst);
+        *READ_ENTRIES_CALLS
+            .lock()
+            .expect("ledger read counter lock poisoned")
+            .entry(path.clone())
+            .or_default() += 1;
     }
-    let path = cfg.defaults.ledger_path();
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -885,13 +890,21 @@ pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
 }
 
 #[cfg(test)]
-pub(crate) fn reset_read_entries_call_count() {
-    READ_ENTRIES_CALLS.store(0, Ordering::SeqCst);
+pub(crate) fn reset_read_entries_call_count(cfg: &GahConfig) {
+    READ_ENTRIES_CALLS
+        .lock()
+        .expect("ledger read counter lock poisoned")
+        .remove(&cfg.defaults.ledger_path());
 }
 
 #[cfg(test)]
-pub(crate) fn read_entries_call_count() -> usize {
-    READ_ENTRIES_CALLS.load(Ordering::SeqCst)
+pub(crate) fn read_entries_call_count(cfg: &GahConfig) -> usize {
+    READ_ENTRIES_CALLS
+        .lock()
+        .expect("ledger read counter lock poisoned")
+        .get(&cfg.defaults.ledger_path())
+        .copied()
+        .unwrap_or(0)
 }
 
 /// TICKET-125: review mode's own ledger entry records the reviewer's
@@ -1127,12 +1140,6 @@ pub mod sqlite_store {
         let mut conn = Connection::open(&db_path)
             .with_context(|| format!("opening sqlite ledger {}", db_path.display()))?;
         ensure_schema(&conn)?;
-        conn.execute("DELETE FROM ledger_entries", [])
-            .context("clearing sqlite ledger mirror before resync")?;
-        let tx = conn.transaction().context("opening sqlite transaction")?;
-        for entry in entries {
-            insert_entry(&tx, entry)?;
-        }
         let synced_byte_len = fs::metadata(cfg.defaults.ledger_path())
             .with_context(|| {
                 format!(
@@ -1141,6 +1148,12 @@ pub mod sqlite_store {
                 )
             })?
             .len();
+        let tx = conn.transaction().context("opening sqlite transaction")?;
+        tx.execute("DELETE FROM ledger_entries", [])
+            .context("clearing sqlite ledger mirror before resync")?;
+        for entry in entries {
+            insert_entry(&tx, entry)?;
+        }
         store_sync_state(&tx, synced_byte_len, entries.len() as u64)?;
         tx.commit().context("committing sqlite ledger mirror")?;
         Ok(())
@@ -1159,9 +1172,9 @@ pub mod sqlite_store {
         let ledger_meta = match fs::metadata(&ledger_path) {
             Ok(meta) => meta,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                conn.execute("DELETE FROM ledger_entries", [])
-                    .context("clearing sqlite ledger mirror before resync")?;
                 let tx = conn.transaction().context("opening sqlite transaction")?;
+                tx.execute("DELETE FROM ledger_entries", [])
+                    .context("clearing sqlite ledger mirror before resync")?;
                 store_sync_state(&tx, 0, 0)?;
                 tx.commit().context("committing sqlite ledger mirror")?;
                 return Ok(());
@@ -1315,7 +1328,7 @@ pub mod sqlite_store {
         #[test]
         fn sync_incrementally_appends_without_rereading_the_full_ledger() {
             let (_tmp, cfg) = test_config();
-            crate::ledger::reset_read_entries_call_count();
+            crate::ledger::reset_read_entries_call_count(&cfg);
 
             let mut first = LedgerEntry::new(
                 "test",
@@ -1328,7 +1341,7 @@ pub mod sqlite_store {
             );
             first.branch = Some("gah/test-1".to_string());
             append(&cfg, &first).unwrap();
-            assert_eq!(crate::ledger::read_entries_call_count(), 1);
+            assert_eq!(crate::ledger::read_entries_call_count(&cfg), 1);
 
             let db_path = db_path(&cfg);
             let conn = Connection::open(&db_path).unwrap();
@@ -1348,12 +1361,74 @@ pub mod sqlite_store {
             );
             second.branch = Some("gah/test-2".to_string());
             append(&cfg, &second).unwrap();
-            assert_eq!(crate::ledger::read_entries_call_count(), 1);
+            assert_eq!(crate::ledger::read_entries_call_count(&cfg), 1);
 
             let count_after_second: i64 = conn
                 .query_row("SELECT COUNT(*) FROM ledger_entries", [], |r| r.get(0))
                 .unwrap();
             assert_eq!(count_after_second, 2);
+        }
+
+        #[test]
+        fn failed_full_rebuild_preserves_previous_rows_and_sync_state() {
+            let (_tmp, cfg) = test_config();
+            let first = LedgerEntry::new(
+                "test",
+                &profile(),
+                "codex",
+                "improve",
+                "original",
+                None,
+                None,
+            );
+            append(&cfg, &first).unwrap();
+
+            let db_path = db_path(&cfg);
+            let conn = Connection::open(&db_path).unwrap();
+            let state_before: (i64, i64) = conn
+                .query_row(
+                    "SELECT synced_byte_len, synced_entry_count FROM ledger_sync_state WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER reject_rebuild BEFORE INSERT ON ledger_entries
+                 BEGIN SELECT RAISE(FAIL, 'injected rebuild failure'); END;",
+            )
+            .unwrap();
+            drop(conn);
+
+            let replacement = LedgerEntry::new(
+                "test",
+                &profile(),
+                "codex",
+                "improve",
+                "replacement",
+                None,
+                None,
+            );
+            let error = sync_full_from_entries(&cfg, &[replacement]).unwrap_err();
+            assert!(error.to_string().contains("injected rebuild failure"));
+
+            let conn = Connection::open(&db_path).unwrap();
+            let rows: Vec<String> = conn
+                .prepare("SELECT raw_json FROM ledger_entries ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].contains("original"));
+            let state_after: (i64, i64) = conn
+                .query_row(
+                    "SELECT synced_byte_len, synced_entry_count FROM ledger_sync_state WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state_after, state_before);
         }
     }
 }
