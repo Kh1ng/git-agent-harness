@@ -77,6 +77,9 @@ pub struct RunResult {
     pub exit_code: i32,
     pub duration_secs: f64,
     pub log_path: String,
+    /// Authoritative final assistant text selected by the backend adapter.
+    /// Raw stdout/stderr is never promoted into this field.
+    pub final_summary: Option<String>,
     /// TICKET-066/#155: for AGY backends, the bytes appended to AGY's
     /// `cli.log` during this specific run, scoped to the pre-run byte
     /// offset (so concurrent appends from other AGY instances/log sources
@@ -503,6 +506,9 @@ pub fn run_openhands(
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
+        final_summary: fs::read_to_string(&log_path)
+            .ok()
+            .and_then(|text| output::extract_openhands_jsonl_summary(&text)),
         agy_cli_log_delta: None,
         internal_log_delta: None,
         internal_log_path: None,
@@ -575,6 +581,9 @@ pub fn run_codex_with_executable(
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
+        final_summary: fs::read_to_string(&log_path)
+            .ok()
+            .and_then(|text| output::extract_codex_jsonl_summary(&text)),
         agy_cli_log_delta: None,
         internal_log_delta: None,
         internal_log_path: None,
@@ -772,11 +781,16 @@ pub fn run_claude_with_executable(
         .as_ref()
         .and_then(|h| crate::claude_monitor::find_claude_transcript(h, worktree, &session_id))
         .map(|p| p.to_string_lossy().into_owned());
+    let final_summary = transcript_path
+        .as_deref()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| output::extract_claude_transcript_summary(&text));
 
     Ok(RunResult {
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
+        final_summary,
         agy_cli_log_delta: None,
         internal_log_delta: None,
         internal_log_path: None,
@@ -862,11 +876,18 @@ pub fn run_vibe_with_executable(
 
     let metadata_path =
         find_vibe_session_metadata(env_vars, worktree, started_at, &sessions_before);
+    let final_summary = metadata_path
+        .as_deref()
+        .and_then(|path| Path::new(path).parent())
+        .map(|directory| directory.join("messages.jsonl"))
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| output::extract_vibe_messages_summary(&text));
 
     Ok(RunResult {
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
+        final_summary,
         agy_cli_log_delta: None,
         internal_log_delta: None,
         internal_log_path: None,
@@ -1041,12 +1062,16 @@ pub fn run_opencode_with_executable(
         idle_timeout_seconds,
         "launching opencode; is it installed and on PATH?",
     )?;
-    let transcript_path = snapshot_opencode_session(env_vars, worktree, started_at, session_dir);
+    let (transcript_path, final_summary) =
+        snapshot_opencode_session(env_vars, worktree, started_at, session_dir)
+            .map(|snapshot| (Some(snapshot.path), snapshot.final_summary))
+            .unwrap_or((None, None));
 
     Ok(RunResult {
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
+        final_summary,
         agy_cli_log_delta: None,
         internal_log_delta: log_delta(&opencode_log, opencode_log_pre_offset),
         internal_log_path: opencode_log.map(|path| path.to_string_lossy().into_owned()),
@@ -1078,12 +1103,17 @@ fn opencode_log_path(env_vars: &[(String, String)]) -> Option<PathBuf> {
 /// Persist the exact OpenCode session created by this invocation as a small
 /// JSON artifact. Querying by worktree and start time prevents concurrent
 /// workers from attributing each other's SQLite rows.
+struct OpenCodeSessionSnapshot {
+    path: String,
+    final_summary: Option<String>,
+}
+
 fn snapshot_opencode_session(
     env_vars: &[(String, String)],
     worktree: &Path,
     started_at: std::time::SystemTime,
     session_dir: &Path,
-) -> Option<String> {
+) -> Option<OpenCodeSessionSnapshot> {
     let value_for = |name: &str| {
         env_vars
             .iter()
@@ -1130,9 +1160,49 @@ fn snapshot_opencode_session(
             },
         )
         .ok()?;
+    let session_id = snapshot.get("id")?.as_str()?;
+    let final_summary = connection
+        .prepare(
+            "SELECT message.data, part.data FROM message \
+             JOIN part ON part.message_id = message.id \
+             WHERE message.session_id = ?1 \
+             ORDER BY message.time_created DESC, part.time_created DESC",
+        )
+        .ok()
+        .and_then(|mut statement| {
+            let rows = statement
+                .query_map(rusqlite::params![session_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .ok()?;
+            for row in rows.flatten() {
+                let Ok(message) = serde_json::from_str::<serde_json::Value>(&row.0) else {
+                    continue;
+                };
+                let Ok(part) = serde_json::from_str::<serde_json::Value>(&row.1) else {
+                    continue;
+                };
+                if message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                    && message.get("finish").and_then(serde_json::Value::as_str) == Some("stop")
+                    && part.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                {
+                    if let Some(text) = part
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| !text.trim().is_empty())
+                    {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+            None
+        });
     let path = session_dir.join("opencode-session.json");
     fs::write(&path, serde_json::to_vec(&snapshot).ok()?).ok()?;
-    Some(path.to_string_lossy().into_owned())
+    Some(OpenCodeSessionSnapshot {
+        path: path.to_string_lossy().into_owned(),
+        final_summary,
+    })
 }
 
 /// Run Antigravity CLI non-interactively via `agy --print`.
@@ -1479,6 +1549,7 @@ pub fn run_agy_with_executable(
             exit_code: -1,
             duration_secs,
             log_path: log_path.to_string_lossy().into_owned(),
+            final_summary: None,
             agy_cli_log_delta,
             internal_log_delta: None,
             internal_log_path: None,
@@ -1491,6 +1562,10 @@ pub fn run_agy_with_executable(
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
+        // AGY --print currently mixes stdout and stderr in the diagnostic
+        // log and exposes no run-scoped structured conversation artifact.
+        // Fail closed until its adapter can identify one authoritatively.
+        final_summary: None,
         agy_cli_log_delta: log_delta(&agy_cli_log, agy_cli_log_pre_offset),
         internal_log_delta: None,
         internal_log_path: None,
@@ -3003,6 +3078,19 @@ mod tests {
                     tokens_cache_write INTEGER NOT NULL,
                     time_created INTEGER NOT NULL,
                     time_updated INTEGER NOT NULL
+                );
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE TABLE part (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    data TEXT NOT NULL
                 );",
             )
             .unwrap();
@@ -3023,15 +3111,43 @@ mod tests {
                 ],
             )
             .unwrap();
+        connection
+            .execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    "message-final",
+                    "session-current",
+                    started_at_ms + 3,
+                    r#"{"role":"assistant","finish":"stop"}"#,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "part-final",
+                    "message-final",
+                    "session-current",
+                    started_at_ms + 4,
+                    r#"{"type":"text","text":"Implemented the scoped fix."}"#,
+                ],
+            )
+            .unwrap();
         let envs = vec![("HOME".to_string(), f._tmp.path().display().to_string())];
 
         let snapshot = snapshot_opencode_session(&envs, &f.worktree, started_at, &f.session_dir)
             .expect("current worktree session should be captured");
-        let usage =
-            crate::usage::parse_opencode_session_metadata(&fs::read_to_string(snapshot).unwrap());
+        let usage = crate::usage::parse_opencode_session_metadata(
+            &fs::read_to_string(snapshot.path).unwrap(),
+        );
         assert_eq!(usage.actual_model.as_deref(), Some("hy3-free"));
         assert_eq!(usage.input_tokens, Some(775));
         assert_eq!(usage.total_tokens, Some(16295));
+        assert_eq!(
+            snapshot.final_summary.as_deref(),
+            Some("Implemented the scoped fix.")
+        );
     }
 
     #[test]
