@@ -157,6 +157,55 @@ pub struct DiffStats {
     pub deletions: u32,
 }
 
+/// Content-sensitive state used to prove that one backend attempt changed its
+/// own starting worktree. This is intentionally different from `has_changes`,
+/// which answers whether the branch differs from the target branch and is
+/// therefore already true before every FixMr attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeStateSnapshot(Vec<u8>);
+
+pub fn state_snapshot(worktree: &Path) -> Result<WorktreeStateSnapshot> {
+    let head = git_raw(&["rev-parse", "HEAD"], worktree)?;
+    let diff = git_raw(
+        &["diff", "--no-ext-diff", "--binary", "HEAD", "--"],
+        worktree,
+    )?;
+    let staged = git_raw(
+        &[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--binary",
+            "HEAD",
+            "--",
+        ],
+        worktree,
+    )?;
+    let status = git_raw(
+        &["status", "--porcelain", "--untracked-files=all"],
+        worktree,
+    )?;
+    for (name, output) in [
+        ("rev-parse HEAD", &head),
+        ("diff HEAD", &diff),
+        ("diff --cached HEAD", &staged),
+        ("status", &status),
+    ] {
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {name}: {}",
+                crate::redact::redact(&String::from_utf8_lossy(&output.stderr)).trim()
+            );
+        }
+    }
+
+    let mut bytes = head.stdout;
+    bytes.extend_from_slice(&diff.stdout);
+    bytes.extend_from_slice(&staged.stdout);
+    bytes.extend_from_slice(&status.stdout);
+    Ok(WorktreeStateSnapshot(bytes))
+}
+
 pub fn git(args: &[&str], cwd: &Path) -> Result<String> {
     let out = git_raw(args, cwd)?;
     if !out.status.success() {
@@ -713,6 +762,49 @@ mod tests {
         // has_changes must still report true via the origin diff -- this
         // commit is real work that needs pushing, just not re-staged.
         assert!(has_changes(&repo, "main").unwrap());
+    }
+
+    #[test]
+    fn state_snapshot_distinguishes_attempt_progress_from_existing_pr_changes() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+
+        // Model an existing PR branch: it already differs from main before a
+        // repair starts, so branch-vs-main cannot prove repair progress.
+        fs::write(repo.join("existing.txt"), "existing PR change\n").unwrap();
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-q", "-m", "existing PR"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(has_changes(&repo, "main").unwrap());
+
+        let before = state_snapshot(&repo).unwrap();
+        assert_eq!(state_snapshot(&repo).unwrap(), before);
+
+        // Uncommitted edits and backend-created commits both count as net
+        // progress relative to this attempt's own starting point.
+        fs::write(repo.join("existing.txt"), "repaired\n").unwrap();
+        assert_ne!(state_snapshot(&repo).unwrap(), before);
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-q", "-m", "repair"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert_ne!(state_snapshot(&repo).unwrap(), before);
     }
 
     #[test]

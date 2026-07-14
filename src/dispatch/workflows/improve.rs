@@ -288,6 +288,11 @@ pub(crate) fn improve(
         );
         let attempt_session = session_dir.join(format!("attempt-{}", attempt + 1));
         fs::create_dir_all(&attempt_session)?;
+        let attempt_state_before = classify_git_operation_result(
+            ledger,
+            crate::ledger::FailureStage::AgentRun,
+            worktree::state_snapshot(&wt),
+        )?;
         ledger.attempts_started = Some(ledger.attempts_started.unwrap_or(0) + 1);
         let attempt_start = std::time::Instant::now();
 
@@ -622,11 +627,12 @@ pub(crate) fn improve(
         // consume quota, pass the repository's unchanged test suite, and
         // falsely advance the controller with no patch or PR to show for it.
         // Stop before post-change validation: there is no change to validate.
-        if !classify_git_operation_result(
+        let attempt_state_after = classify_git_operation_result(
             ledger,
             crate::ledger::FailureStage::PostValidation,
-            worktree::has_changes(&wt, &profile.default_target_branch),
-        )? {
+            worktree::state_snapshot(&wt),
+        )?;
+        if attempt_state_after == attempt_state_before {
             // OpenCode can exit successfully after a provider rejection and
             // put the useful diagnostic only in its internal log. Inspect
             // that run-scoped tail before treating this as generic no-progress
