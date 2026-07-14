@@ -1,4 +1,5 @@
-use super::{first_markdown_heading, normalize_match, utf8_safe_suffix};
+use super::text::{first_markdown_heading, normalize_match};
+use super::utf8_safe_suffix;
 use crate::config::Profile;
 use crate::models::WorkMetadata;
 use crate::provider::provider_command;
