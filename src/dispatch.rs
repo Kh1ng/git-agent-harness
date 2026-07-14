@@ -26,6 +26,10 @@ mod claims;
 mod issues;
 mod prompts;
 mod publish;
+mod validation;
+
+#[cfg(test)]
+mod test_util;
 
 use self::issues::{
     issue_is_auto_dispatch_blocked, list_open_issues, parse_ticket_metadata,
@@ -44,6 +48,11 @@ use self::publish::{
 pub(crate) use self::claims::duplicate_work_error;
 use self::claims::{check_duplicate_work, ensure_dispatch_capacity};
 pub use self::claims::{merge_branch, scan_available_tickets};
+use self::validation::{
+    classify_validation_failure_progress, run_auto_fix_commands, should_skip_per_dispatch_baseline,
+    validation_env, validation_failure_no_progress_reason,
+};
+pub use self::validation::{self_check_validation_gate, ValidationGateError};
 
 fn mark_shutdown_cancelled(
     ledger: &mut LedgerEntry,
@@ -186,62 +195,6 @@ impl std::error::Error for ReviewBudgetExhausted {}
 
 pub fn review_budget_exhausted_error(err: &anyhow::Error) -> Option<&ReviewBudgetExhausted> {
     err.downcast_ref::<ReviewBudgetExhausted>()
-}
-
-/// Marks an error as a failed validation-gate self-check rather than a
-/// ticket, backend, or transient controller failure. The controller uses this
-/// typed boundary to pause a loop instead of repeatedly retrying a gate that
-/// has already proved broken.
-#[derive(Debug)]
-pub struct ValidationGateError;
-
-impl fmt::Display for ValidationGateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("validation gate self-check failed")
-    }
-}
-
-impl std::error::Error for ValidationGateError {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValidationFailureProgress {
-    Changed,
-    UnchangedFromBaseline,
-    UnchangedFromPreviousAttempt,
-    UnchangedFromBaselineAndPreviousAttempt,
-}
-
-impl ValidationFailureProgress {
-    fn unchanged_from_baseline(self) -> bool {
-        matches!(
-            self,
-            Self::UnchangedFromBaseline | Self::UnchangedFromBaselineAndPreviousAttempt
-        )
-    }
-
-    fn unchanged_from_previous_attempt(self) -> bool {
-        matches!(
-            self,
-            Self::UnchangedFromPreviousAttempt | Self::UnchangedFromBaselineAndPreviousAttempt
-        )
-    }
-}
-
-fn validation_failure_no_progress_reason(
-    progress: ValidationFailureProgress,
-) -> Option<&'static str> {
-    match progress {
-        ValidationFailureProgress::Changed => None,
-        ValidationFailureProgress::UnchangedFromBaseline => Some(
-            "validation failure identical to the pristine-tree baseline — the agent's changes never affected this error. Fix the validation command or environment, not the ticket.",
-        ),
-        ValidationFailureProgress::UnchangedFromPreviousAttempt => Some(
-            "validation failure identical to the previous attempt — the agent made no progress on the failing check.",
-        ),
-        ValidationFailureProgress::UnchangedFromBaselineAndPreviousAttempt => Some(
-            "validation failure identical to both the pristine-tree baseline and the previous attempt — the agent made no progress and never affected the original error.",
-        ),
-    }
 }
 
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
@@ -596,199 +549,7 @@ fn run_backend_with_reserved_route(
     result
 }
 
-/// Run `auto_fix_commands` in the worktree, best-effort, right before
-/// `validate()`. A formatter failing to run (missing binary, whatever) must
-/// never block the dispatch -- it's a convenience, not a gate -- so every
-/// failure is logged and swallowed rather than propagated.
-fn run_auto_fix_commands(commands: &[String], wt: &Path, env_vars: &[(String, String)]) {
-    for cmd_str in commands {
-        if cmd_str.trim().is_empty() {
-            continue;
-        }
-        let mut command = Command::new("sh");
-        command.args(["-c", cmd_str]).current_dir(wt);
-        for (key, value) in env_vars {
-            command.env(key, value);
-        }
-        match command.output() {
-            Ok(out) if !out.status.success() => {
-                eprintln!(
-                    "warning: auto_fix command '{cmd_str}' exited {}: {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
-            Err(e) => {
-                eprintln!("warning: auto_fix command '{cmd_str}' failed to run: {e:#}");
-            }
-            Ok(_) => {}
-        }
-    }
-}
-
 const MIN_DISPATCH_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
-
-fn validation_env(profile: &Profile, session_scope: &Path) -> Vec<(String, String)> {
-    vec![(
-        "CARGO_TARGET_DIR".to_string(),
-        crate::build_cache::target_dir(&profile.artifact_root, session_scope)
-            .to_string_lossy()
-            .into_owned(),
-    )]
-}
-
-/// TICKET-073: verify a profile's `validation_commands` against a genuinely
-/// fresh worktree before trusting the dispatch gate.
-///
-/// This is the "verify the gate itself works before trusting it" check. The
-/// common case (commands unchanged since the last successful self-check) is a
-/// pure hash compare against durable state and costs essentially nothing. Only
-/// on a hash change (or no prior record, or a previously-failed check) does
-/// this spin up a real isolated worktree from `default_target_branch`, run the
-/// commands once, record pass/fail + the new hash, and clean the worktree up.
-///
-/// On success this returns `Ok(())` and may have written a new state record.
-/// On a failed self-check it bails with a distinct, loud error — the failure
-/// class is `FailureClass::ValidationGate`, deliberately *not*
-/// `FailureClass::ValidationFailure`, so a broken config is never conflated
-/// with the dispatched ticket's own outcome.
-///
-/// `skip` honours an explicit operator bypass (passed through
-/// `--skip-validation-gate`); everything else is fail-closed.
-pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool) -> Result<()> {
-    use crate::validation_check as vc;
-
-    if skip {
-        println!("[validation-gate] skipped by explicit --skip-validation-gate");
-        return Ok(());
-    }
-
-    // Nothing to verify when the profile has no validation commands at all.
-    if profile.validation_commands.is_empty() {
-        return Ok(());
-    }
-
-    let repo = Path::new(&profile.local_path);
-    let target_sha = command_output("git", &["rev-parse", &profile.default_target_branch], repo)
-        .map_err(|error| {
-            // A dedicated ValidationGateError, not a generic error: this is
-            // the gate itself failing to even run (e.g. default_target_branch
-            // was renamed/deleted, or a shallow clone is missing the ref),
-            // not a transient dispatch hiccup. Left as a plain error, it
-            // would be misclassified by is_validation_gate_failure and the
-            // daemon would retry it every 5 minutes forever instead of
-            // pausing with a clear, actionable message like every other
-            // broken-gate state in this function.
-            anyhow::Error::new(ValidationGateError).context(format!(
-                "VALIDATION GATE FAILED — could not resolve target branch '{}' for profile \
-                 '{}': {error:#}",
-                profile.default_target_branch, profile.repo_id
-            ))
-        })?;
-    let gate_environment_signature =
-        crate::build_cache::validation_environment_signature(&profile.artifact_root);
-    let hash = vc::hash_validation_context(
-        &profile.validation_commands,
-        target_sha.trim(),
-        &gate_environment_signature,
-    );
-    let state_path = vc::resolve_state_path();
-
-    // Hold a per-profile lock across the whole decide-then-verify sequence,
-    // not just the final write. Same-profile callers then share one proof,
-    // while validation commands that invoke GAH for a different test profile
-    // cannot deadlock behind their parent. The state file's global lock is
-    // taken only for the short atomic record update below.
-    let profile_lock = vc::acquire_profile_lock(&state_path, &profile.repo_id)?;
-    if crate::runner::shutdown_requested() {
-        fs2::FileExt::unlock(&profile_lock).ok();
-        anyhow::bail!("shutdown requested before validation gate self-check");
-    }
-
-    let state = vc::load_state(&state_path)
-        .with_context(|| format!("loading validation-check state {}", state_path.display()))?;
-
-    if !vc::should_recheck(&state, &profile.repo_id, &hash) {
-        println!(
-            "[validation-gate] commands unchanged (hash {}) — skipping fresh-worktree self-check",
-            &hash[..hash.len().min(8)]
-        );
-        fs2::FileExt::unlock(&profile_lock).ok();
-        return Ok(());
-    }
-
-    println!(
-        "[validation-gate] commands changed (hash {}) — verifying against a fresh worktree from '{}'...",
-        &hash[..hash.len().min(8)],
-        profile.default_target_branch
-    );
-
-    let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
-
-    // `worktree::create` errors out if the branch already exists. Use a
-    // full-precision timestamp + random suffix so the branch name is truly
-    // unique per run — the previous code truncated to 8 alphanumeric chars
-    // from RFC3339, which collapsed to just the date (`20260709`) and
-    // caused every same-day gate run after the first to fail.
-    let ts = vc::now_rfc3339(OffsetDateTime::now_utc());
-    let ts_compact: String = ts.chars().filter(|c| c.is_alphanumeric()).collect();
-    let suffix = &ts_compact[..ts_compact.len().min(20)];
-    let branch = format!(
-        "gah/validation-gate-{}-{}",
-        &hash[..hash.len().min(8)],
-        suffix
-    );
-
-    let wt = worktree::create(
-        repo,
-        &profile.default_target_branch,
-        &branch,
-        &worktree_base,
-    )?;
-    let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, &wt)?;
-    let gate_environment = cargo_target.environment();
-    let verified_at = vc::now_rfc3339(OffsetDateTime::now_utc());
-    let result = validate(&profile.validation_commands, &wt, &gate_environment);
-    let ok = result.is_ok();
-
-    // Always clean up, regardless of pass/fail — a leftover validation-gate
-    // worktree AND branch is state noise that the next dispatch would trip
-    // over. The branch must be deleted too: worktree::cleanup only removes
-    // the worktree dir and prunes, leaving the branch ref behind.
-    worktree::cleanup(&wt, repo);
-    let _ = worktree::git_raw(&["branch", "-D", &branch], repo);
-
-    if crate::runner::shutdown_requested() {
-        fs2::FileExt::unlock(&profile_lock).ok();
-        anyhow::bail!("shutdown requested during validation gate self-check");
-    }
-
-    let record_result = vc::record_check(&state_path, &profile.repo_id, &hash, ok, &verified_at)
-        .with_context(|| format!("recording validation-check result {}", state_path.display()));
-    fs2::FileExt::unlock(&profile_lock).ok();
-    record_result?;
-
-    if let Err(text) = result {
-        return Err(anyhow::Error::new(ValidationGateError).context(format!(
-            "VALIDATION GATE FAILED — profile '{}' validation_commands did not pass on a \
-             fresh worktree from '{}'. This is a broken gate config, NOT the dispatched \
-             ticket's fault. Fix validation_commands (or run with --skip-validation-gate to \
-             proceed anyway once you've acknowledged it).\n\n\
-             Self-check recorded last_verified_ok=false (hash {}).\n\n\
-             Failure output:\n{}",
-            profile.repo_id,
-            profile.default_target_branch,
-            &hash[..hash.len().min(8)],
-            text,
-        )));
-    }
-
-    println!(
-        "[validation-gate] passed on fresh worktree — self-check recorded (hash {})",
-        &hash[..hash.len().min(8)]
-    );
-    Ok(())
-}
 
 /// TICKET-101: usage the backend reported for exactly this attempt.
 /// `RunResult` only carries a log path, not captured stdout in memory (see
@@ -1023,7 +784,7 @@ fn ensure_bin(bin: &str) -> Result<()> {
     }
 }
 
-fn command_output(bin: &str, args: &[&str], cwd: &Path) -> Result<String> {
+pub(super) fn command_output(bin: &str, args: &[&str], cwd: &Path) -> Result<String> {
     let out = Command::new(bin)
         .args(args)
         .current_dir(cwd)
@@ -1073,22 +834,6 @@ fn enforce_policy(profile: &Profile, action: &str) -> Result<()> {
             repo.trust_mode, action, policy_path
         )
     }
-}
-
-/// Whether `improve()` can skip its own per-dispatch pristine-worktree
-/// baseline validation, relying instead on the profile-level validation gate
-/// (`self_check_validation_gate`). That shared gate only ever proves
-/// `profile.default_target_branch` -- so its proof only covers a dispatch
-/// that skipping requires: a FRESH worktree cut from that branch (no
-/// `existing_branch`, i.e. not a `FixMr`/repair dispatch, which validates the
-/// existing MR branch instead) AND the gate not having been explicitly
-/// bypassed (no shared proof exists in that case either).
-fn should_skip_per_dispatch_baseline(
-    validation_commands_empty: bool,
-    has_existing_branch: bool,
-    skip_validation_gate: bool,
-) -> bool {
-    validation_commands_empty || (!has_existing_branch && !skip_validation_gate)
 }
 
 fn improve(
@@ -3779,22 +3524,18 @@ fn enforce_context_budget(
 mod tests {
     use super::preflight;
     use super::publish::{build_metadata_rich_mr_body, build_mr_title, build_standard_mr_body};
-    use super::run_auto_fix_commands;
-    use super::self_check_validation_gate;
-    use super::ValidationGateError;
+    use super::test_util::{gah_config, profile};
     use super::{
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
         attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body, build_pm_plan_task,
-        check_review_budget, classify_git_operation_result, classify_validation_failure_progress,
-        classify_worktree_result, collect_pm_preflight, collect_ticket_summaries, decide_route,
-        derive_reviewer_tier, first_markdown_heading, mark_backend_unavailable_from_output_at,
-        next_escalatory_reviewer, next_ticket_id, parse_pm_plan, parse_review_verdict,
-        parse_review_verdict_with_context, render_review_comment, review_escalation_reason,
-        review_labels, review_preflight, review_usage, reviewer_dedup_class, routing_runtime_state,
-        run_backend, should_skip_per_dispatch_baseline, validation_failure_fingerprint,
-        validation_failure_no_progress_reason, ExperimentMrRenderContext, MrRenderContext,
-        ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision, TicketMetadata,
-        UsageAttribution, ValidationFailureProgress,
+        check_review_budget, classify_git_operation_result, classify_worktree_result,
+        collect_pm_preflight, collect_ticket_summaries, decide_route, derive_reviewer_tier,
+        first_markdown_heading, mark_backend_unavailable_from_output_at, next_escalatory_reviewer,
+        next_ticket_id, parse_pm_plan, parse_review_verdict, parse_review_verdict_with_context,
+        render_review_comment, review_escalation_reason, review_labels, review_preflight,
+        review_usage, reviewer_dedup_class, routing_runtime_state, run_backend,
+        ExperimentMrRenderContext, MrRenderContext, ReviewDiffBundle, ReviewGateContext,
+        ReviewerTier, RouteDecision, TicketMetadata, UsageAttribution,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{CandidateConfig, Defaults, GahConfig, Profile, RoutingPolicy};
@@ -3811,75 +3552,6 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
     const OPENCODE_HY3_RATE_LIMIT: &str =
         include_str!("../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
-
-    pub(super) fn profile(local_path: &Path) -> Profile {
-        Profile {
-            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
-            prune_older_than_days: None,
-            display_name: "Repo".into(),
-            repo_id: "repo".into(),
-            provider: "github".into(),
-            repo: "owner/repo".into(),
-            local_path: local_path.display().to_string(),
-            artifact_root: "/tmp/artifacts".into(),
-            default_target_branch: "main".into(),
-            provider_api_base: None,
-            provider_project_id: None,
-            oh_profile: None,
-            openhands_args: vec![],
-            codex_args: vec![],
-            codex_path: None,
-            claude_args: vec![],
-            claude_path: None,
-            agy_path: None,
-            vibe_args: vec![],
-            vibe_path: None,
-            opencode_args: vec![],
-            opencode_path: None,
-            agy_second_home: None,
-            agy_print_timeout_seconds: std::collections::HashMap::new(),
-            agy_idle_timeout_seconds: None,
-            opencode_idle_timeout_seconds: None,
-            opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
-            max_concurrent_per_model: std::collections::HashMap::new(),
-            openhands_idle_timeout_seconds: None,
-            vibe_idle_timeout_seconds: None,
-            codex_idle_timeout_seconds: None,
-            claude_idle_timeout_seconds: None,
-            max_parallel_workers: None,
-            policy_path: None,
-            env_file: None,
-            env_file_prod: None,
-            validation_commands: vec![],
-            auto_fix_commands: vec![],
-            test_file_patterns: vec![],
-            known_baseline_failure_markers: vec![],
-            model_improve: None,
-            model_pm: None,
-            model_review: None,
-            review_timeout_seconds: None,
-            notify_command: None,
-            routing: RoutingPolicy::default(),
-            pacing: Default::default(),
-            publishing: Default::default(),
-        }
-    }
-
-    fn gah_config(routing: RoutingPolicy) -> GahConfig {
-        GahConfig {
-            context: Default::default(),
-            defaults: Defaults {
-                current_manager: None,
-                artifact_root: String::new(),
-                worktree_base: String::new(),
-                llm_base_url: String::new(),
-                llm_model_local: String::new(),
-                llm_model_cloud: String::new(),
-                routing,
-            },
-            profiles: std::collections::HashMap::new(),
-        }
-    }
 
     // Like `gah_config`, but with `artifact_root` pointed at a real tempdir
     // so `ledger::append`/`read_entries` have somewhere to write.
@@ -5702,65 +5374,6 @@ which lacks a leading boundary check.
     }
 
     #[test]
-    fn validation_gate_reports_unresolvable_target_branch_as_gate_failure() {
-        // A profile whose default_target_branch can't be resolved (renamed,
-        // deleted, or never fetched locally) must fail as a distinct,
-        // visible ValidationGateError -- the same category as a broken
-        // validation_commands config -- not a plain error a caller would
-        // misclassify as a transient, retry-forever failure.
-        let tmp = tempfile::tempdir().unwrap();
-        run_git(tmp.path(), &["init", "-q"]);
-        run_git(tmp.path(), &["config", "user.email", "test@test.com"]);
-        run_git(tmp.path(), &["config", "user.name", "test"]);
-        fs::write(tmp.path().join("f.txt"), "1").unwrap();
-        run_git(tmp.path(), &["add", "."]);
-        run_git(tmp.path(), &["commit", "-q", "-m", "init"]);
-
-        let mut prof = profile(tmp.path());
-        prof.default_target_branch = "does-not-exist".into();
-        prof.validation_commands = vec!["true".into()];
-        let cfg = gah_config(RoutingPolicy::default());
-
-        let error = self_check_validation_gate(&prof, &cfg, false)
-            .expect_err("an unresolvable target branch must fail the gate");
-        assert!(
-            error.chain().any(|cause| cause.is::<ValidationGateError>()),
-            "expected a ValidationGateError in the chain, got: {error:#}"
-        );
-    }
-
-    fn run_git(dir: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    #[test]
-    fn baseline_skip_covers_every_combination() {
-        // No commands: always skip, regardless of the other two flags.
-        assert!(should_skip_per_dispatch_baseline(true, false, false));
-        assert!(should_skip_per_dispatch_baseline(true, true, true));
-
-        // Fresh dispatch (no existing_branch), gate ran normally (not
-        // bypassed): the shared gate's proof covers this exact worktree, so
-        // the redundant per-dispatch baseline is skipped.
-        assert!(should_skip_per_dispatch_baseline(false, false, false));
-
-        // Fresh dispatch, but the gate was explicitly bypassed: no shared
-        // proof exists, so the old per-dispatch baseline safety net runs.
-        assert!(!should_skip_per_dispatch_baseline(false, false, true));
-
-        // FixMr/repair dispatch (existing_branch set): the shared gate only
-        // ever proves default_target_branch, never this MR's own branch, so
-        // the baseline must run regardless of skip_validation_gate.
-        assert!(!should_skip_per_dispatch_baseline(false, true, false));
-        assert!(!should_skip_per_dispatch_baseline(false, true, true));
-    }
-
-    #[test]
     fn apply_route_to_ledger_leaves_null_when_no_model() {
         let tmp = tempfile::tempdir().unwrap();
         let mut entry = LedgerEntry::new(
@@ -6138,122 +5751,6 @@ which lacks a leading boundary check.
         let plan =
             parse_pm_plan("noise\n{\"title\":\"T\",\"summary\":\"S\",\"tickets\":[]}\n").unwrap();
         assert_eq!(plan.title, "T");
-    }
-
-    #[test]
-    fn validation_failure_matching_baseline_is_classified_separately() {
-        let progress =
-            classify_validation_failure_progress(Some("same failure"), None, "same failure");
-        assert_eq!(progress, ValidationFailureProgress::UnchangedFromBaseline);
-        assert!(progress.unchanged_from_baseline());
-        assert!(!progress.unchanged_from_previous_attempt());
-    }
-
-    #[test]
-    fn validation_failure_matching_previous_attempt_is_classified_separately() {
-        let progress = classify_validation_failure_progress(
-            Some("baseline failure"),
-            Some("same failure"),
-            "same failure",
-        );
-        assert_eq!(
-            progress,
-            ValidationFailureProgress::UnchangedFromPreviousAttempt
-        );
-        assert!(!progress.unchanged_from_baseline());
-        assert!(progress.unchanged_from_previous_attempt());
-    }
-
-    #[test]
-    fn validation_failure_matching_both_baseline_and_previous_is_distinct() {
-        let progress = classify_validation_failure_progress(
-            Some("same failure"),
-            Some("same failure"),
-            "same failure",
-        );
-        assert_eq!(
-            progress,
-            ValidationFailureProgress::UnchangedFromBaselineAndPreviousAttempt
-        );
-        assert!(progress.unchanged_from_baseline());
-        assert!(progress.unchanged_from_previous_attempt());
-    }
-
-    #[test]
-    fn validation_failure_changes_are_not_misclassified() {
-        let progress = classify_validation_failure_progress(
-            Some("baseline failure"),
-            Some("previous failure"),
-            "new failure",
-        );
-        assert_eq!(progress, ValidationFailureProgress::Changed);
-        assert!(!progress.unchanged_from_baseline());
-        assert!(!progress.unchanged_from_previous_attempt());
-    }
-
-    // Real failure text captured live from a TICKET-154 dispatch attempt
-    // (dead_code lint on unwired vibe-quota helper functions) -- see
-    // `/home/khing/workspace/agent-lab/artifacts/gah/sessions/468dc430-48e3-49a9-8429-1875085bc37b/attempt-3/validation-failure.txt`.
-    // The second copy below simulates a later attempt hitting the identical
-    // mistake but with a different worktree path and shifted line numbers,
-    // which is exactly what a raw byte-for-byte comparison would miss.
-    const TICKET_154_ATTEMPT_1: &str = "$ cargo clippy --all-targets --all-features -- -D warnings\n    Checking git-agent-harness v0.1.0 (/home/khing/workspace/agent-lab/worktrees/gah-gah-1783786976)\nerror: function `vibe_admin_api_to_quota_observation` is never used\n   --> src/usage.rs:611:8\n    |\n611 | pub fn vibe_admin_api_to_quota_observation(\n    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |\n    = note: `-D dead-code` implied by `-D warnings`\n\nerror: function `refresh_vibe_quota` is never used\n   --> src/usage.rs:831:8\n    |\n831 | pub fn refresh_vibe_quota(\n    |        ^^^^^^^^^^^^^^^^^^\n\nerror: could not compile `git-agent-harness` (bin \"gah\") due to 2 previous errors\n";
-    const TICKET_154_ATTEMPT_2_SAME_MISTAKE: &str = "$ cargo clippy --all-targets --all-features -- -D warnings\n    Checking git-agent-harness v0.1.0 (/home/khing/workspace/agent-lab/worktrees/gah-gah-1783799102)\nerror: function `vibe_admin_api_to_quota_observation` is never used\n   --> src/usage.rs:648:8\n    |\n648 | pub fn vibe_admin_api_to_quota_observation(\n    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |\n    = note: `-D dead-code` implied by `-D warnings`\n\nerror: function `refresh_vibe_quota` is never used\n   --> src/usage.rs:902:8\n    |\n902 | pub fn refresh_vibe_quota(\n    |        ^^^^^^^^^^^^^^^^^^\n\nerror: could not compile `git-agent-harness` (bin \"gah\") due to 2 previous errors\n";
-    const CARGO_TEST_FAILURE: &str = "$ cargo test\nrunning 1 test\ntest usage::tests::vibe_quota_roundtrip ... FAILED\n\nfailures:\n\n---- usage::tests::vibe_quota_roundtrip stdout ----\nthread 'usage::tests::vibe_quota_roundtrip' panicked at src/usage.rs:900:5:\nassertion `left == right` failed\n  left: 0\n right: 42\n";
-
-    #[test]
-    fn validation_failure_fingerprint_ignores_paths_and_line_numbers() {
-        // Same underlying dead_code mistake, different worktree path and
-        // shifted line numbers -- must still fingerprint identically.
-        assert_eq!(
-            validation_failure_fingerprint(TICKET_154_ATTEMPT_1),
-            validation_failure_fingerprint(TICKET_154_ATTEMPT_2_SAME_MISTAKE)
-        );
-    }
-
-    #[test]
-    fn validation_failure_fingerprint_distinguishes_different_failure_kinds() {
-        assert_ne!(
-            validation_failure_fingerprint(TICKET_154_ATTEMPT_1),
-            validation_failure_fingerprint(CARGO_TEST_FAILURE)
-        );
-    }
-
-    #[test]
-    fn repeated_dead_code_mistake_is_recognized_as_no_progress_despite_shifted_lines() {
-        let progress = classify_validation_failure_progress(
-            None,
-            Some(TICKET_154_ATTEMPT_1),
-            TICKET_154_ATTEMPT_2_SAME_MISTAKE,
-        );
-        assert_eq!(
-            progress,
-            ValidationFailureProgress::UnchangedFromPreviousAttempt
-        );
-    }
-
-    #[test]
-    fn genuinely_different_failure_kind_is_not_treated_as_repeat() {
-        let progress = classify_validation_failure_progress(
-            None,
-            Some(TICKET_154_ATTEMPT_1),
-            CARGO_TEST_FAILURE,
-        );
-        assert_eq!(progress, ValidationFailureProgress::Changed);
-    }
-
-    #[test]
-    fn validation_failure_reasons_explain_baseline_vs_previous_attempt() {
-        assert!(validation_failure_no_progress_reason(
-            ValidationFailureProgress::UnchangedFromBaseline
-        )
-        .unwrap()
-        .contains("pristine-tree baseline"));
-        assert!(validation_failure_no_progress_reason(
-            ValidationFailureProgress::UnchangedFromPreviousAttempt
-        )
-        .unwrap()
-        .contains("previous attempt"));
     }
 
     #[test]
@@ -6707,31 +6204,6 @@ which lacks a leading boundary check.
     }
 
     #[test]
-    fn run_auto_fix_commands_actually_fixes_the_worktree() {
-        // The whole point: a formatter run here should mean a subsequent
-        // validate() with a --check-style command passes, instead of
-        // burning an LLM retry on pure whitespace.
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("f.txt"), "unformatted\n").unwrap();
-        let fix_cmds = vec!["printf 'fixed\\n' > f.txt".to_string()];
-        run_auto_fix_commands(&fix_cmds, tmp.path(), &[]);
-        assert_eq!(
-            std::fs::read_to_string(tmp.path().join("f.txt")).unwrap(),
-            "fixed\n"
-        );
-    }
-
-    #[test]
-    fn run_auto_fix_commands_swallows_a_failing_command() {
-        // A formatter that isn't installed, or that errors on this
-        // particular tree, must never abort the dispatch -- it's a
-        // best-effort convenience, not a validation gate.
-        let tmp = tempfile::tempdir().unwrap();
-        let cmds = vec!["exit 1".to_string()];
-        run_auto_fix_commands(&cmds, tmp.path(), &[]); // must not panic
-    }
-
-    #[test]
     fn metadata_rich_mr_body_includes_closes_directive() {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = LedgerEntry::new(
@@ -6951,60 +6423,6 @@ fn dry_run_route(
         &runtime,
     )
     .ok()
-}
-
-/// Extracts a stable fingerprint from raw validation failure output (combined
-/// stdout+stderr from `validate()`) for `classify_validation_failure_progress`
-/// to compare instead of the raw text.
-///
-/// Two attempts that hit the exact same mistake can still differ byte-for-byte:
-/// clippy/rustc line:column numbers shift as surrounding code the agent wrote
-/// changes shape, and the `Checking ... (path)` header embeds a worktree path
-/// that can differ between dispatches. Comparing raw text would then miss a
-/// genuine repeat and burn a whole extra attempt on a mistake that was never
-/// going to resolve (observed live: TICKET-154's `dead_code` lint firing on
-/// the same unwired functions across attempts).
-///
-/// Keeps only the diagnostic header lines (`error: ...`, `error[E...]: ...`,
-/// `warning: ...`) that name the actual mistake, dropping `--> file:line:col`
-/// locations, source snippets, and `= note:`/`= help:` lines that vary without
-/// the mistake itself changing. Falls back to the full trimmed text when
-/// nothing matches those markers (e.g. a cargo test panic/assertion failure),
-/// so two dissimilar failures are never conflated into an identical empty
-/// fingerprint.
-fn validation_failure_fingerprint(text: &str) -> String {
-    let diagnostic_lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("error") || line.starts_with("warning:"))
-        .collect();
-    if diagnostic_lines.is_empty() {
-        text.trim().to_string()
-    } else {
-        diagnostic_lines.join("\n")
-    }
-}
-
-fn classify_validation_failure_progress(
-    baseline_failure: Option<&str>,
-    previous_failure: Option<&str>,
-    current_failure: &str,
-) -> ValidationFailureProgress {
-    let current_fp = validation_failure_fingerprint(current_failure);
-    let same_as_baseline = baseline_failure
-        .map(validation_failure_fingerprint)
-        .as_deref()
-        == Some(current_fp.as_str());
-    let same_as_previous = previous_failure
-        .map(validation_failure_fingerprint)
-        .as_deref()
-        == Some(current_fp.as_str());
-    match (same_as_baseline, same_as_previous) {
-        (true, true) => ValidationFailureProgress::UnchangedFromBaselineAndPreviousAttempt,
-        (true, false) => ValidationFailureProgress::UnchangedFromBaseline,
-        (false, true) => ValidationFailureProgress::UnchangedFromPreviousAttempt,
-        (false, false) => ValidationFailureProgress::Changed,
-    }
 }
 
 fn resolve_review_target(
