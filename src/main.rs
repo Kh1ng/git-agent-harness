@@ -1,5 +1,6 @@
 mod availability;
 mod baseline;
+mod build_cache;
 mod candidates;
 mod capability;
 pub mod claude_monitor;

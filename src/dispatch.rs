@@ -1073,7 +1073,7 @@ fn run_backend_with_reserved_route(
     // otherwise multiply multi-gigabyte artifacts until the host fills.
     env_vars.push((
         "CARGO_TARGET_DIR".to_string(),
-        shared_cargo_target_dir(profile)
+        crate::build_cache::target_dir(&profile.artifact_root, session_dir)
             .to_string_lossy()
             .into_owned(),
     ));
@@ -1199,18 +1199,10 @@ fn run_auto_fix_commands(commands: &[String], wt: &Path, env_vars: &[(String, St
 
 const MIN_DISPATCH_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-/// Build artifacts must outlive individual worktrees, but stay scoped to one
-/// profile so unrelated repositories never share Cargo fingerprints.
-fn shared_cargo_target_dir(profile: &Profile) -> PathBuf {
-    PathBuf::from(&profile.artifact_root)
-        .join("build-cache")
-        .join("cargo-target")
-}
-
-fn validation_env(profile: &Profile) -> Vec<(String, String)> {
+fn validation_env(profile: &Profile, session_scope: &Path) -> Vec<(String, String)> {
     vec![(
         "CARGO_TARGET_DIR".to_string(),
-        shared_cargo_target_dir(profile)
+        crate::build_cache::target_dir(&profile.artifact_root, session_scope)
             .to_string_lossy()
             .into_owned(),
     )]
@@ -1219,10 +1211,11 @@ fn validation_env(profile: &Profile) -> Vec<(String, String)> {
 fn ensure_dispatch_capacity(profile: &Profile, worktree_base: &Path) -> Result<()> {
     ensure_minimum_free_space(worktree_base, "worktree filesystem")?;
     ensure_minimum_free_space(&std::env::temp_dir(), "temporary filesystem")?;
-    // Ensure the shared cache parent exists before the first backend inherits
-    // it; this also proves the configured artifact root is writable early.
-    std::fs::create_dir_all(shared_cargo_target_dir(profile))
-        .context("creating shared Cargo target directory")?;
+    // Ensure the isolated-target parent exists before the first backend
+    // inherits it; this also proves the configured artifact root is writable
+    // early without sharing mutable Cargo outputs between worktrees.
+    std::fs::create_dir_all(crate::build_cache::target_root(&profile.artifact_root))
+        .context("creating isolated Cargo target root")?;
     Ok(())
 }
 
@@ -1319,11 +1312,12 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
                 profile.default_target_branch, profile.repo_id
             ))
         })?;
-    let gate_environment = validation_env(profile);
+    let gate_environment_signature =
+        crate::build_cache::validation_environment_signature(&profile.artifact_root);
     let hash = vc::hash_validation_context(
         &profile.validation_commands,
         target_sha.trim(),
-        &gate_environment,
+        &gate_environment_signature,
     );
     let state_path = vc::resolve_state_path();
 
@@ -1378,6 +1372,8 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
         &branch,
         &worktree_base,
     )?;
+    let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, &wt)?;
+    let gate_environment = cargo_target.environment();
     let verified_at = vc::now_rfc3339(OffsetDateTime::now_utc());
     let result = validate(&profile.validation_commands, &wt, &gate_environment);
     let ok = result.is_ok();
@@ -2064,6 +2060,9 @@ fn improve(
     apply_authoritative_work_identity(ledger, ticket_meta.as_ref(), &branch);
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
+    let _cargo_target =
+        crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
+    let validation_environment = validation_env(profile, session_dir);
 
     let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
 
@@ -2075,7 +2074,7 @@ fn improve(
         (None, None)
     } else {
         println!("Baseline validation on pristine worktree...");
-        match validate_with_exit_code(&profile.validation_commands, &wt, &validation_env(profile)) {
+        match validate_with_exit_code(&profile.validation_commands, &wt, &validation_environment) {
             Ok(()) => {
                 println!("Baseline validation passed.");
                 (None, None)
@@ -2609,14 +2608,13 @@ fn improve(
             break;
         }
 
-        let validation_env = validation_env(profile);
-        run_auto_fix_commands(&profile.auto_fix_commands, &wt, &validation_env);
+        run_auto_fix_commands(&profile.auto_fix_commands, &wt, &validation_environment);
 
         println!(
             "Running validation ({} commands)...",
             profile.validation_commands.len()
         );
-        match validate(&profile.validation_commands, &wt, &validation_env) {
+        match validate(&profile.validation_commands, &wt, &validation_environment) {
             Ok(()) => {
                 println!("Validation passed.");
                 validation_failed = false;
@@ -3166,6 +3164,8 @@ fn experiment(
     ledger.branch = Some(branch.clone());
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
+    let _cargo_target =
+        crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
 
     let issue_details = resolve_target_to_issue_or_string(profile, &args.target)?;
     let task = build_task(
@@ -3496,6 +3496,8 @@ fn pm(
     }
 
     let task = build_pm_plan_task(profile, &preflight_ctx, &args.target)?;
+    let _cargo_target =
+        crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
 
     let mut attempted_routes = HashSet::new();
     let log_text = loop {
@@ -3827,11 +3829,14 @@ fn review(
     } else {
         profile.env_file.as_deref().unwrap_or("")
     };
-    let env_vars = if resolved_env.is_empty() {
+    let mut env_vars = if resolved_env.is_empty() {
         vec![]
     } else {
         runner::load_env_file(resolved_env)
     };
+    let cargo_target =
+        crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
+    env_vars.extend(cargo_target.environment());
 
     // Escalate to the next untried reviewer in the ordered
     // ESCALATORY_REVIEW list. A routine reviewer may legitimately request

@@ -297,11 +297,18 @@ gah prune --profile <profile> --older-than 30
 
 ### Concurrent Rust workers and disk capacity
 
-GAH sets `CARGO_TARGET_DIR` to
-`<profile.artifact_root>/build-cache/cargo-target` for every backend,
-auto-fix command, validation command, and validation-gate check. Concurrent
-worktrees therefore share Cargo's lock-safe artifact cache instead of each
-creating multi-gigabyte `target/` directories.
+GAH gives every dispatch session its own writable `CARGO_TARGET_DIR` under
+`<profile.artifact_root>/build-cache/cargo-targets/`. All attempts in one
+session reuse that directory, but concurrent worktrees never share it. Cargo's
+registry/source cache remains shared normally; only compiled outputs are
+isolated. This is required for correctness: Cargo's internal locks serialize
+individual writes, but a shared target directory can still make one worktree
+execute a same-package test binary produced from another worktree's source.
+
+The session owner holds an advisory lock for the target's lifetime and removes
+the directory at dispatch completion. Automatic pruning removes any unlocked
+target left by SIGKILL, a host crash, or an older binary, so isolation does not
+reintroduce the stale multi-gigabyte artifact leak.
 
 Before creating a worktree, GAH also requires at least 10 GiB free on both the
 worktree filesystem and the temporary filesystem. It fails before spending an

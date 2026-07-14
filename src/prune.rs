@@ -48,6 +48,7 @@ fn prune_profile(
         println!("[{name}] retention={retention}d");
     }
     prune_sessions(profile, cutoff, dry_run)?;
+    crate::build_cache::prune_inactive(&profile.artifact_root, dry_run)?;
     prune_worktrees(cfg, profile, cutoff, dry_run)?;
     Ok(())
 }
