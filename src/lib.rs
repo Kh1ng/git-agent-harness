@@ -41,3 +41,4 @@ pub mod worktree;
 pub mod test_support;
 pub mod tui_state;
 pub mod validation_check;
+pub mod validation_runner;
