@@ -8,17 +8,16 @@ use crate::routing::{
     self, CandidateIdentity, RouteDecision, RouteError, RouteRequest, RoutingRuntimeState,
     TaskRoutingContext,
 };
+use crate::validation_runner::{validate, validate_with_exit_code};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::Command;
 use std::sync::mpsc::SyncSender;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -1196,135 +1195,6 @@ fn run_auto_fix_commands(commands: &[String], wt: &Path, env_vars: &[(String, St
             Ok(_) => {}
         }
     }
-}
-
-/// Run validation_commands in the worktree. Returns Err(combined output) on first failure.
-fn validate(commands: &[String], wt: &Path, env_vars: &[(String, String)]) -> Result<()> {
-    for cmd_str in commands {
-        if cmd_str.trim().is_empty() {
-            continue;
-        }
-        println!("  Validating: {}", cmd_str);
-        // Run through the shell: validation commands routinely use `cd x && y`,
-        // pipes, and env vars, which Command::new(bin) cannot execute.
-        let out = run_validation_shell_command(cmd_str, wt, env_vars)
-            .with_context(|| format!("failed to run '{}'", cmd_str))?;
-        if !out.status.success() {
-            bail!(
-                "$ {}
-{}{}",
-                cmd_str,
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr),
-            );
-        }
-    }
-    Ok(())
-}
-
-/// TICKET-110: like `validate()`, but also surfaces the failing command's
-/// exit code so baseline classification can key on POSIX shell conventions
-/// (127/126) rather than string-matching stdout.
-fn validate_with_exit_code(
-    commands: &[String],
-    wt: &Path,
-    env_vars: &[(String, String)],
-) -> Result<(), (String, Option<i32>)> {
-    for cmd_str in commands {
-        if cmd_str.trim().is_empty() {
-            continue;
-        }
-        println!("  Validating: {}", cmd_str);
-        let out = run_validation_shell_command(cmd_str, wt, env_vars)
-            .map_err(|e| (format!("failed to run '{}': {:#}", cmd_str, e), None))?;
-        if !out.status.success() {
-            return Err((
-                format!(
-                    "$ {}\n{}{}",
-                    cmd_str,
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr),
-                ),
-                out.status.code(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn run_validation_shell_command(
-    cmd_str: &str,
-    wt: &Path,
-    env_vars: &[(String, String)],
-) -> Result<Output> {
-    run_validation_shell_command_with_shutdown(cmd_str, wt, env_vars, || {
-        crate::runner::shutdown_requested()
-    })
-}
-
-fn run_validation_shell_command_with_shutdown(
-    cmd_str: &str,
-    wt: &Path,
-    env_vars: &[(String, String)],
-    shutdown_requested: impl Fn() -> bool,
-) -> Result<Output> {
-    if shutdown_requested() {
-        bail!("shutdown requested before validation command '{cmd_str}'");
-    }
-
-    let mut command = Command::new("sh");
-    command
-        .args(["-c", cmd_str])
-        .current_dir(wt)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (key, value) in env_vars {
-        command.env(key, value);
-    }
-    crate::runner::prepare_process_group(&mut command);
-
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawning validation command '{cmd_str}'"))?;
-    let mut stdout = child.stdout.take().context("capturing validation stdout")?;
-    let mut stderr = child.stderr.take().context("capturing validation stderr")?;
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
-
-    let status = loop {
-        if shutdown_requested() {
-            crate::runner::kill_process_group(&mut child);
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            bail!("shutdown requested during validation command '{cmd_str}'");
-        }
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("waiting for validation command '{cmd_str}'"))?
-        {
-            break status;
-        }
-        thread::sleep(Duration::from_millis(50));
-    };
-
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("validation stdout reader panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("validation stderr reader panicked"))??;
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
 }
 
 const MIN_DISPATCH_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -4904,9 +4774,7 @@ fn format_candidate_task(
 mod tests {
     use super::preflight;
     use super::run_auto_fix_commands;
-    use super::run_validation_shell_command_with_shutdown;
     use super::self_check_validation_gate;
-    use super::validate;
     use super::ValidationGateError;
     use super::{
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
@@ -4937,9 +4805,6 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
     use time::OffsetDateTime;
 
     const CODEX_FULL_RESET: &str =
@@ -9265,75 +9130,6 @@ The parser should retain structured sections.\n\n\
         assert!(body.contains("Generated research findings report."));
         assert!(!body.contains("## Changes"));
         assert!(!body.contains("## Branch"));
-    }
-
-    #[test]
-    fn validate_runs_shell_syntax() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("sub")).unwrap();
-        // `cd x && y` requires a shell — this was silently impossible before
-        let cmds = vec!["cd sub && true".to_string()];
-        assert!(validate(&cmds, tmp.path(), &[]).is_ok());
-    }
-
-    #[test]
-    fn validate_reports_failing_command_output() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cmds = vec!["echo oops >&2 && false".to_string()];
-        let err = validate(&cmds, tmp.path(), &[]).unwrap_err();
-        assert!(format!("{:#}", err).contains("oops"));
-    }
-
-    #[test]
-    fn validation_shutdown_kills_the_command_process_group_promptly() {
-        let tmp = tempfile::tempdir().unwrap();
-        let marker = tmp.path().join("orphan-marker");
-        let command = format!("(sleep 2; printf orphaned > '{}') & wait", marker.display());
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let trigger = Arc::clone(&shutdown);
-        let trigger_thread = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            trigger.store(true, Ordering::SeqCst);
-        });
-
-        let started = Instant::now();
-        let error = run_validation_shell_command_with_shutdown(&command, tmp.path(), &[], || {
-            shutdown.load(Ordering::SeqCst)
-        })
-        .unwrap_err();
-        trigger_thread.join().unwrap();
-
-        assert!(error.to_string().contains("shutdown requested"));
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "validation shutdown should not wait for the shell command"
-        );
-        std::thread::sleep(Duration::from_millis(2100));
-        assert!(
-            !marker.exists(),
-            "the validation command's background child must die with its process group"
-        );
-    }
-
-    #[test]
-    fn validate_propagates_shared_cargo_target_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let observed = tmp.path().join("observed-target");
-        let commands = vec![format!(
-            "printf '%s' \"$CARGO_TARGET_DIR\" > {}",
-            observed.display()
-        )];
-        let expected = tmp.path().join("shared-cargo-target");
-        let env = vec![(
-            "CARGO_TARGET_DIR".to_string(),
-            expected.to_string_lossy().into_owned(),
-        )];
-
-        validate(&commands, tmp.path(), &env).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(observed).unwrap(),
-            expected.display().to_string()
-        );
     }
 
     #[test]
