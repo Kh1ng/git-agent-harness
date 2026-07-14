@@ -1,6 +1,6 @@
 use super::issues::{
-    extract_markdown_list_section, extract_markdown_section, parse_ticket_metadata_from_issue,
-    IssueDetails,
+    extract_markdown_list_section, extract_markdown_requirement_items, extract_markdown_section,
+    parse_ticket_metadata_from_issue, IssueDetails,
 };
 use super::text::utf8_safe_prefix;
 use crate::config::{GahConfig, Profile};
@@ -325,8 +325,11 @@ fn issue_has_no_structured_body(issue: &IssueDetails) -> bool {
     extract_markdown_section(&issue.body, "Problem").is_none()
         && extract_markdown_section(&issue.body, "Background").is_none()
         && extract_markdown_section(&issue.body, "Description").is_none()
+        && extract_markdown_section(&issue.body, "Scope").is_none()
         && extract_markdown_list_section(&issue.body, "Acceptance Criteria").is_empty()
         && extract_markdown_list_section(&issue.body, "Constraints").is_empty()
+        && extract_markdown_requirement_items(&issue.body, "Invariants").is_empty()
+        && extract_markdown_requirement_items(&issue.body, "Required Behavior").is_empty()
 }
 
 fn append_bounded_text(task: &mut String, text: &str, max_bytes: usize, label: &str) {
@@ -611,6 +614,36 @@ mod tests {
 
         assert!(task.contains("### Issue Description"));
         assert!(task.contains("non-structured reproduction"));
+    }
+
+    #[test]
+    fn scope_and_invariants_headings_suppress_the_raw_body_fallback() {
+        // Issue #405: an issue using `Scope`/`Invariants` instead of
+        // `Problem`/`Constraints` is still structured -- the Live Task Pack
+        // must carry the requirements, and the raw-body fallback (which
+        // would otherwise duplicate them unbounded) must not also fire.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "378".to_string(),
+            title: "Fix drift detection".to_string(),
+            body: "## Scope\n\nDetect config drift across restarts\n\n\
+                   ## Invariants\n\n- Never silently disable classification"
+                .to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#378", Some(&issue));
+
+        assert!(task.contains("### Problem"));
+        assert!(task.contains("Detect config drift across restarts"));
+        assert!(task.contains("### Constraints"));
+        assert!(task.contains("Never silently disable classification"));
+        assert!(!task.contains("### Issue Description"));
     }
 
     #[test]
