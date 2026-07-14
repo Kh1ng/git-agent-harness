@@ -67,10 +67,25 @@ pub(in crate::dispatch) fn check_review_budget(
     };
     let routing = profile.effective_routing(&cfg.defaults);
     let entries = ledger::entries_for_work_id(cfg, work_id)?;
-    let reviews: Vec<_> = entries
+    // `clear-attempts` is an operator reset for this work item's bounded
+    // automation budgets. Keep the append-only history, but do not let review
+    // calls from before the latest matching tombstone permanently block the
+    // ticket. Scope the reset to this profile/repository just like the review
+    // records themselves so an identically-numbered issue elsewhere cannot
+    // reset this budget.
+    let active_entries = entries
+        .iter()
+        .rposition(|entry| {
+            entry.profile == profile_name
+                && entry.repo_id == profile.repo_id
+                && entry.mode == "clear_attempts"
+        })
+        .map_or(entries.as_slice(), |index| &entries[index + 1..]);
+    let reviews: Vec<_> = active_entries
         .iter()
         .filter(|entry| {
             entry.profile == profile_name
+                && entry.repo_id == profile.repo_id
                 && entry.mode == "review"
                 && !matches!(
                     entry.validation_result.as_deref(),
