@@ -1,7 +1,49 @@
+//! Publishing policy, source freshness checks, and deterministic handoff/MR rendering.
+
+use super::issues::{fetch_issue_details, IssueDetails, TicketMetadata};
 use crate::config::Profile;
 use crate::ledger::LedgerEntry;
 use crate::models::ReviewVerdict;
 use std::path::Path;
+
+pub(super) fn ensure_issue_open_for_publish(
+    profile: &Profile,
+    issue: &IssueDetails,
+) -> anyhow::Result<()> {
+    let fresh = fetch_issue_details(profile, &issue.number)?;
+    match fresh.state.as_deref() {
+        Some(state) if state.eq_ignore_ascii_case("open") => Ok(()),
+        Some(state) => anyhow::bail!(
+            "source issue #{} is {state}; refusing to publish completed or closed work",
+            fresh.number
+        ),
+        None => anyhow::bail!(
+            "source issue #{} did not report its state; refusing to publish without authoritative status",
+            fresh.number
+        ),
+    }
+}
+
+pub(super) fn emit_human_handoff(
+    profile: &Profile,
+    ledger: &LedgerEntry,
+    branch: &str,
+    reason: &str,
+) {
+    println!("=== GAH human handoff (publishing policy) ===");
+    println!("reason: {}", reason);
+    println!("profile: {}", profile.display_name);
+    println!("branch: {}", branch);
+    println!(
+        "validation_status: {}",
+        ledger.validation_result.as_deref().unwrap_or("unknown")
+    );
+    println!("changed_files: {}", ledger.files_changed.unwrap_or(0));
+    if let Some(verdict) = &ledger.review_verdict {
+        println!("review_verdict: {}", verdict);
+    }
+    println!("=== end GAH human handoff ===");
+}
 
 /// TICKET-128: whether the profile may publish the work autonomously. A
 /// restricted profile can still run the full backend and validation pipeline
@@ -11,7 +53,7 @@ pub(super) fn publishing_allows_publish(profile: &Profile) -> bool {
         && profile.publishing.allow_commit_message_generation
 }
 
-pub(super) fn render_ticket_label(ticket: Option<&crate::dispatch::TicketMetadata>) -> String {
+pub(super) fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
     let Some(ticket) = ticket else {
         return "n/a".into();
     };
@@ -57,7 +99,7 @@ pub(super) fn format_failure_state(ledger: &LedgerEntry) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_standard_mr_body(
     mode: &str,
-    ticket: Option<&crate::dispatch::TicketMetadata>,
+    ticket: Option<&TicketMetadata>,
     backend: &str,
     model: &str,
     _branch: &str,
@@ -102,7 +144,7 @@ pub(super) struct MrRenderContext<'a> {
 
 pub(super) fn build_metadata_rich_mr_body(
     mode: &str,
-    ticket: &crate::dispatch::TicketMetadata,
+    ticket: &TicketMetadata,
     ctx: &MrRenderContext<'_>,
 ) -> String {
     let mut sections = Vec::new();
@@ -198,7 +240,7 @@ pub(super) fn build_metadata_rich_mr_body(
 
 pub(super) fn build_fix_or_improve_mr_body(
     mode: &str,
-    ticket: Option<&crate::dispatch::TicketMetadata>,
+    ticket: Option<&TicketMetadata>,
     ctx: &MrRenderContext<'_>,
     validation_passed: bool,
 ) -> String {
@@ -269,7 +311,7 @@ pub(super) fn build_mr_title(
     mode: &str,
     repo_id: &str,
     validation_failed: bool,
-    ticket: Option<&crate::dispatch::TicketMetadata>,
+    ticket: Option<&TicketMetadata>,
 ) -> String {
     let mode_label = match mode {
         "fix" => "Fix",
@@ -383,5 +425,74 @@ pub(super) fn review_labels(verdict: &ReviewVerdict) -> Vec<&'static str> {
         "NEEDS_FIX" | "REJECT" => vec!["gah-needs-fix"],
         "HUMAN_REVIEW" => vec!["gah-review-escalating"],
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_preserves_authoritative_identity_and_draft_prefix() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("#319".into()),
+            work_id: Some("#319".into()),
+            title: Some("Use native issue numbers".into()),
+            issue_number: Some("319".into()),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+
+        assert_eq!(
+            build_mr_title("fix", "repo", false, Some(&ticket)),
+            "[GAH] Fix: #319 Use native issue numbers"
+        );
+        assert_eq!(
+            build_mr_title("fix", "repo", true, Some(&ticket)),
+            "[GAH][DRAFT-FAIL] Fix: #319 Use native issue numbers"
+        );
+    }
+
+    #[test]
+    fn standard_body_keeps_close_directive_and_summary_bytes() {
+        let ticket = TicketMetadata {
+            issue_number: Some("319".into()),
+            title: Some("Native issue".into()),
+            ..TicketMetadata::default()
+        };
+        let body = build_standard_mr_body(
+            "fix",
+            Some(&ticket),
+            "codex",
+            "gpt",
+            "branch",
+            "main",
+            true,
+            "Changed one thing.",
+        );
+
+        assert!(body.contains("Closes #319"));
+        assert!(body.contains("## What changed and why\n\nChanged one thing."));
+        assert!(body.ends_with("Validation passed: true\n\nGenerated by `gah dispatch`."));
+    }
+
+    #[test]
+    fn review_comment_keeps_non_blocking_findings_risks_and_gate_reason_once() {
+        let mut verdict: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"HUMAN_REVIEW","confidence":"low","human_required":true,
+                "blocking_findings":[],
+                "non_blocking_findings":["missing test coverage"],
+                "risk_notes":["new module coupling"]}"#,
+        )
+        .unwrap();
+        verdict.safety_gate_reason = Some("APPROVE omitted grounded evidence".into());
+
+        let comment = render_review_comment(&verdict, Path::new("/tmp/session"));
+        assert!(comment.contains("missing test coverage"));
+        assert!(comment.contains("new module coupling"));
+        assert_eq!(
+            comment.matches("APPROVE omitted grounded evidence").count(),
+            1
+        );
     }
 }

@@ -348,21 +348,6 @@ pub(super) fn fetch_issue_details(profile: &Profile, issue_number: &str) -> Resu
     }
 }
 
-pub(super) fn ensure_issue_open_for_publish(profile: &Profile, issue: &IssueDetails) -> Result<()> {
-    let fresh = fetch_issue_details(profile, &issue.number)?;
-    match fresh.state.as_deref() {
-        Some(state) if state.eq_ignore_ascii_case("open") => Ok(()),
-        Some(state) => anyhow::bail!(
-            "source issue #{} is {state}; refusing to publish completed or closed work",
-            fresh.number
-        ),
-        None => anyhow::bail!(
-            "source issue #{} did not report its state; refusing to publish without authoritative status",
-            fresh.number
-        ),
-    }
-}
-
 fn extract_field_value(body: &str, field: &str) -> Option<String> {
     let prefix = format!("{field}:");
     body.lines()

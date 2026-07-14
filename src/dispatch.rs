@@ -28,17 +28,17 @@ mod prompts;
 mod publish;
 
 use self::issues::{
-    ensure_issue_open_for_publish, issue_is_auto_dispatch_blocked, list_open_issues,
-    parse_ticket_metadata, parse_ticket_metadata_from_issue, resolve_target_to_issue_or_string,
-    ticket_number_prefix, TicketMetadata,
+    issue_is_auto_dispatch_blocked, list_open_issues, parse_ticket_metadata,
+    parse_ticket_metadata_from_issue, resolve_target_to_issue_or_string, ticket_number_prefix,
+    TicketMetadata,
 };
 
 use self::prompts::build_task;
 
 use self::publish::{
-    build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title,
-    publishing_allows_publish, render_review_comment, review_labels, ExperimentMrRenderContext,
-    MrRenderContext,
+    build_experiment_mr_body, build_fix_or_improve_mr_body, build_mr_title, emit_human_handoff,
+    ensure_issue_open_for_publish, publishing_allows_publish, render_review_comment, review_labels,
+    ExperimentMrRenderContext, MrRenderContext,
 };
 
 fn mark_shutdown_cancelled(
@@ -8459,33 +8459,6 @@ fn apply_diff_stats(ledger: &mut LedgerEntry, wt: &Path, target_branch: &str) {
     }
 }
 
-/// TICKET-128: emit deterministic, machine-readable human-handoff metadata when
-/// a profile's publishing policy forbids agent-authored repository messaging
-/// (PR/MR creation or LLM-generated commit text). No PR/MR is created and no
-/// tracker comment is posted; the worktree/branch is left for a human to
-/// complete. The output is intentionally free of any LLM-generated prose.
-fn emit_human_handoff(profile: &Profile, ledger: &LedgerEntry, branch: &str, reason: &str) {
-    println!("=== GAH human handoff (publishing policy) ===");
-    println!("reason: {}", reason);
-    println!("profile: {}", profile.display_name);
-    println!("branch: {}", branch);
-    println!(
-        "validation_status: {}",
-        ledger.validation_result.as_deref().unwrap_or("unknown")
-    );
-    println!("changed_files: {}", ledger.files_changed.unwrap_or(0));
-    if let Some(verdict) = &ledger.review_verdict {
-        println!("review_verdict: {}", verdict);
-    }
-    println!("=== end GAH human handoff ===");
-}
-
-/// TICKET-128: whether the profile may publish the work autonomously. A
-/// restricted profile that forbids PR/MR creation OR LLM-generated commit
-/// messages must stop at a deterministic human handoff instead of publishing:
-/// there is nothing to push without a commit, and an empty/uncommitted branch
-/// cannot seed a PR. Each flag is an independent policy axis; neither is
-/// overloaded onto `human_required`.
 fn summarize_error(err: &anyhow::Error) -> String {
     let text = format!("{:#}", err).replace('\n', " ");
     if text.len() > 500 {
