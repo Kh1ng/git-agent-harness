@@ -11,8 +11,19 @@ use support::{FakeBackend, Scenario};
 use tempfile::TempDir;
 
 fn bin() -> Command {
-    static VALIDATION_STATE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let invocation_id = COMMAND_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut cmd = Command::cargo_bin("gah").unwrap();
+    // CLI integration tests may run under the real systemd loop, which sets
+    // XDG_STATE_HOME to the operator's persistent state directory. Never let
+    // fake profiles and work claims leak into (or inherit from) that state.
+    cmd.env(
+        "XDG_STATE_HOME",
+        std::env::temp_dir().join(format!(
+            "gah-cli-test-state-{}-{invocation_id}",
+            std::process::id()
+        )),
+    );
     cmd.env(
         "GAH_AVAILABILITY_PATH",
         "/nonexistent-availability-path.json",
@@ -20,9 +31,8 @@ fn bin() -> Command {
     cmd.env(
         "GAH_VALIDATION_CHECK_PATH",
         std::env::temp_dir().join(format!(
-            "gah-cli-test-validation-{}-{}.json",
+            "gah-cli-test-validation-{}-{invocation_id}.json",
             std::process::id(),
-            VALIDATION_STATE_COUNTER.fetch_add(1, Ordering::Relaxed)
         )),
     );
     cmd
