@@ -13,6 +13,8 @@ const CODEX_FULL_RESET: &str =
     include_str!("../../../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
 const OPENCODE_HY3_RATE_LIMIT: &str =
     include_str!("../../../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
+const CODEX_CONTEXT_LIMIT: &str =
+    include_str!("../../../tests/fixtures/quota-logs/codex_context_limit_exceeded.txt");
 
 #[test]
 fn review_preflight_fails_with_backend_unavailable_when_executable_missing() {
@@ -890,6 +892,41 @@ fn harness_idle_watchdog_marks_backend_outage_not_rate_limit() {
     .unwrap();
     assert!(!decision.eligible);
     assert_eq!(decision.reason, Some(Reason::BackendOutage));
+}
+
+#[test]
+fn context_limit_text_is_classified_before_stall_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("availability.json");
+    let output = format!(
+        "{CODEX_CONTEXT_LIMIT}\nGAH: killed after 600s with no new backend output or worktree progress (stalled, not just slow)."
+    );
+    let parsed = mark_backend_unavailable_from_output_at(
+        &state,
+        "codex",
+        Some("gpt-5.4-mini"),
+        Some("codex-quota"),
+        &output,
+        "/tmp/codex.log",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        parsed.kind,
+        crate::quota_parser::FailureKind::ContextLimitExceeded
+    );
+    let decision = availability_for(
+        &state,
+        "codex",
+        Some("gpt-5.4-mini"),
+        Some("codex-quota"),
+        OffsetDateTime::now_utc(),
+    )
+    .unwrap();
+    assert!(!decision.eligible);
+    assert_eq!(decision.reason, Some(Reason::QuotaExhausted));
+    assert!(!parsed.retryable);
 }
 
 #[test]

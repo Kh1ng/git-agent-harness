@@ -782,6 +782,50 @@ fn mark_backend_unavailable_from_output_at(
     log_path: &str,
 ) -> Result<Option<crate::quota_parser::ParsedFailure>> {
     let now = now_with_local_offset();
+
+    if let Some(parsed) = crate::quota_parser::parse(backend, log_text, now) {
+        let unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {
+            OffsetDateTime::parse(reset_at, &Rfc3339).ok()
+        } else {
+            parsed
+                .retry_after_seconds
+                .map(|secs| now + time::Duration::seconds(secs as i64))
+        };
+        let reason = match parsed.kind {
+            crate::quota_parser::FailureKind::QuotaExhausted => {
+                crate::availability::Reason::QuotaExhausted
+            }
+            crate::quota_parser::FailureKind::RateLimited => {
+                crate::availability::Reason::RateLimited
+            }
+            crate::quota_parser::FailureKind::AuthenticationError => {
+                crate::availability::Reason::AuthenticationError
+            }
+            crate::quota_parser::FailureKind::BackendStalled => {
+                crate::availability::Reason::BackendOutage
+            }
+            crate::quota_parser::FailureKind::ContextLimitExceeded => {
+                crate::availability::Reason::QuotaExhausted
+            }
+        };
+        let summary = format!(
+            "{}; confidence={:?}; log={}",
+            parsed.matched_evidence, parsed.confidence, log_path
+        );
+        crate::availability::record_unavailable(
+            state_path,
+            backend,
+            model.filter(|m| !m.is_empty()),
+            quota_pool,
+            reason,
+            crate::availability::Source::BackendError,
+            unavailable_until,
+            Some(summary),
+            now,
+        )?;
+        return Ok(Some(parsed));
+    }
+
     // An idle watchdog kill is a backend outage signal, not an ordinary agent
     // failure. Keep this route out of the candidate set for a short bounded
     // cooldown so the next attempt can use another backend/model instead of
@@ -815,45 +859,7 @@ fn mark_backend_unavailable_from_output_at(
             unresolved_timezone: None,
         }));
     }
-    let Some(parsed) = crate::quota_parser::parse(backend, log_text, now) else {
-        return Ok(None);
-    };
-
-    let unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {
-        OffsetDateTime::parse(reset_at, &Rfc3339).ok()
-    } else {
-        parsed
-            .retry_after_seconds
-            .map(|secs| now + time::Duration::seconds(secs as i64))
-    };
-    let reason = match parsed.kind {
-        crate::quota_parser::FailureKind::QuotaExhausted => {
-            crate::availability::Reason::QuotaExhausted
-        }
-        crate::quota_parser::FailureKind::RateLimited => crate::availability::Reason::RateLimited,
-        crate::quota_parser::FailureKind::AuthenticationError => {
-            crate::availability::Reason::AuthenticationError
-        }
-        crate::quota_parser::FailureKind::BackendStalled => {
-            crate::availability::Reason::BackendOutage
-        }
-    };
-    let summary = format!(
-        "{}; confidence={:?}; log={}",
-        parsed.matched_evidence, parsed.confidence, log_path
-    );
-    crate::availability::record_unavailable(
-        state_path,
-        backend,
-        model.filter(|m| !m.is_empty()),
-        quota_pool,
-        reason,
-        crate::availability::Source::BackendError,
-        unavailable_until,
-        Some(summary),
-        now,
-    )?;
-    Ok(Some(parsed))
+    Ok(None)
 }
 
 #[cfg(test)]

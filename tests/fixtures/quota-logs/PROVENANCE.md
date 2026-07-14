@@ -12,6 +12,7 @@ Captured into this repo: 2026-07-04.
 |---|---|---|
 | `codex_usage_exhausted_full_reset.txt` | github.com/openai/codex issue #12299 | Full date + time, no timezone. |
 | `codex_usage_exhausted_admin_variant.txt` | github.com/openai/codex issue #16906 | Business/admin wording variant, full date + time, no timezone. |
+| `codex_context_limit_exceeded.txt` | Local capture, `run-output` transcript, 2026-07-14 | Explicit context-limit exhaustion phrase from the failing Codex backend output (sanitized). |
 | `codex_usage_exhausted_time_only.txt` | github.com/openai/codex issue #16847 | Time-only reset, no date, no timezone. |
 | `claude_usage_exhausted_tz_reset.txt` | github.com/anthropics/claude-code issue #9236 | Time-only reset with an explicit IANA timezone name. |
 | `claude_weekly_limit_structured.json` | github.com/anthropics/claude-code issue #68816 | Structured event; weekly limit language, month+day+time with explicit IANA timezone name, no year. |

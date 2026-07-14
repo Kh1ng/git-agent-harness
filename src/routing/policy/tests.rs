@@ -698,6 +698,7 @@ fn is_genuine_agent_failure_classifies_correctly() {
     assert!(is_genuine_agent_failure(Some("agent_failure")));
     assert!(is_genuine_agent_failure(Some("agent_no_progress")));
     assert!(is_genuine_agent_failure(Some("validation_failure")));
+    assert!(is_genuine_agent_failure(Some("context_limit_exceeded")));
     assert!(!is_genuine_agent_failure(Some("harness_error")));
     assert!(!is_genuine_agent_failure(Some("environment_error")));
     assert!(!is_genuine_agent_failure(Some("backend_error")));

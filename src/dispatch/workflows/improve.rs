@@ -34,6 +34,15 @@ use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn parse_failure_class(parsed: &crate::quota_parser::ParsedFailure) -> crate::ledger::FailureClass {
+    match parsed.kind {
+        crate::quota_parser::FailureKind::ContextLimitExceeded => {
+            crate::ledger::FailureClass::ContextLimitExceeded
+        }
+        _ => crate::ledger::FailureClass::BackendError,
+    }
+}
+
 pub(crate) fn improve(
     cfg: &GahConfig,
     profile: &Profile,
@@ -447,8 +456,17 @@ pub(crate) fn improve(
                 && log_text.contains("(stalled, not just slow).");
             let semantic_no_progress = stalled
                 && log_text.contains("with no new worktree progress (stalled, not just slow).");
+            let parsed = mark_backend_unavailable_from_output(
+                &route.effective_backend,
+                route.effective_model.as_deref(),
+                route.effective_quota_pool.as_deref(),
+                &log_text,
+                failure_log_path,
+            )?;
             let failure_class = if semantic_no_progress {
                 crate::ledger::FailureClass::AgentNoProgress
+            } else if let Some(parsed) = parsed.as_ref() {
+                parse_failure_class(parsed)
             } else if stalled {
                 crate::ledger::FailureClass::HarnessError
             } else {
@@ -503,20 +521,11 @@ pub(crate) fn improve(
                 );
             }
             if attempt + 1 < max_attempts {
-                if let Some(parsed) = mark_backend_unavailable_from_output(
-                    &route.effective_backend,
-                    route.effective_model.as_deref(),
-                    route.effective_quota_pool.as_deref(),
-                    &log_text,
-                    failure_log_path,
-                )? {
-                    let rerouted = decide_route(
-                        cfg,
-                        profile,
-                        route_req.clone(),
-                        ticket_meta.as_ref(),
-                        ledger,
-                    )?;
+                if let Some(parsed) = parsed {
+                    let mut reroute_req = route_req.clone();
+                    reroute_req.last_failure_class = Some(failure_class.as_str());
+                    let rerouted =
+                        decide_route(cfg, profile, reroute_req, ticket_meta.as_ref(), ledger)?;
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
                     let rerouted_identity = route_identity(
@@ -636,24 +645,23 @@ pub(crate) fn improve(
                 .internal_log_path
                 .as_deref()
                 .unwrap_or(&result.log_path);
-            if let Some(parsed) = mark_backend_unavailable_from_output(
+            let parsed = mark_backend_unavailable_from_output(
                 &route.effective_backend,
                 route.effective_model.as_deref(),
                 route.effective_quota_pool.as_deref(),
                 &failure_text,
                 failure_log_path,
-            )? {
-                ledger.set_failure(
-                    crate::ledger::FailureClass::BackendError,
-                    crate::ledger::FailureStage::AgentRun,
-                );
+            )?;
+            if let Some(parsed) = parsed {
+                let failure_class = parse_failure_class(&parsed);
+                ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
                 ledger.attempts.push(crate::ledger::AttemptRecord {
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
                     effective_model: Some(llm.model.clone()),
                     exit_code: Some(0),
                     validation_result: Some("not_run_backend_unavailable".into()),
-                    failure_class: Some(crate::ledger::FailureClass::BackendError.as_str().into()),
+                    failure_class: Some(failure_class.as_str().into()),
                     failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
@@ -667,13 +675,10 @@ pub(crate) fn improve(
                     cli_version: result.agy_version.clone(),
                 });
                 if attempt + 1 < max_attempts {
-                    let rerouted = decide_route(
-                        cfg,
-                        profile,
-                        route_req.clone(),
-                        ticket_meta.as_ref(),
-                        ledger,
-                    )?;
+                    let mut reroute_req = route_req.clone();
+                    reroute_req.last_failure_class = Some(failure_class.as_str());
+                    let rerouted =
+                        decide_route(cfg, profile, reroute_req, ticket_meta.as_ref(), ledger)?;
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
                     let rerouted_identity = route_identity(

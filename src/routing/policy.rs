@@ -220,7 +220,10 @@ fn dedupe_candidates(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
 pub(super) fn is_genuine_agent_failure(last_failure_class: Option<&str>) -> bool {
     matches!(
         last_failure_class,
-        Some("agent_failure") | Some("agent_no_progress") | Some("validation_failure")
+        Some("agent_failure")
+            | Some("agent_no_progress")
+            | Some("validation_failure")
+            | Some("context_limit_exceeded")
     )
 }
 

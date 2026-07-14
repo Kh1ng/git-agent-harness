@@ -1,5 +1,5 @@
-//! TICKET-066: parse rate-limit and quota-reset signals from backend
-//! failure output.
+//! TICKET-066: parse rate-limit, context-limit, and quota-reset signals from
+//! backend failure output.
 //!
 //! Every classification pattern in this module exists because a real,
 //! provenance-tracked example justified it — see
@@ -34,6 +34,8 @@ pub enum FailureKind {
     /// GAH observed a genuinely idle backend process. This is a harness
     /// watchdog classification, never provider quota/rate-limit evidence.
     BackendStalled,
+    /// Explicit model context-window/context-length exhaustion.
+    ContextLimitExceeded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,6 +96,16 @@ fn insufficient_balance_re() -> &'static Regex {
     RE.get_or_init(|| {
         Regex::new(
             r"(?i)(account balance (?:is )?insufficient|insufficient (?:account )?balance|credit balance.{0,24}(?:insufficient|exhausted)|payment required)",
+        )
+        .unwrap()
+    })
+}
+
+fn context_limit_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:(?:\b(?:context|token|prompt|input)\b.{0,80}(?:window|length|limit|budget|size)|(?:context|token|prompt|input)\s+length).{0,80}(?:exceeded|exceeding|over|beyond|too long|too many|surpassed|too)|(?:exceeded|exceeding|over|beyond|too long|too many|surpassed|too).{0,80}\b(?:context|token|prompt|input)\b.{0,80}(?:window|length|limit|budget|size))",
         )
         .unwrap()
     })
@@ -342,6 +354,19 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
         });
     }
 
+    if let Some(m) = context_limit_re().find(text) {
+        return Some(ParsedFailure {
+            backend: backend.to_string(),
+            kind: FailureKind::ContextLimitExceeded,
+            retryable: false,
+            reset_at: None,
+            retry_after_seconds: None,
+            confidence: Confidence::High,
+            matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+            unresolved_timezone: None,
+        });
+    }
+
     if let Some(m) = usage_or_weekly_limit_re().find(text) {
         let (reset_at, unresolved_timezone) = extract_reset(text, now);
         return Some(ParsedFailure {
@@ -444,6 +469,8 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/agy_auth_not_logged_in.txt");
     const OPENCODE_HY3_RATE_LIMIT: &str =
         include_str!("../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
+    const CODEX_CONTEXT_LIMIT: &str =
+        include_str!("../tests/fixtures/quota-logs/codex_context_limit_exceeded.txt");
 
     // ── Codex: full date+time, no timezone (openai/codex #12299) ───────────
 
@@ -499,6 +526,16 @@ mod tests {
         let now = utc(2026, Month::March, 31, 18, 0);
         let parsed = parse("codex", CODEX_TIME_ONLY, now).unwrap();
         assert_eq!(parsed.reset_at.as_deref(), Some("2026-04-01T14:57:00Z"));
+    }
+
+    #[test]
+    fn codex_context_limit_exceeded_is_distinct_from_quota_exhaustion() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("codex", CODEX_CONTEXT_LIMIT, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::ContextLimitExceeded);
+        assert_eq!(parsed.confidence, Confidence::High);
+        assert!(!parsed.retryable);
+        assert_eq!(parsed.reset_at, None);
     }
 
     // ── Claude: explicit IANA timezone (anthropics/claude-code #9236) ──────
@@ -574,6 +611,13 @@ mod tests {
     }
 
     #[test]
+    fn claude_context_window_exceeded_is_classified_as_context_limit() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("claude", "Context window exceeded (max 200000 tokens)", now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::ContextLimitExceeded);
+    }
+
+    #[test]
     fn opencode_internal_hy3_rate_limit_is_classified_without_a_fabricated_reset() {
         let now = utc(2026, Month::January, 1, 0, 0);
         let parsed = parse("opencode", OPENCODE_HY3_RATE_LIMIT, now).unwrap();
@@ -600,6 +644,37 @@ mod tests {
         assert_eq!(parsed.confidence, Confidence::High);
         assert_eq!(parsed.reset_at, None);
         assert!(parsed.matched_evidence.contains("balance is insufficient"));
+    }
+
+    #[test]
+    fn opencode_input_length_exceeded_is_classified_as_context_limit() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse(
+            "opencode",
+            "error while batching request: prompt input length exceeded supported context length",
+            now,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind, FailureKind::ContextLimitExceeded);
+    }
+
+    #[test]
+    fn vibe_context_exceeded_is_classified_as_context_limit() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("vibe", "vibe request failed: input length exceeded", now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::ContextLimitExceeded);
+    }
+
+    #[test]
+    fn agy_context_exceeded_is_classified_as_context_limit() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse(
+            "agy",
+            "AGY request rejected: context window length exceeded",
+            now,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind, FailureKind::ContextLimitExceeded);
     }
 
     // ── Required negative tests ──────────────────────────────────────────
@@ -710,5 +785,12 @@ mod tests {
         let now = utc(2026, Month::January, 1, 0, 0);
         assert!(parse("agy-main", "", now).is_none());
         assert!(parse("agy-second", "process exited with no output", now).is_none());
+    }
+
+    #[test]
+    fn context_keyword_without_limit_verbiage_is_not_matched() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let text = "The context menu lists available options for this run.";
+        assert!(parse("codex", text, now).is_none());
     }
 }
