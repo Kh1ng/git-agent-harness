@@ -202,9 +202,11 @@ fn build_snapshot_inner(
     let mut errors = Vec::new();
 
     // TICKET-118: Count fix attempts per branch from ledger entries
-    let fix_attempt_counts = sync::count_fix_attempts_per_branch_from_entries(entries);
+    let fix_attempt_counts =
+        sync::count_fix_attempts_per_branch_for_scope(entries, profile_name, &profile.repo_id);
     // TICKET-127: Count merge attempts per branch for the auto-merge retry cap
-    let merge_attempt_counts = sync::count_merge_attempts_per_branch_from_entries(entries);
+    let merge_attempt_counts =
+        sync::count_merge_attempts_per_branch_for_scope(entries, profile_name, &profile.repo_id);
     // review-hold: work_ids a manager session is actively reviewing via
     // `gah hold set`, out of band from gah's own auto-merge loop.
     let review_held_work_ids =
