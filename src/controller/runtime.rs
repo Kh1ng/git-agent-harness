@@ -1,3 +1,9 @@
+use super::decision::decide_next_action;
+use super::recovery::{
+    defer_if_branch_attached, detect_stuck_loop, reconcile_abandoned_dispatches,
+    record_action_events,
+};
+use super::NextAction;
 use anyhow::Result;
 use fs2::FileExt;
 use serde::Serialize;
@@ -5,19 +11,6 @@ use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::time::{Duration, Instant};
-
-mod action;
-pub use self::action::NextAction;
-
-mod decision;
-pub use self::decision::decide_next_action;
-pub(crate) use self::decision::is_genuine_agent_failure;
-
-mod recovery;
-use self::recovery::{
-    defer_if_branch_attached, detect_stuck_loop, reconcile_abandoned_dispatches,
-    record_action_events,
-};
 
 fn is_validation_gate_failure(error: &anyhow::Error) -> bool {
     error
@@ -897,7 +890,7 @@ pub(crate) fn run_dispatch_and_record(
 }
 
 #[cfg(test)]
-#[path = "controller/ledger_read_tests.rs"]
+#[path = "ledger_read_tests.rs"]
 mod ledger_read_tests;
 
 #[cfg(test)]
