@@ -2396,7 +2396,7 @@ fn review_shutdown_records_cancelled_shutdown_and_dispatch_finished_event() {
     let ledger_text = fs::read_to_string(&ledger_path).unwrap();
     let entry: Value = serde_json::from_str(ledger_text.lines().next().unwrap()).unwrap();
     assert_eq!(entry["failure_class"], "harness_error");
-    assert_eq!(entry["failure_stage"], "agent_run");
+    assert_eq!(entry["failure_stage"], "review");
     assert_eq!(entry["validation_result"], "cancelled_shutdown");
 
     let events_text = fs::read_to_string(&events_path).unwrap();

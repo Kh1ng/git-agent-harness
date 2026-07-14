@@ -30,11 +30,12 @@ const LIVE_TASK_ACCEPTANCE_MAX_BYTES: usize = 8_192;
 const LIVE_TASK_LIST_MAX_BYTES: usize = 4_096;
 const LIVE_TASK_LIST_ITEM_MAX_BYTES: usize = 1_024;
 
-fn mark_shutdown_cancelled(ledger: &mut LedgerEntry, backend_exit_code: Option<i32>) {
-    ledger.set_failure(
-        crate::ledger::FailureClass::HarnessError,
-        crate::ledger::FailureStage::AgentRun,
-    );
+fn mark_shutdown_cancelled(
+    ledger: &mut LedgerEntry,
+    stage: crate::ledger::FailureStage,
+    backend_exit_code: Option<i32>,
+) {
+    ledger.set_failure(crate::ledger::FailureClass::HarnessError, stage);
     ledger.backend_exit_code = backend_exit_code;
     ledger.validation_result = Some("cancelled_shutdown".into());
 }
@@ -2264,7 +2265,11 @@ fn improve(
         // process group; return so the controller can write the matching
         // terminal dispatch event.
         if crate::runner::shutdown_requested() {
-            mark_shutdown_cancelled(ledger, Some(result.exit_code));
+            mark_shutdown_cancelled(
+                ledger,
+                crate::ledger::FailureStage::AgentRun,
+                Some(result.exit_code),
+            );
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
@@ -4240,7 +4245,7 @@ fn review(
             anyhow::bail!("review backend exited with status {code}")
         }
         runner::ReviewProcessOutcome::SignalTermination(signal) => {
-            mark_shutdown_cancelled(ledger, Some(-signal));
+            mark_shutdown_cancelled(ledger, crate::ledger::FailureStage::Review, Some(-signal));
             println!(
                 "Review shutdown requested; terminated backend process group (signal {}).",
                 signal
