@@ -587,7 +587,7 @@ fn record_issue_closure_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::tests::test_config;
+    use crate::ledger::test_util::test_config;
     use std::fs;
 
     #[test]

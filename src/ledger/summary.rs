@@ -1,6 +1,33 @@
+use crate::config::GahConfig;
+use time::format_description::well_known::Rfc3339;
+
+/// TICKET-125: GroupBy option for ledger summary
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupBy {
+    None,
+    Backend,
+    Model,
+}
+
+impl std::str::FromStr for GroupBy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" => Ok(GroupBy::None),
+            "backend" => Ok(GroupBy::Backend),
+            "model" => Ok(GroupBy::Model),
+            _ => Err(format!(
+                "Invalid group-by value: '{}'. Expected 'none', 'backend' or 'model'",
+                s
+            )),
+        }
+    }
+}
+
+use super::{read_entries, LedgerEntry, LedgerUsage};
 use crate::config;
-use crate::ledger::entry::{LedgerEntry, LedgerUsage};
-use crate::ledger::jsonl::read_entries;
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -111,7 +138,7 @@ pub fn run_with_json(
     profile: Option<&str>,
     config_path: Option<&str>,
     json: bool,
-    group_by: super::GroupBy,
+    group_by: GroupBy,
 ) -> Result<()> {
     let cfg = config::load(config_path)?;
     let data = build_summary(&cfg, since, profile, group_by)?;
@@ -132,90 +159,70 @@ pub fn run_with_json(
     print_counts(&data.by_mode);
     println!("Requested backend:");
     print_counts(&data.by_requested_backend);
-    println!("Backend:");
+    println!("By backend:");
     print_counts(&data.by_backend);
-    println!("Model:");
+    println!("By model:");
     print_counts(&data.by_model);
-    println!("Failure class:");
-    print_counts(&data.by_failure_class);
-    println!("Fallback: {}", data.fallback_count);
-    println!("Validation pass: {}", data.validation_pass);
-    println!("Push success: {}", data.push_success);
+    if !data.by_failure_class.is_empty() {
+        println!("By failure class:");
+        print_counts(&data.by_failure_class);
+    }
+    println!("Fallbacks: {}", data.fallback_count);
+    println!(
+        "Validation pass rate: {}/{}",
+        data.validation_pass, data.entries
+    );
+    println!("Push success rate: {}/{}", data.push_success, data.entries);
     println!("MR count: {}", data.mr_count);
     println!("Human required: {}", data.human_required_count);
     if let Some(avg) = data.average_duration_seconds {
-        println!("Average duration: {:.2}s", avg);
+        println!("Average duration: {:.1}s", avg);
     }
-    if let Some(input) = data.usage_input_tokens {
-        println!("Input tokens: {}", input);
+    println!(
+        "Usage totals: input={} output={} cache_read={} cache_write={} total={} requests={}",
+        data.usage_input_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        data.usage_output_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        data.usage_cache_read_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        data.usage_cache_write_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        data.usage_total_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        data.usage_requests_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    if let Some(cost) = data.estimated_cost_usd {
+        println!("Estimated cost total: ${:.4}", cost);
     }
-    if let Some(output) = data.usage_output_tokens {
-        println!("Output tokens: {}", output);
+    if let Some(cost) = data.actual_cost_usd {
+        println!("Actual cost total: ${:.4}", cost);
     }
-    if let Some(cache_read) = data.usage_cache_read_tokens {
-        println!("Cache read tokens: {}", cache_read);
+    if let Some(last) = data.last_run {
+        println!("Last run: {}", last);
     }
-    if let Some(cache_write) = data.usage_cache_write_tokens {
-        println!("Cache write tokens: {}", cache_write);
-    }
-    if let Some(total) = data.usage_total_tokens {
-        println!("Total tokens: {}", total);
-    }
-    if let Some(count) = data.usage_requests_count {
-        println!("Requests count: {}", count);
-    }
-    if let Some(estimated) = data.estimated_cost_usd {
-        println!("Estimated cost: ${:.4}", estimated);
-    }
-    if let Some(actual) = data.actual_cost_usd {
-        println!("Actual cost: ${:.4}", actual);
-    }
-    if let Some(avg) = data
-        .attempts_started
-        .zip(data.attempts_completed)
-        .map(|(started, completed)| started as f64 / completed as f64)
-    {
-        println!("Attempts per completion: {:.2}", avg);
-    }
-    if let Some(avg_duration) = data.average_duration_seconds {
-        println!("Average duration: {:.2}s", avg_duration);
-    }
-    if let Some(avg_tokens) = data
-        .usage_input_tokens
-        .zip(data.usage_output_tokens)
-        .map(|(input, output)| (input + output) as f64 / data.success as f64)
-    {
-        println!("Tokens per success: {:.2}", avg_tokens);
-    }
-    if let Some(avg_requests) = data
-        .usage_requests_count
-        .map(|count| count as f64 / data.success as f64)
-    {
-        println!("Requests per success: {:.2}", avg_requests);
-    }
-    if let Some(ref grouped) = data.grouped_by_backend {
+
+    // TICKET-125: Display grouped data if requested
+    if let Some(grouped) = &data.grouped_by_backend {
         println!("\nGrouped by backend:");
         for group in grouped {
-            println!("  {}:", group.group_key);
+            println!("  Backend: {}", group.group_key);
             println!("    Entries: {}", group.entries);
             println!("    Attempts: {}", group.attempts);
-            if let Some(started) = group.attempts_started {
-                println!("    Attempts started: {}", started);
-            }
-            if let Some(completed) = group.attempts_completed {
-                println!("    Attempts completed: {}", completed);
-            }
             println!(
-                "    Attempts started unknown: {}",
-                group.attempts_started_unknown
+                "    Validation pass: {}/ {}",
+                group.validation_pass, group.entries
             );
-            println!(
-                "    Attempts completed unknown: {}",
-                group.attempts_completed_unknown
-            );
-            println!("    Validation pass: {}", group.validation_pass);
-            if let Some(rate) = group.success_rate {
-                println!("    Success rate: {:.2}%", rate * 100.0);
+            println!("    Review verdict distribution:");
+            for (verdict, count) in &group.review_verdict_distribution {
+                println!("      {}: {}", verdict, count);
             }
             if let Some(cost) = group.total_cost_usd {
                 println!("    Total cost: ${:.4}", cost);
@@ -226,61 +233,55 @@ pub fn run_with_json(
             if let Some(cost) = group.estimated_cost_usd {
                 println!("    Estimated cost: ${:.4}", cost);
             }
-            if let Some(avg) = group.average_cost_usd {
-                println!("    Average cost: ${:.4}", avg);
+            if let Some(cost) = group.average_cost_usd {
+                println!("    Average cost: ${:.4}", cost);
             }
-            if let Some(avg) = group.average_duration_seconds {
-                println!("    Average duration: {:.2}s", avg);
+            if let Some(cost) = group.cost_per_approve_strong {
+                println!("    Cost per APPROVE: ${:.4}", cost);
             }
-            if let Some(input) = group.input_tokens {
-                println!("    Input tokens: {}", input);
-            }
-            if let Some(output) = group.output_tokens {
-                println!("    Output tokens: {}", output);
-            }
-            if let Some(cache_read) = group.cache_read_tokens {
-                println!("    Cache read tokens: {}", cache_read);
-            }
-            if let Some(cache_write) = group.cache_write_tokens {
-                println!("    Cache write tokens: {}", cache_write);
-            }
-            if let Some(total) = group.total_tokens {
-                println!("    Total tokens: {}", total);
-            }
-            if let Some(count) = group.requests_count {
-                println!("    Requests count: {}", count);
-            }
-            if let Some(tokens) = group.tokens_per_success {
-                println!("    Tokens per success: {:.2}", tokens);
-            }
-            if let Some(requests) = group.requests_per_success {
-                println!("    Requests per success: {:.2}", requests);
-            }
+            println!(
+                "    Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
+                group
+                    .input_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .output_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .cache_read_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .cache_write_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .total_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .requests_count
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            );
         }
     }
-    if let Some(ref grouped) = data.grouped_by_model {
+
+    if let Some(grouped) = &data.grouped_by_model {
         println!("\nGrouped by model:");
         for group in grouped {
-            println!("  {}:", group.group_key);
+            println!("  Model: {}", group.group_key);
             println!("    Entries: {}", group.entries);
             println!("    Attempts: {}", group.attempts);
-            if let Some(started) = group.attempts_started {
-                println!("    Attempts started: {}", started);
-            }
-            if let Some(completed) = group.attempts_completed {
-                println!("    Attempts completed: {}", completed);
-            }
             println!(
-                "    Attempts started unknown: {}",
-                group.attempts_started_unknown
+                "    Validation pass: {}/ {}",
+                group.validation_pass, group.entries
             );
-            println!(
-                "    Attempts completed unknown: {}",
-                group.attempts_completed_unknown
-            );
-            println!("    Validation pass: {}", group.validation_pass);
-            if let Some(rate) = group.success_rate {
-                println!("    Success rate: {:.2}%", rate * 100.0);
+            println!("    Review verdict distribution:");
+            for (verdict, count) in &group.review_verdict_distribution {
+                println!("      {}: {}", verdict, count);
             }
             if let Some(cost) = group.total_cost_usd {
                 println!("    Total cost: ${:.4}", cost);
@@ -291,46 +292,58 @@ pub fn run_with_json(
             if let Some(cost) = group.estimated_cost_usd {
                 println!("    Estimated cost: ${:.4}", cost);
             }
-            if let Some(avg) = group.average_cost_usd {
-                println!("    Average cost: ${:.4}", avg);
+            if let Some(cost) = group.average_cost_usd {
+                println!("    Average cost: ${:.4}", cost);
             }
-            if let Some(avg) = group.average_duration_seconds {
-                println!("    Average duration: {:.2}s", avg);
+            if let Some(cost) = group.cost_per_approve_strong {
+                println!("    Cost per APPROVE: ${:.4}", cost);
             }
-            if let Some(input) = group.input_tokens {
-                println!("    Input tokens: {}", input);
-            }
-            if let Some(output) = group.output_tokens {
-                println!("    Output tokens: {}", output);
-            }
-            if let Some(cache_read) = group.cache_read_tokens {
-                println!("    Cache read tokens: {}", cache_read);
-            }
-            if let Some(cache_write) = group.cache_write_tokens {
-                println!("    Cache write tokens: {}", cache_write);
-            }
-            if let Some(total) = group.total_tokens {
-                println!("    Total tokens: {}", total);
-            }
-            if let Some(count) = group.requests_count {
-                println!("    Requests count: {}", count);
-            }
-            if let Some(tokens) = group.tokens_per_success {
-                println!("    Tokens per success: {:.2}", tokens);
-            }
-            if let Some(requests) = group.requests_per_success {
-                println!("    Requests per success: {:.2}", requests);
-            }
+            println!(
+                "    Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
+                group
+                    .input_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .output_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .cache_read_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .cache_write_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .total_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .requests_count
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            );
         }
     }
+
     Ok(())
 }
+
+/// Label for entries/observations/attempts with no known model (e.g. an
+/// early-exit dispatch that never reached route resolution). Previously
+/// these silently collapsed into a `""` group key via `unwrap_or_default`,
+/// which merged every "we don't know the model" entry into one opaque,
+/// unlabeled bucket in `gah report --group-by model` -- indistinguishable
+/// from a real (if oddly-named) model called "".
+pub const UNKNOWN_MODEL_LABEL: &str = "(unknown model)";
 
 pub fn build_summary(
     cfg: &config::GahConfig,
     since: &str,
     profile: Option<&str>,
-    group_by: super::GroupBy,
+    group_by: GroupBy,
 ) -> Result<SummaryData> {
     let cutoff = parse_since(since)?;
     let mut entries = read_entries(cfg)?;
@@ -478,7 +491,7 @@ pub fn build_summary(
     });
 
     // TICKET-125: Build grouped data if requested
-    let grouped_by_backend = if group_by == super::GroupBy::Backend {
+    let grouped_by_backend = if group_by == GroupBy::Backend {
         build_grouped_summary(
             &entries,
             |entry| crate::config::canonical_backend_name(&entry.effective_backend).to_string(),
@@ -490,7 +503,7 @@ pub fn build_summary(
         None
     };
 
-    let grouped_by_model = if group_by == super::GroupBy::Model {
+    let grouped_by_model = if group_by == GroupBy::Model {
         build_grouped_summary(
             &entries,
             |entry| {
@@ -553,14 +566,14 @@ pub fn build_summary(
 
 /// TICKET-125: Build grouped summary data for a specific grouping key
 pub fn build_grouped_summary<F, U, A>(
-    entries: &[LedgerEntry],
+    entries: &[super::LedgerEntry],
     entry_group_key_fn: F,
     usage_group_key_fn: U,
     attempt_group_key_fn: A,
     merge_account_quota: bool,
 ) -> Option<Vec<GroupSummary>>
 where
-    F: Fn(&LedgerEntry) -> String,
+    F: Fn(&super::LedgerEntry) -> String,
     U: Fn(UsageObservation<'_>) -> String,
     A: Fn(&str, Option<&str>) -> String,
 {
@@ -575,8 +588,11 @@ where
 }
 
 /// Like [`build_grouped_summary`] but with the account-level quota
+/// observations injected explicitly (issue #206 regression coverage), so
+/// the merge behaviour can be tested hermetically without touching the
+/// global on-disk quota store.
 pub fn build_grouped_summary_with_account_quota<F, U, A>(
-    entries: &[LedgerEntry],
+    entries: &[super::LedgerEntry],
     entry_group_key_fn: F,
     usage_group_key_fn: U,
     attempt_group_key_fn: A,
@@ -584,7 +600,7 @@ pub fn build_grouped_summary_with_account_quota<F, U, A>(
     account_quota_observations: &[crate::quota_store::QuotaObservationRecord],
 ) -> Option<Vec<GroupSummary>>
 where
-    F: Fn(&LedgerEntry) -> String,
+    F: Fn(&super::LedgerEntry) -> String,
     U: Fn(UsageObservation<'_>) -> String,
     A: Fn(&str, Option<&str>) -> String,
 {
@@ -592,7 +608,7 @@ where
         return None;
     }
 
-    let mut groups: BTreeMap<String, Vec<&LedgerEntry>> = BTreeMap::new();
+    let mut groups: BTreeMap<String, Vec<&super::LedgerEntry>> = BTreeMap::new();
     let mut usage_groups: BTreeMap<String, Vec<UsageObservation<'_>>> = BTreeMap::new();
     let mut attempt_counts: BTreeMap<String, usize> = BTreeMap::new();
     for entry in entries {
@@ -600,7 +616,7 @@ where
         groups.entry(key).or_default().push(entry);
         for observed in canonical_usage_observations(entry) {
             usage_groups
-                .entry(usage_group_key_fn(observed.clone()))
+                .entry(usage_group_key_fn(observed))
                 .or_default()
                 .push(observed);
         }
@@ -777,63 +793,51 @@ where
                         .and_then(|e| e.observed_at.as_ref()),
                     &candidate.observed_at.as_ref(),
                 );
-                if replace {
+                if replace || !quota_observations.contains_key(&key) {
                     quota_observations.insert(key, candidate);
                 }
             }
         }
 
-        // Merge account-level quota observations if requested
+        // #166 / #151 cross-cutting: merge in any durable account-level
+        // quota observation (e.g. from `codex status --json`) so the
+        // Quota/Telemetry pages show real backend quota data, not just
+        // per-attempt tokens. Account observations are backend-scoped
+        // (model = None), so `group_key` is the record's backend only when
+        // grouping by backend. In the model-grouped view `group_key` is a
+        // model name and would essentially never match a backend-scoped
+        // record, so we skip the merge entirely there (issue #206) rather
+        // than silently no-op against a mismatched key.
         if merge_account_quota {
-            for account_obs in account_quota_observations {
-                if account_obs.backend == group_key
-                    || account_obs
-                        .model
-                        .as_deref()
-                        .unwrap_or("")
-                        .contains(&group_key)
-                {
-                    let key = (
-                        account_obs.backend.clone(),
-                        account_obs.model.clone(),
-                        account_obs.quota_window.clone(),
-                    );
-                    let candidate = GroupQuotaObservation {
-                        backend: account_obs.backend.clone(),
-                        model: account_obs.model.clone(),
-                        quota_window: account_obs.quota_window.clone(),
-                        quota_used_percent: account_obs.quota_used_percent,
-                        quota_remaining_percent: account_obs.quota_remaining_percent,
-                        quota_reset_at: account_obs.quota_reset_at.clone(),
-                        observed_at: account_obs.observed_at.clone(),
-                        usage_source: account_obs.usage_source.clone(),
-                    };
-                    let replace = is_timestamp_earlier(
-                        &quota_observations
-                            .get(&key)
-                            .and_then(|e| e.observed_at.as_ref()),
-                        &candidate.observed_at.as_ref(),
-                    );
-                    if replace {
-                        quota_observations.insert(key, candidate);
-                    }
+            if let Some(account) =
+                crate::quota_store::latest_for(account_quota_observations, &group_key, None)
+            {
+                let key = (
+                    account.backend.clone(),
+                    account.model.clone(),
+                    account.quota_window.clone(),
+                );
+                let candidate = GroupQuotaObservation {
+                    backend: account.backend.clone(),
+                    model: account.model.clone(),
+                    quota_window: account.quota_window.clone(),
+                    quota_used_percent: account.quota_used_percent,
+                    quota_remaining_percent: account.quota_remaining_percent,
+                    quota_reset_at: account.quota_reset_at.clone(),
+                    observed_at: account.observed_at.clone(),
+                    usage_source: account.usage_source.clone(),
+                };
+                let replace = is_timestamp_earlier(
+                    &quota_observations
+                        .get(&key)
+                        .and_then(|e| e.observed_at.as_ref()),
+                    &candidate.observed_at.as_ref(),
+                );
+                if replace || !quota_observations.contains_key(&key) {
+                    quota_observations.insert(key, candidate);
                 }
             }
         }
-
-        let mut quota_observations_vec: Vec<GroupQuotaObservation> =
-            quota_observations.into_values().collect();
-        quota_observations_vec.sort_by(|a, b| {
-            let a_time = a.observed_at.as_deref().unwrap_or("");
-            let b_time = b.observed_at.as_deref().unwrap_or("");
-            b_time.cmp(a_time) // newest first
-        });
-
-        let success_rate = if group_entry_count > 0 {
-            Some(validation_pass as f64 / group_entry_count as f64)
-        } else {
-            None
-        };
 
         let average_cost_usd = if cost_seen && group_entry_count > 0 {
             Some(total_cost_usd / group_entry_count as f64)
@@ -841,26 +845,30 @@ where
             None
         };
 
+        // Issue #214: cost per *strong-tier* approval, keyed on the
+        // persisted `reviewer_tier` field (not verdict text). Entries with
+        // an unknown/other tier are excluded -- never folded into strong.
+        let cost_per_approve_strong = if strong_approve_count > 0 && cost_seen {
+            Some(total_cost_usd / strong_approve_count as f64)
+        } else {
+            None
+        };
+
+        // Calculate average duration
         let average_duration_seconds = if duration_count > 0 {
             Some(total_duration / duration_count as f64)
         } else {
             None
         };
-
-        let tokens_per_success = if validation_pass > 0 {
-            input_tokens_seen.then(|| input_tokens as f64 / validation_pass as f64)
+        let success_rate =
+            (group_entry_count > 0).then_some(validation_pass as f64 / group_entry_count as f64);
+        let tokens_per_success = if validation_pass > 0 && total_tokens_seen {
+            Some(total_tokens as f64 / validation_pass as f64)
         } else {
             None
         };
-
-        let requests_per_success = if validation_pass > 0 {
-            requests_count_seen.then(|| requests_count as f64 / validation_pass as f64)
-        } else {
-            None
-        };
-
-        let cost_per_approve_strong = if strong_approve_count > 0 && actual_cost_seen {
-            Some(actual_cost_total / strong_approve_count as f64)
+        let requests_per_success = if validation_pass > 0 && requests_count_seen {
+            Some(requests_count as f64 / validation_pass as f64)
         } else {
             None
         };
@@ -881,6 +889,7 @@ where
             estimated_cost_usd: estimated_cost_seen.then_some(estimated_cost_total),
             average_cost_usd,
             average_duration_seconds,
+            cost_per_approve_strong,
             input_tokens: input_tokens_seen.then_some(input_tokens),
             output_tokens: output_tokens_seen.then_some(output_tokens),
             cache_read_tokens: cache_read_tokens_seen.then_some(cache_read_tokens),
@@ -889,14 +898,22 @@ where
             requests_count: requests_count_seen.then_some(requests_count),
             tokens_per_success,
             requests_per_success,
-            cost_per_approve_strong,
-            quota_observations: quota_observations_vec,
+            quota_observations: quota_observations.into_values().collect(),
         });
     }
 
     Some(summaries)
 }
 
+#[derive(Clone, Copy)]
+pub struct UsageObservation<'a> {
+    pub backend: &'a str,
+    pub model: Option<&'a str>,
+    pub usage: &'a LedgerUsage,
+}
+
+/// Compare two RFC3339 timestamps, returning true if the first is earlier than the second.
+/// Handles different timezone offsets and missing timestamps properly.
 fn is_timestamp_earlier<T: AsRef<str>>(a: &Option<T>, b: &Option<T>) -> bool {
     use time::format_description::well_known::Rfc3339;
     match (a, b) {
@@ -930,13 +947,6 @@ fn usage_has_observation(usage: &LedgerUsage) -> bool {
         || usage.quota_used_percent.is_some()
         || usage.quota_remaining_percent.is_some()
         || usage.quota_reset_at.is_some()
-}
-
-#[derive(Clone)]
-pub struct UsageObservation<'a> {
-    pub backend: &'a str,
-    pub model: Option<&'a str>,
-    pub usage: &'a LedgerUsage,
 }
 
 fn canonical_usage_observations(entry: &LedgerEntry) -> Vec<UsageObservation<'_>> {
@@ -1000,7 +1010,90 @@ pub(crate) fn parse_since(input: &str) -> Result<String> {
     anyhow::bail!(
         "invalid --since value '{}'; use forms like 7d or 24h",
         input
-    );
+    )
 }
 
-pub const UNKNOWN_MODEL_LABEL: &str = "(unknown model)";
+#[derive(Debug, Default, Clone)]
+pub struct BackendUsageSummary {
+    pub runs_this_week: u64,
+    pub runs_this_session: u64,
+    pub estimated_cost_this_week: f64,
+    pub actual_cost_this_week: f64,
+    pub strong_runs_this_week: u64,
+    pub strong_runs_this_session: u64,
+}
+
+/// Returns `true` if the model name indicates a strong (capable) model.
+///
+/// Checks the final path segment of the model name (after the last `/`)
+/// for weak-model substrings: "flash", "mini", "tiny", "lite".
+/// This is a heuristic — it assumes models without these substrings are strong.
+pub fn is_strong_model(model: &str) -> bool {
+    let segment = model.rsplit('/').next().unwrap_or(model);
+    let lower = segment.to_lowercase();
+    !(lower.contains("flash")
+        || lower.contains("mini")
+        || lower.contains("tiny")
+        || lower.contains("lite"))
+}
+
+/// Resolve the best available model name from a ledger entry.
+/// Prefers effective_model, falls back to requested_model.
+/// Returns None if both are missing, empty, or whitespace-only.
+fn ledger_entry_model_name(entry: &LedgerEntry) -> Option<&str> {
+    entry
+        .effective_model
+        .as_deref()
+        .or(entry.requested_model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+}
+
+pub fn usage_summary_for_backend(
+    cfg: &GahConfig,
+    backend: &str,
+    model: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<BackendUsageSummary> {
+    let entries = read_entries(cfg)?;
+    let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(7))
+        .format(&Rfc3339)
+        .unwrap_or_default();
+    let mut out = BackendUsageSummary::default();
+    for entry in &entries {
+        let same_backend = entry.effective_backend == backend;
+        let same_model = model
+            .map(|m| entry.effective_model.as_deref() == Some(m))
+            .unwrap_or(true);
+        let this_week = entry.timestamp >= cutoff;
+        let this_session = session_id
+            .map(|s| entry.session_id.as_deref() == Some(s))
+            .unwrap_or(false);
+        if same_backend && same_model && this_week {
+            out.runs_this_week += 1;
+            out.estimated_cost_this_week += entry.usage.estimated_cost_usd.unwrap_or(0.0);
+            out.actual_cost_this_week += entry.usage.actual_cost_usd.unwrap_or(0.0);
+        }
+        if same_backend && same_model && this_session {
+            out.runs_this_session += 1;
+        }
+        if same_backend
+            && same_model
+            && entry.confidence_impact.as_deref() != Some("low")
+            && ledger_entry_model_name(entry)
+                .map(is_strong_model)
+                .unwrap_or(false)
+        {
+            if this_week {
+                out.strong_runs_this_week += 1;
+            }
+            if this_session {
+                out.strong_runs_this_session += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests;
