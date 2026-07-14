@@ -1,6 +1,5 @@
 use crate::config::{self, CandidateConfig, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
-use crate::models::CandidateArtifact;
 use crate::models::{AvailableTicket, PmPlan, WorkMetadata};
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::routing::{
@@ -23,6 +22,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+mod capacity;
+mod claims;
 mod issues;
 mod prompts;
 mod publish;
@@ -40,6 +41,12 @@ use self::publish::{
     ensure_issue_open_for_publish, publishing_allows_publish, render_review_comment, review_labels,
     ExperimentMrRenderContext, MrRenderContext,
 };
+
+use self::capacity::ensure_dispatch_capacity;
+pub(crate) use self::claims::duplicate_work_error;
+use self::claims::{check_duplicate_work, is_claim_stale};
+#[allow(unused_imports)]
+pub use self::claims::{ActiveClaimError, DuplicateWorkError};
 
 fn mark_shutdown_cancelled(
     ledger: &mut LedgerEntry,
@@ -240,7 +247,7 @@ fn validation_failure_no_progress_reason(
     }
 }
 
-fn is_ledger_entry_stale(entry: &LedgerEntry) -> bool {
+pub(super) fn is_ledger_entry_stale(entry: &LedgerEntry) -> bool {
     let entry_time = if let Ok(parsed) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
         parsed
     } else if let Ok(secs) = entry.timestamp.parse::<i64>() {
@@ -254,217 +261,6 @@ fn is_ledger_entry_stale(entry: &LedgerEntry) -> bool {
     };
     let now = OffsetDateTime::now_utc();
     now - entry_time > time::Duration::days(14)
-}
-
-/// Parallel workers: how long a "claim" entry (`LedgerEntry::new_claim`)
-/// blocks a ticket before it's treated as abandoned (worker crashed/killed
-/// mid-flight, or was force-killed by the idle-timeout watchdog after
-/// producing partial output that never reached a real completion entry).
-/// 6 hours is a generous margin above the longest real dispatch duration
-/// observed in practice (~3.9h, a slow openhands/hy3 run) -- long enough
-/// that a live, still-working claim is never mistaken for abandoned, short
-/// enough that a genuinely dead claim doesn't block a ticket for days.
-const CLAIM_STALE_AFTER_HOURS: i64 = 6;
-
-fn is_claim_stale(entry: &LedgerEntry) -> bool {
-    let entry_time = if let Ok(parsed) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
-        parsed
-    } else if let Ok(secs) = entry.timestamp.parse::<i64>() {
-        if let Ok(dt) = OffsetDateTime::from_unix_timestamp(secs) {
-            dt
-        } else {
-            return true;
-        }
-    } else {
-        return true;
-    };
-    let now = OffsetDateTime::now_utc();
-    now - entry_time > time::Duration::hours(CLAIM_STALE_AFTER_HOURS)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuplicateWorkError {
-    pub work_id: String,
-    pub branch: Option<String>,
-    pub mr_url: Option<String>,
-}
-
-impl fmt::Display for DuplicateWorkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Refusing dispatch: active open PR already exists for work ID '{}'",
-            self.work_id
-        )?;
-        if let Some(url) = self.mr_url.as_deref() {
-            write!(f, " ({url})")?;
-        } else if let Some(branch) = self.branch.as_deref() {
-            write!(f, " (branch {branch})")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for DuplicateWorkError {}
-
-pub(crate) fn duplicate_work_error(err: &anyhow::Error) -> Option<&DuplicateWorkError> {
-    err.downcast_ref::<DuplicateWorkError>()
-}
-
-/// Parallel workers: another concurrent `gah loop`/`gah dispatch` process
-/// already claimed this work_id and hasn't finished (or abandoned) it yet.
-/// Distinct from `DuplicateWorkError` (which means a real PR/MR already
-/// exists) since no PR/branch may exist at all here -- the other worker
-/// might still be mid-backend-run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActiveClaimError {
-    pub work_id: String,
-}
-
-impl fmt::Display for ActiveClaimError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Refusing dispatch: work ID '{}' was claimed by another in-flight dispatch within the last {CLAIM_STALE_AFTER_HOURS}h",
-            self.work_id
-        )
-    }
-}
-
-impl std::error::Error for ActiveClaimError {}
-
-/// Returns the resolved work_id on success (so `run()` can immediately
-/// write a parallel-worker claim for it), or an error if this work_id is
-/// already spoken for -- by a real open PR/MR (`DuplicateWorkError`) or by
-/// another in-flight worker's claim (`ActiveClaimError`). `Ok(None)` means
-/// no work_id could be resolved (nothing to claim, nothing to block).
-fn check_duplicate_work(
-    cfg: &GahConfig,
-    profile: &Profile,
-    args: &DispatchArgs,
-) -> Result<Option<String>> {
-    let target = if args.target.is_empty() {
-        if args.mode == "improve" || args.mode == "fix" {
-            let default = PathBuf::from(&profile.artifact_root)
-                .join("candidates")
-                .join("latest.json");
-            if default.exists() {
-                default.to_string_lossy().into_owned()
-            } else {
-                args.target.clone()
-            }
-        } else {
-            args.target.clone()
-        }
-    } else {
-        args.target.clone()
-    };
-
-    if target.is_empty() {
-        return Ok(None);
-    }
-
-    let p = Path::new(&target);
-    let work_id = if p.extension().is_some_and(|e| e == "json") && p.exists() {
-        if let Ok(text) = fs::read_to_string(p) {
-            if let Ok(artifact) = serde_json::from_str::<CandidateArtifact>(&text) {
-                artifact.candidates.first().map(|c| c.candidate_id.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else if p.extension().is_some_and(|e| e == "md") && p.exists() {
-        if let Ok(Some(ticket)) = parse_ticket_metadata(p) {
-            ticket.work_id.clone().or(ticket.ticket_id.clone())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let Some(work_id) = work_id else {
-        return Ok(None);
-    };
-
-    let matching_entries = match crate::ledger::entries_for_work_id(cfg, &work_id) {
-        Ok(entries) => entries,
-        Err(e) => {
-            eprintln!("warning: failed to read ledger entries: {:#}", e);
-            return Ok(Some(work_id));
-        }
-    };
-
-    if matching_entries.is_empty() {
-        return Ok(Some(work_id));
-    }
-
-    // Try to fetch MRs/PRs from provider
-    let mrs = crate::sync::fetch_mrs(profile).unwrap_or_default();
-
-    for entry in matching_entries {
-        if is_ledger_entry_stale(&entry) {
-            continue;
-        }
-
-        // Parallel workers: another concurrent dispatch already claimed
-        // this work_id and hasn't finished (or been abandoned long enough
-        // to ignore) yet.
-        if entry.mode == "claim" && !is_claim_stale(&entry) {
-            return Err(anyhow::Error::new(ActiveClaimError {
-                work_id: work_id.clone(),
-            }));
-        }
-
-        // Check if there is a matching MR
-        let matching_mr = mrs.iter().find(|mr| {
-            if let Some(ref entry_branch) = entry.branch {
-                if mr.branch == *entry_branch {
-                    return true;
-                }
-            }
-            if let Some(ref entry_mr_url) = entry.mr_url {
-                if mr.url.as_ref() == Some(entry_mr_url) {
-                    return true;
-                }
-            }
-            false
-        });
-
-        if let Some(mr) = matching_mr {
-            let class = crate::sync::classify(mr);
-            if class == "MERGED" {
-                continue;
-            }
-            if class == "CLOSED_UNMERGED" {
-                continue;
-            }
-            if class == "STALE" {
-                continue;
-            }
-            // Otherwise, it's an active open PR -> Block
-            return Err(anyhow::Error::new(DuplicateWorkError {
-                work_id: work_id.clone(),
-                branch: Some(mr.branch.clone()),
-                mr_url: mr.url.clone(),
-            }));
-        }
-
-        // If no matching MR is found, check if branch exists
-        let repo_path = Path::new(&profile.local_path);
-        if let Some(ref branch_name) = entry.branch {
-            if command_output("git", &["rev-parse", "--verify", branch_name], repo_path).is_ok() {
-                println!(
-                    "Warning: active branch '{}' may already own work for work ID '{}'",
-                    branch_name, work_id
-                );
-            }
-        }
-    }
-
-    Ok(Some(work_id))
 }
 
 /// TICKET-078: observation feed for `decide_next_action` -- one entry per
@@ -1197,8 +993,6 @@ fn run_auto_fix_commands(commands: &[String], wt: &Path, env_vars: &[(String, St
     }
 }
 
-const MIN_DISPATCH_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
-
 fn validation_env(profile: &Profile, session_scope: &Path) -> Vec<(String, String)> {
     vec![(
         "CARGO_TARGET_DIR".to_string(),
@@ -1206,62 +1000,6 @@ fn validation_env(profile: &Profile, session_scope: &Path) -> Vec<(String, Strin
             .to_string_lossy()
             .into_owned(),
     )]
-}
-
-fn ensure_dispatch_capacity(profile: &Profile, worktree_base: &Path) -> Result<()> {
-    ensure_minimum_free_space(worktree_base, "worktree filesystem")?;
-    ensure_minimum_free_space(&std::env::temp_dir(), "temporary filesystem")?;
-    // Ensure the isolated-target parent exists before the first backend
-    // inherits it; this also proves the configured artifact root is writable
-    // early without sharing mutable Cargo outputs between worktrees.
-    std::fs::create_dir_all(crate::build_cache::target_root(&profile.artifact_root))
-        .context("creating isolated Cargo target root")?;
-    Ok(())
-}
-
-fn ensure_minimum_free_space(path: &Path, label: &str) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-
-        // Dispatch creates the worktree directory after this preflight.  A
-        // configured worktree base therefore commonly does not exist yet;
-        // stat the nearest existing ancestor to measure the same filesystem
-        // without making a harmless first dispatch fail with ENOENT.
-        let filesystem_path = nearest_existing_ancestor(path)?;
-        let path_c = CString::new(filesystem_path.as_os_str().as_bytes())?;
-        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        if unsafe { libc::statvfs(path_c.as_ptr(), &mut stat) } != 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| {
-                format!(
-                    "checking free space for {} (configured path {}; filesystem path {})",
-                    label,
-                    path.display(),
-                    filesystem_path.display(),
-                )
-            });
-        }
-        let available = (stat.f_bavail as u128).saturating_mul(stat.f_frsize as u128);
-        if available < MIN_DISPATCH_FREE_BYTES as u128 {
-            anyhow::bail!(
-                "insufficient free space on {} ({}): {} GiB available; require at least {} GiB before dispatch",
-                label,
-                path.display(),
-                available / (1024 * 1024 * 1024),
-                MIN_DISPATCH_FREE_BYTES / (1024 * 1024 * 1024),
-            );
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (path, label);
-    Ok(())
-}
-
-fn nearest_existing_ancestor(path: &Path) -> Result<&Path> {
-    path.ancestors()
-        .find(|ancestor| ancestor.exists())
-        .ok_or_else(|| anyhow::anyhow!("no existing ancestor for path {}", path.display()))
 }
 
 /// TICKET-073: verify a profile's `validation_commands` against a genuinely
@@ -1650,7 +1388,7 @@ fn ensure_bin(bin: &str) -> Result<()> {
     }
 }
 
-fn command_output(bin: &str, args: &[&str], cwd: &Path) -> Result<String> {
+pub(super) fn command_output(bin: &str, args: &[&str], cwd: &Path) -> Result<String> {
     let out = Command::new(bin)
         .args(args)
         .current_dir(cwd)
@@ -4415,14 +4153,13 @@ mod tests {
         check_review_budget, classify_git_operation_result, classify_validation_failure_progress,
         classify_worktree_result, collect_pm_preflight, collect_ticket_summaries, decide_route,
         derive_reviewer_tier, first_markdown_heading, mark_backend_unavailable_from_output_at,
-        nearest_existing_ancestor, next_escalatory_reviewer, next_ticket_id, parse_pm_plan,
-        parse_review_verdict, parse_review_verdict_with_context, render_review_comment,
-        review_escalation_reason, review_labels, review_preflight, review_usage,
-        reviewer_dedup_class, routing_runtime_state, run_backend, scan_available_tickets,
-        should_skip_per_dispatch_baseline, validation_failure_fingerprint,
-        validation_failure_no_progress_reason, ExperimentMrRenderContext, MrRenderContext,
-        ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision, TicketMetadata,
-        UsageAttribution, ValidationFailureProgress,
+        next_escalatory_reviewer, next_ticket_id, parse_pm_plan, parse_review_verdict,
+        parse_review_verdict_with_context, render_review_comment, review_escalation_reason,
+        review_labels, review_preflight, review_usage, reviewer_dedup_class, routing_runtime_state,
+        run_backend, scan_available_tickets, should_skip_per_dispatch_baseline,
+        validation_failure_fingerprint, validation_failure_no_progress_reason,
+        ExperimentMrRenderContext, MrRenderContext, ReviewDiffBundle, ReviewGateContext,
+        ReviewerTier, RouteDecision, TicketMetadata, UsageAttribution, ValidationFailureProgress,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{CandidateConfig, Defaults, GahConfig, Profile, RoutingPolicy};
@@ -6497,24 +6234,6 @@ which lacks a leading boundary check.
         );
     }
 
-    #[test]
-    fn duplicate_work_error_detection_is_typed_not_string_matched() {
-        let err = anyhow::Error::new(super::DuplicateWorkError {
-            work_id: "TICKET-999".into(),
-            branch: Some("gah/repo-999".into()),
-            mr_url: Some("https://example/pull/999".into()),
-        })
-        .context("outer wording changed completely");
-
-        let duplicate = super::duplicate_work_error(&err).unwrap();
-        assert_eq!(duplicate.work_id, "TICKET-999");
-        assert_eq!(duplicate.branch.as_deref(), Some("gah/repo-999"));
-        assert_eq!(
-            duplicate.mr_url.as_deref(),
-            Some("https://example/pull/999")
-        );
-    }
-
     fn init_repo(repo: &Path) {
         fs::create_dir_all(repo.join("docs/tickets")).unwrap();
         Command::new("git")
@@ -7997,18 +7716,6 @@ which lacks a leading boundary check.
     }
 
     #[test]
-    fn capacity_preflight_uses_existing_parent_for_new_worktree_base() {
-        let tmp = tempfile::tempdir().unwrap();
-        let worktree_base = tmp.path().join("worktrees");
-
-        assert!(!worktree_base.exists());
-        assert_eq!(
-            nearest_existing_ancestor(&worktree_base).unwrap(),
-            tmp.path()
-        );
-    }
-
-    #[test]
     fn run_auto_fix_commands_actually_fixes_the_worktree() {
         // The whole point: a formatter run here should mean a subsequent
         // validate() with a --check-style command passes, instead of
@@ -8031,277 +7738,6 @@ which lacks a leading boundary check.
         let tmp = tempfile::tempdir().unwrap();
         let cmds = vec!["exit 1".to_string()];
         run_auto_fix_commands(&cmds, tmp.path(), &[]); // must not panic
-    }
-
-    fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
-        let gh_path = bin_dir.join("gh");
-        let content = format!(
-            "#!/bin/sh\n\
-             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
-                 echo '{}'\n\
-             fi\n",
-            response_json.replace('\'', "'\\''")
-        );
-        fs::write(&gh_path, content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&gh_path, perms).unwrap();
-        }
-    }
-
-    #[test]
-    fn test_check_duplicate_work_cases() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-
-        // 1. Create a fake ticket markdown
-        let ticket_dir = tmp.path().join("docs/tickets");
-        fs::create_dir_all(&ticket_dir).unwrap();
-        let ticket_path = ticket_dir.join("TICKET-097-test.md");
-        fs::write(
-            &ticket_path,
-            "# TICKET-097: Test ticket\n\n\
-             Goal: Test duplicate work guard\n\n\
-             ## Problem\n\
-             Test\n",
-        )
-        .unwrap();
-
-        // 2. Setup config & profile
-        let cfg = crate::config::GahConfig {
-            context: Default::default(),
-            defaults: crate::config::Defaults {
-                current_manager: None,
-                artifact_root: tmp.path().to_string_lossy().into_owned(),
-                worktree_base: tmp.path().to_string_lossy().into_owned(),
-                llm_base_url: String::new(),
-                llm_model_local: String::new(),
-                llm_model_cloud: String::new(),
-                routing: crate::config::RoutingPolicy::default(),
-            },
-            profiles: std::collections::HashMap::new(),
-        };
-
-        let mut prof = profile(tmp.path());
-        prof.provider = "github".to_string();
-        prof.repo = "owner/repo".to_string();
-
-        let ledger_path = tmp.path().join("ledger.jsonl");
-        // The test configuration's artifact root points at `tmp`, so the
-        // duplicate guard reads this isolated ledger without mutating a
-        // process-global environment variable.
-
-        // 3. Case A: No previous work -> Should pass
-        let args = super::DispatchArgs {
-            profile: "test".to_string(),
-            mode: "improve".to_string(),
-            backend: "codex".to_string(),
-            target: ticket_path.display().to_string(),
-            branch: None,
-            mr: None,
-            current_branch: false,
-            budget: 0,
-            dry_run: false,
-            config_path: None,
-            oh_profile: None,
-            model: None,
-            retries: 0,
-            allow_draft_fail: false,
-            prod: false,
-            allow_unknown_red_baseline: false,
-            escalate: false,
-            existing_branch: None,
-            skip_validation_gate: false,
-            dispatch_reason: None,
-            work_id: None,
-            run_id: None,
-            route_ready: None,
-        };
-
-        // No ledger exists yet.
-        let res = super::check_duplicate_work(&cfg, &prof, &args);
-        assert!(res.is_ok());
-
-        // 4. Case B: Active open PR exists -> Should block
-        let pr_json = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"OPEN","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":null,"updatedAt":"2026-07-04T17:22:35-05:00","statusCheckRollup":[]}]"#;
-        setup_fake_gh(&bin_dir, pr_json);
-        let _guard = PathGuard::set(&bin_dir);
-
-        // Write ledger entry matching the ticket and branch
-        let mut entry = LedgerEntry::new(
-            "test",
-            &prof,
-            "codex",
-            "improve",
-            &ticket_path.display().to_string(),
-            Some("session-1".into()),
-            None,
-        );
-        entry.work_id = Some("TICKET-097".to_string());
-        entry.branch = Some("gah/repo-active".to_string());
-        entry.mr_url = Some("https://github.com/owner/repo/pull/1".to_string());
-        entry.timestamp = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap();
-
-        let ledger_line = serde_json::to_string(&entry).unwrap();
-        fs::write(&ledger_path, format!("{}\n", ledger_line)).unwrap();
-
-        let res = super::check_duplicate_work(&cfg, &prof, &args);
-        assert!(res.is_err());
-        let err = res.unwrap_err();
-        let err_msg = err.to_string();
-        assert!(err_msg.contains("Refusing dispatch: active open PR already exists"));
-        let duplicate = super::duplicate_work_error(&err).unwrap();
-        assert_eq!(duplicate.work_id, "TICKET-097");
-        assert_eq!(
-            duplicate.mr_url.as_deref(),
-            Some("https://github.com/owner/repo/pull/1")
-        );
-
-        // 5. Case C: PR is merged -> Should pass
-        let pr_json_merged = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"MERGED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":"2026-07-04T17:22:35-05:00","updatedAt":"2026-07-04T17:22:35-05:00","statusCheckRollup":[]}]"#;
-        setup_fake_gh(&bin_dir, pr_json_merged);
-
-        let res = super::check_duplicate_work(&cfg, &prof, &args);
-        assert!(res.is_ok());
-
-        // 6. Case D: PR is closed unmerged -> Should pass
-        let pr_json_closed = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"CLOSED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":null,"updatedAt":"2026-07-04T17:22:35-05:00","statusCheckRollup":[]}]"#;
-        setup_fake_gh(&bin_dir, pr_json_closed);
-
-        let res = super::check_duplicate_work(&cfg, &prof, &args);
-        assert!(res.is_ok());
-
-        // 7. Case E: Ledger entry is stale (> 14 days) -> Should pass
-        setup_fake_gh(&bin_dir, pr_json);
-        entry.timestamp = (OffsetDateTime::now_utc() - time::Duration::days(15))
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap();
-        let ledger_line_stale = serde_json::to_string(&entry).unwrap();
-        fs::write(&ledger_path, format!("{}\n", ledger_line_stale)).unwrap();
-
-        let res = super::check_duplicate_work(&cfg, &prof, &args);
-        assert!(res.is_ok());
-
-        // 8. Case F: Active branch may own work -> Warn
-        setup_fake_gh(&bin_dir, "[]");
-        let local_repo_path = tmp.path().join("local_repo");
-        fs::create_dir_all(&local_repo_path).unwrap();
-        init_repo(&local_repo_path);
-        Command::new("git")
-            .args(["branch", "gah/repo-active"])
-            .current_dir(&local_repo_path)
-            .output()
-            .unwrap();
-        let mut prof_with_repo = prof.clone();
-        prof_with_repo.local_path = local_repo_path.display().to_string();
-
-        entry.timestamp = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap();
-        let ledger_line_active_branch = serde_json::to_string(&entry).unwrap();
-        fs::write(&ledger_path, format!("{}\n", ledger_line_active_branch)).unwrap();
-
-        let res = super::check_duplicate_work(&cfg, &prof_with_repo, &args);
-        assert!(res.is_ok());
-    }
-
-    // Parallel workers: a recent, non-stale claim entry (no PR/branch yet --
-    // the claiming worker may still be mid-backend-run) must block a second
-    // concurrent dispatch of the same work_id.
-    #[test]
-    fn check_duplicate_work_blocks_on_active_claim() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        setup_fake_gh(&bin_dir, "[]");
-        let _guard = PathGuard::set(&bin_dir);
-
-        let ticket_dir = tmp.path().join("docs/tickets");
-        fs::create_dir_all(&ticket_dir).unwrap();
-        let ticket_path = ticket_dir.join("TICKET-500-test.md");
-        fs::write(
-            &ticket_path,
-            "# TICKET-500: Test\n\nGoal: test claim guard\n",
-        )
-        .unwrap();
-
-        let cfg = crate::config::GahConfig {
-            context: Default::default(),
-            defaults: crate::config::Defaults {
-                current_manager: None,
-                artifact_root: tmp.path().to_string_lossy().into_owned(),
-                worktree_base: tmp.path().to_string_lossy().into_owned(),
-                llm_base_url: String::new(),
-                llm_model_local: String::new(),
-                llm_model_cloud: String::new(),
-                routing: crate::config::RoutingPolicy::default(),
-            },
-            profiles: std::collections::HashMap::new(),
-        };
-        let mut prof = profile(tmp.path());
-        prof.provider = "github".to_string();
-        prof.repo = "owner/repo".to_string();
-
-        let ledger_path = tmp.path().join("ledger.jsonl");
-        let claim = LedgerEntry::new_claim("test", &prof, "TICKET-500");
-        fs::write(
-            &ledger_path,
-            format!("{}\n", serde_json::to_string(&claim).unwrap()),
-        )
-        .unwrap();
-
-        let args = super::DispatchArgs {
-            profile: "test".to_string(),
-            mode: "improve".to_string(),
-            backend: "codex".to_string(),
-            target: ticket_path.display().to_string(),
-            branch: None,
-            mr: None,
-            current_branch: false,
-            budget: 0,
-            dry_run: false,
-            config_path: None,
-            oh_profile: None,
-            model: None,
-            retries: 0,
-            allow_draft_fail: false,
-            prod: false,
-            allow_unknown_red_baseline: false,
-            escalate: false,
-            existing_branch: None,
-            skip_validation_gate: false,
-            dispatch_reason: None,
-            work_id: None,
-            run_id: None,
-            route_ready: None,
-        };
-
-        // Fresh claim -> blocked.
-        let res = super::check_duplicate_work(&cfg, &prof, &args);
-        assert!(res.is_err());
-        let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("claimed by another in-flight dispatch"));
-
-        // A stale claim (older than CLAIM_STALE_AFTER_HOURS) -> no longer blocks.
-        let mut stale_claim = claim.clone();
-        stale_claim.timestamp = (OffsetDateTime::now_utc() - time::Duration::hours(7))
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap();
-        fs::write(
-            &ledger_path,
-            format!("{}\n", serde_json::to_string(&stale_claim).unwrap()),
-        )
-        .unwrap();
-        let res = super::check_duplicate_work(&cfg, &prof, &args);
-        assert!(res.is_ok());
     }
 
     #[test]
