@@ -4102,6 +4102,7 @@ fn review(
             ledger.review_confidence = Some(verdict.confidence.clone());
             ledger.reviewer_backend = Some(route.effective_backend.clone());
             ledger.reviewer_model = route.effective_model.clone();
+            ledger.reviewer_tier = Some(reviewer_tier.as_str().to_string());
             ledger.review_gate_reason = verdict.safety_gate_reason.clone();
             ledger.usage = review_usage.clone();
             // TICKET-125: attribute this verdict back to the branch's
@@ -4115,6 +4116,7 @@ fn review(
                     confidence: &verdict.confidence,
                     reviewer_backend: &route.effective_backend,
                     reviewer_model: route.effective_model.as_deref(),
+                    reviewer_tier: verdict.reviewer_tier.as_deref(),
                     review_gate_reason: verdict.safety_gate_reason.as_deref(),
                 },
             ) {
