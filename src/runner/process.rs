@@ -1,4 +1,5 @@
-//! Generic child-process lifecycle and watchdogs, extracted from `runner.rs`.
+//! Generic child-process lifecycle and watchdogs, extracted from the runner
+//! facade.
 //!
 //! This module owns the backend-agnostic mechanics of launching a child
 //! process group, copying/redacting its streams to a log, snapshotting

@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::claude_monitor::find_claude_transcript;
-use crate::runner::backends::codex::filtered_backend_args;
 use crate::runner::output;
 use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
+use crate::runner::resolve::filtered_backend_args;
 use crate::runner::RunResult;
 
 /// Run Claude CLI non-interactively via `claude -p`.

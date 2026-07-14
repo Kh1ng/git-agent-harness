@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::runner::backends::codex::filtered_backend_args;
 use crate::runner::process::{spawn_with_worktree_progress_watch, write_redacted_task};
+use crate::runner::resolve::filtered_backend_args;
 use crate::runner::{log_delta, RunResult};
 
 /// Run OpenCode CLI non-interactively via `opencode run --model <model> --dir <path> --auto `<prompt>`.

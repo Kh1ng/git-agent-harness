@@ -787,9 +787,9 @@ impl Profile {
     }
 
     /// An explicit executable path override for `backend`, if this profile
-    /// sets one. `resolve_backend_executable` (runner.rs) treats a `Some`
-    /// return as a literal file path to check with `is_executable_path` --
-    /// this must ONLY ever return a real path override, never a marker
+    /// sets one. `resolve_backend_executable` (in `runner::resolve`) treats a
+    /// `Some` return as a literal file path to check with `is_executable_path`
+    /// -- this must ONLY ever return a real path override, never a marker
     /// string, or backend launch silently breaks (see `is_backend_configured`
     /// below for the "is this set up at all" signal, which is a different
     /// question with a different answer for openhands).
@@ -1459,12 +1459,12 @@ pub mod tests {
     }
 
     // Regression: configured_backend_path("openhands") used to return
-    // oh_profile (e.g. "nous-hy3"), which resolve_backend_executable
-    // (runner.rs) then treated as a literal executable file path -- that
-    // string is never a real file, so every explicit `--backend openhands`
-    // dispatch on a profile with oh_profile set silently routed away from
-    // openhands as if it were unavailable. configured_backend_path must
-    // never return anything for openhands; is_backend_configured is the
+    // oh_profile (e.g. "nous-hy3"), which resolve_backend_executable in
+    // `runner::resolve` then treated as a literal executable file path --
+    // that string is never a real file, so every explicit `--backend
+    // openhands` dispatch on a profile with oh_profile set silently routed
+    // away from openhands as if it were unavailable. configured_backend_path
+    // must never return anything for openhands; is_backend_configured is the
     // right function for "is this set up" instead.
     #[test]
     fn configured_backend_path_never_returns_a_value_for_openhands() {
