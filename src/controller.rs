@@ -13,7 +13,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -819,6 +819,75 @@ fn reload_config_for_profile(
     Ok(loaded)
 }
 
+/// TICKET-282: before reusing an existing branch for a `FixMr`, detect a
+/// branch that is already attached to a worktree GAH does not manage (an
+/// externally-owned or stale worktree for the same open PR). Returns a
+/// replacement `NextAction` for the loop to run instead:
+///
+/// * `None` -- the action is safe to execute as-is (not a branch-reuse
+///   action, or the branch is GAH-owned and `create_existing` will reclaim it).
+/// * `Some(redispatched)` -- the branch conflicted with a foreign/stale
+///   worktree. An explicit non-terminal `WorkDeferred` event has been recorded
+///   and a fresh snapshot (excluding the conflicted work item) has been
+///   re-decided, so the loop continues with the next eligible item instead of
+///   stalling on `fatal: branch is already used by worktree at '<path>'`.
+///
+/// A clean-and-stale attachment is never reclaimed under this rule: GAH only
+/// releases worktrees it owns, so a foreign worktree (even when clean) is
+/// deferred, never pruned.
+fn defer_if_branch_attached(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    action: &NextAction,
+) -> Result<Option<NextAction>> {
+    let (branch, work_id) = match action {
+        NextAction::FixMr {
+            branch, work_id, ..
+        } => (branch, work_id),
+        _ => return Ok(None),
+    };
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    let repo = Path::new(&profile.local_path);
+    let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
+    let attachment = crate::worktree::branch_attachment(repo, branch, &worktree_base)?;
+    let Some(attachment) = attachment else {
+        return Ok(None);
+    };
+    if attachment.gah_owned {
+        // GAH owns this exact worktree path; `create_existing` reclaims it.
+        return Ok(None);
+    }
+
+    // Foreign or stale attachment -- defer rather than fail. Record an explicit
+    // non-terminal deferral so the dashboard/operators can see why this item
+    // was skipped, then re-decide excluding the conflicted work item.
+    crate::events::record(
+        cfg,
+        crate::events::EventType::WorkDeferred,
+        Some(profile_name),
+        work_id.as_deref(),
+        format!(
+            "branch '{}' already attached to worktree {} (gah_owned={}, clean={}); deferring to next eligible item",
+            branch,
+            attachment.path.display(),
+            attachment.gah_owned,
+            attachment.clean
+        ),
+    )?;
+
+    let mut fresh =
+        crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
+    if let Some(wid) = work_id {
+        fresh
+            .merge_requests
+            .retain(|mr| mr.work_id.as_deref() != Some(wid));
+        fresh
+            .available_tickets
+            .retain(|t| t.work_id.as_deref() != Some(wid));
+    }
+    Ok(Some(decide_next_action(&fresh)))
+}
+
 /// Run the controller continuously in one process. The process lock is held
 /// for the lifetime of the loop so a second manager for the same profile
 /// cannot create a competing worker pool.
@@ -1028,6 +1097,13 @@ pub fn run_once(
                 action = redispatched;
             }
         }
+        // TICKET-282: a FixMr reusing a branch already attached to a foreign
+        // or stale worktree must be deferred (non-terminal) and the loop
+        // continued with the next eligible item, never allowed to stall the
+        // recurring loop on a hard `git worktree add` failure.
+        if let Some(redispatch) = defer_if_branch_attached(cfg, profile_name, &action)? {
+            action = redispatch;
+        }
         record_action_events(cfg, profile_name, &original_action, &action)?;
 
         let outcome = if let Some(work_id) = action.work_id().filter(|_| {
@@ -1194,6 +1270,13 @@ fn run_parallel_once(
                 } else {
                     action = redispatched;
                 }
+            }
+
+            // TICKET-282: defer a FixMr whose branch is already attached to a
+            // foreign/stale worktree and continue with the next eligible item
+            // rather than stalling the batch on a hard `git worktree add`.
+            if let Some(redispatch) = defer_if_branch_attached(cfg, profile_name, &action)? {
+                action = redispatch;
             }
 
             // Check if this action involves a work_id that's already claimed or executed in this batch

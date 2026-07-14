@@ -38,6 +38,13 @@ pub enum EventType {
     ReviewBudgetExhausted,
     DuplicateGuardTriggered,
     LoopStopped,
+    /// TICKET-282: a work item was deliberately NOT dispatched because it would
+    /// reuse a branch already attached to another worktree. This is a
+    /// non-terminal, per-item deferral: the loop records it and continues with
+    /// another eligible item rather than stalling on a hard `git worktree add`
+    /// failure. Distinct from `LoopStopped` so dashboards/operators can tell a
+    /// transient branch conflict apart from a genuine profile stall.
+    WorkDeferred,
 }
 
 impl EventType {
@@ -55,6 +62,7 @@ impl EventType {
             Self::ReviewBudgetExhausted => "review_budget_exhausted",
             Self::DuplicateGuardTriggered => "duplicate_guard_triggered",
             Self::LoopStopped => "loop_stopped",
+            Self::WorkDeferred => "work_deferred",
         }
     }
 }

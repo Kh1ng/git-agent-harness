@@ -219,6 +219,68 @@ pub fn create_existing(
     Ok(worktree_path)
 }
 
+/// Describes a worktree currently attached to a branch, as reported by
+/// `git worktree list`, if one exists.
+pub struct BranchWorktreeAttachment {
+    /// Absolute path of the attached worktree.
+    pub path: PathBuf,
+    /// True when the attached worktree is the exact path GAH would create for
+    /// this branch under its managed `worktree_base` -- i.e. GAH owns it and
+    /// may safely reclaim it via `create_existing`.
+    pub gah_owned: bool,
+    /// True when the attached worktree has no uncommitted changes.
+    pub clean: bool,
+}
+
+/// Returns the worktree (if any) currently attached to `branch`. A branch
+/// checked out in a worktree cannot be reused by `git worktree add`; doing so
+/// fails with "branch is already used by worktree at '<path>'", which would
+/// otherwise terminate a recurring `gah loop`. Detect this before dispatch so
+/// the controller can defer the work item instead of stalling on a hard git
+/// failure.
+///
+/// `worktree_base` is GAH's configured managed worktree root. An attachment
+/// located anywhere else (an externally-owned or stale worktree for the same
+/// open PR) is reported with `gah_owned = false` and must not be reclaimed.
+pub fn branch_attachment(
+    repo: &Path,
+    branch: &str,
+    worktree_base: &Path,
+) -> Result<Option<BranchWorktreeAttachment>> {
+    let out = git_raw(&["worktree", "list", "--porcelain"], repo)?;
+    if !out.status.success() {
+        // If we can't enumerate worktrees, err on the side of attempting the
+        // dispatch -- better a surfaced transient failure than a silent skip.
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let expected = worktree_base.join(branch.replace('/', "-"));
+    let canonical_expected = std::fs::canonicalize(&expected).unwrap_or(expected);
+
+    let mut current_path: Option<PathBuf> = None;
+    for line in text.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            current_path = Some(PathBuf::from(p.trim()));
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            if let Some(path) = &current_path {
+                let branch_ref = format!("refs/heads/{}", branch);
+                if b.trim() == branch_ref {
+                    let canonical_path =
+                        std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                    let gah_owned = canonical_path == canonical_expected;
+                    let clean = path.exists() && !matches!(has_uncommitted_changes(path), Ok(true));
+                    return Ok(Some(BranchWorktreeAttachment {
+                        path: path.clone(),
+                        gah_owned,
+                        clean,
+                    }));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 pub fn has_changes(worktree: &Path, target_branch: &str) -> Result<bool> {
     if has_uncommitted_changes(worktree)? {
         return Ok(true);
@@ -809,6 +871,100 @@ mod tests {
         assert!(
             log_text.contains("a fix"),
             "the commit must actually reach the remote branch, got: {log_text}"
+        );
+    }
+
+    #[test]
+    fn branch_attachment_detects_foreign_worktree_and_marks_non_gah_owned() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+        fs::create_dir_all(&worktree_base).unwrap();
+
+        StdCommand::new("git")
+            .args(["checkout", "-q", "-b", "shared-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["push", "-q", "origin", "shared-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        // An externally-owned worktree living OUTSIDE GAH's managed base.
+        let foreign = tmp.path().join("external-worktree");
+        let add = StdCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "shared-branch",
+                foreign.to_str().unwrap(),
+                "origin/shared-branch",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(add.status.success(), "worktree add must succeed");
+
+        let attachment = branch_attachment(&repo, "shared-branch", &worktree_base).unwrap();
+        let attachment = attachment.expect("must detect the attached worktree");
+        assert_eq!(
+            attachment.path, foreign,
+            "path must be the foreign worktree"
+        );
+        assert!(
+            !attachment.gah_owned,
+            "a worktree outside worktree_base must not be reported as GAH-owned"
+        );
+
+        // The same branch with no foreign attachment reports nothing.
+        let none = branch_attachment(&repo, "no-such-branch", &worktree_base).unwrap();
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn branch_attachment_marks_gah_owned_worktree_when_at_expected_path() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        StdCommand::new("git")
+            .args(["checkout", "-q", "-b", "shared-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["push", "-q", "origin", "shared-branch"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        // A GAH-managed worktree at exactly the expected path.
+        let _wt = create_existing(&repo, "shared-branch", &worktree_base).unwrap();
+
+        let attachment = branch_attachment(&repo, "shared-branch", &worktree_base).unwrap();
+        let attachment = attachment.expect("must detect the attached worktree");
+        assert!(
+            attachment.gah_owned,
+            "a worktree at the GAH-managed path must be reported as GAH-owned"
         );
     }
 }
