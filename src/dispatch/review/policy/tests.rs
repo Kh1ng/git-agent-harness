@@ -153,6 +153,39 @@ fn review_escalation_reason_none_when_no_prior_entries() {
 }
 
 #[test]
+fn cancelled_shutdown_is_not_a_low_confidence_verdict_or_spent_reviewer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+    let mut prof = profile(tmp.path());
+    prof.routing.escalatory_reviewers = vec![
+        CandidateConfig {
+            backend: "claude".into(),
+            model: Some("sonnet".into()),
+            ..Default::default()
+        },
+        CandidateConfig {
+            backend: "opencode".into(),
+            model: Some("nous-portal/z-ai/glm-5.2".into()),
+            ..Default::default()
+        },
+    ];
+    let mut cancelled =
+        review_ledger_entry("test", &prof, "gah/branch-1", "cancelled_shutdown", "low");
+    cancelled.effective_backend = "claude".into();
+    cancelled.effective_model = Some("sonnet".into());
+    cancelled.human_required = true;
+    crate::ledger::append(&cfg, &cancelled).unwrap();
+
+    assert_eq!(
+        review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+        None
+    );
+    let next = next_escalatory_reviewer(&cfg, &prof, "test", "gah/branch-1", None).unwrap();
+    assert_eq!(next.backend, "claude");
+    assert_eq!(next.model.as_deref(), Some("sonnet"));
+}
+
+#[test]
 fn review_escalation_reason_none_with_single_needs_fix() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());

@@ -3,9 +3,9 @@
 use super::diagnostics::build_routing_diagnostics;
 use super::policy::{
     any_available_backend, append_reorder_reason, auto_candidates, builtin_backend,
-    explicit_candidates, is_genuine_agent_failure, order_candidates, policy_backend_model,
-    policy_candidates, review_fallback_backend, review_fallback_model, task_rule_candidates,
-    RouteCandidate,
+    configured_route_requires_approval, explicit_candidates, is_genuine_agent_failure,
+    order_candidates, policy_backend_model, policy_candidates, review_fallback_backend,
+    review_fallback_model, task_rule_candidates, RouteCandidate,
 };
 use super::reservation::max_concurrent_skip;
 use super::types::{
@@ -602,7 +602,12 @@ where
         marginal_cost_usd: None,
         quota_usage_percent: None,
         quota_days_remaining: None,
-        requires_approval: false,
+        requires_approval: configured_route_requires_approval(
+            effective_routing,
+            req.mode,
+            &requested_backend,
+            requested_model.as_deref(),
+        ),
         original_order: 0,
     };
     let candidates = explicit_candidates(

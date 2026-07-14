@@ -144,7 +144,13 @@ pub(in crate::dispatch) fn review_escalation_reason(
         .iter()
         .rev()
         .filter(|e| {
-            e.profile == profile_name && e.mode == "review" && e.branch.as_deref() == Some(branch)
+            e.profile == profile_name
+                && e.mode == "review"
+                && e.branch.as_deref() == Some(branch)
+                && matches!(
+                    e.validation_result.as_deref(),
+                    Some("APPROVE") | Some("NEEDS_FIX") | Some("REJECT") | Some("HUMAN_REVIEW")
+                )
         })
         .take(repeated_failure_threshold)
         .collect();
@@ -199,6 +205,9 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
                 && entry.mode == "review"
                 && entry.branch.as_deref() == Some(branch)
                 && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
+                // An operator-requested shutdown is not a reviewer opinion
+                // and must remain retryable after the daemon restarts.
+                && entry.validation_result.as_deref() != Some("cancelled_shutdown")
         })
         .map(|entry| (entry.effective_backend, entry.effective_model))
         .collect();

@@ -414,6 +414,68 @@ fn explicit_cli_model_override_cannot_bypass_approval_gate() {
 }
 
 #[test]
+fn explicit_internal_review_route_cannot_bypass_paid_approval_gate() {
+    let tmp = TempDir::new().unwrap();
+    let mut profile = profile();
+    let mut paid = candidate_config(
+        "opencode",
+        Some("nous-portal/z-ai/glm-5.2"),
+        Some("nous-portal-api"),
+    );
+    paid.requires_approval = true;
+    profile.routing.review_candidates = Some(vec![paid.clone()]);
+    profile.routing.escalatory_reviewers = vec![paid];
+    let request = RouteRequest {
+        last_failure_class: None,
+        mode: "review",
+        requested_backend: "opencode",
+        requested_model: Some("nous-portal/z-ai/glm-5.2"),
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+    };
+
+    let err = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request.clone(),
+        &RoutingRuntimeState::default(),
+        &path(&tmp),
+        OffsetDateTime::now_utc(),
+        backend_available,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::ApprovalRequired { backend, model, .. })
+            if backend == "opencode"
+                && model.as_deref() == Some("nous-portal/z-ai/glm-5.2")
+    ));
+
+    let mut approved = RoutingRuntimeState::default();
+    approved.approved.insert(CandidateIdentity::new(
+        "opencode",
+        Some("nous-portal/z-ai/glm-5.2"),
+    ));
+    let decision = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request,
+        &approved,
+        &path(&tmp),
+        OffsetDateTime::now_utc(),
+        backend_available,
+    )
+    .unwrap();
+    assert_eq!(decision.effective_backend, "opencode");
+    assert_eq!(
+        decision.effective_model.as_deref(),
+        Some("nous-portal/z-ai/glm-5.2")
+    );
+}
+
+#[test]
 fn missing_or_unmatched_task_metadata_preserves_generic_routing() {
     let tmp = TempDir::new().unwrap();
     let mut profile = profile();

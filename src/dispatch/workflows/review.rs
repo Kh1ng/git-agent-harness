@@ -628,7 +628,7 @@ pub(in crate::dispatch) fn review(
             anyhow::bail!("review backend exited with status {code}")
         }
         runner::ReviewProcessOutcome::SignalTermination(signal) => {
-            mark_shutdown_cancelled(ledger, crate::ledger::FailureStage::Review, Some(-signal));
+            mark_review_shutdown_cancelled(ledger, signal);
             println!(
                 "Review shutdown requested; terminated backend process group (signal {}).",
                 signal
@@ -657,6 +657,15 @@ pub(in crate::dispatch) fn review(
         }
     }
     Ok(())
+}
+
+fn mark_review_shutdown_cancelled(ledger: &mut LedgerEntry, signal: i32) {
+    mark_shutdown_cancelled(ledger, crate::ledger::FailureStage::Review, Some(-signal));
+    // apply_route_to_ledger may have marked an availability fallback as
+    // low-confidence/human-required before the backend started. A killed
+    // process produced no verdict, so neither flag is true.
+    ledger.confidence_impact = None;
+    ledger.human_required = false;
 }
 
 fn reserve_review_route(profile: &Profile, route: &RouteDecision) -> Result<ConcurrencyGuard> {
@@ -714,11 +723,32 @@ fn stop_for_exhausted_review_escalation(
 
 #[cfg(test)]
 mod reservation_tests {
-    use super::reserve_review_route;
+    use super::{mark_review_shutdown_cancelled, reserve_review_route};
     use crate::config::tests::test_profile_for_notifications;
+    use crate::ledger::LedgerEntry;
     use crate::routing::{current_concurrent, RouteDecision};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn shutdown_clears_provisional_fallback_confidence_and_human_hold() {
+        let profile = test_profile_for_notifications();
+        let mut ledger = LedgerEntry::new("gah", &profile, "claude", "review", "test", None, None);
+        ledger.confidence_impact = Some("low".into());
+        ledger.human_required = true;
+
+        mark_review_shutdown_cancelled(&mut ledger, 15);
+
+        assert_eq!(
+            ledger.validation_result.as_deref(),
+            Some("cancelled_shutdown")
+        );
+        assert_eq!(ledger.failure_class.as_deref(), Some("harness_error"));
+        assert_eq!(ledger.failure_stage.as_deref(), Some("review"));
+        assert_eq!(ledger.backend_exit_code, Some(-15));
+        assert_eq!(ledger.confidence_impact, None);
+        assert!(!ledger.human_required);
+    }
 
     #[test]
     fn three_reviews_never_overlap_on_a_backend_model_capped_at_one() {

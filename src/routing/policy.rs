@@ -148,25 +148,33 @@ pub(super) fn explicit_candidates(
         });
         if let Some(remainder) = configured_remainder {
             candidates.extend(remainder);
-        } else if let Some(weak_backend) = review_fallback_backend {
-            let weak_model = review_fallback_model(routing)
-                .map(str::to_string)
-                .or_else(|| primary.model.clone());
-            let quota_pool = routing.find_quota_pool(mode, &weak_backend, weak_model.as_deref());
-            candidates.push(RouteCandidate {
-                backend: weak_backend,
-                model: weak_model,
-                quota_pool,
-                priority: 0,
-                included_in_quota: false,
-                marginal_cost_usd: None,
-                quota_usage_percent: None,
-                quota_days_remaining: None,
-                requires_approval: false,
-                original_order: candidates.len(),
-            });
+        } else {
+            if let Some(weak_backend) = review_fallback_backend {
+                let weak_model = review_fallback_model(routing)
+                    .map(str::to_string)
+                    .or_else(|| primary.model.clone());
+                let quota_pool =
+                    routing.find_quota_pool(mode, &weak_backend, weak_model.as_deref());
+                candidates.push(RouteCandidate {
+                    backend: weak_backend,
+                    model: weak_model,
+                    quota_pool,
+                    priority: 0,
+                    included_in_quota: false,
+                    marginal_cost_usd: None,
+                    quota_usage_percent: None,
+                    quota_days_remaining: None,
+                    requires_approval: false,
+                    original_order: candidates.len(),
+                });
+            }
+            // Ad-hoc explicit reviewers retain the legacy generic fallback.
+            // A reviewer that matched the configured ordered pool must stop
+            // at the end of that pool; appending arbitrary backends here can
+            // launch an incompatible model name on the wrong CLI and can
+            // bypass a paid-route approval failure.
+            extend_remaining_candidates(routing, &mut candidates, mode, primary.model.clone());
         }
-        extend_remaining_candidates(routing, &mut candidates, mode, primary.model.clone());
     } else if mode != "review" && allow_impl_fallback {
         extend_remaining_candidates(routing, &mut candidates, mode, primary.model.clone());
     }
@@ -422,6 +430,54 @@ pub(super) fn policy_candidates(policy: &RoutingPolicy, mode: &str) -> Option<Ve
         _ => None,
     };
     raw.map(|list| route_candidates(list))
+}
+
+/// Return true when this exact backend/model is configured as an
+/// operator-approved-only route anywhere applicable to `mode`.
+///
+/// Internal escalation uses the explicit-route path. That path must retain
+/// the same paid-route guard as normal auto routing instead of rebuilding the
+/// candidate with `requires_approval = false`.
+pub(super) fn configured_route_requires_approval(
+    routing: &RoutingPolicy,
+    mode: &str,
+    backend: &str,
+    model: Option<&str>,
+) -> bool {
+    let matches = |candidate: &crate::config::CandidateConfig| {
+        candidate.backend == backend && candidate.model.as_deref() == model
+    };
+
+    let mode_candidates_require_approval = match mode {
+        "pm" => routing.pm_candidates.as_ref(),
+        "review" => routing.review_candidates.as_ref(),
+        "improve" | "fix" | "experiment" => routing.improve_candidates.as_ref(),
+        _ => None,
+    }
+    .is_some_and(|candidates| {
+        candidates
+            .iter()
+            .any(|candidate| matches(candidate) && candidate.requires_approval)
+    });
+
+    mode_candidates_require_approval
+        || (mode == "review"
+            && routing
+                .escalatory_reviewers
+                .iter()
+                .any(|candidate| matches(candidate) && candidate.requires_approval))
+        || (matches!(mode, "improve" | "fix" | "experiment")
+            && routing.task_routing_rules.iter().any(|rule| {
+                (rule.modes.is_empty()
+                    || rule
+                        .modes
+                        .iter()
+                        .any(|configured_mode| configured_mode.eq_ignore_ascii_case(mode)))
+                    && rule
+                        .candidates
+                        .iter()
+                        .any(|candidate| matches(candidate) && candidate.requires_approval)
+            }))
 }
 
 pub(super) fn task_rule_candidates(
