@@ -2293,7 +2293,11 @@ fn improve(
         }
 
         // Extract backend summary from the tail of the log
-        backend_summary = extract_backend_summary(&result.log_path);
+        backend_summary = runner::output::extract_backend_summary(
+            &route.effective_backend,
+            &result.log_path,
+            ledger.target_summary.as_deref(),
+        );
 
         if result.exit_code != 0 {
             // The backend launched but exited nonzero — the backend itself
@@ -3221,7 +3225,11 @@ fn experiment(
     ledger.backend_exit_code = Some(result.exit_code);
 
     // Extract backend summary from the tail of the log
-    let backend_summary = extract_backend_summary(&result.log_path);
+    let backend_summary = runner::output::extract_backend_summary(
+        &route.effective_backend,
+        &result.log_path,
+        ledger.target_summary.as_deref(),
+    );
 
     // Collect research artifacts (notebooks, plots, CSVs, reports)
     let artifacts_dir = session_dir.join("artifacts");
@@ -4806,15 +4814,14 @@ mod tests {
         build_metadata_rich_mr_body, build_mr_title, build_pm_plan_task, build_standard_mr_body,
         build_task, check_review_budget, classify_git_operation_result,
         classify_validation_failure_progress, classify_worktree_result, collect_pm_preflight,
-        collect_ticket_summaries, decide_route, derive_reviewer_tier, extract_backend_summary,
-        extract_issue_number, first_markdown_heading, format_candidate_task,
-        github_issue_author_is_allowed, is_issue_number_reference,
-        mark_backend_unavailable_from_output_at, nearest_existing_ancestor,
-        next_escalatory_reviewer, next_ticket_id, parse_pm_plan, parse_review_verdict,
-        parse_review_verdict_with_context, parse_ticket_metadata, parse_ticket_metadata_from_issue,
-        render_review_comment, review_escalation_reason, review_labels, review_preflight,
-        review_usage, reviewer_dedup_class, routing_runtime_state, run_backend,
-        scan_available_tickets, should_skip_per_dispatch_baseline, strip_terminal_noise,
+        collect_ticket_summaries, decide_route, derive_reviewer_tier, extract_issue_number,
+        first_markdown_heading, format_candidate_task, github_issue_author_is_allowed,
+        is_issue_number_reference, mark_backend_unavailable_from_output_at,
+        nearest_existing_ancestor, next_escalatory_reviewer, next_ticket_id, parse_pm_plan,
+        parse_review_verdict, parse_review_verdict_with_context, parse_ticket_metadata,
+        parse_ticket_metadata_from_issue, render_review_comment, review_escalation_reason,
+        review_labels, review_preflight, review_usage, reviewer_dedup_class, routing_runtime_state,
+        run_backend, scan_available_tickets, should_skip_per_dispatch_baseline,
         validation_failure_fingerprint, validation_failure_no_progress_reason,
         ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewDiffBundle,
         ReviewGateContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
@@ -4835,88 +4842,6 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
     const OPENCODE_HY3_RATE_LIMIT: &str =
         include_str!("../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
-
-    #[test]
-    fn strip_terminal_noise_removes_ansi_codes_and_openhands_exit_banner() {
-        // Reproduces the exact garbage confirmed live in worldcup-props MR
-        // !243's "What changed and why" section: ANSI color codes, box-
-        // drawing panel borders, and openhands' unconditional exit banner,
-        // all landing verbatim in a PR/MR body.
-        let raw = "\u{1b}[36m\u{2502}\u{1b}[0m Fixed the eligibility gate.        \u{1b}[36m\u{2502}\u{1b}[0m\n\
-                   \u{1b}[92m\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{1b}[0m\n\
-                   Goodbye! \u{1f44b}\n\
-                   Conversation ID: 4fae58dacf204cff9f92fbb7fbed8229\n\
-                   Hint: run openhands --resume 4fae58da-cf20-4cff-9f92-fbb7fbed8229 to resume this\n\
-                   conversation.\n";
-        let cleaned = strip_terminal_noise(raw);
-        assert_eq!(cleaned, "Fixed the eligibility gate.");
-    }
-
-    #[test]
-    fn strip_terminal_noise_leaves_plain_text_untouched() {
-        let plain = "Implemented the fix.\nAll tests pass.";
-        assert_eq!(strip_terminal_noise(plain), plain);
-    }
-
-    #[test]
-    fn strip_terminal_noise_removes_opencode_shell_transcript_fragment() {
-        let raw = "\u{1b}]0;onl; cargo test --lib 2>&1 | tail -40\u{07}\nReal summary sentence.";
-        let cleaned = strip_terminal_noise(raw);
-        assert_eq!(cleaned, "Real summary sentence.");
-    }
-
-    #[test]
-    fn strip_terminal_noise_removes_cargo_test_spam() {
-        // Reproduces the exact garbage confirmed live in PR #217: a correct
-        // one-line quota_store.rs fix whose PR body and commit message were
-        // buried under dozens of raw `cargo test` result lines, with the
-        // backend's one real summary sentence left at the very end.
-        let raw = "running 23 tests\n\
-                   test utf8_safety_with_various_multibyte_chars ... ok\n\
-                   test strip_terminal_noise_leaves_plain_text_untouched ... ok\n\
-                   test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n\
-                   \n\
-                   Doc-tests git_agent_harness\n\
-                   $ cargo test 2>&1 | grep -E \"test result|FAILED|error\\[\" | tail -40\n\
-                   test result: ok. 551 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n\
-                   \n\
-                   All tests pass. Fixed `quota_store::append` to propagate flock failure \
-                   (src/quota_store.rs:91) matching the sibling convention in \
-                   availability.rs/ledger.rs.";
-        let cleaned = strip_terminal_noise(raw);
-        assert_eq!(
-            cleaned,
-            "All tests pass. Fixed `quota_store::append` to propagate flock failure \
-             (src/quota_store.rs:91) matching the sibling convention in \
-             availability.rs/ledger.rs."
-        );
-    }
-
-    #[test]
-    fn extract_backend_summary_survives_test_spam_past_2000_raw_chars() {
-        // The old implementation truncated to the last 2000 *raw* chars
-        // before stripping noise, so a long enough cargo test dump could
-        // consume the whole window and leave nothing (or a fragment) of the
-        // real summary. Build a log where the noise alone exceeds 2000
-        // chars, confirming the wider read-then-clean-then-truncate order
-        // still recovers the real sentence.
-        let mut log = String::new();
-        for i in 0..80 {
-            log.push_str(&format!("test some_test_case_{i} ... ok\n"));
-        }
-        log.push_str(
-            "test result: ok. 80 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
-        );
-        assert!(log.len() > 2000, "fixture must exceed the raw tail window");
-        log.push_str("All tests pass. Fixed the bug.");
-
-        let tmp = tempfile::tempdir().unwrap();
-        let log_path = tmp.path().join("backend-output.log");
-        std::fs::write(&log_path, &log).unwrap();
-
-        let summary = extract_backend_summary(log_path.to_str().unwrap());
-        assert_eq!(summary, "All tests pass. Fixed the bug.");
-    }
 
     fn profile(local_path: &Path) -> Profile {
         Profile {
@@ -11304,85 +11229,6 @@ fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
         (None, Some(title)) => title.to_string(),
         (None, None) => "n/a".into(),
     }
-}
-
-/// True for a line that is raw test-runner/build-tool output rather than
-/// prose: `cargo test` per-test lines and result tables, `Doc-tests`
-/// headers, shell echoes of the command itself, and pytest/dotnet summary
-/// lines. Confirmed live (PR #217): a one-line quota_store.rs fix whose
-/// PR body and commit message were buried under dozens of these lines,
-/// with the backend's one real summary sentence left at the very end.
-fn is_test_runner_noise_line(line: &str) -> bool {
-    let patterns = [
-        r"^running \d+ tests?$",
-        r"^test \S.*\.\.\. (ok|FAILED|ignored)$",
-        r"^test result: (ok|FAILED)\.",
-        r"^\$ \S",
-        r"^onl; \S",
-        r"^Doc-tests \S",
-        r"^\d+ \w+(, \d+ \w+)* in [\d.]+s\b",
-        r"^(Passed!|Failed!|Test Run (Successful|Failed))\b",
-    ];
-    patterns
-        .iter()
-        .any(|p| regex::Regex::new(p).unwrap().is_match(line))
-}
-
-/// Extract the backend summary from the tail of the backend output log.
-/// This captures the backend's own final summary/reasoning.
-/// Strips terminal rendering noise from a backend's raw log tail before it
-/// goes into a PR/MR body. Confirmed live (MR !243, worldcup-props): the
-/// openhands CLI's Rich-rendered final message panel (ANSI color codes,
-/// box-drawing borders) and its unconditional exit banner ("Goodbye! 👋" /
-/// "Conversation ID: ..." / "Hint: run openhands --resume ...") land in
-/// backend-output.log outside the `--json` event stream and get grabbed
-/// verbatim by the raw-tail extraction below -- landing in the PR body
-/// looking like the model itself produced garbled text, when it's actually
-/// terminal styling the extraction never stripped. Also strips raw
-/// test-runner/build-tool output (see `is_test_runner_noise_line`).
-fn strip_terminal_noise(text: &str) -> String {
-    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
-    // OpenCode can emit OSC sequences (e.g. `\x1b]0;...`) that become raw
-    // shell transcript fragments in captured output once ANSI CSI codes are
-    // stripped. Drop both common OSC terminators (BEL and ST).
-    let osc = regex::Regex::new(r"\x1b\].*?(?:\x07|\x1b\\)").unwrap();
-    let ansi_text = ansi.replace_all(text, "");
-    let without_ansi = osc.replace_all(&ansi_text, "");
-
-    without_ansi
-        .lines()
-        .map(|line| line.trim_matches(['│', '╭', '╮', '╰', '╯', '─', ' ']))
-        .filter(|line| {
-            !(line.is_empty()
-                || *line == "Goodbye! 👋"
-                || line.starts_with("Conversation ID:")
-                // Terminal line-wrapping can split this hint across two
-                // physical lines at an arbitrary column, so match on
-                // substrings rather than a single fixed prefix.
-                || line.contains("openhands --resume")
-                || line.contains("resume this")
-                || *line == "conversation."
-                || is_test_runner_noise_line(line))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn extract_backend_summary(log_path: &str) -> String {
-    let log_text = fs::read_to_string(log_path).unwrap_or_default();
-    if log_text.is_empty() {
-        return String::new();
-    }
-    // Widen the raw read window well past the final ~2000-char summary
-    // target: test-runner/build noise (e.g. a `cargo test` dump) can run to
-    // thousands of characters right before the backend's real closing
-    // sentence, so stripping noise from only the last 2000 raw chars can
-    // truncate mid-table and leave a fragment or nothing at all (PR #217).
-    // Read a wider window, strip noise from it, then take the tail of the
-    // CLEANED text -- not the other way around.
-    let wide_tail = utf8_safe_suffix(&log_text, 20_000);
-    let cleaned = strip_terminal_noise(wide_tail);
-    utf8_safe_suffix(&cleaned, 2000).to_string()
 }
 
 fn format_validation_outcome(result: Option<&str>) -> &'static str {

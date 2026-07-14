@@ -12,6 +12,8 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+pub(crate) mod output;
+
 /// Set by the loop/dispatch process's SIGINT/SIGTERM handler. Backend runners
 /// poll it and terminate their dedicated process group, allowing the caller to
 /// write the normal terminal event and ledger record before exiting.
