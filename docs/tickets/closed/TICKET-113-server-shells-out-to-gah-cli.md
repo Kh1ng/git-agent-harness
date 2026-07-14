@@ -1,5 +1,7 @@
 # TICKET-113: apps/server executes work via the real `gah` CLI, not duplicate driver stubs
 
+Status: archived; the current server integration supersedes this legacy ticket.
+
 **Priority:** P1 (depends on TICKET-112 landing first for tooling, but can be developed against
 the current uncompiled tree in parallel — just needs TICKET-112's install/typecheck to verify)
 **Profile:** gah
