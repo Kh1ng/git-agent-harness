@@ -293,6 +293,45 @@ fn scan_available_tickets_excludes_ticket_with_active_mr() {
 }
 
 #[test]
+fn clear_attempts_does_not_hide_current_provider_mr_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut prof = profile(tmp.path());
+    prof.provider = String::new();
+    let clear = LedgerEntry::new_clear_attempts("test", &prof, "#437");
+    let index = crate::ledger::index_entries_by_work_id(&[clear]);
+    let mut mr = crate::sync::SyncMr {
+        title: "Draft: [GAH] Fix: #437 context exhaustion".into(),
+        body: None,
+        branch: "gah/existing-437".into(),
+        labels: vec!["gah-needs-fix".into()],
+        url: Some("https://example/pull/469".into()),
+        id: Some("469".into()),
+        state: Some("OPEN".into()),
+        draft: true,
+        merge_status: None,
+        merged: false,
+        updated_at: None,
+        merged_at: None,
+        ci_failed: false,
+        ci_passed: true,
+        ci_pending: false,
+        work_id: Some("#437".into()),
+    };
+
+    let lookup = ledger_lookup_for_ticket(Some("#437"), &prof, &[mr.clone()], &index)
+        .expect("an open MR keeps the ticket in status for repair routing");
+    assert_eq!(lookup.0, 0, "the tombstone still resets attempt count");
+    assert!(lookup.3, "the current open MR must remain authoritative");
+
+    mr.state = Some("MERGED".into());
+    mr.merged = true;
+    assert!(
+        ledger_lookup_for_ticket(Some("#437"), &prof, &[mr], &index).is_none(),
+        "current merged provider work must remove the ticket candidate"
+    );
+}
+
+#[test]
 fn scan_available_tickets_excludes_ticket_completed_via_merged_mr() {
     // Regression: a ticket that failed once, then succeeded and got its MR
     // merged, must not keep poisoning the queue via its old failure count.
