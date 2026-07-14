@@ -1,9 +1,10 @@
 use super::super::issues::{parse_ticket_metadata, TicketMetadata};
 use super::super::text::normalize_match;
-use super::super::{git_output, DispatchArgs};
+use super::super::DispatchArgs;
 use crate::config::{GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::provider;
+use crate::worktree;
 use anyhow::Result;
 use std::path::Path;
 
@@ -54,7 +55,7 @@ pub(in crate::dispatch) fn resolve_review_target(
 
     if args.current_branch {
         let repo = Path::new(&profile.local_path);
-        let branch = git_output(&["rev-parse", "--abbrev-ref", "HEAD"], repo)?;
+        let branch = worktree::git(&["rev-parse", "--abbrev-ref", "HEAD"], repo)?;
         return review_target_from_branch(profile, &branch);
     }
 
@@ -197,8 +198,8 @@ pub(in crate::dispatch) fn prepare_review_diff(
     _profile: &Profile,
     target: &ReviewTarget,
 ) -> Result<ReviewDiffBundle> {
-    git_output(&["fetch", "-q", "origin", "--prune"], repo)?;
-    git_output(
+    worktree::git(&["fetch", "-q", "origin", "--prune"], repo)?;
+    worktree::git(
         &[
             "fetch",
             "-q",
@@ -210,7 +211,7 @@ pub(in crate::dispatch) fn prepare_review_diff(
         ],
         repo,
     )?;
-    git_output(
+    worktree::git(
         &[
             "fetch",
             "-q",
@@ -225,8 +226,8 @@ pub(in crate::dispatch) fn prepare_review_diff(
 
     let target_ref = format!("origin/{}", target.target_branch);
     let source_ref = format!("origin/{}", target.source_branch);
-    let diff = git_output(&["diff", &format!("{target_ref}...{source_ref}")], repo)?;
-    let files = git_output(
+    let diff = worktree::git(&["diff", &format!("{target_ref}...{source_ref}")], repo)?;
+    let files = worktree::git(
         &[
             "diff",
             "--name-only",
@@ -251,13 +252,13 @@ pub(in crate::dispatch) fn empty_review_diff_diagnostics(
     target_ref: &str,
     source_ref: &str,
 ) -> String {
-    let current_branch = git_output(&["rev-parse", "--abbrev-ref", "HEAD"], repo)
+    let current_branch = worktree::git(&["rev-parse", "--abbrev-ref", "HEAD"], repo)
         .unwrap_or_else(|e| format!("(error: {e:#})"));
-    let target_sha =
-        git_output(&["rev-parse", target_ref], repo).unwrap_or_else(|e| format!("(error: {e:#})"));
-    let source_sha =
-        git_output(&["rev-parse", source_ref], repo).unwrap_or_else(|e| format!("(error: {e:#})"));
-    let diff_stat = git_output(
+    let target_sha = worktree::git(&["rev-parse", target_ref], repo)
+        .unwrap_or_else(|e| format!("(error: {e:#})"));
+    let source_sha = worktree::git(&["rev-parse", source_ref], repo)
+        .unwrap_or_else(|e| format!("(error: {e:#})"));
+    let diff_stat = worktree::git(
         &["diff", "--stat", &format!("{target_ref}...{source_ref}")],
         repo,
     )

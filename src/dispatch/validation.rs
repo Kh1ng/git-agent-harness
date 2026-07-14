@@ -1,4 +1,4 @@
-use super::command_output;
+use super::command::command_output;
 use crate::config::{GahConfig, Profile};
 use crate::validation_runner::validate;
 use crate::worktree;

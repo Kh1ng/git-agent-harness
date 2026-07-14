@@ -4,6 +4,7 @@ use crate::ledger::LedgerEntry;
 use crate::test_support::PathGuard;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
     let gh_path = bin_dir.join("gh");
