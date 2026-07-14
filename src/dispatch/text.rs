@@ -105,3 +105,49 @@ pub(super) fn normalize_match(input: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+/// UTF-8 safe suffix: returns the last up to `max_bytes` of `s`,
+/// adjusting the start index forward to a valid character boundary.
+/// Result length is guaranteed <= max_bytes.
+/// Never panics on valid UTF-8 input.
+pub(in crate::dispatch) fn utf8_safe_suffix(s: &str, max_bytes: usize) -> &str {
+    if s.is_empty() || max_bytes == 0 {
+        return "";
+    }
+    let byte_start = s.len().saturating_sub(max_bytes);
+    // Ensure we start at a valid character boundary
+    // If byte_start is not a boundary, find the next boundary after it
+    // This guarantees result.len() <= max_bytes
+    let safe_start = if !s.is_char_boundary(byte_start) {
+        s.char_indices()
+            .find(|(i, _)| *i >= byte_start)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len())
+    } else {
+        byte_start
+    };
+    &s[safe_start..]
+}
+
+/// UTF-8 safe prefix: returns the first up to `max_bytes` of `s`,
+/// adjusting the end index backward to a valid character boundary.
+/// Result length is guaranteed <= max_bytes.
+/// Never panics on valid UTF-8 input.
+pub(crate) fn utf8_safe_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.is_empty() || max_bytes == 0 {
+        return "";
+    }
+    let byte_end = s.len().min(max_bytes);
+    // Ensure we end at a valid character boundary
+    // If byte_end is not a boundary, find the previous boundary before it
+    // This guarantees result.len() <= max_bytes
+    let safe_end = if !s.is_char_boundary(byte_end) {
+        s.char_indices()
+            .take_while(|(i, _)| *i < byte_end)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    } else {
+        byte_end
+    };
+    &s[..safe_end]
+}

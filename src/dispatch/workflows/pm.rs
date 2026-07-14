@@ -1,15 +1,17 @@
 use super::super::attempts::{
-    apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output, preflight,
-    resolve_llm, route_identity, run_backend,
+    apply_route_to_ledger, decide_route, ensure_bin, mark_backend_unavailable_from_output,
+    preflight, resolve_llm, route_identity, run_backend,
 };
+use super::super::command::command_output;
+use super::super::repo_inspection::count_test_files;
+use super::super::text::utf8_safe_prefix;
 use super::super::text::{extract_first_json_object, first_markdown_heading, normalize_match};
-use super::super::{
-    command_output, count_test_files, ensure_bin, git_output, utf8_safe_prefix, DispatchArgs,
-};
+use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
 use crate::models::{PmPlan, WorkMetadata};
 use crate::routing::RouteRequest;
+use crate::worktree;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::fs;
@@ -25,7 +27,7 @@ pub(crate) fn pm(
 
     // Without a target: static repo snapshot (context for the agent, not a dispatch)
     if args.target.is_empty() {
-        let log = git_output(&["log", "--oneline", "-20"], repo).unwrap_or_default();
+        let log = worktree::git(&["log", "--oneline", "-20"], repo).unwrap_or_default();
         let test_count = count_test_files(profile, repo);
         let has_ci = repo.join(".github/workflows").exists()
             || repo.join(".gitlab-ci.yml").exists()
