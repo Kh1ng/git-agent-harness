@@ -3,6 +3,7 @@
 
 pub mod availability;
 pub mod baseline;
+pub mod build_cache;
 pub mod candidates;
 pub mod capability;
 pub mod claude_monitor;
