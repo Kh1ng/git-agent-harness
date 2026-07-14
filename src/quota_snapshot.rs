@@ -234,6 +234,8 @@ pub fn build_snapshot(
             default_target_branch: profile.default_target_branch.clone(),
             merge_policy: resolved_routing.merge_policy.unwrap_or_default(),
             max_fix_attempts_per_mr: resolved_routing.max_fix_attempts_per_mr(),
+            max_implementation_failures_per_ticket: resolved_routing
+                .max_implementation_failures_per_ticket(),
         },
         since: since.to_string(),
         usage,

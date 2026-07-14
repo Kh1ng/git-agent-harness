@@ -1201,9 +1201,13 @@ fn agy_empty_output_diagnosis(env_vars: &[(String, String)], executable: &Path) 
 /// Detect AGY CLI version by running `agy --version`. Returns `None` on any
 /// failure (missing binary, non-zero exit, unparseable output). Cheap and used
 /// for log-path selection and upstream log-format drift detection (TICKET-242).
-fn detect_agy_version(executable: &Path, env_vars: &[(String, String)]) -> Option<String> {
+fn detect_agy_version(
+    executable: &Path,
+    worktree: &Path,
+    env_vars: &[(String, String)],
+) -> Option<String> {
     let mut cmd = Command::new(executable);
-    cmd.arg("--version");
+    cmd.arg("--version").current_dir(worktree);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
@@ -1394,7 +1398,7 @@ pub fn run_agy_with_executable(
     // TICKET-242: detect the AGY CLI version up front. It is cheap, good
     // attribution, and drives log-path resolution plus upstream log-format
     // drift detection below.
-    let agy_version = detect_agy_version(executable, env_vars);
+    let agy_version = detect_agy_version(executable, worktree, env_vars);
 
     let mut cmd = Command::new(executable);
     cmd.arg("--print");
@@ -3829,7 +3833,7 @@ mod tests {
             "#!/bin/sh\necho 'antigravity-cli version 1.0.16'\n",
         );
         assert_eq!(
-            detect_agy_version(&tmp.path().join("agy"), &[]).as_deref(),
+            detect_agy_version(&tmp.path().join("agy"), tmp.path(), &[]).as_deref(),
             Some("1.0.16")
         );
     }
@@ -3840,7 +3844,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         make_fake_bin(tmp.path(), "agy", "#!/bin/sh\necho 'v2.3.4'\n");
         assert_eq!(
-            detect_agy_version(&tmp.path().join("agy"), &[]).as_deref(),
+            detect_agy_version(&tmp.path().join("agy"), tmp.path(), &[]).as_deref(),
             Some("2.3.4")
         );
     }
@@ -3853,7 +3857,36 @@ mod tests {
             "agy",
             "#!/bin/sh\necho 'not a version'\nexit 1\n",
         );
-        assert_eq!(detect_agy_version(&tmp.path().join("agy"), &[]), None);
+        assert_eq!(
+            detect_agy_version(&tmp.path().join("agy"), tmp.path(), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_agy_version_runs_inside_the_dispatch_worktree() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let worktree = tmp.path().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        let observed_cwd = tmp.path().join("observed-cwd");
+        make_fake_bin(
+            tmp.path(),
+            "agy",
+            &format!(
+                "#!/bin/sh\npwd > '{}'\necho 'antigravity-cli version 1.0.16'\n",
+                observed_cwd.display()
+            ),
+        );
+
+        assert_eq!(
+            detect_agy_version(&tmp.path().join("agy"), &worktree, &[]).as_deref(),
+            Some("1.0.16")
+        );
+        assert_eq!(
+            fs::read_to_string(observed_cwd).unwrap().trim(),
+            worktree.display().to_string()
+        );
     }
 
     #[test]

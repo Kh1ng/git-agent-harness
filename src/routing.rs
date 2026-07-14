@@ -167,6 +167,33 @@ pub struct RouteRequest<'a> {
     pub last_failure_class: Option<&'a str>,
 }
 
+/// Dynamic, per-dispatch facts that must not be baked into static routing
+/// configuration. Equal-priority candidates are balanced by recent execution
+/// count; genuine capability escalation excludes backend/model pairs already
+/// tried for this work item; paid routes remain ineligible until an operator
+/// grants that exact pair.
+#[derive(Debug, Clone, Default)]
+pub struct RoutingRuntimeState {
+    pub recent_runs: HashMap<CandidateIdentity, u64>,
+    pub attempted: HashSet<CandidateIdentity>,
+    pub approved: HashSet<CandidateIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CandidateIdentity {
+    pub backend: String,
+    pub model: Option<String>,
+}
+
+impl CandidateIdentity {
+    pub fn new(backend: impl Into<String>, model: Option<impl Into<String>>) -> Self {
+        Self {
+            backend: backend.into(),
+            model: model.map(Into::into),
+        }
+    }
+}
+
 /// Trusted ticket metadata used only to choose an operator-configured
 /// implementation candidate list. This is intentionally separate from
 /// `RouteRequest`: ordinary routing callers (reviews, PM, CLI overrides) keep
@@ -208,6 +235,11 @@ pub enum RouteError {
         skipped: Vec<SkippedBackend>,
         earliest_reset: Option<String>,
     },
+    ApprovalRequired {
+        backend: String,
+        model: Option<String>,
+        skipped: Vec<SkippedBackend>,
+    },
 }
 
 impl fmt::Display for RouteError {
@@ -232,6 +264,21 @@ impl fmt::Display for RouteError {
                 }
                 Ok(())
             }
+            RouteError::ApprovalRequired {
+                backend,
+                model,
+                skipped,
+            } => {
+                write!(
+                    f,
+                    "operator approval required before using paid route {}",
+                    candidate_label(backend, model.as_deref())
+                )?;
+                if !skipped.is_empty() {
+                    write!(f, "; skipped: {}", render_skips(skipped))?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -248,6 +295,7 @@ struct RouteCandidate {
     marginal_cost_usd: Option<f64>,
     quota_usage_percent: Option<f64>,
     quota_days_remaining: Option<f64>,
+    requires_approval: bool,
     original_order: usize,
 }
 
@@ -257,15 +305,23 @@ struct ReorderDecision {
     escalated: bool,
 }
 
-pub fn decide(
+#[derive(Clone, Copy)]
+struct RouteEvaluation<'a> {
+    state_path: &'a Path,
+    now: OffsetDateTime,
+}
+
+pub fn decide_with_state(
     defaults: &Defaults,
     profile: &Profile,
     req: RouteRequest<'_>,
+    runtime: &RoutingRuntimeState,
 ) -> Result<RouteDecision> {
-    decide_with(
+    decide_with_runtime(
         defaults,
         profile,
         req,
+        runtime,
         &availability::resolve_state_path(),
         OffsetDateTime::now_utc(),
         |backend| runner::backend_available_for_profile(profile, backend),
@@ -275,24 +331,29 @@ pub fn decide(
 /// Route an implementation request with deterministic task-class rules. A
 /// matching rule wins over the generic implementation candidate list, but
 /// unavailable or saturated entries still fall through to the next candidate
-/// in that same rule. Callers without trusted metadata should use `decide`.
-pub fn decide_for_task(
+/// in that same rule.
+pub fn decide_for_task_with_state(
     defaults: &Defaults,
     profile: &Profile,
     req: RouteRequest<'_>,
     task: TaskRoutingContext<'_>,
+    runtime: &RoutingRuntimeState,
 ) -> Result<RouteDecision> {
-    decide_with_task(
+    decide_with_task_runtime(
         defaults,
         profile,
         req,
         Some(task),
-        &availability::resolve_state_path(),
-        OffsetDateTime::now_utc(),
+        runtime,
+        RouteEvaluation {
+            state_path: &availability::resolve_state_path(),
+            now: OffsetDateTime::now_utc(),
+        },
         |backend| runner::backend_available_for_profile(profile, backend),
     )
 }
 
+#[cfg(test)]
 fn decide_with<F>(
     defaults: &Defaults,
     profile: &Profile,
@@ -304,17 +365,41 @@ fn decide_with<F>(
 where
     F: Fn(&str) -> bool + Copy,
 {
-    decide_with_task(
+    decide_with_runtime(
         defaults,
         profile,
         req,
-        None,
+        &RoutingRuntimeState::default(),
         state_path,
         now,
         backend_available,
     )
 }
 
+fn decide_with_runtime<F>(
+    defaults: &Defaults,
+    profile: &Profile,
+    req: RouteRequest<'_>,
+    runtime: &RoutingRuntimeState,
+    state_path: &Path,
+    now: OffsetDateTime,
+    backend_available: F,
+) -> Result<RouteDecision>
+where
+    F: Fn(&str) -> bool + Copy,
+{
+    decide_with_task_runtime(
+        defaults,
+        profile,
+        req,
+        None,
+        runtime,
+        RouteEvaluation { state_path, now },
+        backend_available,
+    )
+}
+
+#[cfg(test)]
 fn decide_with_task<F>(
     defaults: &Defaults,
     profile: &Profile,
@@ -327,15 +412,122 @@ fn decide_with_task<F>(
 where
     F: Fn(&str) -> bool + Copy,
 {
-    let mut decision = decide_with_inner(
+    decide_with_task_runtime(
         defaults,
         profile,
         req,
         task,
-        state_path,
-        now,
+        &RoutingRuntimeState::default(),
+        RouteEvaluation { state_path, now },
+        backend_available,
+    )
+}
+
+fn decide_with_task_runtime<F>(
+    defaults: &Defaults,
+    profile: &Profile,
+    req: RouteRequest<'_>,
+    task: Option<TaskRoutingContext<'_>>,
+    runtime: &RoutingRuntimeState,
+    evaluation: RouteEvaluation<'_>,
+    backend_available: F,
+) -> Result<RouteDecision>
+where
+    F: Fn(&str) -> bool + Copy,
+{
+    let auto_model_override = (req.requested_backend == "auto")
+        .then(|| req.requested_model.map(str::to_string))
+        .flatten();
+    let mode = req.mode.to_string();
+    let last_failure_class = req.last_failure_class;
+    let (mut decision, candidates) = decide_with_inner(
+        defaults,
+        profile,
+        req,
+        task,
+        runtime,
+        evaluation,
         backend_available,
     )?;
+    if let Some(model) = auto_model_override {
+        // The requested model may not match any configured candidate at all
+        // (an ad-hoc override unrelated to the routing config) -- that's
+        // fine, nothing gates it. But if it DOES match a configured
+        // candidate for the selected backend, that candidate must pass the
+        // same eligibility checks (availability, already-attempted,
+        // requires_approval) every other candidate had to pass, or an
+        // explicit --model flag would be a standing bypass of the approval
+        // gate this routing layer exists to enforce.
+        if decision.effective_model.as_deref() != Some(model.as_str()) {
+            if let Some(candidate) = candidates.iter().find(|c| {
+                c.backend == decision.effective_backend
+                    && c.model.as_deref() == Some(model.as_str())
+            }) {
+                let escalate =
+                    is_genuine_agent_failure(last_failure_class) || !runtime.attempted.is_empty();
+                if let Some(skip) = skip_reason_for_candidate(
+                    evaluation.state_path,
+                    &candidate.backend,
+                    candidate.model.as_deref(),
+                    candidate.quota_pool.as_deref(),
+                    &profile.max_concurrent_per_model,
+                    evaluation.now,
+                    backend_available,
+                    runtime,
+                    escalate,
+                    candidate.requires_approval,
+                )? {
+                    if skip.reason == "operator_approval_required" {
+                        return Err(RouteError::ApprovalRequired {
+                            backend: skip.backend.clone(),
+                            model: skip.model.clone(),
+                            skipped: vec![skip],
+                        }
+                        .into());
+                    }
+                    return Err(RouteError::NoEligibleBackend {
+                        preferred_backend: candidate.backend.clone(),
+                        preferred_model: candidate.model.clone(),
+                        skipped: vec![skip],
+                        earliest_reset: None,
+                    }
+                    .into());
+                }
+            }
+        }
+        let previous_model = decision.effective_model.replace(model.clone());
+        decision.effective_quota_pool = profile.effective_routing(defaults).find_quota_pool(
+            &mode,
+            &decision.effective_backend,
+            Some(&model),
+        );
+        if let Some(diagnostics) = decision.routing_diagnostics.as_mut() {
+            diagnostics.selected_model = Some(model.clone());
+            diagnostics.selected_quota_pool = decision.effective_quota_pool.clone();
+            if let Some(candidate) = diagnostics.candidates.iter_mut().find(|candidate| {
+                candidate.backend == decision.effective_backend
+                    && candidate.model == previous_model
+                    && candidate.skip_reason.is_none()
+            }) {
+                candidate.model = Some(model.clone());
+                candidate.quota_pool = decision.effective_quota_pool.clone();
+            }
+            let tail = diagnostics
+                .human_summary
+                .as_deref()
+                .and_then(|summary| summary.split_once("; ").map(|(_, tail)| tail));
+            diagnostics.human_summary = Some(match tail {
+                Some(tail) => format!(
+                    "selected {}/{} (explicit CLI model override); {tail}",
+                    decision.effective_backend, model
+                ),
+                None => format!(
+                    "selected {}/{} (explicit CLI model override)",
+                    decision.effective_backend, model
+                ),
+            });
+        }
+    }
     if decision.effective_backend == "codex" && decision.effective_model.is_none() {
         if let Some(model) = runner::extract_model_from_args(&profile.codex_args) {
             decision.effective_model = Some(model);
@@ -344,23 +536,33 @@ where
     Ok(decision)
 }
 
+/// Returns the decision alongside the exact candidate list it was chosen
+/// from, so a caller applying a post-hoc override (an explicit CLI model
+/// with `requested_backend == "auto"`) can validate the override target
+/// against the same eligibility gates every other candidate had to pass --
+/// including `requires_approval` -- rather than swapping it in unchecked.
 fn decide_with_inner<F>(
     defaults: &Defaults,
     profile: &Profile,
     req: RouteRequest<'_>,
     task: Option<TaskRoutingContext<'_>>,
-    state_path: &Path,
-    now: OffsetDateTime,
+    runtime: &RoutingRuntimeState,
+    evaluation: RouteEvaluation<'_>,
     backend_available: F,
-) -> Result<RouteDecision>
+) -> Result<(RouteDecision, Vec<RouteCandidate>)>
 where
     F: Fn(&str) -> bool + Copy,
 {
+    let state_path = evaluation.state_path;
+    let now = evaluation.now;
     let requested_backend = req.requested_backend.to_string();
     let requested_model = req.requested_model.map(str::to_string);
     let effective_routing = profile.effective_routing(defaults);
 
     if req.requested_backend != "auto" {
+        // No auto_model_override is ever applied on this path (it only
+        // triggers for requested_backend == "auto"), so the candidate list
+        // is never consulted here.
         return route_explicit(
             defaults,
             profile,
@@ -371,12 +573,18 @@ where
             state_path,
             now,
             backend_available,
-        );
+            runtime,
+        )
+        .map(|decision| (decision, Vec::new()));
     }
 
     if let Some((rule_index, candidates)) = task_rule_candidates(&effective_routing, req.mode, task)
         .filter(|(_, list)| !list.is_empty())
     {
+        let escalate =
+            is_genuine_agent_failure(req.last_failure_class) || !runtime.attempted.is_empty();
+        let (candidates, reorder) =
+            order_candidates(profile, candidates, escalate, runtime, req.mode);
         let preferred = candidates
             .first()
             .cloned()
@@ -388,31 +596,42 @@ where
             &profile.max_concurrent_per_model,
             now,
             backend_available,
+            runtime,
+            escalate,
         )?;
         let fallback_used =
             selected.backend != preferred.backend || selected.model != preferred.model;
         let mut reason = format!("task routing rule #{}", rule_index + 1);
+        if let Some(reorder) = reorder
+            .as_ref()
+            .filter(|reorder| !reorder.selected_over.is_empty())
+        {
+            reason = append_reorder_reason(reason, &selected, reorder, &profile.pacing);
+        }
         if fallback_used {
             reason = append_availability_reason(reason, &skipped, &selected.backend, false);
         }
-        return Ok(RouteDecision {
-            requested_backend,
-            effective_backend: selected.backend.clone(),
-            requested_model,
-            effective_model: selected.model.clone(),
-            effective_quota_pool: selected.quota_pool.clone(),
-            routing_reason: reason,
-            fallback_used,
-            confidence_impact: None,
-            human_required: false,
-            routing_diagnostics: Some(build_routing_diagnostics(
-                &candidates_for_diagnostics,
-                &selected,
-                &skipped,
-                None,
-                &profile.pacing,
-            )),
-        });
+        return Ok((
+            RouteDecision {
+                requested_backend,
+                effective_backend: selected.backend.clone(),
+                requested_model,
+                effective_model: selected.model.clone(),
+                effective_quota_pool: selected.quota_pool.clone(),
+                routing_reason: reason,
+                fallback_used,
+                confidence_impact: None,
+                human_required: false,
+                routing_diagnostics: Some(build_routing_diagnostics(
+                    &candidates_for_diagnostics,
+                    &selected,
+                    &skipped,
+                    reorder.as_ref(),
+                    &profile.pacing,
+                )),
+            },
+            candidates_for_diagnostics,
+        ));
     }
 
     let mut is_profile_policy = false;
@@ -431,8 +650,10 @@ where
         };
 
     if let Some(candidates) = candidates {
-        let escalate = is_genuine_agent_failure(req.last_failure_class);
-        let (candidates, reorder) = order_candidates(profile, candidates, escalate);
+        let escalate =
+            is_genuine_agent_failure(req.last_failure_class) || !runtime.attempted.is_empty();
+        let (candidates, reorder) =
+            order_candidates(profile, candidates, escalate, runtime, req.mode);
         let preferred = candidates.first().cloned().expect("non-empty list");
         let candidates_for_diagnostics = candidates.clone();
         let (selected, skipped) = pick_route_candidate(
@@ -441,6 +662,8 @@ where
             &profile.max_concurrent_per_model,
             now,
             backend_available,
+            runtime,
+            escalate,
         )?;
 
         let mut fallback_used = false;
@@ -477,18 +700,21 @@ where
             reorder.as_ref(),
             &profile.pacing,
         ));
-        return Ok(RouteDecision {
-            requested_backend,
-            effective_backend: selected.backend.clone(),
-            requested_model,
-            effective_model: selected.model.clone(),
-            effective_quota_pool: selected.quota_pool.clone(),
-            routing_reason: reason,
-            fallback_used,
-            confidence_impact,
-            human_required,
-            routing_diagnostics,
-        });
+        return Ok((
+            RouteDecision {
+                requested_backend,
+                effective_backend: selected.backend.clone(),
+                requested_model,
+                effective_model: selected.model.clone(),
+                effective_quota_pool: selected.quota_pool.clone(),
+                routing_reason: reason,
+                fallback_used,
+                confidence_impact,
+                human_required,
+                routing_diagnostics,
+            },
+            candidates_for_diagnostics,
+        ));
     }
 
     let profile_mode = policy_backend_model(&profile.routing, req.mode);
@@ -566,6 +792,7 @@ where
         marginal_cost_usd: None,
         quota_usage_percent: None,
         quota_days_remaining: None,
+        requires_approval: false,
         original_order: 0,
     };
     let candidates = auto_candidates(&effective_routing, req.mode, &primary);
@@ -576,6 +803,8 @@ where
         &profile.max_concurrent_per_model,
         now,
         backend_available,
+        runtime,
+        false,
     )?;
 
     if selected.backend != primary.backend || selected.model != primary.model {
@@ -595,18 +824,21 @@ where
         None,
         &profile.pacing,
     ));
-    Ok(RouteDecision {
-        requested_backend,
-        effective_backend: selected.backend.clone(),
-        requested_model,
-        effective_model: selected.model.clone(),
-        effective_quota_pool: selected.quota_pool.clone(),
-        routing_reason: reason,
-        fallback_used,
-        confidence_impact,
-        human_required,
-        routing_diagnostics,
-    })
+    Ok((
+        RouteDecision {
+            requested_backend,
+            effective_backend: selected.backend.clone(),
+            requested_model,
+            effective_model: selected.model.clone(),
+            effective_quota_pool: selected.quota_pool.clone(),
+            routing_reason: reason,
+            fallback_used,
+            confidence_impact,
+            human_required,
+            routing_diagnostics,
+        },
+        candidates_for_diagnostics,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -620,6 +852,7 @@ fn route_explicit<F>(
     state_path: &Path,
     now: OffsetDateTime,
     backend_available: F,
+    runtime: &RoutingRuntimeState,
 ) -> Result<RouteDecision>
 where
     F: Fn(&str) -> bool + Copy,
@@ -645,6 +878,7 @@ where
         marginal_cost_usd: None,
         quota_usage_percent: None,
         quota_days_remaining: None,
+        requires_approval: false,
         original_order: 0,
     };
     let candidates = explicit_candidates(
@@ -662,6 +896,8 @@ where
         &profile.max_concurrent_per_model,
         now,
         backend_available,
+        runtime,
+        false,
     )?;
 
     if selected.backend == primary.backend && selected.model == primary.model {
@@ -783,6 +1019,8 @@ fn pick_route_candidate<F>(
     max_concurrent: &HashMap<String, u32>,
     now: OffsetDateTime,
     backend_available: F,
+    runtime: &RoutingRuntimeState,
+    exclude_attempted: bool,
 ) -> Result<(RouteCandidate, Vec<SkippedBackend>)>
 where
     F: Fn(&str) -> bool + Copy,
@@ -801,11 +1039,25 @@ where
             max_concurrent,
             now,
             backend_available,
+            runtime,
+            exclude_attempted,
+            candidate.requires_approval,
         )? {
             skipped.push(reason);
             continue;
         }
         return Ok((candidate, skipped));
+    }
+    if let Some(candidate) = skipped
+        .iter()
+        .find(|candidate| candidate.reason == "operator_approval_required")
+    {
+        return Err(RouteError::ApprovalRequired {
+            backend: candidate.backend.clone(),
+            model: candidate.model.clone(),
+            skipped,
+        }
+        .into());
     }
     Err(RouteError::NoEligibleBackend {
         preferred_backend: preferred.backend,
@@ -825,6 +1077,9 @@ fn skip_reason_for_candidate<F>(
     max_concurrent: &HashMap<String, u32>,
     now: OffsetDateTime,
     backend_available: F,
+    runtime: &RoutingRuntimeState,
+    exclude_attempted: bool,
+    requires_approval: bool,
 ) -> Result<Option<SkippedBackend>>
 where
     F: Fn(&str) -> bool + Copy,
@@ -844,6 +1099,23 @@ where
 
     let decision = availability::availability_for(state_path, backend, model, quota_pool, now)?;
     if decision.eligible {
+        let identity = CandidateIdentity::new(backend, model);
+        if exclude_attempted && runtime.attempted.contains(&identity) {
+            return Ok(Some(SkippedBackend {
+                backend: backend.to_string(),
+                model: model.map(str::to_string),
+                reason: "already_attempted_after_capability_failure".into(),
+                unavailable_until: None,
+            }));
+        }
+        if requires_approval && !runtime.approved.contains(&identity) {
+            return Ok(Some(SkippedBackend {
+                backend: backend.to_string(),
+                model: model.map(str::to_string),
+                reason: "operator_approval_required".into(),
+                unavailable_until: None,
+            }));
+        }
         return Ok(None);
     }
 
@@ -899,6 +1171,7 @@ fn auto_candidates(
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
                 original_order: candidates.len(),
             });
         }
@@ -950,6 +1223,7 @@ fn explicit_candidates(
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
                 original_order: candidates.len(),
             });
         }
@@ -977,6 +1251,7 @@ fn extend_remaining_candidates(
             marginal_cost_usd: None,
             quota_usage_percent: None,
             quota_days_remaining: None,
+            requires_approval: false,
             original_order: candidates.len(),
         });
     }
@@ -1014,6 +1289,8 @@ fn order_candidates(
     profile: &Profile,
     candidates: Vec<RouteCandidate>,
     escalate: bool,
+    runtime: &RoutingRuntimeState,
+    mode: &str,
 ) -> (Vec<RouteCandidate>, Option<ReorderDecision>) {
     let mut candidates = with_original_order(candidates);
     if !escalate && !candidates.iter().any(RouteCandidate::has_cost_policy) {
@@ -1021,7 +1298,9 @@ fn order_candidates(
     }
 
     let original = candidates.clone();
-    candidates.sort_by(|left, right| compare_candidates(left, right, &profile.pacing, escalate));
+    candidates.sort_by(|left, right| {
+        compare_candidates(left, right, &profile.pacing, escalate, runtime, mode)
+    });
 
     let Some(selected) = candidates.first() else {
         return (candidates, None);
@@ -1032,7 +1311,14 @@ fn order_candidates(
             candidate.backend != selected.backend || candidate.model != selected.model
         })
         .filter(|candidate| {
-            compare_candidates(selected, candidate, &profile.pacing, escalate) == Ordering::Less
+            compare_candidates(
+                selected,
+                candidate,
+                &profile.pacing,
+                escalate,
+                runtime,
+                mode,
+            ) == Ordering::Less
         })
         .map(|candidate| describe_candidate(candidate, &profile.pacing))
         .collect::<Vec<_>>();
@@ -1056,15 +1342,34 @@ fn is_strong_candidate(candidate: &RouteCandidate) -> bool {
         .unwrap_or(true)
 }
 
+/// Load-balancing by recent execution count is scoped to implementation
+/// dispatch (improve/fix/experiment) -- the only modes `routing_runtime_state`
+/// (src/dispatch.rs) collects `recent_runs` for with balancing in mind.
+/// Applying it to review/pm candidate ordering too would silently reorder
+/// those pools by usage, contradicting the deterministic-order guarantee
+/// review's own escalation chain relies on.
+fn is_load_balanced_mode(mode: &str) -> bool {
+    matches!(mode, "improve" | "fix" | "experiment")
+}
+
 fn compare_candidates(
     left: &RouteCandidate,
     right: &RouteCandidate,
     pacing: &crate::quota::PacingConfig,
     escalate: bool,
+    runtime: &RoutingRuntimeState,
+    mode: &str,
 ) -> Ordering {
     right
         .priority
         .cmp(&left.priority)
+        .then_with(|| {
+            if is_load_balanced_mode(mode) {
+                candidate_run_count(left, runtime).cmp(&candidate_run_count(right, runtime))
+            } else {
+                Ordering::Equal
+            }
+        })
         .then_with(|| {
             if escalate {
                 is_strong_candidate(right).cmp(&is_strong_candidate(left))
@@ -1075,6 +1380,17 @@ fn compare_candidates(
         .then_with(|| economic_rank(left, pacing).cmp(&economic_rank(right, pacing)))
         .then_with(|| compare_optional_f64(left.marginal_cost_usd, right.marginal_cost_usd))
         .then_with(|| left.original_order.cmp(&right.original_order))
+}
+
+fn candidate_run_count(candidate: &RouteCandidate, runtime: &RoutingRuntimeState) -> u64 {
+    runtime
+        .recent_runs
+        .get(&CandidateIdentity::new(
+            candidate.backend.as_str(),
+            candidate.model.as_deref(),
+        ))
+        .copied()
+        .unwrap_or(0)
 }
 
 fn economic_rank(candidate: &RouteCandidate, pacing: &crate::quota::PacingConfig) -> u8 {
@@ -1122,6 +1438,8 @@ fn describe_candidate(candidate: &RouteCandidate, pacing: &crate::quota::PacingC
                 PaceBand::HardConserve => "included quota hard-conserve".into(),
             },
         );
+    } else if candidate.requires_approval {
+        details.push("paid approval required".into());
     } else if let Some(cost) = candidate.marginal_cost_usd {
         details.push(format!("paid ${cost:.4}"));
     }
@@ -1233,7 +1551,7 @@ fn candidate_pace_band(
 fn candidate_cost_class(candidate: &RouteCandidate) -> String {
     if candidate.included_in_quota {
         "included_quota".into()
-    } else if candidate.marginal_cost_usd.unwrap_or(0.0) > 0.0 {
+    } else if candidate.requires_approval || candidate.marginal_cost_usd.unwrap_or(0.0) > 0.0 {
         "paid".into()
     } else {
         "standard".into()
@@ -1353,6 +1671,7 @@ fn route_candidates(raw: &[crate::config::CandidateConfig]) -> Vec<RouteCandidat
             marginal_cost_usd: c.marginal_cost_usd,
             quota_usage_percent: c.quota_usage_percent,
             quota_days_remaining: c.quota_days_remaining,
+            requires_approval: c.requires_approval,
             original_order: idx,
         })
         .collect()
@@ -1508,8 +1827,9 @@ fn over_cap_reason(
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_with, decide_with_task, is_genuine_agent_failure, ConcurrencyGuard, RouteError,
-        RouteRequest, TaskRoutingContext,
+        decide_with, decide_with_runtime, decide_with_task, decide_with_task_runtime,
+        is_genuine_agent_failure, CandidateIdentity, ConcurrencyGuard, RouteError, RouteEvaluation,
+        RouteRequest, RoutingRuntimeState, TaskRoutingContext,
     };
     use crate::availability::{Reason, Source};
     use crate::config::{Defaults, Profile, RoutingPolicy, TaskRoutingRule};
@@ -1655,6 +1975,7 @@ mod tests {
             marginal_cost_usd: None,
             quota_usage_percent: None,
             quota_days_remaining: None,
+            requires_approval: false,
         }
     }
 
@@ -1751,6 +2072,334 @@ mod tests {
         assert_eq!(decision.effective_backend, "codex");
         assert!(decision.fallback_used);
         assert!(decision.routing_reason.contains("quota_exhausted"));
+    }
+
+    #[test]
+    fn equal_priority_task_pool_selects_least_used_candidate() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        let mut first = candidate_config("opencode", Some("hy3"), None);
+        first.priority = 100;
+        first.included_in_quota = true;
+        let mut second = candidate_config("codex", Some("spark"), None);
+        second.priority = 100;
+        second.included_in_quota = true;
+        profile.routing.task_routing_rules = vec![easy_docs_rule(vec![first, second])];
+        let mut runtime = RoutingRuntimeState::default();
+        runtime
+            .recent_runs
+            .insert(CandidateIdentity::new("opencode", Some("hy3")), 4);
+        runtime
+            .recent_runs
+            .insert(CandidateIdentity::new("codex", Some("spark")), 1);
+
+        let decision = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            implementation_request(),
+            Some(TaskRoutingContext {
+                task_class: Some("documentation"),
+                difficulty: Some("easy"),
+                risk: Some("low"),
+            }),
+            &runtime,
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("spark"));
+        assert!(
+            decision
+                .routing_diagnostics
+                .unwrap()
+                .policy_reordered_candidates
+        );
+    }
+
+    #[test]
+    fn capability_escalation_excludes_previously_attempted_candidate() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        let mut first = candidate_config("opencode", Some("hy3"), None);
+        first.priority = 100;
+        let mut second = candidate_config("codex", Some("spark"), None);
+        second.priority = 90;
+        profile.routing.task_routing_rules = vec![easy_docs_rule(vec![first, second])];
+        let mut runtime = RoutingRuntimeState::default();
+        runtime
+            .attempted
+            .insert(CandidateIdentity::new("opencode", Some("hy3")));
+        let mut request = implementation_request();
+        request.last_failure_class = Some("agent_no_progress");
+
+        let decision = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            request,
+            Some(TaskRoutingContext {
+                task_class: Some("documentation"),
+                difficulty: Some("easy"),
+                risk: Some("low"),
+            }),
+            &runtime,
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("spark"));
+        assert_eq!(
+            decision.routing_diagnostics.unwrap().candidates[0]
+                .skip_reason
+                .as_deref(),
+            Some("already_attempted_after_capability_failure")
+        );
+    }
+
+    #[test]
+    fn capability_escalation_remains_sticky_after_a_later_infrastructure_failure() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        let mut first = candidate_config("opencode", Some("hy3"), None);
+        first.priority = 100;
+        let mut second = candidate_config("codex", Some("spark"), None);
+        second.priority = 90;
+        profile.routing.task_routing_rules = vec![easy_docs_rule(vec![first, second])];
+        let mut runtime = RoutingRuntimeState::default();
+        runtime
+            .attempted
+            .insert(CandidateIdentity::new("opencode", Some("hy3")));
+        let mut request = implementation_request();
+        request.last_failure_class = Some("backend_error");
+
+        let decision = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            request,
+            Some(TaskRoutingContext {
+                task_class: Some("documentation"),
+                difficulty: Some("easy"),
+                risk: Some("low"),
+            }),
+            &runtime,
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "codex");
+        assert_eq!(decision.effective_model.as_deref(), Some("spark"));
+        assert_eq!(
+            decision.routing_diagnostics.unwrap().candidates[0]
+                .skip_reason
+                .as_deref(),
+            Some("already_attempted_after_capability_failure")
+        );
+    }
+
+    #[test]
+    fn paid_candidate_requires_exact_operator_approval() {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        let mut paid = candidate_config("opencode", Some("openai/gpt-paid"), None);
+        paid.priority = 10;
+        paid.requires_approval = true;
+        profile.routing.task_routing_rules = vec![easy_docs_rule(vec![paid])];
+        let task = Some(TaskRoutingContext {
+            task_class: Some("documentation"),
+            difficulty: Some("easy"),
+            risk: Some("low"),
+        });
+
+        let err = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            implementation_request(),
+            task,
+            &RoutingRuntimeState::default(),
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<RouteError>(),
+            Some(RouteError::ApprovalRequired { backend, model, .. })
+                if backend == "opencode" && model.as_deref() == Some("openai/gpt-paid")
+        ));
+
+        let mut approved = RoutingRuntimeState::default();
+        approved
+            .approved
+            .insert(CandidateIdentity::new("opencode", Some("openai/gpt-paid")));
+        let decision = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            implementation_request(),
+            task,
+            &approved,
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(decision.effective_model.as_deref(), Some("openai/gpt-paid"));
+        assert_eq!(
+            decision
+                .routing_diagnostics
+                .unwrap()
+                .selected_cost_class
+                .as_deref(),
+            Some("paid")
+        );
+    }
+
+    #[test]
+    fn load_balancing_does_not_reorder_review_candidates() {
+        // recent_runs is populated from review/pm history too (routing_runtime_state
+        // in src/dispatch.rs deliberately tracks all agent-execution modes for
+        // attribution), but the balancing TIE-BREAK must stay scoped to
+        // implementation dispatch. Review's configured order is a
+        // deliberate escalation chain (see explicit_candidates' "Claude ->
+        // GLM must not fall back to AGY again" invariant elsewhere in this
+        // file) and must not be silently reshuffled by usage counts.
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        let mut first = candidate_config("claude", Some("sonnet"), None);
+        first.priority = 100;
+        let mut second = candidate_config("opencode", Some("glm"), None);
+        second.priority = 100;
+        profile.routing.review_candidates = Some(vec![first, second]);
+        let mut runtime = RoutingRuntimeState::default();
+        // The configured-first candidate is far more heavily used -- if
+        // load-balancing applied here, it would be passed over.
+        runtime
+            .recent_runs
+            .insert(CandidateIdentity::new("claude", Some("sonnet")), 10);
+        runtime
+            .recent_runs
+            .insert(CandidateIdentity::new("opencode", Some("glm")), 0);
+
+        let decision = decide_with_runtime(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                last_failure_class: None,
+                mode: "review",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &runtime,
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "claude");
+        assert_eq!(decision.effective_model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn explicit_cli_model_override_cannot_bypass_approval_gate() {
+        // requested_backend defaults to "auto" on every real dispatch (see
+        // main.rs's --backend default), so an operator running
+        // `gah dispatch --model <paid-model>` without an explicit --backend
+        // must not be able to silently reach an unapproved requires_approval
+        // candidate just because the model string matches.
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        let mut free = candidate_config("opencode", Some("hy3-free"), None);
+        free.priority = 100;
+        let mut paid = candidate_config("opencode", Some("openai/gpt-paid"), None);
+        paid.priority = 10;
+        paid.requires_approval = true;
+        profile.routing.task_routing_rules = vec![easy_docs_rule(vec![free, paid])];
+        let task = Some(TaskRoutingContext {
+            task_class: Some("documentation"),
+            difficulty: Some("easy"),
+            risk: Some("low"),
+        });
+        let mut request = implementation_request();
+        request.requested_model = Some("openai/gpt-paid");
+
+        // Baseline: without an override, routing naturally picks the free
+        // candidate -- confirms the override target genuinely differs from
+        // what would have been selected, so this test exercises the
+        // override path at all.
+        let unoverridden = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            implementation_request(),
+            task,
+            &RoutingRuntimeState::default(),
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(unoverridden.effective_model.as_deref(), Some("hy3-free"));
+
+        let err = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            request.clone(),
+            task,
+            &RoutingRuntimeState::default(),
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<RouteError>(),
+            Some(RouteError::ApprovalRequired { backend, model, .. })
+                if backend == "opencode" && model.as_deref() == Some("openai/gpt-paid")
+        ));
+
+        // Once approved, the exact same override succeeds.
+        let mut approved = RoutingRuntimeState::default();
+        approved
+            .approved
+            .insert(CandidateIdentity::new("opencode", Some("openai/gpt-paid")));
+        let decision = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            request,
+            task,
+            &approved,
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(decision.effective_model.as_deref(), Some("openai/gpt-paid"));
     }
 
     #[test]
@@ -1943,6 +2592,46 @@ mod tests {
 
         assert_eq!(decision.effective_backend, "codex");
         assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn auto_backend_honors_cli_model_override_in_effective_identity() {
+        let tmp = TempDir::new().unwrap();
+        let defaults = defaults();
+        let profile = profile();
+
+        let decision = decide_with(
+            &defaults,
+            &profile,
+            RouteRequest {
+                mode: "improve",
+                requested_backend: "auto",
+                requested_model: Some("custom/test-model"),
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+                last_failure_class: None,
+            },
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(
+            decision.effective_model.as_deref(),
+            Some("custom/test-model")
+        );
+        let diagnostics = decision.routing_diagnostics.unwrap();
+        assert_eq!(
+            diagnostics.selected_model.as_deref(),
+            Some("custom/test-model")
+        );
+        assert!(diagnostics
+            .human_summary
+            .unwrap()
+            .contains("explicit CLI model override"));
     }
 
     #[test]
@@ -2384,6 +3073,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(earliest_reset.as_deref(), Some(expected.as_str()));
             }
+            other => panic!("expected no eligible backend, got {other:?}"),
         }
     }
 
@@ -2803,6 +3493,7 @@ mod tests {
                 assert_eq!(skipped[1].reason, "backend-wide rate_limited");
                 assert!(earliest_reset.is_some());
             }
+            other => panic!("expected no eligible backend, got {other:?}"),
         }
     }
 
@@ -2911,6 +3602,7 @@ mod tests {
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             },
             crate::config::CandidateConfig {
                 backend: "codex".into(),
@@ -2921,6 +3613,7 @@ mod tests {
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             },
         ]);
 
@@ -2964,6 +3657,7 @@ mod tests {
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             },
             crate::config::CandidateConfig {
                 backend: "codex".into(),
@@ -2974,6 +3668,7 @@ mod tests {
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             },
         ]);
 
@@ -3017,6 +3712,7 @@ mod tests {
                 marginal_cost_usd: Some(0.25),
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             },
             crate::config::CandidateConfig {
                 backend: "codex".into(),
@@ -3027,6 +3723,7 @@ mod tests {
                 marginal_cost_usd: Some(0.0),
                 quota_usage_percent: Some(20.0),
                 quota_days_remaining: Some(5.0),
+                requires_approval: false,
             },
         ]);
 
@@ -3090,6 +3787,7 @@ mod tests {
                 marginal_cost_usd: Some(0.0),
                 quota_usage_percent: Some(85.0),
                 quota_days_remaining: Some(5.0),
+                requires_approval: false,
             },
             crate::config::CandidateConfig {
                 backend: "openhands".into(),
@@ -3100,6 +3798,7 @@ mod tests {
                 marginal_cost_usd: Some(0.25),
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             },
         ]);
 
@@ -3142,6 +3841,7 @@ mod tests {
                 marginal_cost_usd: Some(0.0),
                 quota_usage_percent: Some(85.0),
                 quota_days_remaining: Some(5.0),
+                requires_approval: false,
             },
             crate::config::CandidateConfig {
                 backend: "openhands".into(),
@@ -3152,6 +3852,7 @@ mod tests {
                 marginal_cost_usd: Some(0.25),
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             },
         ]);
 

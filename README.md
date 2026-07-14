@@ -113,6 +113,10 @@ any other `NEEDS_FIX` verdict.
 For a profile that should use several subscription-backed workers, configure
 explicit backend/model pairs in priority order. Higher `priority` wins; an
 unavailable backend is skipped and the next eligible candidate is selected.
+Candidates with the same priority form a balanced pool: GAH selects the pair
+with the fewest executions in the last seven days (configuration order breaks
+ties). After a genuine capability failure, the same work item advances past
+backend/model pairs it already tried instead of selecting them again.
 Do not use `model = "default"` for a route you care about: a backend default
 can resolve through a global alias such as `defaults.llm_model_cloud`.
 
@@ -129,6 +133,7 @@ review_backend = "vibe"
 review_model = "mistral-medium-3.5"
 allow_implementation_fallback = true
 allow_review_fallback = true
+max_implementation_failures_per_ticket = 8
 
 # Preferred inexpensive implementation tier.
 [[profiles.my-repo.routing.improve_candidates]]
@@ -176,6 +181,29 @@ prerequisites from the CLI before starting a loop:
 gah profile show my-repo
 gah doctor --profile my-repo --validate
 gah status --profile my-repo --json
+```
+
+Paid implementation routes can be kept as terminal fallbacks without granting
+the unattended loop permission to spend money:
+
+```toml
+[[profiles.my-repo.routing.improve_candidates]]
+backend = "opencode"
+model = "openai/gpt-paid-fallback"
+priority = 10
+included_in_quota = false
+requires_approval = true
+```
+
+When all eligible non-paid routes are exhausted, GAH stops that work item and
+prints the exact approval command. Grant or revoke the exact backend/model pair
+without editing credentials or rewriting ledger history:
+
+```bash
+gah route-approval grant --profile my-repo ISSUE-42 \
+  --backend opencode --model openai/gpt-paid-fallback
+gah route-approval revoke --profile my-repo ISSUE-42 \
+  --backend opencode --model openai/gpt-paid-fallback
 ```
 
 The dashboard settings editor and effective-route display are tracked in

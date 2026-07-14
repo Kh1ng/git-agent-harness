@@ -4,7 +4,10 @@ use crate::models::CandidateArtifact;
 use crate::models::{AvailableTicket, PmPlan, WorkMetadata};
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::provider::provider_command;
-use crate::routing::{self, RouteDecision, RouteError, RouteRequest, TaskRoutingContext};
+use crate::routing::{
+    self, CandidateIdentity, RouteDecision, RouteError, RouteRequest, RoutingRuntimeState,
+    TaskRoutingContext,
+};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
@@ -509,6 +512,21 @@ fn ledger_lookup_for_ticket(
         // completion entry follows) or goes stale (abandoned worker).
         if e.mode == "claim" {
             has_active_claim = !is_claim_stale(e);
+            continue;
+        }
+        // Paid-route approvals are operator control records, not execution
+        // attempts. Granting one releases the work-item human gate that asked
+        // for approval; neither grant nor revoke consumes retry budget.
+        if e.mode == "paid_route_approval_grant" {
+            human_required = false;
+            last_failure_class = Some(
+                crate::ledger::FailureClass::AgentNoProgress
+                    .as_str()
+                    .to_string(),
+            );
+            continue;
+        }
+        if e.mode == "paid_route_approval_revoke" {
             continue;
         }
         count += 1;
@@ -4305,7 +4323,7 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
                 if let Some(m) = &args.model {
                     println!("Model override: {}", m);
                 }
-            } else {
+            } else if route.is_none() {
                 let cloud = args.backend == "cloud-coder";
                 let default_model = cfg.defaults.llm_model(cloud);
                 let model_name = args.model.as_deref().unwrap_or(&default_model);
@@ -4314,8 +4332,19 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
             }
             println!("Backend:      {}", args.backend);
             if let Some(route) = &route {
-                println!("Effective:    {}", route.effective_backend);
+                println!(
+                    "Effective:    {}/{}",
+                    route.effective_backend,
+                    route.effective_model.as_deref().unwrap_or("default")
+                );
                 println!("Routing:      {}", route.routing_reason);
+                if let Some(summary) = route
+                    .routing_diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.human_summary.as_deref())
+                {
+                    println!("Route detail: {}", summary);
+                }
             }
             println!("Retries:      {}", args.retries);
             println!("Allow draft fail: {}", args.allow_draft_fail);
@@ -4349,7 +4378,11 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
                 let route = dry_run_route(cfg, profile, "pm", args);
                 println!("Backend:      {}", args.backend);
                 if let Some(route) = &route {
-                    println!("Effective:    {}", route.effective_backend);
+                    println!(
+                        "Effective:    {}/{}",
+                        route.effective_backend,
+                        route.effective_model.as_deref().unwrap_or("default")
+                    );
                     println!("Routing:      {}", route.routing_reason);
                 }
                 println!(
@@ -4362,7 +4395,11 @@ fn dry_run(cfg: &GahConfig, profile: &Profile, args: &DispatchArgs) -> Result<()
             let route = dry_run_route(cfg, profile, "review", args);
             println!("Backend:      {}", args.backend);
             if let Some(route) = &route {
-                println!("Effective:    {}", route.effective_backend);
+                println!(
+                    "Effective:    {}/{}",
+                    route.effective_backend,
+                    route.effective_model.as_deref().unwrap_or("default")
+                );
                 println!("Routing:      {}", route.routing_reason);
             }
             if let Some(mr) = args.mr.as_deref() {
@@ -4815,18 +4852,18 @@ mod tests {
         next_escalatory_reviewer, next_ticket_id, parse_pm_plan, parse_review_verdict,
         parse_review_verdict_with_context, parse_ticket_metadata, parse_ticket_metadata_from_issue,
         render_review_comment, review_escalation_reason, review_labels, review_preflight,
-        review_usage, reviewer_dedup_class, run_backend, scan_available_tickets,
-        should_skip_per_dispatch_baseline, strip_terminal_noise, validation_failure_fingerprint,
-        validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
-        MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
-        TicketMetadata, ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES,
-        PROJECT_BRIEF_MAX_BYTES,
+        review_usage, reviewer_dedup_class, routing_runtime_state, run_backend,
+        scan_available_tickets, should_skip_per_dispatch_baseline, strip_terminal_noise,
+        validation_failure_fingerprint, validation_failure_no_progress_reason,
+        ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewDiffBundle,
+        ReviewGateContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
+        LIVE_TASK_ACCEPTANCE_MAX_BYTES, PROJECT_BRIEF_MAX_BYTES,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{CandidateConfig, Defaults, GahConfig, Profile, RoutingPolicy};
     use crate::ledger::LedgerEntry;
     use crate::models::{Candidate, PmPlan};
-    use crate::routing::{RouteError, RouteRequest};
+    use crate::routing::{CandidateIdentity, RouteError, RouteRequest};
     use crate::test_support::PathGuard;
     use std::fs;
     use std::path::Path;
@@ -5555,6 +5592,7 @@ mod tests {
             marginal_cost_usd: None,
             quota_usage_percent: None,
             quota_days_remaining: None,
+            requires_approval: false,
         };
         prof.routing.review_candidates = Some(vec![
             candidate("agy", "Claude Sonnet 4.6 (Thinking)"),
@@ -6673,6 +6711,106 @@ which lacks a leading boundary check.
             candidates[0].human_required,
             "a later non-review entry must not clear a human_required hold"
         );
+    }
+
+    #[test]
+    fn paid_route_grant_clears_handoff_and_resumes_escalation_without_consuming_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ticket_dir = tmp.path().join("docs/tickets");
+        fs::create_dir_all(&ticket_dir).unwrap();
+        fs::write(
+            ticket_dir.join("TICKET-301-test.md"),
+            "# TICKET-301: Test ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+        let cfg = crate::config::GahConfig {
+            context: Default::default(),
+            defaults: crate::config::Defaults {
+                current_manager: None,
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                worktree_base: tmp.path().to_string_lossy().into_owned(),
+                llm_base_url: String::new(),
+                llm_model_local: String::new(),
+                llm_model_cloud: String::new(),
+                routing: crate::config::RoutingPolicy::default(),
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        let mut prof = profile(tmp.path());
+        prof.local_path = tmp.path().display().to_string();
+        prof.provider = String::new();
+
+        let mut handoff = LedgerEntry::new("test", &prof, "auto", "fix", "x", None, None);
+        handoff.work_id = Some("TICKET-301".into());
+        handoff.human_required = true;
+        handoff.set_failure(
+            crate::ledger::FailureClass::HumanBlocked,
+            crate::ledger::FailureStage::Route,
+        );
+        crate::ledger::append(&cfg, &handoff).unwrap();
+        crate::ledger::append(
+            &cfg,
+            &LedgerEntry::new_paid_route_approval(
+                "test",
+                &prof,
+                "TICKET-301",
+                "opencode",
+                Some("openai/gpt-paid"),
+                true,
+            ),
+        )
+        .unwrap();
+
+        let candidates = scan_available_tickets(
+            &prof,
+            &[],
+            &crate::ledger::index_entries_by_work_id(&crate::ledger::read_entries(&cfg).unwrap()),
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(!candidates[0].human_required);
+        assert_eq!(candidates[0].prior_attempt_count, 1);
+        assert_eq!(
+            candidates[0].last_failure_class.as_deref(),
+            Some("agent_no_progress")
+        );
+    }
+
+    #[test]
+    fn implementation_escalation_ignores_review_failure_routes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+        let prof = profile(tmp.path());
+        let mut review = LedgerEntry::new("test", &prof, "codex", "review", "x", None, None);
+        review.work_id = Some("ISSUE-42".into());
+        review.effective_backend = "codex".into();
+        review.effective_model = Some("review-model".into());
+        review.set_failure(
+            crate::ledger::FailureClass::AgentFailure,
+            crate::ledger::FailureStage::AgentRun,
+        );
+        crate::ledger::append(&cfg, &review).unwrap();
+
+        let mut current = LedgerEntry::new("test", &prof, "auto", "fix", "x", None, None);
+        current.work_id = Some("ISSUE-42".into());
+        let state = routing_runtime_state(&cfg, &current).unwrap();
+        assert!(state.attempted.is_empty());
+
+        let mut implementation =
+            LedgerEntry::new("test", &prof, "codex", "improve", "x", None, None);
+        implementation.work_id = Some("ISSUE-42".into());
+        implementation.effective_backend = "codex".into();
+        implementation.effective_model = Some("worker-model".into());
+        implementation.set_failure(
+            crate::ledger::FailureClass::AgentFailure,
+            crate::ledger::FailureStage::AgentRun,
+        );
+        crate::ledger::append(&cfg, &implementation).unwrap();
+
+        let state = routing_runtime_state(&cfg, &current).unwrap();
+        assert_eq!(state.attempted.len(), 1);
+        assert!(state
+            .attempted
+            .contains(&CandidateIdentity::new("codex", Some("worker-model"))));
     }
 
     #[test]
@@ -9613,7 +9751,20 @@ fn dry_run_route(
     } else {
         None
     };
-    routing::decide_for_task(
+    let mut dry_ledger = LedgerEntry::new(
+        &args.profile,
+        profile,
+        &args.backend,
+        mode,
+        &args.target,
+        None,
+        None,
+    );
+    dry_ledger.work_id = ticket_meta
+        .as_ref()
+        .and_then(|meta| meta.work_id.clone().or_else(|| meta.ticket_id.clone()));
+    let runtime = routing_runtime_state(cfg, &dry_ledger).unwrap_or_default();
+    routing::decide_for_task_with_state(
         &cfg.defaults,
         profile,
         RouteRequest {
@@ -9639,6 +9790,7 @@ fn dry_run_route(
                 .and_then(|meta| meta.difficulty.as_deref()),
             risk: ticket_meta.as_ref().and_then(|meta| meta.risk.as_deref()),
         },
+        &runtime,
     )
     .ok()
 }
@@ -10657,8 +10809,9 @@ fn decide_route(
     task: Option<&WorkMetadata>,
     ledger: &mut LedgerEntry,
 ) -> Result<RouteDecision> {
+    let runtime = routing_runtime_state(cfg, ledger)?;
     let decision = if let Some(task) = task {
-        routing::decide_for_task(
+        routing::decide_for_task_with_state(
             &cfg.defaults,
             profile,
             req,
@@ -10667,9 +10820,10 @@ fn decide_route(
                 difficulty: task.difficulty.as_deref(),
                 risk: task.risk.as_deref(),
             },
+            &runtime,
         )
     } else {
-        routing::decide(&cfg.defaults, profile, req)
+        routing::decide_with_state(&cfg.defaults, profile, req, &runtime)
     };
     match decision {
         Ok(route) => Ok(route),
@@ -10686,6 +10840,20 @@ fn decide_route(
                     RouteError::NoEligibleBackend { .. } => {
                         crate::ledger::FailureClass::BackendError
                     }
+                    RouteError::ApprovalRequired { backend, model, .. } => {
+                        ledger.human_required = true;
+                        ledger.error_summary = Some(format!(
+                            "paid route approval required; run: gah route-approval grant --profile {} {} --backend {}{}",
+                            ledger.profile,
+                            ledger.work_id.as_deref().unwrap_or("<work-id>"),
+                            backend,
+                            model
+                                .as_deref()
+                                .map(|model| format!(" --model {model}"))
+                                .unwrap_or_default()
+                        ));
+                        crate::ledger::FailureClass::HumanBlocked
+                    }
                 };
                 ledger.set_failure(class, crate::ledger::FailureStage::Route);
             } else if format!("{:#}", err).contains("parsing availability state") {
@@ -10696,6 +10864,116 @@ fn decide_route(
             }
             Err(err)
         }
+    }
+}
+
+fn routing_runtime_state(cfg: &GahConfig, current: &LedgerEntry) -> Result<RoutingRuntimeState> {
+    let entries = ledger::read_entries(cfg)?;
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::days(7);
+    let mut state = RoutingRuntimeState::default();
+
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.profile == current.profile)
+    {
+        let in_window = OffsetDateTime::parse(&entry.timestamp, &Rfc3339)
+            .map(|timestamp| timestamp >= cutoff)
+            .unwrap_or(false);
+        if in_window && is_agent_execution_mode(&entry.mode) {
+            if entry.attempts.is_empty() {
+                if entry.attempts_completed.unwrap_or(0) > 0 || entry.backend_exit_code.is_some() {
+                    record_recent_route_run(
+                        &mut state,
+                        &entry.effective_backend,
+                        entry.effective_model.as_deref(),
+                    );
+                }
+            } else {
+                for attempt in &entry.attempts {
+                    record_recent_route_run(
+                        &mut state,
+                        &attempt.backend,
+                        attempt.effective_model.as_deref(),
+                    );
+                }
+            }
+        }
+    }
+    for attempt in &current.attempts {
+        record_recent_route_run(
+            &mut state,
+            &attempt.backend,
+            attempt.effective_model.as_deref(),
+        );
+    }
+
+    if let Some(work_id) = current.work_id.as_deref() {
+        if is_implementation_execution_mode(&current.mode) {
+            for entry in entries.iter().filter(|entry| {
+                entry.profile == current.profile
+                    && entry.repo_id == current.repo_id
+                    && entry.work_id.as_deref() == Some(work_id)
+                    && is_implementation_execution_mode(&entry.mode)
+            }) {
+                record_genuine_failure_routes(&mut state, entry);
+            }
+            record_genuine_failure_routes(&mut state, current);
+        }
+        for (backend, model) in ledger::active_paid_route_approvals(cfg, &current.profile, work_id)?
+        {
+            state
+                .approved
+                .insert(CandidateIdentity::new(backend, model));
+        }
+    }
+
+    Ok(state)
+}
+
+fn record_recent_route_run(state: &mut RoutingRuntimeState, backend: &str, model: Option<&str>) {
+    if backend.is_empty() {
+        return;
+    }
+    *state
+        .recent_runs
+        .entry(CandidateIdentity::new(backend, model))
+        .or_insert(0) += 1;
+}
+
+fn is_agent_execution_mode(mode: &str) -> bool {
+    matches!(mode, "improve" | "fix" | "experiment" | "pm" | "review")
+}
+
+fn is_implementation_execution_mode(mode: &str) -> bool {
+    matches!(mode, "improve" | "fix" | "experiment")
+}
+
+fn record_genuine_failure_routes(state: &mut RoutingRuntimeState, entry: &LedgerEntry) {
+    let mut recorded_attempt = false;
+    for attempt in &entry.attempts {
+        if attempt
+            .failure_class
+            .as_deref()
+            .is_some_and(crate::controller::is_genuine_agent_failure)
+        {
+            state.attempted.insert(CandidateIdentity::new(
+                attempt.backend.as_str(),
+                attempt.effective_model.as_deref(),
+            ));
+            recorded_attempt = true;
+        }
+    }
+    if !recorded_attempt
+        && entry
+            .failure_class
+            .as_deref()
+            .is_some_and(crate::controller::is_genuine_agent_failure)
+        && !entry.effective_backend.is_empty()
+    {
+        state.attempted.insert(CandidateIdentity::new(
+            entry.effective_backend.as_str(),
+            entry.effective_model.as_deref(),
+        ));
     }
 }
 

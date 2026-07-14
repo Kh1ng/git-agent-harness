@@ -201,6 +201,7 @@ mod tests {
                 default_target_branch: "main".into(),
                 merge_policy: crate::config::MergePolicy::default(),
                 max_fix_attempts_per_mr: 2,
+                max_implementation_failures_per_ticket: 8,
             },
             observations: Observations {
                 sync: ObservationStatus { status: "ok" },

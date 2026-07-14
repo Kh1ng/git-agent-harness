@@ -456,13 +456,18 @@ pub struct CandidateConfig {
     pub quota_usage_percent: Option<f64>,
     #[serde(default)]
     pub quota_days_remaining: Option<f64>,
+    /// Paid/API-backed candidates can remain configured as terminal
+    /// fallbacks without ever being selected autonomously. An operator must
+    /// grant a work-item-scoped route approval before routing may select one.
+    #[serde(default)]
+    pub requires_approval: bool,
 }
 
 /// A deterministic implementation-routing override selected from trusted
 /// ticket metadata. Empty match lists are wildcards; every non-empty list
 /// must match. Rules are evaluated in declaration order, so the first match
-/// wins and its candidate order is preserved except when a candidate is
-/// unavailable or at its concurrency limit.
+/// wins. Priority defines fallback tiers; equal-priority candidates are
+/// balanced from runtime usage, with declaration order as the final tie-break.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct TaskRoutingRule {
     #[serde(default)]
@@ -563,6 +568,12 @@ pub struct RoutingPolicy {
     /// three; quota-backed and local reviews do not consume this cap.
     #[serde(default)]
     pub max_paid_reviews_per_ticket: Option<u32>,
+    /// Maximum genuine implementation failures before the controller gives
+    /// up. This is deliberately separate from the post-review repair budget:
+    /// a multi-model implementation ladder needs enough room to try each
+    /// configured subscription candidate before human handoff. Defaults to 8.
+    #[serde(default)]
+    pub max_implementation_failures_per_ticket: Option<u32>,
     /// TICKET-127/Issue #124: per-repo merge policy gating what the
     /// controller does for a `READY_FOR_HUMAN` MR whose CI has been evaluated.
     /// `None` inherits the canonical/defaults policy (resolved to `Auto`).
@@ -681,6 +692,9 @@ impl RoutingPolicy {
             max_paid_reviews_per_ticket: self
                 .max_paid_reviews_per_ticket
                 .or(defaults.max_paid_reviews_per_ticket),
+            max_implementation_failures_per_ticket: self
+                .max_implementation_failures_per_ticket
+                .or(defaults.max_implementation_failures_per_ticket),
             merge_policy: self.merge_policy.or(defaults.merge_policy),
         }
     }
@@ -738,6 +752,10 @@ impl RoutingPolicy {
     #[allow(dead_code)] // enforced by dispatch review budget checks (#113)
     pub fn max_paid_reviews_per_ticket(&self) -> u32 {
         self.max_paid_reviews_per_ticket.unwrap_or(3)
+    }
+
+    pub fn max_implementation_failures_per_ticket(&self) -> u32 {
+        self.max_implementation_failures_per_ticket.unwrap_or(8)
     }
 
     pub fn find_quota_pool(
@@ -1088,6 +1106,9 @@ fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> Ro
     repo.max_paid_reviews_per_ticket = repo
         .max_paid_reviews_per_ticket
         .or(canonical.max_paid_reviews_per_ticket);
+    repo.max_implementation_failures_per_ticket = repo
+        .max_implementation_failures_per_ticket
+        .or(canonical.max_implementation_failures_per_ticket);
     let mut capabilities = canonical.review_required_capabilities;
     capabilities.extend(repo.review_required_capabilities);
     repo.review_required_capabilities = capabilities;
@@ -1579,6 +1600,7 @@ pub mod tests {
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             }]),
             ..Default::default()
         };
@@ -1592,6 +1614,7 @@ pub mod tests {
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             }]),
             ..Default::default()
         };
@@ -1841,6 +1864,7 @@ pub mod tests {
                 marginal_cost_usd: Some(0.0),
                 quota_usage_percent: Some(25.0),
                 quota_days_remaining: Some(5.0),
+                requires_approval: false,
             }]),
             task_routing_rules: vec![super::TaskRoutingRule {
                 modes: vec!["improve".into()],
@@ -1889,6 +1913,7 @@ pub mod tests {
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             }]),
             ..RoutingPolicy::default()
         };
@@ -1902,6 +1927,7 @@ pub mod tests {
                 marginal_cost_usd: None,
                 quota_usage_percent: None,
                 quota_days_remaining: None,
+                requires_approval: false,
             }]),
             ..RoutingPolicy::default()
         };
@@ -1946,11 +1972,13 @@ pub mod tests {
         assert_eq!(defaults.max_review_cycles_per_ticket(), 3);
         assert_eq!(defaults.max_fix_attempts_per_mr(), 2);
         assert_eq!(defaults.max_paid_reviews_per_ticket(), 3);
+        assert_eq!(defaults.max_implementation_failures_per_ticket(), 8);
 
         let global = RoutingPolicy {
             max_review_cycles_per_ticket: Some(4),
             max_fix_attempts_per_mr: Some(3),
             max_paid_reviews_per_ticket: Some(5),
+            max_implementation_failures_per_ticket: Some(10),
             ..RoutingPolicy::default()
         };
         let profile = RoutingPolicy {
@@ -1962,6 +1990,7 @@ pub mod tests {
         assert_eq!(effective.max_review_cycles_per_ticket(), 1);
         assert_eq!(effective.max_fix_attempts_per_mr(), 4);
         assert_eq!(effective.max_paid_reviews_per_ticket(), 5);
+        assert_eq!(effective.max_implementation_failures_per_ticket(), 10);
 
         let repair_budget_only = RoutingPolicy {
             max_fix_attempts_per_mr: Some(4),
