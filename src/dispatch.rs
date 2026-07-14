@@ -13,11 +13,12 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::SyncSender;
-use std::time::Instant;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -1206,13 +1207,7 @@ fn validate(commands: &[String], wt: &Path, env_vars: &[(String, String)]) -> Re
         println!("  Validating: {}", cmd_str);
         // Run through the shell: validation commands routinely use `cd x && y`,
         // pipes, and env vars, which Command::new(bin) cannot execute.
-        let mut command = Command::new("sh");
-        command.args(["-c", cmd_str]).current_dir(wt);
-        for (key, value) in env_vars {
-            command.env(key, value);
-        }
-        let out = command
-            .output()
+        let out = run_validation_shell_command(cmd_str, wt, env_vars)
             .with_context(|| format!("failed to run '{}'", cmd_str))?;
         if !out.status.success() {
             bail!(
@@ -1240,13 +1235,7 @@ fn validate_with_exit_code(
             continue;
         }
         println!("  Validating: {}", cmd_str);
-        let mut command = Command::new("sh");
-        command.args(["-c", cmd_str]).current_dir(wt);
-        for (key, value) in env_vars {
-            command.env(key, value);
-        }
-        let out = command
-            .output()
+        let out = run_validation_shell_command(cmd_str, wt, env_vars)
             .map_err(|e| (format!("failed to run '{}': {:#}", cmd_str, e), None))?;
         if !out.status.success() {
             return Err((
@@ -1261,6 +1250,81 @@ fn validate_with_exit_code(
         }
     }
     Ok(())
+}
+
+fn run_validation_shell_command(
+    cmd_str: &str,
+    wt: &Path,
+    env_vars: &[(String, String)],
+) -> Result<Output> {
+    run_validation_shell_command_with_shutdown(cmd_str, wt, env_vars, || {
+        crate::runner::shutdown_requested()
+    })
+}
+
+fn run_validation_shell_command_with_shutdown(
+    cmd_str: &str,
+    wt: &Path,
+    env_vars: &[(String, String)],
+    shutdown_requested: impl Fn() -> bool,
+) -> Result<Output> {
+    if shutdown_requested() {
+        bail!("shutdown requested before validation command '{cmd_str}'");
+    }
+
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", cmd_str])
+        .current_dir(wt)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env_vars {
+        command.env(key, value);
+    }
+    crate::runner::prepare_process_group(&mut command);
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("spawning validation command '{cmd_str}'"))?;
+    let mut stdout = child.stdout.take().context("capturing validation stdout")?;
+    let mut stderr = child.stderr.take().context("capturing validation stderr")?;
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+
+    let status = loop {
+        if shutdown_requested() {
+            crate::runner::kill_process_group(&mut child);
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            bail!("shutdown requested during validation command '{cmd_str}'");
+        }
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("waiting for validation command '{cmd_str}'"))?
+        {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("validation stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("validation stderr reader panicked"))??;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 const MIN_DISPATCH_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -1393,16 +1457,16 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     );
     let state_path = vc::resolve_state_path();
 
-    // Hold the lock across the whole decide-then-verify sequence, not just the
-    // final write. Without this, concurrent callers (parallel workers in the
-    // same `gah loop`, or separate processes) can each independently read
-    // "needs recheck", each spin up their own redundant fresh-worktree run,
-    // and race to record whichever result lands last -- multiplying load
-    // exactly when the gate is already the bottleneck, and making the
-    // recorded pass/fail state nondeterministic. Only one fresh-worktree
-    // self-check for this state file runs at a time; everyone else blocks
-    // briefly and then takes the fast path once it lands.
-    let lock_file = vc::acquire_lock(&state_path)?;
+    // Hold a per-profile lock across the whole decide-then-verify sequence,
+    // not just the final write. Same-profile callers then share one proof,
+    // while validation commands that invoke GAH for a different test profile
+    // cannot deadlock behind their parent. The state file's global lock is
+    // taken only for the short atomic record update below.
+    let profile_lock = vc::acquire_profile_lock(&state_path, &profile.repo_id)?;
+    if crate::runner::shutdown_requested() {
+        fs2::FileExt::unlock(&profile_lock).ok();
+        anyhow::bail!("shutdown requested before validation gate self-check");
+    }
 
     let state = vc::load_state(&state_path)
         .with_context(|| format!("loading validation-check state {}", state_path.display()))?;
@@ -1412,7 +1476,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
             "[validation-gate] commands unchanged (hash {}) — skipping fresh-worktree self-check",
             &hash[..hash.len().min(8)]
         );
-        fs2::FileExt::unlock(&lock_file).ok();
+        fs2::FileExt::unlock(&profile_lock).ok();
         return Ok(());
     }
 
@@ -1455,10 +1519,14 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     worktree::cleanup(&wt, repo);
     let _ = worktree::git_raw(&["branch", "-D", &branch], repo);
 
-    let record_result =
-        vc::record_check_locked(&state_path, &profile.repo_id, &hash, ok, &verified_at)
-            .with_context(|| format!("recording validation-check result {}", state_path.display()));
-    fs2::FileExt::unlock(&lock_file).ok();
+    if crate::runner::shutdown_requested() {
+        fs2::FileExt::unlock(&profile_lock).ok();
+        anyhow::bail!("shutdown requested during validation gate self-check");
+    }
+
+    let record_result = vc::record_check(&state_path, &profile.repo_id, &hash, ok, &verified_at)
+        .with_context(|| format!("recording validation-check result {}", state_path.display()));
+    fs2::FileExt::unlock(&profile_lock).ok();
     record_result?;
 
     if let Err(text) = result {
@@ -4836,6 +4904,7 @@ fn format_candidate_task(
 mod tests {
     use super::preflight;
     use super::run_auto_fix_commands;
+    use super::run_validation_shell_command_with_shutdown;
     use super::self_check_validation_gate;
     use super::validate;
     use super::ValidationGateError;
@@ -4868,6 +4937,9 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use time::OffsetDateTime;
 
     const CODEX_FULL_RESET: &str =
@@ -9210,6 +9282,37 @@ The parser should retain structured sections.\n\n\
         let cmds = vec!["echo oops >&2 && false".to_string()];
         let err = validate(&cmds, tmp.path(), &[]).unwrap_err();
         assert!(format!("{:#}", err).contains("oops"));
+    }
+
+    #[test]
+    fn validation_shutdown_kills_the_command_process_group_promptly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("orphan-marker");
+        let command = format!("(sleep 2; printf orphaned > '{}') & wait", marker.display());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&shutdown);
+        let trigger_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            trigger.store(true, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        let error = run_validation_shell_command_with_shutdown(&command, tmp.path(), &[], || {
+            shutdown.load(Ordering::SeqCst)
+        })
+        .unwrap_err();
+        trigger_thread.join().unwrap();
+
+        assert!(error.to_string().contains("shutdown requested"));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "validation shutdown should not wait for the shell command"
+        );
+        std::thread::sleep(Duration::from_millis(2100));
+        assert!(
+            !marker.exists(),
+            "the validation command's background child must die with its process group"
+        );
     }
 
     #[test]

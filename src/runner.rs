@@ -30,7 +30,7 @@ pub fn shutdown_requested() -> bool {
 }
 
 #[cfg(unix)]
-fn prepare_process_group(cmd: &mut Command) {
+pub(crate) fn prepare_process_group(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     unsafe {
         cmd.pre_exec(|| {
@@ -43,9 +43,9 @@ fn prepare_process_group(cmd: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn prepare_process_group(_cmd: &mut Command) {}
+pub(crate) fn prepare_process_group(_cmd: &mut Command) {}
 
-fn kill_process_group(child: &mut std::process::Child) {
+pub(crate) fn kill_process_group(child: &mut std::process::Child) {
     #[cfg(unix)]
     unsafe {
         let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
