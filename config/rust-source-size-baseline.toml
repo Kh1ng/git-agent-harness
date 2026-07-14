@@ -4,5 +4,5 @@ threshold = 1500
 "src/config.rs" = 2080
 "src/ledger.rs" = 40
 "src/main.rs" = 1901
-"src/routing.rs" = 3639
+"src/routing.rs" = 3390
 "tests/gah_cli.rs" = 6359

@@ -51,6 +51,18 @@ fn dispatch_facade_preserves_public_call_paths_and_final_layout() {
     );
 }
 
+#[test]
+fn routing_reservation_preserves_public_call_paths_and_layout() {
+    fn public<T>(_item: T) {}
+
+    public(git_agent_harness::routing::current_concurrent);
+    let _ = std::mem::size_of::<git_agent_harness::routing::ConcurrencyGuard>();
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert!(repo_root.join("src/routing/reservation.rs").is_file());
+    assert!(repo_root.join("src/routing/reservation/tests.rs").is_file());
+}
+
 #[derive(Debug, Deserialize)]
 struct RustSourceBaseline {
     #[serde(default = "default_max_lines")]
