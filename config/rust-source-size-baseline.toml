@@ -6,6 +6,6 @@ threshold = 1500
 "src/dispatch.rs" = 12439
 "src/ledger.rs" = 4526
 "src/main.rs" = 1901
-"src/routing.rs" = 3882
+"src/routing.rs" = 3639
 "src/runner.rs" = 4332
 "tests/gah_cli.rs" = 6359
