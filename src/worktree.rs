@@ -177,21 +177,15 @@ pub fn create_existing(
     let worktree_path = worktree_base.join(existing_branch.replace('/', "-"));
     fs::create_dir_all(worktree_path.parent().unwrap_or(worktree_base))?;
 
-    // If a worktree already exists at this path (from a prior dispatch that
-    // left it behind), remove it first — `git worktree add -B` fails with
-    // "'<branch>' is already used by worktree at '<path>'" if the path is
-    // already a registered worktree.
+    // Never force-remove an existing path here. Its pathname is not proof
+    // that GAH owns it, and even a GAH-created worktree can still belong to a
+    // live worker or contain uncommitted recovery data. Lifecycle pruning is
+    // the only subsystem allowed to remove retained worktrees.
     if worktree_path.exists() {
-        let _ = git_raw(
-            &[
-                "worktree",
-                "remove",
-                "-f",
-                worktree_path.to_str().unwrap_or(""),
-            ],
-            repo,
+        anyhow::bail!(
+            "refusing to replace existing worktree path {}; prune or remove it explicitly after verifying it is inactive",
+            worktree_path.display()
         );
-        let _ = git_raw(&["worktree", "prune"], repo);
     }
 
     // `-B existing_branch` creates/resets a real local branch tracking
@@ -224,10 +218,6 @@ pub fn create_existing(
 pub struct BranchWorktreeAttachment {
     /// Absolute path of the attached worktree.
     pub path: PathBuf,
-    /// True when the attached worktree is the exact path GAH would create for
-    /// this branch under its managed `worktree_base` -- i.e. GAH owns it and
-    /// may safely reclaim it via `create_existing`.
-    pub gah_owned: bool,
     /// True when the attached worktree has no uncommitted changes.
     pub clean: bool,
 }
@@ -239,14 +229,10 @@ pub struct BranchWorktreeAttachment {
 /// the controller can defer the work item instead of stalling on a hard git
 /// failure.
 ///
-/// `worktree_base` is GAH's configured managed worktree root. An attachment
-/// located anywhere else (an externally-owned or stale worktree for the same
-/// open PR) is reported with `gah_owned = false` and must not be reclaimed.
-pub fn branch_attachment(
-    repo: &Path,
-    branch: &str,
-    worktree_base: &Path,
-) -> Result<Option<BranchWorktreeAttachment>> {
+/// Detection deliberately does not infer ownership from path. Any attachment
+/// can be live or dirty and must be deferred until lifecycle cleanup proves it
+/// safe to remove.
+pub fn branch_attachment(repo: &Path, branch: &str) -> Result<Option<BranchWorktreeAttachment>> {
     let out = git_raw(&["worktree", "list", "--porcelain"], repo)?;
     if !out.status.success() {
         // If we can't enumerate worktrees, err on the side of attempting the
@@ -254,9 +240,6 @@ pub fn branch_attachment(
         return Ok(None);
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let expected = worktree_base.join(branch.replace('/', "-"));
-    let canonical_expected = std::fs::canonicalize(&expected).unwrap_or(expected);
-
     let mut current_path: Option<PathBuf> = None;
     for line in text.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
@@ -265,13 +248,9 @@ pub fn branch_attachment(
             if let Some(path) = &current_path {
                 let branch_ref = format!("refs/heads/{}", branch);
                 if b.trim() == branch_ref {
-                    let canonical_path =
-                        std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                    let gah_owned = canonical_path == canonical_expected;
-                    let clean = path.exists() && !matches!(has_uncommitted_changes(path), Ok(true));
+                    let clean = path.exists() && matches!(has_uncommitted_changes(path), Ok(false));
                     return Ok(Some(BranchWorktreeAttachment {
                         path: path.clone(),
-                        gah_owned,
                         clean,
                     }));
                 }
@@ -875,15 +854,12 @@ mod tests {
     }
 
     #[test]
-    fn branch_attachment_detects_foreign_worktree_and_marks_non_gah_owned() {
+    fn branch_attachment_detects_foreign_worktree_without_inferring_ownership() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap();
         init_bare_repo_with_main(&repo);
         add_bare_origin(&repo);
-        let worktree_base = tmp.path().join("worktrees");
-        fs::create_dir_all(&worktree_base).unwrap();
-
         StdCommand::new("git")
             .args(["checkout", "-q", "-b", "shared-branch"])
             .current_dir(&repo)
@@ -916,24 +892,21 @@ mod tests {
             .unwrap();
         assert!(add.status.success(), "worktree add must succeed");
 
-        let attachment = branch_attachment(&repo, "shared-branch", &worktree_base).unwrap();
+        let attachment = branch_attachment(&repo, "shared-branch").unwrap();
         let attachment = attachment.expect("must detect the attached worktree");
         assert_eq!(
             attachment.path, foreign,
             "path must be the foreign worktree"
         );
-        assert!(
-            !attachment.gah_owned,
-            "a worktree outside worktree_base must not be reported as GAH-owned"
-        );
+        assert!(attachment.clean);
 
         // The same branch with no foreign attachment reports nothing.
-        let none = branch_attachment(&repo, "no-such-branch", &worktree_base).unwrap();
+        let none = branch_attachment(&repo, "no-such-branch").unwrap();
         assert!(none.is_none());
     }
 
     #[test]
-    fn branch_attachment_marks_gah_owned_worktree_when_at_expected_path() {
+    fn create_existing_never_replaces_an_attached_worktree_at_the_expected_path() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap();
@@ -957,14 +930,20 @@ mod tests {
             .output()
             .unwrap();
 
-        // A GAH-managed worktree at exactly the expected path.
-        let _wt = create_existing(&repo, "shared-branch", &worktree_base).unwrap();
+        let wt = create_existing(&repo, "shared-branch", &worktree_base).unwrap();
+        fs::write(wt.join("uncommitted.txt"), "must survive").unwrap();
 
-        let attachment = branch_attachment(&repo, "shared-branch", &worktree_base).unwrap();
+        let attachment = branch_attachment(&repo, "shared-branch").unwrap();
         let attachment = attachment.expect("must detect the attached worktree");
-        assert!(
-            attachment.gah_owned,
-            "a worktree at the GAH-managed path must be reported as GAH-owned"
+        assert!(!attachment.clean);
+
+        let error = create_existing(&repo, "shared-branch", &worktree_base).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("refusing to replace existing worktree path"));
+        assert_eq!(
+            fs::read_to_string(wt.join("uncommitted.txt")).unwrap(),
+            "must survive"
         );
     }
 }

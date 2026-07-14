@@ -824,68 +824,88 @@ fn reload_config_for_profile(
 /// externally-owned or stale worktree for the same open PR). Returns a
 /// replacement `NextAction` for the loop to run instead:
 ///
-/// * `None` -- the action is safe to execute as-is (not a branch-reuse
-///   action, or the branch is GAH-owned and `create_existing` will reclaim it).
-/// * `Some(redispatched)` -- the branch conflicted with a foreign/stale
-///   worktree. An explicit non-terminal `WorkDeferred` event has been recorded
-///   and a fresh snapshot (excluding the conflicted work item) has been
-///   re-decided, so the loop continues with the next eligible item instead of
-///   stalling on `fatal: branch is already used by worktree at '<path>'`.
+/// * `None` -- the action is safe to execute as-is.
+/// * `Some(redispatched)` -- one or more branch conflicts were skipped and the
+///   returned action is the first unblocked candidate (or a terminal action).
 ///
-/// A clean-and-stale attachment is never reclaimed under this rule: GAH only
-/// releases worktrees it owns, so a foreign worktree (even when clean) is
-/// deferred, never pruned.
+/// Path location is never treated as proof of ownership. Clean and dirty
+/// attachments are both deferred; lifecycle pruning decides removal.
+fn resolve_attached_branch_conflicts(
+    action: &NextAction,
+    mut find_attachment: impl FnMut(&str) -> Result<Option<crate::worktree::BranchWorktreeAttachment>>,
+    mut record_deferral: impl FnMut(
+        &str,
+        Option<&str>,
+        &crate::worktree::BranchWorktreeAttachment,
+    ) -> Result<()>,
+    mut choose_next: impl FnMut(&HashSet<String>, &HashSet<String>) -> Result<NextAction>,
+) -> Result<Option<NextAction>> {
+    let mut candidate = action.clone();
+    let mut deferred_work_ids = HashSet::new();
+    let mut deferred_branches = HashSet::new();
+
+    loop {
+        let (branch, work_id) = match &candidate {
+            NextAction::FixMr {
+                branch, work_id, ..
+            } => (branch, work_id),
+            _ => return Ok((!deferred_branches.is_empty()).then_some(candidate)),
+        };
+        let Some(attachment) = find_attachment(branch)? else {
+            return Ok((!deferred_branches.is_empty()).then_some(candidate));
+        };
+
+        deferred_branches.insert(branch.clone());
+        if let Some(work_id) = work_id {
+            deferred_work_ids.insert(work_id.clone());
+        }
+        record_deferral(branch, work_id.as_deref(), &attachment)?;
+        candidate = choose_next(&deferred_work_ids, &deferred_branches)?;
+    }
+}
+
 fn defer_if_branch_attached(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
     action: &NextAction,
 ) -> Result<Option<NextAction>> {
-    let (branch, work_id) = match action {
-        NextAction::FixMr {
-            branch, work_id, ..
-        } => (branch, work_id),
-        _ => return Ok(None),
-    };
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let repo = Path::new(&profile.local_path);
-    let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
-    let attachment = crate::worktree::branch_attachment(repo, branch, &worktree_base)?;
-    let Some(attachment) = attachment else {
-        return Ok(None);
-    };
-    if attachment.gah_owned {
-        // GAH owns this exact worktree path; `create_existing` reclaims it.
-        return Ok(None);
-    }
-
-    // Foreign or stale attachment -- defer rather than fail. Record an explicit
-    // non-terminal deferral so the dashboard/operators can see why this item
-    // was skipped, then re-decide excluding the conflicted work item.
-    crate::events::record(
-        cfg,
-        crate::events::EventType::WorkDeferred,
-        Some(profile_name),
-        work_id.as_deref(),
-        format!(
-            "branch '{}' already attached to worktree {} (gah_owned={}, clean={}); deferring to next eligible item",
-            branch,
-            attachment.path.display(),
-            attachment.gah_owned,
-            attachment.clean
-        ),
-    )?;
-
-    let mut fresh =
-        crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
-    if let Some(wid) = work_id {
-        fresh
-            .merge_requests
-            .retain(|mr| mr.work_id.as_deref() != Some(wid));
-        fresh
-            .available_tickets
-            .retain(|t| t.work_id.as_deref() != Some(wid));
-    }
-    Ok(Some(decide_next_action(&fresh)))
+    resolve_attached_branch_conflicts(
+        action,
+        |branch| crate::worktree::branch_attachment(repo, branch),
+        |branch, work_id, attachment| {
+            crate::events::record(
+                cfg,
+                crate::events::EventType::WorkDeferred,
+                Some(profile_name),
+                work_id,
+                format!(
+                    "branch '{}' already attached to worktree {} (clean={}); deferring to next eligible item",
+                    branch,
+                    attachment.path.display(),
+                    attachment.clean
+                ),
+            )
+        },
+        |deferred_work_ids, deferred_branches| {
+            let mut fresh =
+                crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
+            fresh.merge_requests.retain(|mr| {
+                !mr.work_id
+                    .as_ref()
+                    .is_some_and(|id| deferred_work_ids.contains(id))
+                    && !deferred_branches.contains(&mr.branch)
+            });
+            fresh.available_tickets.retain(|ticket| {
+                !ticket
+                    .work_id
+                    .as_ref()
+                    .is_some_and(|id| deferred_work_ids.contains(id))
+            });
+            Ok(decide_next_action(&fresh))
+        },
+    )
 }
 
 /// Run the controller continuously in one process. The process lock is held
@@ -1655,6 +1675,10 @@ pub(crate) fn run_dispatch_and_record(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "controller/worktree_deferral_tests.rs"]
+mod worktree_deferral_tests;
 
 #[cfg(test)]
 mod tests {
