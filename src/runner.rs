@@ -12,6 +12,8 @@ pub(crate) mod backends;
 pub(crate) mod output;
 pub(crate) mod process;
 #[allow(unused_imports)]
+pub(crate) use crate::runner::backends::agy::log_delta;
+#[allow(unused_imports)]
 pub use crate::runner::backends::agy::{run_agy, run_agy_with_executable};
 #[allow(unused_imports)]
 pub use crate::runner::backends::claude::{run_claude, run_claude_with_executable};
@@ -124,19 +126,6 @@ pub struct ReviewRunResult {
     pub duration_secs: f64,
     pub stdout: String,
     pub stderr: String,
-}
-
-/// Read only bytes appended to a backend-owned log after `pre_offset`.
-/// Returns `None` on missing/unreadable logs and treats a truncated/unchanged
-/// log as no delta. Lossy decoding deliberately preserves diagnostic text
-/// even if a backend left a partial UTF-8 write while exiting.
-pub(crate) fn log_delta(log: &Option<PathBuf>, pre_offset: u64) -> Option<String> {
-    let path = log.as_ref()?;
-    let bytes = fs::read(path).ok()?;
-    if (pre_offset as usize) >= bytes.len() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&bytes[pre_offset as usize..]).into_owned())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

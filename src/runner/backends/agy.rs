@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
-use crate::runner::{log_delta as runner_log_delta, LlmConfig, RunResult};
+use crate::runner::{LlmConfig, RunResult};
 
 /// Run Antigravity CLI non-interactively via `agy --print`.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -245,6 +245,19 @@ fn is_agy_log_format_unrecognized(delta: &str) -> bool {
     !KNOWN_SIGNATURES.iter().any(|sig| delta.contains(sig))
 }
 
+/// Read only bytes appended to AGY's backend-owned log after `pre_offset`.
+/// Returns `None` on missing/unreadable logs and treats a truncated/unchanged
+/// log as no delta. Lossy decoding deliberately preserves diagnostic text
+/// even if AGY left a partial UTF-8 write while exiting.
+pub(crate) fn log_delta(log: &Option<PathBuf>, pre_offset: u64) -> Option<String> {
+    let path = log.as_ref()?;
+    let bytes = fs::read(path).ok()?;
+    if (pre_offset as usize) >= bytes.len() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes[pre_offset as usize..]).into_owned())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_agy_with_executable(
     executable: &Path,
@@ -320,7 +333,7 @@ pub fn run_agy_with_executable(
         // but matches zero known signatures, upstream has silently changed its
         // log format/path. Emit a distinct note so the degradation is visible
         // the day it happens, instead of being silently classified unknown.
-        let agy_cli_log_delta = runner_log_delta(&agy_cli_log, agy_cli_log_pre_offset);
+        let agy_cli_log_delta = log_delta(&agy_cli_log, agy_cli_log_pre_offset);
         if is_agy_log_format_unrecognized(agy_cli_log_delta.as_deref().unwrap_or("")) {
             let drift_msg = format!(
                 "[agy_log_format_unrecognized] AGY produced no output with an unrecognized cli.log delta (agy_version={}). Upstream log format/path may have changed; quota/auth classification is degraded.",
@@ -358,7 +371,7 @@ pub fn run_agy_with_executable(
         // log and exposes no run-scoped structured conversation artifact.
         // Fail closed until its adapter can identify one authoritatively.
         final_summary: None,
-        agy_cli_log_delta: runner_log_delta(&agy_cli_log, agy_cli_log_pre_offset),
+        agy_cli_log_delta: log_delta(&agy_cli_log, agy_cli_log_pre_offset),
         internal_log_delta: None,
         internal_log_path: None,
         transcript_path: None,
