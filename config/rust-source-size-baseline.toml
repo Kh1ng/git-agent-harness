@@ -2,7 +2,7 @@ threshold = 1500
 
 [files]
 "src/config.rs" = 2080
-"src/controller.rs" = 1593
+"src/controller.rs" = 1200
 "src/dispatch.rs" = 1136
 "src/ledger.rs" = 40
 "src/main.rs" = 1901
