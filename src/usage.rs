@@ -373,6 +373,12 @@ pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
         backend_instance: base.backend_instance.or(other.backend_instance),
         provider: base.provider.or(other.provider),
         actual_model: base.actual_model.or(other.actual_model),
+        actual_model_unknown_reason: base
+            .actual_model_unknown_reason
+            .or(other.actual_model_unknown_reason),
+        provider_unknown_reason: base
+            .provider_unknown_reason
+            .or(other.provider_unknown_reason),
         account_label: base.account_label.or(other.account_label),
         pricing_source: base.pricing_source.or(other.pricing_source),
         pricing_version: base.pricing_version.or(other.pricing_version),

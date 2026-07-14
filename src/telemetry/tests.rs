@@ -75,8 +75,8 @@ mod telemetry_tests {
     #[test]
     fn test_schema_version_in_record() {
         assert_eq!(
-            SCHEMA_VERSION, 4,
-            "review evidence-gate attribution requires telemetry export schema version 4"
+            SCHEMA_VERSION, 5,
+            "unknown model/provider attribution requires telemetry export schema version 5"
         );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
@@ -101,6 +101,7 @@ mod telemetry_tests {
             effective_model: None,
             requested_model: None,
             actual_model: None,
+            actual_model_unknown_reason: None,
             exit_code: None,
             duration_seconds: None,
             validation_result: None,
@@ -113,6 +114,7 @@ mod telemetry_tests {
             usage_classification: None,
             backend_instance: None,
             model_provider: None,
+            model_provider_unknown_reason: None,
             account_label: None,
             pricing_source: None,
             pricing_version: None,
@@ -306,6 +308,8 @@ mod telemetry_tests {
                 backend_instance: None,
                 provider: None,
                 actual_model: None,
+                actual_model_unknown_reason: None,
+                provider_unknown_reason: None,
                 account_label: None,
                 pricing_source: None,
                 pricing_version: None,
@@ -345,6 +349,8 @@ mod telemetry_tests {
                 backend_instance: None,
                 provider: None,
                 actual_model: None,
+                actual_model_unknown_reason: None,
+                provider_unknown_reason: None,
                 account_label: None,
                 pricing_source: None,
                 pricing_version: None,
@@ -372,6 +378,8 @@ mod telemetry_tests {
             backend_instance: None,
             provider: None,
             actual_model: None,
+            actual_model_unknown_reason: None,
+            provider_unknown_reason: None,
             account_label: None,
             pricing_source: None,
             pricing_version: None,

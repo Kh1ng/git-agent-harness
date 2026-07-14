@@ -415,7 +415,9 @@ fn successful_agy_execution_captures_quota_telemetry() {
 
     // Verify top-level usage
     let top_usage = &entry["usage"];
-    assert_eq!(top_usage["usage_classification"], serde_json::Value::Null); // top level doesn't aggregate usage_classification
+    assert_eq!(top_usage["usage_classification"], "quota_backed");
+    assert_eq!(top_usage["backend_instance"], "agy");
+    assert_eq!(top_usage["provider"], "google");
     assert_eq!(top_usage["requests_count"], 1);
     assert_eq!(top_usage["quota_window"], "AGY individual quota");
 }

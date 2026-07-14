@@ -36,6 +36,7 @@ mod tui;
 mod tui_state;
 mod update;
 mod usage;
+mod usage_attribution;
 mod validation_check;
 mod validation_runner;
 mod work_claim;

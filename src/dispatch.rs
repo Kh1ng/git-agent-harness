@@ -8,6 +8,9 @@ use crate::routing::{
     self, CandidateIdentity, RouteDecision, RouteError, RouteRequest, RoutingRuntimeState,
     TaskRoutingContext,
 };
+use crate::usage_attribution::{
+    aggregate_attempt_usage, normalize_attempt_usage, usage_has_observation, UsageAttribution,
+};
 use crate::validation_runner::{validate, validate_with_exit_code};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
@@ -1447,79 +1450,24 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
 fn attempt_usage(
     log_path: &str,
     agy_cli_log_delta: Option<&str>,
-    backend: Option<&str>,
-    effective_model: Option<&str>,
+    attribution: UsageAttribution<'_>,
     transcript_path: Option<&str>,
     claude_path: Option<&str>,
 ) -> crate::ledger::LedgerUsage {
-    let normalize = |mut usage: crate::ledger::LedgerUsage| {
-        // These four named backends are subscription/account-backed in the
-        // operator's routing policy. This is a classification of accounting
-        // source, not a claim that their subscription has zero economic value.
-        usage.backend_instance = backend.map(str::to_string);
-        usage.usage_classification = match backend {
-            Some("claude" | "codex" | "vibe" | "agy" | "agy-main" | "agy-second") => {
-                Some("quota_backed".to_string())
-            }
-            Some(_) => Some("unknown".to_string()),
-            None => None,
-        };
-        usage.provider = match backend {
-            Some("claude") => Some("anthropic".to_string()),
-            Some("codex") => Some("openai".to_string()),
-            Some("vibe") => Some("mistral".to_string()),
-            Some("agy" | "agy-main" | "agy-second") => Some("google".to_string()),
-            _ => usage.provider,
-        };
-        // AGY receives this fully-qualified label as an explicit `--model`
-        // argument. Its log exposes quota/reset state but no stable token or
-        // model field on successful executions, so retain the bound model as
-        // the exact invoked model rather than leaving coding attempts
-        // unattributable. Other backends keep `actual_model` unknown unless a
-        // backend-owned artifact reports it.
-        if matches!(backend, Some("agy" | "agy-main" | "agy-second"))
-            && usage.actual_model.is_none()
-        {
-            usage.actual_model = effective_model.map(str::to_string);
-        }
-        if matches!(backend, Some("agy" | "agy-main" | "agy-second")) {
-            if usage.quota_window.is_none() {
-                usage.quota_window = Some("AGY individual quota".to_string());
-            }
-            if usage.observed_at.is_none() {
-                usage.observed_at = Some(
-                    time::OffsetDateTime::now_utc()
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_default(),
-                );
-            }
-        }
-        if usage.requests_count.is_none() {
-            // A launched backend invocation is one consumed subscription
-            // request even when its CLI exposes no token counters.
-            usage.requests_count = Some(1);
-        }
-        if usage.usage_source.is_none() {
-            usage.usage_source = Some("execution_observed".to_string());
-        }
-        if usage.actual_cost_usd.is_none() && usage.estimated_cost_usd.is_none() {
-            usage.cost_unknown_reason = Some(
-                "subscription backend does not expose a defensible per-execution dollar cost"
-                    .to_string(),
-            );
-        }
-        usage
-    };
     let text = match fs::read_to_string(log_path) {
         Ok(t) => t,
-        // No artifact means the execution evidence itself is unavailable;
-        // preserve unknown rather than manufacturing a consumed request.
-        Err(_) => return crate::ledger::LedgerUsage::default(),
+        Err(_) => {
+            return normalize_attempt_usage(
+                crate::ledger::LedgerUsage::default(),
+                attribution,
+                true,
+            );
+        }
     };
 
     // Claude Code: prefer the structured session transcript for real
     // per-attempt token/cost usage (issue #153). Never scrape stdout text.
-    if backend == Some("claude") {
+    if attribution.backend == Some("claude") {
         if let Some(transcript) = transcript_path {
             if let Ok(t) = fs::read_to_string(transcript) {
                 let transcript_usage = crate::claude_monitor::parse_claude_transcript_usage(&t);
@@ -1550,7 +1498,7 @@ fn attempt_usage(
                                 .unwrap_or_default(),
                         );
                     }
-                    return normalize(merged);
+                    return normalize_attempt_usage(merged, attribution, true);
                 }
             }
         }
@@ -1564,17 +1512,17 @@ fn attempt_usage(
                     .unwrap_or_default(),
             );
         }
-        return normalize(usage);
+        return normalize_attempt_usage(usage, attribution, true);
     }
 
     // Vibe's structured session metadata is passed through the same artifact
     // slot as Claude's transcript.
-    if backend == Some("vibe") {
+    if attribution.backend == Some("vibe") {
         if let Some(metadata) = transcript_path {
             if let Ok(metadata_json) = fs::read_to_string(metadata) {
                 let session_usage = usage::parse_vibe_session_metadata(&metadata_json);
                 if session_usage.usage_source.is_some() {
-                    return normalize(session_usage);
+                    return normalize_attempt_usage(session_usage, attribution, true);
                 }
             }
         }
@@ -1583,12 +1531,12 @@ fn attempt_usage(
     // OpenCode persists exact per-session model and token counters in its
     // local SQLite store. The runner snapshots only this invocation's row
     // into a JSON artifact, avoiding a racy global "latest session" lookup.
-    if backend == Some("opencode") {
+    if attribution.backend == Some("opencode") {
         if let Some(metadata) = transcript_path {
             if let Ok(metadata_json) = fs::read_to_string(metadata) {
                 let session_usage = usage::parse_opencode_session_metadata(&metadata_json);
                 if session_usage.usage_source.is_some() {
-                    return normalize(session_usage);
+                    return normalize_attempt_usage(session_usage, attribution, true);
                 }
             }
         }
@@ -1596,19 +1544,19 @@ fn attempt_usage(
 
     // Try codex exec --json parser first — handles JSONL output from
     // codex exec --json where the generic regex parser would find nothing.
-    let mut usage = if backend == Some("codex") {
+    let mut usage = if attribution.backend == Some("codex") {
         usage::parse_codex_exec_json(&text)
     } else {
         crate::ledger::LedgerUsage::default()
     };
-    if backend == Some("openhands") {
+    if attribution.backend == Some("openhands") {
         let openhands_usage = usage::parse_openhands_usage(&text);
         if openhands_usage.usage_source.is_some() {
             usage = usage::merge_usage(openhands_usage, usage);
         }
     }
     let has_json_lines = text.lines().any(|line| line.trim_start().starts_with('{'));
-    if usage.usage_source.is_none() && (backend != Some("codex") || !has_json_lines) {
+    if usage.usage_source.is_none() && (attribution.backend != Some("codex") || !has_json_lines) {
         // Fall back to the generic regex-based parser for other backends (or
         // for codex running in non-JSON mode).
         usage = usage::parse_generic_usage(&text, "attempt_output_log");
@@ -1626,7 +1574,7 @@ fn attempt_usage(
                 .unwrap_or_default(),
         );
     }
-    normalize(usage)
+    normalize_attempt_usage(usage, attribution, true)
 }
 
 /// Attribute a review invocation even when the reviewer does not expose token
@@ -1642,137 +1590,10 @@ fn attempt_usage(
 /// backend artifact reports it.
 fn review_usage(
     log_path: &str,
-    backend: &str,
-    effective_model: Option<&str>,
+    attribution: UsageAttribution<'_>,
     claude_path: Option<&str>,
 ) -> crate::ledger::LedgerUsage {
-    attempt_usage(
-        log_path,
-        None,
-        Some(backend),
-        effective_model,
-        None,
-        claude_path,
-    )
-}
-
-fn usage_has_observation(usage: &crate::ledger::LedgerUsage) -> bool {
-    usage.usage_source.is_some()
-        || usage.input_tokens.is_some()
-        || usage.output_tokens.is_some()
-        || usage.cache_read_tokens.is_some()
-        || usage.cache_write_tokens.is_some()
-        || usage.total_tokens.is_some()
-        || usage.requests_count.is_some()
-        || usage.estimated_cost_usd.is_some()
-        || usage.actual_cost_usd.is_some()
-        || usage.quota_window.is_some()
-        || usage.quota_used_percent.is_some()
-        || usage.quota_remaining_percent.is_some()
-        || usage.quota_reset_at.is_some()
-}
-
-fn aggregate_attempt_usage(
-    attempts: &[crate::ledger::AttemptRecord],
-) -> crate::ledger::LedgerUsage {
-    let mut aggregated = crate::ledger::LedgerUsage::default();
-    let mut seen = false;
-    for attempt in attempts {
-        let usage = &attempt.usage;
-        if !usage_has_observation(usage) {
-            continue;
-        }
-        seen = true;
-        aggregated.input_tokens =
-            Some(aggregated.input_tokens.unwrap_or(0) + usage.input_tokens.unwrap_or(0));
-        aggregated.output_tokens =
-            Some(aggregated.output_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0));
-        aggregated.cache_read_tokens =
-            Some(aggregated.cache_read_tokens.unwrap_or(0) + usage.cache_read_tokens.unwrap_or(0));
-        aggregated.cache_write_tokens = Some(
-            aggregated.cache_write_tokens.unwrap_or(0) + usage.cache_write_tokens.unwrap_or(0),
-        );
-        aggregated.total_tokens =
-            Some(aggregated.total_tokens.unwrap_or(0) + usage.total_tokens.unwrap_or(0));
-        aggregated.requests_count =
-            Some(aggregated.requests_count.unwrap_or(0) + usage.requests_count.unwrap_or(0));
-        aggregated.estimated_cost_usd = Some(
-            aggregated.estimated_cost_usd.unwrap_or(0.0) + usage.estimated_cost_usd.unwrap_or(0.0),
-        );
-        aggregated.actual_cost_usd =
-            Some(aggregated.actual_cost_usd.unwrap_or(0.0) + usage.actual_cost_usd.unwrap_or(0.0));
-
-        if aggregated.observed_at.as_deref() < usage.observed_at.as_deref() {
-            aggregated.observed_at = usage.observed_at.clone();
-            aggregated.quota_window = usage.quota_window.clone();
-            aggregated.quota_used_percent = usage.quota_used_percent;
-            aggregated.quota_remaining_percent = usage.quota_remaining_percent;
-            aggregated.quota_reset_at = usage.quota_reset_at.clone();
-        }
-    }
-
-    if !seen {
-        return crate::ledger::LedgerUsage::default();
-    }
-
-    if aggregated.input_tokens == Some(0)
-        && !attempts
-            .iter()
-            .any(|attempt| attempt.usage.input_tokens.is_some())
-    {
-        aggregated.input_tokens = None;
-    }
-    if aggregated.output_tokens == Some(0)
-        && !attempts
-            .iter()
-            .any(|attempt| attempt.usage.output_tokens.is_some())
-    {
-        aggregated.output_tokens = None;
-    }
-    if aggregated.cache_read_tokens == Some(0)
-        && !attempts
-            .iter()
-            .any(|attempt| attempt.usage.cache_read_tokens.is_some())
-    {
-        aggregated.cache_read_tokens = None;
-    }
-    if aggregated.cache_write_tokens == Some(0)
-        && !attempts
-            .iter()
-            .any(|attempt| attempt.usage.cache_write_tokens.is_some())
-    {
-        aggregated.cache_write_tokens = None;
-    }
-    if aggregated.total_tokens == Some(0)
-        && !attempts
-            .iter()
-            .any(|attempt| attempt.usage.total_tokens.is_some())
-    {
-        aggregated.total_tokens = None;
-    }
-    if aggregated.requests_count == Some(0)
-        && !attempts
-            .iter()
-            .any(|attempt| attempt.usage.requests_count.is_some())
-    {
-        aggregated.requests_count = None;
-    }
-    if aggregated.estimated_cost_usd == Some(0.0)
-        && !attempts
-            .iter()
-            .any(|attempt| attempt.usage.estimated_cost_usd.is_some())
-    {
-        aggregated.estimated_cost_usd = None;
-    }
-    if aggregated.actual_cost_usd == Some(0.0)
-        && !attempts
-            .iter()
-            .any(|attempt| attempt.usage.actual_cost_usd.is_some())
-    {
-        aggregated.actual_cost_usd = None;
-    }
-    aggregated.usage_source = Some("attempt_aggregate".to_string());
-    aggregated
+    attempt_usage(log_path, None, attribution, None, claude_path)
 }
 
 fn preflight(profile: &Profile, backend: &str) -> Result<()> {
@@ -2243,7 +2064,11 @@ fn improve(
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
                     cli_version: None,
-                    usage: crate::ledger::LedgerUsage::default(),
+                    usage: normalize_attempt_usage(
+                        crate::ledger::LedgerUsage::default(),
+                        UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
+                        false,
+                    ),
                 });
                 worktree::cleanup(&wt, repo);
                 return Err(e);
@@ -2283,8 +2108,7 @@ fn improve(
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
-                    Some(route.effective_backend.as_str()),
-                    Some(&llm.model),
+                    UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
@@ -2348,8 +2172,7 @@ fn improve(
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
-                    Some(route.effective_backend.as_str()),
-                    Some(&llm.model),
+                    UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
@@ -2538,8 +2361,7 @@ fn improve(
                     usage: attempt_usage(
                         &result.log_path,
                         result.agy_cli_log_delta.as_deref(),
-                        Some(route.effective_backend.as_str()),
-                        Some(&llm.model),
+                        UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                         result.transcript_path.as_deref(),
                         Some(&claude_path),
                     ),
@@ -2597,8 +2419,7 @@ fn improve(
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
-                    Some(route.effective_backend.as_str()),
-                    Some(&llm.model),
+                    UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
@@ -2650,8 +2471,7 @@ fn improve(
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
-                    Some(route.effective_backend.as_str()),
-                    Some(&llm.model),
+                    UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
@@ -2684,8 +2504,7 @@ fn improve(
                     usage: attempt_usage(
                         &result.log_path,
                         result.agy_cli_log_delta.as_deref(),
-                        Some(route.effective_backend.as_str()),
-                        Some(&llm.model),
+                        UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                         result.transcript_path.as_deref(),
                         Some(&claude_path),
                     ),
@@ -2761,8 +2580,7 @@ fn improve(
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
-                            Some(route.effective_backend.as_str()),
-                            Some(&llm.model),
+                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
@@ -2855,8 +2673,7 @@ fn improve(
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
-                            Some(route.effective_backend.as_str()),
-                            Some(&llm.model),
+                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
@@ -2892,8 +2709,7 @@ fn improve(
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
-                            Some(route.effective_backend.as_str()),
-                            Some(&llm.model),
+                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
@@ -2920,8 +2736,7 @@ fn improve(
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
-                            Some(route.effective_backend.as_str()),
-                            Some(&llm.model),
+                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                             result.transcript_path.as_deref(),
                             Some(&claude_path),
                         ),
@@ -3997,6 +3812,7 @@ fn review(
     let mut prior_review_context = String::new();
     let mut result = None;
     for attempt_number in 0..MAX_REVIEW_ATTEMPTS {
+        ledger.attempts_started = Some(ledger.attempts_started.unwrap_or(0) + 1);
         apply_route_to_ledger(ledger, &route);
         let required_capabilities = review_preflight(cfg, profile, &route.effective_backend)?;
         let mut capability_prefix = String::new();
@@ -4029,15 +3845,111 @@ fn review(
             ledger,
         )?;
 
+        let attempt_session = session_dir.join(format!("review-attempt-{}", attempt_number + 1));
+        fs::create_dir_all(&attempt_session)?;
         let attempt = runner::run_review_backend(
             profile,
             &route.effective_backend,
             repo,
             &prompt,
-            session_dir,
+            &attempt_session,
             route.effective_model.as_deref(),
             &env_vars,
         );
+        if !matches!(
+            &attempt.outcome,
+            runner::ReviewProcessOutcome::ExecutableUnavailable
+                | runner::ReviewProcessOutcome::SpawnFailure
+        ) {
+            ledger.attempts_completed = Some(ledger.attempts_completed.unwrap_or(0) + 1);
+        }
+        let attribution = UsageAttribution::from_route(&route);
+        let usage = if matches!(
+            &attempt.outcome,
+            runner::ReviewProcessOutcome::ExecutableUnavailable
+                | runner::ReviewProcessOutcome::SpawnFailure
+        ) {
+            normalize_attempt_usage(crate::ledger::LedgerUsage::default(), attribution, false)
+        } else {
+            review_usage(
+                &attempt_session
+                    .join("review-stdout.log")
+                    .display()
+                    .to_string(),
+                attribution,
+                profile.claude_path.as_deref(),
+            )
+        };
+        let (exit_code, validation_result, failure_class, failure_stage) = match &attempt.outcome {
+            runner::ReviewProcessOutcome::Success => (Some(0), None, None, None),
+            runner::ReviewProcessOutcome::ExecutableUnavailable => (
+                None,
+                Some("not_run".to_string()),
+                Some(
+                    crate::ledger::FailureClass::EnvironmentError
+                        .as_str()
+                        .to_string(),
+                ),
+                Some(crate::ledger::FailureStage::Review.as_str().to_string()),
+            ),
+            runner::ReviewProcessOutcome::SpawnFailure => (
+                None,
+                Some("not_run".to_string()),
+                Some(
+                    crate::ledger::FailureClass::HarnessError
+                        .as_str()
+                        .to_string(),
+                ),
+                Some(
+                    crate::ledger::FailureStage::BackendLaunch
+                        .as_str()
+                        .to_string(),
+                ),
+            ),
+            runner::ReviewProcessOutcome::NonZeroExit(code) => (
+                Some(*code),
+                Some("not_run".to_string()),
+                Some(
+                    crate::ledger::FailureClass::BackendError
+                        .as_str()
+                        .to_string(),
+                ),
+                Some(crate::ledger::FailureStage::Review.as_str().to_string()),
+            ),
+            runner::ReviewProcessOutcome::SignalTermination(signal) => (
+                Some(-*signal),
+                Some("cancelled_shutdown".to_string()),
+                Some(
+                    crate::ledger::FailureClass::HarnessError
+                        .as_str()
+                        .to_string(),
+                ),
+                Some(crate::ledger::FailureStage::Review.as_str().to_string()),
+            ),
+            runner::ReviewProcessOutcome::Timeout => (
+                None,
+                Some("not_run_timeout".to_string()),
+                Some(
+                    crate::ledger::FailureClass::BackendError
+                        .as_str()
+                        .to_string(),
+                ),
+                Some(crate::ledger::FailureStage::Review.as_str().to_string()),
+            ),
+        };
+        ledger.attempts.push(crate::ledger::AttemptRecord {
+            attempt_number: attempt_number as u32 + 1,
+            backend: route.effective_backend.clone(),
+            effective_model: route.effective_model.clone(),
+            exit_code,
+            validation_result,
+            failure_class,
+            failure_stage,
+            duration_seconds: Some(attempt.duration_secs),
+            diff_path: None,
+            cli_version: None,
+            usage,
+        });
         if !fresh_context && !attempt.stdout.trim().is_empty() {
             prior_review_context = utf8_safe_suffix(&attempt.stdout, 20_000).to_string();
         }
@@ -4056,9 +3968,9 @@ fn review(
                     format!("{}\n{}", attempt.stdout, attempt.stderr)
                 };
                 let failure_log = if attempt.stdout.trim().is_empty() {
-                    session_dir.join("review-stderr.log")
+                    attempt_session.join("review-stderr.log")
                 } else {
-                    session_dir.join("review-stdout.log")
+                    attempt_session.join("review-stdout.log")
                 };
                 if let Some(parsed) = mark_backend_unavailable_from_output(
                     &route.effective_backend,
@@ -4108,19 +4020,18 @@ fn review(
     let report_path = session_dir.join("review-report.md");
     let verdict_path = session_dir.join("review-verdict.json");
     fs::write(&report_path, &result.stdout)?;
+    fs::write(session_dir.join("review-stdout.log"), &result.stdout)?;
     if !result.stderr.trim().is_empty() {
         fs::write(session_dir.join("review-stderr.log"), &result.stderr)?;
     }
 
     match result.outcome {
         runner::ReviewProcessOutcome::Success => {
-            let review_output_log = session_dir.join("review-stdout.log");
-            let review_usage = review_usage(
-                &review_output_log.display().to_string(),
-                &route.effective_backend,
-                route.effective_model.as_deref(),
-                profile.claude_path.as_deref(),
-            );
+            let review_usage = ledger
+                .attempts
+                .last()
+                .map(|attempt| attempt.usage.clone())
+                .unwrap_or_default();
             let reviewer_tier = derive_reviewer_tier(cfg, profile, &route);
             let mut verdict = match parse_review_verdict_with_context(
                 &result.stdout,
@@ -4140,6 +4051,13 @@ fn review(
                     );
                     ledger.backend_exit_code = Some(0);
                     ledger.validation_result = Some("invalid_output".into());
+                    if let Some(attempt) = ledger.attempts.last_mut() {
+                        attempt.validation_result = Some("invalid_output".into());
+                        attempt.failure_class =
+                            Some(crate::ledger::FailureClass::BackendError.as_str().into());
+                        attempt.failure_stage =
+                            Some(crate::ledger::FailureStage::Review.as_str().into());
+                    }
                     return Err(err);
                 }
             };
@@ -4173,7 +4091,10 @@ fn review(
             ledger.reviewer_model = route.effective_model.clone();
             ledger.reviewer_tier = Some(reviewer_tier.as_str().to_string());
             ledger.review_gate_reason = verdict.safety_gate_reason.clone();
-            ledger.usage = review_usage.clone();
+            ledger.usage = aggregate_attempt_usage(&ledger.attempts);
+            if let Some(attempt) = ledger.attempts.last_mut() {
+                attempt.validation_result = Some(verdict.verdict.clone());
+            }
             // TICKET-125: attribute this verdict back to the branch's
             // implementation entry (the backend that wrote the code being
             // reviewed), not this review dispatch's own entry (the reviewer).
@@ -4869,8 +4790,8 @@ mod tests {
         run_backend, scan_available_tickets, should_skip_per_dispatch_baseline,
         validation_failure_fingerprint, validation_failure_no_progress_reason,
         ExperimentMrRenderContext, IssueDetails, MrRenderContext, ReviewDiffBundle,
-        ReviewGateContext, ReviewerTier, RouteDecision, TicketMetadata, ValidationFailureProgress,
-        LIVE_TASK_ACCEPTANCE_MAX_BYTES, PROJECT_BRIEF_MAX_BYTES,
+        ReviewGateContext, ReviewerTier, RouteDecision, TicketMetadata, UsageAttribution,
+        ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES, PROJECT_BRIEF_MAX_BYTES,
     };
     use crate::availability::{availability_for, load_state, Reason};
     use crate::config::{CandidateConfig, Defaults, GahConfig, Profile, RoutingPolicy};
@@ -6130,25 +6051,32 @@ which lacks a leading boundary check.
         )
         .unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap(), None, Some("vibe"), None, None, None);
+        let usage = attempt_usage(
+            path.to_str().unwrap(),
+            None,
+            UsageAttribution::backend(Some("vibe"), None),
+            None,
+            None,
+        );
         assert_eq!(usage.input_tokens, Some(500));
         assert_eq!(usage.output_tokens, Some(120));
         assert_eq!(usage.total_tokens, Some(620));
     }
 
     #[test]
-    fn attempt_usage_is_empty_not_zero_when_log_missing() {
-        // TICKET-101: unknown must remain unknown, never a fabricated zero.
+    fn attempt_usage_attributes_missing_artifact_without_fabricating_tokens() {
         let usage = attempt_usage(
             "/definitely/does/not/exist/backend-output.log",
             None,
-            None,
-            None,
+            UsageAttribution::backend(Some("codex"), Some("gpt-5.4-mini")),
             None,
             None,
         );
         assert_eq!(usage.input_tokens, None);
-        assert_eq!(usage.usage_source, None);
+        assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
+        assert_eq!(usage.provider.as_deref(), Some("openai"));
+        assert_eq!(usage.usage_classification.as_deref(), Some("quota_backed"));
+        assert!(usage.actual_model_unknown_reason.is_some());
     }
 
     #[test]
@@ -6157,7 +6085,13 @@ which lacks a leading boundary check.
         let path = tmp.path().join("backend-output.log");
         fs::write(&path, "agent made some edits, no usage reported\n").unwrap();
 
-        let usage = attempt_usage(path.to_str().unwrap(), None, Some("vibe"), None, None, None);
+        let usage = attempt_usage(
+            path.to_str().unwrap(),
+            None,
+            UsageAttribution::backend(Some("vibe"), None),
+            None,
+            None,
+        );
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
         assert_eq!(usage.requests_count, Some(1));
@@ -6173,8 +6107,7 @@ which lacks a leading boundary check.
         let usage = attempt_usage(
             path.to_str().unwrap(),
             Some("quotaRefreshLoop: completed"),
-            Some("agy"),
-            Some("Gemini 3.5 Flash (Medium)"),
+            UsageAttribution::backend(Some("agy"), Some("Gemini 3.5 Flash (Medium)")),
             None,
             None,
         );
@@ -6198,15 +6131,14 @@ which lacks a leading boundary check.
 
         let usage = review_usage(
             path.to_str().unwrap(),
-            "agy",
-            Some("Claude Sonnet 4.6 (Thinking)"),
+            UsageAttribution::backend(Some("agy"), Some("Claude Sonnet 4.6 (Thinking)")),
             None,
         );
 
         assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
         assert_eq!(usage.usage_classification.as_deref(), Some("quota_backed"));
         assert_eq!(usage.backend_instance.as_deref(), Some("agy"));
-        assert_eq!(usage.provider.as_deref(), Some("google"));
+        assert_eq!(usage.provider.as_deref(), Some("anthropic"));
         assert_eq!(
             usage.actual_model.as_deref(),
             Some("Claude Sonnet 4.6 (Thinking)")
@@ -6231,8 +6163,7 @@ which lacks a leading boundary check.
         let usage = attempt_usage(
             path.to_str().unwrap(),
             None,
-            Some("codex"),
-            None,
+            UsageAttribution::backend(Some("codex"), None),
             None,
             None,
         );

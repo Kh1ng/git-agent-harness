@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 /// a false zero. Consumers of the former v2 `u32` fields must explicitly
 /// handle the v3 nullable representation.
 /// Version 4 adds the optional review evidence-gate reason to task outcomes.
-pub const SCHEMA_VERSION: u32 = 4;
+/// Version 5 adds explicit unknown-attribution reasons for model and provider.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -77,6 +78,8 @@ pub struct AttemptUsageRecord {
     pub requested_model: Option<String>,
     /// Model reported by the backend/session, when available
     pub actual_model: Option<String>,
+    /// Explicit reason the backend/session model could not be observed.
+    pub actual_model_unknown_reason: Option<String>,
 
     /// Exit code from the attempt
     pub exit_code: Option<i32>,
@@ -104,6 +107,7 @@ pub struct AttemptUsageRecord {
     /// Safe logical backend instance/account attribution.
     pub backend_instance: Option<String>,
     pub model_provider: Option<String>,
+    pub model_provider_unknown_reason: Option<String>,
     pub account_label: Option<String>,
     pub pricing_source: Option<String>,
     pub pricing_version: Option<String>,

@@ -46,13 +46,13 @@ pub fn extract_attempt_usage_records(
             backend: attempt.backend.clone(),
             effective_backend: attempt.backend.clone(),
             requested_backend: entry.requested_backend.clone(),
-            effective_model: attempt
-                .usage
-                .actual_model
+            effective_model: attempt.effective_model.clone(),
+            requested_model: attempt
+                .effective_model
                 .clone()
-                .or_else(|| attempt.effective_model.clone()),
-            requested_model: entry.requested_model.clone(),
+                .or_else(|| entry.requested_model.clone()),
             actual_model: attempt.usage.actual_model.clone(),
+            actual_model_unknown_reason: attempt.usage.actual_model_unknown_reason.clone(),
             exit_code: attempt.exit_code,
             duration_seconds: attempt.duration_seconds,
             validation_result: attempt.validation_result.clone(),
@@ -77,6 +77,11 @@ pub fn extract_attempt_usage_records(
                 .provider
                 .clone()
                 .or_else(|| entry.usage.provider.clone()),
+            model_provider_unknown_reason: attempt
+                .usage
+                .provider_unknown_reason
+                .clone()
+                .or_else(|| entry.usage.provider_unknown_reason.clone()),
             account_label: attempt
                 .usage
                 .account_label

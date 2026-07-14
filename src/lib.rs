@@ -35,6 +35,7 @@ pub mod sync;
 pub mod telemetry;
 pub mod tui;
 pub mod usage;
+pub(crate) mod usage_attribution;
 pub mod work_claim;
 pub mod worktree;
 
