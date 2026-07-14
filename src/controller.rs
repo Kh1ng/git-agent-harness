@@ -38,6 +38,7 @@ pub(crate) fn is_genuine_agent_failure(failure_class: &str) -> bool {
 fn reconcile_abandoned_dispatches(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
+    entries: &mut Vec<crate::ledger::LedgerEntry>,
 ) -> Result<usize> {
     let events = crate::events::read_events(cfg)?;
     let orphans = crate::events::orphaned_dispatch_runs(&events, profile_name);
@@ -45,9 +46,9 @@ fn reconcile_abandoned_dispatches(
         return Ok(0);
     }
     let profile = crate::config::get_profile(cfg, profile_name)?;
-    let existing_sessions: HashSet<String> = crate::ledger::read_entries(cfg)?
-        .into_iter()
-        .filter_map(|entry| entry.session_id)
+    let existing_sessions: HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| entry.session_id.clone())
         .collect();
 
     for (run_id, work_id) in &orphans {
@@ -72,6 +73,7 @@ fn reconcile_abandoned_dispatches(
                 crate::ledger::FailureStage::AgentRun,
             );
             crate::ledger::append(cfg, &entry)?;
+            entries.push(entry);
         }
         crate::events::record_with_run_id(
             cfg,
@@ -1033,13 +1035,15 @@ pub fn run_once(
     // It only removes clean GAH-owned worktrees that are terminal upstream or
     // past retention; an uncommitted fresh worktree is never inferred stale.
     crate::prune::run_automatic(cfg, profile_name)?;
-    reconcile_abandoned_dispatches(cfg, profile_name)?;
+    let mut ledger_entries = crate::ledger::read_entries(cfg)?;
+    reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
     let claim_scope = {
         let profile = crate::config::get_profile(cfg, profile_name)?;
         format!("{profile_name}@{}", profile.repo_id)
     };
     let now = time::OffsetDateTime::now_utc();
-    let snapshot = crate::status::build_snapshot(cfg, profile_name, now)?;
+    let snapshot =
+        crate::status::build_snapshot_from_entries(cfg, profile_name, now, &ledger_entries)?;
     crate::events::record(
         cfg,
         crate::events::EventType::ObservationCompleted,
@@ -1095,8 +1099,12 @@ pub fn run_once(
             // profile. Only if nothing else is actionable do we surface
             // profile-wide HumanRequired -- that is a genuine profile stall,
             // not a single blocked ticket.
-            let fresh =
-                crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
+            let fresh = crate::status::build_snapshot_from_entries(
+                cfg,
+                profile_name,
+                time::OffsetDateTime::now_utc(),
+                &ledger_entries,
+            )?;
             let mut scoped = fresh;
             if let Some(stuck_wid) = original_action.work_id() {
                 scoped
@@ -1182,7 +1190,7 @@ pub fn run_once(
 fn run_parallel_once(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
-    _snapshot: &crate::status::StatusSnapshot,
+    snapshot: &crate::status::StatusSnapshot,
     json: bool,
     max_parallel: usize,
     skip_validation_gate: bool,
@@ -1220,9 +1228,10 @@ fn run_parallel_once(
             // Re-fetch claimed work IDs to get fresh state (other processes might have claimed work)
             let claimed_work_ids = crate::work_claim::get_claimed_work_ids(&claim_scope)?;
 
-            // Re-build snapshot to get fresh state (this is conservative but safe)
-            let mut fresh_snapshot =
-                crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
+            // Reuse the controller snapshot for this cycle; claim filtering
+            // below removes work already taken by earlier slots or other
+            // processes.
+            let mut fresh_snapshot = snapshot.clone();
 
             // Do not let the next slot re-select a ticket claimed by an
             // earlier slot in this batch or by another controller process.
@@ -3304,9 +3313,10 @@ default_target_branch = "main"
             "dispatch_ticket: 500",
         )
         .unwrap();
+        let mut ledger_entries = crate::ledger::read_entries(&cfg).unwrap();
 
         assert_eq!(
-            super::reconcile_abandoned_dispatches(&cfg, "real").unwrap(),
+            super::reconcile_abandoned_dispatches(&cfg, "real", &mut ledger_entries).unwrap(),
             1
         );
 

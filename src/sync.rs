@@ -545,6 +545,7 @@ fn gitlab_ci_pending(pipeline_status: Option<&str>) -> bool {
 /// do NOT consume retry budget.  This prevents a ticket that needed 2
 /// internal attempts to pass validation from being blocked from its first
 /// post-review fix before the review even happens.
+#[allow(dead_code)]
 pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashMap<String, usize> {
     use std::collections::HashMap;
 
@@ -552,6 +553,14 @@ pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashM
         Ok(entries) => entries,
         Err(_) => return HashMap::new(),
     };
+    count_fix_attempts_per_branch_from_entries(&entries)
+}
+
+#[allow(dead_code)]
+pub fn count_fix_attempts_per_branch_from_entries(
+    entries: &[crate::ledger::LedgerEntry],
+) -> std::collections::HashMap<String, usize> {
+    use std::collections::HashMap;
 
     let mut counts = HashMap::new();
 
@@ -575,6 +584,7 @@ pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashM
 /// (conflicts, unresolved discussions, external checks) would otherwise be
 /// re-attempted every loop iteration forever. Mirrors
 /// `count_fix_attempts_per_branch` exactly, filtered to `mode == "merge"`.
+#[allow(dead_code)]
 pub fn count_merge_attempts_per_branch(
     cfg: &GahConfig,
 ) -> std::collections::HashMap<String, usize> {
@@ -584,6 +594,14 @@ pub fn count_merge_attempts_per_branch(
         Ok(entries) => entries,
         Err(_) => return HashMap::new(),
     };
+    count_merge_attempts_per_branch_from_entries(&entries)
+}
+
+#[allow(dead_code)]
+pub fn count_merge_attempts_per_branch_from_entries(
+    entries: &[crate::ledger::LedgerEntry],
+) -> std::collections::HashMap<String, usize> {
+    use std::collections::HashMap;
 
     let mut counts = HashMap::new();
 

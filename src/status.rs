@@ -7,7 +7,7 @@ use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct StatusSnapshot {
     pub schema_version: u32,
     pub generated_at: String,
@@ -84,19 +84,19 @@ pub struct ProfileIdentity {
     pub max_implementation_failures_per_ticket: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Observations {
     pub sync: ObservationStatus,
     pub availability: ObservationStatus,
     pub ledger: ObservationStatus,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ObservationStatus {
     pub status: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ScopeStatusJson {
     pub backend: String,
     pub model: Option<String>,
@@ -111,7 +111,7 @@ pub struct ScopeStatusJson {
     pub scope: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct RecentLedgerSummary {
     pub most_recent_dispatch_timestamp: String,
     pub most_recent_effective_backend: String,
@@ -147,7 +147,7 @@ pub struct Blocker {
     pub source_reference: Option<String>,
 }
 
-#[derive(Serialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Debug, PartialEq, Eq, Clone)]
 pub struct StatusError {
     pub subsystem: String,
     pub message: String,
@@ -158,6 +158,16 @@ pub fn build_snapshot(
     cfg: &GahConfig,
     profile_name: &str,
     now: OffsetDateTime,
+) -> Result<StatusSnapshot> {
+    let entries = ledger::read_entries(cfg)?;
+    build_snapshot_from_entries(cfg, profile_name, now, &entries)
+}
+
+pub fn build_snapshot_from_entries(
+    cfg: &GahConfig,
+    profile_name: &str,
+    now: OffsetDateTime,
+    entries: &[LedgerEntry],
 ) -> Result<StatusSnapshot> {
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let generated_at = now.format(&Rfc3339).unwrap_or_default();
@@ -180,12 +190,13 @@ pub fn build_snapshot(
     let mut errors = Vec::new();
 
     // TICKET-118: Count fix attempts per branch from ledger entries
-    let fix_attempt_counts = sync::count_fix_attempts_per_branch(cfg);
+    let fix_attempt_counts = sync::count_fix_attempts_per_branch_from_entries(entries);
     // TICKET-127: Count merge attempts per branch for the auto-merge retry cap
-    let merge_attempt_counts = sync::count_merge_attempts_per_branch(cfg);
+    let merge_attempt_counts = sync::count_merge_attempts_per_branch_from_entries(entries);
     // review-hold: work_ids a manager session is actively reviewing via
     // `gah hold set`, out of band from gah's own auto-merge loop.
-    let review_held_work_ids = ledger::active_review_hold_work_ids(cfg, profile_name);
+    let review_held_work_ids =
+        ledger::active_review_hold_work_ids_from_entries(entries, profile_name);
 
     // 1. Sync State
     let mut merge_requests = Vec::new();
@@ -194,11 +205,7 @@ pub fn build_snapshot(
 
     // Ledger read is hoisted above the sync step so recently-merged MRs can be
     // enriched with their backend/model and review verdict (TICKET-198).
-    let ledger_result = ledger::read_entries(cfg);
-    let ledger_entries_by_work_id = ledger_result
-        .as_ref()
-        .map(|e| ledger::index_entries_by_work_id(e))
-        .unwrap_or_default();
+    let ledger_entries_by_work_id = ledger::index_entries_by_work_id(entries);
     match sync::fetch_mrs(profile) {
         Ok(mrs) => {
             let mrs = if profile.provider == "gitlab" {
@@ -267,57 +274,45 @@ pub fn build_snapshot(
 
     // 3. Ledger State
     let mut recent_ledger = None;
-    let mut ledger_obs = ObservationStatus { status: "ok" };
-    match &ledger_result {
-        Ok(entries) => {
-            let mut latest: Option<&LedgerEntry> = None;
-            let mut max_ts: Option<OffsetDateTime> = None;
+    let ledger_obs = ObservationStatus { status: "ok" };
+    {
+        let mut latest: Option<&LedgerEntry> = None;
+        let mut max_ts: Option<OffsetDateTime> = None;
 
-            for entry in entries.iter().filter(|e| e.profile == profile_name) {
-                if let Ok(ts) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
-                    match max_ts {
-                        Some(m) if ts > m => {
-                            max_ts = Some(ts);
-                            latest = Some(entry);
-                        }
-                        None => {
-                            max_ts = Some(ts);
-                            latest = Some(entry);
-                        }
-                        _ => {}
-                    }
-                } else {
-                    if latest.is_none() {
+        for entry in entries.iter().filter(|e| e.profile == profile_name) {
+            if let Ok(ts) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
+                match max_ts {
+                    Some(m) if ts > m => {
+                        max_ts = Some(ts);
                         latest = Some(entry);
                     }
+                    None => {
+                        max_ts = Some(ts);
+                        latest = Some(entry);
+                    }
+                    _ => {}
                 }
-            }
-
-            if let Some(entry) = latest {
-                recent_ledger = Some(RecentLedgerSummary {
-                    most_recent_dispatch_timestamp: entry.timestamp.clone(),
-                    most_recent_effective_backend: entry.effective_backend.clone(),
-                    most_recent_effective_model: entry.effective_model.clone(),
-                    most_recent_work_id: entry.work_id.clone(),
-                    most_recent_mode: entry.mode.clone(),
-                    most_recent_validation_result: entry.validation_result.clone(),
-                    most_recent_failure_class: entry.failure_class.clone(),
-                    most_recent_failure_stage: entry.failure_stage.clone(),
-                    most_recent_branch: entry.branch.clone(),
-                    most_recent_mr_url: entry.mr_url.clone(),
-                    attempts_started: entry.attempts_started,
-                    attempts_completed: entry.attempts_completed,
-                    human_required: entry.human_required,
-                    routing_diagnostics: entry.routing_diagnostics.clone(),
-                });
+            } else if latest.is_none() {
+                latest = Some(entry);
             }
         }
-        Err(e) => {
-            ledger_obs.status = "error";
-            errors.push(StatusError {
-                subsystem: "ledger".into(),
-                message: format!("{:#}", e),
-                incomplete_snapshot: true,
+
+        if let Some(entry) = latest {
+            recent_ledger = Some(RecentLedgerSummary {
+                most_recent_dispatch_timestamp: entry.timestamp.clone(),
+                most_recent_effective_backend: entry.effective_backend.clone(),
+                most_recent_effective_model: entry.effective_model.clone(),
+                most_recent_work_id: entry.work_id.clone(),
+                most_recent_mode: entry.mode.clone(),
+                most_recent_validation_result: entry.validation_result.clone(),
+                most_recent_failure_class: entry.failure_class.clone(),
+                most_recent_failure_stage: entry.failure_stage.clone(),
+                most_recent_branch: entry.branch.clone(),
+                most_recent_mr_url: entry.mr_url.clone(),
+                attempts_started: entry.attempts_started,
+                attempts_completed: entry.attempts_completed,
+                human_required: entry.human_required,
+                routing_diagnostics: entry.routing_diagnostics.clone(),
             });
         }
     }
@@ -590,6 +585,19 @@ default_target_branch = "main"
         assert!(snap.recent_ledger.is_none());
         assert!(snap.blockers.is_empty());
         assert!(snap.constraints.is_empty());
+    }
+
+    #[test]
+    fn build_snapshot_reads_ledger_once() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_test_cfg(&tmp);
+        let _availability_guard =
+            crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
+
+        crate::ledger::reset_read_entries_call_count();
+        let snap = build_snapshot(&cfg, "test", OffsetDateTime::now_utc()).unwrap();
+        assert_eq!(crate::ledger::read_entries_call_count(), 1);
+        assert!(snap.blockers.is_empty());
     }
 
     #[test]
