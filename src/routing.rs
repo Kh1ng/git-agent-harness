@@ -439,7 +439,8 @@ where
         .then(|| req.requested_model.map(str::to_string))
         .flatten();
     let mode = req.mode.to_string();
-    let mut decision = decide_with_inner(
+    let last_failure_class = req.last_failure_class;
+    let (mut decision, candidates) = decide_with_inner(
         defaults,
         profile,
         req,
@@ -449,6 +450,51 @@ where
         backend_available,
     )?;
     if let Some(model) = auto_model_override {
+        // The requested model may not match any configured candidate at all
+        // (an ad-hoc override unrelated to the routing config) -- that's
+        // fine, nothing gates it. But if it DOES match a configured
+        // candidate for the selected backend, that candidate must pass the
+        // same eligibility checks (availability, already-attempted,
+        // requires_approval) every other candidate had to pass, or an
+        // explicit --model flag would be a standing bypass of the approval
+        // gate this routing layer exists to enforce.
+        if decision.effective_model.as_deref() != Some(model.as_str()) {
+            if let Some(candidate) = candidates.iter().find(|c| {
+                c.backend == decision.effective_backend
+                    && c.model.as_deref() == Some(model.as_str())
+            }) {
+                let escalate =
+                    is_genuine_agent_failure(last_failure_class) || !runtime.attempted.is_empty();
+                if let Some(skip) = skip_reason_for_candidate(
+                    evaluation.state_path,
+                    &candidate.backend,
+                    candidate.model.as_deref(),
+                    candidate.quota_pool.as_deref(),
+                    &profile.max_concurrent_per_model,
+                    evaluation.now,
+                    backend_available,
+                    runtime,
+                    escalate,
+                    candidate.requires_approval,
+                )? {
+                    if skip.reason == "operator_approval_required" {
+                        return Err(RouteError::ApprovalRequired {
+                            backend: skip.backend.clone(),
+                            model: skip.model.clone(),
+                            skipped: vec![skip],
+                        }
+                        .into());
+                    }
+                    return Err(RouteError::NoEligibleBackend {
+                        preferred_backend: candidate.backend.clone(),
+                        preferred_model: candidate.model.clone(),
+                        skipped: vec![skip],
+                        earliest_reset: None,
+                    }
+                    .into());
+                }
+            }
+        }
         let previous_model = decision.effective_model.replace(model.clone());
         decision.effective_quota_pool = profile.effective_routing(defaults).find_quota_pool(
             &mode,
@@ -490,6 +536,11 @@ where
     Ok(decision)
 }
 
+/// Returns the decision alongside the exact candidate list it was chosen
+/// from, so a caller applying a post-hoc override (an explicit CLI model
+/// with `requested_backend == "auto"`) can validate the override target
+/// against the same eligibility gates every other candidate had to pass --
+/// including `requires_approval` -- rather than swapping it in unchecked.
 fn decide_with_inner<F>(
     defaults: &Defaults,
     profile: &Profile,
@@ -498,7 +549,7 @@ fn decide_with_inner<F>(
     runtime: &RoutingRuntimeState,
     evaluation: RouteEvaluation<'_>,
     backend_available: F,
-) -> Result<RouteDecision>
+) -> Result<(RouteDecision, Vec<RouteCandidate>)>
 where
     F: Fn(&str) -> bool + Copy,
 {
@@ -509,6 +560,9 @@ where
     let effective_routing = profile.effective_routing(defaults);
 
     if req.requested_backend != "auto" {
+        // No auto_model_override is ever applied on this path (it only
+        // triggers for requested_backend == "auto"), so the candidate list
+        // is never consulted here.
         return route_explicit(
             defaults,
             profile,
@@ -520,7 +574,8 @@ where
             now,
             backend_available,
             runtime,
-        );
+        )
+        .map(|decision| (decision, Vec::new()));
     }
 
     if let Some((rule_index, candidates)) = task_rule_candidates(&effective_routing, req.mode, task)
@@ -528,7 +583,8 @@ where
     {
         let escalate =
             is_genuine_agent_failure(req.last_failure_class) || !runtime.attempted.is_empty();
-        let (candidates, reorder) = order_candidates(profile, candidates, escalate, runtime);
+        let (candidates, reorder) =
+            order_candidates(profile, candidates, escalate, runtime, req.mode);
         let preferred = candidates
             .first()
             .cloned()
@@ -555,24 +611,27 @@ where
         if fallback_used {
             reason = append_availability_reason(reason, &skipped, &selected.backend, false);
         }
-        return Ok(RouteDecision {
-            requested_backend,
-            effective_backend: selected.backend.clone(),
-            requested_model,
-            effective_model: selected.model.clone(),
-            effective_quota_pool: selected.quota_pool.clone(),
-            routing_reason: reason,
-            fallback_used,
-            confidence_impact: None,
-            human_required: false,
-            routing_diagnostics: Some(build_routing_diagnostics(
-                &candidates_for_diagnostics,
-                &selected,
-                &skipped,
-                reorder.as_ref(),
-                &profile.pacing,
-            )),
-        });
+        return Ok((
+            RouteDecision {
+                requested_backend,
+                effective_backend: selected.backend.clone(),
+                requested_model,
+                effective_model: selected.model.clone(),
+                effective_quota_pool: selected.quota_pool.clone(),
+                routing_reason: reason,
+                fallback_used,
+                confidence_impact: None,
+                human_required: false,
+                routing_diagnostics: Some(build_routing_diagnostics(
+                    &candidates_for_diagnostics,
+                    &selected,
+                    &skipped,
+                    reorder.as_ref(),
+                    &profile.pacing,
+                )),
+            },
+            candidates_for_diagnostics,
+        ));
     }
 
     let mut is_profile_policy = false;
@@ -593,7 +652,8 @@ where
     if let Some(candidates) = candidates {
         let escalate =
             is_genuine_agent_failure(req.last_failure_class) || !runtime.attempted.is_empty();
-        let (candidates, reorder) = order_candidates(profile, candidates, escalate, runtime);
+        let (candidates, reorder) =
+            order_candidates(profile, candidates, escalate, runtime, req.mode);
         let preferred = candidates.first().cloned().expect("non-empty list");
         let candidates_for_diagnostics = candidates.clone();
         let (selected, skipped) = pick_route_candidate(
@@ -640,18 +700,21 @@ where
             reorder.as_ref(),
             &profile.pacing,
         ));
-        return Ok(RouteDecision {
-            requested_backend,
-            effective_backend: selected.backend.clone(),
-            requested_model,
-            effective_model: selected.model.clone(),
-            effective_quota_pool: selected.quota_pool.clone(),
-            routing_reason: reason,
-            fallback_used,
-            confidence_impact,
-            human_required,
-            routing_diagnostics,
-        });
+        return Ok((
+            RouteDecision {
+                requested_backend,
+                effective_backend: selected.backend.clone(),
+                requested_model,
+                effective_model: selected.model.clone(),
+                effective_quota_pool: selected.quota_pool.clone(),
+                routing_reason: reason,
+                fallback_used,
+                confidence_impact,
+                human_required,
+                routing_diagnostics,
+            },
+            candidates_for_diagnostics,
+        ));
     }
 
     let profile_mode = policy_backend_model(&profile.routing, req.mode);
@@ -761,18 +824,21 @@ where
         None,
         &profile.pacing,
     ));
-    Ok(RouteDecision {
-        requested_backend,
-        effective_backend: selected.backend.clone(),
-        requested_model,
-        effective_model: selected.model.clone(),
-        effective_quota_pool: selected.quota_pool.clone(),
-        routing_reason: reason,
-        fallback_used,
-        confidence_impact,
-        human_required,
-        routing_diagnostics,
-    })
+    Ok((
+        RouteDecision {
+            requested_backend,
+            effective_backend: selected.backend.clone(),
+            requested_model,
+            effective_model: selected.model.clone(),
+            effective_quota_pool: selected.quota_pool.clone(),
+            routing_reason: reason,
+            fallback_used,
+            confidence_impact,
+            human_required,
+            routing_diagnostics,
+        },
+        candidates_for_diagnostics,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1224,6 +1290,7 @@ fn order_candidates(
     candidates: Vec<RouteCandidate>,
     escalate: bool,
     runtime: &RoutingRuntimeState,
+    mode: &str,
 ) -> (Vec<RouteCandidate>, Option<ReorderDecision>) {
     let mut candidates = with_original_order(candidates);
     if !escalate && !candidates.iter().any(RouteCandidate::has_cost_policy) {
@@ -1231,8 +1298,9 @@ fn order_candidates(
     }
 
     let original = candidates.clone();
-    candidates
-        .sort_by(|left, right| compare_candidates(left, right, &profile.pacing, escalate, runtime));
+    candidates.sort_by(|left, right| {
+        compare_candidates(left, right, &profile.pacing, escalate, runtime, mode)
+    });
 
     let Some(selected) = candidates.first() else {
         return (candidates, None);
@@ -1243,8 +1311,14 @@ fn order_candidates(
             candidate.backend != selected.backend || candidate.model != selected.model
         })
         .filter(|candidate| {
-            compare_candidates(selected, candidate, &profile.pacing, escalate, runtime)
-                == Ordering::Less
+            compare_candidates(
+                selected,
+                candidate,
+                &profile.pacing,
+                escalate,
+                runtime,
+                mode,
+            ) == Ordering::Less
         })
         .map(|candidate| describe_candidate(candidate, &profile.pacing))
         .collect::<Vec<_>>();
@@ -1268,17 +1342,34 @@ fn is_strong_candidate(candidate: &RouteCandidate) -> bool {
         .unwrap_or(true)
 }
 
+/// Load-balancing by recent execution count is scoped to implementation
+/// dispatch (improve/fix/experiment) -- the only modes `routing_runtime_state`
+/// (src/dispatch.rs) collects `recent_runs` for with balancing in mind.
+/// Applying it to review/pm candidate ordering too would silently reorder
+/// those pools by usage, contradicting the deterministic-order guarantee
+/// review's own escalation chain relies on.
+fn is_load_balanced_mode(mode: &str) -> bool {
+    matches!(mode, "improve" | "fix" | "experiment")
+}
+
 fn compare_candidates(
     left: &RouteCandidate,
     right: &RouteCandidate,
     pacing: &crate::quota::PacingConfig,
     escalate: bool,
     runtime: &RoutingRuntimeState,
+    mode: &str,
 ) -> Ordering {
     right
         .priority
         .cmp(&left.priority)
-        .then_with(|| candidate_run_count(left, runtime).cmp(&candidate_run_count(right, runtime)))
+        .then_with(|| {
+            if is_load_balanced_mode(mode) {
+                candidate_run_count(left, runtime).cmp(&candidate_run_count(right, runtime))
+            } else {
+                Ordering::Equal
+            }
+        })
         .then_with(|| {
             if escalate {
                 is_strong_candidate(right).cmp(&is_strong_candidate(left))
@@ -1736,9 +1827,9 @@ fn over_cap_reason(
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_with, decide_with_task, decide_with_task_runtime, is_genuine_agent_failure,
-        CandidateIdentity, ConcurrencyGuard, RouteError, RouteEvaluation, RouteRequest,
-        RoutingRuntimeState, TaskRoutingContext,
+        decide_with, decide_with_runtime, decide_with_task, decide_with_task_runtime,
+        is_genuine_agent_failure, CandidateIdentity, ConcurrencyGuard, RouteError, RouteEvaluation,
+        RouteRequest, RoutingRuntimeState, TaskRoutingContext,
     };
     use crate::availability::{Reason, Source};
     use crate::config::{Defaults, Profile, RoutingPolicy, TaskRoutingRule};
@@ -2177,6 +2268,138 @@ mod tests {
                 .as_deref(),
             Some("paid")
         );
+    }
+
+    #[test]
+    fn load_balancing_does_not_reorder_review_candidates() {
+        // recent_runs is populated from review/pm history too (routing_runtime_state
+        // in src/dispatch.rs deliberately tracks all agent-execution modes for
+        // attribution), but the balancing TIE-BREAK must stay scoped to
+        // implementation dispatch. Review's configured order is a
+        // deliberate escalation chain (see explicit_candidates' "Claude ->
+        // GLM must not fall back to AGY again" invariant elsewhere in this
+        // file) and must not be silently reshuffled by usage counts.
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        let mut first = candidate_config("claude", Some("sonnet"), None);
+        first.priority = 100;
+        let mut second = candidate_config("opencode", Some("glm"), None);
+        second.priority = 100;
+        profile.routing.review_candidates = Some(vec![first, second]);
+        let mut runtime = RoutingRuntimeState::default();
+        // The configured-first candidate is far more heavily used -- if
+        // load-balancing applied here, it would be passed over.
+        runtime
+            .recent_runs
+            .insert(CandidateIdentity::new("claude", Some("sonnet")), 10);
+        runtime
+            .recent_runs
+            .insert(CandidateIdentity::new("opencode", Some("glm")), 0);
+
+        let decision = decide_with_runtime(
+            &defaults(),
+            &profile,
+            RouteRequest {
+                last_failure_class: None,
+                mode: "review",
+                requested_backend: "auto",
+                requested_model: None,
+                recommended_backend: None,
+                recommended_model: None,
+                session_id: None,
+                usage_summary: None,
+            },
+            &runtime,
+            &path(&tmp),
+            OffsetDateTime::now_utc(),
+            backend_available,
+        )
+        .unwrap();
+
+        assert_eq!(decision.effective_backend, "claude");
+        assert_eq!(decision.effective_model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn explicit_cli_model_override_cannot_bypass_approval_gate() {
+        // requested_backend defaults to "auto" on every real dispatch (see
+        // main.rs's --backend default), so an operator running
+        // `gah dispatch --model <paid-model>` without an explicit --backend
+        // must not be able to silently reach an unapproved requires_approval
+        // candidate just because the model string matches.
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        let mut free = candidate_config("opencode", Some("hy3-free"), None);
+        free.priority = 100;
+        let mut paid = candidate_config("opencode", Some("openai/gpt-paid"), None);
+        paid.priority = 10;
+        paid.requires_approval = true;
+        profile.routing.task_routing_rules = vec![easy_docs_rule(vec![free, paid])];
+        let task = Some(TaskRoutingContext {
+            task_class: Some("documentation"),
+            difficulty: Some("easy"),
+            risk: Some("low"),
+        });
+        let mut request = implementation_request();
+        request.requested_model = Some("openai/gpt-paid");
+
+        // Baseline: without an override, routing naturally picks the free
+        // candidate -- confirms the override target genuinely differs from
+        // what would have been selected, so this test exercises the
+        // override path at all.
+        let unoverridden = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            implementation_request(),
+            task,
+            &RoutingRuntimeState::default(),
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(unoverridden.effective_model.as_deref(), Some("hy3-free"));
+
+        let err = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            request.clone(),
+            task,
+            &RoutingRuntimeState::default(),
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<RouteError>(),
+            Some(RouteError::ApprovalRequired { backend, model, .. })
+                if backend == "opencode" && model.as_deref() == Some("openai/gpt-paid")
+        ));
+
+        // Once approved, the exact same override succeeds.
+        let mut approved = RoutingRuntimeState::default();
+        approved
+            .approved
+            .insert(CandidateIdentity::new("opencode", Some("openai/gpt-paid")));
+        let decision = decide_with_task_runtime(
+            &defaults(),
+            &profile,
+            request,
+            task,
+            &approved,
+            RouteEvaluation {
+                state_path: &path(&tmp),
+                now: OffsetDateTime::now_utc(),
+            },
+            backend_available,
+        )
+        .unwrap();
+        assert_eq!(decision.effective_model.as_deref(), Some("openai/gpt-paid"));
     }
 
     #[test]
