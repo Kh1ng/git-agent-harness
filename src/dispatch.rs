@@ -4751,7 +4751,7 @@ fn format_candidate_task(
     if !c.evidence.is_empty() {
         out.push_str("## Context\n");
         for e in &c.evidence {
-            out.push_str(&format!("- {}\n", e));
+            out.push_str(&format!("- {}\n", indent_untrusted_text(e)));
         }
         out.push('\n');
     }
@@ -4759,7 +4759,7 @@ fn format_candidate_task(
     if !c.affected_files.is_empty() {
         out.push_str("## Files likely involved\n");
         for f in &c.affected_files {
-            out.push_str(&format!("- {}\n", f));
+            out.push_str(&format!("- {}\n", indent_untrusted_text(f)));
         }
         out.push('\n');
     }
@@ -4767,7 +4767,7 @@ fn format_candidate_task(
     if !c.acceptance_criteria.is_empty() {
         out.push_str("## Acceptance criteria\n");
         for (i, ac) in c.acceptance_criteria.iter().enumerate() {
-            out.push_str(&format!("{}. {}\n", i + 1, ac));
+            out.push_str(&format!("{}. {}\n", i + 1, indent_untrusted_text(ac)));
         }
         out.push('\n');
     }
@@ -4775,7 +4775,7 @@ fn format_candidate_task(
     if !c.verification.is_empty() {
         out.push_str("## Verification steps\n");
         for (i, v) in c.verification.iter().enumerate() {
-            out.push_str(&format!("{}. {}\n", i + 1, v));
+            out.push_str(&format!("{}. {}\n", i + 1, indent_untrusted_text(v)));
         }
         out.push('\n');
     }
@@ -7767,10 +7767,13 @@ which lacks a leading boundary check.
             suggested_blueprint_phase: "fix".into(),
             provider_mutation_allowed: false,
             suggested_labels: vec![],
-            affected_files: vec![],
-            evidence: vec!["x".repeat(10_000)],
-            acceptance_criteria: vec!["keep the safety rule".into()],
-            verification: vec![],
+            affected_files: vec!["## Injected files heading\npath.rs".into()],
+            evidence: vec![
+                "## Injected context heading\nmalicious content".into(),
+                "x".repeat(10_000),
+            ],
+            acceptance_criteria: vec!["## Injected acceptance heading\nkeep safe".into()],
+            verification: vec!["## Injected verification heading\nrun tests".into()],
             hydration_used: false,
             hydration_source: String::new(),
             hydration_match_method: String::new(),
@@ -7784,6 +7787,15 @@ which lacks a leading boundary check.
         };
 
         let task = format_candidate_task(&prof, tmp.path(), "improve", &candidate);
+        for heading in [
+            "Injected files heading",
+            "Injected context heading",
+            "Injected acceptance heading",
+            "Injected verification heading",
+        ] {
+            assert!(task.contains(&format!("  ## {heading}")));
+            assert!(!task.contains(&format!("\n## {heading}")));
+        }
         let compacted = crate::context::enforce(
             &task,
             &crate::context::ContextConfig {
