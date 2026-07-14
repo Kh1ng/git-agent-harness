@@ -5,8 +5,10 @@ use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 use support::{FakeBackend, Scenario};
 use tempfile::TempDir;
 
@@ -17,6 +19,33 @@ fn bin() -> Command {
     // CLI integration tests may run under the real systemd loop, which sets
     // XDG_STATE_HOME to the operator's persistent state directory. Never let
     // fake profiles and work claims leak into (or inherit from) that state.
+    cmd.env(
+        "XDG_STATE_HOME",
+        std::env::temp_dir().join(format!(
+            "gah-cli-test-state-{}-{invocation_id}",
+            std::process::id()
+        )),
+    );
+    cmd.env(
+        "GAH_AVAILABILITY_PATH",
+        "/nonexistent-availability-path.json",
+    );
+    cmd.env(
+        "GAH_VALIDATION_CHECK_PATH",
+        std::env::temp_dir().join(format!(
+            "gah-cli-test-validation-{}-{invocation_id}.json",
+            std::process::id(),
+        )),
+    );
+    cmd
+}
+
+fn spawn_bin() -> ProcessCommand {
+    static COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let invocation_id = COMMAND_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut cmd = ProcessCommand::new(
+        std::env::var("CARGO_BIN_EXE_gah").unwrap_or_else(|_| "target/debug/gah".into()),
+    );
     cmd.env(
         "XDG_STATE_HOME",
         std::env::temp_dir().join(format!(
@@ -89,6 +118,26 @@ fn make_fake_bin_with_body(dir: &std::path::Path, name: &str, body: &str) {
 fn prepend_path(dir: &std::path::Path) -> String {
     let old = std::env::var("PATH").unwrap_or_default();
     format!("{}:{}", dir.display(), old)
+}
+
+#[cfg(unix)]
+fn send_signal(pid: u32, signal: i32) {
+    unsafe {
+        let _ = libc::kill(pid as i32, signal);
+    }
+}
+
+fn wait_for_backend_call(backend: &FakeBackend, child: &mut std::process::Child, call: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while backend.call_count() < call {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("child exited before backend call {call} started: {status:?}");
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for backend call {call} to start");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn init_git_repo(path: &std::path::Path) {
@@ -2298,6 +2347,64 @@ fn review_parse_failure_preserves_raw_report() {
     assert!(!session.join("review-verdict.json").exists());
 }
 
+#[test]
+fn review_shutdown_records_cancelled_shutdown_and_dispatch_finished_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, fake_bin, home) = setup_review_repo_and_gh(&tmp);
+    fs::create_dir_all(&home).unwrap();
+    let claude = FakeBackend::new(tmp.path(), "claude");
+    claude.install(Scenario::success().with_delay_ms(30_000));
+    let cfg = write_real_repo_config_with_extra(
+        &tmp,
+        &repo,
+        "github",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+        "",
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let events_path = tmp.path().join("events.jsonl");
+
+    let mut child = spawn_bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "review",
+            "--branch",
+            "feature/review",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .env("GAH_EVENTS_PATH", &events_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    wait_for_backend_call(&claude, &mut child, 1);
+    #[cfg(unix)]
+    send_signal(child.id(), libc::SIGINT);
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(claude.call_count(), 1);
+
+    let ledger_text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(ledger_text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["failure_class"], "harness_error");
+    assert_eq!(entry["failure_stage"], "agent_run");
+    assert_eq!(entry["validation_result"], "cancelled_shutdown");
+
+    let events_text = fs::read_to_string(&events_path).unwrap();
+    assert!(events_text.contains("dispatch_started"));
+    assert!(events_text.contains("dispatch_finished"));
+    assert!(events_text.contains("shutdown requested while claude was running"));
+}
+
 /// A review backend failure must propagate through the controller-facing
 /// dispatch path.  Otherwise `gah loop --once` records `review: success`
 /// even though the ledger correctly says backend_error, which can conceal a
@@ -3525,6 +3632,67 @@ fn dispatch_fix_records_per_attempt_usage_from_backend_output() {
     assert_eq!(attempts[0]["usage"]["output_tokens"], 120);
     assert_eq!(attempts[0]["usage"]["total_tokens"], 620);
     assert_eq!(attempts[0]["usage"]["estimated_cost_usd"], 0.02);
+}
+
+#[test]
+fn dispatch_fix_shutdown_records_cancelled_shutdown_and_dispatch_finished_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let events_path = tmp.path().join("events.jsonl");
+
+    let codex = FakeBackend::new(tmp.path(), "codex");
+    codex.install(Scenario::success().with_delay_ms(30_000));
+    make_fake_bin_with_body(
+        &tmp.path().join("bin"),
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+    );
+
+    let mut child = spawn_bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "fix the thing",
+        ])
+        .env("PATH", prepend_path(&tmp.path().join("bin")))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .env("GAH_EVENTS_PATH", &events_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    wait_for_backend_call(&codex, &mut child, 1);
+    #[cfg(unix)]
+    send_signal(child.id(), libc::SIGINT);
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(codex.call_count(), 1);
+
+    let ledger_text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(ledger_text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["failure_class"], "harness_error");
+    assert_eq!(entry["failure_stage"], "agent_run");
+    assert_eq!(entry["validation_result"], "cancelled_shutdown");
+    let attempts = entry["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["failure_class"], "harness_error");
+    assert_eq!(attempts[0]["failure_stage"], "agent_run");
+    assert_eq!(attempts[0]["validation_result"], "cancelled_shutdown");
+
+    let events_text = fs::read_to_string(&events_path).unwrap();
+    assert!(events_text.contains("dispatch_started"));
+    assert!(events_text.contains("dispatch_finished"));
+    assert!(events_text.contains("shutdown requested while codex was running"));
 }
 
 /// TICKET-079: --escalate seeds the *initial* route decision (not just an

@@ -30,6 +30,15 @@ const LIVE_TASK_ACCEPTANCE_MAX_BYTES: usize = 8_192;
 const LIVE_TASK_LIST_MAX_BYTES: usize = 4_096;
 const LIVE_TASK_LIST_ITEM_MAX_BYTES: usize = 1_024;
 
+fn mark_shutdown_cancelled(ledger: &mut LedgerEntry, backend_exit_code: Option<i32>) {
+    ledger.set_failure(
+        crate::ledger::FailureClass::HarnessError,
+        crate::ledger::FailureStage::AgentRun,
+    );
+    ledger.backend_exit_code = backend_exit_code;
+    ledger.validation_result = Some("cancelled_shutdown".into());
+}
+
 /// UTF-8 safe suffix: returns the last up to `max_bytes` of `s`,
 /// adjusting the start index forward to a valid character boundary.
 /// Result length is guaranteed <= max_bytes.
@@ -2255,11 +2264,7 @@ fn improve(
         // process group; return so the controller can write the matching
         // terminal dispatch event.
         if crate::runner::shutdown_requested() {
-            ledger.set_failure(
-                crate::ledger::FailureClass::HarnessError,
-                crate::ledger::FailureStage::AgentRun,
-            );
-            ledger.validation_result = Some("cancelled_shutdown".into());
+            mark_shutdown_cancelled(ledger, Some(result.exit_code));
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
@@ -4235,15 +4240,16 @@ fn review(
             anyhow::bail!("review backend exited with status {code}")
         }
         runner::ReviewProcessOutcome::SignalTermination(signal) => {
-            ledger.set_failure(
-                crate::ledger::FailureClass::BackendError,
-                crate::ledger::FailureStage::Review,
+            mark_shutdown_cancelled(ledger, Some(-signal));
+            println!(
+                "Review shutdown requested; terminated backend process group (signal {}).",
+                signal
             );
-            ledger.backend_exit_code = Some(-signal);
-            ledger.validation_result = Some("not_run".into());
-            println!("Review backend terminated by signal {}.", signal);
             println!("Review bundle written to: {}", bundle.display());
-            anyhow::bail!("review backend terminated by signal {signal}")
+            anyhow::bail!(
+                "shutdown requested while {} was running",
+                route.effective_backend
+            )
         }
         runner::ReviewProcessOutcome::Timeout => {
             ledger.set_failure(
