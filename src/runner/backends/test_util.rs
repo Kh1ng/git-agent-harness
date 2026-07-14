@@ -1,7 +1,7 @@
 //! Shared test fixtures for the backend adapter tests. These were previously
-//! defined inline in `runner.rs`'s `mod tests`; the adapters that own them
-//! moved into `runner/backends/*`, so the fixtures now live in one place that
-//! every adapter test module (and `runner.rs`'s remaining tests) can reuse.
+//! defined inline in the old `runner.rs` test module; the adapters that own
+//! them moved into `runner/backends/*`, so the fixtures now live in one place
+//! that every adapter test module can reuse.
 
 use crate::config::*;
 use crate::runner::LlmConfig;

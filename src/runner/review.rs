@@ -1,113 +1,18 @@
 use crate::config::Profile;
-use anyhow::Result;
-use std::env;
+use crate::runner::backends::agy::agy_empty_output_diagnosis;
+use crate::runner::process::{
+    copy_stream_to_file, kill_process_group, prepare_process_group, shutdown_requested,
+    write_redacted_task,
+};
+use crate::runner::resolve::{
+    codex_model_args, filtered_codex_args, resolve_backend_executable, ExecutableResolution,
+};
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-
-pub(crate) mod backends;
-pub(crate) mod output;
-pub(crate) mod process;
-#[allow(unused_imports)]
-pub(crate) use crate::runner::backends::agy::log_delta;
-#[allow(unused_imports)]
-pub use crate::runner::backends::agy::{run_agy, run_agy_with_executable};
-#[allow(unused_imports)]
-pub use crate::runner::backends::claude::{run_claude, run_claude_with_executable};
-pub(crate) use crate::runner::backends::codex::{codex_model_args, filtered_codex_args};
-#[allow(unused_imports)]
-pub use crate::runner::backends::codex::{
-    extract_model_from_args, extract_model_from_backend_args, filtered_backend_args, run_codex,
-    run_codex_with_executable,
-};
-#[allow(unused_imports)]
-pub use crate::runner::backends::opencode::{run_opencode, run_opencode_with_executable};
-#[allow(unused_imports)]
-pub use crate::runner::backends::openhands::{list_oh_profiles, load_oh_profile, run_openhands};
-#[allow(unused_imports)]
-pub use crate::runner::backends::vibe::{run_vibe, run_vibe_with_executable};
-
-use crate::runner::backends::agy::agy_empty_output_diagnosis;
-pub(crate) use crate::runner::process::copy_stream_to_file;
-pub use crate::runner::process::install_shutdown_handler;
-pub(crate) use crate::runner::process::kill_process_group;
-pub(crate) use crate::runner::process::prepare_process_group;
-pub use crate::runner::process::shutdown_requested;
-#[allow(unused_imports)]
-pub(crate) use crate::runner::process::spawn_with_idle_watch;
-#[allow(unused_imports)]
-pub(crate) use crate::runner::process::spawn_with_worktree_progress_watch;
-pub(crate) use crate::runner::process::write_redacted_task;
-
-/// Parse a KEY=VALUE env file, skipping blank lines and comments.
-pub fn load_env_file(path: &str) -> Vec<(String, String)> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return vec![];
-    };
-    text.lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-        .filter_map(|l| {
-            let (k, v) = l.split_once('=')?;
-            Some((
-                k.trim().to_string(),
-                v.trim().trim_matches('"').trim_matches('\'').to_string(),
-            ))
-        })
-        .collect()
-}
-
-#[derive(Debug)]
-pub struct RunResult {
-    pub exit_code: i32,
-    pub duration_secs: f64,
-    pub log_path: String,
-    /// Authoritative final assistant text selected by the backend adapter.
-    /// Raw stdout/stderr is never promoted into this field.
-    pub final_summary: Option<String>,
-    /// TICKET-066/#155: for AGY backends, the bytes appended to AGY's
-    /// `cli.log` during this specific run, scoped to the pre-run byte
-    /// offset (so concurrent appends from other AGY instances/log sources
-    /// are excluded). `None` for non-AGY backends and for runs where the
-    /// cli.log could not be read. This delta — not a fresh read of the
-    /// whole log — is what usage/quota parsing consumes, so a single
-    /// attempt's usage is never polluted by prior runs.
-    pub agy_cli_log_delta: Option<String>,
-    /// A run-scoped tail of a backend-owned diagnostic log. Unlike
-    /// `log_path`, this is not CLI stdout/stderr: some backends (notably
-    /// OpenCode) write provider failures only to their own internal log.
-    /// The tail begins at the pre-run byte offset, so old failures and other
-    /// runs cannot poison routing for this attempt.
-    pub internal_log_delta: Option<String>,
-    /// Source path for `internal_log_delta`, retained for availability
-    /// diagnostics. Missing/unreadable logs leave both fields `None`.
-    pub internal_log_path: Option<String>,
-    /// Backend-owned structured usage artifact. Claude uses its transcript
-    /// JSONL; Vibe uses its session `meta.json`. `None` when the backend did
-    /// not produce a discoverable artifact.
-    pub transcript_path: Option<String>,
-    /// AGY CLI version for this run (e.g. "1.0.16"), captured via
-    /// `agy --version`. `None` for non-AGY backends and for runs where version
-    /// detection fails. Used for log-path resolution and upstream log-format
-    /// drift detection (TICKET-242).
-    pub agy_version: Option<String>,
-}
-
-pub struct LlmConfig {
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExecutableResolution {
-    Found(PathBuf),
-    MissingExplicitPath(PathBuf),
-    MissingFromPath(String),
-    UnknownBackend(String),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewProcessOutcome {
@@ -119,60 +24,12 @@ pub enum ReviewProcessOutcome {
     Timeout,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub struct ReviewRunResult {
     pub outcome: ReviewProcessOutcome,
     pub duration_secs: f64,
     pub stdout: String,
     pub stderr: String,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn backend_available(name: &str) -> bool {
-    backend_command_name(name)
-        .and_then(resolve_executable_on_path)
-        .is_some()
-}
-
-pub fn backend_available_for_profile(profile: &Profile, name: &str) -> bool {
-    matches!(
-        resolve_backend_executable(profile, name),
-        ExecutableResolution::Found(_)
-    )
-}
-
-pub fn require_backend_executable(profile: &Profile, backend: &str) -> Result<PathBuf> {
-    match resolve_backend_executable(profile, backend) {
-        ExecutableResolution::Found(path) => Ok(path),
-        ExecutableResolution::MissingExplicitPath(path) => {
-            anyhow::bail!("configured executable '{}' does not exist", path.display())
-        }
-        ExecutableResolution::MissingFromPath(cmd) => {
-            anyhow::bail!("required binary '{}' not found on PATH", cmd)
-        }
-        ExecutableResolution::UnknownBackend(backend) => {
-            anyhow::bail!("unknown backend '{}'", backend)
-        }
-    }
-}
-
-pub fn resolve_backend_executable(profile: &Profile, backend: &str) -> ExecutableResolution {
-    let Some(command) = backend_command_name(backend) else {
-        return ExecutableResolution::UnknownBackend(backend.to_string());
-    };
-    if let Some(explicit) = profile.configured_backend_path(backend) {
-        let path = PathBuf::from(explicit);
-        return if is_executable_path(&path) {
-            ExecutableResolution::Found(path)
-        } else {
-            ExecutableResolution::MissingExplicitPath(path)
-        };
-    }
-    match resolve_executable_on_path(command) {
-        Some(path) => ExecutableResolution::Found(path),
-        None => ExecutableResolution::MissingFromPath(command.to_string()),
-    }
 }
 
 pub fn run_review_backend(
@@ -252,9 +109,6 @@ pub fn run_review_backend(
             cmd.arg("--output").arg("text");
             cmd.arg("--trust");
             cmd.arg("--auto-approve");
-            // Vibe does not accept --model flag; model selection is via
-            // environment/config. We record the effective model separately
-            // in ledger metadata but do not pass it to Vibe CLI.
         }
         "opencode" => {
             cmd.arg("run");
@@ -363,15 +217,6 @@ pub fn run_review_backend(
     }
 
     let mut stdout = read_text_file(&stdout_path);
-    // AGY sometimes exits 0 with empty stdout on a provider-side failure
-    // (quota exhaustion, expired auth) -- the same silent-success failure
-    // mode already handled for the worker path in run_agy_with_executable.
-    // Left as Success here, parse_review_verdict would just fail with an
-    // opaque "reviewer did not return verdict JSON" and never give the
-    // caller (dispatch::review) a chance to recognize the real cause and
-    // reroute to the next review_candidates entry -- so diagnose it the
-    // same way the worker path does, and put the diagnosis in stdout
-    // where mark_backend_unavailable_from_output can actually see it.
     let outcome = if matches!(backend, "agy" | "agy-main" | "agy-second")
         && matches!(outcome, ReviewProcessOutcome::Success)
         && stdout.trim().is_empty()
@@ -387,44 +232,6 @@ pub fn run_review_backend(
         duration_secs: start.elapsed().as_secs_f64(),
         stdout,
         stderr: read_text_file(&stderr_path),
-    }
-}
-
-fn backend_command_name(name: &str) -> Option<&'static str> {
-    match name {
-        "openhands" | "cloud-coder" | "auto" => Some("openhands"),
-        "codex" => Some("codex"),
-        "claude" => Some("claude"),
-        "agy" => Some("agy"),
-        "agy-main" => Some("agy-main"),
-        "agy-second" => Some("agy-second"),
-        "vibe" => Some("vibe"),
-        "opencode" => Some("opencode"),
-        _ => None,
-    }
-}
-
-fn resolve_executable_on_path(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable_path(candidate))
-}
-
-fn is_executable_path(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path)
-            .map(|meta| meta.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        true
     }
 }
 
@@ -444,72 +251,6 @@ mod tests {
     use super::*;
     use crate::runner::backends::test_util::*;
     use crate::test_support::PathGuard;
-
-    #[test]
-    fn resolve_backend_executable_prefers_explicit_path() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_fake_bin(&f.bin_dir, "claude-explicit", "#!/bin/sh\nexit 0\n");
-        let mut profile = test_profile();
-        profile.claude_path = Some(f.bin_dir.join("claude-explicit").display().to_string());
-        let _guard = PathGuard::set("");
-
-        let resolved = resolve_backend_executable(&profile, "claude");
-
-        assert_eq!(
-            resolved,
-            ExecutableResolution::Found(f.bin_dir.join("claude-explicit"))
-        );
-    }
-
-    #[test]
-    fn resolve_backend_executable_falls_back_to_path_when_unset() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_fake_bin(&f.bin_dir, "claude", "#!/bin/sh\nexit 0\n");
-        let profile = test_profile();
-        let _guard = PathGuard::set(f.bin_dir.display().to_string());
-
-        let resolved = resolve_backend_executable(&profile, "claude");
-
-        assert_eq!(
-            resolved,
-            ExecutableResolution::Found(f.bin_dir.join("claude"))
-        );
-    }
-
-    #[test]
-    fn resolve_backend_executable_invalid_explicit_path_is_unavailable() {
-        let mut profile = test_profile();
-        profile.claude_path = Some("/definitely/missing/claude".into());
-
-        let resolved = resolve_backend_executable(&profile, "claude");
-
-        assert_eq!(
-            resolved,
-            ExecutableResolution::MissingExplicitPath(PathBuf::from("/definitely/missing/claude"))
-        );
-    }
-
-    #[test]
-    fn resolve_backend_executable_supports_codex_and_agy_paths() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_fake_bin(&f.bin_dir, "codex-explicit", "#!/bin/sh\nexit 0\n");
-        make_fake_bin(&f.bin_dir, "agy-explicit", "#!/bin/sh\nexit 0\n");
-        let mut profile = test_profile();
-        profile.codex_path = Some(f.bin_dir.join("codex-explicit").display().to_string());
-        profile.agy_path = Some(f.bin_dir.join("agy-explicit").display().to_string());
-
-        assert_eq!(
-            resolve_backend_executable(&profile, "codex"),
-            ExecutableResolution::Found(f.bin_dir.join("codex-explicit"))
-        );
-        assert_eq!(
-            resolve_backend_executable(&profile, "agy"),
-            ExecutableResolution::Found(f.bin_dir.join("agy-explicit"))
-        );
-    }
 
     #[test]
     fn run_review_backend_times_out_and_preserves_partial_output() {
@@ -600,7 +341,6 @@ mod tests {
         assert!(argv.contains(&"text".to_string()));
         assert!(argv.contains(&"--trust".to_string()));
         assert!(argv.contains(&"--auto-approve".to_string()));
-        // Vibe does NOT accept --model flag
         assert!(!argv.contains(&"--model".to_string()));
         assert!(!argv.contains(&"mistral-medium-3.5".to_string()));
 
@@ -654,25 +394,12 @@ mod tests {
         assert_eq!(result.outcome, ReviewProcessOutcome::Success);
 
         let argv = recorded_argv(&f.record_dir);
-        // Verify correct command construction: vibe -p <prompt> --output text --trust --auto-approve
         assert_eq!(argv[0], "-p");
         assert!(argv.contains(&"--output".to_string()));
         assert!(argv.contains(&"text".to_string()));
         assert!(argv.contains(&"--trust".to_string()));
         assert!(argv.contains(&"--auto-approve".to_string()));
-        // Should NOT contain the invalid "review" subcommand
         assert!(!argv.contains(&"review".to_string()));
-        // Should NOT contain --model flag
         assert!(!argv.contains(&"--model".to_string()));
-    }
-
-    // ── backend_available ────────────────────────────────────────────────
-    // Not part of the spec's priority list, but it is a one-line pure-ish
-    // wrapper around `which` that every routing decision depends on, and it
-    // was previously completely untested.
-
-    #[test]
-    fn backend_available_false_for_unknown_backend_name() {
-        assert!(!backend_available("not-a-real-backend"));
     }
 }
