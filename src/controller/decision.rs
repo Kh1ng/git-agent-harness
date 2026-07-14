@@ -68,7 +68,8 @@ fn now_plus(offset: Duration) -> String {
 /// 9. a ticket with failed history, no active MR, retry cap exceeded ->
 ///    HumanRequired
 /// 10. an eligible never-dispatched ticket -> DispatchTicket
-/// 11. all remaining backends unavailable but with a known reset -> WaitUntil
+/// 11. a retryable infrastructure-failed ticket is capacity-blocked until a
+///     known backend reset -> WaitUntil
 /// 12. otherwise -> NoOp
 ///
 /// Ties within a tier (multiple matching MRs) are broken by branch name,
@@ -445,19 +446,33 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         }
     }
 
-    if let Some(scope) = snapshot
-        .availability
-        .iter()
-        .find(|a| !a.eligible_now && a.unavailable_until.is_some())
-    {
-        return NextAction::WaitUntil {
-            until: scope.unavailable_until.clone().unwrap(),
-            reason: format!(
-                "{} unavailable ({})",
-                scope.backend,
-                scope.reason.clone().unwrap_or_default()
-            ),
-        };
+    // Availability records are global historical state, not evidence that an
+    // idle profile currently needs that backend. Only turn a cooldown into a
+    // controller wait when real retryable work is blocked on capacity. Without
+    // this guard, an empty queue appears stalled until the first unrelated
+    // quota reset (production incident #466).
+    let has_capacity_blocked_retry = failed_tickets.iter().any(|ticket| {
+        !exhausted.contains(ticket.work_id.as_ref().unwrap_or(&ticket.ticket_path))
+            && ticket
+                .last_failure_class
+                .as_deref()
+                .is_some_and(is_infra_failure)
+    });
+    if has_capacity_blocked_retry {
+        if let Some(scope) = snapshot
+            .availability
+            .iter()
+            .find(|a| !a.eligible_now && a.unavailable_until.is_some())
+        {
+            return NextAction::WaitUntil {
+                until: scope.unavailable_until.clone().unwrap(),
+                reason: format!(
+                    "{} unavailable ({})",
+                    scope.backend,
+                    scope.reason.clone().unwrap_or_default()
+                ),
+            };
+        }
     }
 
     NextAction::NoOp {

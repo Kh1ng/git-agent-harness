@@ -1249,7 +1249,7 @@ fn retry_cap_projects_into_blocked_work_items() {
 }
 
 #[test]
-fn unavailable_backend_with_known_reset_waits() {
+fn idle_profile_with_unrelated_known_reset_is_noop() {
     let mut snapshot = empty_snapshot();
     snapshot.availability.push(ScopeStatusJson {
         backend: "claude".into(),
@@ -1263,6 +1263,35 @@ fn unavailable_backend_with_known_reset_waits() {
         observed_at: None,
         scope: None,
     });
+    let action = decide_next_action(&snapshot);
+    assert_eq!(action.kind(), "no_op");
+    assert!(action.reason().contains("nothing actionable"));
+}
+
+#[test]
+fn failed_infrastructure_ticket_with_known_reset_waits() {
+    let mut snapshot = empty_snapshot();
+    snapshot.available_tickets.push(ticket(
+        "466",
+        Some("#466"),
+        1,
+        Some("backend_error"),
+        false,
+        false,
+    ));
+    snapshot.availability.push(ScopeStatusJson {
+        backend: "claude".into(),
+        model: None,
+        quota_pool: None,
+        eligible_now: false,
+        reason: Some("rate_limited".into()),
+        unavailable_until: Some("2026-07-06T00:00:00Z".into()),
+        source: None,
+        last_error_summary: None,
+        observed_at: None,
+        scope: None,
+    });
+
     let action = decide_next_action(&snapshot);
     match action {
         NextAction::WaitUntil { until, .. } => assert_eq!(until, "2026-07-06T00:00:00Z"),
