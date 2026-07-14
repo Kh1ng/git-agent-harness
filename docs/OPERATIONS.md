@@ -489,8 +489,9 @@ The guard scans tracked Rust source and test files and fails only when:
 
 During extraction, remove or lower legacy entries:
 
-- If a file is split and both halves remain over threshold, add new baseline
-  entries and raise ceilings as needed.
+- If a file is split and an extracted file still exceeds the threshold, add a
+  reviewed entry at that file's exact current line count. Never increase an
+  existing ceiling to make growth pass.
 - If a file is split and the original drops below threshold, remove its old
   entry.
 - If a file is moved, remove the stale old path entry and add/update the new

@@ -1,8 +1,8 @@
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::{fs, str};
 
 const DEFAULT_MAX_LINES: usize = 1500;
 
@@ -150,7 +150,15 @@ fn is_excluded(path: &Path) -> bool {
 }
 
 fn count_lines(path: &Path) -> usize {
-    let bytes =
-        fs::read(path).unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-    bytes.iter().filter(|b| **b == b'\n').count()
+    let source = fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    source.lines().count()
+}
+
+#[test]
+fn line_count_includes_a_final_line_without_a_trailing_newline() {
+    let temp = tempfile::NamedTempFile::new().expect("create temporary Rust source");
+    fs::write(temp.path(), "first\nsecond").expect("write temporary Rust source");
+
+    assert_eq!(count_lines(temp.path()), 2);
 }
