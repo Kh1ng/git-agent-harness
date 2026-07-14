@@ -13,7 +13,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -819,6 +819,95 @@ fn reload_config_for_profile(
     Ok(loaded)
 }
 
+/// TICKET-282: before reusing an existing branch for a `FixMr`, detect a
+/// branch that is already attached to a worktree GAH does not manage (an
+/// externally-owned or stale worktree for the same open PR). Returns a
+/// replacement `NextAction` for the loop to run instead:
+///
+/// * `None` -- the action is safe to execute as-is.
+/// * `Some(redispatched)` -- one or more branch conflicts were skipped and the
+///   returned action is the first unblocked candidate (or a terminal action).
+///
+/// Path location is never treated as proof of ownership. Clean and dirty
+/// attachments are both deferred; lifecycle pruning decides removal.
+fn resolve_attached_branch_conflicts(
+    action: &NextAction,
+    mut find_attachment: impl FnMut(&str) -> Result<Option<crate::worktree::BranchWorktreeAttachment>>,
+    mut record_deferral: impl FnMut(
+        &str,
+        Option<&str>,
+        &crate::worktree::BranchWorktreeAttachment,
+    ) -> Result<()>,
+    mut choose_next: impl FnMut(&HashSet<String>, &HashSet<String>) -> Result<NextAction>,
+) -> Result<Option<NextAction>> {
+    let mut candidate = action.clone();
+    let mut deferred_work_ids = HashSet::new();
+    let mut deferred_branches = HashSet::new();
+
+    loop {
+        let (branch, work_id) = match &candidate {
+            NextAction::FixMr {
+                branch, work_id, ..
+            } => (branch, work_id),
+            _ => return Ok((!deferred_branches.is_empty()).then_some(candidate)),
+        };
+        let Some(attachment) = find_attachment(branch)? else {
+            return Ok((!deferred_branches.is_empty()).then_some(candidate));
+        };
+
+        deferred_branches.insert(branch.clone());
+        if let Some(work_id) = work_id {
+            deferred_work_ids.insert(work_id.clone());
+        }
+        record_deferral(branch, work_id.as_deref(), &attachment)?;
+        candidate = choose_next(&deferred_work_ids, &deferred_branches)?;
+    }
+}
+
+fn defer_if_branch_attached(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    action: &NextAction,
+) -> Result<Option<NextAction>> {
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    let repo = Path::new(&profile.local_path);
+    resolve_attached_branch_conflicts(
+        action,
+        |branch| crate::worktree::branch_attachment(repo, branch),
+        |branch, work_id, attachment| {
+            crate::events::record(
+                cfg,
+                crate::events::EventType::WorkDeferred,
+                Some(profile_name),
+                work_id,
+                format!(
+                    "branch '{}' already attached to worktree {} (clean={}); deferring to next eligible item",
+                    branch,
+                    attachment.path.display(),
+                    attachment.clean
+                ),
+            )
+        },
+        |deferred_work_ids, deferred_branches| {
+            let mut fresh =
+                crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
+            fresh.merge_requests.retain(|mr| {
+                !mr.work_id
+                    .as_ref()
+                    .is_some_and(|id| deferred_work_ids.contains(id))
+                    && !deferred_branches.contains(&mr.branch)
+            });
+            fresh.available_tickets.retain(|ticket| {
+                !ticket
+                    .work_id
+                    .as_ref()
+                    .is_some_and(|id| deferred_work_ids.contains(id))
+            });
+            Ok(decide_next_action(&fresh))
+        },
+    )
+}
+
 /// Run the controller continuously in one process. The process lock is held
 /// for the lifetime of the loop so a second manager for the same profile
 /// cannot create a competing worker pool.
@@ -1028,6 +1117,13 @@ pub fn run_once(
                 action = redispatched;
             }
         }
+        // TICKET-282: a FixMr reusing a branch already attached to a foreign
+        // or stale worktree must be deferred (non-terminal) and the loop
+        // continued with the next eligible item, never allowed to stall the
+        // recurring loop on a hard `git worktree add` failure.
+        if let Some(redispatch) = defer_if_branch_attached(cfg, profile_name, &action)? {
+            action = redispatch;
+        }
         record_action_events(cfg, profile_name, &original_action, &action)?;
 
         let outcome = if let Some(work_id) = action.work_id().filter(|_| {
@@ -1194,6 +1290,13 @@ fn run_parallel_once(
                 } else {
                     action = redispatched;
                 }
+            }
+
+            // TICKET-282: defer a FixMr whose branch is already attached to a
+            // foreign/stale worktree and continue with the next eligible item
+            // rather than stalling the batch on a hard `git worktree add`.
+            if let Some(redispatch) = defer_if_branch_attached(cfg, profile_name, &action)? {
+                action = redispatch;
             }
 
             // Check if this action involves a work_id that's already claimed or executed in this batch
@@ -1572,6 +1675,10 @@ pub(crate) fn run_dispatch_and_record(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "controller/worktree_deferral_tests.rs"]
+mod worktree_deferral_tests;
 
 #[cfg(test)]
 mod tests {
