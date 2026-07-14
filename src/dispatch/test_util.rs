@@ -1,5 +1,7 @@
 use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
+use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 pub(super) fn profile(local_path: &Path) -> Profile {
     Profile {
@@ -86,4 +88,33 @@ pub(super) fn gah_config_with_ledger(tmp: &Path, routing: RoutingPolicy) -> GahC
         },
         profiles: std::collections::HashMap::new(),
     }
+}
+pub(super) fn init_repo(repo: &Path) {
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    fs::write(repo.join("README.md"), "hi\n").unwrap();
+    Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
 }
