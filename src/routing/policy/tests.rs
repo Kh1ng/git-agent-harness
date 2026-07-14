@@ -6,7 +6,8 @@ use super::super::test_support::{
     profile, record_unavailable,
 };
 use super::super::{
-    CandidateIdentity, RouteError, RouteRequest, RoutingRuntimeState, TaskRoutingContext,
+    CandidateIdentity, ConcurrencyGuard, RouteError, RouteRequest, RoutingRuntimeState,
+    TaskRoutingContext,
 };
 use super::is_genuine_agent_failure;
 use crate::availability::{Reason, Source};
@@ -473,6 +474,97 @@ fn explicit_internal_review_route_cannot_bypass_paid_approval_gate() {
         decision.effective_model.as_deref(),
         Some("nous-portal/z-ai/glm-5.2")
     );
+}
+
+#[test]
+fn temporary_subscribed_capacity_precedes_paid_route_approval() {
+    let tmp = TempDir::new().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let mut profile = profile();
+    let mut subscribed = candidate_config("claude", Some("sonnet"), Some("claude-main"));
+    subscribed.included_in_quota = true;
+    let mut paid = candidate_config(
+        "opencode",
+        Some("nous-portal/z-ai/glm-5.2"),
+        Some("nous-portal-api"),
+    );
+    paid.requires_approval = true;
+    profile.routing.review_candidates = Some(vec![subscribed, paid]);
+    profile
+        .max_concurrent_per_model
+        .insert("claude/sonnet".into(), 1);
+    let request = RouteRequest {
+        last_failure_class: None,
+        mode: "review",
+        requested_backend: "auto",
+        requested_model: None,
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+    };
+
+    let slot = ConcurrencyGuard::acquire("claude", Some("sonnet"));
+    let err = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request.clone(),
+        &RoutingRuntimeState::default(),
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::NoEligibleBackend { skipped, .. })
+            if skipped.iter().any(|candidate| candidate.reason == "max_concurrent_reached")
+                && skipped
+                    .iter()
+                    .any(|candidate| candidate.reason == "operator_approval_required")
+    ));
+
+    drop(slot);
+    let decision = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request.clone(),
+        &RoutingRuntimeState::default(),
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+    assert_eq!(decision.effective_backend, "claude");
+    assert_eq!(decision.effective_model.as_deref(), Some("sonnet"));
+
+    record_unavailable(
+        &path(&tmp),
+        "claude",
+        Some("sonnet"),
+        Reason::QuotaExhausted,
+        Source::BackendError,
+        None,
+        None,
+        now,
+    )
+    .unwrap();
+    let err = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request,
+        &RoutingRuntimeState::default(),
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::ApprovalRequired { backend, model, .. })
+            if backend == "opencode"
+                && model.as_deref() == Some("nous-portal/z-ai/glm-5.2")
+    ));
 }
 
 #[test]
