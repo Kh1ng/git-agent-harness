@@ -1,7 +1,8 @@
+use super::super::decision::decide_with;
 use super::ConcurrencyGuard;
 use crate::config::tests::test_profile_for_notifications;
 use crate::config::{Defaults, RoutingPolicy};
-use crate::routing::{decide_with, RouteRequest};
+use crate::routing::RouteRequest;
 use std::sync::Mutex;
 use tempfile::TempDir;
 use time::OffsetDateTime;

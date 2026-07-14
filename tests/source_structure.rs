@@ -52,13 +52,26 @@ fn dispatch_facade_preserves_public_call_paths_and_final_layout() {
 }
 
 #[test]
-fn routing_extractions_preserve_public_call_paths_and_layout() {
+fn routing_facade_preserves_public_call_paths_and_final_layout() {
     fn public<T>(_item: T) {}
 
     public(git_agent_harness::routing::current_concurrent);
+    public(git_agent_harness::routing::decide_for_task_with_state);
+    public(git_agent_harness::routing::decide_with_state);
     let _ = std::mem::size_of::<git_agent_harness::routing::ConcurrencyGuard>();
+    let _ = std::mem::size_of::<git_agent_harness::routing::RouteDecision>();
+    let _ = std::mem::size_of::<git_agent_harness::routing::RouteRequest>();
 
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let facade = repo_root.join("src/routing/mod.rs");
+    assert!(facade.is_file());
+    assert!(!repo_root.join("src/routing.rs").exists());
+    assert!(
+        count_lines(&facade) <= 300,
+        "routing facade must remain a thin, stable public boundary"
+    );
+    assert!(repo_root.join("src/routing/decision.rs").is_file());
+    assert!(repo_root.join("src/routing/decision/tests.rs").is_file());
     assert!(repo_root.join("src/routing/policy.rs").is_file());
     assert!(repo_root.join("src/routing/policy/tests.rs").is_file());
     assert!(repo_root.join("src/routing/reservation.rs").is_file());
