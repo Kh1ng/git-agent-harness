@@ -5361,10 +5361,13 @@ fn parallel_loop_slot_terminal_action_does_not_abort_later_slots() {
         &fake_bin,
         "gh",
         &format!(
-            "#!/bin/sh\n\
+             "#!/bin/sh\n\
              if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+             \x20\x20lock_dir='{count_file}.lock'\n\
+             \x20\x20while ! mkdir \"$lock_dir\" 2>/dev/null; do sleep 0.01; done\n\
              \x20\x20count=$(( $(cat '{count_file}' 2>/dev/null || echo 0) + 1 ))\n\
              \x20\x20echo \"$count\" > '{count_file}'\n\
+             \x20\x20rmdir \"$lock_dir\"\n\
              \x20\x20if [ \"$count\" = \"2\" ]; then echo 'simulated transient sync failure' >&2; exit 1; fi\n\
              \x20\x20echo '[]'; exit 0\n\
              fi\n\
@@ -5400,7 +5403,16 @@ fn parallel_loop_slot_terminal_action_does_not_abort_later_slots() {
     // Both distinct tickets must have a real (non-claim) completion entry --
     // slot 3's dispatch of TICKET-301 must not have been aborted by slot 2's
     // NoOp verdict on the transient sync hiccup.
-    let ledger_text = fs::read_to_string(&ledger_path).unwrap();
+    let ledger_text = fs::read_to_string(&ledger_path).unwrap_or_else(|err| {
+        let events = fs::read_to_string(&events_path)
+            .unwrap_or_else(|events_err| format!("<unreadable: {events_err}>"));
+        let pr_list_count =
+            fs::read_to_string(&pr_list_count_file).unwrap_or_else(|_| "<missing>".into());
+        panic!(
+            "parallel loop produced no ledger ({err}); pr-list count={}; events={events}",
+            pr_list_count.trim()
+        );
+    });
     let dispatched_work_ids: std::collections::HashSet<String> = ledger_text
         .lines()
         .map(|l| serde_json::from_str::<Value>(l).unwrap())
