@@ -57,6 +57,101 @@ fn review_budget_counts_review_cycles_across_ticket_id_aliases() {
 }
 
 #[test]
+fn clear_attempts_resets_review_cycle_budget_for_the_current_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            max_review_cycles_per_ticket: Some(2),
+            ..RoutingPolicy::default()
+        },
+    );
+    let prof = profile(tmp.path());
+    for _ in 0..2 {
+        let mut entry = review_ledger_entry("test", &prof, "gah/42", "NEEDS_FIX", "high");
+        entry.work_id = Some("#42".into());
+        crate::ledger::append(&cfg, &entry).unwrap();
+    }
+    crate::ledger::append(&cfg, &LedgerEntry::new_clear_attempts("test", &prof, "#42")).unwrap();
+
+    let block = check_review_budget(
+        &cfg,
+        &prof,
+        "test",
+        Some("#42"),
+        &route_decision("vibe", Some("reviewer"), false),
+    )
+    .unwrap();
+
+    assert!(block.is_none(), "pre-tombstone reviews must be cleared");
+}
+
+#[test]
+fn reviews_after_clear_attempts_still_consume_the_cycle_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            max_review_cycles_per_ticket: Some(1),
+            ..RoutingPolicy::default()
+        },
+    );
+    let prof = profile(tmp.path());
+    let mut old = review_ledger_entry("test", &prof, "gah/42", "NEEDS_FIX", "high");
+    old.work_id = Some("#42".into());
+    crate::ledger::append(&cfg, &old).unwrap();
+    crate::ledger::append(&cfg, &LedgerEntry::new_clear_attempts("test", &prof, "#42")).unwrap();
+    let mut current = review_ledger_entry("test", &prof, "gah/42", "NEEDS_FIX", "high");
+    current.work_id = Some("#42".into());
+    crate::ledger::append(&cfg, &current).unwrap();
+
+    let block = check_review_budget(
+        &cfg,
+        &prof,
+        "test",
+        Some("#42"),
+        &route_decision("vibe", Some("reviewer"), false),
+    )
+    .unwrap()
+    .expect("the post-tombstone review must consume the one-cycle budget");
+
+    assert!(block.reason.contains("1/1 review cycles"));
+}
+
+#[test]
+fn another_profiles_clear_attempts_does_not_reset_review_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            max_review_cycles_per_ticket: Some(1),
+            ..RoutingPolicy::default()
+        },
+    );
+    let prof = profile(tmp.path());
+    let mut review = review_ledger_entry("test", &prof, "gah/42", "NEEDS_FIX", "high");
+    review.work_id = Some("#42".into());
+    crate::ledger::append(&cfg, &review).unwrap();
+    crate::ledger::append(
+        &cfg,
+        &LedgerEntry::new_clear_attempts("other-profile", &prof, "#42"),
+    )
+    .unwrap();
+
+    let block = check_review_budget(
+        &cfg,
+        &prof,
+        "test",
+        Some("#42"),
+        &route_decision("vibe", Some("reviewer"), false),
+    )
+    .unwrap()
+    .expect("another profile's tombstone must not reset this budget");
+
+    assert!(block.reason.contains("1/1 review cycles"));
+}
+
+#[test]
 fn skipped_duplicate_reviews_do_not_consume_the_cycle_budget() {
     // Regression: a duplicate-review short-circuit (#109) launches no
     // reviewer and must not be indistinguishable from a real cycle when
