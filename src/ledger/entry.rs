@@ -307,6 +307,19 @@ pub struct LedgerEntry {
     /// Deterministic reason why GAH made a reviewer output non-mergeable.
     #[serde(default)]
     pub review_gate_reason: Option<String>,
+    /// Structured reviewer output retained for deterministic repair prompts.
+    /// These fields intentionally remain separate from the rendered provider
+    /// comment so FixMr never has to scrape human-formatted Markdown.
+    #[serde(default)]
+    pub review_blocking_findings: Vec<String>,
+    #[serde(default)]
+    pub review_non_blocking_findings: Vec<String>,
+    #[serde(default)]
+    pub review_risk_notes: Vec<String>,
+    #[serde(default)]
+    pub review_evidence: Vec<String>,
+    #[serde(default)]
+    pub review_compatibility_evidence: Vec<String>,
     pub commit_attempted: bool,
     pub commit_created: bool,
     pub push_attempted: bool,
@@ -412,6 +425,11 @@ impl LedgerEntry {
             review_source_sha: None,
             reviewer_class: None,
             review_gate_reason: None,
+            review_blocking_findings: Vec::new(),
+            review_non_blocking_findings: Vec::new(),
+            review_risk_notes: Vec::new(),
+            review_evidence: Vec::new(),
+            review_compatibility_evidence: Vec::new(),
             commit_attempted: false,
             commit_created: false,
             push_attempted: false,
@@ -493,6 +511,11 @@ impl LedgerEntry {
             review_source_sha: None,
             reviewer_class: None,
             review_gate_reason: None,
+            review_blocking_findings: Vec::new(),
+            review_non_blocking_findings: Vec::new(),
+            review_risk_notes: Vec::new(),
+            review_evidence: Vec::new(),
+            review_compatibility_evidence: Vec::new(),
             commit_attempted: false,
             commit_created: false,
             push_attempted: false,
@@ -765,6 +788,11 @@ mod tests {
         assert_eq!(parsed.routing_diagnostics, None);
         assert_eq!(parsed.work_id, None);
         assert_eq!(parsed.work_title, None);
+        assert!(parsed.review_blocking_findings.is_empty());
+        assert!(parsed.review_non_blocking_findings.is_empty());
+        assert!(parsed.review_risk_notes.is_empty());
+        assert!(parsed.review_evidence.is_empty());
+        assert!(parsed.review_compatibility_evidence.is_empty());
         assert_eq!(parsed.profile, "real");
     }
 

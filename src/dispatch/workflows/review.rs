@@ -518,6 +518,11 @@ pub(in crate::dispatch) fn review(
             ledger.reviewer_model = route.effective_model.clone();
             ledger.reviewer_tier = Some(reviewer_tier.as_str().to_string());
             ledger.review_gate_reason = verdict.safety_gate_reason.clone();
+            ledger.review_blocking_findings = verdict.blocking_findings.clone();
+            ledger.review_non_blocking_findings = verdict.non_blocking_findings.clone();
+            ledger.review_risk_notes = verdict.risk_notes.clone();
+            ledger.review_evidence = verdict.evidence.clone();
+            ledger.review_compatibility_evidence = verdict.compatibility_evidence.clone();
             ledger.usage = aggregate_attempt_usage(&ledger.attempts);
             if let Some(attempt) = ledger.attempts.last_mut() {
                 attempt.validation_result = Some(verdict.verdict.clone());
@@ -535,6 +540,12 @@ pub(in crate::dispatch) fn review(
                     reviewer_model: route.effective_model.as_deref(),
                     reviewer_tier: verdict.reviewer_tier.as_deref(),
                     review_gate_reason: verdict.safety_gate_reason.as_deref(),
+                    review_source_sha: ledger.review_source_sha.as_deref(),
+                    blocking_findings: &verdict.blocking_findings,
+                    non_blocking_findings: &verdict.non_blocking_findings,
+                    risk_notes: &verdict.risk_notes,
+                    evidence: &verdict.evidence,
+                    compatibility_evidence: &verdict.compatibility_evidence,
                 },
             ) {
                 eprintln!(

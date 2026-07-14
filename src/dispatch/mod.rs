@@ -20,6 +20,7 @@ mod metrics;
 mod mutation_policy;
 mod prompts;
 mod publish;
+mod repair_context;
 mod repo_inspection;
 mod review;
 mod text;
