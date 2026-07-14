@@ -472,3 +472,30 @@ or fallback review always requires a human; no auto-merge on a weak review.
 When unattended trust is in doubt, the conservative operator move is
 `gah hold set` on the specific work_id (or `merge_policy = stop_for_human` on the
 profile) rather than editing state or stopping all work.
+
+## 7. Rust source-size ratchet guard
+
+GAH enforces a hard ceiling for large Rust files in the `source_structure`
+integration test. The baseline lives in
+`config/rust-source-size-baseline.toml` and sets:
+
+- `threshold`: files with `<= 1500` lines are unrestricted.
+- `files`: tracked `.rs` files over threshold and their current ceilings.
+
+The guard scans tracked Rust source and test files and fails only when:
+
+- A baseline-listed file grows beyond its recorded ceiling.
+- A tracked file exceeds the threshold but is missing from the baseline.
+
+During extraction, remove or lower legacy entries:
+
+- If a file is split and an extracted file still exceeds the threshold, add a
+  reviewed entry at that file's exact current line count. Never increase an
+  existing ceiling to make growth pass.
+- If a file is split and the original drops below threshold, remove its old
+  entry.
+- If a file is moved, remove the stale old path entry and add/update the new
+  path entry.
+
+Stale baseline entries for deleted/moved paths are reported explicitly by the
+test without blocking the run, so they can be cleaned up in the extraction PR.
