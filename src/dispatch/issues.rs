@@ -628,12 +628,16 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
     }
 
     meta.is_authoritative = meta.ticket_id.is_some() || meta.work_id.is_some();
+    if meta.goal.is_none() {
+        meta.goal = extract_markdown_section(&issue.body, "Goal");
+    }
     meta.problem = extract_markdown_section(&issue.body, "Problem")
         .or_else(|| extract_markdown_section(&issue.body, "Background"))
         .or_else(|| extract_markdown_section(&issue.body, "Description"));
     // Issue #405: `Scope` is common requirement-shaped phrasing but is only
     // ever a stand-in for problem/goal content -- an issue that already has
-    // an explicit Problem/Background/Description or an inline `Goal:` line
+    // an explicit Problem/Background/Description, `Goal:` field, or `Goal`
+    // section
     // keeps that as authoritative rather than being overridden by Scope.
     if meta.problem.is_none() && meta.goal.is_none() {
         meta.problem = extract_markdown_section(&issue.body, "Scope");
@@ -1069,7 +1073,7 @@ The parser should retain structured sections.\n\n\
         let issue = IssueDetails {
             number: "1".to_string(),
             title: "Test".to_string(),
-            body: "Goal: Ship the feature\n\n## Scope\n\nA scope note".to_string(),
+            body: "## Goal\n\nShip the feature\n\n## Scope\n\nA scope note".to_string(),
             labels: vec![],
             state: None,
         };

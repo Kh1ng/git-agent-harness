@@ -325,6 +325,7 @@ fn issue_has_no_structured_body(issue: &IssueDetails) -> bool {
     extract_markdown_section(&issue.body, "Problem").is_none()
         && extract_markdown_section(&issue.body, "Background").is_none()
         && extract_markdown_section(&issue.body, "Description").is_none()
+        && extract_markdown_section(&issue.body, "Goal").is_none()
         && extract_markdown_section(&issue.body, "Scope").is_none()
         && extract_markdown_list_section(&issue.body, "Acceptance Criteria").is_empty()
         && extract_markdown_list_section(&issue.body, "Constraints").is_empty()
@@ -643,6 +644,33 @@ mod tests {
         assert!(task.contains("Detect config drift across restarts"));
         assert!(task.contains("### Constraints"));
         assert!(task.contains("Never silently disable classification"));
+        assert!(!task.contains("### Issue Description"));
+    }
+
+    #[test]
+    fn markdown_goal_is_authoritative_over_scope_and_survives_the_task_pack() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "384".to_string(),
+            title: "Preserve explicit goals".to_string(),
+            body: "## Goal\n\nPreserve this goal.\n\n\
+                   ## Scope\n\nFallback scope.\n\n\
+                   ## Required Behavior\n\n- Keep behavior stable."
+                .to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#384", Some(&issue));
+
+        assert!(task.contains("### Problem"));
+        assert!(task.contains("Preserve this goal."));
+        assert!(!task.contains("Fallback scope."));
+        assert!(task.contains("Keep behavior stable."));
         assert!(!task.contains("### Issue Description"));
     }
 
