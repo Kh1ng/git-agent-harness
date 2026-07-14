@@ -7,21 +7,21 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
-use std::time::Instant;
-
-pub(crate) mod output;
-pub(crate) mod process;
+use std::time::{Duration, Instant};
 
 pub(crate) mod backends;
-
-pub use crate::runner::backends::claude::run_claude_with_executable;
+pub(crate) mod output;
+pub(crate) mod process;
+#[allow(unused_imports)]
+pub use crate::runner::backends::claude::{run_claude, run_claude_with_executable};
 pub(crate) use crate::runner::backends::codex::{codex_model_args, filtered_codex_args};
+#[allow(unused_imports)]
 pub use crate::runner::backends::codex::{
-    extract_model_from_args, extract_model_from_backend_args, filtered_backend_args,
+    extract_model_from_args, extract_model_from_backend_args, filtered_backend_args, run_codex,
     run_codex_with_executable,
 };
-pub use crate::runner::backends::openhands::{load_oh_profile, run_openhands};
+#[allow(unused_imports)]
+pub use crate::runner::backends::openhands::{list_oh_profiles, load_oh_profile, run_openhands};
 
 pub(crate) use crate::runner::process::copy_stream_to_file;
 pub use crate::runner::process::install_shutdown_handler;
