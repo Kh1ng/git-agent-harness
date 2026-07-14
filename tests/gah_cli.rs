@@ -6,14 +6,24 @@ use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command as ProcessCommand;
+use std::sync::atomic::{AtomicU64, Ordering};
 use support::{FakeBackend, Scenario};
 use tempfile::TempDir;
 
 fn bin() -> Command {
+    static VALIDATION_STATE_COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut cmd = Command::cargo_bin("gah").unwrap();
     cmd.env(
         "GAH_AVAILABILITY_PATH",
         "/nonexistent-availability-path.json",
+    );
+    cmd.env(
+        "GAH_VALIDATION_CHECK_PATH",
+        std::env::temp_dir().join(format!(
+            "gah-cli-test-validation-{}-{}.json",
+            std::process::id(),
+            VALIDATION_STATE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        )),
     );
     cmd
 }

@@ -8,6 +8,7 @@ use crate::routing::{
     self, CandidateIdentity, RouteDecision, RouteError, RouteRequest, RoutingRuntimeState,
     TaskRoutingContext,
 };
+use crate::validation_runner::{validate, validate_with_exit_code};
 use crate::{provider, runner, usage, worktree};
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
@@ -16,8 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::SyncSender;
-use std::time::Instant;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -1197,72 +1197,6 @@ fn run_auto_fix_commands(commands: &[String], wt: &Path, env_vars: &[(String, St
     }
 }
 
-/// Run validation_commands in the worktree. Returns Err(combined output) on first failure.
-fn validate(commands: &[String], wt: &Path, env_vars: &[(String, String)]) -> Result<()> {
-    for cmd_str in commands {
-        if cmd_str.trim().is_empty() {
-            continue;
-        }
-        println!("  Validating: {}", cmd_str);
-        // Run through the shell: validation commands routinely use `cd x && y`,
-        // pipes, and env vars, which Command::new(bin) cannot execute.
-        let mut command = Command::new("sh");
-        command.args(["-c", cmd_str]).current_dir(wt);
-        for (key, value) in env_vars {
-            command.env(key, value);
-        }
-        let out = command
-            .output()
-            .with_context(|| format!("failed to run '{}'", cmd_str))?;
-        if !out.status.success() {
-            bail!(
-                "$ {}
-{}{}",
-                cmd_str,
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr),
-            );
-        }
-    }
-    Ok(())
-}
-
-/// TICKET-110: like `validate()`, but also surfaces the failing command's
-/// exit code so baseline classification can key on POSIX shell conventions
-/// (127/126) rather than string-matching stdout.
-fn validate_with_exit_code(
-    commands: &[String],
-    wt: &Path,
-    env_vars: &[(String, String)],
-) -> Result<(), (String, Option<i32>)> {
-    for cmd_str in commands {
-        if cmd_str.trim().is_empty() {
-            continue;
-        }
-        println!("  Validating: {}", cmd_str);
-        let mut command = Command::new("sh");
-        command.args(["-c", cmd_str]).current_dir(wt);
-        for (key, value) in env_vars {
-            command.env(key, value);
-        }
-        let out = command
-            .output()
-            .map_err(|e| (format!("failed to run '{}': {:#}", cmd_str, e), None))?;
-        if !out.status.success() {
-            return Err((
-                format!(
-                    "$ {}\n{}{}",
-                    cmd_str,
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr),
-                ),
-                out.status.code(),
-            ));
-        }
-    }
-    Ok(())
-}
-
 const MIN_DISPATCH_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Build artifacts must outlive individual worktrees, but stay scoped to one
@@ -1393,16 +1327,16 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     );
     let state_path = vc::resolve_state_path();
 
-    // Hold the lock across the whole decide-then-verify sequence, not just the
-    // final write. Without this, concurrent callers (parallel workers in the
-    // same `gah loop`, or separate processes) can each independently read
-    // "needs recheck", each spin up their own redundant fresh-worktree run,
-    // and race to record whichever result lands last -- multiplying load
-    // exactly when the gate is already the bottleneck, and making the
-    // recorded pass/fail state nondeterministic. Only one fresh-worktree
-    // self-check for this state file runs at a time; everyone else blocks
-    // briefly and then takes the fast path once it lands.
-    let lock_file = vc::acquire_lock(&state_path)?;
+    // Hold a per-profile lock across the whole decide-then-verify sequence,
+    // not just the final write. Same-profile callers then share one proof,
+    // while validation commands that invoke GAH for a different test profile
+    // cannot deadlock behind their parent. The state file's global lock is
+    // taken only for the short atomic record update below.
+    let profile_lock = vc::acquire_profile_lock(&state_path, &profile.repo_id)?;
+    if crate::runner::shutdown_requested() {
+        fs2::FileExt::unlock(&profile_lock).ok();
+        anyhow::bail!("shutdown requested before validation gate self-check");
+    }
 
     let state = vc::load_state(&state_path)
         .with_context(|| format!("loading validation-check state {}", state_path.display()))?;
@@ -1412,7 +1346,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
             "[validation-gate] commands unchanged (hash {}) — skipping fresh-worktree self-check",
             &hash[..hash.len().min(8)]
         );
-        fs2::FileExt::unlock(&lock_file).ok();
+        fs2::FileExt::unlock(&profile_lock).ok();
         return Ok(());
     }
 
@@ -1455,10 +1389,14 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     worktree::cleanup(&wt, repo);
     let _ = worktree::git_raw(&["branch", "-D", &branch], repo);
 
-    let record_result =
-        vc::record_check_locked(&state_path, &profile.repo_id, &hash, ok, &verified_at)
-            .with_context(|| format!("recording validation-check result {}", state_path.display()));
-    fs2::FileExt::unlock(&lock_file).ok();
+    if crate::runner::shutdown_requested() {
+        fs2::FileExt::unlock(&profile_lock).ok();
+        anyhow::bail!("shutdown requested during validation gate self-check");
+    }
+
+    let record_result = vc::record_check(&state_path, &profile.repo_id, &hash, ok, &verified_at)
+        .with_context(|| format!("recording validation-check result {}", state_path.display()));
+    fs2::FileExt::unlock(&profile_lock).ok();
     record_result?;
 
     if let Err(text) = result {
@@ -4837,7 +4775,6 @@ mod tests {
     use super::preflight;
     use super::run_auto_fix_commands;
     use super::self_check_validation_gate;
-    use super::validate;
     use super::ValidationGateError;
     use super::{
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
@@ -9200,44 +9137,6 @@ The parser should retain structured sections.\n\n\
         assert!(body.contains("Generated research findings report."));
         assert!(!body.contains("## Changes"));
         assert!(!body.contains("## Branch"));
-    }
-
-    #[test]
-    fn validate_runs_shell_syntax() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("sub")).unwrap();
-        // `cd x && y` requires a shell — this was silently impossible before
-        let cmds = vec!["cd sub && true".to_string()];
-        assert!(validate(&cmds, tmp.path(), &[]).is_ok());
-    }
-
-    #[test]
-    fn validate_reports_failing_command_output() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cmds = vec!["echo oops >&2 && false".to_string()];
-        let err = validate(&cmds, tmp.path(), &[]).unwrap_err();
-        assert!(format!("{:#}", err).contains("oops"));
-    }
-
-    #[test]
-    fn validate_propagates_shared_cargo_target_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let observed = tmp.path().join("observed-target");
-        let commands = vec![format!(
-            "printf '%s' \"$CARGO_TARGET_DIR\" > {}",
-            observed.display()
-        )];
-        let expected = tmp.path().join("shared-cargo-target");
-        let env = vec![(
-            "CARGO_TARGET_DIR".to_string(),
-            expected.to_string_lossy().into_owned(),
-        )];
-
-        validate(&commands, tmp.path(), &env).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(observed).unwrap(),
-            expected.display().to_string()
-        );
     }
 
     #[test]
