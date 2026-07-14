@@ -28,7 +28,7 @@ use crate::ledger::{self, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::routing::RouteRequest;
 use crate::usage_attribution::{normalize_attempt_usage, UsageAttribution};
-use crate::validation_runner::{validate, validate_with_exit_code};
+use crate::validation_runner::{validate_with_exit_code, VALIDATION_COMMAND_TIMEOUT_EXIT_CODE};
 use crate::{provider, runner, worktree};
 use anyhow::{Context, Result};
 use std::fs;
@@ -199,6 +199,7 @@ pub(crate) fn improve(
     let validation_environment = validation_env(profile, session_dir);
 
     let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
+    let timeout = std::time::Duration::from_secs(profile.review_timeout_seconds());
 
     let (baseline_failure, baseline_exit_code) = if should_skip_per_dispatch_baseline(
         profile.validation_commands.is_empty(),
@@ -208,7 +209,12 @@ pub(crate) fn improve(
         (None, None)
     } else {
         println!("Baseline validation on pristine worktree...");
-        match validate_with_exit_code(&profile.validation_commands, &wt, &validation_environment) {
+        match validate_with_exit_code(
+            &profile.validation_commands,
+            &wt,
+            &validation_environment,
+            timeout,
+        ) {
             Ok(()) => {
                 println!("Baseline validation passed.");
                 (None, None)
@@ -795,7 +801,12 @@ pub(crate) fn improve(
             "Running validation ({} commands)...",
             profile.validation_commands.len()
         );
-        match validate(&profile.validation_commands, &wt, &validation_environment) {
+        match validate_with_exit_code(
+            &profile.validation_commands,
+            &wt,
+            &validation_environment,
+            timeout,
+        ) {
             Ok(()) => {
                 println!("Validation passed.");
                 validation_failed = false;
@@ -821,12 +832,44 @@ pub(crate) fn improve(
                 });
                 break;
             }
-            Err(e) => {
+            Err((e, exit_code)) => {
                 validation_failed = true;
                 let failure_output = format!("{:#}", e);
                 let failure_path = attempt_session.join("validation-failure.txt");
                 fs::write(&failure_path, &failure_output)?;
                 println!("Validation failed ({})", failure_path.display());
+
+                if exit_code == Some(VALIDATION_COMMAND_TIMEOUT_EXIT_CODE) {
+                    ledger.set_failure(
+                        crate::ledger::FailureClass::HarnessError,
+                        crate::ledger::FailureStage::PostValidation,
+                    );
+                    ledger.attempts.push(crate::ledger::AttemptRecord {
+                        attempt_number: attempt + 1,
+                        backend: route.effective_backend.clone(),
+                        effective_model: Some(llm.model.clone()),
+                        exit_code: Some(VALIDATION_COMMAND_TIMEOUT_EXIT_CODE),
+                        validation_result: Some("failed".into()),
+                        failure_class: Some(
+                            crate::ledger::FailureClass::HarnessError.as_str().into(),
+                        ),
+                        failure_stage: Some(
+                            crate::ledger::FailureStage::PostValidation.as_str().into(),
+                        ),
+                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                        diff_path: None,
+                        usage: attempt_usage(
+                            &result.log_path,
+                            result.agy_cli_log_delta.as_deref(),
+                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
+                            result.transcript_path.as_deref(),
+                            Some(&claude_path),
+                        ),
+                        cli_version: result.agy_version.clone(),
+                    });
+                    worktree::cleanup(&wt, repo);
+                    anyhow::bail!("validation timed out (harness error). {}", failure_output);
+                }
 
                 // Identical failure to the previous attempt means the agent's
                 // changes had no effect on the error — almost always an

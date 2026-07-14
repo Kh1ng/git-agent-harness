@@ -3,7 +3,13 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+pub(crate) const VALIDATION_COMMAND_TIMEOUT_EXIT_CODE: i32 = 124;
+
+fn is_validation_timeout_error(error: &str) -> bool {
+    error.contains("timed out after")
+}
 
 /// Run validation commands sequentially in the worktree and surface the first
 /// command failure with its combined output.
@@ -11,13 +17,14 @@ pub(crate) fn validate(
     commands: &[String],
     worktree: &Path,
     env_vars: &[(String, String)],
+    timeout: Duration,
 ) -> Result<()> {
     for command in commands {
         if command.trim().is_empty() {
             continue;
         }
         println!("  Validating: {command}");
-        let output = run_shell_command(command, worktree, env_vars)
+        let output = run_shell_command(command, worktree, env_vars, timeout)
             .with_context(|| format!("failed to run '{command}'"))?;
         if !output.status.success() {
             bail!(
@@ -37,14 +44,19 @@ pub(crate) fn validate_with_exit_code(
     commands: &[String],
     worktree: &Path,
     env_vars: &[(String, String)],
+    timeout: Duration,
 ) -> Result<(), (String, Option<i32>)> {
     for command in commands {
         if command.trim().is_empty() {
             continue;
         }
         println!("  Validating: {command}");
-        let output = run_shell_command(command, worktree, env_vars)
-            .map_err(|error| (format!("failed to run '{command}': {error:#}"), None))?;
+        let output = run_shell_command(command, worktree, env_vars, timeout).map_err(|error| {
+            let error_text = format!("failed to run '{command}': {error:#}");
+            let exit_code = is_validation_timeout_error(&error_text)
+                .then_some(VALIDATION_COMMAND_TIMEOUT_EXIT_CODE);
+            (error_text, exit_code)
+        })?;
         if !output.status.success() {
             return Err((
                 format!(
@@ -64,8 +76,9 @@ fn run_shell_command(
     command: &str,
     worktree: &Path,
     env_vars: &[(String, String)],
+    timeout: Duration,
 ) -> Result<Output> {
-    run_shell_command_with_shutdown(command, worktree, env_vars, || {
+    run_shell_command_with_shutdown(command, worktree, env_vars, timeout, || {
         crate::runner::shutdown_requested()
     })
 }
@@ -74,6 +87,7 @@ fn run_shell_command_with_shutdown(
     command_text: &str,
     worktree: &Path,
     env_vars: &[(String, String)],
+    timeout: Duration,
     shutdown_requested: impl Fn() -> bool,
 ) -> Result<Output> {
     if shutdown_requested() {
@@ -105,19 +119,39 @@ fn run_shell_command_with_shutdown(
         stderr.read_to_end(&mut bytes).map(|_| bytes)
     });
 
+    let started = Instant::now();
     let status = loop {
-        if shutdown_requested() {
-            crate::runner::kill_process_group(&mut child);
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            bail!("shutdown requested during validation command '{command_text}'");
-        }
         if let Some(status) = child
             .try_wait()
             .with_context(|| format!("waiting for validation command '{command_text}'"))?
         {
             break status;
+        }
+        if started.elapsed() >= timeout {
+            crate::runner::kill_process_group(&mut child);
+            let _ = child.wait();
+            let _ = stdout_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("validation stdout reader panicked"))??;
+            let _ = stderr_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("validation stderr reader panicked"))??;
+            bail!(
+                "validation command '{command_text}' timed out after {:.1}s (configured timeout {:.1}s)",
+                started.elapsed().as_secs_f64(),
+                timeout.as_secs_f64(),
+            );
+        }
+        if shutdown_requested() {
+            crate::runner::kill_process_group(&mut child);
+            let _ = child.wait();
+            let _ = stdout_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("validation stdout reader panicked"))??;
+            let _ = stderr_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("validation stderr reader panicked"))??;
+            bail!("shutdown requested during validation command '{command_text}'");
         }
         thread::sleep(Duration::from_millis(50));
     };
@@ -146,13 +180,25 @@ mod tests {
     fn supports_shell_syntax() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("sub")).unwrap();
-        validate(&["cd sub && true".into()], tmp.path(), &[]).unwrap();
+        validate(
+            &["cd sub && true".into()],
+            tmp.path(),
+            &[],
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
     }
 
     #[test]
     fn reports_failing_command_output() {
         let tmp = tempfile::tempdir().unwrap();
-        let error = validate(&["echo oops >&2 && false".into()], tmp.path(), &[]).unwrap_err();
+        let error = validate(
+            &["echo oops >&2 && false".into()],
+            tmp.path(),
+            &[],
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("oops"));
     }
 
@@ -170,7 +216,13 @@ mod tests {
             expected.to_string_lossy().into_owned(),
         )];
 
-        validate(&commands, tmp.path(), &environment).unwrap();
+        validate(
+            &commands,
+            tmp.path(),
+            &environment,
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(observed).unwrap(),
             expected.display().to_string()
@@ -190,9 +242,13 @@ mod tests {
         });
 
         let started = Instant::now();
-        let error = run_shell_command_with_shutdown(&command, tmp.path(), &[], || {
-            shutdown.load(Ordering::SeqCst)
-        })
+        let error = run_shell_command_with_shutdown(
+            &command,
+            tmp.path(),
+            &[],
+            std::time::Duration::from_secs(1),
+            || shutdown.load(Ordering::SeqCst),
+        )
         .unwrap_err();
         trigger_thread.join().unwrap();
 
@@ -202,6 +258,41 @@ mod tests {
             "validation shutdown should not wait for the shell command"
         );
         std::thread::sleep(Duration::from_millis(2100));
+        assert!(
+            !marker.exists(),
+            "the validation command's background child must die with its process group"
+        );
+    }
+
+    #[test]
+    fn timeout_kills_the_validation_command_process_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("timeout-marker");
+        let command = format!(
+            "(sleep 1; printf timed_out > '{}') & wait",
+            marker.display()
+        );
+        let started = Instant::now();
+        let error = run_shell_command_with_shutdown(
+            &command,
+            tmp.path(),
+            &[],
+            std::time::Duration::from_millis(150),
+            || false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("timed out after"));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(150));
+        assert!(
+            error.to_string().contains("timed out after"),
+            "timeout error should identify elapsed timeout"
+        );
+        assert!(
+            error.to_string().contains(&command),
+            "timeout error should identify the command"
+        );
+        std::thread::sleep(Duration::from_millis(250));
         assert!(
             !marker.exists(),
             "the validation command's background child must die with its process group"

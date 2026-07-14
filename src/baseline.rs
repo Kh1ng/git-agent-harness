@@ -66,6 +66,13 @@ pub fn classify_baseline(
         return BaselineDisposition::HarnessError;
     }
 
+    if matches!(
+        exit_code,
+        Some(crate::validation_runner::VALIDATION_COMMAND_TIMEOUT_EXIT_CODE)
+    ) {
+        return BaselineDisposition::HarnessError;
+    }
+
     for marker in known_failure_markers {
         if !marker.is_empty() && text.to_lowercase().contains(&marker.to_lowercase()) {
             return BaselineDisposition::ExpectedRed;

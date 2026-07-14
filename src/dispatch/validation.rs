@@ -211,10 +211,16 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
         &branch,
         &worktree_base,
     )?;
+    let timeout = std::time::Duration::from_secs(profile.review_timeout_seconds());
     let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, &wt)?;
     let gate_environment = cargo_target.environment();
     let verified_at = vc::now_rfc3339(OffsetDateTime::now_utc());
-    let result = validate(&profile.validation_commands, &wt, &gate_environment);
+    let result = validate(
+        &profile.validation_commands,
+        &wt,
+        &gate_environment,
+        timeout,
+    );
     let ok = result.is_ok();
 
     // Always clean up, regardless of pass/fail — a leftover validation-gate
