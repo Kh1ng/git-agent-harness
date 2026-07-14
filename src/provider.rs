@@ -818,6 +818,7 @@ mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            validation_timeout_seconds: None,
             notify_command: None,
             routing: RoutingPolicy::default(),
             pacing: Default::default(),

@@ -199,7 +199,7 @@ pub(crate) fn improve(
     let validation_environment = validation_env(profile, session_dir);
 
     let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
-    let timeout = std::time::Duration::from_secs(profile.review_timeout_seconds());
+    let timeout = std::time::Duration::from_secs(profile.validation_timeout_seconds());
 
     let (baseline_failure, baseline_exit_code) = if should_skip_per_dispatch_baseline(
         profile.validation_commands.is_empty(),
