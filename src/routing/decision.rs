@@ -723,6 +723,7 @@ where
         .cloned()
         .expect("candidate list must never be empty");
     let mut skipped = Vec::new();
+    let mut included_capacity_is_busy = false;
     for candidate in candidates {
         if let Some(reason) = skip_reason_for_candidate(
             state_path,
@@ -736,15 +737,20 @@ where
             exclude_attempted,
             candidate.requires_approval,
         )? {
+            if reason.reason == "max_concurrent_reached" && candidate.included_in_quota {
+                included_capacity_is_busy = true;
+            }
             skipped.push(reason);
             continue;
         }
         return Ok((candidate, skipped));
     }
-    if let Some(candidate) = skipped
-        .iter()
-        .find(|candidate| candidate.reason == "operator_approval_required")
-    {
+    // A subscribed route that is only busy is not exhausted. Defer this
+    // dispatch until its slot releases instead of turning a temporary local
+    // capacity condition into a persistent human request to spend money.
+    if let Some(candidate) = skipped.iter().find(|candidate| {
+        candidate.reason == "operator_approval_required" && !included_capacity_is_busy
+    }) {
         return Err(RouteError::ApprovalRequired {
             backend: candidate.backend.clone(),
             model: candidate.model.clone(),
