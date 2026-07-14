@@ -1351,7 +1351,22 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
     }
 
     let repo = Path::new(&profile.local_path);
-    let target_sha = command_output("git", &["rev-parse", &profile.default_target_branch], repo)?;
+    let target_sha = command_output("git", &["rev-parse", &profile.default_target_branch], repo)
+        .map_err(|error| {
+            // A dedicated ValidationGateError, not a generic error: this is
+            // the gate itself failing to even run (e.g. default_target_branch
+            // was renamed/deleted, or a shallow clone is missing the ref),
+            // not a transient dispatch hiccup. Left as a plain error, it
+            // would be misclassified by is_validation_gate_failure and the
+            // daemon would retry it every 5 minutes forever instead of
+            // pausing with a clear, actionable message like every other
+            // broken-gate state in this function.
+            anyhow::Error::new(ValidationGateError).context(format!(
+                "VALIDATION GATE FAILED — could not resolve target branch '{}' for profile \
+                 '{}': {error:#}",
+                profile.default_target_branch, profile.repo_id
+            ))
+        })?;
     let gate_environment = validation_env(profile);
     let hash = vc::hash_validation_context(
         &profile.validation_commands,
@@ -1917,6 +1932,22 @@ fn enforce_policy(profile: &Profile, action: &str) -> Result<()> {
     }
 }
 
+/// Whether `improve()` can skip its own per-dispatch pristine-worktree
+/// baseline validation, relying instead on the profile-level validation gate
+/// (`self_check_validation_gate`). That shared gate only ever proves
+/// `profile.default_target_branch` -- so its proof only covers a dispatch
+/// that skipping requires: a FRESH worktree cut from that branch (no
+/// `existing_branch`, i.e. not a `FixMr`/repair dispatch, which validates the
+/// existing MR branch instead) AND the gate not having been explicitly
+/// bypassed (no shared proof exists in that case either).
+fn should_skip_per_dispatch_baseline(
+    validation_commands_empty: bool,
+    has_existing_branch: bool,
+    skip_validation_gate: bool,
+) -> bool {
+    validation_commands_empty || (!has_existing_branch && !skip_validation_gate)
+}
+
 fn improve(
     cfg: &GahConfig,
     profile: &Profile,
@@ -2080,14 +2111,11 @@ fn improve(
 
     let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
 
-    // The profile-level validation gate above already proved this exact target
-    // SHA + command set + validation environment once under a cross-process
-    // lock. Parallel tickets share that result instead of racing identical
-    // baseline suites. An explicit gate bypass retains the old per-dispatch
-    // baseline safety check because no shared proof exists in that case.
-    let (baseline_failure, baseline_exit_code) = if profile.validation_commands.is_empty()
-        || !args.skip_validation_gate
-    {
+    let (baseline_failure, baseline_exit_code) = if should_skip_per_dispatch_baseline(
+        profile.validation_commands.is_empty(),
+        args.existing_branch.is_some(),
+        args.skip_validation_gate,
+    ) {
         (None, None)
     } else {
         println!("Baseline validation on pristine worktree...");
@@ -4771,7 +4799,9 @@ fn format_candidate_task(
 mod tests {
     use super::preflight;
     use super::run_auto_fix_commands;
+    use super::self_check_validation_gate;
     use super::validate;
+    use super::ValidationGateError;
     use super::{
         apply_authoritative_work_identity, apply_diff_stats, apply_pm_plan, apply_route_to_ledger,
         attempt_usage, build_experiment_mr_body, build_fix_or_improve_mr_body,
@@ -4786,7 +4816,7 @@ mod tests {
         parse_review_verdict_with_context, parse_ticket_metadata, parse_ticket_metadata_from_issue,
         render_review_comment, review_escalation_reason, review_labels, review_preflight,
         review_usage, reviewer_dedup_class, run_backend, scan_available_tickets,
-        strip_terminal_noise, validation_failure_fingerprint,
+        should_skip_per_dispatch_baseline, strip_terminal_noise, validation_failure_fingerprint,
         validation_failure_no_progress_reason, ExperimentMrRenderContext, IssueDetails,
         MrRenderContext, ReviewDiffBundle, ReviewGateContext, ReviewerTier, RouteDecision,
         TicketMetadata, ValidationFailureProgress, LIVE_TASK_ACCEPTANCE_MAX_BYTES,
@@ -7796,6 +7826,65 @@ which lacks a leading boundary check.
             entry.routing_reason.as_deref(),
             Some("ticket recommendation")
         );
+    }
+
+    #[test]
+    fn validation_gate_reports_unresolvable_target_branch_as_gate_failure() {
+        // A profile whose default_target_branch can't be resolved (renamed,
+        // deleted, or never fetched locally) must fail as a distinct,
+        // visible ValidationGateError -- the same category as a broken
+        // validation_commands config -- not a plain error a caller would
+        // misclassify as a transient, retry-forever failure.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        run_git(tmp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(tmp.path(), &["config", "user.name", "test"]);
+        fs::write(tmp.path().join("f.txt"), "1").unwrap();
+        run_git(tmp.path(), &["add", "."]);
+        run_git(tmp.path(), &["commit", "-q", "-m", "init"]);
+
+        let mut prof = profile(tmp.path());
+        prof.default_target_branch = "does-not-exist".into();
+        prof.validation_commands = vec!["true".into()];
+        let cfg = gah_config(RoutingPolicy::default());
+
+        let error = self_check_validation_gate(&prof, &cfg, false)
+            .expect_err("an unresolvable target branch must fail the gate");
+        assert!(
+            error.chain().any(|cause| cause.is::<ValidationGateError>()),
+            "expected a ValidationGateError in the chain, got: {error:#}"
+        );
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn baseline_skip_covers_every_combination() {
+        // No commands: always skip, regardless of the other two flags.
+        assert!(should_skip_per_dispatch_baseline(true, false, false));
+        assert!(should_skip_per_dispatch_baseline(true, true, true));
+
+        // Fresh dispatch (no existing_branch), gate ran normally (not
+        // bypassed): the shared gate's proof covers this exact worktree, so
+        // the redundant per-dispatch baseline is skipped.
+        assert!(should_skip_per_dispatch_baseline(false, false, false));
+
+        // Fresh dispatch, but the gate was explicitly bypassed: no shared
+        // proof exists, so the old per-dispatch baseline safety net runs.
+        assert!(!should_skip_per_dispatch_baseline(false, false, true));
+
+        // FixMr/repair dispatch (existing_branch set): the shared gate only
+        // ever proves default_target_branch, never this MR's own branch, so
+        // the baseline must run regardless of skip_validation_gate.
+        assert!(!should_skip_per_dispatch_baseline(false, true, false));
+        assert!(!should_skip_per_dispatch_baseline(false, true, true));
     }
 
     #[test]
