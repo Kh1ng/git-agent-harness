@@ -31,15 +31,17 @@ claude = ["ponytail"]
 
 # Deterministic implementation routing from trusted ticket metadata. Rules
 # are evaluated top-to-bottom; non-empty match lists are ANDed, and a matching
-# rule's candidate order is used until availability/concurrency requires a
-# fallback. Replace these candidates to swap providers/models -- no code is
-# model-specific. Rules apply only to improve/fix/experiment work.
+# rule's highest-priority tier is used until availability/concurrency requires
+# a fallback. Equal-priority candidates are balanced by recent execution count.
+# Replace these candidates to swap providers/models -- no code is model-specific.
+# Rules apply only to improve/fix/experiment work.
 [[routing.task_routing_rules]]
 modes = ["improve", "fix"]
 task_classes = ["documentation", "test", "mechanical"]
 difficulties = ["easy"]
 risks = ["low"]
 candidates = [
-  { backend = "opencode", model = "your-cheap-model", included_in_quota = true },
-  { backend = "agy", model = "your-fallback-model", included_in_quota = true },
+  { backend = "opencode", model = "your-cheap-model", priority = 100, included_in_quota = true },
+  { backend = "agy", model = "your-fallback-model", priority = 100, included_in_quota = true },
+  { backend = "opencode", model = "your-paid-model", priority = 10, requires_approval = true },
 ]

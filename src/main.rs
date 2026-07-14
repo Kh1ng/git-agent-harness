@@ -187,6 +187,13 @@ enum Commands {
         #[command(subcommand)]
         command: HoldCommands,
     },
+    /// Grant or revoke work-item-scoped permission for an exact paid/API
+    /// implementation route. Paid candidates configured with
+    /// `requires_approval = true` are never selected without this record.
+    RouteApproval {
+        #[command(subcommand)]
+        command: RouteApprovalCommands,
+    },
     /// Run the controller continuously. Use --once for one bounded
     /// observation/decision/execution cycle.
     Loop {
@@ -645,6 +652,34 @@ enum HoldCommands {
 }
 
 #[derive(Subcommand)]
+enum RouteApprovalCommands {
+    /// Allow one exact paid backend/model route for this work item.
+    Grant {
+        #[arg(long)]
+        profile: String,
+        work_id: String,
+        #[arg(long)]
+        backend: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
+    /// Remove a previously granted paid-route approval.
+    Revoke {
+        #[arg(long)]
+        profile: String,
+        work_id: String,
+        #[arg(long)]
+        backend: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum TelemetryCommands {
     /// Export telemetry data to versioned repository
     Export {
@@ -1041,6 +1076,44 @@ fn main() -> Result<()> {
                 );
             }
         },
+
+        Commands::RouteApproval { command } => {
+            let (profile, work_id, backend, model, config_path, granted) = match command {
+                RouteApprovalCommands::Grant {
+                    profile,
+                    work_id,
+                    backend,
+                    model,
+                    config_path,
+                } => (profile, work_id, backend, model, config_path, true),
+                RouteApprovalCommands::Revoke {
+                    profile,
+                    work_id,
+                    backend,
+                    model,
+                    config_path,
+                } => (profile, work_id, backend, model, config_path, false),
+            };
+            let cfg = config::load(config_path.as_deref())?;
+            let prof = config::get_profile(&cfg, &profile)?;
+            let entry = ledger::LedgerEntry::new_paid_route_approval(
+                &profile,
+                prof,
+                &work_id,
+                &backend,
+                model.as_deref(),
+                granted,
+            );
+            let path = ledger::append(&cfg, &entry)?;
+            println!(
+                "Paid route approval {} for work_id '{}' on {}/{} ({})",
+                if granted { "granted" } else { "revoked" },
+                work_id,
+                backend,
+                model.as_deref().unwrap_or("default"),
+                path.display()
+            );
+        }
 
         Commands::Loop {
             profile,

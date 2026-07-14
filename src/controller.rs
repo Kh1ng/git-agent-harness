@@ -516,9 +516,10 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     // genuine agent failures count toward the cap; infra-class failures
     // such as backend_error or environment_error do not permanently poison
     // a ticket's retry budget).
+    let implementation_failure_cap = snapshot.profile.max_implementation_failures_per_ticket;
     let exhausted: HashSet<_> = failed_tickets
         .iter()
-        .filter(|t| t.genuine_agent_failure_count >= AUTO_RETRY_CAP)
+        .filter(|t| t.genuine_agent_failure_count >= implementation_failure_cap as usize)
         .filter_map(|t| t.work_id.clone())
         .collect();
 
@@ -545,7 +546,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     {
         if let Some(first_exhausted) = failed_tickets
             .iter()
-            .find(|t| t.genuine_agent_failure_count >= AUTO_RETRY_CAP)
+            .find(|t| t.genuine_agent_failure_count >= implementation_failure_cap as usize)
         {
             return NextAction::HumanRequired {
                 reason: format!(
@@ -1812,6 +1813,7 @@ default_target_branch = "main"
                 default_target_branch: "main".into(),
                 merge_policy: crate::config::MergePolicy::default(),
                 max_fix_attempts_per_mr: 2,
+                max_implementation_failures_per_ticket: 2,
             },
             observations: Observations {
                 sync: ObservationStatus { status: "ok" },

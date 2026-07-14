@@ -4124,7 +4124,64 @@ fn dispatch_dry_run_ticket_metadata_feeds_routing() {
         .env("GAH_AVAILABILITY_PATH", &availability_path)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Effective:    codex"));
+        .stdout(predicate::str::contains("Effective:    codex"))
+        .stdout(predicate::str::contains("LLM model:").not())
+        .stdout(predicate::str::contains("LLM base:").not());
+}
+
+#[test]
+fn route_approval_cli_records_exact_grant_and_revoke() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let model = "nous-portal/z-ai/glm-5.2";
+
+    for (command, expected_mode) in [
+        ("grant", "paid_route_approval_grant"),
+        ("revoke", "paid_route_approval_revoke"),
+    ] {
+        bin()
+            .args([
+                "route-approval",
+                command,
+                "--profile",
+                "real",
+                "ISSUE-42",
+                "--backend",
+                "opencode",
+                "--model",
+                model,
+                "--config-path",
+                cfg.to_str().unwrap(),
+            ])
+            .env("GAH_LEDGER_PATH", &ledger_path)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!(
+                "Paid route approval {}",
+                if command == "grant" {
+                    "granted"
+                } else {
+                    "revoked"
+                }
+            )));
+
+        let line = fs::read_to_string(&ledger_path)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        let entry: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(entry["mode"], expected_mode);
+        assert_eq!(entry["work_id"], "ISSUE-42");
+        assert_eq!(entry["effective_backend"], "opencode");
+        assert_eq!(entry["effective_model"], model);
+        assert!(entry["failure_class"].is_null());
+    }
 }
 
 #[test]

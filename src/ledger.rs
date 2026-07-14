@@ -2,7 +2,7 @@ use crate::config::{GahConfig, Profile};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -552,6 +552,64 @@ impl LedgerEntry {
             ..Self::new_clear_attempts(profile_name, profile, work_id)
         }
     }
+
+    /// Persist an operator's work-item-scoped permission to use one exact
+    /// paid backend/model route. The identity is intentionally safe metadata,
+    /// never a key, account token, or other credential.
+    pub fn new_paid_route_approval(
+        profile_name: &str,
+        profile: &Profile,
+        work_id: &str,
+        backend: &str,
+        model: Option<&str>,
+        granted: bool,
+    ) -> Self {
+        Self {
+            mode: if granted {
+                "paid_route_approval_grant".to_string()
+            } else {
+                "paid_route_approval_revoke".to_string()
+            },
+            backend: backend.to_string(),
+            requested_backend: backend.to_string(),
+            effective_backend: backend.to_string(),
+            requested_model: model.map(str::to_string),
+            effective_model: model.map(str::to_string),
+            // A grant is a controller resume signal, not a failed execution.
+            // `ledger_lookup_for_ticket` derives the escalation signal from
+            // this control mode without polluting failure telemetry.
+            ..Self::new_clear_attempts(profile_name, profile, work_id)
+        }
+    }
+}
+
+/// Resolve current paid-route grants for one work item. Later grant/revoke
+/// entries supersede earlier ones for the same exact backend/model identity.
+pub fn active_paid_route_approvals(
+    cfg: &GahConfig,
+    profile_name: &str,
+    work_id: &str,
+) -> Result<HashSet<(String, Option<String>)>> {
+    let mut active = HashSet::new();
+    for entry in read_entries(cfg)? {
+        if entry.profile != profile_name || entry.work_id.as_deref() != Some(work_id) {
+            continue;
+        }
+        let identity = (
+            entry.effective_backend.clone(),
+            entry.effective_model.clone(),
+        );
+        match entry.mode.as_str() {
+            "paid_route_approval_grant" => {
+                active.insert(identity);
+            }
+            "paid_route_approval_revoke" => {
+                active.remove(&identity);
+            }
+            _ => {}
+        }
+    }
+    Ok(active)
 }
 
 /// A manager review is a much shorter-lived action than a full dispatch
@@ -2786,8 +2844,8 @@ pub fn usage_summary_for_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        active_review_hold_work_ids, append, backfill_review_verdict, entries_for_work_id,
-        index_entries_by_work_id, is_strong_model, read_entries, reconcile,
+        active_paid_route_approvals, active_review_hold_work_ids, append, backfill_review_verdict,
+        entries_for_work_id, index_entries_by_work_id, is_strong_model, read_entries, reconcile,
         repair_truncated_tail_at, review_already_exists, usage_summary_for_backend, FailureClass,
         FailureStage, GroupBy, LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics,
     };
@@ -4068,5 +4126,43 @@ mod tests {
 
         let held = active_review_hold_work_ids(&cfg, "test");
         assert!(held.contains("TICKET-600"));
+    }
+
+    #[test]
+    fn paid_route_approval_is_exact_and_revocable() {
+        let (_tmp, cfg) = test_config();
+        let prof = profile();
+        append(
+            &cfg,
+            &LedgerEntry::new_paid_route_approval(
+                "test",
+                &prof,
+                "ISSUE-42",
+                "opencode",
+                Some("openai/gpt-paid"),
+                true,
+            ),
+        )
+        .unwrap();
+
+        let active = active_paid_route_approvals(&cfg, "test", "ISSUE-42").unwrap();
+        assert!(active.contains(&("opencode".to_string(), Some("openai/gpt-paid".to_string()))));
+        assert!(!active.contains(&("opencode".to_string(), Some("different-model".to_string()))));
+
+        append(
+            &cfg,
+            &LedgerEntry::new_paid_route_approval(
+                "test",
+                &prof,
+                "ISSUE-42",
+                "opencode",
+                Some("openai/gpt-paid"),
+                false,
+            ),
+        )
+        .unwrap();
+        assert!(active_paid_route_approvals(&cfg, "test", "ISSUE-42")
+            .unwrap()
+            .is_empty());
     }
 }

@@ -79,6 +79,9 @@ pub struct ProfileIdentity {
     /// Effective cap for automatic post-review repair runs. Kept in the
     /// snapshot so controller decisions and dashboard blockers agree.
     pub max_fix_attempts_per_mr: u32,
+    /// Genuine implementation failures allowed while walking the configured
+    /// backend/model ladder. Separate from post-review repairs.
+    pub max_implementation_failures_per_ticket: u32,
 }
 
 #[derive(Serialize)]
@@ -170,6 +173,8 @@ pub fn build_snapshot(
         default_target_branch: profile.default_target_branch.clone(),
         merge_policy: resolved_merge_policy,
         max_fix_attempts_per_mr: effective_routing.max_fix_attempts_per_mr(),
+        max_implementation_failures_per_ticket: effective_routing
+            .max_implementation_failures_per_ticket(),
     };
 
     let mut errors = Vec::new();
