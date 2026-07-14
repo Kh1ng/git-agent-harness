@@ -7,5 +7,5 @@ threshold = 1500
 "src/ledger.rs" = 3675
 "src/main.rs" = 1901
 "src/routing.rs" = 3639
-"src/runner.rs" = 3838
+"src/runner.rs" = 2657
 "tests/gah_cli.rs" = 6359
