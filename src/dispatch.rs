@@ -4898,6 +4898,13 @@ mod tests {
     }
 
     #[test]
+    fn strip_terminal_noise_removes_opencode_shell_transcript_fragment() {
+        let raw = "\u{1b}]0;onl; cargo test --lib 2>&1 | tail -40\u{07}\nReal summary sentence.";
+        let cleaned = strip_terminal_noise(raw);
+        assert_eq!(cleaned, "Real summary sentence.");
+    }
+
+    #[test]
     fn strip_terminal_noise_removes_cargo_test_spam() {
         // Reproduces the exact garbage confirmed live in PR #217: a correct
         // one-line quota_store.rs fix whose PR body and commit message were
@@ -11380,6 +11387,7 @@ fn is_test_runner_noise_line(line: &str) -> bool {
         r"^test \S.*\.\.\. (ok|FAILED|ignored)$",
         r"^test result: (ok|FAILED)\.",
         r"^\$ \S",
+        r"^onl; \S",
         r"^Doc-tests \S",
         r"^\d+ \w+(, \d+ \w+)* in [\d.]+s\b",
         r"^(Passed!|Failed!|Test Run (Successful|Failed))\b",
@@ -11403,7 +11411,12 @@ fn is_test_runner_noise_line(line: &str) -> bool {
 /// test-runner/build-tool output (see `is_test_runner_noise_line`).
 fn strip_terminal_noise(text: &str) -> String {
     let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
-    let without_ansi = ansi.replace_all(text, "");
+    // OpenCode can emit OSC sequences (e.g. `\x1b]0;...`) that become raw
+    // shell transcript fragments in captured output once ANSI CSI codes are
+    // stripped. Drop both common OSC terminators (BEL and ST).
+    let osc = regex::Regex::new(r"\x1b\].*?(?:\x07|\x1b\\)").unwrap();
+    let ansi_text = ansi.replace_all(text, "");
+    let without_ansi = osc.replace_all(&ansi_text, "");
 
     without_ansi
         .lines()
