@@ -1,5 +1,7 @@
 # TICKET-114: Verify apps/web renders real GAH state end-to-end
 
+Status: archived; the current dashboard integration supersedes this legacy ticket.
+
 **Priority:** P2 (depends on TICKET-113 landing — nothing real to render before then)
 **Profile:** gah
 

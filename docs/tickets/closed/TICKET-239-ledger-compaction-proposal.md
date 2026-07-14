@@ -1,6 +1,6 @@
 # TICKET-239: Ledger rotation / compaction proposal
 
-Status: proposal only, not implemented.
+Status: archived; tracked and closed as GitHub issue #239.
 
 ## Goal
 
