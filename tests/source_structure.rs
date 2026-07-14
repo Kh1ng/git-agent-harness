@@ -50,7 +50,7 @@ fn rust_source_files_do_not_grow_past_baseline() {
         let path_string = path.to_string_lossy().to_string();
         match baseline.files.get(&path_string) {
             Some(&limit) => {
-                if line_count > limit {
+                if line_count != limit {
                     over_baseline.push((path_string, line_count, limit));
                 }
             }
@@ -97,11 +97,17 @@ fn rust_source_files_do_not_grow_past_baseline() {
 
     if !over_baseline.is_empty() {
         failures
-            .push("Baseline-tracked Rust files grew beyond their recorded ceiling:".to_string());
+            .push("Baseline-tracked Rust files do not match their recorded ceiling:".to_string());
         for (path, observed, limit) in over_baseline {
-            failures.push(format!(
-                "  - {path}: observed {observed} lines; baseline ceiling is {limit}"
-            ));
+            if observed > limit {
+                failures.push(format!(
+                    "  - {path}: grew to {observed} lines; baseline ceiling is {limit}. File must be reduced."
+                ));
+            } else {
+                failures.push(format!(
+                    "  - {path}: shrank to {observed} lines; baseline ceiling is {limit}. Update the baseline to {observed}."
+                ));
+            }
         }
     }
 
