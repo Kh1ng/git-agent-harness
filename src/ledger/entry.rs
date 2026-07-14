@@ -53,6 +53,10 @@ impl FailureClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // unwired variants are the schema for future tickets, not unused code
 pub enum FailureStage {
+    /// Top-level fallback for an error that escaped a more precise pipeline
+    /// boundary. This keeps operational alerts actionable instead of
+    /// emitting an unclassified `unknown` stage.
+    Dispatch,
     Preflight,
     BaselineValidation,
     Route,
@@ -69,6 +73,7 @@ pub enum FailureStage {
 impl FailureStage {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Dispatch => "dispatch",
             Self::Preflight => "preflight",
             Self::BaselineValidation => "baseline_validation",
             Self::Route => "route",
@@ -432,10 +437,9 @@ impl LedgerEntry {
         }
     }
 
-    /// Set failure attribution. Call this at the specific error site, not
-    /// generically in the top-level error handler — the whole point is to
-    /// know *which* boundary failed, and that context is only available
-    /// where the error actually originates.
+    /// Set precise failure attribution at the specific error site whenever
+    /// possible. The dispatch boundary supplies a broad harness/dispatch
+    /// fallback only when a path reaches it without either field populated.
     pub fn set_failure(&mut self, class: FailureClass, stage: FailureStage) {
         self.failure_class = Some(class.as_str().to_string());
         self.failure_stage = Some(stage.as_str().to_string());

@@ -55,6 +55,18 @@ fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
     review_budget_exhausted_error(error).is_none() && !capacity_deferred_error(error)
 }
 
+fn ensure_terminal_failure_attribution(
+    failure_class: &mut Option<String>,
+    failure_stage: &mut Option<String>,
+) {
+    failure_class.get_or_insert_with(|| {
+        crate::ledger::FailureClass::HarnessError
+            .as_str()
+            .to_string()
+    });
+    failure_stage.get_or_insert_with(|| crate::ledger::FailureStage::Dispatch.as_str().to_string());
+}
+
 pub(super) const MIN_DISPATCH_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 pub struct DispatchArgs {
@@ -184,6 +196,11 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         ledger.usage = aggregate_attempt_usage(&ledger.attempts);
     }
     if let Err(err) = &result {
+        // Every terminal dispatch error must be attributable. More precise
+        // workflow boundaries set their own class/stage; this fallback marks
+        // uncaught orchestration/plumbing errors as harness-owned rather than
+        // sending an operationally useless class=unknown/stage=unknown alert.
+        ensure_terminal_failure_attribution(&mut ledger.failure_class, &mut ledger.failure_stage);
         ledger.error_summary = Some(error::summarize_error(err));
     }
     if let Err(err) = crate::ledger::append(cfg, &ledger) {
@@ -222,7 +239,10 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{capacity_deferred_error, should_notify_dispatch_failure};
+    use super::{
+        capacity_deferred_error, ensure_terminal_failure_attribution,
+        should_notify_dispatch_failure,
+    };
     use crate::routing::{RouteError, SkippedBackend};
 
     fn no_eligible(reason: &str) -> anyhow::Error {
@@ -252,5 +272,27 @@ mod tests {
         let error = no_eligible("quota_exhausted");
         assert!(!capacity_deferred_error(&error));
         assert!(should_notify_dispatch_failure(&error));
+    }
+
+    #[test]
+    fn unattributed_terminal_error_gets_concrete_harness_fallback() {
+        let mut class = None;
+        let mut stage = None;
+
+        ensure_terminal_failure_attribution(&mut class, &mut stage);
+
+        assert_eq!(class.as_deref(), Some("harness_error"));
+        assert_eq!(stage.as_deref(), Some("dispatch"));
+    }
+
+    #[test]
+    fn terminal_error_fallback_preserves_existing_specific_attribution() {
+        let mut class = Some("validation_failure".to_string());
+        let mut stage = Some("post_validation".to_string());
+
+        ensure_terminal_failure_attribution(&mut class, &mut stage);
+
+        assert_eq!(class.as_deref(), Some("validation_failure"));
+        assert_eq!(stage.as_deref(), Some("post_validation"));
     }
 }
