@@ -2320,20 +2320,27 @@ fn improve(
                 .internal_log_path
                 .as_deref()
                 .unwrap_or(&result.log_path);
-            let semantic_no_progress = log_text.contains("GAH: killed after ")
+            let stalled = log_text.contains("GAH: killed after ")
+                && log_text.contains("(stalled, not just slow).");
+            let semantic_no_progress = stalled
                 && log_text.contains("with no new worktree progress (stalled, not just slow).");
             let failure_class = if semantic_no_progress {
                 crate::ledger::FailureClass::AgentNoProgress
+            } else if stalled {
+                crate::ledger::FailureClass::HarnessError
             } else {
                 crate::ledger::FailureClass::BackendError
             };
             ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
+            if stalled {
+                ledger.validation_result = Some("not_run_backend_stalled".into());
+            }
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
                 effective_model: Some(llm.model.clone()),
                 exit_code: Some(result.exit_code),
-                validation_result: None,
+                validation_result: stalled.then(|| "not_run_backend_stalled".into()),
                 failure_class: Some(failure_class.as_str().into()),
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
@@ -2348,8 +2355,6 @@ fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
-            let stalled = log_text.contains("GAH: killed after ")
-                && log_text.contains("(stalled, not just slow).");
             if stalled {
                 notify_event(
                     cfg,
@@ -2397,6 +2402,26 @@ fn improve(
                         rerouted.effective_model.as_deref(),
                     );
                     if rerouted_identity != current_identity {
+                        let checkpoint = wip_checkpoint_branch(&branch, attempt + 1);
+                        let resumed = worktree::checkpoint_wip(
+                            &wt,
+                            &profile.default_target_branch,
+                            &checkpoint,
+                            &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
+                        )?;
+                        if resumed {
+                            println!(
+                                "Preserved retry progress on local branch {checkpoint}; next backend will continue it"
+                            );
+                            wip_checkpoints.push(checkpoint);
+                        }
+                        prior_phase_context = Some(task.clone());
+                        task = format!(
+                            "{}\n\n## Previous backend became unavailable (attempt {}/{})\n\nThe existing checkpointed repository changes remain in this worktree. Inspect them, preserve useful progress, and complete or repair the ticket with the next backend.",
+                            base_task,
+                            attempt + 1,
+                            max_attempts,
+                        );
                         println!(
                             "Backend unavailable; retrying next attempt with {} instead of {} ({:?})",
                             rerouted.effective_backend, route.effective_backend, parsed.kind
@@ -2427,24 +2452,34 @@ fn improve(
                     result.exit_code, attempt + 1, max_attempts
                 );
                 let checkpoint = wip_checkpoint_branch(&branch, attempt + 1);
-                if worktree::checkpoint_wip(
+                let resumed = worktree::checkpoint_wip(
                     &wt,
                     &profile.default_target_branch,
                     &checkpoint,
                     &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
-                )? {
+                )?;
+                if resumed {
                     println!("Preserved failed attempt on local branch {checkpoint}");
-                    wip_checkpoints.push(checkpoint);
+                    wip_checkpoints.push(checkpoint.clone());
                 }
-                worktree::reset_to_target(&wt, &profile.default_target_branch)?;
                 prior_phase_context = Some(task.clone());
-                task = format!(
-                    "{}\n\n## Previous attempt did not complete (attempt {}/{})\n\nThe backend exited with code {} before finishing (not a validation failure -- it errored, crashed, or was killed for producing no output). The worktree has been reset clean. Please try again.",
-                    base_task,
-                    attempt + 1,
-                    max_attempts,
-                    result.exit_code,
-                );
+                task = if resumed {
+                    format!(
+                        "{}\n\n## Previous attempt did not complete (attempt {}/{})\n\nThe backend exited with code {} before finishing. Its checkpointed repository changes remain in this worktree. Inspect them, preserve useful progress, and continue the implementation.",
+                        base_task,
+                        attempt + 1,
+                        max_attempts,
+                        result.exit_code,
+                    )
+                } else {
+                    format!(
+                        "{}\n\n## Previous attempt did not complete (attempt {}/{})\n\nThe backend exited with code {} before producing repository changes. Start the implementation now.",
+                        base_task,
+                        attempt + 1,
+                        max_attempts,
+                        result.exit_code,
+                    )
+                };
                 continue;
             }
             worktree::preserve_wip(
@@ -8175,6 +8210,37 @@ which lacks a leading boundary check.
     }
 
     #[test]
+    fn harness_idle_watchdog_marks_backend_outage_not_rate_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("availability.json");
+        let parsed = mark_backend_unavailable_from_output_at(
+            &state,
+            "vibe",
+            Some("mistral-medium-3.5"),
+            Some("vibe-monthly"),
+            "GAH: killed after 600s with no new backend output or worktree progress (stalled, not just slow).",
+            "/tmp/vibe.log",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            parsed.kind,
+            crate::quota_parser::FailureKind::BackendStalled
+        );
+        let decision = availability_for(
+            &state,
+            "vibe",
+            Some("mistral-medium-3.5"),
+            Some("vibe-monthly"),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        assert!(!decision.eligible);
+        assert_eq!(decision.reason, Some(Reason::BackendOutage));
+    }
+
+    #[test]
     fn unrecognized_backend_failure_does_not_invent_unavailability() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("availability.json");
@@ -10965,7 +11031,7 @@ fn mark_backend_unavailable_from_output_at(
         )?;
         return Ok(Some(crate::quota_parser::ParsedFailure {
             backend: backend.to_string(),
-            kind: crate::quota_parser::FailureKind::RateLimited,
+            kind: crate::quota_parser::FailureKind::BackendStalled,
             retryable: true,
             reset_at: Some(cooldown.format(&Rfc3339)?),
             retry_after_seconds: Some(15 * 60),
@@ -10992,6 +11058,9 @@ fn mark_backend_unavailable_from_output_at(
         crate::quota_parser::FailureKind::RateLimited => crate::availability::Reason::RateLimited,
         crate::quota_parser::FailureKind::AuthenticationError => {
             crate::availability::Reason::AuthenticationError
+        }
+        crate::quota_parser::FailureKind::BackendStalled => {
+            crate::availability::Reason::BackendOutage
         }
     };
     let summary = format!(

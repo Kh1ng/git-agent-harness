@@ -230,6 +230,97 @@ fn worktree_progress_snapshot(worktree: &Path) -> Option<Vec<u8>> {
     Some(snapshot)
 }
 
+/// Linux process-group activity that is meaningful even when a backend is
+/// quiet and its source tree is stable. Build and test commands commonly run
+/// for minutes without writing either stream or touching tracked files. CPU
+/// or I/O activity proves that the backend is still executing; mere process
+/// existence or idle child churn does not, so a sleeping/hung backend expires.
+#[cfg(target_os = "linux")]
+fn process_group_activity_snapshot(process_group: u32) -> Option<Vec<(u32, u64, u64, u64)>> {
+    let mut members = Vec::new();
+    for entry in fs::read_dir("/proc").ok()? {
+        let Ok(entry) = entry else { continue };
+        let pid = entry.file_name().to_string_lossy().parse::<u32>().ok();
+        let Some(pid) = pid else { continue };
+        // Backend activity itself is already represented by output/worktree
+        // progress. Only descendants prove a quiet tool/verification command
+        // is executing; counting a spinning backend root would mask a hang.
+        if pid == process_group {
+            continue;
+        }
+        let stat = fs::read_to_string(entry.path().join("stat")).ok();
+        let Some(stat) = stat else { continue };
+        // `comm` is parenthesized and may contain spaces or parentheses, so
+        // split only after its final closing delimiter. The remaining fields
+        // start at field 3 (`state`).
+        let Some(fields) = stat
+            .rfind(") ")
+            .map(|end| stat[end + 2..].split_whitespace().collect::<Vec<_>>())
+        else {
+            continue;
+        };
+        let Some(pgrp) = fields.get(2).and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pgrp != process_group {
+            continue;
+        }
+        let user_ticks = fields
+            .get(11)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let system_ticks = fields
+            .get(12)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let io_bytes = fs::read_to_string(entry.path().join("io"))
+            .ok()
+            .map(|io| {
+                io.lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .filter(|(name, _)| {
+                        matches!(
+                            name.trim(),
+                            "rchar" | "wchar" | "read_bytes" | "write_bytes"
+                        )
+                    })
+                    .filter_map(|(_, value)| value.trim().parse::<u64>().ok())
+                    .sum()
+            })
+            .unwrap_or(0);
+        members.push((pid, user_ticks, system_ticks, io_bytes));
+    }
+    members.sort_unstable();
+    Some(members)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_group_activity_snapshot(_process_group: u32) -> Option<Vec<(u32, u64, u64, u64)>> {
+    None
+}
+
+fn process_group_activity_advanced(
+    previous: Option<&[(u32, u64, u64, u64)]>,
+    current: &[(u32, u64, u64, u64)],
+) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    current.iter().any(|&(pid, user, system, io)| {
+        previous
+            .iter()
+            .find(|&&(previous_pid, _, _, _)| previous_pid == pid)
+            .map(|&(_, previous_user, previous_system, previous_io)| {
+                user > previous_user || system > previous_system || io > previous_io
+            })
+            // Process creation alone is not progress: a stalled shell can
+            // churn `sleep` children forever. A new descendant only counts
+            // after it has consumed measurable CPU, as real compilers and
+            // test processes do.
+            .unwrap_or(user > 0 || system > 0)
+    })
+}
+
 /// Spawn `cmd` (stdout/stderr are set to piped by this helper) and drive it
 /// to completion, killing it only once both its log and worktree have gone
 /// genuinely quiet for `idle_timeout_seconds` -- never on a flat wall-clock
@@ -314,6 +405,8 @@ fn spawn_with_idle_watch_with_shutdown(
     let worktree_poll_interval = Duration::from_secs(1);
     let mut last_seen_len = fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
     let mut last_worktree_snapshot = worktree_progress_snapshot(worktree);
+    let process_group = child.id();
+    let mut last_process_activity = process_group_activity_snapshot(process_group);
     let mut last_worktree_poll = Instant::now();
     let mut last_progress_at = Instant::now();
     let mut saw_progress = false;
@@ -356,6 +449,16 @@ fn spawn_with_idle_watch_with_shutdown(
                             last_progress_at = Instant::now();
                             saw_progress = true;
                         }
+                    }
+                    if let Some(activity) = process_group_activity_snapshot(process_group) {
+                        if process_group_activity_advanced(
+                            last_process_activity.as_deref(),
+                            &activity,
+                        ) {
+                            last_progress_at = Instant::now();
+                            saw_progress = true;
+                        }
+                        last_process_activity = Some(activity);
                     }
                     last_worktree_poll = Instant::now();
                 }
@@ -3496,6 +3599,54 @@ mod tests {
         assert!(log.contains("started"));
         assert!(!log.contains("should not complete"));
         assert!(log.contains("shutdown requested; terminated backend process group"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_watch_allows_quiet_active_descendant_verification() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "backend",
+            "#!/bin/sh\n/bin/sh -c 'start=$(date +%s); while [ $(date +%s) -lt $((start + 3)) ]; do :; done'\n",
+        );
+        let log_path = f.session_dir.join("backend-output.log");
+        let shutdown = AtomicBool::new(false);
+
+        let result = spawn_with_idle_watch_with_shutdown(
+            Command::new(f.bin_dir.join("backend")),
+            &log_path,
+            &f.worktree,
+            1,
+            "launching quiet verification backend",
+            &shutdown,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(result.0, 0);
+        assert!(result.1 >= 2.0, "quiet verification ended too quickly");
+        let log = fs::read_to_string(log_path).unwrap_or_default();
+        assert!(!log.contains("GAH: killed after"), "got log: {log}");
+    }
+
+    #[test]
+    fn process_activity_ignores_idle_child_churn_but_detects_real_work() {
+        let previous = vec![(10, 1, 0, 20), (11, 0, 0, 0)];
+
+        assert!(!process_group_activity_advanced(
+            Some(&previous),
+            &[(10, 1, 0, 20), (12, 0, 0, 0)]
+        ));
+        assert!(process_group_activity_advanced(
+            Some(&previous),
+            &[(10, 2, 0, 20)]
+        ));
+        assert!(process_group_activity_advanced(
+            Some(&previous),
+            &[(13, 1, 0, 0)]
+        ));
     }
 
     #[test]

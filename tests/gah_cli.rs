@@ -3185,6 +3185,86 @@ fn dispatch_fix_opencode_internal_rate_limit_marks_unavailable_and_reroutes() {
     assert_eq!(attempts[1]["validation_result"], "passed");
 }
 
+#[test]
+fn dispatch_reroute_continues_partial_tree_after_billing_exhaustion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let config = fs::read_to_string(&cfg).unwrap().replace(
+        "improve_backend = \"codex\"",
+        "improve_backend = \"opencode\"\nimprove_candidates = [{ backend = \"opencode\", model = \"opencode/hy3-free\" }, { backend = \"codex\", model = \"gpt-5.4-mini\" }]",
+    );
+    fs::write(&cfg, config).unwrap();
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let availability_path = tmp.path().join("availability.json");
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "opencode",
+        "#!/bin/sh\nprintf 'opencode-partial-progress\\n' >> README.md\nprintf 'Forbidden: Sorry, your account balance is insufficient\\n' >&2\nexit 1\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\ngrep -q 'opencode-partial-progress' README.md || exit 19\nprintf 'codex-completed-progress\\n' >> README.md\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "continue rerouted work",
+            "--retries",
+            "1",
+            "--skip-validation-gate",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Backend unavailable; retrying next attempt with codex instead of opencode (QuotaExhausted)",
+        ));
+
+    let entry: Value = serde_json::from_str(
+        fs::read_to_string(&ledger_path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(entry["attempts"][0]["backend"], "opencode");
+    assert_eq!(entry["attempts"][1]["backend"], "codex");
+    let branch = entry["branch"].as_str().unwrap();
+    let readme = ProcessCommand::new("git")
+        .args(["show", &format!("{branch}:README.md")])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    let readme = String::from_utf8_lossy(&readme.stdout);
+    assert!(readme.contains("opencode-partial-progress"));
+    assert!(readme.contains("codex-completed-progress"));
+
+    let availability: Value =
+        serde_json::from_str(&fs::read_to_string(availability_path).unwrap()).unwrap();
+    assert_eq!(availability["records"][0]["reason"], "quota_exhausted");
+}
+
 /// TICKET-250: no-progress uses the same bounded retry policy as other
 /// recoverable agent failures. Every failed no-change attempt remains visible
 /// in the ledger, and only the final one marks the dispatch terminally failed.
@@ -3831,6 +3911,72 @@ fn dispatch_fix_fail_then_success_records_two_attempts() {
         .contains("attempt-diff.patch"));
     assert_eq!(attempts[1]["attempt_number"], 2);
     assert_eq!(attempts[1]["validation_result"], "passed");
+}
+
+#[test]
+fn dispatch_backend_retry_continues_checkpointed_progress() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let counter = tmp.path().join("codex-call-count");
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nn=$( [ -f '{counter}' ] && cat '{counter}' || echo 0 )\nn=$((n+1))\necho \"$n\" > '{counter}'\nif [ \"$n\" -eq 1 ]; then printf 'first-attempt-progress\\n' >> README.md; exit 17; fi\ngrep -q 'first-attempt-progress' README.md || exit 19\nprintf 'second-attempt-completion\\n' >> README.md\nexit 0\n",
+            counter = counter.display(),
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; fi\nexit 0\n",
+    );
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--skip-validation-gate",
+            "--target",
+            "continue partial backend work",
+            "--retries",
+            "1",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let entry: Value = serde_json::from_str(
+        fs::read_to_string(&ledger_path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(entry["attempts_started"], 2);
+    assert_eq!(entry["attempts"][0]["exit_code"], 17);
+    assert_eq!(entry["attempts"][1]["validation_result"], "passed");
+    let branch = entry["branch"].as_str().unwrap();
+    let readme = ProcessCommand::new("git")
+        .args(["show", &format!("{branch}:README.md")])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    let readme = String::from_utf8_lossy(&readme.stdout);
+    assert!(readme.contains("first-attempt-progress"));
+    assert!(readme.contains("second-attempt-completion"));
 }
 
 /// TICKET-064, test 3: a no-progress abort (TICKET-062) must record exactly
