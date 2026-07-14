@@ -396,8 +396,9 @@ pub fn preserve_wip(worktree: &Path, target_branch: &str, message: &str) -> Resu
     Ok(true)
 }
 
-/// Preserve changed work under a dedicated checkpoint branch, then let a
-/// retry start from the clean target. The checkpoint is local and is removed
+/// Commit changed work and preserve the resulting HEAD under a dedicated
+/// checkpoint branch. The caller decides whether a retry should continue from
+/// that HEAD or reset to the target. The checkpoint is local and is removed
 /// only after the overall dispatch publishes successfully.
 pub fn checkpoint_wip(
     worktree: &Path,

@@ -31,6 +31,9 @@ pub enum FailureKind {
     RateLimited,
     /// Authentication failure (invalid token, not logged in, etc).
     AuthenticationError,
+    /// GAH observed a genuinely idle backend process. This is a harness
+    /// watchdog classification, never provider quota/rate-limit evidence.
+    BackendStalled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,8 +52,8 @@ pub struct ParsedFailure {
     pub backend: String,
     pub kind: FailureKind,
     /// Whether a short-term retry loop is worth attempting at all. `false`
-    /// for quota exhaustion (nothing short-term fixes it); `true` for
-    /// rate-limiting (it resolves itself).
+    /// for quota/billing exhaustion; `true` for transient rate limiting or a
+    /// bounded reroute after a harness-observed backend stall.
     pub retryable: bool,
     /// RFC3339. Only set when resolved with actual confidence — see
     /// `unresolved_timezone` for the case where we recognized a reset
@@ -84,6 +87,16 @@ fn transient_not_usage_limit_re() -> &'static Regex {
 fn usage_or_weekly_limit_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)(usage limit|weekly limit)").unwrap())
+}
+
+fn insufficient_balance_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(account balance (?:is )?insufficient|insufficient (?:account )?balance|credit balance.{0,24}(?:insufficient|exhausted)|payment required)",
+        )
+        .unwrap()
+    })
 }
 
 fn generic_rate_limit_re() -> &'static Regex {
@@ -343,6 +356,19 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
         });
     }
 
+    if let Some(m) = insufficient_balance_re().find(text) {
+        return Some(ParsedFailure {
+            backend: backend.to_string(),
+            kind: FailureKind::QuotaExhausted,
+            retryable: false,
+            reset_at: None,
+            retry_after_seconds: None,
+            confidence: Confidence::High,
+            matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+            unresolved_timezone: None,
+        });
+    }
+
     if let Some(m) = generic_rate_limit_re().find(text) {
         // Real-world reports (see PROVENANCE.md) show this generic phrasing
         // can be client-side/session-related rather than account quota
@@ -558,6 +584,22 @@ mod tests {
             Some(CONSERVATIVE_RATE_LIMIT_COOLDOWN_SECONDS)
         );
         assert!(parsed.matched_evidence.contains("Rate limit exceeded"));
+    }
+
+    #[test]
+    fn opencode_insufficient_balance_is_non_retryable_quota_unavailability() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse(
+            "opencode",
+            "Error: Forbidden: Sorry, your account balance is insufficient",
+            now,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+        assert!(!parsed.retryable);
+        assert_eq!(parsed.confidence, Confidence::High);
+        assert_eq!(parsed.reset_at, None);
+        assert!(parsed.matched_evidence.contains("balance is insufficient"));
     }
 
     // ── Required negative tests ──────────────────────────────────────────
