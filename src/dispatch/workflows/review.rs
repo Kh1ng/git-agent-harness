@@ -1,6 +1,6 @@
 use super::super::attempts::{
     apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output,
-    mark_shutdown_cancelled, review_preflight, review_usage, route_identity,
+    mark_shutdown_cancelled, reserve_backend_slot, review_preflight, review_usage, route_identity,
 };
 use super::super::prompts::enforce_context_budget;
 use super::super::publish::{render_review_comment, review_labels};
@@ -17,7 +17,7 @@ use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
 use crate::notifications::{notify_event, NotifyEvent};
-use crate::routing::RouteRequest;
+use crate::routing::{ConcurrencyGuard, RouteDecision, RouteRequest};
 use crate::usage_attribution::{
     aggregate_attempt_usage, normalize_attempt_usage, UsageAttribution,
 };
@@ -216,6 +216,15 @@ pub(in crate::dispatch) fn review(
         return Err(ReviewBudgetExhausted::new(block.reason).into());
     }
 
+    // Reserve the selected reviewer before the controller lets the next
+    // parallel slot route. Implementation dispatches already use this same
+    // rendezvous; reviews must participate too or sibling reviews can all
+    // observe a zero live count and select a backend/model capped at one.
+    let mut review_slot = Some(reserve_review_route(profile, &route)?);
+    if let Some(route_ready) = &args.route_ready {
+        let _ = route_ready.send(());
+    }
+
     // Bounded retry across review_candidates: an empty/unavailable-backend
     // outcome (e.g. AGY quota exhaustion -- see agy_empty_output_diagnosis)
     // used to fail the whole review outright even though review_candidates
@@ -269,6 +278,10 @@ pub(in crate::dispatch) fn review(
             route.effective_model.as_deref(),
             &env_vars,
         );
+        // The slot covers the backend invocation itself. Release it before
+        // parsing/rerouting so another worker can use the reviewer as soon as
+        // capacity is genuinely free.
+        drop(review_slot.take());
         if !matches!(
             &attempt.outcome,
             runner::ReviewProcessOutcome::ExecutableUnavailable
@@ -420,6 +433,7 @@ pub(in crate::dispatch) fn review(
                             rerouted.effective_backend, route.effective_backend, parsed.kind
                         );
                         route = rerouted;
+                        review_slot = Some(reserve_review_route(profile, &route)?);
                         continue;
                     }
                 }
@@ -645,6 +659,14 @@ pub(in crate::dispatch) fn review(
     Ok(())
 }
 
+fn reserve_review_route(profile: &Profile, route: &RouteDecision) -> Result<ConcurrencyGuard> {
+    reserve_backend_slot(
+        profile,
+        &route.effective_backend,
+        route.effective_model.as_deref(),
+    )
+}
+
 fn stop_for_exhausted_review_escalation(
     cfg: &GahConfig,
     profile: &Profile,
@@ -688,4 +710,66 @@ fn stop_for_exhausted_review_escalation(
         )?;
     }
     bail!("{message}")
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::reserve_review_route;
+    use crate::config::tests::test_profile_for_notifications;
+    use crate::routing::{current_concurrent, RouteDecision};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn three_reviews_never_overlap_on_a_backend_model_capped_at_one() {
+        let backend = format!("review-reservation-test-{}", std::process::id());
+        let model = "sonnet-test";
+        let mut profile = test_profile_for_notifications();
+        profile
+            .max_concurrent_per_model
+            .insert(format!("{backend}/{model}"), 1);
+        let route = RouteDecision {
+            requested_backend: backend.clone(),
+            effective_backend: backend.clone(),
+            requested_model: Some(model.into()),
+            effective_model: Some(model.into()),
+            effective_quota_pool: None,
+            routing_reason: "test".into(),
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
+            routing_diagnostics: None,
+        };
+
+        let profile = Arc::new(profile);
+        let route = Arc::new(route);
+        let start = Arc::new(Barrier::new(3));
+        let max_seen = Arc::new(AtomicU32::new(0));
+        let workers: Vec<_> = (0..3)
+            .map(|_| {
+                let profile = Arc::clone(&profile);
+                let route = Arc::clone(&route);
+                let start = Arc::clone(&start);
+                let max_seen = Arc::clone(&max_seen);
+                std::thread::spawn(move || {
+                    start.wait();
+                    let _slot = reserve_review_route(&profile, &route).unwrap();
+                    max_seen.fetch_max(
+                        current_concurrent(
+                            &route.effective_backend,
+                            route.effective_model.as_deref(),
+                        ),
+                        Ordering::SeqCst,
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert_eq!(max_seen.load(Ordering::SeqCst), 1);
+        assert_eq!(current_concurrent(&backend, Some(model)), 0);
+    }
 }
