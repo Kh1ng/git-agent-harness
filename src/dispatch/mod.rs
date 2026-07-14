@@ -39,6 +39,22 @@ pub(crate) use self::claims::duplicate_work_error;
 pub use self::claims::{merge_branch, scan_available_tickets};
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
 
+/// A parallel sibling reached routing after another worker reserved the only
+/// available backend/model slot. This is typed capacity contention, not a
+/// failed backend execution; the controller should close the run as deferred
+/// and retry it on a later iteration without alarming the operator.
+pub fn capacity_deferred_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::routing::RouteError>()
+            .is_some_and(crate::routing::RouteError::is_capacity_deferral)
+    })
+}
+
+fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
+    review_budget_exhausted_error(error).is_none() && !capacity_deferred_error(error)
+}
+
 pub(super) const MIN_DISPATCH_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 pub struct DispatchArgs {
@@ -173,12 +189,10 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     if let Err(err) = crate::ledger::append(cfg, &ledger) {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
     }
-    if result.is_err()
-        && result
-            .as_ref()
-            .err()
-            .and_then(review_budget_exhausted_error)
-            .is_none()
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(should_notify_dispatch_failure)
     {
         notify_event(
             cfg,
@@ -204,4 +218,39 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         );
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{capacity_deferred_error, should_notify_dispatch_failure};
+    use crate::routing::{RouteError, SkippedBackend};
+
+    fn no_eligible(reason: &str) -> anyhow::Error {
+        RouteError::NoEligibleBackend {
+            preferred_backend: "claude".into(),
+            preferred_model: Some("sonnet".into()),
+            skipped: vec![SkippedBackend {
+                backend: "claude".into(),
+                model: Some("sonnet".into()),
+                reason: reason.into(),
+                unavailable_until: None,
+            }],
+            earliest_reset: None,
+        }
+        .into()
+    }
+
+    #[test]
+    fn capacity_deferral_is_detected_through_anyhow_context_and_not_notified() {
+        let error = no_eligible("max_concurrent_reached").context("routing review");
+        assert!(capacity_deferred_error(&error));
+        assert!(!should_notify_dispatch_failure(&error));
+    }
+
+    #[test]
+    fn genuine_no_eligible_route_still_notifies_as_a_failure() {
+        let error = no_eligible("quota_exhausted");
+        assert!(!capacity_deferred_error(&error));
+        assert!(should_notify_dispatch_failure(&error));
+    }
 }

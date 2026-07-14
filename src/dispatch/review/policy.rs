@@ -89,7 +89,9 @@ pub(in crate::dispatch) fn check_review_budget(
                 && entry.mode == "review"
                 && !matches!(
                     entry.validation_result.as_deref(),
-                    Some("review_budget_exhausted") | Some("skipped_duplicate_review")
+                    Some("review_budget_exhausted")
+                        | Some("skipped_duplicate_review")
+                        | Some("deferred_capacity")
                 )
         })
         .collect();

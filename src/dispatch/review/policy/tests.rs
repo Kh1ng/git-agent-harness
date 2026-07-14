@@ -192,6 +192,35 @@ fn skipped_duplicate_reviews_do_not_consume_the_cycle_budget() {
 }
 
 #[test]
+fn capacity_deferrals_do_not_consume_the_review_cycle_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            max_review_cycles_per_ticket: Some(1),
+            ..RoutingPolicy::default()
+        },
+    );
+    let prof = profile(tmp.path());
+    let mut deferred = review_ledger_entry("test", &prof, "gah/44", "deferred_capacity", "high");
+    deferred.work_id = Some("#44".into());
+    deferred.attempts_started = Some(0);
+    deferred.attempts_completed = Some(0);
+    crate::ledger::append(&cfg, &deferred).unwrap();
+
+    let block = check_review_budget(
+        &cfg,
+        &prof,
+        "test",
+        Some("#44"),
+        &route_decision("claude", Some("sonnet"), false),
+    )
+    .unwrap();
+
+    assert!(block.is_none(), "a deferred route launched no reviewer");
+}
+
+#[test]
 fn paid_review_budget_only_blocks_explicitly_paid_route() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = gah_config_with_ledger(
