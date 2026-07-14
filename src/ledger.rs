@@ -281,6 +281,14 @@ pub struct LedgerEntry {
     pub reviewer_backend: Option<String>,
     #[serde(default)]
     pub reviewer_model: Option<String>,
+    /// Issue #214: reviewer authority tier ("strong"/"escalatory"/"standard"/
+    /// "weak"), derived from routing config via `derive_reviewer_tier` -- never
+    /// parsed from the model's JSON. Persisted on `LedgerEntry` (the transient
+    /// `ReviewVerdict.reviewer_tier` in models.rs is the source of truth that
+    /// populates this) so per-tier cost/outcome breakdowns can be reconstructed
+    /// from ledger history instead of sniffing verdict text.
+    #[serde(default)]
+    pub reviewer_tier: Option<String>,
     /// Immutable source commit reviewed by this ledger record. Missing on
     /// historical records, which must never be considered duplicates.
     #[serde(default)]
@@ -395,6 +403,7 @@ impl LedgerEntry {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            reviewer_tier: None,
             review_source_sha: None,
             reviewer_class: None,
             review_gate_reason: None,
@@ -476,6 +485,7 @@ impl LedgerEntry {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            reviewer_tier: None,
             review_source_sha: None,
             reviewer_class: None,
             review_gate_reason: None,
@@ -849,6 +859,7 @@ pub struct ReviewVerdictBackfill<'a> {
     pub confidence: &'a str,
     pub reviewer_backend: &'a str,
     pub reviewer_model: Option<&'a str>,
+    pub reviewer_tier: Option<&'a str>,
     pub review_gate_reason: Option<&'a str>,
 }
 
@@ -889,6 +900,7 @@ pub fn backfill_review_verdict(
     entries[idx].review_confidence = Some(backfill.confidence.to_string());
     entries[idx].reviewer_backend = Some(backfill.reviewer_backend.to_string());
     entries[idx].reviewer_model = backfill.reviewer_model.map(str::to_string);
+    entries[idx].reviewer_tier = backfill.reviewer_tier.map(str::to_string);
     entries[idx].review_gate_reason = backfill.review_gate_reason.map(str::to_string);
 
     let mut out = String::new();
@@ -1125,6 +1137,7 @@ pub mod sqlite_store {
                     confidence: "high",
                     reviewer_backend: "claude",
                     reviewer_model: Some("claude-sonnet-4"),
+                    reviewer_tier: None,
                     review_gate_reason: None,
                 },
             )
@@ -2406,7 +2419,7 @@ pub mod summary {
             let mut estimated_cost_total = 0.0f64;
             let mut actual_cost_seen = false;
             let mut estimated_cost_seen = false;
-            let mut approve_count = 0usize;
+            let mut strong_approve_count = 0usize;
             let mut total_duration = 0.0f64;
             let mut duration_count = 0usize;
             let mut input_tokens = 0u64;
@@ -2440,16 +2453,15 @@ pub mod summary {
                     *review_verdict_distribution
                         .entry(verdict.clone())
                         .or_default() += 1;
-                    // Only one APPROVE verdict remains (no more STRONG/WEAK
-                    // self-reported split), so this can no longer distinguish
-                    // strong-tier vs weak-tier approvals by verdict text
-                    // alone. A real per-tier cost breakdown would need
-                    // `reviewer_tier` persisted on `LedgerEntry` itself (today
-                    // it only lives on the transient `ReviewVerdict` in
-                    // models.rs, never written to the ledger) -- out of scope
-                    // here; tracked as a fast-follow.
-                    if verdict == "APPROVE" {
-                        approve_count += 1;
+                    // Issue #214: key the per-tier cost metric on the
+                    // persisted `reviewer_tier` field rather than sniffing
+                    // verdict text. The verdict is always `APPROVE` now (the
+                    // STRONG/WEAK self-reported split was removed in PR #213),
+                    // so it can no longer proxy tier -- `reviewer_tier`
+                    // (derived from routing config) is the real authority
+                    // signal and is what `cost_per_approve_strong` counts.
+                    if verdict == "APPROVE" && entry.reviewer_tier.as_deref() == Some("strong") {
+                        strong_approve_count += 1;
                     }
                 }
 
@@ -2593,9 +2605,11 @@ pub mod summary {
                 None
             };
 
-            // Calculate cost per APPROVE outcome
-            let cost_per_approve_strong = if approve_count > 0 && cost_seen {
-                Some(total_cost_usd / approve_count as f64)
+            // Issue #214: cost per *strong-tier* approval, keyed on the
+            // persisted `reviewer_tier` field (not verdict text). Entries with
+            // an unknown/other tier are excluded -- never folded into strong.
+            let cost_per_approve_strong = if strong_approve_count > 0 && cost_seen {
+                Some(total_cost_usd / strong_approve_count as f64)
             } else {
                 None
             };
@@ -3547,6 +3561,7 @@ mod tests {
                 confidence: "high",
                 reviewer_backend: "claude",
                 reviewer_model: Some("claude-sonnet-4"),
+                reviewer_tier: None,
                 review_gate_reason: Some("test review evidence gate"),
             },
         )
@@ -3587,6 +3602,7 @@ mod tests {
                 confidence: "high",
                 reviewer_backend: "codex",
                 reviewer_model: None,
+                reviewer_tier: None,
                 review_gate_reason: None,
             },
         )
@@ -3718,6 +3734,7 @@ mod tests {
         entry1.effective_backend = "codex".to_string();
         entry1.effective_model = Some("gpt-4".to_string());
         entry1.review_verdict = Some("APPROVE".to_string());
+        entry1.reviewer_tier = Some("strong".to_string());
         entry1.validation_result = Some("passed".to_string());
         entry1.usage.actual_cost_usd = Some(1.0);
 
@@ -3726,6 +3743,7 @@ mod tests {
         entry2.effective_backend = "codex".to_string();
         entry2.effective_model = Some("gpt-4".to_string());
         entry2.review_verdict = Some("APPROVE".to_string());
+        entry2.reviewer_tier = Some("strong".to_string());
         entry2.validation_result = Some("passed".to_string());
         entry2.usage.actual_cost_usd = Some(2.0);
 
@@ -3774,6 +3792,60 @@ mod tests {
             Some(&1)
         );
         assert!((mistral_group.total_cost_usd.unwrap() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cost_per_approve_strong_keys_on_reviewer_tier_not_verdict_text() {
+        // Issue #214: cost_per_approve_strong must count only *strong-tier*
+        // APPROVE verdicts, keyed on the persisted `reviewer_tier` field. A
+        // weak-tier or unknown-tier APPROVE must not be folded into the
+        // strong metric (and an unknown tier must stay unknown -- never
+        // coerced to strong).
+        let (_tmp, _cfg) = test_config();
+        let mut strong = LedgerEntry::new("test", &profile(), "codex", "improve", "t1", None, None);
+        strong.effective_backend = "codex".to_string();
+        strong.effective_model = Some("gpt-4".to_string());
+        strong.review_verdict = Some("APPROVE".to_string());
+        strong.reviewer_tier = Some("strong".to_string());
+        strong.validation_result = Some("passed".to_string());
+        strong.usage.actual_cost_usd = Some(2.0);
+
+        let mut weak = LedgerEntry::new("test", &profile(), "codex", "improve", "t2", None, None);
+        weak.effective_backend = "codex".to_string();
+        weak.effective_model = Some("gpt-4".to_string());
+        weak.review_verdict = Some("APPROVE".to_string());
+        weak.reviewer_tier = Some("weak".to_string());
+        weak.validation_result = Some("passed".to_string());
+        weak.usage.actual_cost_usd = Some(4.0);
+
+        let mut unknown =
+            LedgerEntry::new("test", &profile(), "codex", "improve", "t3", None, None);
+        unknown.effective_backend = "codex".to_string();
+        unknown.effective_model = Some("gpt-4".to_string());
+        unknown.review_verdict = Some("APPROVE".to_string());
+        unknown.reviewer_tier = None;
+        unknown.validation_result = Some("passed".to_string());
+        unknown.usage.actual_cost_usd = Some(8.0);
+
+        let entries = vec![strong, weak, unknown];
+        let grouped = super::summary::build_grouped_summary(
+            &entries,
+            |entry| entry.effective_model.clone().unwrap_or_default(),
+            |observed| observed.model.unwrap_or_default().to_string(),
+            |_backend, model| model.unwrap_or_default().to_string(),
+            false,
+        )
+        .unwrap();
+
+        let gpt4 = grouped.iter().find(|g| g.group_key == "gpt-4").unwrap();
+        // Total grouped cost is 2 + 4 + 8 = 14 (all entries), but the
+        // denominator of cost_per_approve_strong is only the single strong-tier
+        // APPROVE -- the weak/unknown APPROVEs are excluded from the count, so
+        // the metric reflects the real per-strong-approval cost (14.0), not a
+        // diluted per-any-approval figure.
+        assert!((gpt4.total_cost_usd.unwrap() - 14.0).abs() < f64::EPSILON);
+        assert_eq!(gpt4.review_verdict_distribution.get("APPROVE"), Some(&3));
+        assert!((gpt4.cost_per_approve_strong.unwrap() - 14.0).abs() < f64::EPSILON);
     }
 
     // Issue #206: an account-level quota observation (backend-scoped,

@@ -611,6 +611,7 @@ mod telemetry_tests {
             review_confidence: None,
             reviewer_backend: None,
             reviewer_model: None,
+            reviewer_tier: None,
             review_source_sha: None,
             reviewer_class: None,
             review_gate_reason: None,
