@@ -2292,11 +2292,10 @@ fn improve(
             );
         }
 
-        // Extract backend summary from the tail of the log
-        backend_summary = runner::output::extract_backend_summary(
-            &route.effective_backend,
-            &result.log_path,
+        backend_summary = runner::output::publishable_summary(
+            result.final_summary.as_deref(),
             ledger.target_summary.as_deref(),
+            &wt,
         );
 
         if result.exit_code != 0 {
@@ -3210,6 +3209,7 @@ fn experiment(
                 exit_code: -1,
                 duration_secs: 0.0,
                 log_path: log_path.to_string_lossy().into_owned(),
+                final_summary: None,
                 agy_cli_log_delta: None,
                 internal_log_delta: None,
                 internal_log_path: None,
@@ -3224,11 +3224,10 @@ fn experiment(
     );
     ledger.backend_exit_code = Some(result.exit_code);
 
-    // Extract backend summary from the tail of the log
-    let backend_summary = runner::output::extract_backend_summary(
-        &route.effective_backend,
-        &result.log_path,
+    let backend_summary = runner::output::publishable_summary(
+        result.final_summary.as_deref(),
         ledger.target_summary.as_deref(),
+        &wt,
     );
 
     // Collect research artifacts (notebooks, plots, CSVs, reports)
