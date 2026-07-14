@@ -2,13 +2,16 @@ use super::super::attempts::{
     apply_route_to_ledger, classify_git_operation_result, classify_worktree_result, decide_route,
     preflight, resolve_llm, run_backend,
 };
+use super::super::identity::timestamp;
 use super::super::issues::resolve_target_to_issue_or_string;
+use super::super::metrics::apply_diff_stats;
 use super::super::prompts::build_task;
 use super::super::publish::{
     build_experiment_mr_body, emit_human_handoff, publishing_allows_publish,
     ExperimentMrRenderContext,
 };
-use super::super::{apply_diff_stats, timestamp, utf8_safe_prefix, utf8_safe_suffix, DispatchArgs};
+use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
+use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
 use crate::notifications::{notify_event, NotifyEvent};

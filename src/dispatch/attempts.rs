@@ -1,4 +1,5 @@
-use super::{which, DispatchArgs};
+use super::command::which;
+use super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::WorkMetadata;

@@ -28,6 +28,29 @@ fn runner_adapter_facade_preserves_public_call_paths() {
     public(git_agent_harness::runner::run_vibe_with_executable);
 }
 
+#[test]
+fn dispatch_facade_preserves_public_call_paths_and_final_layout() {
+    fn public<T>(_item: T) {}
+
+    public(git_agent_harness::dispatch::run);
+    public(git_agent_harness::dispatch::review_budget_exhausted_error);
+    public(git_agent_harness::dispatch::review_preflight);
+    public(git_agent_harness::dispatch::merge_branch);
+    public(git_agent_harness::dispatch::scan_available_tickets);
+    public(git_agent_harness::dispatch::self_check_validation_gate);
+    let _ = std::mem::size_of::<git_agent_harness::dispatch::DispatchArgs>();
+    let _ = std::mem::size_of::<git_agent_harness::dispatch::ValidationGateError>();
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let facade = repo_root.join("src/dispatch/mod.rs");
+    assert!(facade.is_file());
+    assert!(!repo_root.join("src/dispatch.rs").exists());
+    assert!(
+        count_lines(&facade) <= 300,
+        "dispatch facade must remain a thin, stable public boundary"
+    );
+}
+
 #[derive(Debug, Deserialize)]
 struct RustSourceBaseline {
     #[serde(default = "default_max_lines")]

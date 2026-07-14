@@ -5,23 +5,24 @@ use super::super::attempts::{
     resolve_llm, route_identity, run_backend_with_reserved_route, wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
+use super::super::identity::timestamp;
 use super::super::issues::{
     parse_ticket_metadata, parse_ticket_metadata_from_issue, resolve_target_to_issue_or_string,
     TicketMetadata,
 };
-use super::super::prompts::build_task;
+use super::super::metrics::apply_diff_stats;
+use super::super::mutation_policy::enforce_policy;
+use super::super::prompts::{build_task, enforce_context_budget};
 use super::super::publish::{
     build_fix_or_improve_mr_body, build_mr_title, emit_human_handoff,
     ensure_issue_open_for_publish, publishing_allows_publish, MrRenderContext,
 };
+use super::super::text::utf8_safe_prefix;
 use super::super::validation::{
     classify_validation_failure_progress, run_auto_fix_commands, should_skip_per_dispatch_baseline,
     validation_env, validation_failure_no_progress_reason,
 };
-use super::super::{
-    apply_diff_stats, enforce_context_budget, enforce_policy, timestamp, utf8_safe_prefix,
-    DispatchArgs,
-};
+use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};

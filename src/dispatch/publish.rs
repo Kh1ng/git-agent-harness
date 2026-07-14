@@ -431,6 +431,8 @@ pub(super) fn review_labels(verdict: &ReviewVerdict) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::test_util::profile;
+    use crate::ledger::LedgerEntry;
 
     #[test]
     fn title_preserves_authoritative_identity_and_draft_prefix() {
@@ -493,6 +495,373 @@ mod tests {
         assert_eq!(
             comment.matches("APPROVE omitted grounded evidence").count(),
             1
+        );
+    }
+
+    #[test]
+    fn mr_title_uses_ticket_context_and_preserves_draft_fail_prefix() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-058".into()),
+            work_id: Some("TICKET-058".into()),
+            title: Some("Descriptive MR Titles".into()),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+        assert_eq!(
+            build_mr_title("fix", "real", false, Some(&ticket)),
+            "[GAH] Fix: TICKET-058 Descriptive MR Titles"
+        );
+        assert_eq!(
+            build_mr_title("fix", "real", true, Some(&ticket)),
+            "[GAH][DRAFT-FAIL] Fix: TICKET-058 Descriptive MR Titles"
+        );
+    }
+
+    #[test]
+    fn mr_title_uses_native_issue_identity_without_ticket_alias() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("#319".into()),
+            work_id: Some("#319".into()),
+            title: Some("Use native issue numbers".into()),
+            issue_number: Some("319".into()),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+
+        assert_eq!(
+            build_mr_title("fix", "real", false, Some(&ticket)),
+            "[GAH] Fix: #319 Use native issue numbers"
+        );
+    }
+
+    #[test]
+    fn render_review_comment_includes_non_blocking_findings_and_risk_notes() {
+        // Regression: a verdict with zero blocking_findings (e.g. a
+        // low-confidence APPROVE) still carries real substance in these two
+        // fields. The posted PR comment was silently dropping both, leaving
+        // reviewers with nothing but a bare verdict/confidence line and no
+        // actual feedback.
+        let verdict: crate::models::ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE","confidence":"low","human_required":true,
+                "blocking_findings":[],
+                "non_blocking_findings":["missing test coverage on one path"],
+                "risk_notes":["new module coupling"]}"#,
+        )
+        .unwrap();
+        let comment = render_review_comment(&verdict, Path::new("/tmp/session"));
+        assert!(comment.contains("Non-blocking findings:"));
+        assert!(comment.contains("missing test coverage on one path"));
+        assert!(comment.contains("Risk notes:"));
+        assert!(comment.contains("new module coupling"));
+    }
+
+    #[test]
+    fn render_review_comment_prints_gate_reason_once() {
+        let mut verdict: crate::models::ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"HUMAN_REVIEW","confidence":"high","human_required":true,
+                "blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#,
+        )
+        .unwrap();
+        verdict.safety_gate_reason = Some("APPROVE omitted grounded evidence".into());
+
+        let comment = render_review_comment(&verdict, Path::new("/tmp/session"));
+        assert_eq!(
+            comment.matches("APPROVE omitted grounded evidence").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mr_title_missing_metadata_fallback() {
+        // Without ticket metadata, it should fall back to mode + repo_id
+        let title = build_mr_title("fix", "real", false, None);
+        assert_eq!(title, "[GAH] Fix: real");
+
+        let title_draft = build_mr_title("fix", "real", true, None);
+        assert_eq!(title_draft, "[GAH][DRAFT-FAIL] Fix: real");
+    }
+
+    #[test]
+    fn mr_title_suggested_mr_title_used() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-093".into()),
+            work_id: Some("TICKET-093".into()),
+            title: Some("Heading Title".into()),
+            suggested_mr_title: Some(
+                "Derive PR titles from authoritative structured work metadata".into(),
+            ),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+
+        // When suggested_mr_title is present and authoritative, use it with the ID
+        let title = build_mr_title("fix", "real", false, Some(&ticket));
+        assert_eq!(
+            title,
+            "[GAH] Fix: TICKET-093 Derive PR titles from authoritative structured work metadata"
+        );
+    }
+
+    #[test]
+    fn mr_title_graceful_truncation() {
+        let long_title = "a".repeat(300);
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-093".into()),
+            work_id: Some("TICKET-093".into()),
+            title: Some(long_title),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+
+        let title = build_mr_title("fix", "real", false, Some(&ticket));
+        assert!(title.len() <= 255);
+        assert!(title.ends_with("..."));
+    }
+
+    #[test]
+    fn metadata_rich_mr_body_includes_structured_sections() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-094".into()),
+            work_id: Some("TICKET-094".into()),
+            title: Some("Authoritative PR Description".into()),
+            summary: Some("Authoritative PR Description".into()),
+            problem: Some("The old MR body only showed a minimal template.".into()),
+            goal: Some("Generate PR descriptions from structured metadata.".into()),
+            acceptance_criteria: vec![
+                "Description includes structured sections".into(),
+                "Legacy fallback remains available".into(),
+            ],
+            constraints: vec!["Do not dump raw prompts".into()],
+            source: Some("docs/tickets/TICKET-094-authoritative-pr-description.md".into()),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ledger = LedgerEntry::new(
+            "real",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+        ledger.validation_result = Some("passed".into());
+        ledger.files_changed = Some(2);
+        ledger.insertions = Some(14);
+        ledger.deletions = Some(3);
+        ledger.attempts_started = Some(2);
+        ledger.attempts_completed = Some(2);
+        ledger.fallback_used = true;
+
+        let validation_commands = vec!["cargo test".into(), "cargo fmt --check".into()];
+        let backend_summary = "Fixed the PR description to include reasoning.";
+        let ctx = MrRenderContext {
+            backend: "codex",
+            model: "gpt-5.4",
+            branch: "gah/repo-123",
+            target_branch: "main",
+            validation_commands: &validation_commands,
+            ledger: &ledger,
+            backend_summary,
+        };
+        let body = build_fix_or_improve_mr_body("fix", Some(&ticket), &ctx, true);
+
+        assert!(body.contains("## Work Item"));
+        assert!(body.contains("ID: `TICKET-094`"));
+        assert!(body.contains("## Problem"));
+        assert!(body.contains("The old MR body only showed a minimal template."));
+        assert!(body.contains("## Goal"));
+        assert!(body.contains("## Acceptance Criteria"));
+        assert!(body.contains("- Description includes structured sections"));
+        assert!(body.contains("## Constraints"));
+        assert!(body.contains("- Do not dump raw prompts"));
+        assert!(body.contains("## What changed and why"));
+        assert!(body.contains("Fixed the PR description to include reasoning."));
+        assert!(body.contains("## Validation"));
+        assert!(body.contains("Outcome: passed"));
+        assert!(body.contains("- `cargo test`"));
+        assert!(body.contains("## Backend / Model"));
+        assert!(body.contains("## Attempts"));
+        assert!(body.contains("Fallback used: yes"));
+        assert!(body.contains("## Source"));
+        assert!(body.contains("docs/tickets/TICKET-094-authoritative-pr-description.md"));
+        assert!(!body.contains("## Changes"));
+        assert!(!body.contains("## Branch"));
+        assert!(!body.contains("## Failure / Stop State"));
+    }
+
+    #[test]
+    fn metadata_poor_mr_body_falls_back_to_legacy_template() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = LedgerEntry::new(
+            "real",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+
+        let validation_commands = Vec::new();
+        let backend_summary = "Fixed the issue.";
+        let ctx = MrRenderContext {
+            backend: "codex",
+            model: "gpt-5.4",
+            branch: "gah/repo-123",
+            target_branch: "main",
+            validation_commands: &validation_commands,
+            ledger: &ledger,
+            backend_summary,
+        };
+        let body = build_fix_or_improve_mr_body("fix", None, &ctx, true);
+
+        assert!(body.contains("## GAH fix mode"));
+        assert!(body.contains("Ticket: n/a"));
+        assert!(body.contains("Validation passed: true"));
+        assert!(!body.contains("## Work Item"));
+    }
+
+    #[test]
+    fn metadata_rich_mr_body_includes_closes_directive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = LedgerEntry::new(
+            "real",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-72".to_string()),
+            work_id: Some("TICKET-72".to_string()),
+            title: Some("Test Issue".to_string()),
+            issue_number: Some("72".to_string()),
+            ..TicketMetadata::default()
+        };
+
+        let ctx = MrRenderContext {
+            backend: "test",
+            model: "test-model",
+            branch: "gah/test-123",
+            target_branch: "main",
+            validation_commands: &[],
+            ledger: &ledger,
+            backend_summary: "Test summary",
+        };
+
+        let body = build_metadata_rich_mr_body("fix", &ticket, &ctx);
+
+        // Verify that the Closes directive is included
+        assert!(
+            body.contains("Closes #72"),
+            "MR body should contain 'Closes #72'"
+        );
+
+        // Verify it's not at the very beginning or end (should be after Work Item section)
+        assert!(
+            !body.starts_with("Closes #72"),
+            "Closes directive should not be at the start"
+        );
+    }
+
+    #[test]
+    fn standard_mr_body_includes_closes_directive() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-72".to_string()),
+            work_id: Some("TICKET-72".to_string()),
+            title: Some("Test Issue".to_string()),
+            issue_number: Some("72".to_string()),
+            ..TicketMetadata::default()
+        };
+
+        let body = build_standard_mr_body(
+            "fix",
+            Some(&ticket),
+            "test",
+            "test-model",
+            "branch",
+            "main",
+            true,
+            "Test summary",
+        );
+
+        // Verify that the Closes directive is included
+        assert!(
+            body.contains("Closes #72"),
+            "Standard MR body should contain 'Closes #72'"
+        );
+    }
+
+    #[test]
+    fn mr_body_no_closes_directive_without_issue_number() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("TICKET-72".to_string()),
+            work_id: Some("TICKET-72".to_string()),
+            title: Some("Test Issue".to_string()),
+            issue_number: None, // No issue number
+            ..TicketMetadata::default()
+        };
+
+        let body = build_standard_mr_body(
+            "fix",
+            Some(&ticket),
+            "test",
+            "test-model",
+            "branch",
+            "main",
+            true,
+            "Test summary",
+        );
+
+        // Verify that the Closes directive is NOT included when there's no issue number
+        assert!(
+            !body.contains("Closes #"),
+            "Standard MR body should not contain Closes directive without issue number"
+        );
+    }
+
+    #[test]
+    fn metadata_rich_mr_body_no_closes_directive_without_issue_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = LedgerEntry::new(
+            "real",
+            &profile(tmp.path()),
+            "codex",
+            "fix",
+            "target",
+            Some("session-1".into()),
+            None,
+        );
+
+        let ticket = TicketMetadata {
+            ticket_id: None,
+            work_id: None,
+            title: Some("Test Issue".to_string()),
+            issue_number: None, // No issue number
+            ..TicketMetadata::default()
+        };
+
+        let ctx = MrRenderContext {
+            backend: "test",
+            model: "test-model",
+            branch: "gah/test-123",
+            target_branch: "main",
+            validation_commands: &[],
+            ledger: &ledger,
+            backend_summary: "Test summary",
+        };
+
+        let body = build_metadata_rich_mr_body("fix", &ticket, &ctx);
+
+        // Verify that the Closes directive is NOT included when there's no issue number
+        assert!(
+            !body.contains("Closes #"),
+            "MR body should not contain Closes directive without issue number"
         );
     }
 }

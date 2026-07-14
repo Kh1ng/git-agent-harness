@@ -2,6 +2,7 @@ use super::super::attempts::{
     apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output,
     mark_shutdown_cancelled, review_preflight, review_usage, route_identity,
 };
+use super::super::prompts::enforce_context_budget;
 use super::super::publish::{render_review_comment, review_labels};
 use super::super::review::context::{
     lookup_review_state_by_branch, prepare_review_diff, resolve_review_target, ReviewTarget,
@@ -11,7 +12,8 @@ use super::super::review::policy::{
     parse_review_verdict_with_context, review_escalation_reason, reviewer_dedup_class,
     ReviewBudgetExhausted, ReviewGateContext,
 };
-use super::super::{enforce_context_budget, utf8_safe_prefix, utf8_safe_suffix, DispatchArgs};
+use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
+use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
 use crate::notifications::{notify_event, NotifyEvent};

@@ -2,12 +2,74 @@ use super::issues::{
     extract_markdown_list_section, extract_markdown_section, parse_ticket_metadata_from_issue,
     IssueDetails,
 };
-use super::utf8_safe_prefix;
-use crate::config::Profile;
+use super::text::utf8_safe_prefix;
+use crate::config::{GahConfig, Profile};
+use crate::ledger::LedgerEntry;
 use crate::models::Candidate;
 use crate::models::CandidateArtifact;
+use anyhow::Result;
 use std::fs;
 use std::path::Path;
+
+/// Build the task prompt for the agent.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::dispatch) fn enforce_context_budget(
+    cfg: &GahConfig,
+    _profile: &Profile,
+    profile_name: &str,
+    backend: &str,
+    phase: &str,
+    fresh_context: bool,
+    prompt: &str,
+    session_dir: &Path,
+    run_id: Option<&str>,
+    ledger: &mut LedgerEntry,
+) -> Result<String> {
+    let context_cfg = cfg.context.effective(profile_name, backend);
+    let build = match crate::context::enforce(prompt, &context_cfg) {
+        Ok(build) => build,
+        Err(err) => {
+            ledger.set_failure(
+                crate::ledger::FailureClass::ContextLimitExceeded,
+                crate::ledger::FailureStage::AgentRun,
+            );
+            ledger.context_phase = Some(phase.to_string());
+            ledger.context_estimated_tokens_before = Some(crate::context::estimate_tokens(prompt));
+            ledger.context_estimated_tokens_after = None;
+            ledger.context_compacted = true;
+            return Err(err);
+        }
+    };
+    ledger.context_phase = Some(phase.to_string());
+    ledger.context_estimated_tokens_before = Some(build.estimated_tokens_before_reduction);
+    ledger.context_estimated_tokens_after = Some(build.estimated_tokens_after_reduction);
+    ledger.context_compacted = build.compacted;
+    let _ = fs::write(
+        session_dir.join("context-built.json"),
+        serde_json::to_vec_pretty(&build)?,
+    );
+    let details = serde_json::json!({
+        "phase": phase,
+        "backend": backend,
+        "estimated_tokens_before_reduction": build.estimated_tokens_before_reduction,
+        "estimated_tokens_after_reduction": build.estimated_tokens_after_reduction,
+        "soft_limit_tokens": context_cfg.soft_limit_tokens,
+        "hard_limit_tokens": context_cfg.hard_limit_tokens,
+        "compacted": build.compacted,
+        "fresh_context": fresh_context,
+        "largest_sections": build.largest_sections,
+        "sources": build.sources,
+    });
+    let _ = crate::events::record_with_run_id(
+        cfg,
+        crate::events::EventType::ContextBuilt,
+        Some(profile_name),
+        ledger.work_id.as_deref(),
+        run_id,
+        details.to_string(),
+    );
+    Ok(build.prompt)
+}
 
 pub(super) const PROJECT_BRIEF_MAX_BYTES: usize = 10_000;
 pub(super) const LIVE_TASK_FALLBACK_MAX_BYTES: usize = 12_000;
