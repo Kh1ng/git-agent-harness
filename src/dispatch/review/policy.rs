@@ -1,5 +1,5 @@
 use super::super::text::extract_first_json_object;
-use super::super::ReviewDiffBundle;
+use super::context::ReviewDiffBundle;
 use crate::config::{CandidateConfig, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::routing::RouteDecision;
