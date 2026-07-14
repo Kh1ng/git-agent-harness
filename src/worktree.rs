@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::process::{Child, Output, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, ExitStatus, Output, Stdio};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -68,21 +69,69 @@ fn retry_transient_git_network<T>(
     unreachable!("bounded git retry loop always returns")
 }
 
-fn wait_with_timeout(mut child: Child, context: &str) -> Result<Output> {
+fn wait_with_timeout(child: Child, context: &str) -> Result<Output> {
+    wait_with_timeout_for(child, context, GIT_TIMEOUT)
+}
+
+fn drain_pipe<R>(mut pipe: R) -> JoinHandle<std::io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn collect_pipe(
+    reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    context: &str,
+    stream: &str,
+) -> Result<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("{context} {stream} reader panicked"))?
+        .with_context(|| format!("reading {context} {stream}"))
+}
+
+fn wait_with_timeout_for(mut child: Child, context: &str, timeout: Duration) -> Result<Output> {
+    // Read both pipes while the child runs. Waiting for exit before draining
+    // deadlocks as soon as git emits more than the OS pipe capacity: git
+    // blocks in write(2), cannot exit, and the parent waits until timeout.
+    let stdout = child
+        .stdout
+        .take()
+        .map(|pipe: ChildStdout| drain_pipe(pipe));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|pipe: ChildStderr| drain_pipe(pipe));
     let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            return child
-                .wait_with_output()
-                .with_context(|| format!("collecting {context} output"));
+    let status: ExitStatus = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
         }
-        if started.elapsed() >= GIT_TIMEOUT {
+        if started.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("{context} timed out after {}s", GIT_TIMEOUT.as_secs());
+            // Killing the child closes its pipe ends, allowing the drain
+            // threads to terminate before this function returns.
+            let _ = collect_pipe(stdout, context, "stdout");
+            let _ = collect_pipe(stderr, context, "stderr");
+            anyhow::bail!("{context} timed out after {}s", timeout.as_secs());
         }
         thread::sleep(Duration::from_millis(100));
-    }
+    };
+
+    Ok(Output {
+        status,
+        stdout: collect_pipe(stdout, context, "stdout")?,
+        stderr: collect_pipe(stderr, context, "stderr")?,
+    })
 }
 
 fn fetch_origin(repo: &Path) -> Result<()> {
@@ -564,6 +613,26 @@ mod tests {
         // std::process::Command surfaces this as a launch error via the
         // anyhow context wired in git_raw(), not a git stderr message.
         assert!(format!("{:#}", err).contains("git status"));
+    }
+
+    #[test]
+    fn wait_with_timeout_drains_output_larger_than_os_pipe_capacity() {
+        let child = StdCommand::new("sh")
+            .args([
+                "-c",
+                "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = wait_with_timeout_for(child, "large-output fixture", Duration::from_secs(2))
+            .expect("concurrent pipe drains must prevent a child-output deadlock");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 262_144);
+        assert_eq!(output.stderr.len(), 262_144);
     }
 
     // ── create() ─────────────────────────────────────────────────────────

@@ -622,7 +622,11 @@ pub(crate) fn improve(
         // consume quota, pass the repository's unchanged test suite, and
         // falsely advance the controller with no patch or PR to show for it.
         // Stop before post-change validation: there is no change to validate.
-        if !worktree::has_changes(&wt, &profile.default_target_branch)? {
+        if !classify_git_operation_result(
+            ledger,
+            crate::ledger::FailureStage::PostValidation,
+            worktree::has_changes(&wt, &profile.default_target_branch),
+        )? {
             // OpenCode can exit successfully after a provider rejection and
             // put the useful diagnostic only in its internal log. Inspect
             // that run-scoped tail before treating this as generic no-progress
@@ -1082,7 +1086,11 @@ pub(crate) fn improve(
     // each attempt is self-contained.
     // ────────────────────────────────────────────────────────────────────────
 
-    let has_changes = worktree::has_changes(&wt, &profile.default_target_branch)?;
+    let has_changes = classify_git_operation_result(
+        ledger,
+        crate::ledger::FailureStage::PostValidation,
+        worktree::has_changes(&wt, &profile.default_target_branch),
+    )?;
     if !has_changes {
         // Defensive backstop: auto-fix commands or a future post-validation
         // transform could remove every change after the normal early check.
