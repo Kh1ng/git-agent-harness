@@ -1,4 +1,5 @@
-use super::super::tests::{init_repo, profile};
+use super::super::test_util::profile;
+use super::super::tests::init_repo;
 use super::*;
 use crate::ledger::LedgerEntry;
 use crate::test_support::PathGuard;
