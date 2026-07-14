@@ -73,12 +73,38 @@ impl Default for ValidationCheckState {
 /// non-cryptographic string hash -- exactly what the ticket asks for. A
 /// separator byte between entries ensures `["a", "b"]` hashes differently from
 /// `["ab"]`, and an empty list hashes to a stable deterministic value.
+#[cfg(test)]
 pub fn hash_validation_commands(commands: &[String]) -> String {
+    hash_parts(commands.iter().map(String::as_str))
+}
+
+/// Cache key for one profile-level baseline. The environment values are
+/// hashed, never persisted, so changing an env file invalidates the result
+/// without leaking credentials into validation state.
+pub fn hash_validation_context(
+    commands: &[String],
+    target_sha: &str,
+    environment: &[(String, String)],
+) -> String {
+    let mut parts = Vec::with_capacity(commands.len() + environment.len() + 1);
+    parts.extend(commands.iter().cloned());
+    parts.push(format!("target:{target_sha}"));
+    let mut environment = environment.to_vec();
+    environment.sort_by(|a, b| a.0.cmp(&b.0));
+    parts.extend(
+        environment
+            .into_iter()
+            .map(|(key, value)| format!("env:{key}={value}")),
+    );
+    hash_parts(parts.iter().map(String::as_str))
+}
+
+fn hash_parts<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut hash: u64 = OFFSET;
-    for cmd in commands {
-        for b in cmd.as_bytes() {
+    for part in parts {
+        for b in part.as_bytes() {
             hash ^= *b as u64;
             hash = hash.wrapping_mul(PRIME);
         }
@@ -307,6 +333,39 @@ mod tests {
         let h = hash_validation_commands(&[]);
         assert_eq!(h, hash_validation_commands(&[]));
         assert!(!h.is_empty());
+    }
+
+    #[test]
+    fn validation_context_cache_key_changes_with_target_or_environment() {
+        let commands = vec!["cargo test".to_string()];
+        let env = vec![("PATH".to_string(), "/bin".to_string())];
+        let original = hash_validation_context(&commands, "sha-one", &env);
+        assert_ne!(
+            original,
+            hash_validation_context(&commands, "sha-two", &env)
+        );
+        assert_ne!(
+            original,
+            hash_validation_context(
+                &commands,
+                "sha-one",
+                &[("PATH".to_string(), "/other".to_string())]
+            )
+        );
+    }
+
+    #[test]
+    fn validation_context_environment_order_does_not_change_cache_key() {
+        let commands = vec!["cargo test".to_string()];
+        let first = vec![
+            ("B".to_string(), "two".to_string()),
+            ("A".to_string(), "one".to_string()),
+        ];
+        let second = vec![first[1].clone(), first[0].clone()];
+        assert_eq!(
+            hash_validation_context(&commands, "sha", &first),
+            hash_validation_context(&commands, "sha", &second)
+        );
     }
 
     // ── should_recheck ───────────────────────────────────────────────────
