@@ -1350,7 +1350,14 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
         return Ok(());
     }
 
-    let hash = vc::hash_validation_commands(&profile.validation_commands);
+    let repo = Path::new(&profile.local_path);
+    let target_sha = command_output("git", &["rev-parse", &profile.default_target_branch], repo)?;
+    let gate_environment = validation_env(profile);
+    let hash = vc::hash_validation_context(
+        &profile.validation_commands,
+        target_sha.trim(),
+        &gate_environment,
+    );
     let state_path = vc::resolve_state_path();
 
     // Hold the lock across the whole decide-then-verify sequence, not just the
@@ -1382,7 +1389,6 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
         profile.default_target_branch
     );
 
-    let repo = Path::new(&profile.local_path);
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
 
     // `worktree::create` errors out if the branch already exists. Use a
@@ -1406,7 +1412,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
         &worktree_base,
     )?;
     let verified_at = vc::now_rfc3339(OffsetDateTime::now_utc());
-    let result = validate(&profile.validation_commands, &wt, &validation_env(profile));
+    let result = validate(&profile.validation_commands, &wt, &gate_environment);
     let ok = result.is_ok();
 
     // Always clean up, regardless of pass/fail — a leftover validation-gate
@@ -2074,11 +2080,14 @@ fn improve(
 
     let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
 
-    // Baseline: run validation once on the pristine worktree BEFORE spending
-    // tokens. A failure here is a config error or a pre-existing red repo —
-    // either way the agent must know, and later failures can be compared
-    // against it to tell "agent made no progress" from "agent broke it".
-    let (baseline_failure, baseline_exit_code) = if profile.validation_commands.is_empty() {
+    // The profile-level validation gate above already proved this exact target
+    // SHA + command set + validation environment once under a cross-process
+    // lock. Parallel tickets share that result instead of racing identical
+    // baseline suites. An explicit gate bypass retains the old per-dispatch
+    // baseline safety check because no shared proof exists in that case.
+    let (baseline_failure, baseline_exit_code) = if profile.validation_commands.is_empty()
+        || !args.skip_validation_gate
+    {
         (None, None)
     } else {
         println!("Baseline validation on pristine worktree...");

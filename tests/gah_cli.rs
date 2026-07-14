@@ -3314,9 +3314,12 @@ fn dispatch_runs_validation_gate_once_per_config_change_then_skips() {
     // First dispatch: nothing recorded yet → gate runs, passes, records.
     // The gate logs to stdout.
     let first = run();
-    first.success().stdout(predicate::str::contains(
-        "[validation-gate] commands changed",
-    ));
+    first
+        .success()
+        .stdout(predicate::str::contains(
+            "[validation-gate] commands changed",
+        ))
+        .stdout(predicate::str::contains("Baseline validation on pristine worktree").not());
 
     // State now records last_verified_ok = true for profile "real".
     let state_text = fs::read_to_string(&state_path).unwrap();
@@ -3334,7 +3337,8 @@ fn dispatch_runs_validation_gate_once_per_config_change_then_skips() {
     let second = run();
     second
         .success()
-        .stdout(predicate::str::contains("[validation-gate] commands changed").not());
+        .stdout(predicate::str::contains("[validation-gate] commands changed").not())
+        .stdout(predicate::str::contains("Baseline validation on pristine worktree").not());
 }
 
 /// TICKET-073: a broken validation_commands entry is caught as a distinct,
