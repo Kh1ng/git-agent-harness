@@ -17,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Source-size ratchets compare a PR with its base branch so a
+          # baseline increase cannot disguise source growth.
+          fetch-depth: 0
 
       - name: Install Node.js
         uses: actions/setup-node@v4
