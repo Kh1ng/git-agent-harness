@@ -400,6 +400,20 @@ pub(super) fn extract_markdown_list_section(body: &str, heading: &str) -> Vec<St
         .unwrap_or_default()
 }
 
+/// Bullet-list items under `heading`, falling back to the whole section as a
+/// single entry when its content isn't formatted as a list (issue #405:
+/// `Invariants`/`Required Behavior` sections written as prose were
+/// previously discarded entirely by the list-only extractor).
+pub(super) fn extract_markdown_requirement_items(body: &str, heading: &str) -> Vec<String> {
+    let items = extract_markdown_list_section(body, heading);
+    if !items.is_empty() {
+        return items;
+    }
+    extract_markdown_section(body, heading)
+        .into_iter()
+        .collect()
+}
+
 pub(super) fn extract_markdown_code_list_section(body: &str, heading: &str) -> Vec<String> {
     extract_markdown_list_section(body, heading)
         .into_iter()
@@ -617,8 +631,24 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
     meta.problem = extract_markdown_section(&issue.body, "Problem")
         .or_else(|| extract_markdown_section(&issue.body, "Background"))
         .or_else(|| extract_markdown_section(&issue.body, "Description"));
+    // Issue #405: `Scope` is common requirement-shaped phrasing but is only
+    // ever a stand-in for problem/goal content -- an issue that already has
+    // an explicit Problem/Background/Description or an inline `Goal:` line
+    // keeps that as authoritative rather than being overridden by Scope.
+    if meta.problem.is_none() && meta.goal.is_none() {
+        meta.problem = extract_markdown_section(&issue.body, "Scope");
+    }
     meta.acceptance_criteria = extract_markdown_list_section(&issue.body, "Acceptance Criteria");
     meta.constraints = extract_markdown_list_section(&issue.body, "Constraints");
+    // Issue #405: `Invariants` and `Required Behavior` were silently dropped
+    // because only `Constraints` was recognized. Fold both into the bounded
+    // constraints list rather than discarding them; fall back to the whole
+    // section as a single entry when the heading's content isn't formatted
+    // as a bullet list.
+    for heading in ["Invariants", "Required Behavior"] {
+        meta.constraints
+            .extend(extract_markdown_requirement_items(&issue.body, heading));
+    }
     meta.verification_commands =
         extract_markdown_code_list_section(&issue.body, "Verification Commands");
     meta.affected_files = extract_markdown_list_section(&issue.body, "Affected Files");
@@ -962,6 +992,111 @@ The parser should retain structured sections.\n\n\
         assert_eq!(meta.recommended_backend.as_deref(), Some("agy"));
         assert_eq!(meta.goal.as_deref(), Some("Fix everything"));
         assert_eq!(meta.work_id.as_deref(), Some("#42"));
+    }
+
+    #[test]
+    fn parse_ticket_metadata_from_issue_folds_scope_and_invariants_378_style() {
+        // Issue #405 / #378: `Scope` and `Invariants` headings were silently
+        // dropped because only `Problem`/`Goal` and `Constraints` were
+        // recognized.
+        let issue = IssueDetails {
+            number: "378".to_string(),
+            title: "TICKET-378: Fix drift detection".to_string(),
+            body: "## Scope\n\nDetect config drift across restarts\n\n\
+                   ## Invariants\n\n- Never silently disable classification\n\
+                   - Must fail closed on parse errors"
+                .to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let meta = parse_ticket_metadata_from_issue(&issue);
+        assert_eq!(
+            meta.problem.as_deref(),
+            Some("Detect config drift across restarts")
+        );
+        assert!(meta
+            .constraints
+            .contains(&"Never silently disable classification".to_string()));
+        assert!(meta
+            .constraints
+            .contains(&"Must fail closed on parse errors".to_string()));
+    }
+
+    #[test]
+    fn parse_ticket_metadata_from_issue_folds_required_behavior_384_style() {
+        // Issue #405 / #384: `Required Behavior` was silently dropped.
+        let issue = IssueDetails {
+            number: "384".to_string(),
+            title: "TICKET-384: Eligibility gating".to_string(),
+            body: "## Problem\n\nBad-ROI markets keep dispatching\n\n\
+                   ## Required Behavior\n\n- Gate markets below the ROI floor\n\
+                   - Preserve existing eligible markets"
+                .to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let meta = parse_ticket_metadata_from_issue(&issue);
+        assert_eq!(
+            meta.problem.as_deref(),
+            Some("Bad-ROI markets keep dispatching")
+        );
+        assert!(meta
+            .constraints
+            .contains(&"Gate markets below the ROI floor".to_string()));
+        assert!(meta
+            .constraints
+            .contains(&"Preserve existing eligible markets".to_string()));
+    }
+
+    #[test]
+    fn parse_ticket_metadata_from_issue_scope_never_overrides_explicit_problem() {
+        let issue = IssueDetails {
+            number: "1".to_string(),
+            title: "Test".to_string(),
+            body: "## Problem\n\nThe real problem\n\n## Scope\n\nA scope note".to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let meta = parse_ticket_metadata_from_issue(&issue);
+        assert_eq!(meta.problem.as_deref(), Some("The real problem"));
+    }
+
+    #[test]
+    fn parse_ticket_metadata_from_issue_scope_never_overrides_explicit_goal() {
+        let issue = IssueDetails {
+            number: "1".to_string(),
+            title: "Test".to_string(),
+            body: "Goal: Ship the feature\n\n## Scope\n\nA scope note".to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let meta = parse_ticket_metadata_from_issue(&issue);
+        assert_eq!(meta.problem, None);
+        assert_eq!(meta.goal.as_deref(), Some("Ship the feature"));
+    }
+
+    #[test]
+    fn parse_ticket_metadata_from_issue_folds_prose_invariants_as_single_constraint() {
+        // Not every Invariants/Required Behavior section is a bullet list --
+        // prose content must not be silently dropped either.
+        let issue = IssueDetails {
+            number: "1".to_string(),
+            title: "Test".to_string(),
+            body:
+                "## Problem\n\nSomething\n\n## Invariants\n\nMust remain fail-closed at all times."
+                    .to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let meta = parse_ticket_metadata_from_issue(&issue);
+        assert!(meta
+            .constraints
+            .contains(&"Must remain fail-closed at all times.".to_string()));
     }
 
     #[test]
