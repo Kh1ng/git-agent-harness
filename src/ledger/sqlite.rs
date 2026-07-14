@@ -213,7 +213,7 @@ pub fn rebuild_from_jsonl(cfg: &GahConfig) -> Result<()> {
 mod tests {
     use super::*;
     use crate::ledger::append;
-    use crate::ledger::tests::{profile, test_config};
+    use crate::ledger::test_util::{profile, test_config};
 
     #[test]
     fn sync_mirrors_appended_entries_and_stays_in_lockstep_on_backfill() {

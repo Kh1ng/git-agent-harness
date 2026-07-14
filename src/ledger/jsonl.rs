@@ -473,7 +473,7 @@ mod tests {
         entries_for_work_id, index_entries_by_work_id, read_entries, repair_truncated_tail_at,
         review_already_exists, ReviewVerdictBackfill,
     };
-    use crate::ledger::tests as ledger_tests;
+    use crate::ledger::test_util as ledger_tests;
     use std::fs;
     use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
