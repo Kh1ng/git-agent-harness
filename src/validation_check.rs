@@ -164,6 +164,15 @@ fn lock_path_for(state_path: &Path) -> PathBuf {
     state_path.with_file_name(lock_name)
 }
 
+fn profile_lock_path_for(state_path: &Path, profile: &str) -> PathBuf {
+    let mut lock_name = state_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "validation_check.json".into());
+    lock_name.push(format!(".{}.profile.lock", hash_parts([profile])));
+    state_path.with_file_name(lock_name)
+}
+
 /// Read the state file, if present. A missing file is `Ok(default)` (no state
 /// recorded yet = nothing verified, so the caller must re-check). A
 /// present-but-malformed file or an unsupported version is an actionable `Err`,
@@ -211,6 +220,30 @@ pub fn acquire_lock(state_path: &Path) -> Result<File> {
     lock_file
         .lock_exclusive()
         .with_context(|| format!("locking {}", lock_path.display()))?;
+    Ok(lock_file)
+}
+
+/// Serialize the expensive read-decide-verify sequence for one profile only.
+///
+/// The state file's global lock is intentionally not held while validation
+/// commands execute. A validation command may itself run GAH (this repo's
+/// integration suite does), and a global lock would make that child wait for
+/// its parent while the parent waits for the child. Per-profile locks retain
+/// same-profile proof de-duplication without blocking unrelated profiles.
+pub fn acquire_profile_lock(state_path: &Path, profile: &str) -> Result<File> {
+    let dir = state_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir).with_context(|| format!("creating directory {}", dir.display()))?;
+
+    let lock_path = profile_lock_path_for(state_path, profile);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("opening profile lock file {}", lock_path.display()))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("locking profile validation gate {}", lock_path.display()))?;
     Ok(lock_file)
 }
 
@@ -266,8 +299,7 @@ pub fn record_check_locked(
     Ok(())
 }
 
-#[cfg(test)]
-fn record_check(
+pub fn record_check(
     state_path: &Path,
     profile: &str,
     commands_hash: &str,
@@ -523,6 +555,45 @@ mod tests {
             1,
             "acquire_lock must serialize callers -- never more than one holder at a time"
         );
+    }
+
+    #[test]
+    fn profile_locks_serialize_same_profile_but_not_other_profiles() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmp = TempDir::new().unwrap();
+        let p = path(&tmp);
+        let gah_lock = acquire_profile_lock(&p, "gah").unwrap();
+
+        let (same_tx, same_rx) = mpsc::channel();
+        let same_path = p.clone();
+        let same = thread::spawn(move || {
+            let lock = acquire_profile_lock(&same_path, "gah").unwrap();
+            same_tx.send(()).unwrap();
+            FileExt::unlock(&lock).ok();
+        });
+
+        let (other_tx, other_rx) = mpsc::channel();
+        let other_path = p.clone();
+        let other = thread::spawn(move || {
+            let lock = acquire_profile_lock(&other_path, "other").unwrap();
+            other_tx.send(()).unwrap();
+            FileExt::unlock(&lock).ok();
+        });
+
+        other_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a different profile must not wait on the gah profile lock");
+        assert!(same_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        FileExt::unlock(&gah_lock).ok();
+        same_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("same profile should proceed after its lock is released");
+        same.join().unwrap();
+        other.join().unwrap();
     }
 
     // ── path resolution ──────────────────────────────────────────────────
