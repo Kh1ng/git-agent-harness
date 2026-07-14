@@ -79,15 +79,30 @@ pub(super) fn detect_stuck_loop(
     events: &[crate::events::ControllerEvent],
     profile_name: &str,
     action: &NextAction,
+    reset_after: Option<&str>,
 ) -> Option<String> {
     let work_id = action.work_id()?;
     let fingerprint_prefix = format!("{}:", action.kind());
     let mut consecutive = 0;
     for event in events.iter().rev() {
-        if event.profile.as_deref() != Some(profile_name) || event.event_type != "action_decided" {
+        if event.profile.as_deref() != Some(profile_name) {
             continue;
         }
         if event.work_id.as_deref() != Some(work_id) {
+            continue;
+        }
+        if reset_after.is_some_and(|reset| timestamp_at_or_before(&event.timestamp, reset)) {
+            break;
+        }
+        // A prior selection that reached only local route contention made no
+        // agent call and explicitly deferred itself. It is an expected wait
+        // boundary, not evidence that the controller is spinning without a
+        // state change.
+        if event.event_type == "dispatch_finished" && event.details.contains(": deferred_capacity:")
+        {
+            break;
+        }
+        if event.event_type != "action_decided" {
             continue;
         }
         if event.details.starts_with(&fingerprint_prefix) {
@@ -106,6 +121,39 @@ pub(super) fn detect_stuck_loop(
         }
     }
     None
+}
+
+fn timestamp_at_or_before(timestamp: &str, boundary: &str) -> bool {
+    use time::format_description::well_known::Rfc3339;
+    match (
+        time::OffsetDateTime::parse(timestamp, &Rfc3339),
+        time::OffsetDateTime::parse(boundary, &Rfc3339),
+    ) {
+        (Ok(timestamp), Ok(boundary)) => timestamp <= boundary,
+        _ => timestamp <= boundary,
+    }
+}
+
+/// Return the latest operator reset that applies to this exact
+/// profile/repository/work item. The ledger remains append-only; consumers
+/// use the tombstone timestamp as the lower bound for controller history.
+pub(super) fn latest_clear_attempts_timestamp<'a>(
+    entries: &'a [crate::ledger::LedgerEntry],
+    profile_name: &str,
+    repo_id: &str,
+    work_id: &str,
+) -> Option<&'a str> {
+    let aliases = crate::ledger::work_id_aliases(work_id);
+    entries.iter().rev().find_map(|entry| {
+        (entry.profile == profile_name
+            && entry.repo_id == repo_id
+            && entry.mode == "clear_attempts"
+            && entry
+                .work_id
+                .as_deref()
+                .is_some_and(|id| aliases.iter().any(|alias| alias == id)))
+        .then_some(entry.timestamp.as_str())
+    })
 }
 
 pub(super) fn record_action_events(
@@ -230,8 +278,8 @@ pub(super) fn defer_if_branch_attached(
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_stuck_loop, record_action_events, resolve_attached_branch_conflicts, NextAction,
-        STUCK_LOOP_THRESHOLD,
+        detect_stuck_loop, latest_clear_attempts_timestamp, record_action_events,
+        resolve_attached_branch_conflicts, NextAction, STUCK_LOOP_THRESHOLD,
     };
     use crate::config::{Defaults, GahConfig, RoutingPolicy};
     use crate::events::ControllerEvent;
@@ -344,7 +392,10 @@ mod tests {
         let events: Vec<_> = (0..STUCK_LOOP_THRESHOLD - 1)
             .map(|_| decided_event("real", "TICKET-500", "fix_mr"))
             .collect();
-        assert_eq!(detect_stuck_loop(&events, "real", &fix_mr_action()), None);
+        assert_eq!(
+            detect_stuck_loop(&events, "real", &fix_mr_action(), None),
+            None
+        );
     }
 
     #[test]
@@ -352,7 +403,7 @@ mod tests {
         let events: Vec<_> = (0..STUCK_LOOP_THRESHOLD)
             .map(|_| decided_event("real", "TICKET-500", "fix_mr"))
             .collect();
-        assert!(detect_stuck_loop(&events, "real", &fix_mr_action()).is_some());
+        assert!(detect_stuck_loop(&events, "real", &fix_mr_action(), None).is_some());
     }
 
     #[test]
@@ -361,7 +412,10 @@ mod tests {
             .map(|_| decided_event("real", "TICKET-500", "fix_mr"))
             .collect();
         events.push(decided_event("real", "TICKET-500", "review_mr"));
-        assert_eq!(detect_stuck_loop(&events, "real", &fix_mr_action()), None);
+        assert_eq!(
+            detect_stuck_loop(&events, "real", &fix_mr_action(), None),
+            None
+        );
     }
 
     #[test]
@@ -370,7 +424,10 @@ mod tests {
             .map(|_| decided_event("real", "TICKET-500", "fix_mr"))
             .collect();
         events.push(decided_event("real", "TICKET-999", "fix_mr"));
-        assert_eq!(detect_stuck_loop(&events, "real", &fix_mr_action()), None);
+        assert_eq!(
+            detect_stuck_loop(&events, "real", &fix_mr_action(), None),
+            None
+        );
     }
 
     #[test]
@@ -378,7 +435,10 @@ mod tests {
         let events: Vec<_> = (0..STUCK_LOOP_THRESHOLD)
             .map(|_| decided_event("other", "TICKET-500", "fix_mr"))
             .collect();
-        assert_eq!(detect_stuck_loop(&events, "real", &fix_mr_action()), None);
+        assert_eq!(
+            detect_stuck_loop(&events, "real", &fix_mr_action(), None),
+            None
+        );
     }
 
     #[test]
@@ -389,7 +449,95 @@ mod tests {
         let action = NextAction::NoOp {
             reason: "nothing actionable".into(),
         };
-        assert_eq!(detect_stuck_loop(&events, "real", &action), None);
+        assert_eq!(detect_stuck_loop(&events, "real", &action, None), None);
+    }
+
+    #[test]
+    fn clear_attempts_boundary_resets_old_stuck_loop_decisions() {
+        let events: Vec<_> = (0..STUCK_LOOP_THRESHOLD)
+            .map(|_| decided_event("real", "TICKET-500", "fix_mr"))
+            .collect();
+        assert_eq!(
+            detect_stuck_loop(
+                &events,
+                "real",
+                &fix_mr_action(),
+                Some("2026-07-05T00:00:01Z"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn post_clear_decisions_still_trigger_stuck_loop_detection() {
+        let mut events: Vec<_> = (0..STUCK_LOOP_THRESHOLD)
+            .map(|_| decided_event("real", "TICKET-500", "fix_mr"))
+            .collect();
+        for event in &mut events {
+            event.timestamp = "2026-07-05T00:00:02Z".into();
+        }
+        assert!(detect_stuck_loop(
+            &events,
+            "real",
+            &fix_mr_action(),
+            Some("2026-07-05T00:00:01Z"),
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn capacity_deferral_breaks_the_stuck_loop_streak() {
+        let mut events: Vec<_> = (0..STUCK_LOOP_THRESHOLD)
+            .map(|_| decided_event("real", "TICKET-500", "fix_mr"))
+            .collect();
+        events.push(ControllerEvent {
+            timestamp: "2026-07-05T00:00:01Z".into(),
+            event_type: "dispatch_finished".into(),
+            profile: Some("real".into()),
+            work_id: Some("TICKET-500".into()),
+            run_id: Some("deferred-run".into()),
+            details: "fix_existing: deferred_capacity: claude/sonnet busy".into(),
+        });
+
+        assert_eq!(
+            detect_stuck_loop(&events, "real", &fix_mr_action(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn latest_clear_attempts_is_scoped_to_profile_repo_and_work_alias() {
+        let profile: crate::config::Profile = toml::from_str(
+            r#"
+display_name = "Real"
+repo_id = "real-repo"
+provider = "github"
+repo = "owner/real"
+local_path = "/tmp/real"
+artifact_root = "/tmp/real-artifacts"
+default_target_branch = "main"
+"#,
+        )
+        .unwrap();
+        let mut matching =
+            crate::ledger::LedgerEntry::new_clear_attempts("real", &profile, "TICKET-500");
+        matching.timestamp = "2026-07-05T00:00:01Z".into();
+        let mut other_profile =
+            crate::ledger::LedgerEntry::new_clear_attempts("other", &profile, "#500");
+        other_profile.timestamp = "2026-07-05T00:00:02Z".into();
+        let mut other_work =
+            crate::ledger::LedgerEntry::new_clear_attempts("real", &profile, "#501");
+        other_work.timestamp = "2026-07-05T00:00:03Z".into();
+
+        assert_eq!(
+            latest_clear_attempts_timestamp(
+                &[matching, other_profile, other_work],
+                "real",
+                "real-repo",
+                "#500",
+            ),
+            Some("2026-07-05T00:00:01Z")
+        );
     }
 
     fn event_test_config() -> (tempfile::TempDir, GahConfig) {

@@ -636,6 +636,34 @@ fn entries_after_tombstone_still_count() {
 }
 
 #[test]
+fn capacity_deferral_does_not_count_as_a_ticket_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ticket_dir = tmp.path().join("docs/tickets");
+    fs::create_dir_all(&ticket_dir).unwrap();
+    fs::write(
+        ticket_dir.join("TICKET-302-test.md"),
+        "# TICKET-302: Test capacity deferral\nGoal: remain dispatchable\n",
+    )
+    .unwrap();
+    let mut prof = profile(tmp.path());
+    prof.local_path = tmp.path().display().to_string();
+    prof.provider = String::new();
+    let mut deferred = LedgerEntry::new("test", &prof, "auto", "fix", "x", None, None);
+    deferred.work_id = Some("TICKET-302".into());
+    deferred.validation_result = Some("deferred_capacity".into());
+    deferred.failure_class = Some("backend_error".into());
+    deferred.attempts_started = Some(0);
+    deferred.attempts_completed = Some(0);
+    let index = crate::ledger::index_entries_by_work_id(&[deferred]);
+
+    let candidates = scan_available_tickets(&prof, &[], &index);
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].prior_attempt_count, 0);
+    assert_eq!(candidates[0].genuine_agent_failure_count, 0);
+}
+
+#[test]
 fn infra_failures_not_counted_as_agent_failures() {
     let tmp = tempfile::tempdir().unwrap();
     let ticket_dir = tmp.path().join("docs/tickets");

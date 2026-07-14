@@ -327,6 +327,13 @@ fn ledger_lookup_for_ticket(
         if e.mode == "paid_route_approval_revoke" {
             continue;
         }
+        // A sibling worker already owns the only configured backend/model
+        // slot. The dispatch reached no backend and consumed no execution
+        // attempt, so keep it auditable in the ledger without poisoning
+        // ticket attempt counts or retry/stuck-loop policy.
+        if e.validation_result.as_deref() == Some("deferred_capacity") {
+            continue;
+        }
         count += 1;
         // A real completion entry (of any outcome) means whatever claim
         // preceded this attempt has resolved -- this ticket is no longer

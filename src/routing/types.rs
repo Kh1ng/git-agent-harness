@@ -102,6 +102,22 @@ pub enum RouteError {
     },
 }
 
+impl RouteError {
+    /// True when routing is temporarily blocked only because a configured
+    /// backend/model has reached its local concurrency cap. No backend was
+    /// launched and a later controller iteration can retry after the active
+    /// slot releases, so this is a deferral rather than a dispatch failure.
+    pub fn is_capacity_deferral(&self) -> bool {
+        matches!(
+            self,
+            Self::NoEligibleBackend { skipped, .. }
+                if skipped
+                    .iter()
+                    .any(|candidate| candidate.reason == "max_concurrent_reached")
+        )
+    }
+}
+
 impl fmt::Display for RouteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -209,5 +225,41 @@ mod tests {
             error.to_string(),
             "operator approval required before using paid route opencode-nous/glm-5.2"
         );
+    }
+
+    #[test]
+    fn only_max_concurrency_no_eligible_errors_are_capacity_deferrals() {
+        let busy = RouteError::NoEligibleBackend {
+            preferred_backend: "claude".into(),
+            preferred_model: Some("sonnet".into()),
+            skipped: vec![SkippedBackend {
+                backend: "claude".into(),
+                model: Some("sonnet".into()),
+                reason: "max_concurrent_reached".into(),
+                unavailable_until: None,
+            }],
+            earliest_reset: None,
+        };
+        assert!(busy.is_capacity_deferral());
+
+        let exhausted = RouteError::NoEligibleBackend {
+            preferred_backend: "claude".into(),
+            preferred_model: Some("sonnet".into()),
+            skipped: vec![SkippedBackend {
+                backend: "claude".into(),
+                model: Some("sonnet".into()),
+                reason: "quota_exhausted".into(),
+                unavailable_until: None,
+            }],
+            earliest_reset: None,
+        };
+        assert!(!exhausted.is_capacity_deferral());
+
+        let approval = RouteError::ApprovalRequired {
+            backend: "opencode".into(),
+            model: Some("glm-5.2".into()),
+            skipped: Vec::new(),
+        };
+        assert!(!approval.is_capacity_deferral());
     }
 }

@@ -558,6 +558,9 @@ pub(super) fn decide_route(
                 // inherit this classification.
                 let class = match route_err {
                     RouteError::NoEligibleBackend { .. } => {
+                        if route_err.is_capacity_deferral() {
+                            ledger.validation_result = Some("deferred_capacity".into());
+                        }
                         crate::ledger::FailureClass::BackendError
                     }
                     RouteError::ApprovalRequired { backend, model, .. } => {

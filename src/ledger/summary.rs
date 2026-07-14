@@ -339,6 +339,10 @@ pub fn run_with_json(
 /// from a real (if oddly-named) model called "".
 pub const UNKNOWN_MODEL_LABEL: &str = "(unknown model)";
 
+fn is_capacity_deferral(entry: &LedgerEntry) -> bool {
+    entry.validation_result.as_deref() == Some("deferred_capacity")
+}
+
 pub fn build_summary(
     cfg: &config::GahConfig,
     since: &str,
@@ -351,6 +355,10 @@ pub fn build_summary(
         entries.retain(|entry| entry.profile == profile);
     }
     entries.retain(|entry| entry.timestamp >= cutoff);
+    // Capacity deferrals are append-only control-plane audit records, not
+    // executions: no backend launched and no usage was consumed. Excluding
+    // them keeps success-rate and cost-per-execution denominators honest.
+    entries.retain(|entry| !is_capacity_deferral(entry));
 
     let mut by_mode: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_backend: BTreeMap<String, usize> = BTreeMap::new();
@@ -1061,6 +1069,9 @@ pub fn usage_summary_for_backend(
         .unwrap_or_default();
     let mut out = BackendUsageSummary::default();
     for entry in &entries {
+        if is_capacity_deferral(entry) {
+            continue;
+        }
         let same_backend = entry.effective_backend == backend;
         let same_model = model
             .map(|m| entry.effective_model.as_deref() == Some(m))
