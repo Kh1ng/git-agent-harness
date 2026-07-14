@@ -554,13 +554,7 @@ fn run_parallel_once(
                     // next slot makes its routing decision. The rendezvous
                     // sender is dropped if dispatch fails before routing, so
                     // that failure cannot deadlock the batch.
-                    let waits_for_route = matches!(
-                        &action_for_thread,
-                        NextAction::DispatchTicket { .. }
-                            | NextAction::Retry { .. }
-                            | NextAction::Escalate { .. }
-                            | NextAction::FixMr { .. }
-                    );
+                    let waits_for_route = action_waits_for_route(&action_for_thread);
                     let (route_ready, route_receiver) = if waits_for_route {
                         let (sender, receiver) = sync_channel(0);
                         (Some(sender), Some(receiver))
@@ -670,6 +664,17 @@ fn run_parallel_once(
     }
 
     Ok(())
+}
+
+fn action_waits_for_route(action: &NextAction) -> bool {
+    matches!(
+        action,
+        NextAction::DispatchTicket { .. }
+            | NextAction::Retry { .. }
+            | NextAction::Escalate { .. }
+            | NextAction::FixMr { .. }
+            | NextAction::ReviewMr { .. }
+    )
 }
 
 /// Executes at most one action. `FixMr` dispatches a fix operation
@@ -896,9 +901,20 @@ mod ledger_read_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_profile_lock, is_validation_gate_failure, loop_lock_path,
+        acquire_profile_lock, action_waits_for_route, is_validation_gate_failure, loop_lock_path,
         reload_config_for_profile, wait_interruptibly,
     };
+
+    #[test]
+    fn review_actions_wait_until_the_selected_route_is_reserved() {
+        let action = crate::controller::NextAction::ReviewMr {
+            branch: "gah/review-cap".into(),
+            work_id: Some("#471".into()),
+            mr_url: None,
+            reason: "review required".into(),
+        };
+        assert!(action_waits_for_route(&action));
+    }
 
     #[test]
     fn validation_gate_errors_are_identified_through_anyhow_context() {
