@@ -10,6 +10,8 @@ const DEFAULT_MAX_LINES: usize = 1500;
 fn runner_adapter_facade_preserves_public_call_paths() {
     fn public<T>(_item: T) {}
 
+    public(git_agent_harness::runner::run_agy);
+    public(git_agent_harness::runner::run_agy_with_executable);
     public(git_agent_harness::runner::run_claude);
     public(git_agent_harness::runner::run_claude_with_executable);
     public(git_agent_harness::runner::run_codex);
