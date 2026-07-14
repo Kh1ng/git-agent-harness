@@ -172,3 +172,42 @@ pub(crate) fn render_skips(skipped: &[SkippedBackend]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_error_preserves_candidate_and_reset_diagnostics() {
+        let error = RouteError::NoEligibleBackend {
+            preferred_backend: "codex".into(),
+            preferred_model: Some("gpt-5.4-mini".into()),
+            skipped: vec![SkippedBackend {
+                backend: "codex".into(),
+                model: Some("gpt-5.4-mini".into()),
+                reason: "quota_exhausted".into(),
+                unavailable_until: Some("tomorrow".into()),
+            }],
+            earliest_reset: Some("tomorrow".into()),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "no eligible backend available for preferred codex/gpt-5.4-mini; skipped: codex/gpt-5.4-mini: quota_exhausted until tomorrow; earliest reset: tomorrow"
+        );
+    }
+
+    #[test]
+    fn approval_error_preserves_exact_paid_route_identity() {
+        let error = RouteError::ApprovalRequired {
+            backend: "opencode-nous".into(),
+            model: Some("glm-5.2".into()),
+            skipped: Vec::new(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "operator approval required before using paid route opencode-nous/glm-5.2"
+        );
+    }
+}

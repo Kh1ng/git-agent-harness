@@ -1,6 +1,6 @@
 use crate::availability::{self, AvailabilityDecision, BlockScope};
 use crate::config::{Defaults, Profile, RoutingPolicy, TaskRoutingRule};
-use crate::ledger::{BackendUsageSummary, RoutingCandidateDiagnostic, RoutingDiagnostics};
+use crate::ledger::BackendUsageSummary;
 use crate::quota::{self, PaceBand};
 use crate::runner;
 use anyhow::Result;
@@ -17,6 +17,7 @@ use std::time::Duration;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+mod diagnostics;
 mod types;
 
 // Re-export stable types
@@ -26,7 +27,8 @@ pub use types::{
 };
 
 // Import helper functions for internal use
-use types::{candidate_label, render_skips};
+use diagnostics::{build_routing_diagnostics, describe_candidate, DiagnosticCandidate};
+use types::render_skips;
 
 fn concurrency_key(backend: &str, model: Option<&str>) -> String {
     format!("{backend}/{}", model.unwrap_or(""))
@@ -170,6 +172,48 @@ struct RouteCandidate {
     quota_days_remaining: Option<f64>,
     requires_approval: bool,
     original_order: usize,
+}
+
+impl DiagnosticCandidate for RouteCandidate {
+    fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    fn quota_pool(&self) -> Option<&str> {
+        self.quota_pool.as_deref()
+    }
+
+    fn priority(&self) -> i32 {
+        self.priority
+    }
+
+    fn included_in_quota(&self) -> bool {
+        self.included_in_quota
+    }
+
+    fn marginal_cost_usd(&self) -> Option<f64> {
+        self.marginal_cost_usd
+    }
+
+    fn quota_usage_percent(&self) -> Option<f64> {
+        self.quota_usage_percent
+    }
+
+    fn quota_days_remaining(&self) -> Option<f64> {
+        self.quota_days_remaining
+    }
+
+    fn requires_approval(&self) -> bool {
+        self.requires_approval
+    }
+
+    fn original_order(&self) -> usize {
+        self.original_order
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -499,7 +543,9 @@ where
                     &candidates_for_diagnostics,
                     &selected,
                     &skipped,
-                    reorder.as_ref(),
+                    reorder
+                        .as_ref()
+                        .map(|decision| decision.selected_over.as_slice()),
                     &profile.pacing,
                 )),
             },
@@ -570,7 +616,9 @@ where
             &candidates_for_diagnostics,
             &selected,
             &skipped,
-            reorder.as_ref(),
+            reorder
+                .as_ref()
+                .map(|decision| decision.selected_over.as_slice()),
             &profile.pacing,
         ));
         return Ok((
@@ -1271,144 +1319,6 @@ fn compare_optional_f64(left: Option<f64>, right: Option<f64>) -> Ordering {
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
-    }
-}
-
-fn describe_candidate(candidate: &RouteCandidate, pacing: &crate::quota::PacingConfig) -> String {
-    let mut details = Vec::new();
-    if candidate.included_in_quota {
-        details.push(
-            match quota::quota_pace(
-                candidate.quota_usage_percent,
-                candidate.quota_days_remaining,
-                pacing,
-            )
-            .unwrap_or(PaceBand::Normal)
-            {
-                PaceBand::AggressiveBurn => "included quota aggressive-burn".into(),
-                PaceBand::MildBurn => "included quota mild-burn".into(),
-                PaceBand::Normal => "included quota normal".into(),
-                PaceBand::Conserve => "included quota conserve".into(),
-                PaceBand::HardConserve => "included quota hard-conserve".into(),
-            },
-        );
-    } else if candidate.requires_approval {
-        details.push("paid approval required".into());
-    } else if let Some(cost) = candidate.marginal_cost_usd {
-        details.push(format!("paid ${cost:.4}"));
-    }
-    if candidate.priority != 0 {
-        details.push(format!("priority {}", candidate.priority));
-    }
-    let label = candidate_label(&candidate.backend, candidate.model.as_deref());
-    if details.is_empty() {
-        label
-    } else {
-        format!("{label} ({})", details.join(", "))
-    }
-}
-
-fn build_routing_diagnostics(
-    candidates: &[RouteCandidate],
-    selected: &RouteCandidate,
-    skipped: &[SkippedBackend],
-    reorder: Option<&ReorderDecision>,
-    pacing: &crate::quota::PacingConfig,
-) -> RoutingDiagnostics {
-    let candidates = candidates
-        .iter()
-        .enumerate()
-        .map(|(consideration_order, candidate)| {
-            let skipped = skipped
-                .iter()
-                .find(|skip| skip.backend == candidate.backend && skip.model == candidate.model);
-            RoutingCandidateDiagnostic {
-                backend: candidate.backend.clone(),
-                model: candidate.model.clone(),
-                quota_pool: candidate.quota_pool.clone(),
-                default_order: Some(candidate.original_order),
-                consideration_order: Some(consideration_order),
-                pace_band: candidate_pace_band(candidate, pacing),
-                cost_class: Some(candidate_cost_class(candidate)),
-                skip_reason: skipped.map(|skip| skip.reason.clone()),
-                unavailable_until: skipped.and_then(|skip| skip.unavailable_until.clone()),
-            }
-        })
-        .collect();
-
-    RoutingDiagnostics {
-        policy_reordered_candidates: reorder.is_some(),
-        selected_backend: Some(selected.backend.clone()),
-        selected_model: selected.model.clone(),
-        selected_quota_pool: selected.quota_pool.clone(),
-        selected_pace_band: candidate_pace_band(selected, pacing),
-        selected_cost_class: Some(candidate_cost_class(selected)),
-        selected_over: reorder.map(|r| r.selected_over.clone()).unwrap_or_default(),
-        human_summary: Some(render_routing_diagnostics_human(
-            selected, skipped, reorder, pacing,
-        )),
-        candidates,
-    }
-}
-
-fn render_routing_diagnostics_human(
-    selected: &RouteCandidate,
-    skipped: &[SkippedBackend],
-    reorder: Option<&ReorderDecision>,
-    pacing: &crate::quota::PacingConfig,
-) -> String {
-    let mut parts = vec![format!("selected {}", describe_candidate(selected, pacing))];
-    if let Some(pool) = &selected.quota_pool {
-        parts.push(format!("quota pool {}", pool));
-    }
-    if let Some(band) = candidate_pace_band(selected, pacing) {
-        parts.push(format!("pace {}", band));
-    }
-    parts.push(format!("cost {}", candidate_cost_class(selected)));
-    if let Some(reorder) = reorder.filter(|r| !r.selected_over.is_empty()) {
-        parts.push(format!(
-            "policy reordered defaults over {}",
-            reorder.selected_over.join(", ")
-        ));
-    }
-    if !skipped.is_empty() {
-        parts.push(format!("skipped {}", render_skips(skipped)));
-    }
-    parts.join("; ")
-}
-
-fn candidate_pace_band(
-    candidate: &RouteCandidate,
-    pacing: &crate::quota::PacingConfig,
-) -> Option<String> {
-    if !candidate.included_in_quota {
-        return None;
-    }
-    Some(
-        match quota::quota_pace(
-            candidate.quota_usage_percent,
-            candidate.quota_days_remaining,
-            pacing,
-        )
-        .unwrap_or(PaceBand::Normal)
-        {
-            PaceBand::AggressiveBurn => "aggressive_burn",
-            PaceBand::MildBurn => "mild_burn",
-            PaceBand::Normal => "normal",
-            PaceBand::Conserve => "conserve",
-            PaceBand::HardConserve => "hard_conserve",
-        }
-        .to_string(),
-    )
-}
-
-fn candidate_cost_class(candidate: &RouteCandidate) -> String {
-    if candidate.included_in_quota {
-        "included_quota".into()
-    } else if candidate.requires_approval || candidate.marginal_cost_usd.unwrap_or(0.0) > 0.0 {
-        "paid".into()
-    } else {
-        "standard".into()
     }
 }
 
