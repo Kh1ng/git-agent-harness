@@ -12,7 +12,7 @@ pub(super) fn ensure_issue_open_for_publish(
 ) -> anyhow::Result<()> {
     let fresh = fetch_issue_details(profile, &issue.number)?;
     match fresh.state.as_deref() {
-        Some(state) if state.eq_ignore_ascii_case("open") => Ok(()),
+        Some(state) if issue_state_is_open(state) => Ok(()),
         Some(state) => anyhow::bail!(
             "source issue #{} is {state}; refusing to publish completed or closed work",
             fresh.number
@@ -22,6 +22,10 @@ pub(super) fn ensure_issue_open_for_publish(
             fresh.number
         ),
     }
+}
+
+fn issue_state_is_open(state: &str) -> bool {
+    state.eq_ignore_ascii_case("open") || state.eq_ignore_ascii_case("opened")
 }
 
 pub(super) fn emit_human_handoff(
@@ -433,6 +437,19 @@ mod tests {
     use super::*;
     use crate::dispatch::test_util::profile;
     use crate::ledger::LedgerEntry;
+
+    #[test]
+    fn provider_open_issue_states_are_publishable() {
+        for state in ["open", "OPEN", "opened", "OPENED"] {
+            assert!(issue_state_is_open(state), "expected open state: {state}");
+        }
+        for state in ["closed", "completed", "locked", ""] {
+            assert!(
+                !issue_state_is_open(state),
+                "expected terminal state: {state}"
+            );
+        }
+    }
 
     #[test]
     fn title_preserves_authoritative_identity_and_draft_prefix() {
