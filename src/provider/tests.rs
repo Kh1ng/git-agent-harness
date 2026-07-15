@@ -1,5 +1,5 @@
 use super::{
-    create_draft_mr, find_review_target_by_mr, github_review_target_by_number,
+    create_draft_mr, draft_mr_title, find_review_target_by_mr, github_review_target_by_number,
     gitlab_target_from_value, mark_ready_for_review, merge_mr, TEST_PATH_OVERRIDE,
 };
 use crate::config::{Profile, RoutingPolicy};
@@ -260,6 +260,15 @@ fn gitlab_mr_valid_response_returns_id_and_url() {
     assert!(args.contains("source_branch=gah/test"));
     assert!(args.contains("target_branch=main"));
     assert!(!args.contains("PRIVATE-TOKEN"));
+}
+
+#[test]
+fn provider_draft_title_is_capped_after_prefix() {
+    let title = draft_mr_title(&"é".repeat(300));
+
+    assert_eq!(title.chars().count(), 255);
+    assert!(title.starts_with("Draft: "));
+    assert!(title.ends_with("..."));
 }
 
 #[test]

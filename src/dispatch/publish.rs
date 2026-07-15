@@ -293,19 +293,12 @@ pub(super) fn build_experiment_mr_body(ctx: &ExperimentMrRenderContext<'_>) -> S
 }
 
 pub(super) fn truncate_title(title: &str, limit: usize) -> String {
-    if title.len() <= limit {
+    if title.chars().count() <= limit {
         title.to_string()
+    } else if limit <= 3 {
+        ".".repeat(limit)
     } else {
-        let mut truncated = String::new();
-        let mut char_count = 0;
-        for c in title.chars() {
-            if char_count < limit - 3 {
-                truncated.push(c);
-                char_count += 1;
-            } else {
-                break;
-            }
-        }
+        let mut truncated: String = title.chars().take(limit - 3).collect();
         truncated.push_str("...");
         truncated
     }
@@ -631,7 +624,22 @@ mod tests {
         };
 
         let title = build_mr_title("fix", "real", false, Some(&ticket));
-        assert!(title.len() <= 255);
+        assert!(title.chars().count() <= 255);
+        assert!(title.ends_with("..."));
+    }
+
+    #[test]
+    fn mr_title_unicode_truncation_uses_character_limit() {
+        let ticket = TicketMetadata {
+            ticket_id: Some("#159".into()),
+            work_id: Some("#159".into()),
+            title: Some("é".repeat(300)),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+
+        let title = build_mr_title("fix", "real", false, Some(&ticket));
+        assert_eq!(title.chars().count(), 255);
         assert!(title.ends_with("..."));
     }
 
