@@ -2666,7 +2666,7 @@ fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
     assert!(prompt.contains("Source: feature/review"));
     assert!(prompt.contains("Target: main"));
     assert!(prompt.contains("MR title: Draft: [GAH] Fix"));
-    assert!(prompt.contains("MR body:\nMR body"));
+    assert!(prompt.contains("MR body:\n  MR body"));
 
     let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
     let verdict = fs::read_to_string(session_dir.join("review-verdict.json")).unwrap();
