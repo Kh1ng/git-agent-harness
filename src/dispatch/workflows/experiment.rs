@@ -1,6 +1,6 @@
 use super::super::attempts::{
     apply_route_to_ledger, classify_git_operation_result, classify_worktree_result, decide_route,
-    preflight, resolve_llm, run_backend,
+    preflight, record_route_attempt, resolve_llm, run_backend,
 };
 use super::super::identity::timestamp;
 use super::super::issues::resolve_target_to_issue_or_string;
@@ -140,6 +140,11 @@ pub(crate) fn experiment(
         result.exit_code, result.duration_secs, result.log_path
     );
     ledger.backend_exit_code = Some(result.exit_code);
+    record_route_attempt(
+        ledger,
+        &route.effective_backend,
+        route.effective_model.as_deref(),
+    );
 
     let backend_summary = runner::output::publishable_summary(
         result.final_summary.as_deref(),

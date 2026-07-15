@@ -29,6 +29,9 @@ pub struct RouteRequest<'a> {
 pub struct RoutingRuntimeState {
     pub recent_runs: HashMap<CandidateIdentity, u64>,
     pub attempted: HashSet<CandidateIdentity>,
+    /// Routes already launched in the current dispatch, even if they have
+    /// not yet been durable-logged as the final attempt record.
+    pub dispatch_attempted: HashSet<CandidateIdentity>,
     pub approved: HashSet<CandidateIdentity>,
 }
 

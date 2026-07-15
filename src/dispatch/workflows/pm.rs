@@ -1,6 +1,6 @@
 use super::super::attempts::{
     apply_route_to_ledger, decide_route, ensure_bin, mark_backend_unavailable_from_output,
-    preflight, resolve_llm, route_identity, run_backend,
+    preflight, record_route_attempt, resolve_llm, route_identity, route_label, run_backend,
 };
 use super::super::command::command_output;
 use super::super::repo_inspection::count_test_files;
@@ -120,6 +120,11 @@ pub(crate) fn pm(
         );
         ledger.backend_exit_code = Some(result.exit_code);
         ledger.validation_result = Some("not_run".into());
+        record_route_attempt(
+            ledger,
+            &plan_route.effective_backend,
+            plan_route.effective_model.as_deref(),
+        );
 
         let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
         if result.exit_code == 0 {
@@ -164,7 +169,15 @@ pub(crate) fn pm(
         }
         println!(
             "PM rerouting: {} -> {} ({:?})",
-            plan_route.effective_backend, rerouted.effective_backend, parsed.kind
+            route_label(
+                &plan_route.effective_backend,
+                plan_route.effective_model.as_deref(),
+            ),
+            route_label(
+                &rerouted.effective_backend,
+                rerouted.effective_model.as_deref()
+            ),
+            parsed.kind
         );
         plan_route = rerouted;
         apply_route_to_ledger(ledger, &plan_route);

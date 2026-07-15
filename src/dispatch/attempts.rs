@@ -491,6 +491,13 @@ pub(super) fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecis
     ledger.routing_diagnostics = route.routing_diagnostics.clone();
 }
 
+pub(super) fn record_route_attempt(ledger: &mut LedgerEntry, backend: &str, model: Option<&str>) {
+    ledger
+        .routing_runtime
+        .dispatch_attempted
+        .insert(CandidateIdentity::new(backend, model));
+}
+
 /// Live-observed bug: `worktree::create`/`create_existing` failures (e.g. a
 /// transient `git fetch` auth/network error) were propagating via `?`
 /// straight past every `ledger.set_failure()` call site, reaching `run()`'s
@@ -656,6 +663,9 @@ pub(super) fn routing_runtime_state(
                 .insert(CandidateIdentity::new(backend, model));
         }
     }
+    state
+        .dispatch_attempted
+        .extend(current.routing_runtime.dispatch_attempted.iter().cloned());
 
     Ok(state)
 }
@@ -709,6 +719,13 @@ pub(super) fn record_genuine_failure_routes(state: &mut RoutingRuntimeState, ent
 
 pub(super) fn route_identity(backend: &str, model: Option<&str>) -> String {
     format!("{backend}\u{0}{}", model.unwrap_or(""))
+}
+
+pub(super) fn route_label(backend: &str, model: Option<&str>) -> String {
+    match model {
+        Some(model) => format!("{backend}/{model}"),
+        None => backend.to_string(),
+    }
 }
 
 /// Local-only recovery refs for discarded retry attempts. Keep the prefix

@@ -183,8 +183,9 @@ where
                 c.backend == decision.effective_backend
                     && c.model.as_deref() == Some(model.as_str())
             }) {
-                let escalate =
-                    is_genuine_agent_failure(last_failure_class) || !runtime.attempted.is_empty();
+                let exclude_attempted = is_genuine_agent_failure(last_failure_class)
+                    || !runtime.attempted.is_empty()
+                    || !runtime.dispatch_attempted.is_empty();
                 if let Some(skip) = skip_reason_for_candidate(
                     evaluation.state_path,
                     &candidate.backend,
@@ -194,7 +195,7 @@ where
                     evaluation.now,
                     backend_available,
                     runtime,
-                    escalate,
+                    exclude_attempted,
                     candidate.requires_approval,
                 )? {
                     if skip.reason == "operator_approval_required" {
@@ -583,6 +584,9 @@ where
 {
     let allow_impl_fallback = effective_routing.allow_implementation_fallback;
     let allow_review_fallback = effective_routing.allow_review_fallback;
+    let exclude_attempted = is_genuine_agent_failure(req.last_failure_class)
+        || !runtime.attempted.is_empty()
+        || !runtime.dispatch_attempted.is_empty();
     let review_fallback = if req.mode == "review" && allow_review_fallback {
         review_fallback_backend(defaults, profile, backend_available)
     } else {
@@ -626,7 +630,7 @@ where
         now,
         backend_available,
         runtime,
-        false,
+        exclude_attempted,
     )?;
 
     if selected.backend == primary.backend && selected.model == primary.model {
@@ -799,7 +803,10 @@ where
     let decision = availability::availability_for(state_path, backend, model, quota_pool, now)?;
     if decision.eligible {
         let identity = CandidateIdentity::new(backend, model);
-        if exclude_attempted && runtime.attempted.contains(&identity) {
+        if exclude_attempted
+            && (runtime.attempted.contains(&identity)
+                || runtime.dispatch_attempted.contains(&identity))
+        {
             return Ok(Some(SkippedBackend {
                 backend: backend.to_string(),
                 model: model.map(str::to_string),

@@ -1,6 +1,7 @@
 use super::super::attempts::{
     apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output,
-    mark_shutdown_cancelled, reserve_backend_slot, review_preflight, review_usage, route_identity,
+    mark_shutdown_cancelled, record_route_attempt, reserve_backend_slot, review_preflight,
+    review_usage, route_identity, route_label,
 };
 use super::super::prompts::enforce_context_budget;
 use super::super::publish::{render_review_comment, review_labels};
@@ -283,6 +284,11 @@ pub(in crate::dispatch) fn review(
                 | runner::ReviewProcessOutcome::SpawnFailure
         ) {
             ledger.attempts_completed = Some(ledger.attempts_completed.unwrap_or(0) + 1);
+            record_route_attempt(
+                ledger,
+                &route.effective_backend,
+                route.effective_model.as_deref(),
+            );
         }
         let attribution = UsageAttribution::from_route(&route);
         let usage = if matches!(
@@ -425,7 +431,12 @@ pub(in crate::dispatch) fn review(
                     if rerouted_identity != current_identity {
                         println!(
                             "Backend unavailable; retrying review with {} instead of {} ({:?})",
-                            rerouted.effective_backend, route.effective_backend, parsed.kind
+                            route_label(
+                                &rerouted.effective_backend,
+                                rerouted.effective_model.as_deref(),
+                            ),
+                            route_label(&route.effective_backend, route.effective_model.as_deref(),),
+                            parsed.kind
                         );
                         route = rerouted;
                         review_slot = Some(reserve_review_route(profile, &route)?);

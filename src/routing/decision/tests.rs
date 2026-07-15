@@ -2,7 +2,8 @@ use super::super::test_support::{
     backend_available, candidate_config, defaults, path, profile, record_available,
     record_unavailable,
 };
-use super::{decide_with, RouteError, RouteRequest};
+use super::{decide_with, decide_with_runtime, RouteError, RouteRequest};
+use super::{CandidateIdentity, RoutingRuntimeState};
 use crate::availability::{Reason, Source};
 use tempfile::TempDir;
 use time::format_description::well_known::Rfc3339;
@@ -785,4 +786,103 @@ fn routing_honors_shared_quota_pool() {
         Some("codex-main")
     );
     assert!(decision2.fallback_used);
+}
+
+#[test]
+fn validation_retry_skips_every_route_already_tried_in_the_same_dispatch() {
+    let tmp = TempDir::new().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let mut profile = profile();
+    profile.routing.improve_candidates = Some(vec![
+        candidate_config("agy", Some("sonnet"), None),
+        candidate_config("agy-second", Some("sonnet"), None),
+        candidate_config("claude", Some("sonnet"), None),
+    ]);
+    let mut runtime = RoutingRuntimeState::default();
+    runtime
+        .dispatch_attempted
+        .insert(CandidateIdentity::new("agy", Some("sonnet")));
+    let request = RouteRequest {
+        last_failure_class: Some("validation_failure"),
+        mode: "improve",
+        requested_backend: "auto",
+        requested_model: None,
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+    };
+
+    let second = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request.clone(),
+        &runtime,
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+    assert_eq!(second.effective_backend, "agy-second");
+    assert_eq!(second.effective_model.as_deref(), Some("sonnet"));
+
+    runtime
+        .dispatch_attempted
+        .insert(CandidateIdentity::new("agy-second", Some("sonnet")));
+    let third = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request,
+        &runtime,
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+    assert_eq!(third.effective_backend, "claude");
+    assert_eq!(third.effective_model.as_deref(), Some("sonnet"));
+}
+
+#[test]
+fn validation_retry_returns_structured_no_route_when_all_candidates_were_tried() {
+    let tmp = TempDir::new().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let mut profile = profile();
+    profile.routing.improve_candidates = Some(vec![
+        candidate_config("agy", Some("sonnet"), None),
+        candidate_config("agy-second", Some("sonnet"), None),
+    ]);
+    let mut runtime = RoutingRuntimeState::default();
+    runtime
+        .dispatch_attempted
+        .insert(CandidateIdentity::new("agy", Some("sonnet")));
+    runtime
+        .dispatch_attempted
+        .insert(CandidateIdentity::new("agy-second", Some("sonnet")));
+
+    let err = decide_with_runtime(
+        &defaults(),
+        &profile,
+        RouteRequest {
+            last_failure_class: Some("validation_failure"),
+            mode: "improve",
+            requested_backend: "auto",
+            requested_model: None,
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: None,
+            usage_summary: None,
+        },
+        &runtime,
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::NoEligibleBackend { skipped, .. })
+            if skipped.iter().all(|candidate| candidate.reason == "already_attempted_after_capability_failure")
+    ));
 }

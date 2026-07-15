@@ -1,4 +1,5 @@
 use crate::config::Profile;
+use crate::routing::RoutingRuntimeState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use time::format_description::well_known::Rfc3339;
@@ -358,6 +359,9 @@ pub struct LedgerEntry {
     pub attempts_completed: Option<u32>,
     #[serde(default)]
     pub attempts: Vec<AttemptRecord>,
+    /// Live routing state for the current dispatch only.
+    #[serde(skip, default)]
+    pub routing_runtime: RoutingRuntimeState,
     /// Distinguishes the *kind* of dispatch that produced this ledger entry:
     /// `initial` (first DispatchTicket), `post_review_repair` (FixMr after a
     /// NEEDS_FIX review), `review` (ReviewMr), or `stuck_loop_gate` (a
@@ -453,6 +457,7 @@ impl LedgerEntry {
             attempts_started: Some(0),
             attempts_completed: Some(0),
             attempts: Vec::new(),
+            routing_runtime: RoutingRuntimeState::default(),
             dispatch_reason: None,
             context_phase: None,
             context_estimated_tokens_before: None,
@@ -540,6 +545,7 @@ impl LedgerEntry {
             attempts_started: Some(0),
             attempts_completed: Some(0),
             attempts: Vec::new(),
+            routing_runtime: RoutingRuntimeState::default(),
             dispatch_reason: None,
             context_phase: None,
             context_estimated_tokens_before: None,
