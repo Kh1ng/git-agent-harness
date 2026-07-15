@@ -98,6 +98,11 @@ fn run_shell_command_with_shutdown(
     command
         .args(["-c", command_text])
         .current_dir(worktree)
+        // Validation is always unattended. Inheriting a manager/dispatch PTY
+        // makes this newly-created process group a background terminal group;
+        // a nested PTY helper such as `script(1)` can then receive SIGTTOU and
+        // stop the entire validation tree indefinitely.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in env_vars {
@@ -227,6 +232,23 @@ mod tests {
             std::fs::read_to_string(observed).unwrap(),
             expected.display().to_string()
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn validation_commands_receive_noninteractive_stdin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = run_shell_command_with_shutdown(
+            "readlink /proc/self/fd/0",
+            tmp.path(),
+            &[],
+            std::time::Duration::from_secs(30),
+            || false,
+        )
+        .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "/dev/null");
     }
 
     #[test]
