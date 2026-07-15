@@ -621,6 +621,7 @@ default_target_branch = "main"
         let effective = NextAction::HumanRequired {
             reason: "stuck-loop detected: 'review_mr' selected 3 times in a row for TICKET-500 with no intervening state change".into(),
             reference: Some("TICKET-500".into()),
+            reason_code: Some("policy_approval".into()),
         };
 
         record_action_events(&cfg, "real", &original, &effective).unwrap();

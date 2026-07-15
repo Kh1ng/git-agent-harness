@@ -203,6 +203,7 @@ pub(in crate::dispatch) fn review(
             NotifyEvent::HumanRequired {
                 reason: "review budget exhausted",
                 reference: target.mr_url.as_deref(),
+                reason_code: Some("review_evidence_gate"),
                 failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
                 failure_stage: ledger.failure_stage.as_deref(),
                 error_summary: ledger.error_summary.as_deref(),
@@ -571,6 +572,7 @@ pub(in crate::dispatch) fn review(
                     NotifyEvent::HumanRequired {
                         reason: "review verdict requires human attention",
                         reference: mr_url.as_deref(),
+                        reason_code: Some("review_evidence_gate"),
                         failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
                         failure_stage: ledger.failure_stage.as_deref(),
                         error_summary: ledger.error_summary.as_deref(),
@@ -711,6 +713,7 @@ fn stop_for_exhausted_review_escalation(
         NotifyEvent::HumanRequired {
             reason: "review escalation exhausted",
             reference: target.mr_url.as_deref(),
+            reason_code: Some("review_evidence_gate"),
             failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
             failure_stage: ledger.failure_stage.as_deref(),
             error_summary: ledger.error_summary.as_deref(),

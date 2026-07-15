@@ -42,6 +42,8 @@ pub enum NotifyEvent<'a> {
     HumanRequired {
         reason: &'a str,
         reference: Option<&'a str>,
+        /// TICKET-505: stable reason code for why autonomy stopped.
+        reason_code: Option<&'a str>,
         failure_class: &'a str,
         failure_stage: Option<&'a str>,
         error_summary: Option<&'a str>,
@@ -99,6 +101,7 @@ pub fn format_message(event: &NotifyEvent) -> String {
         NotifyEvent::HumanRequired {
             reason,
             reference,
+            reason_code,
             failure_class,
             failure_stage,
             error_summary,
@@ -112,6 +115,9 @@ pub fn format_message(event: &NotifyEvent) -> String {
             );
             if let Some(reference) = reference.or(*mr_url) {
                 msg.push_str(&format!(" ({reference})"));
+            }
+            if let Some(code) = reason_code {
+                msg.push_str(&format!(" [code={code}]"));
             }
             if let Some(summary) = summarize_error_summary(*error_summary) {
                 msg.push_str(&format!(" summary={summary}"));
@@ -221,6 +227,7 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
         NotifyEvent::HumanRequired {
             reason,
             reference,
+            reason_code,
             failure_class,
             failure_stage,
             error_summary,
@@ -232,6 +239,9 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
                 failure_stage.unwrap_or("unknown"),
                 format_attempt_count(*attempt_count),
             );
+            if let Some(code) = reason_code {
+                context.push_str(&format!(" [code={code}]"));
+            }
             if let Some(reference) = reference.or(*mr_url) {
                 context.push_str(&format!(" Reference: {reference}."));
             }
@@ -486,6 +496,7 @@ mod tests {
         let msg = format_message(&NotifyEvent::HumanRequired {
             reason: "MR ready for human decision",
             reference: Some("https://github.com/owner/repo/pull/7"),
+            reason_code: Some("merge_policy"),
             failure_class: "human_blocked",
             failure_stage: Some("review"),
             error_summary: None,
@@ -494,7 +505,7 @@ mod tests {
         });
         assert_eq!(
             msg,
-            "[gah] human required: MR ready for human decision [class=human_blocked] [stage=review] [attempts=2] (https://github.com/owner/repo/pull/7)"
+            "[gah] human required: MR ready for human decision [class=human_blocked] [stage=review] [attempts=2] (https://github.com/owner/repo/pull/7) [code=merge_policy]"
         );
     }
 
@@ -503,6 +514,7 @@ mod tests {
         let msg = format_message(&NotifyEvent::HumanRequired {
             reason: "waiting on operator",
             reference: None,
+            reason_code: None,
             failure_class: "human_blocked",
             failure_stage: Some("review"),
             error_summary: None,
@@ -634,6 +646,7 @@ mod tests {
             NotifyEvent::HumanRequired {
                 reason: "x",
                 reference: None,
+                reason_code: None,
                 failure_class: "human_blocked",
                 failure_stage: Some("review"),
                 error_summary: None,
@@ -678,6 +691,7 @@ mod tests {
             NotifyEvent::HumanRequired {
                 reason: "x",
                 reference: None,
+                reason_code: None,
                 failure_class: "human_blocked",
                 failure_stage: Some("review"),
                 error_summary: None,
@@ -761,6 +775,7 @@ mod tests {
         let event = NotifyEvent::HumanRequired {
             reason: "MR ready for human decision",
             reference: Some("https://example.com/mr/7"),
+            reason_code: Some("merge_policy"),
             failure_class: "human_blocked",
             failure_stage: Some("review"),
             error_summary: None,
@@ -770,6 +785,7 @@ mod tests {
         let instruction = format_wake_instruction(&event, WakeAutonomy::Full).unwrap();
         assert!(instruction.contains("MR ready for human decision"));
         assert!(instruction.contains("https://example.com/mr/7"));
+        assert!(instruction.contains("[code=merge_policy]"));
     }
 
     // ── manager wake integration (real spawn via a fake `claude` binary) ──

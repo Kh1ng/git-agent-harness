@@ -145,6 +145,9 @@ pub struct Blocker {
     pub until: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_reference: Option<String>,
+    /// TICKET-505: stable reason code for why autonomy stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq, Clone)]
@@ -353,6 +356,7 @@ fn build_snapshot_inner(
                 model: avail.model.clone(),
                 until: avail.unavailable_until.clone(),
                 source_reference: None,
+                reason_code: None,
             });
         }
     }
@@ -392,6 +396,7 @@ fn build_snapshot_inner(
                 model: None,
                 until: None,
                 source_reference: ticket.work_id.clone(),
+                reason_code: Some("review_evidence_gate".into()),
             });
         }
     }
@@ -417,6 +422,7 @@ fn build_snapshot_inner(
                     model: None,
                     until: None,
                     source_reference: Some(mr.branch.clone()),
+                    reason_code: Some("fix_retry_cap_exceeded".into()),
                 });
             }
         }

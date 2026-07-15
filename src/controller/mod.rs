@@ -11,6 +11,9 @@ mod decision;
 pub use self::decision::decide_next_action;
 pub(crate) use self::decision::is_genuine_agent_failure;
 
+mod human_required_reason;
+pub use self::human_required_reason::HumanRequiredReason;
+
 mod recovery;
 
 mod runtime;

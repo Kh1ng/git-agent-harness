@@ -109,6 +109,8 @@ export interface Blocker {
   model?: string | null;
   until?: string | null;
   source_reference?: string | null;
+  /** TICKET-505: stable reason code for HumanRequired blockers. */
+  reason_code?: string | null;
 }
 
 export interface StatusError {
@@ -382,6 +384,18 @@ export interface ControllerEvent {
   run_id?: string | null;
   details: string;
 }
+
+// TICKET-505: HumanRequired reason codes
+export type HumanRequiredReasonCode =
+  | 'policy_approval'
+  | 'retry_budget_exhausted'
+  | 'review_evidence_gate'
+  | 'merge_policy'
+  | 'publishing_restriction'
+  | 'configuration_infra'
+  | 'fix_retry_cap_exceeded'
+  | 'merge_retry_cap_exceeded'
+  | 'unknown';
 
 export type ControllerActivityStatus = 'running' | 'finished' | 'failed';
 

@@ -1,4 +1,5 @@
 use super::decision::decide_next_action;
+use super::human_required_reason::HumanRequiredReason;
 use super::recovery::{
     defer_if_branch_attached, detect_stuck_loop, latest_clear_attempts_timestamp,
     reconcile_abandoned_dispatches, record_action_events,
@@ -335,6 +336,7 @@ pub fn run_once(
                 action = NextAction::HumanRequired {
                     reason,
                     reference: original_action.work_id().map(str::to_string),
+                    reason_code: Some(HumanRequiredReason::PolicyApproval.as_str().to_string()),
                 };
             } else {
                 action = redispatched;
@@ -521,6 +523,7 @@ fn run_parallel_once(
                     action = NextAction::HumanRequired {
                         reason,
                         reference: original_action.work_id().map(str::to_string),
+                        reason_code: Some(HumanRequiredReason::PolicyApproval.as_str().to_string()),
                     };
                 } else {
                     action = redispatched;
@@ -842,11 +845,19 @@ pub(crate) fn execute_action(
             Ok(deferred.unwrap_or_else(|| format!("Escalated ticket '{ticket_path}'")))
         }
         NextAction::WaitUntil { until, reason } => Ok(format!("Waiting until {until} ({reason})")),
-        NextAction::HumanRequired { reason, reference } => Ok(format!(
-            "Human required: {reason}{}",
+        NextAction::HumanRequired {
+            reason,
+            reference,
+            reason_code,
+        } => Ok(format!(
+            "Human required: {reason}{}{}",
             reference
                 .as_deref()
                 .map(|r| format!(" ({r})"))
+                .unwrap_or_default(),
+            reason_code
+                .as_deref()
+                .map(|c| format!(" [code={c}]"))
                 .unwrap_or_default()
         )),
         NextAction::NoOp { reason } => Ok(format!("No action: {reason}")),
