@@ -242,6 +242,8 @@ fn split_sections(prompt: &str) -> Vec<Section> {
                 "Acceptance Criteria",
                 "Verification Commands",
                 "Repair Findings",
+                "Source Issue Contract",
+                "Source Issue Lookup",
                 "Warning",
                 "Current Git",
                 "Unresolved",

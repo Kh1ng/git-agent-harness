@@ -3,7 +3,8 @@ use super::super::attempts::{
     mark_shutdown_cancelled, record_route_attempt, reserve_backend_slot, review_preflight,
     review_usage, route_identity, route_label,
 };
-use super::super::prompts::enforce_context_budget;
+use super::super::issues::{fetch_issue_details, parse_ticket_metadata_from_issue, IssueDetails};
+use super::super::prompts::{enforce_context_budget, indent_untrusted_text};
 use super::super::publish::{render_review_comment, review_labels};
 use super::super::review::context::{
     lookup_review_state_by_branch, prepare_review_diff, resolve_review_target, ReviewTarget,
@@ -17,7 +18,7 @@ use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::controller::HumanRequiredReason;
-use crate::ledger::LedgerEntry;
+use crate::ledger::{self, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::routing::{ConcurrencyGuard, RouteDecision, RouteRequest};
 use crate::usage_attribution::{
@@ -79,6 +80,20 @@ pub(in crate::dispatch) fn review(
     );
     let review_gate_context =
         ReviewGateContext::from_diff_bundle(&diff_bundle, target.ci_status.as_deref());
+    let source_issue_context = resolve_source_issue_context(
+        cfg,
+        profile,
+        &args.profile,
+        ledger.work_id.as_deref(),
+        &target,
+    )?;
+    fs::write(
+        bundle.join("source-issue-lookup.json"),
+        serde_json::to_string_pretty(&source_issue_context.lookup_report)?,
+    )?;
+    if let Some(contract) = &source_issue_context.contract {
+        fs::write(bundle.join("source-issue-contract.md"), contract)?;
+    }
 
     // Everything except the capability-activation prefix is identical
     // regardless of which backend ends up running the review.
@@ -97,6 +112,7 @@ pub(in crate::dispatch) fn review(
          - HUMAN_REVIEW: you cannot make a confident recommendation at all.\n\
          Repo: {}. MR: {}. Source: {}. Target: {}. CI status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
+         {}\n\
          Prior run state:\n{}\n\n## Diff\n\n```\n{}\n```\nChanged files:\n{}",
         profile.repo,
         target.mr_id.as_deref().unwrap_or("n/a"),
@@ -105,6 +121,10 @@ pub(in crate::dispatch) fn review(
         target.ci_status.as_deref().unwrap_or("unknown"),
         target.mr_title.as_deref().unwrap_or("n/a"),
         target.mr_body.as_deref().unwrap_or("n/a"),
+        source_issue_context
+            .prompt_section
+            .as_deref()
+            .unwrap_or(""),
         target.prior_state.as_deref().unwrap_or("not found"),
         utf8_safe_prefix(&diff_bundle.diff, 60_000),
         diff_bundle.files,
@@ -678,6 +698,216 @@ pub(in crate::dispatch) fn review(
     Ok(())
 }
 
+const SOURCE_ISSUE_TITLE_MAX_BYTES: usize = 1_024;
+const SOURCE_ISSUE_PROBLEM_MAX_BYTES: usize = 4_096;
+const SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES: usize = 8_192;
+const SOURCE_ISSUE_LIST_MAX_BYTES: usize = 4_096;
+const SOURCE_ISSUE_LIST_ITEM_MAX_BYTES: usize = 1_024;
+const SOURCE_ISSUE_FALLBACK_MAX_BYTES: usize = 12_000;
+
+struct SourceIssueIdentity {
+    issue_number: String,
+    resolved_from: &'static str,
+}
+
+struct SourceIssueContext {
+    prompt_section: Option<String>,
+    contract: Option<String>,
+    lookup_report: serde_json::Value,
+}
+
+fn resolve_source_issue_context(
+    cfg: &GahConfig,
+    profile: &Profile,
+    profile_name: &str,
+    work_id: Option<&str>,
+    target: &ReviewTarget,
+) -> Result<SourceIssueContext> {
+    let Some(identity) = resolve_source_issue_identity(cfg, profile_name, work_id, target) else {
+        return Ok(SourceIssueContext {
+            prompt_section: Some(
+                "## Source Issue Lookup\n\nSource issue identity could not be resolved from the ledger or MR body; no canonical issue contract was fetched."
+                    .to_string(),
+            ),
+            contract: None,
+            lookup_report: serde_json::json!({
+                "state": "missing",
+                "source": "none",
+                "issue_number": serde_json::Value::Null,
+                "error": "source issue identity not found",
+            }),
+        });
+    };
+
+    match fetch_issue_details(profile, &identity.issue_number) {
+        Ok(issue) => {
+            let contract = render_source_issue_contract(&issue);
+            Ok(SourceIssueContext {
+                prompt_section: Some(contract.clone()),
+                contract: Some(contract.clone()),
+                lookup_report: serde_json::json!({
+                    "state": "fetched",
+                    "source": identity.resolved_from,
+                    "issue_number": identity.issue_number,
+                    "contract_bytes": contract.len(),
+                }),
+            })
+        }
+        Err(err) => {
+            let message = format!(
+                "Source issue #{} lookup failed: {err:#}",
+                identity.issue_number
+            );
+            Ok(SourceIssueContext {
+                prompt_section: Some(format!("## Source Issue Lookup\n\n{message}")),
+                contract: None,
+                lookup_report: serde_json::json!({
+                    "state": "lookup_failed",
+                    "source": identity.resolved_from,
+                    "issue_number": identity.issue_number,
+                    "error": err.to_string(),
+                }),
+            })
+        }
+    }
+}
+
+fn resolve_source_issue_identity(
+    cfg: &GahConfig,
+    profile_name: &str,
+    work_id: Option<&str>,
+    target: &ReviewTarget,
+) -> Option<SourceIssueIdentity> {
+    if let Some(work_id) = work_id.filter(|value| !value.trim().is_empty()) {
+        if let Ok(entries) = ledger::entries_for_work_id(cfg, work_id) {
+            if let Some(issue_number) = entries.into_iter().rev().find_map(|entry| {
+                (entry.profile == profile_name && matches!(entry.mode.as_str(), "fix" | "improve"))
+                    .then(|| entry.source_issue_number.clone())
+                    .flatten()
+            }) {
+                return Some(SourceIssueIdentity {
+                    issue_number,
+                    resolved_from: "ledger",
+                });
+            }
+        }
+    }
+
+    extract_issue_number_from_text(target.mr_body.as_deref()).map(|issue_number| {
+        SourceIssueIdentity {
+            issue_number,
+            resolved_from: "mr_body",
+        }
+    })
+}
+
+fn extract_issue_number_from_text(text: Option<&str>) -> Option<String> {
+    let text = text?;
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim();
+        for prefix in ["closes #", "fixes #", "resolves #"] {
+            if trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
+            {
+                let rest = trimmed[prefix.len()..].trim();
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty() {
+                    return Some(digits);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn render_source_issue_contract(issue: &IssueDetails) -> String {
+    let meta = parse_ticket_metadata_from_issue(issue);
+    let mut sections = vec![format!(
+        "## Source Issue Contract\n\nIssue: #{}\nTitle: {}",
+        issue.number,
+        indent_untrusted_text(utf8_safe_prefix(
+            meta.title.as_deref().unwrap_or(issue.title.as_str()),
+            SOURCE_ISSUE_TITLE_MAX_BYTES
+        )),
+    )];
+
+    if let Some(problem) = meta.problem.as_deref().or(meta.goal.as_deref()) {
+        sections.push(format!(
+            "### Problem\n\n{}",
+            indent_untrusted_text(utf8_safe_prefix(
+                problem.trim(),
+                SOURCE_ISSUE_PROBLEM_MAX_BYTES
+            ))
+        ));
+    }
+    if !meta.acceptance_criteria.is_empty() {
+        sections.push(format!(
+            "### Acceptance Criteria\n\n{}",
+            render_source_issue_list(&meta.acceptance_criteria, SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES)
+        ));
+    }
+    if !meta.constraints.is_empty() {
+        sections.push(format!(
+            "### Constraints\n\n{}",
+            render_source_issue_list(&meta.constraints, SOURCE_ISSUE_LIST_MAX_BYTES)
+        ));
+    }
+    if !meta.verification_commands.is_empty() {
+        sections.push(format!(
+            "### Verification Commands\n\n{}",
+            render_source_issue_list(&meta.verification_commands, SOURCE_ISSUE_LIST_MAX_BYTES)
+        ));
+    }
+    if !meta.affected_files.is_empty() {
+        sections.push(format!(
+            "### Affected Files\n\n{}",
+            render_source_issue_list(&meta.affected_files, SOURCE_ISSUE_LIST_MAX_BYTES)
+        ));
+    }
+    if let Some(source) = meta.source.as_deref() {
+        sections.push(format!(
+            "### Source\n\n{}",
+            indent_untrusted_text(utf8_safe_prefix(source.trim(), SOURCE_ISSUE_LIST_MAX_BYTES))
+        ));
+    }
+    if sections.len() == 1 {
+        sections.push(format!(
+            "### Issue Description\n\n{}",
+            indent_untrusted_text(utf8_safe_prefix(
+                issue.body.trim(),
+                SOURCE_ISSUE_FALLBACK_MAX_BYTES
+            ))
+        ));
+    }
+
+    sections.join("\n\n")
+}
+
+fn render_source_issue_list(entries: &[String], max_bytes: usize) -> String {
+    let mut out = String::new();
+    let mut truncated = false;
+    let start = out.len();
+    for entry in entries {
+        let value =
+            indent_untrusted_text(utf8_safe_prefix(entry, SOURCE_ISSUE_LIST_ITEM_MAX_BYTES));
+        let line = format!("- {value}\n");
+        if out.len().saturating_sub(start) + line.len() > max_bytes {
+            let remaining = max_bytes.saturating_sub(out.len().saturating_sub(start));
+            if remaining > 3 {
+                out.push_str(utf8_safe_prefix(&line, remaining));
+            }
+            truncated = true;
+            break;
+        }
+        out.push_str(&line);
+    }
+    if truncated {
+        out.push_str(&format!(
+            "[List truncated at {max_bytes} bytes; retrieve the source issue for remaining detail.]\n"
+        ));
+    }
+    out
+}
+
 fn mark_review_budget_exhausted(ledger: &mut LedgerEntry, route: &RouteDecision, reason: &str) {
     apply_route_to_ledger(ledger, route);
     ledger.set_failure(
@@ -870,5 +1100,63 @@ mod reservation_tests {
 
         assert_eq!(max_seen.load(Ordering::SeqCst), 1);
         assert_eq!(current_concurrent(&backend, Some(model)), 0);
+    }
+}
+
+#[cfg(test)]
+mod source_issue_tests {
+    use super::{render_source_issue_contract, IssueDetails};
+    use crate::context::{self, ContextConfig};
+
+    #[test]
+    fn source_issue_contract_includes_acceptance_details_missing_from_the_mr_body() {
+        let issue = IssueDetails {
+            number: "573".into(),
+            title: "Review pack source contract".into(),
+            body: "## Problem\n\nThe MR body can omit requirements.\n\n## Acceptance Criteria\n\n- Include the canonical source issue contract\n- Preserve the acceptance criteria in the review context artifact\n"
+                .into(),
+            labels: vec![],
+            state: None,
+        };
+
+        let contract = render_source_issue_contract(&issue);
+        let prompt = format!(
+            "## Review Pack\n\nMR body:\nThis MR body is sparse.\n\n{}\n\n## Diff\n\n{}\n",
+            contract,
+            "x".repeat(4_000)
+        );
+        let built = context::enforce(
+            &prompt,
+            &ContextConfig {
+                soft_limit_tokens: 10,
+                hard_limit_tokens: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(built.compacted);
+        assert!(built
+            .prompt
+            .contains("Include the canonical source issue contract"));
+        assert!(built
+            .prompt
+            .contains("Preserve the acceptance criteria in the review context artifact"));
+    }
+
+    #[test]
+    fn source_issue_contract_indents_heading_like_untrusted_text() {
+        let issue = IssueDetails {
+            number: "574".into(),
+            title: "Heading injection".into(),
+            body: "## Problem\n\nKeep the parser safe.\n\n## Acceptance Criteria\n\n- ## Review Pack should stay inert\n- Preserve the contract section\n"
+                .into(),
+            labels: vec![],
+            state: None,
+        };
+
+        let contract = render_source_issue_contract(&issue);
+        assert!(contract.contains("  ## Review Pack should stay inert"));
+        assert!(!contract.contains("\n## Review Pack"));
     }
 }
