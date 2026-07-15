@@ -1,4 +1,5 @@
 use crate::config::{self, Defaults, GahConfig, Profile};
+use crate::provider::provider_command;
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
@@ -52,7 +53,7 @@ fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
     let mut failed = false;
     failed |= !check_repo(profile);
     failed |= !check_provider_cli(profile);
-    failed |= !check_provider_token(profile);
+    failed |= !check_provider_auth(profile);
     failed |= !check_push_url(profile);
     failed |= !check_writable_path("artifact_root", Path::new(&profile.artifact_root));
     if !defaults.worktree_base.trim().is_empty() {
@@ -107,31 +108,246 @@ fn check_provider_cli(profile: &Profile) -> bool {
     }
 }
 
-fn check_provider_token(profile: &Profile) -> bool {
+/// Provider-neutral authentication result shape shared by the GitHub and
+/// GitLab adapters. `doctor` accepts either an explicit supported token
+/// environment variable or a successful, non-secret provider CLI preflight
+/// against the exact configured host and project. It fails closed otherwise.
+pub(crate) enum ProviderAuthMethod {
+    Token,
+    ProviderCli,
+}
+
+pub(crate) enum ProviderAuthFailure {
+    /// No supported token env var and the provider CLI is unavailable.
+    NoCredential(String),
+    /// Provider CLI cannot authenticate to the exact configured host (wrong
+    /// host, expired token, or simply not logged in).
+    AuthFailed(String),
+    /// Authenticated to the exact host but the configured project is
+    /// inaccessible or does not exist.
+    ProjectUnavailable(String),
+    /// The provider CLI could not reach the host (transport/network error).
+    Network(String),
+    /// The exact host could not be derived from configuration.
+    HostUnconfigured(String),
+}
+
+pub(crate) enum ProviderAuthResult {
+    Authenticated(ProviderAuthMethod),
+    Failed(ProviderAuthFailure),
+}
+
+fn check_provider_auth(profile: &Profile) -> bool {
     let vars = profile.pat_env_names();
-    if vars.is_empty() {
-        print_check(
-            CheckStatus::Warn,
-            "provider token",
-            "no known token convention",
-        );
-        return true;
+    let result = match profile.provider.as_str() {
+        "gitlab" => gitlab_provider_auth(profile),
+        "github" => github_provider_auth(profile),
+        _other => {
+            // Unknown provider: fall back to the original token-convention check.
+            if vars.is_empty() {
+                print_check(
+                    CheckStatus::Warn,
+                    "provider auth",
+                    "no known auth convention",
+                );
+                return true;
+            }
+            if profile.pat().is_empty() {
+                print_check(
+                    CheckStatus::Fail,
+                    "provider auth",
+                    &format!("set one of {}", vars.join(", ")),
+                );
+                ProviderAuthResult::Failed(ProviderAuthFailure::NoCredential(format!(
+                    "set one of {}",
+                    vars.join(", ")
+                )))
+            } else {
+                print_check(
+                    CheckStatus::Pass,
+                    "provider auth",
+                    &format!("found {}", vars.join(" or ")),
+                );
+                ProviderAuthResult::Authenticated(ProviderAuthMethod::Token)
+            }
+        }
+    };
+
+    match result {
+        ProviderAuthResult::Authenticated(method) => {
+            let detail = match method {
+                ProviderAuthMethod::Token => format!("found {}", vars.join(" or ")),
+                ProviderAuthMethod::ProviderCli => format!(
+                    "provider CLI session for exact {} host/project",
+                    profile.provider
+                ),
+            };
+            print_check(CheckStatus::Pass, "provider auth", &detail);
+            true
+        }
+        ProviderAuthResult::Failed(reason) => {
+            let detail = match reason {
+                ProviderAuthFailure::NoCredential(m) => m,
+                ProviderAuthFailure::AuthFailed(m) => m,
+                ProviderAuthFailure::ProjectUnavailable(m) => m,
+                ProviderAuthFailure::Network(m) => m,
+                ProviderAuthFailure::HostUnconfigured(m) => m,
+            };
+            print_check(CheckStatus::Fail, "provider auth", &detail);
+            false
+        }
     }
-    if profile.pat().is_empty() {
-        print_check(
-            CheckStatus::Fail,
-            "provider token",
-            &format!("set one of {}", vars.join(", ")),
-        );
-        false
+}
+
+/// GitHub adapter: accept a `GITHUB_TOKEN`/`GH_TOKEN` env var, or a successful
+/// `gh api` preflight against the exact `github.com` host and project.
+fn github_provider_auth(profile: &Profile) -> ProviderAuthResult {
+    if !profile.pat().is_empty() {
+        return ProviderAuthResult::Authenticated(ProviderAuthMethod::Token);
+    }
+    let host = "github.com";
+    run_provider_cli_preflight("gh", host, &format!("repos/{}", profile.repo), "github")
+}
+
+/// GitLab adapter: accept a `GITLAB_PAT`/`GITLAB_PAT2` env var, or a successful
+/// `glab api` preflight against the exact configured GitLab host and project.
+fn gitlab_provider_auth(profile: &Profile) -> ProviderAuthResult {
+    if !profile.pat().is_empty() {
+        return ProviderAuthResult::Authenticated(ProviderAuthMethod::Token);
+    }
+    let Some(host) = gitlab_host(profile) else {
+        return ProviderAuthResult::Failed(ProviderAuthFailure::HostUnconfigured(
+            "gitlab profile missing provider_api_base; cannot determine the exact host to \
+             authenticate against"
+                .into(),
+        ));
+    };
+    let project_ref = match profile.provider_project_id.as_deref() {
+        Some(id) => id.to_string(),
+        None => profile.repo.replace('/', "%2F"),
+    };
+    run_provider_cli_preflight(
+        "glab",
+        &host,
+        &format!("/projects/{}", project_ref),
+        "gitlab",
+    )
+}
+
+/// The exact GitLab host a `glab` session must be authenticated against,
+/// derived from `provider_api_base`. Returns `None` when it cannot be
+/// determined (e.g. a GitLab profile without `provider_api_base`).
+fn gitlab_host(profile: &Profile) -> Option<String> {
+    let base = profile.provider_api_base.as_deref()?.trim();
+    let trimmed = base.trim_end_matches('/');
+    let without_api = trimmed.strip_suffix("/api/v4").unwrap_or(trimmed);
+    let (_, rest) = without_api
+        .split_once("://")
+        .unwrap_or(("https", without_api));
+    let host = rest.split('/').next().unwrap_or("").trim_matches('/');
+    if host.is_empty() {
+        None
     } else {
-        print_check(
-            CheckStatus::Pass,
-            "provider token",
-            &format!("found {}", vars.join(" or ")),
-        );
-        true
+        Some(host.to_string())
     }
+}
+
+/// Runs a non-secret provider CLI API preflight scoped to the exact host and
+/// project, and classifies the result. The CLI reads its own credential store,
+/// so no token is ever read, printed, persisted, or copied by `doctor`.
+fn run_provider_cli_preflight(
+    cli: &str,
+    host: &str,
+    api_path: &str,
+    provider: &str,
+) -> ProviderAuthResult {
+    if !which(cli) {
+        return ProviderAuthResult::Failed(ProviderAuthFailure::NoCredential(format!(
+            "{cli} not found on PATH and no {provider} token env var set"
+        )));
+    }
+    let output = match provider_command(cli)
+        .args(["api", "--hostname", host, api_path])
+        .output()
+    {
+        Ok(out) => out,
+        Err(err) => {
+            return ProviderAuthResult::Failed(ProviderAuthFailure::NoCredential(format!(
+                "failed to invoke {cli}: {err}"
+            )))
+        }
+    };
+    if output.status.success() {
+        return ProviderAuthResult::Authenticated(ProviderAuthMethod::ProviderCli);
+    }
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    ProviderAuthResult::Failed(classify_provider_cli_failure(&combined, cli))
+}
+
+/// Maps a failed provider CLI preflight to a classified reason. Network errors
+/// are distinguished from auth failures and from project-not-found errors.
+fn classify_provider_cli_failure(output: &str, cli: &str) -> ProviderAuthFailure {
+    let text = output.to_lowercase();
+
+    // Transport/network failure reaching the provider host.
+    if text.contains("error connecting to")
+        || text.contains("check your internet connection")
+        || text.contains("could not resolve")
+        || text.contains("no such host")
+        || text.contains("dial tcp")
+        || text.contains("connection refused")
+        || text.contains("connection reset")
+        || text.contains("network is unreachable")
+        || text.contains("temporary failure in name resolution")
+        || text.contains("lookup ")
+        || (text.contains("timeout") && text.contains("deadline"))
+    {
+        return ProviderAuthFailure::Network(format!(
+            "{cli} preflight could not reach the provider host (network error)"
+        ));
+    }
+
+    // Authenticated to the host, but the configured project is unavailable.
+    if text.contains("404")
+        || text.contains("not found")
+        || text.contains("does not exist")
+        || text.contains("repository not found")
+        || text.contains("project not found")
+        || text.contains("resource not found")
+        || text.contains("http 404")
+    {
+        return ProviderAuthFailure::ProjectUnavailable(format!(
+            "{cli} preflight authenticated to the exact host but the configured project is \
+             inaccessible or not found"
+        ));
+    }
+
+    // Auth failure: wrong host, expired token, or not logged in.
+    if text.contains("401")
+        || text.contains("403")
+        || text.contains("unauthorized")
+        || text.contains("forbidden")
+        || text.contains("token expired")
+        || text.contains("must be logged in")
+        || text.contains("not logged into")
+        || text.contains("missing authentication")
+        || text.contains("to authenticate")
+        || text.contains("http 401")
+        || text.contains("http 403")
+    {
+        return ProviderAuthFailure::AuthFailed(format!(
+            "{cli} preflight could not authenticate to the exact {cli} host (wrong host, \
+             expired token, or not logged in)"
+        ));
+    }
+
+    ProviderAuthFailure::AuthFailed(format!(
+        "{cli} preflight failed to authenticate to the exact {cli} host"
+    ))
 }
 
 fn check_push_url(profile: &Profile) -> bool {
