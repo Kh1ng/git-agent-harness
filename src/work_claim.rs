@@ -435,6 +435,7 @@ pub fn get_claimed_work_ids(profile: &str) -> Result<Vec<String>> {
 }
 
 /// Check if a work_id is claimed for a profile
+#[allow(dead_code)]
 pub fn is_claimed(profile: &str, work_id: &str) -> Result<bool> {
     with_locked_state(|state| Ok(state.is_claimed(profile, work_id)))
 }
