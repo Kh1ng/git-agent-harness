@@ -94,3 +94,29 @@ fn controller_work_id_survives_existing_branch_resolution() {
 
     assert_eq!(ledger.work_id.as_deref(), Some("#437"));
 }
+
+#[test]
+fn bounded_validation_failure_preserves_command_and_failure_tail() {
+    let text = format!(
+        "$ cargo test\n{}\nfailures:\n    sync_provider_fails_then_recovers\ntest result: FAILED",
+        "routine passing output\n".repeat(500)
+    );
+
+    let bounded = bounded_validation_failure(&text, 500);
+
+    assert!(bounded.len() <= 500);
+    assert!(bounded.starts_with("$ cargo test"));
+    assert!(bounded.contains("failure evidence"));
+    assert!(bounded.contains("sync_provider_fails_then_recovers"));
+    assert!(bounded.ends_with("test result: FAILED"));
+}
+
+#[test]
+fn bounded_validation_failure_handles_multibyte_boundaries() {
+    let text = format!("start {} end failure", "🚀".repeat(300));
+    let bounded = bounded_validation_failure(&text, 101);
+
+    assert!(bounded.len() <= 101);
+    assert!(bounded.starts_with("start"));
+    assert!(bounded.ends_with("end failure"));
+}
