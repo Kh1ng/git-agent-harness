@@ -79,8 +79,8 @@ fn apply_pm_plan_skips_duplicates() {
     };
     let plan: PmPlan = serde_json::from_str(
         r#"{"title":"Plan","summary":"Summary","tickets":[
-            {"title":"Fix login","summary":"dup","difficulty":"easy","risk":"low","recommended_backend":null,"duplicate_evidence":[],"affected_files":["a"],"acceptance_criteria":["b"],"verification_commands":["pytest"],"uncovered_reason":"x"},
-            {"title":"Fix auth","summary":"new","difficulty":"easy","risk":"low","recommended_backend":null,"duplicate_evidence":[],"affected_files":["a"],"acceptance_criteria":["b"],"verification_commands":["pytest"],"uncovered_reason":"x"}
+            {"key":"fix-login","title":"Fix login","objective":"dup","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit","min_tier":"standard"},"duplicate_evidence":[],"affected_files":["a"],"acceptance_criteria":["b"],"verification_commands":["pytest"],"uncovered_reason":"x"},
+            {"key":"fix-auth","title":"Fix auth","objective":"new","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit","min_tier":"standard"},"duplicate_evidence":[],"affected_files":["a"],"acceptance_criteria":["b"],"verification_commands":["pytest"],"uncovered_reason":"x"}
         ]}"#,
     )
     .unwrap();
@@ -108,4 +108,65 @@ fn next_ticket_id_avoids_collision_with_manager_memory_reservation() {
 
     let id = next_ticket_id(&tickets_dir, Some(&repo.join("docs/MANAGER_MEMORY.md"))).unwrap();
     assert_eq!(id, 43, "must skip past the memory-reserved TICKET-042");
+}
+
+fn bounded_plan(tickets_json: &str) -> String {
+    format!(
+        "{{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{}]}}",
+        tickets_json
+    )
+}
+
+#[test]
+fn parse_pm_plan_validates_bounded_packet() {
+    let json = bounded_plan(
+        r#"{"key":"k1","title":"Fix auth","objective":"Harden auth","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit","min_tier":"standard"},"affected_files":["src/auth.rs"],"acceptance_criteria":["auth rejects bad token"],"verification_commands":["pytest tests/test_auth.py"],"depends_on":[],"duplicate_evidence":[],"uncovered_reason":"No MR covers it."}"#,
+    );
+    let plan = parse_pm_plan(&json).unwrap();
+    assert_eq!(plan.tickets.len(), 1);
+    assert_eq!(plan.tickets[0].key, "k1");
+    assert_eq!(plan.tickets[0].recommended_routing.capability, "edit");
+}
+
+#[test]
+fn parse_pm_plan_rejects_duplicate_keys() {
+    let json = bounded_plan(
+        r#"{"key":"k1","title":"A","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit"},"acceptance_criteria":["c"],"verification_commands":["v"],"uncovered_reason":"x"},
+           {"key":"k1","title":"B","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit"},"acceptance_criteria":["c"],"verification_commands":["v"],"uncovered_reason":"x"}"#,
+    );
+    let err = parse_pm_plan(&json).unwrap_err();
+    assert!(err.to_string().contains("duplicate work packet key"));
+}
+
+#[test]
+fn parse_pm_plan_rejects_unknown_dependency() {
+    let json = bounded_plan(
+        r#"{"key":"k1","title":"A","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit"},"acceptance_criteria":["c"],"verification_commands":["v"],"depends_on":["missing"],"uncovered_reason":"x"}"#,
+    );
+    let err = parse_pm_plan(&json).unwrap_err();
+    assert!(err.to_string().contains("depends on unknown key"));
+}
+
+#[test]
+fn parse_pm_plan_rejects_invalid_disposition_and_routing() {
+    let bad_disposition = bounded_plan(
+        r#"{"key":"k1","title":"A","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"robot","recommended_routing":{"capability":"edit"},"acceptance_criteria":["c"],"verification_commands":["v"],"uncovered_reason":"x"}"#,
+    );
+    assert!(parse_pm_plan(&bad_disposition)
+        .unwrap_err()
+        .to_string()
+        .contains("execution_disposition"));
+
+    let bad_routing = bounded_plan(
+        r#"{"key":"k1","title":"A","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"magic"},"acceptance_criteria":["c"],"verification_commands":["v"],"uncovered_reason":"x"}"#,
+    );
+    assert!(parse_pm_plan(&bad_routing)
+        .unwrap_err()
+        .to_string()
+        .contains("recommended_routing"));
+
+    let ok_dep = bounded_plan(
+        r#"{"key":"k1","title":"A","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"human_required","recommended_routing":{"capability":"review","min_tier":"strong"},"acceptance_criteria":["c"],"verification_commands":["v"],"depends_on":["k1"],"uncovered_reason":"x"}"#,
+    );
+    assert!(parse_pm_plan(&ok_dep).is_ok());
 }
