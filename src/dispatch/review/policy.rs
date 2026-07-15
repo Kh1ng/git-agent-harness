@@ -164,6 +164,11 @@ pub(in crate::dispatch) fn review_escalation_reason(
             e.profile == profile_name
                 && e.mode == "review"
                 && e.branch.as_deref() == Some(branch)
+                // Legacy reviews written before reviewed-SHA persistence
+                // cannot support a safe repair and must be re-runnable. Do
+                // not let them trigger escalation before that migration
+                // review has a chance to run.
+                && e.review_source_sha.is_some()
                 && matches!(
                     e.validation_result.as_deref(),
                     Some("APPROVE") | Some("NEEDS_FIX") | Some("REJECT") | Some("HUMAN_REVIEW")
@@ -221,6 +226,10 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
             entry.profile == profile_name
                 && entry.mode == "review"
                 && entry.branch.as_deref() == Some(branch)
+                // A SHA-less legacy opinion is not reusable repair context.
+                // Treating its backend as spent would skip directly to the
+                // next (possibly paid) reviewer instead of migrating it.
+                && entry.review_source_sha.is_some()
                 && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
                 // An operator-requested shutdown is not a reviewer opinion
                 // and must remain retryable after the daemon restarts.

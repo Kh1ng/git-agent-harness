@@ -15,6 +15,7 @@ fn review_ledger_entry(
     entry.branch = Some(branch.to_string());
     entry.validation_result = Some(verdict.to_string());
     entry.confidence_impact = Some(confidence.to_string());
+    entry.review_source_sha = Some("reviewed-sha".to_string());
     entry
 }
 
@@ -274,6 +275,40 @@ fn review_escalation_reason_none_when_no_prior_entries() {
         review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
         None
     );
+}
+
+#[test]
+fn sha_less_legacy_reviews_are_retried_before_escalation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+    let mut prof = profile(tmp.path());
+    prof.routing.escalatory_reviewers = vec![
+        CandidateConfig {
+            backend: "claude".into(),
+            model: Some("sonnet".into()),
+            ..Default::default()
+        },
+        CandidateConfig {
+            backend: "opencode".into(),
+            model: Some("nous-portal/z-ai/glm-5.2".into()),
+            ..Default::default()
+        },
+    ];
+    for verdict in ["NEEDS_FIX", "REJECT"] {
+        let mut legacy = review_ledger_entry("test", &prof, "gah/branch-1", verdict, "high");
+        legacy.review_source_sha = None;
+        legacy.effective_backend = "claude".into();
+        legacy.effective_model = Some("sonnet".into());
+        crate::ledger::append(&cfg, &legacy).unwrap();
+    }
+
+    assert_eq!(
+        review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+        None
+    );
+    let next = next_escalatory_reviewer(&cfg, &prof, "test", "gah/branch-1", None).unwrap();
+    assert_eq!(next.backend, "claude");
+    assert_eq!(next.model.as_deref(), Some("sonnet"));
 }
 
 #[test]
