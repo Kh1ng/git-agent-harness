@@ -18,7 +18,7 @@ pub type LedgerEntry = serde_json::Value;
 /// This function produces every field the production `LedgerEntry` struct
 /// requires (fields without `#[serde(default)]`).
 ///
-/// Keep this in sync with `src/ledger.rs:LedgerEntry` required fields and
+/// Keep this in sync with `src/ledger/mod.rs:LedgerEntry` required fields and
 /// `REQUIRED` array in `validate_production_schema()`.
 pub fn ledger_entry_full(
     mode: &str,
@@ -218,7 +218,7 @@ impl TestLedger {
     pub fn validate_production_schema(&self) -> Result<(), String> {
         // Required field names from production LedgerEntry — every field
         // that does NOT carry `#[serde(default)]`.  Keep in sync with
-        // `src/ledger.rs:LedgerEntry`.
+        // `src/ledger/mod.rs:LedgerEntry`.
         const REQUIRED: &[&str] = &[
             "timestamp",
             "session_id",

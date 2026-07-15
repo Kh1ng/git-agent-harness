@@ -1711,7 +1711,7 @@ llm_model_cloud = ""
 /// Thin wrapper around `ledger::entries_for_work_id` -- this test proves
 /// the CLI wiring (flag parsing, filtering by work_id, JSON shape), not the
 /// filtering logic itself, which already has its own unit tests in
-/// src/ledger.rs.
+/// src/ledger/mod.rs.
 #[test]
 fn ledger_work_filters_to_one_work_id_and_supports_json() {
     let tmp = tempfile::tempdir().unwrap();

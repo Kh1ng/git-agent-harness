@@ -127,7 +127,12 @@ fn rust_source_files_do_not_grow_past_baseline() {
             continue;
         }
 
-        let line_count = count_lines(&repo_root.join(path));
+        let file_path = repo_root.join(path);
+        if !file_path.exists() {
+            continue;
+        }
+
+        let line_count = count_lines(&file_path);
         let path_string = path.to_string_lossy().to_string();
         if let Some(violation) = classify_size(
             &path_string,

@@ -139,7 +139,7 @@ pub(in crate::dispatch) fn check_review_budget(
 ///
 /// Reads `validation_result`/`confidence_impact` off this branch's own
 /// `mode == "review"` entries -- NOT `review_verdict`/`review_confidence`.
-/// Those two fields are written by `backfill_review_verdict` (ledger.rs,
+/// Those two fields are written by `backfill_review_verdict` (ledger/mod.rs,
 /// TICKET-125) onto the *implementation* (fix/improve) entry instead, by
 /// design (see `backfill_review_verdict_attributes_to_implementation_entry_not_reviewer`).
 /// A review dispatch's own entry never carries a `review_verdict`, so
@@ -317,7 +317,7 @@ impl ReviewGateContext {
             .filter(|path| {
                 path.starts_with("packages/contracts/")
                     || path.starts_with("src/telemetry/")
-                    || path == &"src/ledger.rs"
+                    || path == &"src/ledger/mod.rs"
                     || path.starts_with("migrations/")
                     || path.contains("/api/")
                     || path.starts_with("apps/server/src/")

@@ -536,7 +536,7 @@ mod tests {
     /// A `GroupSummary` with every field zeroed/empty, so individual tests
     /// only spell out the fields they actually care about via struct-update
     /// syntax (`GroupSummary { entries: 3, ..empty_group() }`). No `Default`
-    /// impl exists on the production type (see `ledger.rs`), so this mirrors
+    /// impl exists on the production type (see `ledger/mod.rs`), so this mirrors
     /// that module's own fixture convention.
     fn empty_group() -> ledger::summary::GroupSummary {
         ledger::summary::GroupSummary {
