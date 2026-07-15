@@ -311,6 +311,65 @@ pub fn create_existing(
     Ok(worktree_path)
 }
 
+/// Bring an existing repair branch up to date with the exact target ref
+/// fetched immediately before its worktree was created.
+///
+/// Long-lived draft PRs routinely outlive fixes merged to the target branch.
+/// Validating such a branch before incorporating the target can therefore
+/// fail on already-fixed infrastructure or flaky tests and repeatedly block
+/// the repair before an agent launches. A local merge preserves the PR's
+/// history and lets the normal successful publish push the refresh together
+/// with the repair. The caller snapshots attempt progress after this step, so
+/// this maintenance merge cannot masquerade as agent work.
+pub fn refresh_existing_branch_from_target(worktree: &Path, target_branch: &str) -> Result<bool> {
+    let target_ref = format!("origin/{target_branch}");
+    let ancestor = git_raw(
+        &["merge-base", "--is-ancestor", &target_ref, "HEAD"],
+        worktree,
+    )?;
+    if ancestor.status.success() {
+        return Ok(false);
+    }
+    if ancestor.status.code() != Some(1) {
+        anyhow::bail!(
+            "checking whether repair branch contains {target_ref}: {}",
+            crate::redact::redact(&String::from_utf8_lossy(&ancestor.stderr)).trim()
+        );
+    }
+
+    let merge = git_raw(
+        &[
+            "-c",
+            "user.name=GAH",
+            "-c",
+            "user.email=gah@localhost",
+            "merge",
+            "--no-edit",
+            "--no-stat",
+            &target_ref,
+        ],
+        worktree,
+    )?;
+    if merge.status.success() {
+        return Ok(true);
+    }
+
+    // Never leave a conflicted worktree behind for baseline validation or an
+    // agent to misinterpret. Preserve the original branch and surface a
+    // deterministic preflight error instead.
+    let merge_error = crate::redact::redact(&String::from_utf8_lossy(&merge.stderr))
+        .trim()
+        .to_string();
+    let abort = git_raw(&["merge", "--abort"], worktree)?;
+    if !abort.status.success() {
+        anyhow::bail!(
+            "refreshing repair branch from {target_ref} failed: {merge_error}; additionally failed to abort merge: {}",
+            crate::redact::redact(&String::from_utf8_lossy(&abort.stderr)).trim()
+        );
+    }
+    anyhow::bail!("refreshing repair branch from {target_ref} failed: {merge_error}")
+}
+
 /// Describes a worktree currently attached to a branch, as reported by
 /// `git worktree list`, if one exists.
 pub struct BranchWorktreeAttachment {
@@ -1013,6 +1072,94 @@ mod tests {
             log_text.contains("a fix"),
             "the commit must actually reach the remote branch, got: {log_text}"
         );
+    }
+
+    #[test]
+    fn refresh_existing_branch_merges_new_target_before_repair() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        git(&["checkout", "-b", "repair"], &repo).unwrap();
+        fs::write(repo.join("repair.txt"), "existing repair\n").unwrap();
+        git(&["add", "repair.txt"], &repo).unwrap();
+        git(&["commit", "-m", "repair work"], &repo).unwrap();
+        git(&["push", "origin", "repair"], &repo).unwrap();
+        git(&["checkout", "main"], &repo).unwrap();
+        fs::write(repo.join("target-fix.txt"), "fixed on main\n").unwrap();
+        git(&["add", "target-fix.txt"], &repo).unwrap();
+        git(&["commit", "-m", "target fix"], &repo).unwrap();
+        git(&["push", "origin", "main"], &repo).unwrap();
+
+        let wt = create_existing(&repo, "repair", &worktree_base).unwrap();
+        assert!(refresh_existing_branch_from_target(&wt, "main").unwrap());
+        assert_eq!(
+            fs::read_to_string(wt.join("target-fix.txt")).unwrap(),
+            "fixed on main\n"
+        );
+        assert!(
+            git_raw(&["merge-base", "--is-ancestor", "origin/main", "HEAD"], &wt)
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+
+    #[test]
+    fn refresh_existing_branch_is_noop_when_target_is_already_present() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        git(&["checkout", "-b", "repair"], &repo).unwrap();
+        git(&["push", "origin", "repair"], &repo).unwrap();
+        git(&["checkout", "main"], &repo).unwrap();
+        let wt = create_existing(&repo, "repair", &worktree_base).unwrap();
+        let head_before = git(&["rev-parse", "HEAD"], &wt).unwrap();
+
+        assert!(!refresh_existing_branch_from_target(&wt, "main").unwrap());
+        assert_eq!(git(&["rev-parse", "HEAD"], &wt).unwrap(), head_before);
+    }
+
+    #[test]
+    fn refresh_existing_branch_aborts_conflicted_merge_cleanly() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+        let worktree_base = tmp.path().join("worktrees");
+
+        git(&["checkout", "-b", "repair"], &repo).unwrap();
+        fs::write(repo.join("f.txt"), "repair version\n").unwrap();
+        git(&["add", "f.txt"], &repo).unwrap();
+        git(&["commit", "-m", "repair edit"], &repo).unwrap();
+        git(&["push", "origin", "repair"], &repo).unwrap();
+        git(&["checkout", "main"], &repo).unwrap();
+        fs::write(repo.join("f.txt"), "target version\n").unwrap();
+        git(&["add", "f.txt"], &repo).unwrap();
+        git(&["commit", "-m", "target edit"], &repo).unwrap();
+        git(&["push", "origin", "main"], &repo).unwrap();
+
+        let wt = create_existing(&repo, "repair", &worktree_base).unwrap();
+        let head_before = git(&["rev-parse", "HEAD"], &wt).unwrap();
+        let err = refresh_existing_branch_from_target(&wt, "main").unwrap_err();
+
+        assert!(format!("{err:#}").contains("refreshing repair branch"));
+        assert_eq!(git(&["rev-parse", "HEAD"], &wt).unwrap(), head_before);
+        assert_eq!(
+            fs::read_to_string(wt.join("f.txt")).unwrap(),
+            "repair version\n"
+        );
+        assert!(git(&["status", "--porcelain"], &wt).unwrap().is_empty());
+        let merge_head = git(&["rev-parse", "--git-path", "MERGE_HEAD"], &wt).unwrap();
+        assert!(!Path::new(&merge_head).exists());
     }
 
     #[test]
