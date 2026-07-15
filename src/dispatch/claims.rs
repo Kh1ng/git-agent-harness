@@ -298,7 +298,6 @@ fn ledger_lookup_for_ticket(
             count = 0;
             agent_failure_count = 0;
             last_failure_class = None;
-            has_active_mr = false;
             has_active_claim = false;
             human_required = false;
             continue;
@@ -325,6 +324,13 @@ fn ledger_lookup_for_ticket(
             continue;
         }
         if e.mode == "paid_route_approval_revoke" {
+            continue;
+        }
+        // A sibling worker already owns the only configured backend/model
+        // slot. The dispatch reached no backend and consumed no execution
+        // attempt, so keep it auditable in the ledger without poisoning
+        // ticket attempt counts or retry/stuck-loop policy.
+        if e.validation_result.as_deref() == Some("deferred_capacity") {
             continue;
         }
         count += 1;
@@ -365,6 +371,28 @@ fn ledger_lookup_for_ticket(
             } else if !matches!(class, "CLOSED_UNMERGED" | "STALE") {
                 has_active_mr = true;
             }
+        }
+    }
+
+    // Current provider state is authoritative and does not belong to the
+    // resettable attempt history above. In particular, a clear-attempts
+    // tombstone has no branch/MR URL; requiring a post-tombstone ledger entry
+    // to rediscover an already-open PR makes the same issue look undispatched
+    // and permits a duplicate implementation branch. Match provider-native
+    // work IDs (plus the historical TICKET alias) independently of ledger
+    // boundaries. The branch/URL matching in the loop remains as a fallback
+    // for legacy MRs whose title did not carry a work ID.
+    let aliases = crate::ledger::work_id_aliases(wid);
+    for mr in all_mrs.iter().filter(|mr| {
+        mr.work_id
+            .as_deref()
+            .is_some_and(|mr_id| aliases.iter().any(|alias| alias == mr_id))
+    }) {
+        let class = crate::sync::classify(mr);
+        if class == "MERGED" {
+            has_merged_mr = true;
+        } else if !matches!(class, "CLOSED_UNMERGED" | "STALE") {
+            has_active_mr = true;
         }
     }
     if has_merged_mr {

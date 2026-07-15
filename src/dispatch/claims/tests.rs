@@ -293,6 +293,45 @@ fn scan_available_tickets_excludes_ticket_with_active_mr() {
 }
 
 #[test]
+fn clear_attempts_does_not_hide_current_provider_mr_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut prof = profile(tmp.path());
+    prof.provider = String::new();
+    let clear = LedgerEntry::new_clear_attempts("test", &prof, "#437");
+    let index = crate::ledger::index_entries_by_work_id(&[clear]);
+    let mut mr = crate::sync::SyncMr {
+        title: "Draft: [GAH] Fix: #437 context exhaustion".into(),
+        body: None,
+        branch: "gah/existing-437".into(),
+        labels: vec!["gah-needs-fix".into()],
+        url: Some("https://example/pull/469".into()),
+        id: Some("469".into()),
+        state: Some("OPEN".into()),
+        draft: true,
+        merge_status: None,
+        merged: false,
+        updated_at: None,
+        merged_at: None,
+        ci_failed: false,
+        ci_passed: true,
+        ci_pending: false,
+        work_id: Some("#437".into()),
+    };
+
+    let lookup = ledger_lookup_for_ticket(Some("#437"), &prof, &[mr.clone()], &index)
+        .expect("an open MR keeps the ticket in status for repair routing");
+    assert_eq!(lookup.0, 0, "the tombstone still resets attempt count");
+    assert!(lookup.3, "the current open MR must remain authoritative");
+
+    mr.state = Some("MERGED".into());
+    mr.merged = true;
+    assert!(
+        ledger_lookup_for_ticket(Some("#437"), &prof, &[mr], &index).is_none(),
+        "current merged provider work must remove the ticket candidate"
+    );
+}
+
+#[test]
 fn scan_available_tickets_excludes_ticket_completed_via_merged_mr() {
     // Regression: a ticket that failed once, then succeeded and got its MR
     // merged, must not keep poisoning the queue via its old failure count.
@@ -633,6 +672,34 @@ fn entries_after_tombstone_still_count() {
         candidates[0].genuine_agent_failure_count, 0,
         "post-tombstone entry is infra failure, not agent"
     );
+}
+
+#[test]
+fn capacity_deferral_does_not_count_as_a_ticket_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ticket_dir = tmp.path().join("docs/tickets");
+    fs::create_dir_all(&ticket_dir).unwrap();
+    fs::write(
+        ticket_dir.join("TICKET-302-test.md"),
+        "# TICKET-302: Test capacity deferral\nGoal: remain dispatchable\n",
+    )
+    .unwrap();
+    let mut prof = profile(tmp.path());
+    prof.local_path = tmp.path().display().to_string();
+    prof.provider = String::new();
+    let mut deferred = LedgerEntry::new("test", &prof, "auto", "fix", "x", None, None);
+    deferred.work_id = Some("TICKET-302".into());
+    deferred.validation_result = Some("deferred_capacity".into());
+    deferred.failure_class = Some("backend_error".into());
+    deferred.attempts_started = Some(0);
+    deferred.attempts_completed = Some(0);
+    let index = crate::ledger::index_entries_by_work_id(&[deferred]);
+
+    let candidates = scan_available_tickets(&prof, &[], &index);
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].prior_attempt_count, 0);
+    assert_eq!(candidates[0].genuine_agent_failure_count, 0);
 }
 
 #[test]

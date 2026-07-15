@@ -1,7 +1,7 @@
 use super::decision::decide_next_action;
 use super::recovery::{
-    defer_if_branch_attached, detect_stuck_loop, reconcile_abandoned_dispatches,
-    record_action_events,
+    defer_if_branch_attached, detect_stuck_loop, latest_clear_attempts_timestamp,
+    reconcile_abandoned_dispatches, record_action_events,
 };
 use super::NextAction;
 use anyhow::Result;
@@ -262,6 +262,7 @@ pub fn run_once(
             cfg,
             profile_name,
             &snapshot,
+            &ledger_entries,
             json,
             parallel,
             skip_validation_gate,
@@ -271,7 +272,17 @@ pub fn run_once(
         let original_action = decide_next_action(&snapshot);
         let history = crate::events::read_events(cfg)?;
         let mut action = original_action.clone();
-        if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
+        let reset_after = original_action.work_id().and_then(|work_id| {
+            latest_clear_attempts_timestamp(
+                &ledger_entries,
+                profile_name,
+                &crate::config::get_profile(cfg, profile_name).ok()?.repo_id,
+                work_id,
+            )
+        });
+        if let Some(reason) =
+            detect_stuck_loop(&history, profile_name, &original_action, reset_after)
+        {
             // Persist a work-item-scoped durable human gate so that
             // subsequent loop iterations see human_required=true for this
             // work_id via ledger_lookup_for_ticket and skip it, rather than
@@ -395,6 +406,7 @@ fn run_parallel_once(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
     snapshot: &crate::status::StatusSnapshot,
+    ledger_entries: &[crate::ledger::LedgerEntry],
     json: bool,
     max_parallel: usize,
     skip_validation_gate: bool,
@@ -467,7 +479,17 @@ fn run_parallel_once(
             // Apply stuck-loop detection (TICKET-skip-and-continue): persist the
             // work-item-scoped gate, then skip this item and let the loop pick the
             // next eligible work item rather than parking the whole profile.
-            if let Some(reason) = detect_stuck_loop(&history, profile_name, &original_action) {
+            let reset_after = original_action.work_id().and_then(|work_id| {
+                latest_clear_attempts_timestamp(
+                    ledger_entries,
+                    profile_name,
+                    &crate::config::get_profile(cfg, profile_name).ok()?.repo_id,
+                    work_id,
+                )
+            });
+            if let Some(reason) =
+                detect_stuck_loop(&history, profile_name, &original_action, reset_after)
+            {
                 if let Some(wid) = original_action.work_id() {
                     let profile = crate::config::get_profile(cfg, profile_name)?;
                     let mut gate = crate::ledger::LedgerEntry::new(
@@ -554,13 +576,7 @@ fn run_parallel_once(
                     // next slot makes its routing decision. The rendezvous
                     // sender is dropped if dispatch fails before routing, so
                     // that failure cannot deadlock the batch.
-                    let waits_for_route = matches!(
-                        &action_for_thread,
-                        NextAction::DispatchTicket { .. }
-                            | NextAction::Retry { .. }
-                            | NextAction::Escalate { .. }
-                            | NextAction::FixMr { .. }
-                    );
+                    let waits_for_route = action_waits_for_route(&action_for_thread);
                     let (route_ready, route_receiver) = if waits_for_route {
                         let (sender, receiver) = sync_channel(0);
                         (Some(sender), Some(receiver))
@@ -672,6 +688,17 @@ fn run_parallel_once(
     Ok(())
 }
 
+fn action_waits_for_route(action: &NextAction) -> bool {
+    matches!(
+        action,
+        NextAction::DispatchTicket { .. }
+            | NextAction::Retry { .. }
+            | NextAction::Escalate { .. }
+            | NextAction::FixMr { .. }
+            | NextAction::ReviewMr { .. }
+    )
+}
+
 /// Executes at most one action. `FixMr` dispatches a fix operation
 /// reusing an existing branch (TICKET-118).
 pub(crate) fn execute_action(
@@ -715,8 +742,8 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("review".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, "review", action.work_id(), &args)?;
-            Ok(format!("Dispatched review for branch '{branch}'"))
+            let deferred = run_dispatch_and_record(cfg, "review", action.work_id(), &args)?;
+            Ok(deferred.unwrap_or_else(|| format!("Dispatched review for branch '{branch}'")))
         }
         NextAction::MarkReadyForReview { branch, .. } => {
             let profile = crate::config::get_profile(cfg, profile_name)?;
@@ -730,8 +757,11 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("post_review_repair".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, "fix_existing", action.work_id(), &args)?;
-            Ok(format!("Dispatched fix for existing branch '{branch}'"))
+            let deferred = run_dispatch_and_record(cfg, "fix_existing", action.work_id(), &args)?;
+            Ok(
+                deferred
+                    .unwrap_or_else(|| format!("Dispatched fix for existing branch '{branch}'")),
+            )
         }
         NextAction::MergeMr {
             branch,
@@ -788,8 +818,9 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("initial".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, "dispatch_ticket", action.work_id(), &args)?;
-            Ok(format!("Dispatched ticket '{ticket_path}'"))
+            let deferred =
+                run_dispatch_and_record(cfg, "dispatch_ticket", action.work_id(), &args)?;
+            Ok(deferred.unwrap_or_else(|| format!("Dispatched ticket '{ticket_path}'")))
         }
         NextAction::Retry { ticket_path, .. } => {
             let args = crate::dispatch::DispatchArgs {
@@ -797,8 +828,8 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("initial".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, "retry", action.work_id(), &args)?;
-            Ok(format!("Retried ticket '{ticket_path}'"))
+            let deferred = run_dispatch_and_record(cfg, "retry", action.work_id(), &args)?;
+            Ok(deferred.unwrap_or_else(|| format!("Retried ticket '{ticket_path}'")))
         }
         NextAction::Escalate { ticket_path, .. } => {
             let args = crate::dispatch::DispatchArgs {
@@ -807,8 +838,8 @@ pub(crate) fn execute_action(
                 dispatch_reason: Some("initial".to_string()),
                 ..base_args()
             };
-            run_dispatch_and_record(cfg, "escalate", action.work_id(), &args)?;
-            Ok(format!("Escalated ticket '{ticket_path}'"))
+            let deferred = run_dispatch_and_record(cfg, "escalate", action.work_id(), &args)?;
+            Ok(deferred.unwrap_or_else(|| format!("Escalated ticket '{ticket_path}'")))
         }
         NextAction::WaitUntil { until, reason } => Ok(format!("Waiting until {until} ({reason})")),
         NextAction::HumanRequired { reason, reference } => Ok(format!(
@@ -840,7 +871,7 @@ pub(crate) fn run_dispatch_and_record(
     label: &str,
     work_id: Option<&str>,
     args: &crate::dispatch::DispatchArgs,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let target_context = args
         .branch
         .as_deref()
@@ -866,7 +897,20 @@ pub(crate) fn run_dispatch_and_record(
                 args.run_id.as_deref(),
                 format!("{label}: success"),
             )?;
-            Ok(())
+            Ok(None)
+        }
+        Err(e) if crate::dispatch::capacity_deferred_error(&e) => {
+            crate::events::record_with_run_id(
+                cfg,
+                crate::events::EventType::DispatchFinished,
+                Some(args.profile.as_str()),
+                work_id,
+                args.run_id.as_deref(),
+                format!("{label}: deferred_capacity: {e:#}"),
+            )?;
+            Ok(Some(format!(
+                "Deferred {label} because configured route capacity is busy; no backend launched"
+            )))
         }
         Err(e) => {
             let event_type = if crate::dispatch::duplicate_work_error(&e).is_some() {
@@ -896,9 +940,20 @@ mod ledger_read_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_profile_lock, is_validation_gate_failure, loop_lock_path,
+        acquire_profile_lock, action_waits_for_route, is_validation_gate_failure, loop_lock_path,
         reload_config_for_profile, wait_interruptibly,
     };
+
+    #[test]
+    fn review_actions_wait_until_the_selected_route_is_reserved() {
+        let action = crate::controller::NextAction::ReviewMr {
+            branch: "gah/review-cap".into(),
+            work_id: Some("#471".into()),
+            mr_url: None,
+            reason: "review required".into(),
+        };
+        assert!(action_waits_for_route(&action));
+    }
 
     #[test]
     fn validation_gate_errors_are_identified_through_anyhow_context() {

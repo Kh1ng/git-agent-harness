@@ -15,6 +15,7 @@ fn review_ledger_entry(
     entry.branch = Some(branch.to_string());
     entry.validation_result = Some(verdict.to_string());
     entry.confidence_impact = Some(confidence.to_string());
+    entry.review_source_sha = Some("reviewed-sha".to_string());
     entry
 }
 
@@ -57,6 +58,101 @@ fn review_budget_counts_review_cycles_across_ticket_id_aliases() {
 }
 
 #[test]
+fn clear_attempts_resets_review_cycle_budget_for_the_current_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            max_review_cycles_per_ticket: Some(2),
+            ..RoutingPolicy::default()
+        },
+    );
+    let prof = profile(tmp.path());
+    for _ in 0..2 {
+        let mut entry = review_ledger_entry("test", &prof, "gah/42", "NEEDS_FIX", "high");
+        entry.work_id = Some("#42".into());
+        crate::ledger::append(&cfg, &entry).unwrap();
+    }
+    crate::ledger::append(&cfg, &LedgerEntry::new_clear_attempts("test", &prof, "#42")).unwrap();
+
+    let block = check_review_budget(
+        &cfg,
+        &prof,
+        "test",
+        Some("#42"),
+        &route_decision("vibe", Some("reviewer"), false),
+    )
+    .unwrap();
+
+    assert!(block.is_none(), "pre-tombstone reviews must be cleared");
+}
+
+#[test]
+fn reviews_after_clear_attempts_still_consume_the_cycle_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            max_review_cycles_per_ticket: Some(1),
+            ..RoutingPolicy::default()
+        },
+    );
+    let prof = profile(tmp.path());
+    let mut old = review_ledger_entry("test", &prof, "gah/42", "NEEDS_FIX", "high");
+    old.work_id = Some("#42".into());
+    crate::ledger::append(&cfg, &old).unwrap();
+    crate::ledger::append(&cfg, &LedgerEntry::new_clear_attempts("test", &prof, "#42")).unwrap();
+    let mut current = review_ledger_entry("test", &prof, "gah/42", "NEEDS_FIX", "high");
+    current.work_id = Some("#42".into());
+    crate::ledger::append(&cfg, &current).unwrap();
+
+    let block = check_review_budget(
+        &cfg,
+        &prof,
+        "test",
+        Some("#42"),
+        &route_decision("vibe", Some("reviewer"), false),
+    )
+    .unwrap()
+    .expect("the post-tombstone review must consume the one-cycle budget");
+
+    assert!(block.reason.contains("1/1 review cycles"));
+}
+
+#[test]
+fn another_profiles_clear_attempts_does_not_reset_review_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            max_review_cycles_per_ticket: Some(1),
+            ..RoutingPolicy::default()
+        },
+    );
+    let prof = profile(tmp.path());
+    let mut review = review_ledger_entry("test", &prof, "gah/42", "NEEDS_FIX", "high");
+    review.work_id = Some("#42".into());
+    crate::ledger::append(&cfg, &review).unwrap();
+    crate::ledger::append(
+        &cfg,
+        &LedgerEntry::new_clear_attempts("other-profile", &prof, "#42"),
+    )
+    .unwrap();
+
+    let block = check_review_budget(
+        &cfg,
+        &prof,
+        "test",
+        Some("#42"),
+        &route_decision("vibe", Some("reviewer"), false),
+    )
+    .unwrap()
+    .expect("another profile's tombstone must not reset this budget");
+
+    assert!(block.reason.contains("1/1 review cycles"));
+}
+
+#[test]
 fn skipped_duplicate_reviews_do_not_consume_the_cycle_budget() {
     // Regression: a duplicate-review short-circuit (#109) launches no
     // reviewer and must not be indistinguishable from a real cycle when
@@ -94,6 +190,35 @@ fn skipped_duplicate_reviews_do_not_consume_the_cycle_budget() {
         block.is_none(),
         "five free skipped-duplicate reviews must not exhaust a 2-cycle budget"
     );
+}
+
+#[test]
+fn capacity_deferrals_do_not_consume_the_review_cycle_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            max_review_cycles_per_ticket: Some(1),
+            ..RoutingPolicy::default()
+        },
+    );
+    let prof = profile(tmp.path());
+    let mut deferred = review_ledger_entry("test", &prof, "gah/44", "deferred_capacity", "high");
+    deferred.work_id = Some("#44".into());
+    deferred.attempts_started = Some(0);
+    deferred.attempts_completed = Some(0);
+    crate::ledger::append(&cfg, &deferred).unwrap();
+
+    let block = check_review_budget(
+        &cfg,
+        &prof,
+        "test",
+        Some("#44"),
+        &route_decision("claude", Some("sonnet"), false),
+    )
+    .unwrap();
+
+    assert!(block.is_none(), "a deferred route launched no reviewer");
 }
 
 #[test]
@@ -150,6 +275,73 @@ fn review_escalation_reason_none_when_no_prior_entries() {
         review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
         None
     );
+}
+
+#[test]
+fn sha_less_legacy_reviews_are_retried_before_escalation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+    let mut prof = profile(tmp.path());
+    prof.routing.escalatory_reviewers = vec![
+        CandidateConfig {
+            backend: "claude".into(),
+            model: Some("sonnet".into()),
+            ..Default::default()
+        },
+        CandidateConfig {
+            backend: "opencode".into(),
+            model: Some("nous-portal/z-ai/glm-5.2".into()),
+            ..Default::default()
+        },
+    ];
+    for verdict in ["NEEDS_FIX", "REJECT"] {
+        let mut legacy = review_ledger_entry("test", &prof, "gah/branch-1", verdict, "high");
+        legacy.review_source_sha = None;
+        legacy.effective_backend = "claude".into();
+        legacy.effective_model = Some("sonnet".into());
+        crate::ledger::append(&cfg, &legacy).unwrap();
+    }
+
+    assert_eq!(
+        review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+        None
+    );
+    let next = next_escalatory_reviewer(&cfg, &prof, "test", "gah/branch-1", None).unwrap();
+    assert_eq!(next.backend, "claude");
+    assert_eq!(next.model.as_deref(), Some("sonnet"));
+}
+
+#[test]
+fn cancelled_shutdown_is_not_a_low_confidence_verdict_or_spent_reviewer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+    let mut prof = profile(tmp.path());
+    prof.routing.escalatory_reviewers = vec![
+        CandidateConfig {
+            backend: "claude".into(),
+            model: Some("sonnet".into()),
+            ..Default::default()
+        },
+        CandidateConfig {
+            backend: "opencode".into(),
+            model: Some("nous-portal/z-ai/glm-5.2".into()),
+            ..Default::default()
+        },
+    ];
+    let mut cancelled =
+        review_ledger_entry("test", &prof, "gah/branch-1", "cancelled_shutdown", "low");
+    cancelled.effective_backend = "claude".into();
+    cancelled.effective_model = Some("sonnet".into());
+    cancelled.human_required = true;
+    crate::ledger::append(&cfg, &cancelled).unwrap();
+
+    assert_eq!(
+        review_escalation_reason(&cfg, &prof, "test", "gah/branch-1"),
+        None
+    );
+    let next = next_escalatory_reviewer(&cfg, &prof, "test", "gah/branch-1", None).unwrap();
+    assert_eq!(next.backend, "claude");
+    assert_eq!(next.model.as_deref(), Some("sonnet"));
 }
 
 #[test]

@@ -241,6 +241,7 @@ fn split_sections(prompt: &str) -> Vec<Section> {
                 "Safety",
                 "Acceptance Criteria",
                 "Verification Commands",
+                "Repair Findings",
                 "Warning",
                 "Current Git",
                 "Unresolved",
@@ -379,6 +380,25 @@ mod tests {
             .sources
             .iter()
             .any(|source| source.name == "Live Task Pack"));
+    }
+
+    #[test]
+    fn preserves_repair_findings_while_compacting_other_context() {
+        let cfg = ContextConfig {
+            soft_limit_tokens: 30,
+            hard_limit_tokens: 100,
+            ..Default::default()
+        };
+        let prompt = "## Project Brief\nold old old old old old old old old old old old\n## Repair Findings\nBlocking findings:\n- src/lib.rs: retry loses state\n## Focus\nRepair the reviewed branch.\n";
+
+        let result = enforce(prompt, &cfg).unwrap();
+
+        assert!(result.compacted);
+        assert!(result.prompt.contains("src/lib.rs: retry loses state"));
+        assert!(result
+            .sources
+            .iter()
+            .any(|source| source.name == "Repair Findings"));
     }
 
     #[test]

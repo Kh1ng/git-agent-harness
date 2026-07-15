@@ -67,14 +67,31 @@ pub(in crate::dispatch) fn check_review_budget(
     };
     let routing = profile.effective_routing(&cfg.defaults);
     let entries = ledger::entries_for_work_id(cfg, work_id)?;
-    let reviews: Vec<_> = entries
+    // `clear-attempts` is an operator reset for this work item's bounded
+    // automation budgets. Keep the append-only history, but do not let review
+    // calls from before the latest matching tombstone permanently block the
+    // ticket. Scope the reset to this profile/repository just like the review
+    // records themselves so an identically-numbered issue elsewhere cannot
+    // reset this budget.
+    let active_entries = entries
+        .iter()
+        .rposition(|entry| {
+            entry.profile == profile_name
+                && entry.repo_id == profile.repo_id
+                && entry.mode == "clear_attempts"
+        })
+        .map_or(entries.as_slice(), |index| &entries[index + 1..]);
+    let reviews: Vec<_> = active_entries
         .iter()
         .filter(|entry| {
             entry.profile == profile_name
+                && entry.repo_id == profile.repo_id
                 && entry.mode == "review"
                 && !matches!(
                     entry.validation_result.as_deref(),
-                    Some("review_budget_exhausted") | Some("skipped_duplicate_review")
+                    Some("review_budget_exhausted")
+                        | Some("skipped_duplicate_review")
+                        | Some("deferred_capacity")
                 )
         })
         .collect();
@@ -144,7 +161,18 @@ pub(in crate::dispatch) fn review_escalation_reason(
         .iter()
         .rev()
         .filter(|e| {
-            e.profile == profile_name && e.mode == "review" && e.branch.as_deref() == Some(branch)
+            e.profile == profile_name
+                && e.mode == "review"
+                && e.branch.as_deref() == Some(branch)
+                // Legacy reviews written before reviewed-SHA persistence
+                // cannot support a safe repair and must be re-runnable. Do
+                // not let them trigger escalation before that migration
+                // review has a chance to run.
+                && e.review_source_sha.is_some()
+                && matches!(
+                    e.validation_result.as_deref(),
+                    Some("APPROVE") | Some("NEEDS_FIX") | Some("REJECT") | Some("HUMAN_REVIEW")
+                )
         })
         .take(repeated_failure_threshold)
         .collect();
@@ -198,7 +226,14 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
             entry.profile == profile_name
                 && entry.mode == "review"
                 && entry.branch.as_deref() == Some(branch)
+                // A SHA-less legacy opinion is not reusable repair context.
+                // Treating its backend as spent would skip directly to the
+                // next (possibly paid) reviewer instead of migrating it.
+                && entry.review_source_sha.is_some()
                 && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
+                // An operator-requested shutdown is not a reviewer opinion
+                // and must remain retryable after the daemon restarts.
+                && entry.validation_result.as_deref() != Some("cancelled_shutdown")
         })
         .map(|entry| (entry.effective_backend, entry.effective_model))
         .collect();

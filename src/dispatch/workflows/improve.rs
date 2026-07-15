@@ -17,6 +17,7 @@ use super::super::publish::{
     build_fix_or_improve_mr_body, build_mr_title, emit_human_handoff,
     ensure_issue_open_for_publish, publishing_allows_publish, MrRenderContext,
 };
+use super::super::repair_context;
 use super::super::text::utf8_safe_prefix;
 use super::super::validation::{
     classify_validation_failure_progress, run_auto_fix_commands, should_skip_per_dispatch_baseline,
@@ -28,9 +29,9 @@ use crate::ledger::{self, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::routing::RouteRequest;
 use crate::usage_attribution::{normalize_attempt_usage, UsageAttribution};
-use crate::validation_runner::{validate, validate_with_exit_code};
+use crate::validation_runner::{validate_with_exit_code, VALIDATION_COMMAND_TIMEOUT_EXIT_CODE};
 use crate::{provider, runner, worktree};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -203,11 +204,39 @@ pub(crate) fn improve(
     apply_authoritative_work_identity(ledger, ticket_meta.as_ref(), &branch);
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
+    let repair_context = if args.existing_branch.is_some() {
+        match repair_context::load(
+            cfg,
+            &args.profile,
+            &profile.repo_id,
+            &branch,
+            ledger.work_id.as_deref(),
+            &wt,
+        ) {
+            Ok(context) => Some(context),
+            Err(err) => {
+                ledger.set_failure(
+                    crate::ledger::FailureClass::HarnessError,
+                    crate::ledger::FailureStage::Preflight,
+                );
+                worktree::cleanup(&wt, repo);
+                return Err(err.context(
+                    "FixMr requires structured findings from the latest applicable review",
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let _cargo_target =
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
     let validation_environment = validation_env(profile, session_dir);
 
     let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
+    if let Some(repair_context) = repair_context.as_ref() {
+        repair_context::append_to_prompt(&mut base_task, repair_context);
+    }
+    let timeout = std::time::Duration::from_secs(profile.validation_timeout_seconds());
 
     let (baseline_failure, baseline_exit_code) = if should_skip_per_dispatch_baseline(
         profile.validation_commands.is_empty(),
@@ -217,7 +246,12 @@ pub(crate) fn improve(
         (None, None)
     } else {
         println!("Baseline validation on pristine worktree...");
-        match validate_with_exit_code(&profile.validation_commands, &wt, &validation_environment) {
+        match validate_with_exit_code(
+            &profile.validation_commands,
+            &wt,
+            &validation_environment,
+            timeout,
+        ) {
             Ok(()) => {
                 println!("Baseline validation passed.");
                 (None, None)
@@ -297,6 +331,11 @@ pub(crate) fn improve(
         );
         let attempt_session = session_dir.join(format!("attempt-{}", attempt + 1));
         fs::create_dir_all(&attempt_session)?;
+        let attempt_state_before = classify_git_operation_result(
+            ledger,
+            crate::ledger::FailureStage::AgentRun,
+            worktree::state_snapshot(&wt),
+        )?;
         ledger.attempts_started = Some(ledger.attempts_started.unwrap_or(0) + 1);
         let attempt_start = std::time::Instant::now();
 
@@ -631,7 +670,12 @@ pub(crate) fn improve(
         // consume quota, pass the repository's unchanged test suite, and
         // falsely advance the controller with no patch or PR to show for it.
         // Stop before post-change validation: there is no change to validate.
-        if !worktree::has_changes(&wt, &profile.default_target_branch)? {
+        let attempt_state_after = classify_git_operation_result(
+            ledger,
+            crate::ledger::FailureStage::PostValidation,
+            worktree::state_snapshot(&wt),
+        )?;
+        if attempt_state_after == attempt_state_before {
             // OpenCode can exit successfully after a provider rejection and
             // put the useful diagnostic only in its internal log. Inspect
             // that run-scoped tail before treating this as generic no-progress
@@ -790,7 +834,12 @@ pub(crate) fn improve(
             "Running validation ({} commands)...",
             profile.validation_commands.len()
         );
-        match validate(&profile.validation_commands, &wt, &validation_environment) {
+        match validate_with_exit_code(
+            &profile.validation_commands,
+            &wt,
+            &validation_environment,
+            timeout,
+        ) {
             Ok(()) => {
                 println!("Validation passed.");
                 validation_failed = false;
@@ -816,12 +865,44 @@ pub(crate) fn improve(
                 });
                 break;
             }
-            Err(e) => {
+            Err((e, exit_code)) => {
                 validation_failed = true;
                 let failure_output = format!("{:#}", e);
                 let failure_path = attempt_session.join("validation-failure.txt");
                 fs::write(&failure_path, &failure_output)?;
                 println!("Validation failed ({})", failure_path.display());
+
+                if exit_code == Some(VALIDATION_COMMAND_TIMEOUT_EXIT_CODE) {
+                    ledger.set_failure(
+                        crate::ledger::FailureClass::HarnessError,
+                        crate::ledger::FailureStage::PostValidation,
+                    );
+                    ledger.attempts.push(crate::ledger::AttemptRecord {
+                        attempt_number: attempt + 1,
+                        backend: route.effective_backend.clone(),
+                        effective_model: Some(llm.model.clone()),
+                        exit_code: Some(VALIDATION_COMMAND_TIMEOUT_EXIT_CODE),
+                        validation_result: Some("failed".into()),
+                        failure_class: Some(
+                            crate::ledger::FailureClass::HarnessError.as_str().into(),
+                        ),
+                        failure_stage: Some(
+                            crate::ledger::FailureStage::PostValidation.as_str().into(),
+                        ),
+                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
+                        diff_path: None,
+                        usage: attempt_usage(
+                            &result.log_path,
+                            result.agy_cli_log_delta.as_deref(),
+                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
+                            result.transcript_path.as_deref(),
+                            Some(&claude_path),
+                        ),
+                        cli_version: result.agy_version.clone(),
+                    });
+                    worktree::cleanup(&wt, repo);
+                    anyhow::bail!("validation timed out (harness error). {}", failure_output);
+                }
 
                 // Identical failure to the previous attempt means the agent's
                 // changes had no effect on the error — almost always an
@@ -1087,7 +1168,11 @@ pub(crate) fn improve(
     // each attempt is self-contained.
     // ────────────────────────────────────────────────────────────────────────
 
-    let has_changes = worktree::has_changes(&wt, &profile.default_target_branch)?;
+    let has_changes = classify_git_operation_result(
+        ledger,
+        crate::ledger::FailureStage::PostValidation,
+        worktree::has_changes(&wt, &profile.default_target_branch),
+    )?;
     if !has_changes {
         // Defensive backstop: auto-fix commands or a future post-validation
         // transform could remove every change after the normal early check.
@@ -1222,21 +1307,32 @@ pub(crate) fn improve(
         &mr_ctx,
         !validation_failed,
     );
-    ledger.mr_attempted = true;
-    let mr = provider::create_draft_mr(profile, &branch, &mr_title, &mr_body)?;
-    ledger.mr_created = true;
-    ledger.mr_url = Some(mr.url.clone());
-    println!("Draft MR: {}", mr.url);
-    notify_event(
-        cfg,
-        profile,
-        NotifyEvent::MrCreated {
-            url: &mr.url,
-            work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
-            backend: &route.effective_backend,
-            model: route.effective_model.as_deref().unwrap_or("unknown"),
-        },
-    );
+    if args.existing_branch.is_some() {
+        // FixMr is repairing a provider MR that the controller already
+        // observed. The pushed branch is the publication; trying to create a
+        // second MR converts a successful repair into a false dispatch
+        // failure (and GitHub/GitLab correctly reject the duplicate).
+        let existing = provider::find_review_target_by_branch(profile, &branch)
+            .with_context(|| format!("resolving existing PR/MR for repaired branch '{branch}'"))?;
+        ledger.mr_url = Some(existing.url.clone());
+        println!("Updated existing MR: {}", existing.url);
+    } else {
+        ledger.mr_attempted = true;
+        let mr = provider::create_draft_mr(profile, &branch, &mr_title, &mr_body)?;
+        ledger.mr_created = true;
+        ledger.mr_url = Some(mr.url.clone());
+        println!("Draft MR: {}", mr.url);
+        notify_event(
+            cfg,
+            profile,
+            NotifyEvent::MrCreated {
+                url: &mr.url,
+                work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
+                backend: &route.effective_backend,
+                model: route.effective_model.as_deref().unwrap_or("unknown"),
+            },
+        );
+    }
 
     clear_wip_checkpoints(repo, &wip_checkpoints);
     worktree::cleanup(&wt, repo);
@@ -1263,6 +1359,13 @@ fn apply_authoritative_work_identity(
             ledger.source_issue_number = ticket.issue_number.clone();
             ledger.work_title = ticket.title.clone();
         }
+        // FixMr receives an authoritative work ID from the controller while
+        // its target is the existing branch, not an issue number. Preserve
+        // that identity instead of replacing it with the branch fallback.
+        _ if ledger
+            .work_id
+            .as_deref()
+            .is_some_and(|work_id| !work_id.trim().is_empty()) => {}
         _ => {
             ledger.work_id = Some(fallback_work_id.to_string());
         }

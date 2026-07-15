@@ -138,6 +138,7 @@ fn sync_provider_fails_then_recovers() {
 
     // Loop 1: provider failure → no_op
     let r1 = harness.run_one_loop().unwrap();
+    let calls_after_r1 = gh.call_count();
     assert!(
         r1.action_kind == "no_op" || r1.action_kind == "exit_only",
         "loop 1 failure: got '{}'",
@@ -146,6 +147,7 @@ fn sync_provider_fails_then_recovers() {
 
     // Loop 2: provider failure → no_op
     let r2 = harness.run_one_loop().unwrap();
+    let calls_after_r2 = gh.call_count();
     assert!(
         r2.action_kind == "no_op" || r2.action_kind == "exit_only",
         "loop 2 failure: got '{}'",
@@ -154,17 +156,21 @@ fn sync_provider_fails_then_recovers() {
 
     // Loop 3: provider succeeds → gah should NOT crash
     let r3 = harness.run_one_loop().unwrap();
+    let calls_after_r3 = gh.call_count();
     assert_eq!(
         r3.exit_code,
         Some(0),
         "loop 3 recovery: gah exited non-zero | stderr: {}",
         r3.stderr_tail
     );
-    // gh should have been called all 3 times
+    assert!(calls_after_r1 > 0, "loop 1 must call the provider");
     assert!(
-        gh.call_count() >= 15,
-        "gh should have been called multiple times across 3 loops (got {})",
-        gh.call_count()
+        calls_after_r2 > calls_after_r1,
+        "loop 2 must retry the provider"
+    );
+    assert!(
+        calls_after_r3 > calls_after_r2,
+        "loop 3 must retry the provider"
     );
 }
 

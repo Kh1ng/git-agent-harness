@@ -383,20 +383,13 @@ pub struct Profile {
     /// Example: ["cargo test --quiet", "cargo clippy -- -D warnings"]
     #[serde(default)]
     pub validation_commands: Vec<String>,
-    /// Mechanical formatting fixups run (best-effort, failures ignored) in
-    /// the worktree immediately before `validation_commands`, on every
-    /// attempt. Example: ["cargo fmt"]. Backends routinely write correct
-    /// but unformatted code and burn a full retry (LLM call + review) on
-    /// a `cargo fmt --check`/`black --check`-style failure that a
-    /// deterministic formatter would have fixed in milliseconds -- this
-    /// runs the formatter instead of retrying for it.
+    /// Best-effort mechanical fixups run before validation on every attempt.
+    /// Example: ["cargo fmt"].
     #[serde(default)]
     pub auto_fix_commands: Vec<String>,
     #[serde(default)]
     pub test_file_patterns: Vec<String>,
-    /// TICKET-110/111: substrings that explicitly mark a baseline validation
-    /// failure as known/expected (case-insensitive). Never inferred by the
-    /// classifier itself -- only reachable via this explicit configuration.
+    /// Explicit case-insensitive markers for known baseline failures.
     #[serde(default)]
     pub known_baseline_failure_markers: Vec<String>,
     /// Model override for `improve`/`fix` mode (heavy lifting)
@@ -408,16 +401,17 @@ pub struct Profile {
     /// Model override for `review` mode
     #[serde(default)]
     pub model_review: Option<String>,
-    /// Review subprocess timeout. Defaults to 300 seconds when unset.
+    /// Review subprocess timeout in seconds (default 300).
     #[serde(default)]
     pub review_timeout_seconds: Option<u64>,
+    /// Per-command validation timeout in seconds (default 300).
+    #[serde(default)]
+    pub validation_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub routing: RoutingPolicy,
     /// TICKET-128: per-profile policy for human-facing repository messaging.
-    /// Independence axis from reviewer routing and merge authorization: a
-    /// restricted profile can keep full code-execution + review capability
-    /// while forbidding agent-authored PR/MR text, commit messages, and
-    /// issue-tracker comments. Defaults to everything allowed.
+    /// Independent of reviewer routing and merge authorization; defaults to
+    /// allowing PR/MR text, commit messages, and issue comments.
     #[serde(default)]
     pub publishing: PublishingPolicy,
     #[serde(default)]
@@ -826,6 +820,10 @@ impl Profile {
 
     pub fn review_timeout_seconds(&self) -> u64 {
         self.review_timeout_seconds.unwrap_or(300).max(1)
+    }
+
+    pub fn validation_timeout_seconds(&self) -> u64 {
+        self.validation_timeout_seconds.unwrap_or(300).max(1)
     }
 
     pub fn agy_idle_timeout_seconds(&self) -> u64 {
@@ -1325,6 +1323,7 @@ pub mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            validation_timeout_seconds: None,
             routing: RoutingPolicy::default(),
             publishing: Default::default(),
             pacing: Default::default(),
@@ -1378,6 +1377,7 @@ pub mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            validation_timeout_seconds: None,
             routing: RoutingPolicy::default(),
             publishing: Default::default(),
             pacing: Default::default(),

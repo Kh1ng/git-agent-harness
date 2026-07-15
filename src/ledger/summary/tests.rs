@@ -48,6 +48,36 @@ fn cheap_flash_model_does_not_increment_strong_run_count() {
 }
 
 #[test]
+fn capacity_deferral_is_not_counted_as_a_run_or_summary_failure() {
+    let (_tmp, cfg) = test_config();
+    let mut deferred = LedgerEntry::new(
+        "test",
+        &profile(),
+        "claude",
+        "review",
+        "busy review",
+        Some("session-deferred".into()),
+        None,
+    );
+    deferred.effective_model = Some("sonnet".into());
+    deferred.validation_result = Some("deferred_capacity".into());
+    deferred.failure_class = Some("backend_error".into());
+    deferred.error_summary = Some("max_concurrent_reached".into());
+    deferred.attempts_started = Some(0);
+    deferred.attempts_completed = Some(0);
+    append(&cfg, &deferred).unwrap();
+
+    let usage = usage_summary_for_backend(&cfg, "claude", Some("sonnet"), None).unwrap();
+    assert_eq!(usage.runs_this_week, 0);
+    assert_eq!(usage.strong_runs_this_week, 0);
+
+    let summary = build_summary(&cfg, "7d", Some("test"), GroupBy::None).unwrap();
+    assert_eq!(summary.entries, 0);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.success, 0);
+}
+
+#[test]
 fn strong_model_increments_strong_run_count() {
     let (_tmp, cfg) = test_config();
 

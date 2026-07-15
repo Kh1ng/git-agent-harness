@@ -560,24 +560,31 @@ pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashM
 pub fn count_fix_attempts_per_branch_from_entries(
     entries: &[crate::ledger::LedgerEntry],
 ) -> std::collections::HashMap<String, usize> {
-    use std::collections::HashMap;
+    count_branch_attempts(entries, None, |entry| {
+        usize::from(
+            entry.mode == "fix"
+                && entry
+                    .dispatch_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason == "post_review_repair"),
+        )
+    })
+}
 
-    let mut counts = HashMap::new();
-
-    for entry in entries {
-        if entry.mode == "fix"
-            && entry
-                .dispatch_reason
-                .as_deref()
-                .is_some_and(|r| r == "post_review_repair")
-        {
-            if let Some(branch) = &entry.branch {
-                *counts.entry(branch.clone()).or_insert(0) += 1;
-            }
-        }
-    }
-
-    counts
+pub fn count_fix_attempts_per_branch_for_scope(
+    entries: &[crate::ledger::LedgerEntry],
+    profile: &str,
+    repo_id: &str,
+) -> std::collections::HashMap<String, usize> {
+    count_branch_attempts(entries, Some((profile, repo_id)), |entry| {
+        usize::from(
+            entry.mode == "fix"
+                && entry
+                    .dispatch_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason == "post_review_repair"),
+        )
+    })
 }
 
 /// Used to cap auto-merge retries (TICKET-127): a merge that fails
@@ -601,17 +608,86 @@ pub fn count_merge_attempts_per_branch(
 pub fn count_merge_attempts_per_branch_from_entries(
     entries: &[crate::ledger::LedgerEntry],
 ) -> std::collections::HashMap<String, usize> {
-    use std::collections::HashMap;
-
-    let mut counts = HashMap::new();
-
-    for entry in entries {
-        if entry.mode == "merge" && entry.attempts_started.is_some_and(|n| n > 0) {
-            if let Some(branch) = &entry.branch {
-                *counts.entry(branch.clone()).or_insert(0) +=
-                    entry.attempts_started.unwrap_or(0) as usize;
-            }
+    count_branch_attempts(entries, None, |entry| {
+        if entry.mode == "merge" {
+            entry.attempts_started.unwrap_or(0) as usize
+        } else {
+            0
         }
+    })
+}
+
+pub fn count_merge_attempts_per_branch_for_scope(
+    entries: &[crate::ledger::LedgerEntry],
+    profile: &str,
+    repo_id: &str,
+) -> std::collections::HashMap<String, usize> {
+    count_branch_attempts(entries, Some((profile, repo_id)), |entry| {
+        if entry.mode == "merge" {
+            entry.attempts_started.unwrap_or(0) as usize
+        } else {
+            0
+        }
+    })
+}
+
+fn count_branch_attempts(
+    entries: &[crate::ledger::LedgerEntry],
+    scope: Option<(&str, &str)>,
+    attempt_weight: impl Fn(&crate::ledger::LedgerEntry) -> usize,
+) -> std::collections::HashMap<String, usize> {
+    use std::collections::{HashMap, HashSet};
+
+    let in_scope = |entry: &crate::ledger::LedgerEntry| {
+        scope.is_none_or(|(profile, repo_id)| entry.profile == profile && entry.repo_id == repo_id)
+    };
+    let mut counts = HashMap::new();
+    let mut branches_by_work: HashMap<(String, String, String), HashSet<String>> = HashMap::new();
+
+    for entry in entries.iter().filter(|entry| in_scope(entry)) {
+        if entry.mode == "clear_attempts" {
+            let Some(work_id) = entry.work_id.as_deref() else {
+                continue;
+            };
+            let aliases = crate::ledger::work_id_aliases(work_id);
+            let branches_to_reset: HashSet<String> = branches_by_work
+                .iter()
+                .filter(|((profile, repo_id, known_work_id), _)| {
+                    profile == &entry.profile
+                        && repo_id == &entry.repo_id
+                        && aliases.iter().any(|alias| alias == known_work_id)
+                })
+                .flat_map(|(_, branches)| branches.iter().cloned())
+                .collect();
+            for branch in branches_to_reset {
+                counts.remove(&branch);
+            }
+            continue;
+        }
+
+        // Reviews and other records often carry the authoritative issue ID
+        // even when an older FixMr record used its branch as a synthetic ID.
+        // Retain every attributable branch/work pairing so an operator reset
+        // can also clear those historical repair counters.
+        if let (Some(branch), Some(work_id)) = (&entry.branch, &entry.work_id) {
+            branches_by_work
+                .entry((
+                    entry.profile.clone(),
+                    entry.repo_id.clone(),
+                    work_id.clone(),
+                ))
+                .or_default()
+                .insert(branch.clone());
+        }
+
+        let weight = attempt_weight(entry);
+        if weight == 0 {
+            continue;
+        }
+        let Some(branch) = entry.branch.as_ref() else {
+            continue;
+        };
+        *counts.entry(branch.clone()).or_insert(0) += weight;
     }
 
     counts
@@ -909,6 +985,7 @@ mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            validation_timeout_seconds: None,
             routing: crate::config::RoutingPolicy::default(),
             pacing: crate::quota::PacingConfig::default(),
             publishing: Default::default(),
@@ -918,6 +995,13 @@ mod tests {
         entry.branch = Some(branch.into());
         entry.attempts_started = attempts_started;
         entry.dispatch_reason = dispatch_reason.map(|s| s.into());
+        entry
+    }
+
+    fn clear_entry(work_id: &str) -> crate::ledger::LedgerEntry {
+        let mut entry = ledger_entry("clear_attempts", "", None, None);
+        entry.branch = None;
+        entry.work_id = Some(work_id.into());
         entry
     }
 
@@ -984,6 +1068,52 @@ mod tests {
             2,
             "two post_review_repair entries = count 2 = AUTO_RETRY_CAP"
         );
+    }
+
+    #[test]
+    fn clear_attempts_resets_repair_cycles_for_matching_work_item() {
+        let mut before_one = ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(1));
+        before_one.work_id = Some("branch-A".into());
+        let mut before_two = before_one.clone();
+        before_two.timestamp = "2026-01-02T00:00:00Z".into();
+        let mut attributed_review = ledger_entry("review", "branch-A", Some("review"), Some(1));
+        attributed_review.work_id = Some("#437".into());
+        attributed_review.timestamp = "2026-01-02T12:00:00Z".into();
+        let mut clear = clear_entry("TICKET-437");
+        clear.timestamp = "2026-01-03T00:00:00Z".into();
+        let mut after = before_one.clone();
+        after.work_id = Some("#437".into());
+        after.timestamp = "2026-01-04T00:00:00Z".into();
+
+        let counts = super::count_fix_attempts_per_branch_from_entries(&[
+            before_one,
+            before_two,
+            attributed_review,
+            clear,
+            after,
+        ]);
+        assert_eq!(counts.get("branch-A"), Some(&1));
+    }
+
+    #[test]
+    fn clear_attempts_is_scoped_and_resets_merge_retry_budget() {
+        let mut before = ledger_entry("merge", "branch-A", None, Some(2));
+        before.work_id = Some("#437".into());
+        let mut foreign_clear = clear_entry("#437");
+        foreign_clear.profile = "other-profile".into();
+        let matching_clear = clear_entry("#437");
+        let mut after = before.clone();
+        after.attempts_started = Some(1);
+
+        let entries = [before, foreign_clear, matching_clear, after];
+        let counts = super::count_merge_attempts_per_branch_for_scope(&entries, "test", "test");
+        assert_eq!(counts.get("branch-A"), Some(&1));
+        assert!(super::count_merge_attempts_per_branch_for_scope(
+            &entries,
+            "other-profile",
+            "test"
+        )
+        .is_empty());
     }
 
     /// Entries with mode != "fix" (review, merge) never count.

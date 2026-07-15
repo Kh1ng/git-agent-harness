@@ -653,7 +653,7 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
             "--repo",
             &profile.repo,
             "--json",
-            "number,url,title,body,headRefName,baseRefName,headRefOid,baseRefOid,statusCheckRollup",
+            "number,url,title,body,headRefName,baseRefName,headRefOid,statusCheckRollup",
         ])
         .output()
         .context("gh pr view")?;
@@ -682,7 +682,9 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
         body: resp["body"].as_str().map(str::to_string),
         ci_status,
         source_sha: resp["headRefOid"].as_str().map(str::to_string),
-        target_sha: resp["baseRefOid"].as_str().map(str::to_string),
+        // `gh pr view` does not expose baseRefOid. The dispatch review path
+        // resolves this from the fetched target ref used to build the diff.
+        target_sha: None,
     })
 }
 
@@ -818,6 +820,7 @@ mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            validation_timeout_seconds: None,
             notify_command: None,
             routing: RoutingPolicy::default(),
             pacing: Default::default(),
@@ -980,7 +983,7 @@ mod tests {
         make_fake_bin(
             &bin_dir,
             "gh",
-            "#!/bin/sh\nprintf '%s\\n' '{\"number\":7,\"url\":\"https://github.test/owner/repo/pull/7\",\"headRefName\":\"gah/7\",\"baseRefName\":\"main\",\"headRefOid\":\"source-github-sha\",\"baseRefOid\":\"target-github-sha\",\"statusCheckRollup\":[]}'\n",
+            "#!/bin/sh\nprintf '%s\\n' '{\"number\":7,\"url\":\"https://github.test/owner/repo/pull/7\",\"headRefName\":\"gah/7\",\"baseRefName\":\"main\",\"headRefOid\":\"source-github-sha\",\"statusCheckRollup\":[]}'\n",
         );
         let _guard = PathOverride::set(bin_dir.to_string_lossy().into_owned());
         let github_target = github_review_target_by_number(&github_profile(), "7").unwrap();
@@ -988,10 +991,7 @@ mod tests {
             github_target.source_sha.as_deref(),
             Some("source-github-sha")
         );
-        assert_eq!(
-            github_target.target_sha.as_deref(),
-            Some("target-github-sha")
-        );
+        assert_eq!(github_target.target_sha, None);
     }
 
     #[test]

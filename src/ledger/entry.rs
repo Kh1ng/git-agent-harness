@@ -53,6 +53,10 @@ impl FailureClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // unwired variants are the schema for future tickets, not unused code
 pub enum FailureStage {
+    /// Top-level fallback for an error that escaped a more precise pipeline
+    /// boundary. This keeps operational alerts actionable instead of
+    /// emitting an unclassified `unknown` stage.
+    Dispatch,
     Preflight,
     BaselineValidation,
     Route,
@@ -69,6 +73,7 @@ pub enum FailureStage {
 impl FailureStage {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Dispatch => "dispatch",
             Self::Preflight => "preflight",
             Self::BaselineValidation => "baseline_validation",
             Self::Route => "route",
@@ -302,6 +307,19 @@ pub struct LedgerEntry {
     /// Deterministic reason why GAH made a reviewer output non-mergeable.
     #[serde(default)]
     pub review_gate_reason: Option<String>,
+    /// Structured reviewer output retained for deterministic repair prompts.
+    /// These fields intentionally remain separate from the rendered provider
+    /// comment so FixMr never has to scrape human-formatted Markdown.
+    #[serde(default)]
+    pub review_blocking_findings: Vec<String>,
+    #[serde(default)]
+    pub review_non_blocking_findings: Vec<String>,
+    #[serde(default)]
+    pub review_risk_notes: Vec<String>,
+    #[serde(default)]
+    pub review_evidence: Vec<String>,
+    #[serde(default)]
+    pub review_compatibility_evidence: Vec<String>,
     pub commit_attempted: bool,
     pub commit_created: bool,
     pub push_attempted: bool,
@@ -407,6 +425,11 @@ impl LedgerEntry {
             review_source_sha: None,
             reviewer_class: None,
             review_gate_reason: None,
+            review_blocking_findings: Vec::new(),
+            review_non_blocking_findings: Vec::new(),
+            review_risk_notes: Vec::new(),
+            review_evidence: Vec::new(),
+            review_compatibility_evidence: Vec::new(),
             commit_attempted: false,
             commit_created: false,
             push_attempted: false,
@@ -432,10 +455,9 @@ impl LedgerEntry {
         }
     }
 
-    /// Set failure attribution. Call this at the specific error site, not
-    /// generically in the top-level error handler — the whole point is to
-    /// know *which* boundary failed, and that context is only available
-    /// where the error actually originates.
+    /// Set precise failure attribution at the specific error site whenever
+    /// possible. The dispatch boundary supplies a broad harness/dispatch
+    /// fallback only when a path reaches it without either field populated.
     pub fn set_failure(&mut self, class: FailureClass, stage: FailureStage) {
         self.failure_class = Some(class.as_str().to_string());
         self.failure_stage = Some(stage.as_str().to_string());
@@ -489,6 +511,11 @@ impl LedgerEntry {
             review_source_sha: None,
             reviewer_class: None,
             review_gate_reason: None,
+            review_blocking_findings: Vec::new(),
+            review_non_blocking_findings: Vec::new(),
+            review_risk_notes: Vec::new(),
+            review_evidence: Vec::new(),
+            review_compatibility_evidence: Vec::new(),
             commit_attempted: false,
             commit_created: false,
             push_attempted: false,
@@ -659,6 +686,7 @@ mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            validation_timeout_seconds: None,
             notify_command: None,
             routing: RoutingPolicy::default(),
             pacing: Default::default(),
@@ -760,6 +788,11 @@ mod tests {
         assert_eq!(parsed.routing_diagnostics, None);
         assert_eq!(parsed.work_id, None);
         assert_eq!(parsed.work_title, None);
+        assert!(parsed.review_blocking_findings.is_empty());
+        assert!(parsed.review_non_blocking_findings.is_empty());
+        assert!(parsed.review_risk_notes.is_empty());
+        assert!(parsed.review_evidence.is_empty());
+        assert!(parsed.review_compatibility_evidence.is_empty());
         assert_eq!(parsed.profile, "real");
     }
 
