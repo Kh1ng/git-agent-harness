@@ -34,6 +34,7 @@ fn empty_snapshot() -> StatusSnapshot {
         blocked_work_items: vec![],
         errors: vec![],
         available_tickets: vec![],
+        active_claims: vec![],
         fix_attempt_counts: std::collections::HashMap::new(),
         merge_attempt_counts: std::collections::HashMap::new(),
         review_held_work_ids: std::collections::HashSet::new(),

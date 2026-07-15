@@ -3,6 +3,7 @@ use crate::config::GahConfig;
 use crate::ledger::{self, LedgerEntry, RoutingDiagnostics};
 use crate::sync;
 use anyhow::Result;
+use chrono::Utc;
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -32,6 +33,8 @@ pub struct StatusSnapshot {
     /// TICKET-078: dispatch candidates from `docs/tickets/`, feeding
     /// `decide_next_action`'s DispatchTicket/Retry/Escalate rules.
     pub available_tickets: Vec<crate::models::AvailableTicket>,
+    /// Active durable claims keyed by canonical profile+repo scope.
+    pub active_claims: Vec<ActiveClaimSnapshot>,
     /// TICKET-118: fix attempt counts per branch for retry cap.
     pub fix_attempt_counts: std::collections::HashMap<String, usize>,
     /// TICKET-127: merge attempt counts per branch for the auto-merge
@@ -128,6 +131,16 @@ pub struct RecentLedgerSummary {
     pub human_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_diagnostics: Option<RoutingDiagnostics>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ActiveClaimSnapshot {
+    pub work_id: String,
+    pub pid: u32,
+    pub scope: String,
+    pub hostname: String,
+    pub claimed_at: String,
+    pub age_seconds: u64,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
@@ -374,8 +387,49 @@ fn build_snapshot_inner(
 
     // 5. Available tickets (TICKET-078): reuses the already-fetched `raw_mrs`
     // rather than calling sync::fetch_mrs a second time.
-    let available_tickets =
+    let mut available_tickets =
         crate::dispatch::scan_available_tickets(profile, &raw_mrs, &ledger_entries_by_work_id);
+    // Load durable claim state once and apply active-claim flags directly from
+    // the canonical `<profile>@<repo_id>` scope to avoid stale CLI/runtime
+    // mismatch and per-ticket file reads.
+    let claim_scope = crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id);
+    let mut active_claim_work_ids = std::collections::HashSet::new();
+    let mut active_claims = Vec::new();
+    match crate::work_claim::claim_details_for_profile(&claim_scope) {
+        Ok(claims) => {
+            let now = Utc::now();
+            for claim in claims {
+                if claim.is_stale {
+                    continue;
+                }
+                let age_seconds = now
+                    .signed_duration_since(claim.claimed_at)
+                    .num_seconds()
+                    .max(0) as u64;
+                active_claim_work_ids.insert(claim.work_id.clone());
+                active_claims.push(ActiveClaimSnapshot {
+                    work_id: claim.work_id,
+                    pid: claim.pid,
+                    scope: claim_scope.clone(),
+                    hostname: claim.hostname,
+                    claimed_at: claim.claimed_at.to_rfc3339(),
+                    age_seconds,
+                });
+            }
+        }
+        Err(error) => errors.push(StatusError {
+            subsystem: "claims".into(),
+            message: format!("{:#}", error),
+            incomplete_snapshot: true,
+        }),
+    }
+    for ticket in &mut available_tickets {
+        if let Some(work_id) = ticket.work_id.as_deref() {
+            if active_claim_work_ids.contains(work_id) {
+                ticket.has_active_claim = true;
+            }
+        }
+    }
 
     // TICKET-human-required-scoping: after the per-ticket human_required is
     // derived (in scan_available_tickets via ledger_lookup_for_ticket), record
@@ -462,6 +516,7 @@ fn build_snapshot_inner(
         blocked_work_items,
         errors,
         available_tickets,
+        active_claims,
         fix_attempt_counts,
         merge_attempt_counts,
         review_held_work_ids,
@@ -561,6 +616,7 @@ mod tests {
     use super::*;
     use crate::availability::{AvailabilityRecord, AvailabilityState, Reason, Source, Status};
     use crate::ledger::{LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics};
+    use crate::test_support::ClaimStateEnvGuard;
     use std::fs;
     use tempfile::TempDir;
 
@@ -638,6 +694,97 @@ default_target_branch = "main"
                 && error.incomplete_snapshot
                 && error.message.contains("parsing ledger entry 1")
         }));
+    }
+
+    #[test]
+    fn canonical_claim_scope_marks_active_ticket_and_claims() {
+        let tmp = TempDir::new().unwrap();
+        let local_path = tmp.path().join("repo");
+        fs::create_dir_all(local_path.join("docs").join("tickets")).unwrap();
+        let cfg_path = tmp.path().join("status-canonical.toml");
+        fs::write(
+            &cfg_path,
+            r#"
+[defaults]
+artifact_root = "{artifact_root}"
+worktree_base = "{artifact_root}"
+llm_base_url  = "http://localhost:4000"
+llm_model_local = "local/test"
+llm_model_cloud = "cloud/test"
+
+[profiles.gah]
+display_name          = "Profile gah"
+repo_id               = "gah"
+provider              = ""
+repo                  = "owner/gah"
+local_path            = "{local_path}"
+artifact_root         = "{artifact_root}/profiles/gah"
+default_target_branch = "main"
+"#
+            .replace("{artifact_root}", &tmp.path().to_string_lossy())
+            .replace("{local_path}", &local_path.to_string_lossy()),
+        )
+        .unwrap();
+        let mut cfg = crate::config::load(Some(cfg_path.to_str().unwrap())).unwrap();
+        cfg.defaults.artifact_root = tmp.path().to_string_lossy().into_owned();
+        let _availability_guard =
+            crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
+        let _claim_guard = ClaimStateEnvGuard::set(tmp.path().join("claims.json"));
+
+        let ticket_dir = local_path.join("docs/tickets");
+        fs::write(
+            ticket_dir.join("TICKET-436.md"),
+            "# TICKET-436: canonical scope test\n\nGoal: keep canonical claim scope stable\n\nRecommended backend: codex\n",
+        )
+        .unwrap();
+
+        let claim_state = serde_json::json!({
+            "version": 2u32,
+            "claims": {
+                "gah@gah": [
+                    {
+                        "work_id": "TICKET-436",
+                        "pid": std::process::id(),
+                        "hostname": "localhost",
+                        "claimed_at": "2026-07-14T00:00:00Z"
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            tmp.path().join("claims.json"),
+            serde_json::to_string(&claim_state).unwrap(),
+        )
+        .unwrap();
+
+        let now = OffsetDateTime::now_utc();
+        let snap = build_snapshot(&cfg, "gah", now).unwrap();
+
+        assert_eq!(snap.active_claims.len(), 1);
+        assert_eq!(snap.active_claims[0].work_id, "TICKET-436");
+        assert_eq!(snap.active_claims[0].scope, "gah@gah");
+        assert_eq!(snap.available_tickets.len(), 1);
+        assert_eq!(
+            snap.available_tickets[0].work_id.as_deref(),
+            Some("TICKET-436")
+        );
+        assert!(snap.available_tickets[0].has_active_claim);
+    }
+
+    #[test]
+    fn malformed_claim_state_is_reported_in_snapshot_errors() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_test_cfg(&tmp);
+        let _availability_guard =
+            crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
+        let _claim_guard = ClaimStateEnvGuard::set(tmp.path().join("claims.json"));
+        std::fs::write(tmp.path().join("claims.json"), "not valid json\n").unwrap();
+
+        let snap = build_snapshot(&cfg, "test", OffsetDateTime::now_utc()).unwrap();
+        assert!(snap
+            .errors
+            .iter()
+            .any(|error| error.subsystem == "claims" && error.incomplete_snapshot));
     }
 
     #[test]

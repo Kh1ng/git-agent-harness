@@ -161,7 +161,17 @@ export interface AvailableTicket {
   prior_attempt_count: number;
   last_failure_class: string | null;
   has_active_mr: boolean;
+  has_active_claim: boolean;
   human_required: boolean;
+}
+
+export interface ActiveClaim {
+  work_id: string;
+  pid: number;
+  scope: string;
+  hostname: string;
+  claimed_at: string;
+  age_seconds: number;
 }
 
 export interface StatusSnapshot {
@@ -184,6 +194,7 @@ export interface StatusSnapshot {
   blocked_work_items: Blocker[];
   errors: StatusError[];
   available_tickets: AvailableTicket[];
+  active_claims: ActiveClaim[];
   fix_attempt_counts: Record<string, number>;
   merge_attempt_counts: Record<string, number>;
   publishing_allow_pr: boolean;

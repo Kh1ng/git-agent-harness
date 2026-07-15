@@ -1,3 +1,4 @@
+use crate::config;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
@@ -27,6 +28,25 @@ pub struct WorkClaimState {
     pub version: u32,
     /// Profile -> Vec<WorkClaim> for version 2, Profile -> Vec<work_id> for version 1
     pub claims: std::collections::HashMap<String, Vec<WorkClaimStateEntry>>,
+}
+
+/// Canonical durable claim scope: `<profile>@<repo_id>`.
+///
+/// The work claim state is keyed by profile+repo identity, not raw profile
+/// name. All controller/CLI/status/dashboard call sites must normalize through
+/// this helper to avoid silently treating the same logical scope as distinct
+/// buckets.
+pub fn canonical_claim_scope(profile_name: &str, repo_id: &str) -> String {
+    format!("{profile_name}@{repo_id}")
+}
+
+pub fn canonical_scope_for_profile(
+    profile_name: &str,
+    config_path: Option<&str>,
+) -> Result<String> {
+    let cfg = config::load(config_path)?;
+    let profile = config::get_profile(&cfg, profile_name)?;
+    Ok(canonical_claim_scope(profile_name, &profile.repo_id))
 }
 
 /// Entry in the claims map - can be either a v1 string or v2 WorkClaim
@@ -255,6 +275,11 @@ pub struct ClaimDetail {
     pub is_stale: bool,
 }
 
+/// Load raw claim details for one profile scope in a single filesystem read.
+pub fn claim_details_for_profile(profile: &str) -> Result<Vec<ClaimDetail>> {
+    with_locked_state(|state| Ok(state.get_claims_with_details(profile)))
+}
+
 /// Check if a process is still alive
 fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
@@ -282,6 +307,12 @@ fn is_process_alive(pid: u32) -> bool {
 
 /// Path to the work claims file
 fn work_claims_path() -> PathBuf {
+    if let Some(path) = std::env::var("GAH_CLAIM_STATE_PATH")
+        .ok()
+        .filter(|path| !path.is_empty())
+    {
+        return PathBuf::from(path);
+    }
     resolve_state_path_from_env(
         std::env::var("XDG_STATE_HOME").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
@@ -521,6 +552,15 @@ pub fn handle_claims_reclaim(profile: &str, max_age_secs: u64) -> Result<Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_claim_scope_matches_profile_and_repo_id() {
+        assert_eq!(canonical_claim_scope("gah", "gah"), "gah@gah");
+        assert_eq!(
+            canonical_claim_scope("github", "owner/repo"),
+            "github@owner/repo"
+        );
+    }
 
     #[test]
     fn test_work_claim_state_claim_and_release() {

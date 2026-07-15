@@ -243,7 +243,7 @@ pub fn run_once(
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
     let claim_scope = {
         let profile = crate::config::get_profile(cfg, profile_name)?;
-        format!("{profile_name}@{}", profile.repo_id)
+        crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id)
     };
     let now = time::OffsetDateTime::now_utc();
     let snapshot =
@@ -416,7 +416,7 @@ fn run_parallel_once(
     let mut executed_work_ids = HashSet::new();
     let claim_scope = {
         let profile = crate::config::get_profile(cfg, profile_name)?;
-        format!("{profile_name}@{}", profile.repo_id)
+        crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id)
     };
 
     // Profile routing decides which eligible backend handles each action. Do
@@ -1122,6 +1122,7 @@ default_target_branch = "main"
             blocked_work_items: vec![],
             errors: vec![],
             available_tickets: vec![],
+            active_claims: vec![],
             fix_attempt_counts: std::collections::HashMap::new(),
             merge_attempt_counts: std::collections::HashMap::new(),
             review_held_work_ids: std::collections::HashSet::new(),
