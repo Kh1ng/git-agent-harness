@@ -13,6 +13,8 @@ const CODEX_FULL_RESET: &str =
     include_str!("../../../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
 const OPENCODE_HY3_RATE_LIMIT: &str =
     include_str!("../../../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
+const VIBE_INVALID_API_KEY: &str =
+    include_str!("../../../tests/fixtures/quota-logs/vibe_invalid_api_key.txt");
 
 #[test]
 fn review_preflight_fails_with_backend_unavailable_when_executable_missing() {
@@ -1037,6 +1039,39 @@ fn opencode_internal_rate_limit_marks_the_model_unavailable() {
     .unwrap();
     assert!(!decision.eligible);
     assert_eq!(decision.reason, Some(Reason::RateLimited));
+}
+
+#[test]
+fn vibe_invalid_api_key_marks_exact_model_unavailable_without_retry_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("availability.json");
+    let parsed = mark_backend_unavailable_from_output_at(
+        &state,
+        "vibe",
+        Some("mistral-medium-3.5"),
+        Some("vibe-monthly"),
+        VIBE_INVALID_API_KEY,
+        "/tmp/review-stderr.log",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        parsed.kind,
+        crate::quota_parser::FailureKind::AuthenticationError
+    );
+    assert!(!parsed.retryable);
+    let decision = availability_for(
+        &state,
+        "vibe",
+        Some("mistral-medium-3.5"),
+        Some("vibe-monthly"),
+        OffsetDateTime::now_utc(),
+    )
+    .unwrap();
+    assert!(!decision.eligible);
+    assert_eq!(decision.reason, Some(Reason::AuthenticationError));
+    assert_eq!(decision.unavailable_until, None);
 }
 
 #[test]

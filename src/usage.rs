@@ -4,6 +4,9 @@ use regex::Regex;
 use serde_json::Value;
 use std::process::Command;
 
+mod vibe;
+pub use vibe::parse_vibe_session_metadata;
+
 /// Parse generic usage text from backend output logs.
 /// Uses word boundaries to prevent matching partial words like "my_input_tokens_value".
 pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
@@ -175,59 +178,6 @@ pub fn parse_openhands_usage(text: &str) -> LedgerUsage {
         quota_used_percent: Some(bucket.used_percent),
         quota_remaining_percent: Some(bucket.remaining_percent),
         quota_reset_at: bucket.reset_at,
-        ..LedgerUsage::default()
-    }
-}
-
-/// Parse the durable metadata written by Mistral Vibe for a completed
-/// programmatic session. Vibe records cumulative prompt/completion tokens and
-/// the active model in `logs/session/<id>/meta.json`; the CLI's human-readable
-/// stdout does not reliably include those values.
-pub fn parse_vibe_session_metadata(metadata_json: &str) -> LedgerUsage {
-    let Ok(root) = serde_json::from_str::<Value>(metadata_json) else {
-        return LedgerUsage::default();
-    };
-    let stats = root.get("stats").unwrap_or(&Value::Null);
-    let input_tokens = stats.get("session_prompt_tokens").and_then(Value::as_u64);
-    let output_tokens = stats
-        .get("session_completion_tokens")
-        .and_then(Value::as_u64);
-    let total_tokens = match (input_tokens, output_tokens) {
-        (Some(input), Some(output)) => Some(input + output),
-        _ => stats
-            .get("session_total_llm_tokens")
-            .and_then(Value::as_u64),
-    };
-    let requests_count = stats.get("steps").and_then(Value::as_u64);
-    let actual_model = root
-        .get("config")
-        .and_then(|config| config.get("active_model"))
-        .and_then(Value::as_str)
-        .or_else(|| root.get("model").and_then(Value::as_str))
-        .map(str::to_string);
-    let observed_at = root
-        .get("end_time")
-        .and_then(Value::as_str)
-        .or_else(|| root.get("start_time").and_then(Value::as_str))
-        .map(str::to_string);
-
-    if input_tokens.is_none()
-        && output_tokens.is_none()
-        && total_tokens.is_none()
-        && requests_count.is_none()
-        && actual_model.is_none()
-    {
-        return LedgerUsage::default();
-    }
-
-    LedgerUsage {
-        usage_source: Some("vibe_session_metadata".to_string()),
-        actual_model,
-        observed_at,
-        input_tokens,
-        output_tokens,
-        total_tokens,
-        requests_count,
         ..LedgerUsage::default()
     }
 }
