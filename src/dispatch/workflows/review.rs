@@ -50,7 +50,7 @@ pub(in crate::dispatch) fn review(
         target.prior_state =
             lookup_review_state_by_branch(cfg, &args.profile, &target.source_branch);
     }
-    let diff_bundle = prepare_review_diff(repo, profile, &target)?;
+    let diff_bundle = prepare_review_diff(repo, profile, &mut target)?;
     let bundle = session_dir.join("review-bundle");
     fs::create_dir_all(&bundle)?;
     fs::write(bundle.join("diff.patch"), &diff_bundle.diff)?;

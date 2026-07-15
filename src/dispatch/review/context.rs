@@ -196,7 +196,7 @@ pub(in crate::dispatch) fn render_prior_ledger_state(entry: &LedgerEntry) -> Str
 pub(in crate::dispatch) fn prepare_review_diff(
     repo: &Path,
     _profile: &Profile,
-    target: &ReviewTarget,
+    target: &mut ReviewTarget,
 ) -> Result<ReviewDiffBundle> {
     worktree::git(&["fetch", "-q", "origin", "--prune"], repo)?;
     worktree::git(
@@ -226,6 +226,7 @@ pub(in crate::dispatch) fn prepare_review_diff(
 
     let target_ref = format!("origin/{}", target.target_branch);
     let source_ref = format!("origin/{}", target.source_branch);
+    capture_review_ref_shas(repo, target, &target_ref, &source_ref)?;
     let diff = worktree::git(&["diff", &format!("{target_ref}...{source_ref}")], repo)?;
     let files = worktree::git(
         &[
@@ -244,6 +245,22 @@ pub(in crate::dispatch) fn prepare_review_diff(
         ));
     }
     Ok(ReviewDiffBundle { diff, files })
+}
+
+fn capture_review_ref_shas(
+    repo: &Path,
+    target: &mut ReviewTarget,
+    target_ref: &str,
+    source_ref: &str,
+) -> Result<()> {
+    // Record the immutable commits from the exact refs used to construct the
+    // diff. Provider metadata is useful enrichment, but it must not be the
+    // authority here: provider CLIs expose different SHA fields (and older
+    // `gh` versions do not expose a base-ref OID at all). FixMr relies on the
+    // source SHA to prove that review findings still apply to the branch.
+    target.target_sha = Some(worktree::git(&["rev-parse", target_ref], repo)?);
+    target.source_sha = Some(worktree::git(&["rev-parse", source_ref], repo)?);
+    Ok(())
 }
 
 pub(in crate::dispatch) fn empty_review_diff_diagnostics(
@@ -295,4 +312,57 @@ pub(in crate::dispatch) struct ReviewTarget {
 pub(in crate::dispatch) struct ReviewDiffBundle {
     pub(in crate::dispatch) diff: String,
     pub(in crate::dispatch) files: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn review_shas_come_from_the_exact_fetched_diff_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::dispatch::test_util::init_repo(tmp.path());
+        let base = worktree::git(&["rev-parse", "HEAD"], tmp.path()).unwrap();
+        Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/main", &base])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+
+        std::fs::write(tmp.path().join("change.txt"), "review me\n").unwrap();
+        Command::new("git")
+            .args(["add", "change.txt"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "change"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        let source = worktree::git(&["rev-parse", "HEAD"], tmp.path()).unwrap();
+        Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/feature", &source])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+
+        let mut target = ReviewTarget {
+            mr_id: None,
+            mr_url: None,
+            mr_title: None,
+            mr_body: None,
+            ci_status: None,
+            source_sha: None,
+            target_sha: None,
+            source_branch: "feature".to_string(),
+            target_branch: "main".to_string(),
+            prior_state: None,
+        };
+        capture_review_ref_shas(tmp.path(), &mut target, "origin/main", "origin/feature").unwrap();
+
+        assert_eq!(target.target_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(target.source_sha.as_deref(), Some(source.as_str()));
+    }
 }
