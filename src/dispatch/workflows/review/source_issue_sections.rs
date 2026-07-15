@@ -177,11 +177,12 @@ fn section_entries_from_text(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        render_source_issue_contract, verified_post_budget_source_contract, IssueDetails,
+    use super::super::source_issue_context::{
+        render_source_issue_contract, verified_post_budget_source_contract,
     };
     use super::extract;
     use crate::context::{self, ContextConfig};
+    use crate::dispatch::issues::IssueDetails;
 
     #[test]
     fn extracts_sportsball_style_plain_sections() {
