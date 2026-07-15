@@ -78,7 +78,11 @@ pub(crate) fn improve(
     // swallowing it and dispatching an agent against garbage content --
     // `resolve_target_to_issue_or_string` already returns `Ok(None)`
     // cleanly for a target that isn't an issue reference at all.
-    let issue_details = resolve_target_to_issue_or_string(profile, &target)?;
+    let issue_details =
+        resolve_target_to_issue_or_string(profile, &target, args.issue_intake_override)?;
+    if issue_details.is_some() && args.issue_intake_override {
+        println!("Issue intake override enabled for explicit issue dispatch");
+    }
     let ticket_meta = if let Some(ref issue) = issue_details {
         Some(parse_ticket_metadata_from_issue(issue))
     } else {

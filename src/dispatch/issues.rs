@@ -11,12 +11,97 @@ pub(super) type TicketMetadata = WorkMetadata;
 
 /// Details about an issue fetched from GitHub/GitLab.
 #[derive(Debug, Clone)]
-pub(super) struct IssueDetails {
+pub(crate) struct IssueDetails {
     pub(super) number: String,
     pub(super) title: String,
     pub(super) body: String,
     pub(super) labels: Vec<String>,
     pub(super) state: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueAuthorKind {
+    Human,
+    Bot,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct IssueAuthorIdentity {
+    login: String,
+    kind: IssueAuthorKind,
+}
+
+#[derive(Debug, Clone)]
+struct IssueRecord {
+    details: IssueDetails,
+    author: Option<IssueAuthorIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IssueIntakeDiscovery {
+    pub(crate) allowed: Vec<IssueDetails>,
+    pub(crate) rejected: Vec<crate::models::IssueIntakeRejection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueDisposition {
+    OwnerDecision,
+    Blocked,
+    Planning,
+}
+
+impl IssueDisposition {
+    fn reason_code(self) -> &'static str {
+        match self {
+            Self::OwnerDecision => "owner_decision",
+            Self::Blocked => "blocked",
+            Self::Planning => "planning",
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::OwnerDecision => "owner-decision label present",
+            Self::Blocked => "blocked label present",
+            Self::Planning => "planning label present",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntakeRejection {
+    MissingAuthor,
+    MalformedAuthorIdentity,
+    UntrustedAuthor,
+    CanonicalLabelRequired,
+    Disposition(IssueDisposition),
+}
+
+impl IntakeRejection {
+    fn reason_code(self) -> &'static str {
+        match self {
+            Self::MissingAuthor => "missing_author",
+            Self::MalformedAuthorIdentity => "malformed_author_identity",
+            Self::UntrustedAuthor => "untrusted_author",
+            Self::CanonicalLabelRequired => "canonical_autonomous_label_required",
+            Self::Disposition(disposition) => disposition.reason_code(),
+        }
+    }
+
+    fn reason(self, canonical_label: &str) -> String {
+        match self {
+            Self::MissingAuthor => "author identity missing or unreadable".to_string(),
+            Self::MalformedAuthorIdentity => {
+                "provider returned a malformed author identity".to_string()
+            }
+            Self::UntrustedAuthor => "author is not trusted by this profile".to_string(),
+            Self::CanonicalLabelRequired => {
+                format!("missing canonical autonomous label '{canonical_label}'")
+            }
+            Self::Disposition(disposition) => disposition.reason().to_string(),
+        }
+    }
 }
 
 pub(super) fn ticket_number_prefix(work_id: &str) -> Option<&str> {
@@ -64,49 +149,181 @@ pub(super) fn extract_issue_number(s: &str) -> Option<String> {
     }
 }
 
+fn login_matches(login: &str, candidates: &[String]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(login))
+}
+
+fn issue_author_kind_to_str(kind: IssueAuthorKind) -> &'static str {
+    match kind {
+        IssueAuthorKind::Human => "human",
+        IssueAuthorKind::Bot => "bot",
+        IssueAuthorKind::Unknown => "unknown",
+    }
+}
+
+fn parse_github_author(response: &serde_json::Value) -> Option<IssueAuthorIdentity> {
+    let author = response.get("author")?;
+    let login = author.get("login")?.as_str()?.trim();
+    if login.is_empty() {
+        return None;
+    }
+    let kind = match (
+        author.get("is_bot").and_then(|value| value.as_bool()),
+        author.get("type").and_then(|value| value.as_str()),
+    ) {
+        (Some(true), _) | (_, Some("Bot")) => IssueAuthorKind::Bot,
+        (Some(false), _) | (_, Some("User")) | (_, Some("Organization")) => IssueAuthorKind::Human,
+        _ => IssueAuthorKind::Unknown,
+    };
+    Some(IssueAuthorIdentity {
+        login: login.to_string(),
+        kind,
+    })
+}
+
+fn parse_gitlab_author(response: &serde_json::Value) -> Option<IssueAuthorIdentity> {
+    let author = response.get("author")?;
+    let login = author
+        .get("username")
+        .and_then(|value| value.as_str())
+        .or_else(|| author.get("login").and_then(|value| value.as_str()))?
+        .trim();
+    if login.is_empty() {
+        return None;
+    }
+    let kind = match (
+        author.get("bot").and_then(|value| value.as_bool()),
+        author.get("is_bot").and_then(|value| value.as_bool()),
+    ) {
+        (Some(true), _) | (_, Some(true)) => IssueAuthorKind::Bot,
+        (Some(false), _) | (_, Some(false)) => IssueAuthorKind::Human,
+        _ => IssueAuthorKind::Unknown,
+    };
+    Some(IssueAuthorIdentity {
+        login: login.to_string(),
+        kind,
+    })
+}
+
+fn issue_author_is_trusted(profile: &Profile, author: &IssueAuthorIdentity) -> bool {
+    match author.kind {
+        IssueAuthorKind::Unknown => false,
+        IssueAuthorKind::Bot => profile
+            .publishing
+            .trusted_issue_bot_authors
+            .as_deref()
+            .is_some_and(|authors| login_matches(&author.login, authors)),
+        IssueAuthorKind::Human => {
+            if let Some(authors) = profile.publishing.trusted_issue_human_authors.as_deref() {
+                login_matches(&author.login, authors)
+            } else if let Some(allowlist) =
+                profile.publishing.github_issue_author_allowlist.as_deref()
+            {
+                login_matches(&author.login, allowlist)
+            } else if profile.provider.eq_ignore_ascii_case("github") {
+                profile
+                    .repo
+                    .split_once('/')
+                    .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(&author.login))
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn issue_disposition_from_labels(labels: &[String]) -> Option<IssueDisposition> {
+    for label in labels {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "executive:owner-decision" | "exec:owner-decision" => {
+                return Some(IssueDisposition::OwnerDecision)
+            }
+            "blocked" | "gah:blocked" => return Some(IssueDisposition::Blocked),
+            "planning" | "plan" => return Some(IssueDisposition::Planning),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn issue_is_canonical_autonomous(labels: &[String], canonical_label: &str) -> bool {
+    labels
+        .iter()
+        .any(|label| label.trim().eq_ignore_ascii_case(canonical_label.trim()))
+}
+
+fn evaluate_issue_intake(
+    profile: &Profile,
+    author: Option<&IssueAuthorIdentity>,
+    labels: &[String],
+    allow_label_override: bool,
+) -> Result<(), IntakeRejection> {
+    let Some(author) = author else {
+        return Err(IntakeRejection::MissingAuthor);
+    };
+    if author.kind == IssueAuthorKind::Unknown {
+        return Err(IntakeRejection::MalformedAuthorIdentity);
+    }
+    if !issue_author_is_trusted(profile, author) {
+        return Err(IntakeRejection::UntrustedAuthor);
+    }
+
+    if let Some(disposition) = issue_disposition_from_labels(labels) {
+        return Err(IntakeRejection::Disposition(disposition));
+    }
+
+    if matches!(
+        profile.publishing.issue_intake_mode,
+        crate::config::IssueIntakeMode::CanonicalAutonomousOnly
+    ) && !issue_is_canonical_autonomous(labels, &profile.publishing.canonical_autonomous_label)
+        && !allow_label_override
+    {
+        return Err(IntakeRejection::CanonicalLabelRequired);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
 pub(super) fn github_issue_author_is_allowed(
     profile: &Profile,
     response: &serde_json::Value,
 ) -> bool {
-    let Some(author) = response["author"]["login"].as_str() else {
+    let Some(author) = parse_github_author(response) else {
         return false;
     };
-    match profile.publishing.github_issue_author_allowlist.as_deref() {
-        Some(allowlist) => allowlist
-            .iter()
-            .any(|login| login.eq_ignore_ascii_case(author)),
-        None => profile
-            .repo
-            .split_once('/')
-            .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(author)),
-    }
+    issue_author_is_trusted(profile, &author)
 }
 
-fn fetch_github_issue(profile: &Profile, issue_number: &str) -> Result<IssueDetails> {
-    let out = provider_command("gh")
-        .arg("issue")
-        .arg("view")
-        .arg(issue_number)
-        .arg("--repo")
-        .arg(&profile.repo)
-        .arg("--json")
-        .arg("title,body,labels,author,state")
-        .output()
-        .context("gh issue view")?;
-
-    if !out.status.success() {
+fn issue_details_from_github_response(
+    profile: &Profile,
+    issue_number: &str,
+    resp: &serde_json::Value,
+    allow_label_override: bool,
+) -> Result<IssueDetails> {
+    let author = parse_github_author(resp);
+    if let Err(rejection) = evaluate_issue_intake(
+        profile,
+        author.as_ref(),
+        resp["labels"]
+            .as_array()
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(|label| label["name"].as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .as_slice(),
+        allow_label_override,
+    ) {
         anyhow::bail!(
-            "gh issue view failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-
-    let resp: serde_json::Value =
-        serde_json::from_slice(&out.stdout).context("parsing GitHub issue response")?;
-    if !github_issue_author_is_allowed(profile, &resp) {
-        anyhow::bail!(
-            "GitHub issue #{} author is not allowed by this profile's github_issue_author_allowlist",
-            issue_number
+            "GitHub issue #{} rejected for intake: {} ({})",
+            issue_number,
+            rejection.reason(&profile.publishing.canonical_autonomous_label),
+            rejection.reason_code()
         );
     }
 
@@ -145,27 +362,35 @@ fn fetch_github_issue(profile: &Profile, issue_number: &str) -> Result<IssueDeta
     })
 }
 
-fn fetch_gitlab_issue(profile: &Profile, issue_number: &str) -> Result<IssueDetails> {
-    let out = provider_command("glab")
-        .arg("issue")
-        .arg("view")
-        .arg(issue_number)
-        .arg("--repo")
-        .arg(&profile.repo)
-        .arg("-F")
-        .arg("json")
-        .output()
-        .context("glab issue view")?;
-
-    if !out.status.success() {
+fn issue_details_from_gitlab_response(
+    profile: &Profile,
+    issue_number: &str,
+    resp: &serde_json::Value,
+    allow_label_override: bool,
+) -> Result<IssueDetails> {
+    let author = parse_gitlab_author(resp);
+    if let Err(rejection) = evaluate_issue_intake(
+        profile,
+        author.as_ref(),
+        resp["labels"]
+            .as_array()
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(|label| label.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .as_slice(),
+        allow_label_override,
+    ) {
         anyhow::bail!(
-            "glab issue view failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "GitLab issue #{} rejected for intake: {} ({})",
+            issue_number,
+            rejection.reason(&profile.publishing.canonical_autonomous_label),
+            rejection.reason_code()
         );
     }
-
-    let resp: serde_json::Value =
-        serde_json::from_slice(&out.stdout).context("parsing GitLab issue response")?;
 
     let number = resp["iid"]
         .as_i64()
@@ -202,7 +427,142 @@ fn fetch_gitlab_issue(profile: &Profile, issue_number: &str) -> Result<IssueDeta
     })
 }
 
-fn list_open_github_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
+fn fetch_github_issue(
+    profile: &Profile,
+    issue_number: &str,
+    allow_label_override: bool,
+) -> Result<IssueDetails> {
+    let out = provider_command("gh")
+        .arg("issue")
+        .arg("view")
+        .arg(issue_number)
+        .arg("--repo")
+        .arg(&profile.repo)
+        .arg("--json")
+        .arg("title,body,labels,author,state")
+        .output()
+        .context("gh issue view")?;
+
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh issue view failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    let resp: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("parsing GitHub issue response")?;
+    issue_details_from_github_response(profile, issue_number, &resp, allow_label_override)
+}
+
+fn fetch_gitlab_issue(
+    profile: &Profile,
+    issue_number: &str,
+    allow_label_override: bool,
+) -> Result<IssueDetails> {
+    let out = provider_command("glab")
+        .arg("issue")
+        .arg("view")
+        .arg(issue_number)
+        .arg("--repo")
+        .arg(&profile.repo)
+        .arg("-F")
+        .arg("json")
+        .output()
+        .context("glab issue view")?;
+
+    if !out.status.success() {
+        anyhow::bail!(
+            "glab issue view failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    let resp: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("parsing GitLab issue response")?;
+    issue_details_from_gitlab_response(profile, issue_number, &resp, allow_label_override)
+}
+
+fn issue_record_from_github_value(resp: &serde_json::Value) -> IssueRecord {
+    let number = resp["number"]
+        .as_i64()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    let title = resp["title"].as_str().unwrap_or_default().to_string();
+    let body = resp["body"].as_str().unwrap_or_default().to_string();
+    let labels = resp["labels"]
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label["name"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let state = resp["state"].as_str().map(str::to_string);
+    IssueRecord {
+        details: IssueDetails {
+            number,
+            title,
+            body,
+            labels,
+            state,
+        },
+        author: parse_github_author(resp),
+    }
+}
+
+fn issue_record_from_gitlab_value(resp: &serde_json::Value) -> IssueRecord {
+    let number = resp["iid"]
+        .as_i64()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    let title = resp["title"].as_str().unwrap_or_default().to_string();
+    let body = resp["description"].as_str().unwrap_or_default().to_string();
+    let labels = resp["labels"]
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| label.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let state = resp["state"].as_str().map(str::to_string);
+    IssueRecord {
+        details: IssueDetails {
+            number,
+            title,
+            body,
+            labels,
+            state,
+        },
+        author: parse_gitlab_author(resp),
+    }
+}
+
+fn issue_rejection_snapshot(
+    profile: &Profile,
+    record: &IssueRecord,
+    rejection: IntakeRejection,
+) -> crate::models::IssueIntakeRejection {
+    crate::models::IssueIntakeRejection {
+        ticket_path: record.details.number.clone(),
+        work_id: Some(format!("#{}", record.details.number)),
+        title: Some(record.details.title.clone()),
+        provider: profile.provider.clone(),
+        author_login: record.author.as_ref().map(|author| author.login.clone()),
+        author_kind: record
+            .author
+            .as_ref()
+            .map(|author| issue_author_kind_to_str(author.kind).to_string()),
+        reason_code: rejection.reason_code().to_string(),
+        reason: rejection.reason(&profile.publishing.canonical_autonomous_label),
+        labels: record.details.labels.clone(),
+    }
+}
+
+fn discover_open_github_issues(profile: &Profile) -> Result<IssueIntakeDiscovery> {
     let out = provider_command("gh")
         .arg("issue")
         .arg("list")
@@ -226,41 +586,28 @@ fn list_open_github_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
 
     let items: Vec<serde_json::Value> =
         serde_json::from_slice(&out.stdout).context("parsing GitHub issue list response")?;
+    let mut allowed = Vec::new();
+    let mut rejected = Vec::new();
+    for resp in items {
+        let record = issue_record_from_github_value(&resp);
+        match evaluate_issue_intake(
+            profile,
+            record.author.as_ref(),
+            &record.details.labels,
+            false,
+        ) {
+            Ok(()) => allowed.push(record.details),
+            Err(rejection) => rejected.push(issue_rejection_snapshot(profile, &record, rejection)),
+        }
+    }
 
-    Ok(items
-        .into_iter()
-        .filter(|resp| github_issue_author_is_allowed(profile, resp))
-        .map(|resp| {
-            let number = resp["number"]
-                .as_i64()
-                .map(|n| n.to_string())
-                .unwrap_or_default();
-            let title = resp["title"].as_str().unwrap_or_default().to_string();
-            let body = resp["body"].as_str().unwrap_or_default().to_string();
-            let labels = resp["labels"]
-                .as_array()
-                .map(|labels| {
-                    labels
-                        .iter()
-                        .filter_map(|label| label["name"].as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let state = resp["state"].as_str().map(str::to_string);
-            IssueDetails {
-                number,
-                title,
-                body,
-                labels,
-                state,
-            }
-        })
-        .collect())
+    Ok(IssueIntakeDiscovery { allowed, rejected })
 }
 
-fn list_open_gitlab_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
+fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery> {
     const PAGE_SIZE: usize = 100;
-    let mut all = Vec::new();
+    let mut allowed = Vec::new();
+    let mut rejected = Vec::new();
     let mut page = 1;
     loop {
         let out = provider_command("glab")
@@ -289,29 +636,18 @@ fn list_open_gitlab_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
         let count = items.len();
 
         for resp in items {
-            let number = resp["iid"]
-                .as_i64()
-                .map(|n| n.to_string())
-                .unwrap_or_default();
-            let title = resp["title"].as_str().unwrap_or_default().to_string();
-            let body = resp["description"].as_str().unwrap_or_default().to_string();
-            let labels = resp["labels"]
-                .as_array()
-                .map(|labels| {
-                    labels
-                        .iter()
-                        .filter_map(|label| label.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let state = resp["state"].as_str().map(str::to_string);
-            all.push(IssueDetails {
-                number,
-                title,
-                body,
-                labels,
-                state,
-            });
+            let record = issue_record_from_gitlab_value(&resp);
+            match evaluate_issue_intake(
+                profile,
+                record.author.as_ref(),
+                &record.details.labels,
+                false,
+            ) {
+                Ok(()) => allowed.push(record.details),
+                Err(rejection) => {
+                    rejected.push(issue_rejection_snapshot(profile, &record, rejection))
+                }
+            }
         }
 
         if count < PAGE_SIZE {
@@ -319,22 +655,51 @@ fn list_open_gitlab_issues(profile: &Profile) -> Result<Vec<IssueDetails>> {
         }
         page += 1;
     }
-    Ok(all)
+    Ok(IssueIntakeDiscovery { allowed, rejected })
 }
 
 pub(super) fn list_open_issues(profile: &Profile) -> Vec<IssueDetails> {
     let result = match profile.provider_cli() {
-        Some("gh") => list_open_github_issues(profile),
-        Some("glab") => list_open_gitlab_issues(profile),
+        Some("gh") => discover_open_github_issues(profile),
+        Some("glab") => discover_open_gitlab_issues(profile),
         _ => return vec![],
     };
-    result.unwrap_or_else(|e| {
-        eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
-        vec![]
-    })
+    result
+        .map(|discovery| discovery.allowed)
+        .unwrap_or_else(|e| {
+            eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
+            vec![]
+        })
 }
 
-pub(super) fn fetch_issue_details(profile: &Profile, issue_number: &str) -> Result<IssueDetails> {
+pub(crate) fn discover_open_issues(profile: &Profile) -> IssueIntakeDiscovery {
+    match profile.provider_cli() {
+        Some("gh") => discover_open_github_issues(profile).unwrap_or_else(|e| {
+            eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
+            IssueIntakeDiscovery {
+                allowed: vec![],
+                rejected: vec![],
+            }
+        }),
+        Some("glab") => discover_open_gitlab_issues(profile).unwrap_or_else(|e| {
+            eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
+            IssueIntakeDiscovery {
+                allowed: vec![],
+                rejected: vec![],
+            }
+        }),
+        _ => IssueIntakeDiscovery {
+            allowed: vec![],
+            rejected: vec![],
+        },
+    }
+}
+
+pub(super) fn fetch_issue_details(
+    profile: &Profile,
+    issue_number: &str,
+    allow_label_override: bool,
+) -> Result<IssueDetails> {
     let cli = profile.provider_cli().ok_or_else(|| {
         anyhow::anyhow!(
             "provider '{}' does not support issue fetching",
@@ -343,8 +708,8 @@ pub(super) fn fetch_issue_details(profile: &Profile, issue_number: &str) -> Resu
     })?;
 
     match cli {
-        "gh" => fetch_github_issue(profile, issue_number),
-        "glab" => fetch_gitlab_issue(profile, issue_number),
+        "gh" => fetch_github_issue(profile, issue_number, allow_label_override),
+        "glab" => fetch_gitlab_issue(profile, issue_number, allow_label_override),
         other => anyhow::bail!("unsupported provider CLI: {}", other),
     }
 }
@@ -694,615 +1059,19 @@ pub(super) fn issue_is_auto_dispatch_blocked(labels: &[String]) -> bool {
 pub(super) fn resolve_target_to_issue_or_string(
     profile: &Profile,
     target: &str,
+    allow_label_override: bool,
 ) -> Result<Option<IssueDetails>> {
     if is_issue_number_reference(target) {
         if let Some(issue_number) = extract_issue_number(target) {
-            return Ok(Some(fetch_issue_details(profile, &issue_number)?));
+            return Ok(Some(fetch_issue_details(
+                profile,
+                &issue_number,
+                allow_label_override,
+            )?));
         }
     }
     Ok(None)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::{Defaults, GahConfig, Profile, RoutingPolicy};
-    use crate::dispatch::scan_available_tickets;
-    use crate::ledger;
-    use crate::test_support::{ExecGuard, PathGuard};
-    use std::collections::HashMap;
-    use std::fs;
-    use std::path::Path;
-
-    fn profile(local_path: &Path) -> Profile {
-        Profile {
-            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
-            display_name: "Repo".into(),
-            repo_id: "repo".into(),
-            provider: "github".into(),
-            repo: "owner/repo".into(),
-            local_path: local_path.display().to_string(),
-            artifact_root: "/tmp/artifacts".into(),
-            default_target_branch: "main".into(),
-            provider_api_base: None,
-            provider_project_id: None,
-            oh_profile: None,
-            openhands_args: vec![],
-            codex_args: vec![],
-            codex_path: None,
-            claude_args: vec![],
-            claude_path: None,
-            agy_path: None,
-            vibe_args: vec![],
-            vibe_path: None,
-            opencode_args: vec![],
-            opencode_path: None,
-            agy_second_home: None,
-            agy_print_timeout_seconds: HashMap::new(),
-            agy_idle_timeout_seconds: None,
-            opencode_idle_timeout_seconds: None,
-            opencode_idle_timeout_seconds_by_model: HashMap::new(),
-            max_concurrent_per_model: HashMap::new(),
-            openhands_idle_timeout_seconds: None,
-            vibe_idle_timeout_seconds: None,
-            codex_idle_timeout_seconds: None,
-            claude_idle_timeout_seconds: None,
-            max_parallel_workers: None,
-            policy_path: None,
-            env_file: None,
-            env_file_prod: None,
-            validation_commands: vec![],
-            auto_fix_commands: vec![],
-            test_file_patterns: vec![],
-            known_baseline_failure_markers: vec![],
-            model_improve: None,
-            model_pm: None,
-            model_review: None,
-            review_timeout_seconds: None,
-            validation_timeout_seconds: None,
-            notify_command: None,
-            routing: RoutingPolicy::default(),
-            pacing: Default::default(),
-            publishing: Default::default(),
-            prune_older_than_days: None,
-        }
-    }
-
-    fn ticket_cfg(root: &Path) -> GahConfig {
-        GahConfig {
-            context: Default::default(),
-            defaults: Defaults {
-                current_manager: None,
-                artifact_root: root.to_string_lossy().into_owned(),
-                worktree_base: root.to_string_lossy().into_owned(),
-                llm_base_url: String::new(),
-                llm_model_local: String::new(),
-                llm_model_cloud: String::new(),
-                routing: RoutingPolicy::default(),
-            },
-            profiles: HashMap::new(),
-        }
-    }
-
-    #[test]
-    fn parses_ticket_metadata_for_routing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ticket = tmp.path().join("TICKET-058-descriptive-mr-titles.md");
-        fs::write(
-            &ticket,
-            "# TICKET-058: Descriptive MR Titles\n\nDifficulty: hard\nRisk: high\nRecommended backend: codex\nRecommended model: gpt-x\n\n## Affected Files\n- src/auth.rs\n\n## Verification Commands\n- `pytest tests/test_auth.py -x`\n",
-        )
-        .unwrap();
-        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
-        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-058"));
-        assert_eq!(meta.title.as_deref(), Some("Descriptive MR Titles"));
-        assert_eq!(meta.recommended_backend.as_deref(), Some("codex"));
-        assert_eq!(meta.recommended_model.as_deref(), Some("gpt-x"));
-        assert_eq!(meta.difficulty.as_deref(), Some("hard"));
-        assert_eq!(meta.risk.as_deref(), Some("high"));
-        assert_eq!(
-            meta.verification_commands,
-            vec!["pytest tests/test_auth.py -x"]
-        );
-    }
-
-    #[test]
-    fn parses_structured_ticket_sections_into_typed_metadata() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ticket = tmp.path().join("TICKET-092-structured-work-metadata.md");
-        fs::write(
-            &ticket,
-            "# TICKET-092: Structured work metadata\n\n\
-Goal: Represent task metadata as typed structured fields rather than prompt parsing.\n\n\
-Difficulty: medium\n\
-Risk: medium\n\
-Recommended backend: codex\n\
-Recommended model: gpt-5.4\n\
-Source: docs/tickets/TICKET-092-structured-work-metadata.md\n\n\
-## Problem\n\
-The parser should retain structured sections.\n\n\
-## Acceptance Criteria\n\
-- Define a single structured metadata type\n\
-- Missing fields handled explicitly\n\n\
-## Constraints\n\
-- Do not require a new file format\n\
-- No database\n\n\
-## Affected Files\n\
-- src/dispatch.rs\n\
-- src/models.rs\n\n\
-## Verification Commands\n\
-- `cargo fmt --check`\n\
-- `cargo test`\n",
-        )
-        .unwrap();
-
-        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
-        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-092"));
-        assert_eq!(meta.work_id.as_deref(), Some("TICKET-092"));
-        assert_eq!(meta.summary.as_deref(), Some("Structured work metadata"));
-        assert_eq!(
-            meta.problem.as_deref(),
-            Some("The parser should retain structured sections.")
-        );
-        assert_eq!(
-            meta.acceptance_criteria,
-            vec![
-                "Define a single structured metadata type",
-                "Missing fields handled explicitly"
-            ]
-        );
-        assert_eq!(
-            meta.constraints,
-            vec!["Do not require a new file format", "No database"]
-        );
-        assert_eq!(
-            meta.affected_files,
-            vec!["src/dispatch.rs", "src/models.rs"]
-        );
-        assert_eq!(
-            meta.verification_commands,
-            vec!["cargo fmt --check", "cargo test"]
-        );
-        assert_eq!(
-            meta.source.as_deref(),
-            Some("docs/tickets/TICKET-092-structured-work-metadata.md")
-        );
-    }
-
-    #[test]
-    fn parses_ticket_metadata_preserves_colons_in_normal_headings() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ticket = tmp.path().join("TICKET-104-auth-hardening.md");
-        fs::write(
-            &ticket,
-            "# Auth: reject empty token\n\nDifficulty: medium\nRisk: low\n",
-        )
-        .unwrap();
-
-        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
-        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-104"));
-        assert_eq!(meta.title.as_deref(), Some("Auth: reject empty token"));
-    }
-
-    #[test]
-    fn parses_ticket_metadata_strips_ticket_prefix_from_heading_title() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ticket = tmp.path().join("TICKET-105-heading-title.md");
-        fs::write(&ticket, "# TICKET-105: Keep title intact\n").unwrap();
-
-        let meta = parse_ticket_metadata(&ticket).unwrap().unwrap();
-        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-105"));
-        assert_eq!(meta.title.as_deref(), Some("Keep title intact"));
-    }
-
-    #[test]
-    fn parse_ticket_metadata_ignores_incidental_manager_memory_prose_mentions() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path();
-        let tickets_dir = repo.join("docs/tickets");
-        fs::create_dir_all(&tickets_dir).unwrap();
-
-        fs::write(
-            repo.join("docs/MANAGER_MEMORY.md"),
-            "- **TICKET-114 is a serving-integrity control**\n\
-             - **TICKET-110 before TICKET-112**\n",
-        )
-        .unwrap();
-
-        let ticket_path = tickets_dir.join("TICKET-114-artifact-load-integrity.md");
-        fs::write(
-            &ticket_path,
-            "# TICKET-114 — Artifact load integrity verification\n\nGoal: test\n",
-        )
-        .unwrap();
-
-        let meta = parse_ticket_metadata(&ticket_path).unwrap().unwrap();
-        assert_eq!(meta.ticket_id.as_deref(), Some("TICKET-114"));
-        assert_eq!(meta.work_id.as_deref(), Some("TICKET-114"));
-        assert!(meta.is_authoritative);
-    }
-
-    #[test]
-    fn is_issue_number_reference_recognizes_plain_numbers() {
-        assert!(is_issue_number_reference("42"));
-        assert!(is_issue_number_reference("123"));
-        assert!(!is_issue_number_reference("abc"));
-        assert!(!is_issue_number_reference(""));
-        assert!(!is_issue_number_reference("42abc"));
-    }
-
-    #[test]
-    fn is_issue_number_reference_recognizes_hash_numbers() {
-        assert!(is_issue_number_reference("#42"));
-        assert!(is_issue_number_reference("#123"));
-        assert!(!is_issue_number_reference("#"));
-        assert!(!is_issue_number_reference("#abc"));
-        assert!(is_issue_number_reference(" #42 "));
-    }
-
-    #[test]
-    fn extract_issue_number_from_plain_number() {
-        assert_eq!(extract_issue_number("42"), Some("42".to_string()));
-        assert_eq!(extract_issue_number("123"), Some("123".to_string()));
-        assert_eq!(extract_issue_number("abc"), None);
-        assert_eq!(extract_issue_number(""), None);
-    }
-
-    #[test]
-    fn extract_issue_number_from_hash_number() {
-        assert_eq!(extract_issue_number("#42"), Some("42".to_string()));
-        assert_eq!(extract_issue_number("#123"), Some("123".to_string()));
-        assert_eq!(extract_issue_number("#"), None);
-        assert_eq!(extract_issue_number("#abc"), None);
-    }
-
-    #[test]
-    fn parse_ticket_metadata_from_issue_extracts_basic_fields() {
-        let issue = IssueDetails {
-            number: "42".to_string(),
-            title: "TICKET-42: Fix the bug".to_string(),
-            body:
-                "## Problem\n\nSomething is broken\n\n## Acceptance Criteria\n\n- Fix the issue\n- Add tests"
-                    .to_string(),
-            labels: vec!["bug".to_string()],
-            state: None,
-        };
-
-        let meta = parse_ticket_metadata_from_issue(&issue);
-        assert_eq!(meta.ticket_id.as_deref(), Some("#42"));
-        assert_eq!(meta.work_id.as_deref(), Some("#42"));
-        assert_eq!(meta.issue_number.as_deref(), Some("42"));
-        assert_eq!(meta.title.as_deref(), Some("Fix the bug"));
-        assert!(meta.is_authoritative);
-        assert!(meta
-            .acceptance_criteria
-            .contains(&"Fix the issue".to_string()));
-        assert!(meta.acceptance_criteria.contains(&"Add tests".to_string()));
-    }
-
-    #[test]
-    fn parse_ticket_metadata_from_issue_handles_metadata_fields() {
-        let issue = IssueDetails {
-            number: "42".to_string(),
-            title: "Test Issue".to_string(),
-            body: "Difficulty: High\nRisk: Medium\nRecommended backend: agy\nWork ID: TICKET-999\nGoal: Fix everything"
-                .to_string(),
-            labels: vec![],
-            state: None,
-        };
-
-        let meta = parse_ticket_metadata_from_issue(&issue);
-        assert_eq!(meta.difficulty.as_deref(), Some("High"));
-        assert_eq!(meta.risk.as_deref(), Some("Medium"));
-        assert_eq!(meta.recommended_backend.as_deref(), Some("agy"));
-        assert_eq!(meta.goal.as_deref(), Some("Fix everything"));
-        assert_eq!(meta.work_id.as_deref(), Some("#42"));
-    }
-
-    #[test]
-    fn parse_ticket_metadata_from_issue_folds_scope_and_invariants_378_style() {
-        // Issue #405 / #378: `Scope` and `Invariants` headings were silently
-        // dropped because only `Problem`/`Goal` and `Constraints` were
-        // recognized.
-        let issue = IssueDetails {
-            number: "378".to_string(),
-            title: "TICKET-378: Fix drift detection".to_string(),
-            body: "## Scope\n\nDetect config drift across restarts\n\n\
-                   ## Invariants\n\n- Never silently disable classification\n\
-                   - Must fail closed on parse errors"
-                .to_string(),
-            labels: vec![],
-            state: None,
-        };
-
-        let meta = parse_ticket_metadata_from_issue(&issue);
-        assert_eq!(
-            meta.problem.as_deref(),
-            Some("Detect config drift across restarts")
-        );
-        assert!(meta
-            .constraints
-            .contains(&"Never silently disable classification".to_string()));
-        assert!(meta
-            .constraints
-            .contains(&"Must fail closed on parse errors".to_string()));
-    }
-
-    #[test]
-    fn parse_ticket_metadata_from_issue_folds_required_behavior_384_style() {
-        // Issue #405 / #384: `Required Behavior` was silently dropped.
-        let issue = IssueDetails {
-            number: "384".to_string(),
-            title: "TICKET-384: Eligibility gating".to_string(),
-            body: "## Problem\n\nBad-ROI markets keep dispatching\n\n\
-                   ## Required Behavior\n\n- Gate markets below the ROI floor\n\
-                   - Preserve existing eligible markets"
-                .to_string(),
-            labels: vec![],
-            state: None,
-        };
-
-        let meta = parse_ticket_metadata_from_issue(&issue);
-        assert_eq!(
-            meta.problem.as_deref(),
-            Some("Bad-ROI markets keep dispatching")
-        );
-        assert!(meta
-            .constraints
-            .contains(&"Gate markets below the ROI floor".to_string()));
-        assert!(meta
-            .constraints
-            .contains(&"Preserve existing eligible markets".to_string()));
-    }
-
-    #[test]
-    fn parse_ticket_metadata_from_issue_scope_never_overrides_explicit_problem() {
-        let issue = IssueDetails {
-            number: "1".to_string(),
-            title: "Test".to_string(),
-            body: "## Problem\n\nThe real problem\n\n## Scope\n\nA scope note".to_string(),
-            labels: vec![],
-            state: None,
-        };
-
-        let meta = parse_ticket_metadata_from_issue(&issue);
-        assert_eq!(meta.problem.as_deref(), Some("The real problem"));
-    }
-
-    #[test]
-    fn parse_ticket_metadata_from_issue_scope_never_overrides_explicit_goal() {
-        let issue = IssueDetails {
-            number: "1".to_string(),
-            title: "Test".to_string(),
-            body: "## Goal\n\nShip the feature\n\n## Scope\n\nA scope note".to_string(),
-            labels: vec![],
-            state: None,
-        };
-
-        let meta = parse_ticket_metadata_from_issue(&issue);
-        assert_eq!(meta.problem, None);
-        assert_eq!(meta.goal.as_deref(), Some("Ship the feature"));
-    }
-
-    #[test]
-    fn parse_ticket_metadata_from_issue_folds_prose_invariants_as_single_constraint() {
-        // Not every Invariants/Required Behavior section is a bullet list --
-        // prose content must not be silently dropped either.
-        let issue = IssueDetails {
-            number: "1".to_string(),
-            title: "Test".to_string(),
-            body:
-                "## Problem\n\nSomething\n\n## Invariants\n\nMust remain fail-closed at all times."
-                    .to_string(),
-            labels: vec![],
-            state: None,
-        };
-
-        let meta = parse_ticket_metadata_from_issue(&issue);
-        assert!(meta
-            .constraints
-            .contains(&"Must remain fail-closed at all times.".to_string()));
-    }
-
-    #[test]
-    fn github_issue_intake_author_allowlist_is_fail_closed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut prof = profile(tmp.path());
-        prof.repo = "Kh1ng/git-agent-harness".into();
-        let owner = serde_json::json!({"author": {"login": "kh1ng"}});
-        let outsider = serde_json::json!({"author": {"login": "untrusted"}});
-        let missing = serde_json::json!({});
-
-        assert!(github_issue_author_is_allowed(&prof, &owner));
-        assert!(!github_issue_author_is_allowed(&prof, &outsider));
-        assert!(!github_issue_author_is_allowed(&prof, &missing));
-
-        prof.publishing.github_issue_author_allowlist = Some(vec!["teammate".into()]);
-        let teammate = serde_json::json!({"author": {"login": "TEAMMATE"}});
-        assert!(github_issue_author_is_allowed(&prof, &teammate));
-        assert!(!github_issue_author_is_allowed(&prof, &owner));
-
-        prof.publishing.github_issue_author_allowlist = Some(vec![]);
-        assert!(!github_issue_author_is_allowed(&prof, &teammate));
-    }
-
-    #[test]
-    fn scan_available_tickets_includes_open_github_issues() {
-        let _exec_guard = ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-
-        let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\nRecommended model: Gemini 3.5 Flash (Medium)\n","labels":[],"author":{"login":"owner"}}]"#;
-        let gh_path = bin_dir.join("gh");
-        fs::write(
-            &gh_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&gh_path, perms).unwrap();
-        }
-        let _guard = PathGuard::set(&bin_dir);
-
-        let cfg = ticket_cfg(tmp.path());
-        let mut prof = profile(tmp.path());
-        prof.local_path = tmp.path().display().to_string();
-        prof.provider = "github".to_string();
-        prof.repo = "owner/repo".to_string();
-
-        let candidates = scan_available_tickets(
-            &prof,
-            &[],
-            &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
-        );
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].ticket_path, "118");
-        assert_eq!(candidates[0].work_id.as_deref(), Some("#118"));
-        assert_eq!(candidates[0].recommended_backend.as_deref(), Some("agy"));
-        assert_eq!(candidates[0].prior_attempt_count, 0);
-        assert!(!candidates[0].has_active_mr);
-    }
-
-    #[test]
-    fn scan_available_tickets_uses_native_identity_for_gitlab_issues() {
-        let _exec_guard = ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let issue_json = r#"[{"iid":77,"title":"TICKET-9: Legacy title must not become identity","description":"Work ID: TICKET-9\nRecommended backend: codex","labels":[],"state":"opened"}]"#;
-        let glab_path = bin_dir.join("glab");
-        fs::write(
-            &glab_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&glab_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&glab_path, perms).unwrap();
-        }
-        let _guard = PathGuard::set(&bin_dir);
-
-        let cfg = ticket_cfg(tmp.path());
-        let mut prof = profile(tmp.path());
-        prof.local_path = tmp.path().display().to_string();
-        prof.provider = "gitlab".to_string();
-        prof.repo = "group/project".to_string();
-
-        let candidates = scan_available_tickets(
-            &prof,
-            &[],
-            &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
-        );
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].ticket_path, "77");
-        assert_eq!(candidates[0].work_id.as_deref(), Some("#77"));
-        assert_eq!(
-            candidates[0].title.as_deref(),
-            Some("Legacy title must not become identity")
-        );
-    }
-
-    #[test]
-    fn scan_available_tickets_excludes_owner_decision_github_issues() {
-        let _exec_guard = ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let issue_json = r#"[{"number":92,"title":"MS-5: Fleet ledger","body":"","labels":[{"name":"EXEC:OWNER-DECISION"}],"author":{"login":"owner"}}]"#;
-        let gh_path = bin_dir.join("gh");
-        fs::write(
-            &gh_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&gh_path, perms).unwrap();
-        }
-        let _guard = PathGuard::set(&bin_dir);
-        let cfg = ticket_cfg(tmp.path());
-        let mut prof = profile(tmp.path());
-        prof.local_path = tmp.path().display().to_string();
-        prof.provider = "github".to_string();
-        prof.repo = "owner/repo".to_string();
-
-        let candidates = scan_available_tickets(
-            &prof,
-            &[],
-            &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
-        );
-
-        assert!(candidates.is_empty());
-    }
-
-    #[test]
-    fn scan_available_tickets_excludes_issue_already_archived_locally() {
-        let _exec_guard = ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-
-        let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\n","labels":[],"author":{"login":"owner"}}]"#;
-        let gh_path = bin_dir.join("gh");
-        fs::write(
-            &gh_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&gh_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&gh_path, perms).unwrap();
-        }
-        let _guard = PathGuard::set(&bin_dir);
-
-        let closed_dir = tmp.path().join("docs/tickets/closed");
-        fs::create_dir_all(&closed_dir).unwrap();
-        fs::write(
-            closed_dir.join("TICKET-101-fail-closed-version-drift.md"),
-            "# TICKET-101: Fail closed\n\nGoal: test\n",
-        )
-        .unwrap();
-
-        let cfg = ticket_cfg(tmp.path());
-        let mut prof = profile(tmp.path());
-        prof.local_path = tmp.path().display().to_string();
-        prof.provider = "github".to_string();
-        prof.repo = "owner/repo".to_string();
-
-        let candidates = scan_available_tickets(
-            &prof,
-            &[],
-            &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
-        );
-        assert!(
-            candidates.is_empty(),
-            "expected locally-archived TICKET-101 issue to be excluded, got {candidates:?}"
-        );
-    }
-}
+mod tests;

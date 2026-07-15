@@ -236,6 +236,32 @@ pub fn build_snapshot(
             max_fix_attempts_per_mr: resolved_routing.max_fix_attempts_per_mr(),
             max_implementation_failures_per_ticket: resolved_routing
                 .max_implementation_failures_per_ticket(),
+            issue_intake_policy: crate::models::IssueIntakePolicy {
+                mode: profile.publishing.issue_intake_mode.as_str().to_string(),
+                canonical_autonomous_label: profile.publishing.canonical_autonomous_label.clone(),
+                trusted_human_authors: profile
+                    .publishing
+                    .trusted_issue_human_authors
+                    .clone()
+                    .or_else(|| profile.publishing.github_issue_author_allowlist.clone())
+                    .unwrap_or_else(|| {
+                        profile
+                            .repo
+                            .split_once('/')
+                            .map(|(owner, _)| vec![owner.to_string()])
+                            .unwrap_or_default()
+                    }),
+                trusted_bot_authors: profile
+                    .publishing
+                    .trusted_issue_bot_authors
+                    .clone()
+                    .unwrap_or_default(),
+                github_issue_author_allowlist: profile
+                    .publishing
+                    .github_issue_author_allowlist
+                    .clone()
+                    .unwrap_or_default(),
+            },
         },
         since: since.to_string(),
         usage,
