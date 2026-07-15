@@ -81,6 +81,13 @@ pub struct ParsedFailure {
 /// harmful (hammering an exhausted account).
 const CONSERVATIVE_RATE_LIMIT_COOLDOWN_SECONDS: u64 = 60;
 
+/// A bounded, model-specific cooldown recorded when a backend reports a
+/// context-window/context-length exhaustion. Unlike quota/auth exhaustion it
+/// is NOT an account- or pool-wide condition, and it must never be permanent:
+/// a single oversized task must not take the model (or, via a shared
+/// quota_pool, every candidate) out of rotation indefinitely.
+const CONTEXT_LIMIT_COOLDOWN_SECONDS: u64 = 600;
+
 fn transient_not_usage_limit_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)not your usage limit").unwrap())
@@ -367,7 +374,7 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
             kind: FailureKind::ContextLimitExceeded,
             retryable: false,
             reset_at: None,
-            retry_after_seconds: None,
+            retry_after_seconds: Some(CONTEXT_LIMIT_COOLDOWN_SECONDS),
             confidence: Confidence::High,
             matched_evidence: extract_evidence_line(text, m.start(), m.end()),
             unresolved_timezone: None,
@@ -543,6 +550,11 @@ mod tests {
         assert_eq!(parsed.confidence, Confidence::High);
         assert!(!parsed.retryable);
         assert_eq!(parsed.reset_at, None);
+        assert_eq!(
+            parsed.retry_after_seconds,
+            Some(CONTEXT_LIMIT_COOLDOWN_SECONDS),
+            "context limit must have a bounded cooldown to avoid permanent backend disablement"
+        );
     }
 
     // ── Claude: explicit IANA timezone (anthropics/claude-code #9236) ──────
