@@ -135,8 +135,14 @@ fn wait_with_timeout_for(mut child: Child, context: &str, timeout: Duration) -> 
 }
 
 fn fetch_origin(repo: &Path) -> Result<()> {
-    let git_dir = repo.join(".git");
-    let lock_path = git_dir.join("gah-fetch.lock");
+    // `.git` is a file in a linked worktree, not a directory. Resolve the
+    // shared common Git directory so every checkout of the same repository
+    // serializes fetches on one lock and linked-worktree profiles work too.
+    let git_common_dir = PathBuf::from(git(
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        repo,
+    )?);
+    let lock_path = git_common_dir.join("gah-fetch.lock");
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -775,6 +781,37 @@ mod tests {
         let wt = create(&repo, "main", "gah/test-2", &worktree_base).unwrap();
 
         assert!(wt.join("f.txt").exists());
+    }
+
+    #[test]
+    fn create_from_linked_worktree_uses_shared_git_directory_for_fetch_lock() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_bare_repo_with_main(&repo);
+        add_bare_origin(&repo);
+
+        let linked = tmp.path().join("linked");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked",
+                linked.to_str().unwrap(),
+                "main",
+            ],
+            &repo,
+        )
+        .unwrap();
+        assert!(linked.join(".git").is_file());
+
+        let worktree_base = tmp.path().join("worktrees");
+        let created = create(&linked, "main", "gah/from-linked", &worktree_base).unwrap();
+
+        assert!(created.join("f.txt").exists());
+        assert!(repo.join(".git/gah-fetch.lock").is_file());
     }
 
     // ── ensure_staged() ──────────────────────────────────────────────────
