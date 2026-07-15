@@ -3,7 +3,9 @@ use super::super::attempts::{
     mark_shutdown_cancelled, record_route_attempt, reserve_backend_slot, review_preflight,
     review_usage, route_identity, route_label,
 };
-use super::super::issues::{fetch_issue_details, parse_ticket_metadata_from_issue, IssueDetails};
+use super::super::issues::{
+    extract_markdown_section, fetch_issue_details, parse_ticket_metadata_from_issue, IssueDetails,
+};
 use super::super::prompts::{enforce_context_budget, indent_untrusted_text};
 use super::super::publish::{render_review_comment, review_labels};
 use super::super::review::context::{
@@ -703,6 +705,8 @@ const SOURCE_ISSUE_PROBLEM_MAX_BYTES: usize = 4_096;
 const SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES: usize = 8_192;
 const SOURCE_ISSUE_LIST_MAX_BYTES: usize = 4_096;
 const SOURCE_ISSUE_LIST_ITEM_MAX_BYTES: usize = 1_024;
+const SOURCE_ISSUE_DETAIL_MAX_BYTES: usize = 3_072;
+const SOURCE_ISSUE_DETAILS_MAX_BYTES: usize = 12_288;
 const SOURCE_ISSUE_FALLBACK_MAX_BYTES: usize = 12_000;
 
 struct SourceIssueIdentity {
@@ -869,6 +873,10 @@ fn render_source_issue_contract(issue: &IssueDetails) -> String {
             indent_untrusted_text(utf8_safe_prefix(source.trim(), SOURCE_ISSUE_LIST_MAX_BYTES))
         ));
     }
+    let contract_details = render_additional_contract_details(&issue.body);
+    if !contract_details.is_empty() {
+        sections.push(contract_details);
+    }
     if sections.len() == 1 {
         sections.push(format!(
             "### Issue Description\n\n{}",
@@ -880,6 +888,46 @@ fn render_source_issue_contract(issue: &IssueDetails) -> String {
     }
 
     sections.join("\n\n")
+}
+
+fn render_additional_contract_details(body: &str) -> String {
+    let mut out = String::new();
+    for (source_heading, rendered_heading) in [
+        ("Live reproduction", "Live Reproduction"),
+        ("Expected", "Expected"),
+        ("Examples", "Examples"),
+        ("Example", "Example"),
+        ("Non-goals", "Non-goals"),
+        ("Non Goals", "Non-goals"),
+    ] {
+        let Some(detail) = extract_markdown_section(body, source_heading) else {
+            continue;
+        };
+        // Avoid rendering the same section twice for spelling aliases such as
+        // `Non-goals`/`Non Goals`, while retaining the issue author's exact
+        // examples and non-goals as untrusted, indented text.
+        let rendered = format!(
+            "### {rendered_heading}\n\n{}",
+            indent_untrusted_text(utf8_safe_prefix(
+                detail.trim(),
+                SOURCE_ISSUE_DETAIL_MAX_BYTES
+            ))
+        );
+        if out.contains(&rendered) {
+            continue;
+        }
+        let separator = if out.is_empty() { "" } else { "\n\n" };
+        let remaining = SOURCE_ISSUE_DETAILS_MAX_BYTES.saturating_sub(out.len());
+        if remaining <= separator.len() {
+            break;
+        }
+        out.push_str(separator);
+        out.push_str(utf8_safe_prefix(&rendered, remaining - separator.len()));
+        if out.len() >= SOURCE_ISSUE_DETAILS_MAX_BYTES {
+            break;
+        }
+    }
+    out
 }
 
 fn render_source_issue_list(entries: &[String], max_bytes: usize) -> String {
@@ -1113,7 +1161,7 @@ mod source_issue_tests {
         let issue = IssueDetails {
             number: "573".into(),
             title: "Review pack source contract".into(),
-            body: "## Problem\n\nThe MR body can omit requirements.\n\n## Acceptance Criteria\n\n- Include the canonical source issue contract\n- Preserve the acceptance criteria in the review context artifact\n"
+            body: "## Problem\n\nThe MR body can omit requirements.\n\n## Live reproduction\n\nThe source example passes `agent_model: opencode/opencode/hy3-free`; the MR silently drops it.\n\n## Expected\n\nThe exact source example reaches the reviewer.\n\n## Acceptance Criteria\n\n- Include the canonical source issue contract\n- Preserve the acceptance criteria in the review context artifact\n\n## Non-goals\n\nDo not treat the MR body as the canonical contract.\n"
                 .into(),
             labels: vec![],
             state: None,
@@ -1129,7 +1177,7 @@ mod source_issue_tests {
             &prompt,
             &ContextConfig {
                 soft_limit_tokens: 10,
-                hard_limit_tokens: 100,
+                hard_limit_tokens: 300,
                 ..Default::default()
             },
         )
@@ -1142,6 +1190,15 @@ mod source_issue_tests {
         assert!(built
             .prompt
             .contains("Preserve the acceptance criteria in the review context artifact"));
+        assert!(built
+            .prompt
+            .contains("agent_model: opencode/opencode/hy3-free"));
+        assert!(built
+            .prompt
+            .contains("The exact source example reaches the reviewer"));
+        assert!(built
+            .prompt
+            .contains("Do not treat the MR body as the canonical contract"));
     }
 
     #[test]
