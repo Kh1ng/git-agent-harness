@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 /// handle the v3 nullable representation.
 /// Version 4 adds the optional review evidence-gate reason to task outcomes.
 /// Version 5 adds explicit unknown-attribution reasons for model and provider.
-pub const SCHEMA_VERSION: u32 = 5;
+/// Version 6 adds distinct reasoning-token counters plus explicit unknown
+/// reasons for token and quota observations.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -116,6 +118,9 @@ pub struct AttemptUsageRecord {
     pub input_tokens: Option<u64>,
     /// Output tokens produced
     pub output_tokens: Option<u64>,
+    /// Reasoning tokens reported separately by the backend
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
     /// Cache read tokens
     pub cache_read_tokens: Option<u64>,
     /// Cache write tokens
@@ -137,6 +142,10 @@ pub struct AttemptUsageRecord {
     pub quota_remaining_percent: Option<f64>,
     /// When quota resets
     pub quota_reset_at: Option<String>,
+    #[serde(default)]
+    pub token_usage_unknown_reason: Option<String>,
+    #[serde(default)]
+    pub quota_unknown_reason: Option<String>,
 }
 
 /// Quota observation telemetry record
@@ -324,13 +333,13 @@ pub struct ReviewOutcomeRecord {
 #[serde(tag = "record_type", content = "data")]
 pub enum ExportedTelemetryRecord {
     #[serde(rename = "attempt_usage")]
-    AttemptUsage(AttemptUsageRecord),
+    AttemptUsage(Box<AttemptUsageRecord>),
     #[serde(rename = "quota_observation")]
-    QuotaObservation(QuotaObservationRecord),
+    QuotaObservation(Box<QuotaObservationRecord>),
     #[serde(rename = "task_outcome")]
-    TaskOutcome(TaskOutcomeRecord),
+    TaskOutcome(Box<TaskOutcomeRecord>),
     #[serde(rename = "review_outcome")]
-    ReviewOutcome(ReviewOutcomeRecord),
+    ReviewOutcome(Box<ReviewOutcomeRecord>),
 }
 
 impl ExportedTelemetryRecord {

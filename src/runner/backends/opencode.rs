@@ -133,12 +133,12 @@ fn opencode_log_path(env_vars: &[(String, String)]) -> Option<PathBuf> {
 /// Persist the exact OpenCode session created by this invocation as a small
 /// JSON artifact. Querying by worktree and start time prevents concurrent
 /// workers from attributing each other's SQLite rows.
-struct OpenCodeSessionSnapshot {
-    path: String,
-    final_summary: Option<String>,
+pub(crate) struct OpenCodeSessionSnapshot {
+    pub(crate) path: String,
+    pub(crate) final_summary: Option<String>,
 }
 
-fn snapshot_opencode_session(
+pub(crate) fn snapshot_opencode_session(
     env_vars: &[(String, String)],
     worktree: &Path,
     started_at: std::time::SystemTime,
@@ -164,14 +164,23 @@ fn snapshot_opencode_session(
     let connection =
         rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
-    let mut statement = connection
-        .prepare(
-            "SELECT id, model, tokens_input, tokens_output, tokens_reasoning, \
-             tokens_cache_read, tokens_cache_write, time_updated \
-             FROM session WHERE directory = ?1 AND time_created >= ?2 \
-             ORDER BY time_updated DESC LIMIT 1",
-        )
-        .ok()?;
+    // OpenCode 1.17+ reports the provider-computed session dollar cost. Keep
+    // older databases readable by selecting NULL when that column is absent.
+    let cost_expression = if connection
+        .prepare("SELECT cost FROM session LIMIT 0")
+        .is_ok()
+    {
+        "cost"
+    } else {
+        "NULL"
+    };
+    let query = format!(
+        "SELECT id, model, tokens_input, tokens_output, tokens_reasoning, \
+         tokens_cache_read, tokens_cache_write, {cost_expression}, time_updated \
+         FROM session WHERE directory = ?1 AND time_created >= ?2 \
+         ORDER BY time_updated DESC LIMIT 1"
+    );
+    let mut statement = connection.prepare(&query).ok()?;
     let snapshot = statement
         .query_row(
             rusqlite::params![worktree.to_string_lossy(), started_at_ms],
@@ -185,7 +194,8 @@ fn snapshot_opencode_session(
                     "tokens_reasoning": row.get::<_, i64>(4)? as u64,
                     "tokens_cache_read": row.get::<_, i64>(5)? as u64,
                     "tokens_cache_write": row.get::<_, i64>(6)? as u64,
-                    "time_updated": row.get::<_, i64>(7)?,
+                    "actual_cost_usd": row.get::<_, Option<f64>>(7)?,
+                    "time_updated": row.get::<_, i64>(8)?,
                 }))
             },
         )

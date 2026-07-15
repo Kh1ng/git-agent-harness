@@ -75,8 +75,8 @@ mod telemetry_tests {
     #[test]
     fn test_schema_version_in_record() {
         assert_eq!(
-            SCHEMA_VERSION, 5,
-            "unknown model/provider attribution requires telemetry export schema version 5"
+            SCHEMA_VERSION, 6,
+            "reasoning tokens and explicit usage gaps require telemetry export schema version 6"
         );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
@@ -121,6 +121,7 @@ mod telemetry_tests {
             cost_unknown_reason: None,
             input_tokens: None,
             output_tokens: None,
+            reasoning_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: None,
@@ -131,9 +132,11 @@ mod telemetry_tests {
             quota_used_percent: None,
             quota_remaining_percent: None,
             quota_reset_at: None,
+            token_usage_unknown_reason: None,
+            quota_unknown_reason: None,
         };
 
-        let exported = ExportedTelemetryRecord::AttemptUsage(record);
+        let exported = ExportedTelemetryRecord::AttemptUsage(Box::new(record));
         let json = serde_json::to_string(&exported).unwrap();
         // println!("JSON: {}", json); // Debug output
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -141,6 +144,68 @@ mod telemetry_tests {
         // Check that schema_version is present (inside data due to enum tag)
         assert_eq!(parsed["record_type"], "attempt_usage");
         assert_eq!(parsed["data"]["schema_version"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn attempt_usage_deserializes_before_reasoning_and_unknown_reason_fields() {
+        let value = serde_json::from_str::<serde_json::Value>(
+            r#"{
+            "schema_version": 5,
+            "record_id": "legacy-attempt",
+            "exported_at": "2026-07-10T12:00:00Z",
+            "observed_at": "2026-07-10T12:00:00Z",
+            "profile": "test",
+            "repo_id": "test",
+            "repo": "o/r",
+            "provider": "github",
+            "work_id": null,
+            "target_summary": null,
+            "mode": "review",
+            "attempt_number": 1,
+            "backend": "codex",
+            "effective_backend": "codex",
+            "requested_backend": "codex",
+            "effective_model": null,
+            "requested_model": null,
+            "actual_model": null,
+            "actual_model_unknown_reason": null,
+            "exit_code": 0,
+            "duration_seconds": 1.0,
+            "validation_result": null,
+            "failure_class": null,
+            "failure_stage": null,
+            "fallback_used": false,
+            "human_required": false,
+            "routing_reason": null,
+            "usage_source": null,
+            "usage_classification": "quota_backed",
+            "backend_instance": "codex",
+            "model_provider": "openai",
+            "model_provider_unknown_reason": null,
+            "account_label": null,
+            "pricing_source": null,
+            "pricing_version": null,
+            "cost_unknown_reason": null,
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "cache_read_tokens": null,
+            "cache_write_tokens": null,
+            "total_tokens": 12,
+            "requests_count": 1,
+            "estimated_cost_usd": null,
+            "actual_cost_usd": null,
+            "quota_window": null,
+            "quota_used_percent": null,
+            "quota_remaining_percent": null,
+            "quota_reset_at": null
+        }"#,
+        )
+        .unwrap();
+
+        let record: AttemptUsageRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(record.reasoning_tokens, None);
+        assert_eq!(record.token_usage_unknown_reason, None);
+        assert_eq!(record.quota_unknown_reason, None);
     }
 
     #[test]
@@ -199,7 +264,7 @@ mod telemetry_tests {
             merge_status: None,
         };
 
-        let exported = ExportedTelemetryRecord::TaskOutcome(record);
+        let exported = ExportedTelemetryRecord::TaskOutcome(Box::new(record));
         let json = serde_json::to_string(&exported).unwrap();
 
         // Should be valid JSON
@@ -317,6 +382,7 @@ mod telemetry_tests {
                 observed_at: Some("2026-07-10T12:30:00Z".to_string()),
                 input_tokens: Some(500),
                 output_tokens: Some(250),
+                reasoning_tokens: None,
                 cache_read_tokens: Some(50),
                 cache_write_tokens: Some(25),
                 total_tokens: Some(750),
@@ -327,6 +393,8 @@ mod telemetry_tests {
                 quota_used_percent: None,
                 quota_remaining_percent: None,
                 quota_reset_at: None,
+                token_usage_unknown_reason: None,
+                quota_unknown_reason: None,
             },
         };
 
@@ -358,6 +426,7 @@ mod telemetry_tests {
                 observed_at: Some("2026-07-10T12:30:00Z".to_string()),
                 input_tokens: Some(500),
                 output_tokens: Some(250),
+                reasoning_tokens: None,
                 cache_read_tokens: Some(50),
                 cache_write_tokens: Some(25),
                 total_tokens: Some(750),
@@ -368,6 +437,8 @@ mod telemetry_tests {
                 quota_used_percent: None,
                 quota_remaining_percent: None,
                 quota_reset_at: None,
+                token_usage_unknown_reason: None,
+                quota_unknown_reason: None,
             },
         };
         entry.attempts = vec![attempt];
@@ -387,6 +458,7 @@ mod telemetry_tests {
             observed_at: Some("2026-07-10T12:00:00Z".to_string()),
             input_tokens: Some(1000), // Different from attempt
             output_tokens: Some(500),
+            reasoning_tokens: None,
             cache_read_tokens: Some(100),
             cache_write_tokens: Some(50),
             total_tokens: Some(1500),
@@ -397,6 +469,8 @@ mod telemetry_tests {
             quota_used_percent: None,
             quota_remaining_percent: None,
             quota_reset_at: None,
+            token_usage_unknown_reason: None,
+            quota_unknown_reason: None,
         };
 
         let exported_at = "2026-07-10T13:00:00Z";

@@ -5,6 +5,7 @@ pub(crate) mod output;
 pub(crate) mod process;
 pub(crate) mod resolve;
 pub(crate) mod review;
+pub(crate) mod review_usage;
 
 #[allow(unused_imports)]
 pub(crate) use crate::runner::backends::agy::log_delta;

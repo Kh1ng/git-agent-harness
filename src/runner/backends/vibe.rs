@@ -141,7 +141,7 @@ pub(crate) fn snapshot_vibe_session_metadata_paths(
 /// worktree and recent mtime is insufficient: Vibe can update a pre-existing
 /// session whose counters are cumulative. If no new metadata file appears,
 /// usage is deliberately left unknown rather than attributed incorrectly.
-fn find_vibe_session_metadata(
+pub(crate) fn find_vibe_session_metadata(
     env_vars: &[(String, String)],
     worktree: &Path,
     started_at: std::time::SystemTime,

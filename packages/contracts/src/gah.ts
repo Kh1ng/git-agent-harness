@@ -308,6 +308,7 @@ export interface BackendModelComparison {
   average_duration_seconds: number | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  reasoning_tokens?: number | null;
   cache_read_tokens: number | null;
   cache_write_tokens: number | null;
   total_tokens: number | null;
@@ -473,6 +474,7 @@ export interface LedgerUsage {
   observed_at?: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  reasoning_tokens?: number | null;
   cache_read_tokens: number | null;
   cache_write_tokens: number | null;
   total_tokens: number | null;
@@ -483,6 +485,8 @@ export interface LedgerUsage {
   quota_used_percent: number | null;
   quota_remaining_percent: number | null;
   quota_reset_at: string | null;
+  token_usage_unknown_reason?: string | null;
+  quota_unknown_reason?: string | null;
 }
 
 /** TICKET-101: usage for exactly this attempt (not the whole dispatch). An

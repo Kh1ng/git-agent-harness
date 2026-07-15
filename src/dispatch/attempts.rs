@@ -359,6 +359,16 @@ pub(super) fn attempt_usage(
     } else {
         crate::ledger::LedgerUsage::default()
     };
+    if attribution.backend == Some("codex") {
+        if let Some(transcript) = transcript_path {
+            if let Ok(transcript_jsonl) = fs::read_to_string(transcript) {
+                usage = usage::merge_usage(
+                    usage,
+                    usage::parse_codex_transcript_attribution(&transcript_jsonl),
+                );
+            }
+        }
+    }
     if attribution.backend == Some("openhands") {
         let openhands_usage = usage::parse_openhands_usage(&text);
         if openhands_usage.usage_source.is_some() {
@@ -400,10 +410,18 @@ pub(super) fn attempt_usage(
 /// backend artifact reports it.
 pub(super) fn review_usage(
     log_path: &str,
+    agy_cli_log_delta: Option<&str>,
     attribution: UsageAttribution<'_>,
+    usage_artifact_path: Option<&str>,
     claude_path: Option<&str>,
 ) -> crate::ledger::LedgerUsage {
-    attempt_usage(log_path, None, attribution, None, claude_path)
+    attempt_usage(
+        log_path,
+        agy_cli_log_delta,
+        attribution,
+        usage_artifact_path,
+        claude_path,
+    )
 }
 
 pub(super) fn preflight(profile: &Profile, backend: &str) -> Result<()> {

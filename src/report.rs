@@ -67,6 +67,7 @@ struct BackendModelComparison {
     average_duration_seconds: Option<f64>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
     cache_read_tokens: Option<u64>,
     cache_write_tokens: Option<u64>,
     total_tokens: Option<u64>,
@@ -324,6 +325,7 @@ fn transform_to_report_format(
                 average_duration_seconds: group.average_duration_seconds,
                 input_tokens: group.input_tokens,
                 output_tokens: group.output_tokens,
+                reasoning_tokens: group.reasoning_tokens,
                 cache_read_tokens: group.cache_read_tokens,
                 cache_write_tokens: group.cache_write_tokens,
                 total_tokens: group.total_tokens,
@@ -494,13 +496,17 @@ fn display_report(
                 println!("  Avg duration: {:.1}s", avg_duration);
             }
             println!(
-                "  Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
+                "  Usage: input={} output={} reasoning={} cache_read={} cache_write={} total={} requests={}",
                 group
                     .input_tokens
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
                 group
                     .output_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .reasoning_tokens
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
                 group
@@ -590,6 +596,7 @@ mod tests {
             cost_per_approve_strong: Some(0.75),
             input_tokens: Some(700),
             output_tokens: Some(300),
+            reasoning_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: Some(1000),
@@ -617,6 +624,7 @@ mod tests {
             cost_per_approve_strong: None,
             input_tokens: Some(300),
             output_tokens: Some(200),
+            reasoning_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: Some(500),
@@ -648,6 +656,7 @@ mod tests {
             average_duration_seconds: Some(150.0),
             usage_input_tokens: Some(1000),
             usage_output_tokens: Some(500),
+            usage_reasoning_tokens: None,
             usage_cache_read_tokens: None,
             usage_cache_write_tokens: None,
             usage_total_tokens: Some(1500),
@@ -743,6 +752,7 @@ mod tests {
             cost_per_approve_strong: None,
             input_tokens: None,
             output_tokens: None,
+            reasoning_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: None,
@@ -782,6 +792,7 @@ mod tests {
             cost_per_approve_strong: None,
             input_tokens: None,
             output_tokens: None,
+            reasoning_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: None,

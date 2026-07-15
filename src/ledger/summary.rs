@@ -64,6 +64,7 @@ pub struct GroupSummary {
     pub cost_per_approve_strong: Option<f64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -120,6 +121,7 @@ pub struct SummaryData {
     pub average_duration_seconds: Option<f64>,
     pub usage_input_tokens: Option<u64>,
     pub usage_output_tokens: Option<u64>,
+    pub usage_reasoning_tokens: Option<u64>,
     pub usage_cache_read_tokens: Option<u64>,
     pub usage_cache_write_tokens: Option<u64>,
     pub usage_total_tokens: Option<u64>,
@@ -179,11 +181,14 @@ pub fn run_with_json(
         println!("Average duration: {:.1}s", avg);
     }
     println!(
-        "Usage totals: input={} output={} cache_read={} cache_write={} total={} requests={}",
+        "Usage totals: input={} output={} reasoning={} cache_read={} cache_write={} total={} requests={}",
         data.usage_input_tokens
             .map(|n| n.to_string())
             .unwrap_or_else(|| "unknown".to_string()),
         data.usage_output_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        data.usage_reasoning_tokens
             .map(|n| n.to_string())
             .unwrap_or_else(|| "unknown".to_string()),
         data.usage_cache_read_tokens
@@ -240,13 +245,17 @@ pub fn run_with_json(
                 println!("    Cost per APPROVE: ${:.4}", cost);
             }
             println!(
-                "    Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
+                "    Usage: input={} output={} reasoning={} cache_read={} cache_write={} total={} requests={}",
                 group
                     .input_tokens
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
                 group
                     .output_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .reasoning_tokens
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
                 group
@@ -299,13 +308,17 @@ pub fn run_with_json(
                 println!("    Cost per APPROVE: ${:.4}", cost);
             }
             println!(
-                "    Usage: input={} output={} cache_read={} cache_write={} total={} requests={}",
+                "    Usage: input={} output={} reasoning={} cache_read={} cache_write={} total={} requests={}",
                 group
                     .input_tokens
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
                 group
                     .output_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                group
+                    .reasoning_tokens
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
                 group
@@ -376,6 +389,7 @@ pub fn build_summary(
     let mut duration_count = 0usize;
     let mut input_tokens = 0u64;
     let mut output_tokens = 0u64;
+    let mut reasoning_tokens = 0u64;
     let mut cache_read_tokens = 0u64;
     let mut cache_write_tokens = 0u64;
     let mut total_tokens = 0u64;
@@ -393,6 +407,7 @@ pub fn build_summary(
     // Track whether we've actually observed each metric (None != 0)
     let mut input_tokens_seen = false;
     let mut output_tokens_seen = false;
+    let mut reasoning_tokens_seen = false;
     let mut cache_read_tokens_seen = false;
     let mut cache_write_tokens_seen = false;
     let mut total_tokens_seen = false;
@@ -463,6 +478,10 @@ pub fn build_summary(
             if let Some(tokens) = observed.usage.output_tokens {
                 output_tokens += tokens;
                 output_tokens_seen = true;
+            }
+            if let Some(tokens) = observed.usage.reasoning_tokens {
+                reasoning_tokens += tokens;
+                reasoning_tokens_seen = true;
             }
             if let Some(tokens) = observed.usage.cache_read_tokens {
                 cache_read_tokens += tokens;
@@ -560,6 +579,7 @@ pub fn build_summary(
             .then_some(duration_total / duration_count as f64),
         usage_input_tokens: input_tokens_seen.then_some(input_tokens),
         usage_output_tokens: output_tokens_seen.then_some(output_tokens),
+        usage_reasoning_tokens: reasoning_tokens_seen.then_some(reasoning_tokens),
         usage_cache_read_tokens: cache_read_tokens_seen.then_some(cache_read_tokens),
         usage_cache_write_tokens: cache_write_tokens_seen.then_some(cache_write_tokens),
         usage_total_tokens: total_tokens_seen.then_some(total_tokens),
@@ -672,12 +692,14 @@ where
         let mut duration_count = 0usize;
         let mut input_tokens = 0u64;
         let mut output_tokens = 0u64;
+        let mut reasoning_tokens = 0u64;
         let mut cache_read_tokens = 0u64;
         let mut cache_write_tokens = 0u64;
         let mut total_tokens = 0u64;
         let mut requests_count = 0u64;
         let mut input_tokens_seen = false;
         let mut output_tokens_seen = false;
+        let mut reasoning_tokens_seen = false;
         let mut cache_read_tokens_seen = false;
         let mut cache_write_tokens_seen = false;
         let mut total_tokens_seen = false;
@@ -744,6 +766,10 @@ where
             if let Some(tokens) = observed.usage.output_tokens {
                 output_tokens += tokens;
                 output_tokens_seen = true;
+            }
+            if let Some(tokens) = observed.usage.reasoning_tokens {
+                reasoning_tokens += tokens;
+                reasoning_tokens_seen = true;
             }
             if let Some(tokens) = observed.usage.cache_read_tokens {
                 cache_read_tokens += tokens;
@@ -900,6 +926,7 @@ where
             cost_per_approve_strong,
             input_tokens: input_tokens_seen.then_some(input_tokens),
             output_tokens: output_tokens_seen.then_some(output_tokens),
+            reasoning_tokens: reasoning_tokens_seen.then_some(reasoning_tokens),
             cache_read_tokens: cache_read_tokens_seen.then_some(cache_read_tokens),
             cache_write_tokens: cache_write_tokens_seen.then_some(cache_write_tokens),
             total_tokens: total_tokens_seen.then_some(total_tokens),
@@ -945,6 +972,7 @@ fn usage_has_observation(usage: &LedgerUsage) -> bool {
     usage.usage_source.is_some()
         || usage.input_tokens.is_some()
         || usage.output_tokens.is_some()
+        || usage.reasoning_tokens.is_some()
         || usage.cache_read_tokens.is_some()
         || usage.cache_write_tokens.is_some()
         || usage.total_tokens.is_some()

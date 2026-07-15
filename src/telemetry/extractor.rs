@@ -47,10 +47,7 @@ pub fn extract_attempt_usage_records(
             effective_backend: attempt.backend.clone(),
             requested_backend: entry.requested_backend.clone(),
             effective_model: attempt.effective_model.clone(),
-            requested_model: attempt
-                .effective_model
-                .clone()
-                .or_else(|| entry.requested_model.clone()),
+            requested_model: entry.requested_model.clone(),
             actual_model: attempt.usage.actual_model.clone(),
             actual_model_unknown_reason: attempt.usage.actual_model_unknown_reason.clone(),
             exit_code: attempt.exit_code,
@@ -104,6 +101,7 @@ pub fn extract_attempt_usage_records(
                 .or_else(|| entry.usage.cost_unknown_reason.clone()),
             input_tokens: attempt.usage.input_tokens,
             output_tokens: attempt.usage.output_tokens,
+            reasoning_tokens: attempt.usage.reasoning_tokens,
             cache_read_tokens: attempt.usage.cache_read_tokens,
             cache_write_tokens: attempt.usage.cache_write_tokens,
             total_tokens: attempt.usage.total_tokens,
@@ -114,6 +112,8 @@ pub fn extract_attempt_usage_records(
             quota_used_percent: attempt.usage.quota_used_percent,
             quota_remaining_percent: attempt.usage.quota_remaining_percent,
             quota_reset_at: attempt.usage.quota_reset_at.clone(),
+            token_usage_unknown_reason: attempt.usage.token_usage_unknown_reason.clone(),
+            quota_unknown_reason: attempt.usage.quota_unknown_reason.clone(),
         };
 
         records.push(record);
@@ -399,22 +399,28 @@ pub fn extract_telemetry_records(
 
     // Extract attempt usage records
     for attempt_record in extract_attempt_usage_records(entry, exported_at) {
-        all_records.push(ExportedTelemetryRecord::AttemptUsage(attempt_record));
+        all_records.push(ExportedTelemetryRecord::AttemptUsage(Box::new(
+            attempt_record,
+        )));
     }
 
     // Extract quota observation records
     for quota_record in extract_quota_observation_records(entry, exported_at) {
-        all_records.push(ExportedTelemetryRecord::QuotaObservation(quota_record));
+        all_records.push(ExportedTelemetryRecord::QuotaObservation(Box::new(
+            quota_record,
+        )));
     }
 
     // Extract task outcome records
     for task_record in extract_task_outcome_records(entry, exported_at) {
-        all_records.push(ExportedTelemetryRecord::TaskOutcome(task_record));
+        all_records.push(ExportedTelemetryRecord::TaskOutcome(Box::new(task_record)));
     }
 
     // Extract review outcome records
     for review_record in extract_review_outcome_records(entry, exported_at) {
-        all_records.push(ExportedTelemetryRecord::ReviewOutcome(review_record));
+        all_records.push(ExportedTelemetryRecord::ReviewOutcome(Box::new(
+            review_record,
+        )));
     }
 
     all_records
