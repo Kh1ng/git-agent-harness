@@ -477,6 +477,73 @@ fn attr_token_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"#\s*\[[^\]]*\]").unwrap())
 }
 
+/// Remove line and nested block comments while preserving quoted strings.
+///
+/// This is deliberately a narrow lexical pass, not a Rust parser. It is enough
+/// to prevent commented-out `mod` and `#[path]` text from being treated as live
+/// declarations, including when a block comment spans several lines.
+fn uncommented_rust_lines(content: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut block_depth = 0usize;
+
+    for raw_line in content.lines() {
+        let chars: Vec<char> = raw_line.chars().collect();
+        let mut output = String::new();
+        let mut index = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+
+        while index < chars.len() {
+            let current = chars[index];
+            let next = chars.get(index + 1).copied();
+
+            if block_depth > 0 {
+                if current == '/' && next == Some('*') {
+                    block_depth += 1;
+                    index += 2;
+                } else if current == '*' && next == Some('/') {
+                    block_depth -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+
+            if in_string {
+                output.push(current);
+                if escaped {
+                    escaped = false;
+                } else if current == '\\' {
+                    escaped = true;
+                } else if current == '"' {
+                    in_string = false;
+                }
+                index += 1;
+                continue;
+            }
+
+            if current == '"' {
+                in_string = true;
+                output.push(current);
+                index += 1;
+            } else if current == '/' && next == Some('/') {
+                break;
+            } else if current == '/' && next == Some('*') {
+                block_depth += 1;
+                index += 2;
+            } else {
+                output.push(current);
+                index += 1;
+            }
+        }
+
+        lines.push(output);
+    }
+
+    lines
+}
+
 /// Parse the `mod` declarations out of a source file's content, with proper
 /// word-boundary matching and comment/attribute awareness.
 ///
@@ -491,22 +558,16 @@ fn parse_mod_decls(content: &str) -> Vec<ModDecl> {
     let mod_re = mod_decl_re();
     let attr_re = attr_token_re();
 
-    for raw_line in content.lines() {
+    for uncommented_line in uncommented_rust_lines(content) {
+        let raw_line = uncommented_line.as_str();
         // A `#[path = "..."]` attribute applies to the very next `mod` decl.
         if let Some(cap) = path_re.captures(raw_line) {
             pending_path = Some(cap.get(1).unwrap().as_str().to_string());
         }
-
-        // Strip line comments before any further inspection so that
-        // `// mod foo;` is never treated as a live declaration.
-        let line_no_comment = match raw_line.find("//") {
-            Some(i) => &raw_line[..i],
-            None => raw_line,
-        };
         // Drop `#[...]` attribute tokens (e.g. `#[cfg(test)]`) so they don't
         // interfere with the `mod` regex. The `path` attribute was already
         // captured above.
-        let stripped = attr_re.replace_all(line_no_comment, "");
+        let stripped = attr_re.replace_all(raw_line, "");
 
         if let Some(cap) = mod_re.captures(&stripped) {
             let name = cap.get(1).unwrap().as_str().to_string();
@@ -517,7 +578,7 @@ fn parse_mod_decls(content: &str) -> Vec<ModDecl> {
         } else {
             // A non-attribute, non-comment code line ends any pending path
             // attribute (it only ever applies to the immediately following decl).
-            let trimmed = line_no_comment.trim();
+            let trimmed = raw_line.trim();
             if !trimmed.starts_with('#') && !trimmed.is_empty() {
                 pending_path = None;
             }
@@ -773,38 +834,23 @@ fn find_expected_declaration(path: &Path, repo_root: &Path) -> String {
 /// Usage: In validation or CI scripts, run this after `cargo test <filter>`
 /// to ensure the filter actually matched tests.
 pub fn assert_test_filter_matches_at_least_one(test_output: &str, filter: &str) {
-    // Check if the output contains "test result:" with at least one test run
-    // or if it contains the filter string in a test name
-    if !test_output.contains("test result:") {
-        panic!(
-            "Test filter '{}' matched zero tests. \
-             Either the test file doesn't exist, or the test names don't match the filter.\n             Check: cargo test {} -- --nocapture",
-            filter, filter
-        );
-    }
+    static RESULT_RE: OnceLock<Regex> = OnceLock::new();
+    let result_re = RESULT_RE.get_or_init(|| {
+        Regex::new(
+            r"test result:.*?([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured;",
+        )
+        .unwrap()
+    });
 
-    // Parse the test result line to check if at least one test was run
-    for line in test_output.lines() {
-        if line.contains("test result:") {
-            // Format: "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
-            // or: "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out"
-            if line.contains("0 passed")
-                && line.contains("0 failed")
-                && line.contains("0 filtered out")
-            {
-                panic!(
-                    "Test filter '{}' matched zero tests. \
-                     The test result shows 0 tests were run.\n                     Check: cargo test {} -- --nocapture",
-                    filter, filter
-                );
-            }
-            return; // At least some tests were run
-        }
-    }
+    let matched = result_re.captures_iter(test_output).any(|captures| {
+        (1..=4).any(|index| captures[index].parse::<u64>().is_ok_and(|count| count > 0))
+    });
 
-    panic!(
-        "Could not find test result line in output for filter '{}'",
-        filter
+    assert!(
+        matched,
+        "Test filter '{}' matched zero tests. Either the test file doesn't exist, \
+         or the test names don't match the filter.\nCheck: cargo test {} -- --nocapture",
+        filter, filter
     );
 }
 
@@ -836,6 +882,19 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 "#;
 
     assert_test_filter_matches_at_least_one(zero_test_output, "ticket_118");
+}
+
+#[test]
+fn test_filter_helper_accepts_a_later_matching_test_binary() {
+    let workspace_output = r#"
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out
+running 1 test
+test ticket_118_is_wired ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out
+"#;
+
+    assert_test_filter_matches_at_least_one(workspace_output, "ticket_118");
 }
 
 /// PR #325 scenario: an unreferenced integration-test file nested under a
@@ -959,8 +1018,16 @@ fn declared_nested_test_module_is_reachable() {
 /// do not produce false "declared" results (anti-fabrication guarantee).
 #[test]
 fn module_declaration_match_is_not_a_prefix_substring() {
-    let content =
-        "mod foo;\n// mod bar;\nmod foobar;\n/* mod baz; */\npub mod qux;\nmod quux { }\n";
+    let content = "mod foo;\n\
+        // mod bar;\n\
+        mod foobar;\n\
+        /* mod baz; */\n\
+        /*\n\
+        mod hidden_across_lines;\n\
+        #[path = \"wrong.rs\"]\n\
+        */\n\
+        pub mod qux;\n\
+        mod quux { }\n";
     let decls = parse_mod_decls(content);
     let names: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
 
@@ -968,6 +1035,10 @@ fn module_declaration_match_is_not_a_prefix_substring() {
         names,
         vec!["foo", "foobar", "qux"],
         "only live file-module declarations should be parsed, as exact names"
+    );
+    assert!(
+        decls.iter().all(|decl| decl.path_attr.is_none()),
+        "a commented path attribute must not leak onto the next live module"
     );
 }
 
