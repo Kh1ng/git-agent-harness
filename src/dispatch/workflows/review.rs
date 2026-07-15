@@ -115,7 +115,7 @@ pub(in crate::dispatch) fn review(
          Repo: {}. MR: {}. Source: {}. Target: {}. CI status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
          {}\n\
-         Prior run state:\n{}\n\n## Diff\n\n```\n{}\n```\nChanged files:\n{}",
+         ## Prior Run State\n\n{}\n\n## Diff\n\n```\n{}\n```\nChanged files:\n{}",
         profile.repo,
         target.mr_id.as_deref().unwrap_or("n/a"),
         target.source_branch,
@@ -728,19 +728,7 @@ fn resolve_source_issue_context(
     target: &ReviewTarget,
 ) -> Result<SourceIssueContext> {
     let Some(identity) = resolve_source_issue_identity(cfg, profile_name, work_id, target) else {
-        return Ok(SourceIssueContext {
-            prompt_section: Some(
-                "## Source Issue Lookup\n\nSource issue identity could not be resolved from the ledger or MR body; no canonical issue contract was fetched."
-                    .to_string(),
-            ),
-            contract: None,
-            lookup_report: serde_json::json!({
-                "state": "missing",
-                "source": "none",
-                "issue_number": serde_json::Value::Null,
-                "error": "source issue identity not found",
-            }),
-        });
+        return Ok(missing_source_issue_context());
     };
 
     match fetch_issue_details(profile, &identity.issue_number) {
@@ -776,6 +764,22 @@ fn resolve_source_issue_context(
     }
 }
 
+fn missing_source_issue_context() -> SourceIssueContext {
+    SourceIssueContext {
+        prompt_section: Some(
+            "## Source Issue Lookup\n\nSource issue identity could not be resolved from the ledger or MR body; no canonical issue contract was fetched."
+                .to_string(),
+        ),
+        contract: None,
+        lookup_report: serde_json::json!({
+            "state": "missing",
+            "source": "none",
+            "issue_number": serde_json::Value::Null,
+            "error": "source issue identity not found",
+        }),
+    }
+}
+
 fn resolve_source_issue_identity(
     cfg: &GahConfig,
     profile_name: &str,
@@ -806,17 +810,40 @@ fn resolve_source_issue_identity(
 }
 
 fn extract_issue_number_from_text(text: Option<&str>) -> Option<String> {
+    const CLOSING_KEYWORDS: [&str; 9] = [
+        "close #",
+        "closes #",
+        "closed #",
+        "fix #",
+        "fixes #",
+        "fixed #",
+        "resolve #",
+        "resolves #",
+        "resolved #",
+    ];
     let text = text?;
     for raw_line in text.lines() {
         let trimmed = raw_line.trim();
-        for prefix in ["closes #", "fixes #", "resolves #"] {
-            if trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
-            {
-                let rest = trimmed[prefix.len()..].trim();
-                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if !digits.is_empty() {
-                    return Some(digits);
-                }
+        let lowercase = trimmed.to_ascii_lowercase();
+        for (start, _) in lowercase.char_indices() {
+            let preceding_is_word = lowercase[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+            if preceding_is_word {
+                continue;
+            }
+            let candidate = &lowercase[start..];
+            let Some(keyword) = CLOSING_KEYWORDS
+                .iter()
+                .find(|keyword| candidate.starts_with(**keyword))
+            else {
+                continue;
+            };
+            let rest = &candidate[keyword.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                return Some(digits);
             }
         }
     }
@@ -1153,7 +1180,10 @@ mod reservation_tests {
 
 #[cfg(test)]
 mod source_issue_tests {
-    use super::{render_source_issue_contract, IssueDetails};
+    use super::{
+        extract_issue_number_from_text, missing_source_issue_context, render_source_issue_contract,
+        IssueDetails,
+    };
     use crate::context::{self, ContextConfig};
 
     #[test]
@@ -1169,7 +1199,7 @@ mod source_issue_tests {
 
         let contract = render_source_issue_contract(&issue);
         let prompt = format!(
-            "## Review Pack\n\nMR body:\nThis MR body is sparse.\n\n{}\n\n## Diff\n\n{}\n",
+            "## Review Pack\n\nMR body:\nThis MR body is sparse.\n\n{}\n\n## Prior Run State\n\nA prior run used a different backend.\n\n## Diff\n\n{}\n",
             contract,
             "x".repeat(4_000)
         );
@@ -1199,6 +1229,19 @@ mod source_issue_tests {
         assert!(built
             .prompt
             .contains("Do not treat the MR body as the canonical contract"));
+        assert!(built
+            .sources
+            .iter()
+            .any(|source| source.name == "Prior Run State"));
+        let source_contract = built
+            .prompt
+            .split_once("## Source Issue Contract")
+            .unwrap()
+            .1
+            .split_once("## Prior Run State")
+            .unwrap()
+            .0;
+        assert!(!source_contract.contains("A prior run used a different backend"));
     }
 
     #[test]
@@ -1215,5 +1258,40 @@ mod source_issue_tests {
         let contract = render_source_issue_contract(&issue);
         assert!(contract.contains("  ## Review Pack should stay inert"));
         assert!(!contract.contains("\n## Review Pack"));
+    }
+
+    #[test]
+    fn source_issue_reference_parsing_is_unicode_safe_and_accepts_closing_keyword_forms() {
+        assert_eq!(
+            extract_issue_number_from_text(Some(
+                "1234567é ordinary international MR text\nThis PR resolves #573."
+            )),
+            Some("573".into())
+        );
+        assert_eq!(
+            extract_issue_number_from_text(Some("Context first; FIXED #39 after verification.")),
+            Some("39".into())
+        );
+        assert_eq!(
+            extract_issue_number_from_text(Some("A disclosure #88 is not a closing keyword.")),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_source_issue_identity_is_explicit_in_prompt_and_telemetry() {
+        let context = missing_source_issue_context();
+        assert!(context
+            .prompt_section
+            .as_deref()
+            .unwrap()
+            .contains("identity could not be resolved"));
+        assert_eq!(context.lookup_report["state"], "missing");
+        assert_eq!(context.lookup_report["source"], "none");
+        assert_eq!(
+            context.lookup_report["error"],
+            "source issue identity not found"
+        );
+        assert!(context.contract.is_none());
     }
 }
