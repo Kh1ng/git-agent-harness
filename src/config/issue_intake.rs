@@ -17,7 +17,7 @@ impl IssueIntakeMode {
 }
 
 pub(crate) fn default_issue_intake_mode() -> IssueIntakeMode {
-    IssueIntakeMode::CanonicalAutonomousOnly
+    IssueIntakeMode::Legacy
 }
 
 pub(crate) fn default_canonical_autonomous_label() -> String {

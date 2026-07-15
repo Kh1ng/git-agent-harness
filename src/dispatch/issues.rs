@@ -183,7 +183,10 @@ fn parse_github_author(response: &serde_json::Value) -> Option<IssueAuthorIdenti
     })
 }
 
-fn parse_gitlab_author(response: &serde_json::Value) -> Option<IssueAuthorIdentity> {
+fn parse_gitlab_author(
+    profile: &Profile,
+    response: &serde_json::Value,
+) -> Option<IssueAuthorIdentity> {
     let author = response.get("author")?;
     let login = author
         .get("username")
@@ -193,13 +196,31 @@ fn parse_gitlab_author(response: &serde_json::Value) -> Option<IssueAuthorIdenti
     if login.is_empty() {
         return None;
     }
-    let kind = match (
+    let explicit_kind = match (
         author.get("bot").and_then(|value| value.as_bool()),
         author.get("is_bot").and_then(|value| value.as_bool()),
     ) {
         (Some(true), _) | (_, Some(true)) => IssueAuthorKind::Bot,
         (Some(false), _) | (_, Some(false)) => IssueAuthorKind::Human,
         _ => IssueAuthorKind::Unknown,
+    };
+    let project_bot_prefix = profile
+        .provider_project_id
+        .as_deref()
+        .map(|project_id| format!("project_{project_id}_bot_"));
+    let kind = if explicit_kind != IssueAuthorKind::Unknown {
+        explicit_kind
+    } else if project_bot_prefix
+        .as_deref()
+        .is_some_and(|prefix| login.starts_with(prefix))
+    {
+        IssueAuthorKind::Bot
+    } else {
+        // `glab issue list/view --output json` returns a GitLab User object
+        // without a bot discriminator for ordinary users. Trust still
+        // requires an exact profile allowlist match, so classifying that
+        // documented shape as human does not admit arbitrary authors.
+        IssueAuthorKind::Human
     };
     Some(IssueAuthorIdentity {
         login: login.to_string(),
@@ -218,15 +239,14 @@ fn issue_author_is_trusted(profile: &Profile, author: &IssueAuthorIdentity) -> b
         IssueAuthorKind::Human => {
             if let Some(authors) = profile.publishing.trusted_issue_human_authors.as_deref() {
                 login_matches(&author.login, authors)
-            } else if let Some(allowlist) =
-                profile.publishing.github_issue_author_allowlist.as_deref()
-            {
-                login_matches(&author.login, allowlist)
             } else if profile.provider.eq_ignore_ascii_case("github") {
-                profile
-                    .repo
-                    .split_once('/')
-                    .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(&author.login))
+                match profile.publishing.github_issue_author_allowlist.as_deref() {
+                    Some(allowlist) => login_matches(&author.login, allowlist),
+                    None => profile
+                        .repo
+                        .split_once('/')
+                        .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(&author.login)),
+                }
             } else {
                 false
             }
@@ -235,15 +255,29 @@ fn issue_author_is_trusted(profile: &Profile, author: &IssueAuthorIdentity) -> b
 }
 
 fn issue_disposition_from_labels(labels: &[String]) -> Option<IssueDisposition> {
-    for label in labels {
-        match label.trim().to_ascii_lowercase().as_str() {
-            "executive:owner-decision" | "exec:owner-decision" => {
-                return Some(IssueDisposition::OwnerDecision)
-            }
-            "blocked" | "gah:blocked" => return Some(IssueDisposition::Blocked),
-            "planning" | "plan" => return Some(IssueDisposition::Planning),
-            _ => {}
-        }
+    let normalized = labels
+        .iter()
+        .map(|label| label.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if normalized.iter().any(|label| {
+        matches!(
+            label.as_str(),
+            "executive:owner-decision" | "exec:owner-decision"
+        )
+    }) {
+        return Some(IssueDisposition::OwnerDecision);
+    }
+    if normalized
+        .iter()
+        .any(|label| matches!(label.as_str(), "blocked" | "gah:blocked"))
+    {
+        return Some(IssueDisposition::Blocked);
+    }
+    if normalized
+        .iter()
+        .any(|label| matches!(label.as_str(), "planning" | "plan"))
+    {
+        return Some(IssueDisposition::Planning);
     }
     None
 }
@@ -368,7 +402,7 @@ fn issue_details_from_gitlab_response(
     resp: &serde_json::Value,
     allow_label_override: bool,
 ) -> Result<IssueDetails> {
-    let author = parse_gitlab_author(resp);
+    let author = parse_gitlab_author(profile, resp);
     if let Err(rejection) = evaluate_issue_intake(
         profile,
         author.as_ref(),
@@ -512,7 +546,7 @@ fn issue_record_from_github_value(resp: &serde_json::Value) -> IssueRecord {
     }
 }
 
-fn issue_record_from_gitlab_value(resp: &serde_json::Value) -> IssueRecord {
+fn issue_record_from_gitlab_value(profile: &Profile, resp: &serde_json::Value) -> IssueRecord {
     let number = resp["iid"]
         .as_i64()
         .map(|n| n.to_string())
@@ -537,7 +571,7 @@ fn issue_record_from_gitlab_value(resp: &serde_json::Value) -> IssueRecord {
             labels,
             state,
         },
-        author: parse_gitlab_author(resp),
+        author: parse_gitlab_author(profile, resp),
     }
 }
 
@@ -636,7 +670,7 @@ fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery
         let count = items.len();
 
         for resp in items {
-            let record = issue_record_from_gitlab_value(&resp);
+            let record = issue_record_from_gitlab_value(profile, &resp);
             match evaluate_issue_intake(
                 profile,
                 record.author.as_ref(),

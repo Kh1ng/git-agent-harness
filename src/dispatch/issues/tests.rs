@@ -477,7 +477,7 @@ fn trusted_gitlab_bot_authors_can_be_allowed_separately() {
     let tmp = tempfile::tempdir().unwrap();
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let issue_json = r#"[{"iid":77,"title":"TICKET-9: Legacy title must not become identity","description":"Work ID: TICKET-9\nRecommended backend: codex","labels":[{"name":"exec:autonomous"}],"author":{"username":"project-bot","bot":true},"state":"opened"}]"#;
+    let issue_json = r#"[{"iid":77,"title":"TICKET-9: Legacy title must not become identity","description":"Work ID: TICKET-9\nRecommended backend: codex","labels":["exec:autonomous"],"author":{"id":46,"state":"active","username":"project_5_bot_deadbeef"},"state":"opened"}]"#;
     let glab_path = bin_dir.join("glab");
     fs::write(
             &glab_path,
@@ -501,7 +501,9 @@ fn trusted_gitlab_bot_authors_can_be_allowed_separately() {
     prof.local_path = tmp.path().display().to_string();
     prof.provider = "gitlab".to_string();
     prof.repo = "group/project".to_string();
-    prof.publishing.trusted_issue_bot_authors = Some(vec!["project-bot".into()]);
+    prof.provider_project_id = Some("5".into());
+    prof.publishing.issue_intake_mode = IssueIntakeMode::CanonicalAutonomousOnly;
+    prof.publishing.trusted_issue_bot_authors = Some(vec!["project_5_bot_deadbeef".into()]);
 
     let discovery = discover_open_issues(&prof);
     assert_eq!(discovery.allowed.len(), 1);
@@ -514,6 +516,56 @@ fn trusted_gitlab_bot_authors_can_be_allowed_separately() {
     );
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].work_id.as_deref(), Some("#77"));
+}
+
+#[test]
+fn real_glab_human_shape_requires_the_gitlab_human_allowlist() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut prof = profile(tmp.path());
+    prof.provider = "gitlab".into();
+    prof.publishing.trusted_issue_human_authors = Some(vec!["teammate".into()]);
+    let response = serde_json::json!({
+        "author": {"id": 7, "state": "active", "username": "teammate"}
+    });
+
+    let author = parse_gitlab_author(&prof, &response).unwrap();
+    assert_eq!(author.kind, IssueAuthorKind::Human);
+    assert!(issue_author_is_trusted(&prof, &author));
+}
+
+#[test]
+fn github_compatibility_allowlist_never_grants_gitlab_trust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut prof = profile(tmp.path());
+    prof.provider = "gitlab".into();
+    prof.publishing.github_issue_author_allowlist = Some(vec!["teammate".into()]);
+    let response = serde_json::json!({"author": {"username": "teammate"}});
+
+    let author = parse_gitlab_author(&prof, &response).unwrap();
+    assert!(!issue_author_is_trusted(&prof, &author));
+}
+
+#[test]
+fn canonical_autonomous_intake_remains_opt_in_for_legacy_configs() {
+    assert_eq!(
+        crate::config::PublishingPolicy::default().issue_intake_mode,
+        IssueIntakeMode::Legacy
+    );
+}
+
+#[test]
+fn conflicting_disposition_labels_resolve_to_owner_decision_regardless_of_order() {
+    let labels = vec![
+        "planning".into(),
+        "blocked".into(),
+        "exec:autonomous".into(),
+        "exec:owner-decision".into(),
+    ];
+
+    assert_eq!(
+        issue_disposition_from_labels(&labels),
+        Some(IssueDisposition::OwnerDecision)
+    );
 }
 
 #[test]
