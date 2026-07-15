@@ -21,6 +21,7 @@ use std::sync::{Mutex, MutexGuard};
 static PATH_LOCK: Mutex<()> = Mutex::new(());
 static EXEC_LOCK: Mutex<()> = Mutex::new(());
 static AVAILABILITY_LOCK: Mutex<()> = Mutex::new(());
+static CLAIM_STATE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Scoped override for the process-global availability store path used by
 /// tests. Just like the ledger override, it must be restored before another
@@ -28,6 +29,34 @@ static AVAILABILITY_LOCK: Mutex<()> = Mutex::new(());
 pub struct AvailabilityEnvGuard {
     _lock: MutexGuard<'static, ()>,
     original: Option<OsString>,
+}
+
+pub struct ClaimStateEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    original: Option<OsString>,
+}
+
+impl ClaimStateEnvGuard {
+    pub fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
+        let lock = CLAIM_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let original = std::env::var_os("GAH_CLAIM_STATE_PATH");
+        std::env::set_var("GAH_CLAIM_STATE_PATH", path);
+        Self {
+            _lock: lock,
+            original,
+        }
+    }
+}
+
+impl Drop for ClaimStateEnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(path) => std::env::set_var("GAH_CLAIM_STATE_PATH", path),
+            None => std::env::remove_var("GAH_CLAIM_STATE_PATH"),
+        }
+    }
 }
 
 impl AvailabilityEnvGuard {
