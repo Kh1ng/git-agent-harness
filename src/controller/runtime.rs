@@ -305,6 +305,7 @@ pub fn run_once(
                 gate.human_required_reason_code =
                     Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
                 gate.dispatch_reason = Some("stuck_loop_gate".to_string());
+                gate.human_required_reason_code = Some("stuck_loop_gate".to_string());
                 gate.error_summary = Some(reason.clone());
                 if let Err(e) = crate::ledger::append(cfg, &gate) {
                     eprintln!("warning: failed to persist stuck-loop gate: {e:#}");
@@ -510,6 +511,7 @@ fn run_parallel_once(
                     gate.human_required_reason_code =
                         Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
                     gate.dispatch_reason = Some("stuck_loop_gate".to_string());
+                    gate.human_required_reason_code = Some("stuck_loop_gate".to_string());
                     gate.error_summary = Some(reason.clone());
                     let _ = crate::ledger::append(cfg, &gate);
                 }
@@ -1179,6 +1181,7 @@ default_target_branch = "main"
                 recommended_backend: None,
                 recommended_model: None,
                 human_required: false,
+                human_required_reason_code: None,
                 has_active_claim: false,
             });
         }

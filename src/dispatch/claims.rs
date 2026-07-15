@@ -244,6 +244,16 @@ pub(super) fn check_duplicate_work(
     Ok(Some(work_id))
 }
 
+type TicketHistoryLookup = (
+    usize,
+    usize,
+    Option<String>,
+    bool,
+    bool,
+    bool,
+    Option<String>,
+);
+
 /// TICKET-078: observation feed for `decide_next_action` -- one entry per
 /// ticket file in `docs/tickets/`. Reuses exactly the same active-MR
 /// matching logic as `check_duplicate_work` (branch/mr_url against
@@ -260,9 +270,9 @@ fn ledger_lookup_for_ticket(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
-) -> Option<(usize, usize, Option<String>, bool, bool, bool)> {
+) -> Option<TicketHistoryLookup> {
     let Some(wid) = work_id else {
-        return Some((0, 0, None, false, false, false));
+        return Some((0, 0, None, false, false, false, None));
     };
     let entries = ledger_entries_by_work_id.get(wid);
     let mut count = 0usize;
@@ -276,6 +286,7 @@ fn ledger_lookup_for_ticket(
     // clears an earlier provisional human handoff; OR-ing historical flags
     // would leave the dashboard permanently blocked after automation recovers.
     let mut human_required = false;
+    let mut human_required_reason_code = None;
     for e in entries.into_iter().flatten() {
         // The ledger is a single global file shared by every profile
         // (Defaults::ledger_path, not per-profile), and work_id is
@@ -300,6 +311,7 @@ fn ledger_lookup_for_ticket(
             last_failure_class = None;
             has_active_claim = false;
             human_required = false;
+            human_required_reason_code = None;
             continue;
         }
         // Parallel workers: a claim marks the ticket as currently in-flight
@@ -316,6 +328,7 @@ fn ledger_lookup_for_ticket(
         // for approval; neither grant nor revoke consumes retry budget.
         if e.mode == "paid_route_approval_grant" {
             human_required = false;
+            human_required_reason_code = None;
             last_failure_class = Some(
                 crate::ledger::FailureClass::AgentNoProgress
                     .as_str()
@@ -357,8 +370,10 @@ fn ledger_lookup_for_ticket(
         // ticket that a review already gave up on.
         if e.mode == "review" {
             human_required = e.human_required;
+            human_required_reason_code = e.human_required_reason_code.clone();
         } else if e.human_required {
             human_required = true;
+            human_required_reason_code = e.human_required_reason_code.clone();
         }
         let matching_mr = all_mrs.iter().find(|mr| {
             e.branch.as_deref().is_some_and(|b| b == mr.branch)
@@ -405,6 +420,7 @@ fn ledger_lookup_for_ticket(
         has_active_mr,
         human_required,
         has_active_claim,
+        human_required_reason_code,
     ))
 }
 
@@ -464,6 +480,7 @@ pub fn scan_available_tickets(
                 has_active_mr,
                 human_required,
                 has_active_claim,
+                human_required_reason_code,
             )) = ledger_lookup_for_ticket(
                 work_id.as_deref(),
                 profile,
@@ -485,6 +502,7 @@ pub fn scan_available_tickets(
                 last_failure_class,
                 has_active_mr,
                 human_required,
+                human_required_reason_code,
                 has_active_claim,
             });
         }
@@ -541,6 +559,7 @@ pub fn scan_available_tickets(
             has_active_mr,
             human_required,
             has_active_claim,
+            human_required_reason_code,
         )) = ledger_lookup_for_ticket(
             work_id.as_deref(),
             profile,
@@ -562,6 +581,7 @@ pub fn scan_available_tickets(
             last_failure_class,
             has_active_mr,
             human_required,
+            human_required_reason_code,
             has_active_claim,
         });
     }

@@ -486,6 +486,7 @@ pub(super) fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecis
     ledger.routing_reason = Some(route.routing_reason.clone());
     ledger.fallback_used = route.fallback_used;
     ledger.confidence_impact = route.confidence_impact.clone();
+    ledger.human_required_reason_code = None;
     ledger.human_required = route.human_required;
     ledger.routing_diagnostics = route.routing_diagnostics.clone();
 }

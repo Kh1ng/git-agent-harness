@@ -161,9 +161,11 @@ export interface AvailableTicket {
   recommended_backend: string | null;
   recommended_model: string | null;
   prior_attempt_count: number;
+  genuine_agent_failure_count: number;
   last_failure_class: string | null;
   has_active_mr: boolean;
   human_required: boolean;
+  human_required_reason_code?: string | null;
 }
 
 export interface StatusSnapshot {

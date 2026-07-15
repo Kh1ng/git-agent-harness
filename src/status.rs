@@ -389,15 +389,18 @@ fn build_snapshot_inner(
     // human_required state has since cleared are no longer shown as blocked.
     for ticket in &available_tickets {
         if ticket.human_required {
+            let reason_code = ticket.human_required_reason_code.clone();
             blocked_work_items.push(Blocker {
                 kind: "human_required".into(),
-                reason: Some("ledger_human_required".into()),
+                reason: reason_code
+                    .clone()
+                    .or(Some("ledger_human_required".into())),
                 message: Some("Ledger indicates human intervention required".into()),
                 backend: None,
                 model: None,
                 until: None,
                 source_reference: ticket.work_id.clone(),
-                reason_code: Some(HumanRequiredReason::ReviewEvidenceGate.as_str().into()),
+                reason_code,
             });
         }
     }
@@ -775,6 +778,44 @@ default_target_branch = "main"
         // informational only; blockers are emitted only for current work.
         assert!(snap.blockers.is_empty());
         assert!(snap.blocked_work_items.is_empty());
+    }
+
+    #[test]
+    fn work_item_reason_code_reaches_the_status_blocker() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = make_test_cfg(&tmp);
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+        fs::write(
+            repo.join("docs/tickets/TICKET-300-test.md"),
+            "# TICKET-300: Test ticket\n\nGoal: test\n",
+        )
+        .unwrap();
+        cfg.profiles.get_mut("test").unwrap().local_path = repo.display().to_string();
+        cfg.profiles.get_mut("test").unwrap().provider.clear();
+
+        let mut entry = LedgerEntry::new(
+            "test",
+            &cfg.profiles["test"],
+            "claude",
+            "review",
+            "test",
+            None,
+            None,
+        );
+        entry.work_id = Some("TICKET-300".into());
+        entry.human_required = true;
+        entry.human_required_reason_code = Some("policy_approval".into());
+        crate::ledger::append(&cfg, &entry).unwrap();
+
+        let snap = build_snapshot(&cfg, "test", OffsetDateTime::now_utc()).unwrap();
+        let blocker = snap
+            .blocked_work_items
+            .iter()
+            .find(|blocker| blocker.source_reference.as_deref() == Some("TICKET-300"))
+            .expect("ticket-scoped human hold must be visible");
+        assert_eq!(blocker.reason.as_deref(), Some("policy_approval"));
+        assert_eq!(blocker.reason_code.as_deref(), Some("policy_approval"));
     }
 
     #[test]

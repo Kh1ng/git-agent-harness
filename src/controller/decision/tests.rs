@@ -127,6 +127,7 @@ fn ticket(
         last_failure_class: last_failure_class.map(str::to_string),
         has_active_mr,
         human_required,
+        human_required_reason_code: None,
         has_active_claim: false,
     }
 }
@@ -591,6 +592,7 @@ fn infra_failures_do_not_exhaust_retry_cap() {
         last_failure_class: Some("backend_error".into()),
         has_active_mr: false,
         human_required: false,
+        human_required_reason_code: None,
         has_active_claim: false,
     });
     // Without a backend eligible, it should not be retried or escalated
@@ -687,6 +689,7 @@ fn mixed_failures_only_agent_count_toward_cap() {
         last_failure_class: Some("backend_error".into()),
         has_active_mr: false,
         human_required: false,
+        human_required_reason_code: None,
         has_active_claim: false,
     });
     let action = decide_next_action(&snapshot);
@@ -710,6 +713,7 @@ fn infra_exhausted_ticket_does_not_block_others() {
         last_failure_class: Some("environment_error".into()),
         has_active_mr: false,
         human_required: false,
+        human_required_reason_code: None,
         has_active_claim: false,
     });
     // TICKET-FRESH is undispatched

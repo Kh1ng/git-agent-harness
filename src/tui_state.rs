@@ -261,6 +261,7 @@ mod tests {
             last_failure_class: None,
             has_active_mr: false,
             human_required: false,
+            human_required_reason_code: None,
             has_active_claim: false,
         }
     }

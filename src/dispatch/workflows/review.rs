@@ -190,23 +190,14 @@ pub(in crate::dispatch) fn review(
     if let Some(block) =
         check_review_budget(cfg, profile, &args.profile, args.work_id.as_deref(), &route)?
     {
-        ledger.set_failure(
-            crate::ledger::FailureClass::HumanBlocked,
-            crate::ledger::FailureStage::Review,
-        );
-        ledger.validation_result = Some("review_budget_exhausted".into());
-        ledger.human_required = true;
-        ledger.human_required_reason_code =
-            Some(HumanRequiredReason::ReviewEvidenceGate.as_str().to_string());
-        ledger.error_summary = Some(block.reason.clone());
-        apply_route_to_ledger(ledger, &route);
+        mark_review_budget_exhausted(ledger, &route, &block.reason);
         notify_event(
             cfg,
             profile,
             NotifyEvent::HumanRequired {
                 reason: "review budget exhausted",
                 reference: target.mr_url.as_deref(),
-                reason_code: Some(HumanRequiredReason::ReviewEvidenceGate.as_str()),
+                reason_code: Some(HumanRequiredReason::RetryBudgetExhausted.as_str()),
                 failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
                 failure_stage: ledger.failure_stage.as_deref(),
                 error_summary: ledger.error_summary.as_deref(),
@@ -515,6 +506,11 @@ pub(in crate::dispatch) fn review(
             ledger.backend_exit_code = Some(0);
             ledger.validation_result = Some(verdict.verdict.clone());
             ledger.human_required = verdict.human_required;
+            ledger.human_required_reason_code = verdict.human_required.then(|| {
+                HumanRequiredReason::ReviewEvidenceGate
+                    .as_str()
+                    .to_string()
+            });
             ledger.confidence_impact = Some(verdict.confidence.clone());
             ledger.review_verdict = Some(verdict.verdict.clone());
             ledger.review_confidence = Some(verdict.confidence.clone());
@@ -677,6 +673,23 @@ pub(in crate::dispatch) fn review(
     Ok(())
 }
 
+fn mark_review_budget_exhausted(
+    ledger: &mut LedgerEntry,
+    route: &RouteDecision,
+    reason: &str,
+) {
+    apply_route_to_ledger(ledger, route);
+    ledger.set_failure(
+        crate::ledger::FailureClass::HumanBlocked,
+        crate::ledger::FailureStage::Review,
+    );
+    ledger.validation_result = Some("review_budget_exhausted".into());
+    ledger.human_required = true;
+    ledger.human_required_reason_code =
+        Some(HumanRequiredReason::RetryBudgetExhausted.as_str().to_string());
+    ledger.error_summary = Some(reason.to_string());
+}
+
 fn mark_review_shutdown_cancelled(ledger: &mut LedgerEntry, signal: i32) {
     mark_shutdown_cancelled(ledger, crate::ledger::FailureStage::Review, Some(-signal));
     // apply_route_to_ledger may have marked an availability fallback as
@@ -684,6 +697,7 @@ fn mark_review_shutdown_cancelled(ledger: &mut LedgerEntry, signal: i32) {
     // process produced no verdict, so neither flag is true.
     ledger.confidence_impact = None;
     ledger.human_required = false;
+    ledger.human_required_reason_code = None;
 }
 
 fn reserve_review_route(profile: &Profile, route: &RouteDecision) -> Result<ConcurrencyGuard> {
@@ -744,7 +758,9 @@ fn stop_for_exhausted_review_escalation(
 
 #[cfg(test)]
 mod reservation_tests {
-    use super::{mark_review_shutdown_cancelled, reserve_review_route};
+    use super::{
+        mark_review_budget_exhausted, mark_review_shutdown_cancelled, reserve_review_route,
+    };
     use crate::config::tests::test_profile_for_notifications;
     use crate::ledger::LedgerEntry;
     use crate::routing::{current_concurrent, RouteDecision};
@@ -769,6 +785,34 @@ mod reservation_tests {
         assert_eq!(ledger.backend_exit_code, Some(-15));
         assert_eq!(ledger.confidence_impact, None);
         assert!(!ledger.human_required);
+    }
+
+    #[test]
+    fn route_attribution_does_not_clear_a_review_budget_hold() {
+        let profile = test_profile_for_notifications();
+        let mut ledger = LedgerEntry::new("gah", &profile, "vibe", "review", "test", None, None);
+        let route = RouteDecision {
+            requested_backend: "vibe".into(),
+            effective_backend: "vibe".into(),
+            requested_model: Some("reviewer".into()),
+            effective_model: Some("reviewer".into()),
+            effective_quota_pool: None,
+            routing_reason: "test".into(),
+            fallback_used: false,
+            confidence_impact: None,
+            human_required: false,
+            routing_diagnostics: None,
+        };
+
+        mark_review_budget_exhausted(&mut ledger, &route, "budget exhausted");
+
+        assert!(ledger.human_required);
+        assert_eq!(
+            ledger.human_required_reason_code.as_deref(),
+            Some("retry_budget_exhausted")
+        );
+        assert_eq!(ledger.failure_class.as_deref(), Some("human_blocked"));
+        assert_eq!(ledger.failure_stage.as_deref(), Some("review"));
     }
 
     #[test]
