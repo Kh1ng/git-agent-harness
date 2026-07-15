@@ -1,8 +1,9 @@
 use super::super::attempts::{
     apply_route_to_ledger, attempt_usage, classify_git_operation_result, classify_worktree_result,
     clear_wip_checkpoints, decide_route, failure_text_with_internal_log,
-    mark_backend_unavailable_from_output, mark_shutdown_cancelled, preflight, reserve_backend_slot,
-    resolve_llm, route_identity, run_backend_with_reserved_route, wip_checkpoint_branch,
+    mark_backend_unavailable_from_output, mark_shutdown_cancelled, preflight, record_route_attempt,
+    reserve_backend_slot, resolve_llm, route_identity, route_label,
+    run_backend_with_reserved_route, wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
@@ -390,6 +391,7 @@ pub(crate) fn improve(
         } else {
             None
         };
+        record_route_attempt(ledger, &route);
         let result = run_backend_with_reserved_route(
             &route.effective_backend,
             profile,
@@ -436,7 +438,6 @@ pub(crate) fn improve(
         // of what that code was — "completed" tracks whether the attempt
         // got a fair shot, not whether it succeeded.
         ledger.attempts_completed = Some(ledger.attempts_completed.unwrap_or(0) + 1);
-
         println!(
             "Backend finished: exit={} duration={:.0}s log={}",
             result.exit_code, result.duration_secs, result.log_path
@@ -605,7 +606,15 @@ pub(crate) fn improve(
                         );
                         println!(
                             "Backend unavailable; retrying next attempt with {} instead of {} ({:?})",
-                            rerouted.effective_backend, route.effective_backend, parsed.kind
+                            route_label(
+                                &rerouted.effective_backend,
+                                rerouted.effective_model.as_deref(),
+                            ),
+                            route_label(
+                                &route.effective_backend,
+                                route.effective_model.as_deref(),
+                            ),
+                            parsed.kind
                         );
                         route = rerouted;
                         apply_route_to_ledger(ledger, &route);
@@ -747,7 +756,15 @@ pub(crate) fn improve(
                     if rerouted_identity != current_identity {
                         println!(
                             "Backend unavailable after no-progress result; retrying next attempt with {} instead of {} ({:?})",
-                            rerouted.effective_backend, route.effective_backend, parsed.kind
+                            route_label(
+                                &rerouted.effective_backend,
+                                rerouted.effective_model.as_deref(),
+                            ),
+                            route_label(
+                                &route.effective_backend,
+                                route.effective_model.as_deref(),
+                            ),
+                            parsed.kind
                         );
                         route = rerouted;
                         apply_route_to_ledger(ledger, &route);
@@ -1015,14 +1032,11 @@ pub(crate) fn improve(
                     if rerouted_identity != current_identity {
                         println!(
                             "Escalating retry after validation failure: {} -> {}",
-                            route
-                                .effective_model
-                                .as_deref()
-                                .unwrap_or(&route.effective_backend),
-                            rerouted
-                                .effective_model
-                                .as_deref()
-                                .unwrap_or(&rerouted.effective_backend),
+                            route_label(&route.effective_backend, route.effective_model.as_deref()),
+                            route_label(
+                                &rerouted.effective_backend,
+                                rerouted.effective_model.as_deref(),
+                            ),
                         );
                         route = rerouted;
                         apply_route_to_ledger(ledger, &route);

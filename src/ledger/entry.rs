@@ -1,4 +1,5 @@
 use crate::config::Profile;
+use crate::routing::RoutingRuntimeState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use time::format_description::well_known::Rfc3339;
@@ -122,6 +123,18 @@ pub struct AttemptRecord {
     /// still deserialize.
     #[serde(default)]
     pub usage: LedgerUsage,
+}
+
+/// Route selected for one launched attempt inside a dispatch. Unlike the
+/// top-level routing fields, this list preserves earlier route decisions and
+/// their skip diagnostics when a later retry changes backend.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
+pub struct AttemptRoutingRecord {
+    pub attempt_number: u32,
+    pub backend_instance: String,
+    pub effective_model: Option<String>,
+    #[serde(default)]
+    pub routing_diagnostics: Option<RoutingDiagnostics>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -358,6 +371,11 @@ pub struct LedgerEntry {
     pub attempts_completed: Option<u32>,
     #[serde(default)]
     pub attempts: Vec<AttemptRecord>,
+    #[serde(default)]
+    pub attempt_routing: Vec<AttemptRoutingRecord>,
+    /// Live routing state for the current dispatch only.
+    #[serde(skip, default)]
+    pub routing_runtime: RoutingRuntimeState,
     /// Distinguishes the *kind* of dispatch that produced this ledger entry:
     /// `initial` (first DispatchTicket), `post_review_repair` (FixMr after a
     /// NEEDS_FIX review), `review` (ReviewMr), or `stuck_loop_gate` (a
@@ -453,6 +471,8 @@ impl LedgerEntry {
             attempts_started: Some(0),
             attempts_completed: Some(0),
             attempts: Vec::new(),
+            attempt_routing: Vec::new(),
+            routing_runtime: RoutingRuntimeState::default(),
             dispatch_reason: None,
             context_phase: None,
             context_estimated_tokens_before: None,
@@ -540,6 +560,8 @@ impl LedgerEntry {
             attempts_started: Some(0),
             attempts_completed: Some(0),
             attempts: Vec::new(),
+            attempt_routing: Vec::new(),
+            routing_runtime: RoutingRuntimeState::default(),
             dispatch_reason: None,
             context_phase: None,
             context_estimated_tokens_before: None,

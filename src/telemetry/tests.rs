@@ -645,6 +645,8 @@ mod telemetry_tests {
             attempts_started: Some(1),
             attempts_completed: Some(1),
             attempts: vec![],
+            attempt_routing: vec![],
+            routing_runtime: Default::default(),
             dispatch_reason: None,
             context_phase: None,
             context_estimated_tokens_before: None,

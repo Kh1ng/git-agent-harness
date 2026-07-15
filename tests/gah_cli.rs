@@ -2064,7 +2064,7 @@ fn review_falls_back_when_agy_quota_is_only_on_stderr() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Backend unavailable; retrying review with claude instead of agy",
+            "Backend unavailable; retrying review with claude instead of agy/Claude Sonnet 4.6 (Thinking)",
         ));
 
     let availability = fs::read_to_string(availability_path).unwrap();
@@ -3159,7 +3159,7 @@ fn dispatch_fix_opencode_internal_rate_limit_marks_unavailable_and_reroutes() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Backend unavailable after no-progress result; retrying next attempt with codex instead of opencode",
+            "Backend unavailable after no-progress result; retrying next attempt with codex/gpt-5.4-mini instead of opencode/opencode/hy3-free",
         ));
 
     let availability: Value =
@@ -3237,7 +3237,7 @@ fn dispatch_reroute_continues_partial_tree_after_billing_exhaustion() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Backend unavailable; retrying next attempt with codex instead of opencode (QuotaExhausted)",
+            "Backend unavailable; retrying next attempt with codex/gpt-5.4-mini instead of opencode/opencode/hy3-free (QuotaExhausted)",
         ));
 
     let entry: Value = serde_json::from_str(

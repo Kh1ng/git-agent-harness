@@ -641,6 +641,71 @@ fn apply_route_to_ledger_records_effective_model() {
 }
 
 #[test]
+fn record_route_attempt_preserves_each_route_and_its_diagnostics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut entry = LedgerEntry::new(
+        "test",
+        &profile(tmp.path()),
+        "codex",
+        "improve",
+        "target",
+        Some("session-1".into()),
+        None,
+    );
+    let first = RouteDecision {
+        requested_backend: "auto".into(),
+        effective_backend: "agy".into(),
+        requested_model: None,
+        effective_model: Some("gemini".into()),
+        effective_quota_pool: None,
+        routing_reason: "profile routing policy".into(),
+        fallback_used: false,
+        confidence_impact: None,
+        human_required: false,
+        routing_diagnostics: Some(crate::ledger::RoutingDiagnostics {
+            selected_backend: Some("agy".into()),
+            selected_model: Some("gemini".into()),
+            human_summary: Some("selected agy/gemini".into()),
+            ..Default::default()
+        }),
+    };
+    let second = RouteDecision {
+        effective_backend: "codex".into(),
+        effective_model: Some("gpt-5.4-mini".into()),
+        fallback_used: true,
+        routing_diagnostics: Some(crate::ledger::RoutingDiagnostics {
+            selected_backend: Some("codex".into()),
+            selected_model: Some("gpt-5.4-mini".into()),
+            human_summary: Some("agy skipped: quota_exhausted".into()),
+            ..Default::default()
+        }),
+        ..first.clone()
+    };
+
+    record_route_attempt(&mut entry, &first);
+    record_route_attempt(&mut entry, &second);
+
+    assert!(entry
+        .routing_runtime
+        .dispatch_attempted
+        .contains(&CandidateIdentity::new("agy", Some("gemini"))));
+    assert_eq!(entry.attempt_routing.len(), 2);
+    assert_eq!(entry.attempt_routing[0].backend_instance, "agy");
+    assert_eq!(
+        entry.attempt_routing[1]
+            .routing_diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.human_summary.as_deref()),
+        Some("agy skipped: quota_exhausted")
+    );
+
+    let serialized = serde_json::to_string(&entry).unwrap();
+    let parsed: LedgerEntry = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(parsed.attempt_routing, entry.attempt_routing);
+    assert!(parsed.routing_runtime.dispatch_attempted.is_empty());
+}
+
+#[test]
 fn apply_route_to_ledger_leaves_null_when_no_model() {
     let tmp = tempfile::tempdir().unwrap();
     let mut entry = LedgerEntry::new(

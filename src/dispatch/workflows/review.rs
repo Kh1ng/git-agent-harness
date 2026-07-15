@@ -1,6 +1,7 @@
 use super::super::attempts::{
     apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output,
-    mark_shutdown_cancelled, reserve_backend_slot, review_preflight, review_usage, route_identity,
+    mark_shutdown_cancelled, record_route_attempt, reserve_backend_slot, review_preflight,
+    review_usage, route_identity, route_label,
 };
 use super::super::prompts::enforce_context_budget;
 use super::super::publish::{render_review_comment, review_labels};
@@ -264,6 +265,7 @@ pub(in crate::dispatch) fn review(
 
         let attempt_session = session_dir.join(format!("review-attempt-{}", attempt_number + 1));
         fs::create_dir_all(&attempt_session)?;
+        record_route_attempt(ledger, &route);
         let attempt = runner::run_review_backend(
             profile,
             &route.effective_backend,
@@ -425,7 +427,12 @@ pub(in crate::dispatch) fn review(
                     if rerouted_identity != current_identity {
                         println!(
                             "Backend unavailable; retrying review with {} instead of {} ({:?})",
-                            rerouted.effective_backend, route.effective_backend, parsed.kind
+                            route_label(
+                                &rerouted.effective_backend,
+                                rerouted.effective_model.as_deref(),
+                            ),
+                            route_label(&route.effective_backend, route.effective_model.as_deref(),),
+                            parsed.kind
                         );
                         route = rerouted;
                         review_slot = Some(reserve_review_route(profile, &route)?);
