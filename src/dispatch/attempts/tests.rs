@@ -1,5 +1,5 @@
 use super::*;
-use crate::availability::{availability_for, load_state, Reason};
+use crate::availability::{availability_for, load_state, BlockScope, Reason};
 use crate::config::RoutingPolicy;
 use crate::dispatch::test_util::{gah_config, gah_config_with_ledger, profile};
 use crate::ledger::LedgerEntry;
@@ -925,7 +925,27 @@ fn context_limit_text_is_classified_before_stall_fallback() {
     )
     .unwrap();
     assert!(!decision.eligible);
-    assert_eq!(decision.reason, Some(Reason::QuotaExhausted));
+    assert_eq!(decision.reason, Some(Reason::ContextLimit));
+    assert_eq!(decision.scope, Some(BlockScope::ModelSpecific));
+    // Bounded, auto-expiring: a single oversized task must not permanently
+    // disable the model, nor block the quota pool a larger-context fallback
+    // would share (the MR's own acceptance criterion).
+    assert!(
+        decision.unavailable_until.is_some(),
+        "context-limit unavailability must be bounded, not permanent"
+    );
+    let larger = availability_for(
+        &state,
+        "codex",
+        Some("gpt-5.4-large"),
+        Some("codex-quota"),
+        OffsetDateTime::now_utc(),
+    )
+    .unwrap();
+    assert!(
+        larger.eligible,
+        "a larger-context candidate in the same pool must remain eligible"
+    );
     assert!(!parsed.retryable);
 }
 

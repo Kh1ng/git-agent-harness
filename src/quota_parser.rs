@@ -104,8 +104,15 @@ fn insufficient_balance_re() -> &'static Regex {
 fn context_limit_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
+        // The exhaustion verb alternation deliberately does NOT include a bare
+        // `too`: a generic "too verbose"/"too slow" far from any limit word can
+        // straddle the 80-char windows and falsely match against an unrelated
+        // "token limit" mention. Only the explicit `too long` / `too many`
+        // phrases count. This keeps ordinary backend chatter from being
+        // misclassified as a context-window exhaustion (which would otherwise
+        // disable a model/pool — see availability.rs).
         Regex::new(
-            r"(?i)(?:(?:\b(?:context|token|prompt|input)\b.{0,80}(?:window|length|limit|budget|size)|(?:context|token|prompt|input)\s+length).{0,80}(?:exceeded|exceeding|over|beyond|too long|too many|surpassed|too)|(?:exceeded|exceeding|over|beyond|too long|too many|surpassed|too).{0,80}\b(?:context|token|prompt|input)\b.{0,80}(?:window|length|limit|budget|size))",
+            r"(?i)(?:(?:\b(?:context|token|prompt|input)\b.{0,80}(?:window|length|limit|budget|size)|(?:context|token|prompt|input)\s+length).{0,80}(?:exceeded|exceeding|over|beyond|too long|too many|surpassed)|(?:exceeded|exceeding|over|beyond|too long|too many|surpassed).{0,80}\b(?:context|token|prompt|input)\b.{0,80}(?:window|length|limit|budget|size))",
         )
         .unwrap()
     })
@@ -792,5 +799,44 @@ mod tests {
         let now = utc(2026, Month::January, 1, 0, 0);
         let text = "The context menu lists available options for this run.";
         assert!(parse("codex", text, now).is_none());
+    }
+
+    #[test]
+    fn too_verbose_next_to_token_limit_is_not_context_limit() {
+        // Issue #437: a bare `too` (as in "too verbose") must not combine with
+        // an unrelated "token limit" mention across the 80-char window to
+        // fabricate a context-window exhaustion. Such a false positive would
+        // otherwise disable the model/pool (see availability.rs).
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let text = "The output is too verbose; token limit warnings may follow";
+        assert!(
+            parse("codex", text, now).is_none(),
+            "a generic 'too verbose' note next to 'token limit' must not be classified as context exhaustion"
+        );
+    }
+
+    #[test]
+    fn prompt_too_long_is_classified_as_context_limit() {
+        // The explicit `too long` phrase (not the bare `too`) must still match.
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse(
+            "claude",
+            "The prompt is too long for the model context window",
+            now,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind, FailureKind::ContextLimitExceeded);
+    }
+
+    #[test]
+    fn token_too_many_is_classified_as_context_limit() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse(
+            "codex",
+            "request failed: too many tokens for the input context length",
+            now,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind, FailureKind::ContextLimitExceeded);
     }
 }

@@ -50,6 +50,11 @@ pub enum Reason {
     QuotaExhausted,
     AuthenticationError,
     BackendOutage,
+    /// Explicit model context-window/context-length exhaustion. Distinct from
+    /// `QuotaExhausted`: it is a property of the specific task+model
+    /// combination, not of the backend account or quota pool, so it must
+    /// never be recorded as a permanent, account- or pool-wide unavailability.
+    ContextLimit,
     ManualDisable,
     Unknown,
 }
@@ -63,6 +68,7 @@ impl Reason {
             Self::QuotaExhausted => "quota_exhausted",
             Self::AuthenticationError => "authentication_error",
             Self::BackendOutage => "backend_outage",
+            Self::ContextLimit => "context_limit",
             Self::ManualDisable => "manual_disable",
             Self::Unknown => "unknown",
         }
@@ -1057,6 +1063,7 @@ mod tests {
             Reason::QuotaExhausted,
             Reason::AuthenticationError,
             Reason::BackendOutage,
+            Reason::ContextLimit,
             Reason::ManualDisable,
             Reason::Unknown,
         ] {

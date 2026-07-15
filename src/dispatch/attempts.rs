@@ -743,6 +743,14 @@ fn now_with_local_offset() -> OffsetDateTime {
     OffsetDateTime::now_utc().to_offset(offset)
 }
 
+/// A bounded, model-specific cooldown recorded when a backend reports a
+/// context-window/context-length exhaustion. Unlike quota/auth exhaustion it
+/// is NOT an account- or pool-wide condition, and it must never be permanent:
+/// a single oversized task must not take the model (or, via a shared
+/// quota_pool, every candidate) out of rotation indefinitely. The cooldown
+/// auto-expires so the model recovers for tasks that fit its context window.
+const CONTEXT_LIMIT_COOLDOWN_SECONDS: u64 = 600;
+
 pub(super) fn mark_backend_unavailable_from_output(
     backend: &str,
     model: Option<&str>,
@@ -787,29 +795,47 @@ fn mark_backend_unavailable_from_output_at(
     let now = now_with_local_offset();
 
     if let Some(parsed) = crate::quota_parser::parse(backend, log_text, now) {
-        let unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {
+        let base_unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {
             OffsetDateTime::parse(reset_at, &Rfc3339).ok()
         } else {
             parsed
                 .retry_after_seconds
                 .map(|secs| now + time::Duration::seconds(secs as i64))
         };
-        let reason = match parsed.kind {
-            crate::quota_parser::FailureKind::QuotaExhausted => {
-                crate::availability::Reason::QuotaExhausted
-            }
-            crate::quota_parser::FailureKind::RateLimited => {
-                crate::availability::Reason::RateLimited
-            }
-            crate::quota_parser::FailureKind::AuthenticationError => {
-                crate::availability::Reason::AuthenticationError
-            }
-            crate::quota_parser::FailureKind::BackendStalled => {
-                crate::availability::Reason::BackendOutage
-            }
-            crate::quota_parser::FailureKind::ContextLimitExceeded => {
-                crate::availability::Reason::QuotaExhausted
-            }
+        // Context-limit exhaustion is a property of the specific task+model
+        // combination, not of the backend account or quota pool. Record it as a
+        // bounded, model-specific unavailability so routing can reroute to a
+        // larger-context candidate (see `is_genuine_agent_failure`'s treatment
+        // of `context_limit_exceeded`), but never disable the whole
+        // backend/account or every candidate sharing a quota_pool the way
+        // QuotaExhausted does. The cooldown auto-expires, so a single oversized
+        // task cannot permanently remove the model from rotation.
+        let (reason, scope_pool, unavailable_until) = match parsed.kind {
+            crate::quota_parser::FailureKind::ContextLimitExceeded => (
+                crate::availability::Reason::ContextLimit,
+                None,
+                Some(now + time::Duration::seconds(CONTEXT_LIMIT_COOLDOWN_SECONDS as i64)),
+            ),
+            crate::quota_parser::FailureKind::QuotaExhausted => (
+                crate::availability::Reason::QuotaExhausted,
+                quota_pool,
+                base_unavailable_until,
+            ),
+            crate::quota_parser::FailureKind::RateLimited => (
+                crate::availability::Reason::RateLimited,
+                quota_pool,
+                base_unavailable_until,
+            ),
+            crate::quota_parser::FailureKind::AuthenticationError => (
+                crate::availability::Reason::AuthenticationError,
+                quota_pool,
+                base_unavailable_until,
+            ),
+            crate::quota_parser::FailureKind::BackendStalled => (
+                crate::availability::Reason::BackendOutage,
+                quota_pool,
+                base_unavailable_until,
+            ),
         };
         let summary = format!(
             "{}; confidence={:?}; log={}",
@@ -819,7 +845,7 @@ fn mark_backend_unavailable_from_output_at(
             state_path,
             backend,
             model.filter(|m| !m.is_empty()),
-            quota_pool,
+            scope_pool,
             reason,
             crate::availability::Source::BackendError,
             unavailable_until,

@@ -79,6 +79,13 @@ pub(super) const LIVE_TASK_PROBLEM_MAX_BYTES: usize = 4_096;
 pub(super) const LIVE_TASK_ACCEPTANCE_MAX_BYTES: usize = 8_192;
 pub(super) const LIVE_TASK_LIST_MAX_BYTES: usize = 4_096;
 pub(super) const LIVE_TASK_LIST_ITEM_MAX_BYTES: usize = 1_024;
+/// Cap on the raw GitHub/GitLab issue body injected into the Focus section.
+/// The structured Live Task Pack already carries a bounded summary of the
+/// same issue, so the literal body is a convenience, not a requirement — and
+/// an unbounded paste (e.g. a transcript/log) would reintroduce exactly the
+/// oversized-context risk this ticket is meant to classify correctly.
+pub(super) const FOCUS_BODY_MAX_BYTES: usize = 8_192;
+pub(super) const FOCUS_TITLE_MAX_BYTES: usize = 1_024;
 
 pub(super) fn build_task(
     profile: &Profile,
@@ -425,15 +432,26 @@ pub(super) fn format_candidate_task(
 
 /// Keep the Focus section literal so the worker sees the same source text a
 /// human would read on the issue page, while the Live Task Pack carries the
-/// bounded structured summary.
+/// bounded structured summary. Both the title and the raw body are capped so
+/// a large pasted issue (e.g. a transcript/log) cannot blow the worker's
+/// context budget — every other untrusted issue field in this file goes
+/// through the same bounded sanitation.
 fn format_issue_focus_text(issue: &IssueDetails) -> String {
-    let mut focus = issue.title.trim().to_string();
+    let title = utf8_safe_prefix(issue.title.trim(), FOCUS_TITLE_MAX_BYTES);
     let body = issue.body.trim_end();
-    if !body.is_empty() {
-        if !focus.is_empty() {
-            focus.push_str("\n\n");
-        }
-        focus.push_str(body);
+    if body.is_empty() {
+        return title.to_string();
+    }
+    let truncated = body.len() > FOCUS_BODY_MAX_BYTES;
+    let body_prefix = utf8_safe_prefix(body, FOCUS_BODY_MAX_BYTES);
+    let mut focus = String::with_capacity(title.len() + 2 + body_prefix.len() + 80);
+    focus.push_str(title);
+    focus.push_str("\n\n");
+    focus.push_str(body_prefix);
+    if truncated {
+        focus.push_str(&format!(
+            "\n\n[Issue body truncated at {FOCUS_BODY_MAX_BYTES} bytes; the structured Live Task Pack above carries the bounded summary.]"
+        ));
     }
     focus
 }
@@ -444,6 +462,7 @@ mod tests {
     use super::format_candidate_task;
     use super::Candidate;
     use super::IssueDetails;
+    use super::FOCUS_BODY_MAX_BYTES;
     use super::LIVE_TASK_ACCEPTANCE_MAX_BYTES;
     use super::PROJECT_BRIEF_MAX_BYTES;
     use crate::config::{Profile, RoutingPolicy};
@@ -681,6 +700,35 @@ mod tests {
         assert!(task.contains("Fallback scope."));
         assert!(task.contains("Keep behavior stable."));
         assert!(!task.contains("### Issue Description"));
+    }
+
+    #[test]
+    fn issue_focus_body_is_bounded_to_avoid_oversized_context() {
+        // Issue #437: the raw GitHub issue body used to be injected into the
+        // Focus section verbatim and unbounded. A pasted log/transcript must
+        // be truncated so it cannot blow the worker's context budget.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "999".to_string(),
+            title: "Big pasted issue".to_string(),
+            body: format!("## Problem\n\n{}\n", "x".repeat(FOCUS_BODY_MAX_BYTES * 3)),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#999", Some(&issue));
+
+        let focus_start = task.find("## Focus").unwrap();
+        let focus_section = &task[focus_start..];
+        assert!(
+            focus_section.len() <= FOCUS_BODY_MAX_BYTES + 4_096,
+            "Focus section must stay bounded even for a huge issue body"
+        );
+        assert!(focus_section.contains(&format!("truncated at {FOCUS_BODY_MAX_BYTES} bytes")));
     }
 
     #[test]
