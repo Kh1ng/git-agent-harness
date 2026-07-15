@@ -17,7 +17,7 @@ fn redacted_stderr(out: &Output) -> String {
         .to_string()
 }
 
-fn redacted_curl_output(out: &Output) -> String {
+fn redacted_provider_output(out: &Output) -> String {
     crate::redact::redact(&format!(
         "stdout: {} stderr: {}",
         String::from_utf8_lossy(&out.stdout).trim(),
@@ -27,6 +27,18 @@ fn redacted_curl_output(out: &Output) -> String {
     .chars()
     .take(PROVIDER_ERROR_MAX_CHARS)
     .collect()
+}
+
+fn gitlab_hostname(api_base: &str) -> Result<&str> {
+    let without_scheme = api_base
+        .strip_prefix("https://")
+        .or_else(|| api_base.strip_prefix("http://"))
+        .ok_or_else(|| anyhow::anyhow!("invalid GitLab provider_api_base: expected http(s) URL"))?;
+    let hostname = without_scheme.split('/').next().unwrap_or_default().trim();
+    if hostname.is_empty() {
+        anyhow::bail!("invalid GitLab provider_api_base: missing hostname");
+    }
+    Ok(hostname)
 }
 
 #[cfg(test)]
@@ -168,37 +180,40 @@ fn gitlab_mr(profile: &Profile, branch: &str, title: &str, body: &str) -> Result
         .provider_project_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
-    let pat = profile.pat();
-    let url = format!("{}/projects/{}/merge_requests", api_base, project_id);
-    let payload = serde_json::json!({
-        "source_branch": branch,
-        "target_branch": profile.default_target_branch,
-        "title": format!("Draft: {}", title),
-        "description": body,
-    });
+    let hostname = gitlab_hostname(api_base)?;
+    let endpoint = format!("projects/{project_id}/merge_requests");
+    let source_branch = format!("source_branch={branch}");
+    let target_branch = format!("target_branch={}", profile.default_target_branch);
+    let title = format!("title=Draft: {title}");
+    let description = format!("description={body}");
 
-    let out = provider_command("curl")
+    // Use the same host-scoped provider CLI session that `gah doctor`
+    // validates. Requiring a second GITLAB_PAT environment variable here made
+    // a doctor-clean, authenticated profile fail publication with HTTP 401.
+    let out = provider_command("glab")
         .args([
-            "-s",
-            "-S",
-            "--fail-with-body",
-            "-X",
+            "api",
+            &endpoint,
+            "--hostname",
+            hostname,
+            "--method",
             "POST",
-            "-H",
-            &format!("PRIVATE-TOKEN: {}", pat),
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &payload.to_string(),
-            &url,
+            "--raw-field",
+            &source_branch,
+            "--raw-field",
+            &target_branch,
+            "--raw-field",
+            &title,
+            "--raw-field",
+            &description,
         ])
         .output()
-        .context("curl gitlab create mr")?;
+        .context("glab api gitlab create mr")?;
 
     if !out.status.success() {
         anyhow::bail!(
-            "curl gitlab create mr failed: {}",
-            redacted_curl_output(&out)
+            "glab api gitlab create mr failed: {}",
+            redacted_provider_output(&out)
         );
     }
 

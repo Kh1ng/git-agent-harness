@@ -174,15 +174,15 @@ fn gitlab_mr_error_json_response_fails_closed() {
     fs::create_dir_all(&bin_dir).unwrap();
     make_fake_bin(
             &bin_dir,
-            "curl",
-            "#!/bin/sh\nprintf '%s\\n' '{\"message\":\"404 Project Not Found\",\"token\":\"glpat-abcdefghijklmnopqrstuvwxyz\"}'\necho 'curl: (22) The requested URL returned error: 404' >&2\nexit 22\n",
+            "glab",
+            "#!/bin/sh\nprintf '%s\\n' '{\"message\":\"404 Project Not Found\",\"token\":\"glpat-abcdefghijklmnopqrstuvwxyz\"}'\necho 'glab: API request failed: 404' >&2\nexit 1\n",
         );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
     let err = create_draft_mr(&gitlab_profile(), "gah/test", "title", "body").unwrap_err();
 
     let msg = format!("{:#}", err);
-    assert!(msg.contains("curl gitlab create mr failed"));
+    assert!(msg.contains("glab api gitlab create mr failed"));
     assert!(msg.contains("404 Project Not Found"));
     assert!(!msg.contains("glpat-abcdefghijklmnopqrstuvwxyz"));
     assert!(msg.contains("[REDACTED:GITLAB_TOKEN]"));
@@ -196,7 +196,7 @@ fn gitlab_mr_missing_required_fields_fails_closed() {
     fs::create_dir_all(&bin_dir).unwrap();
     make_fake_bin(
             &bin_dir,
-            "curl",
+            "glab",
             "#!/bin/sh\nprintf '%s\\n' '{\"web_url\":\"https://gitlab.example.com/group/repo/-/merge_requests/42\"}'\nexit 0\n",
         );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
@@ -217,7 +217,7 @@ fn gitlab_mr_empty_web_url_fails_closed() {
     fs::create_dir_all(&bin_dir).unwrap();
     make_fake_bin(
         &bin_dir,
-        "curl",
+        "glab",
         "#!/bin/sh\nprintf '%s\\n' '{\"iid\":42,\"web_url\":\"\"}'\nexit 0\n",
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
@@ -235,10 +235,14 @@ fn gitlab_mr_valid_response_returns_id_and_url() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
+    let args_path = bin_dir.join("glab-args.txt");
     make_fake_bin(
             &bin_dir,
-            "curl",
-            "#!/bin/sh\nprintf '%s\\n' '{\"iid\":42,\"web_url\":\"https://gitlab.example.com/group/repo/-/merge_requests/42\"}'\nexit 0\n",
+            "glab",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"iid\":42,\"web_url\":\"https://gitlab.example.com/group/repo/-/merge_requests/42\"}}'\nexit 0\n",
+                args_path.display()
+            ),
         );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
@@ -249,6 +253,12 @@ fn gitlab_mr_valid_response_returns_id_and_url() {
         mr.url,
         "https://gitlab.example.com/group/repo/-/merge_requests/42"
     );
+    let args = fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("projects/42/merge_requests"));
+    assert!(args.contains("gitlab.example.com"));
+    assert!(args.contains("source_branch=gah/test"));
+    assert!(args.contains("target_branch=main"));
+    assert!(!args.contains("PRIVATE-TOKEN"));
 }
 
 #[test]

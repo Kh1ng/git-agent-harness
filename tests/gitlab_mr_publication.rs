@@ -159,7 +159,7 @@ fn invalid_gitlab_mr_response_fails_publication_closed() {
     );
     make_executable(
         &fake_bin,
-        "curl",
+        "glab",
         "#!/bin/sh\nprintf '%s\\n' '{\"message\":\"404 Project Not Found\"}'\nexit 0\n",
     );
     let path = format!(
