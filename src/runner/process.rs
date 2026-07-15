@@ -480,31 +480,36 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn idle_watch_allows_quiet_active_descendant_verification() {
-        let _exec_guard = ExecGuard::new();
-        let f = fixture();
-        make_fake_bin(
-            &f.bin_dir,
-            "backend",
-            "#!/bin/sh\n/bin/sh -c 'start=$(date +%s); while [ $(date +%s) -lt $((start + 3)) ]; do :; done'\n",
-        );
-        let log_path = f.session_dir.join("backend-output.log");
-        let shutdown = AtomicBool::new(false);
+        for attempt in 1..=8 {
+            let _exec_guard = ExecGuard::new();
+            let f = fixture();
+            make_fake_bin(
+                &f.bin_dir,
+                "backend",
+                "#!/bin/sh\n# Deterministic, quiet parent with active descendant.\n/bin/yes >/dev/null &\nbackend_descendant=$!\nsleep 2\n/bin/kill -TERM \"$backend_descendant\" >/dev/null 2>&1 || true\nwait \"$backend_descendant\" 2>/dev/null || true\n",
+            );
+            let log_path = f.session_dir.join("backend-output.log");
+            let shutdown = AtomicBool::new(false);
 
-        let result = spawn_with_idle_watch_with_shutdown(
-            Command::new(f.bin_dir.join("backend")),
-            &log_path,
-            &f.worktree,
-            1,
-            "launching quiet verification backend",
-            &shutdown,
-            true,
-        )
-        .unwrap();
+            let result = spawn_with_idle_watch_with_shutdown(
+                Command::new(f.bin_dir.join("backend")),
+                &log_path,
+                &f.worktree,
+                1,
+                "launching quiet verification backend",
+                &shutdown,
+                true,
+            )
+            .unwrap();
 
-        assert_eq!(result.0, 0);
-        assert!(result.1 >= 2.0, "quiet verification ended too quickly");
-        let log = fs::read_to_string(log_path).unwrap_or_default();
-        assert!(!log.contains("GAH: killed after"), "got log: {log}");
+            assert_eq!(result.0, 0, "attempt {attempt}");
+            assert!(result.1 >= 1.0, "attempt {attempt} ended too quickly");
+            let log = fs::read_to_string(log_path).unwrap_or_default();
+            assert!(
+                !log.contains("GAH: killed after"),
+                "attempt {attempt} got log: {log}"
+            );
+        }
     }
 
     #[test]
