@@ -1,4 +1,6 @@
 mod support;
+#[path = "gah_cli/validation_gate.rs"]
+mod validation_gate;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -9,7 +11,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
-use support::{FakeBackend, Scenario};
+use support::{test_temp_root, test_tempdir, FakeBackend, Scenario};
 use tempfile::TempDir;
 
 fn bin() -> Command {
@@ -37,6 +39,7 @@ fn bin() -> Command {
             std::process::id(),
         )),
     );
+    cmd.env("TMPDIR", test_temp_root());
     cmd
 }
 
@@ -64,11 +67,12 @@ fn spawn_bin() -> ProcessCommand {
             std::process::id(),
         )),
     );
+    cmd.env("TMPDIR", test_temp_root());
     cmd
 }
 
 fn write_fixture_dir() -> TempDir {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
 
     let scout_dir = tmp.path().join("scout");
     fs::create_dir_all(&scout_dir).unwrap();
@@ -296,7 +300,7 @@ fn help_works() {
 /// produces the expected human/JSON shapes end to end.
 #[test]
 fn availability_human_and_json_views() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let state_path = tmp.path().join("availability.json");
     fs::write(
         &state_path,
@@ -336,7 +340,7 @@ fn availability_human_and_json_views() {
 
 #[test]
 fn availability_with_no_state_file_reports_eligible_by_default() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let state_path = tmp.path().join("does-not-exist.json");
 
     bin()
@@ -501,7 +505,7 @@ fn price_guard_blocks_unavailable_model() {
 
 #[test]
 fn work_trust_mode_blocks_provider_mutation() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = tmp.path().join("work-readonly.toml");
 
     fs::write(
@@ -535,7 +539,7 @@ allow_project_write = false
 
 #[test]
 fn personal_draft_pr_mode_allows_only_draft_pr() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = tmp.path().join("personal-draft.toml");
 
     fs::write(
@@ -610,7 +614,7 @@ claude_args           = ["--allowedTools", "Edit,Write,Bash"]
 
 #[test]
 fn profile_list_shows_configured_profiles() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args(["profile", "list", "--config", cfg.to_str().unwrap()])
@@ -623,7 +627,7 @@ fn profile_list_shows_configured_profiles() {
 
 #[test]
 fn profile_show_displays_all_fields() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -642,7 +646,7 @@ fn profile_show_displays_all_fields() {
 
 #[test]
 fn profile_show_unknown_profile_fails_with_hint() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -659,7 +663,7 @@ fn profile_show_unknown_profile_fails_with_hint() {
 
 #[test]
 fn dispatch_dry_run_improve_prints_plan() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -681,7 +685,7 @@ fn dispatch_dry_run_improve_prints_plan() {
 
 #[test]
 fn dispatch_dry_run_shows_backend_in_plan() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -703,7 +707,7 @@ fn dispatch_dry_run_shows_backend_in_plan() {
 
 #[test]
 fn dispatch_dry_run_shows_oh_profile_when_given() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -725,7 +729,7 @@ fn dispatch_dry_run_shows_oh_profile_when_given() {
 
 #[test]
 fn dispatch_dry_run_pm_mode_prints_pm_steps() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -745,7 +749,7 @@ fn dispatch_dry_run_pm_mode_prints_pm_steps() {
 
 #[test]
 fn dispatch_unknown_mode_fails() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -790,7 +794,7 @@ validation_commands   = ["cargo test --quiet", "cargo clippy -- -D warnings"]
 
 #[test]
 fn profile_show_displays_validation_commands() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config_with_validation(&tmp);
     bin()
         .args([
@@ -809,7 +813,7 @@ fn profile_show_displays_validation_commands() {
 
 #[test]
 fn dispatch_dry_run_shows_validation_commands() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config_with_validation(&tmp);
     bin()
         .args([
@@ -830,7 +834,7 @@ fn dispatch_dry_run_shows_validation_commands() {
 
 #[test]
 fn dispatch_dry_run_shows_retries_in_plan() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config_with_validation(&tmp);
     bin()
         .args([
@@ -852,7 +856,7 @@ fn dispatch_dry_run_shows_retries_in_plan() {
 
 #[test]
 fn dispatch_dry_run_candidate_json_target_labeled() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     let fake_candidates = tmp.path().join("candidates.json");
     // Write a minimal valid candidates.json so build_task identifies it
@@ -881,7 +885,7 @@ fn dispatch_dry_run_candidate_json_target_labeled() {
 
 #[test]
 fn dispatch_dry_run_allow_draft_fail_shown() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -902,7 +906,7 @@ fn dispatch_dry_run_allow_draft_fail_shown() {
 
 #[test]
 fn dispatch_dry_run_oh_profile_shows_model() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -929,7 +933,7 @@ fn dispatch_dry_run_oh_profile_shows_model() {
 
 #[test]
 fn dispatch_dry_run_model_override_shows_custom_model() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     bin()
         .args([
@@ -951,7 +955,7 @@ fn dispatch_dry_run_model_override_shows_custom_model() {
 
 #[test]
 fn dispatch_dry_run_oh_profile_does_not_pass_profile_flag() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = write_dispatch_config(&tmp);
     // The dry-run output must not contain "--profile" as an OpenHands argument.
     // It only shows the GAH --oh-profile flag which is a different thing.
@@ -1009,7 +1013,7 @@ fn init_prints_profile_snippet() {
 
 #[test]
 fn doctor_passes_for_valid_profile() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1037,7 +1041,7 @@ fn doctor_passes_for_valid_profile() {
 
 #[test]
 fn doctor_fails_when_manager_memory_is_missing() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1069,7 +1073,7 @@ fn doctor_validate_warns_when_nothing_extra_configured() {
     // TICKET-076: no validation_commands, no env_file, no routing backend
     // configured -- --validate must WARN, not FAIL, and doctor must still
     // pass overall (matches plain `doctor`'s existing passing behavior).
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1100,7 +1104,7 @@ fn doctor_validate_warns_when_nothing_extra_configured() {
 
 #[test]
 fn doctor_validate_fails_on_unresolvable_validation_command() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1136,7 +1140,7 @@ fn doctor_validate_fails_on_unresolvable_validation_command() {
 
 #[test]
 fn doctor_validate_fails_on_missing_env_file() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1170,7 +1174,7 @@ fn doctor_validate_fails_on_missing_env_file() {
 
 #[test]
 fn doctor_validate_fails_on_missing_backend_executable_but_plain_doctor_still_passes() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1224,7 +1228,7 @@ fn doctor_validate_fails_on_missing_backend_executable_but_plain_doctor_still_pa
 /// `review_preflight` check as the real review invocation.
 #[test]
 fn doctor_validate_reports_missing_review_capability() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1286,7 +1290,7 @@ fn doctor_validate_reports_missing_review_capability() {
 
 #[test]
 fn dispatch_pm_writes_ledger_entry() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1313,7 +1317,7 @@ fn dispatch_pm_writes_ledger_entry() {
 
 #[test]
 fn dispatch_records_effective_model_for_routed_runs() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1383,7 +1387,7 @@ fn dispatch_records_effective_model_for_routed_runs() {
 
 #[test]
 fn prune_dry_run_reports_old_sessions_and_worktrees() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1437,7 +1441,7 @@ fn prune_dry_run_reports_old_sessions_and_worktrees() {
 
 #[test]
 fn prune_retains_dirty_worktree_even_after_retention() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1479,7 +1483,7 @@ fn prune_retains_dirty_worktree_even_after_retention() {
 
 #[test]
 fn dispatch_pm_target_parses_structured_plan_and_writes_ticket() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1527,7 +1531,7 @@ fn dispatch_pm_target_parses_structured_plan_and_writes_ticket() {
 
 #[test]
 fn dispatch_pm_skips_unavailable_preferred_backend() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1599,7 +1603,7 @@ fn dispatch_pm_skips_unavailable_preferred_backend() {
 
 #[test]
 fn dispatch_pm_quota_failure_updates_availability_and_reroutes() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -1666,7 +1670,7 @@ fn dispatch_pm_quota_failure_updates_availability_and_reroutes() {
 
 #[test]
 fn ledger_summary_reports_recent_counts() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = tmp.path().join("gah.toml");
     fs::write(
         &cfg,
@@ -1714,7 +1718,7 @@ llm_model_cloud = ""
 /// src/ledger/mod.rs.
 #[test]
 fn ledger_work_filters_to_one_work_id_and_supports_json() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = tmp.path().join("gah.toml");
     fs::write(
         &cfg,
@@ -1775,7 +1779,7 @@ llm_model_cloud = ""
 
 #[test]
 fn ledger_work_with_no_matching_entries_reports_none_found() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let cfg = tmp.path().join("gah.toml");
     fs::write(
         &cfg,
@@ -1808,7 +1812,7 @@ llm_model_cloud = ""
 
 #[test]
 fn review_writes_structured_verdict_and_posts_comment() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let prompt_log = tmp.path().join("review-prompt.txt");
     fs::create_dir_all(&repo).unwrap();
@@ -1870,7 +1874,7 @@ fn review_writes_structured_verdict_and_posts_comment() {
 
 #[test]
 fn review_routes_to_agy_candidate_and_writes_verdict() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let prompt_log = tmp.path().join("review-prompt.txt");
     fs::create_dir_all(&repo).unwrap();
@@ -1940,7 +1944,7 @@ fn review_routes_to_agy_candidate_and_writes_verdict() {
 /// the next candidate instead of erroring.
 #[test]
 fn review_falls_back_to_next_candidate_on_agy_empty_output() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -2014,7 +2018,7 @@ fn review_falls_back_to_next_candidate_on_agy_empty_output() {
 /// before selecting the fallback; otherwise every loop cycle repeats AGY.
 #[test]
 fn review_falls_back_when_agy_quota_is_only_on_stderr() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -2077,7 +2081,7 @@ fn review_falls_back_when_agy_quota_is_only_on_stderr() {
 
 #[test]
 fn review_uses_explicit_claude_path() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let prompt_log = tmp.path().join("review-prompt.txt");
     fs::create_dir_all(&repo).unwrap();
@@ -2163,7 +2167,7 @@ fn setup_review_repo_and_gh(
 /// installed.
 #[test]
 fn review_fails_when_required_capability_not_installed() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, fake_bin, home) = setup_review_repo_and_gh(&tmp);
     fs::create_dir_all(&home).unwrap();
     make_fake_bin_with_body(
@@ -2205,7 +2209,7 @@ fn review_fails_when_required_capability_not_installed() {
 /// activation text, and the verdict must record it in applied_capabilities.
 #[test]
 fn review_activates_and_records_capability_when_installed() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, fake_bin, home) = setup_review_repo_and_gh(&tmp);
     fs::create_dir_all(home.join(".claude/plugins/cache/ponytail")).unwrap();
     let prompt_log = tmp.path().join("review-prompt.txt");
@@ -2260,7 +2264,7 @@ fn review_activates_and_records_capability_when_installed() {
 /// degraded", not silently run an ordinary review.
 #[test]
 fn review_fails_as_degraded_when_capability_has_no_known_activation() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, fake_bin, home) = setup_review_repo_and_gh(&tmp);
     fs::create_dir_all(home.join(".claude/plugins/cache/some-future-skill")).unwrap();
     make_fake_bin_with_body(
@@ -2297,7 +2301,7 @@ fn review_fails_as_degraded_when_capability_has_no_known_activation() {
 
 #[test]
 fn review_parse_failure_preserves_raw_report() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -2349,7 +2353,7 @@ fn review_parse_failure_preserves_raw_report() {
 
 #[test]
 fn review_shutdown_records_cancelled_shutdown_and_dispatch_finished_event() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, fake_bin, home) = setup_review_repo_and_gh(&tmp);
     fs::create_dir_all(&home).unwrap();
     let claude = FakeBackend::new(tmp.path(), "claude");
@@ -2411,7 +2415,7 @@ fn review_shutdown_records_cancelled_shutdown_and_dispatch_finished_event() {
 /// failed review from the operator and the next controller observation.
 #[test]
 fn loop_reports_nonzero_review_backend_as_failure_not_success() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -2475,7 +2479,7 @@ fn loop_reports_nonzero_review_backend_as_failure_not_success() {
 
 #[test]
 fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -2545,7 +2549,7 @@ fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
     // any provider call. This test deliberately does NOT set GITLAB_PAT via
     // `.env(...)` on the test harness itself -- only via a profile env_file
     // -- to prove the token actually comes from that config-driven path.
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -2613,7 +2617,7 @@ fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
 
 #[test]
 fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let prompt_log = tmp.path().join("review-prompt-mr.txt");
     fs::create_dir_all(&repo).unwrap();
@@ -2675,7 +2679,7 @@ fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
 
 #[test]
 fn review_uses_profile_repo_not_current_worktree() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let worktree = tmp.path().join("review-wt");
     let prompt_log = tmp.path().join("review-prompt-worktree.txt");
@@ -2744,7 +2748,7 @@ fn review_uses_profile_repo_not_current_worktree() {
 
 #[test]
 fn review_empty_diff_fails_loudly() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -2802,7 +2806,7 @@ fn review_empty_diff_fails_loudly() {
 
 #[test]
 fn fix_mode_uses_ticket_title_in_mr_title() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let home = tmp.path().join("home");
     let github_root = tmp.path().join("github-root");
@@ -2971,7 +2975,7 @@ fn branch_exists_on_bare_origin(github_root: &std::path::Path, branch: &str) -> 
 /// exists to prevent (see baseline-validation work in dispatch.rs).
 #[test]
 fn dispatch_fix_validation_never_passes_records_no_push_no_mr() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"false\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -3057,7 +3061,7 @@ fn dispatch_fix_validation_never_passes_records_no_push_no_mr() {
 /// agent_no_progress, never as a successful no-op dispatch.
 #[test]
 fn dispatch_fix_no_change_is_agent_no_progress() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -3106,7 +3110,7 @@ fn dispatch_fix_no_change_is_agent_no_progress() {
 /// the bounded retry must select the configured fallback in the same dispatch.
 #[test]
 fn dispatch_fix_opencode_internal_rate_limit_marks_unavailable_and_reroutes() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let config = fs::read_to_string(&cfg).unwrap().replace(
         "improve_backend = \"codex\"",
@@ -3187,7 +3191,7 @@ fn dispatch_fix_opencode_internal_rate_limit_marks_unavailable_and_reroutes() {
 
 #[test]
 fn dispatch_reroute_continues_partial_tree_after_billing_exhaustion() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let config = fs::read_to_string(&cfg).unwrap().replace(
         "improve_backend = \"codex\"",
@@ -3270,7 +3274,7 @@ fn dispatch_reroute_continues_partial_tree_after_billing_exhaustion() {
 /// in the ledger, and only the final one marks the dispatch terminally failed.
 #[test]
 fn dispatch_fix_retries_no_change_before_terminal_failure() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
     let invocation_log = tmp.path().join("codex-invocations.log");
@@ -3331,7 +3335,7 @@ fn dispatch_fix_retries_no_change_before_terminal_failure() {
 /// the previous attempt remains reachable from a dedicated local checkpoint.
 #[test]
 fn dispatch_fix_validation_retry_retains_each_failed_wip_tree() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         r#"validation_commands = ["sh -c 'if grep -q \"first attempt\" README.md; then echo first; false; elif grep -q \"second attempt\" README.md; then echo second; false; else echo baseline; false; fi'"]
@@ -3420,7 +3424,7 @@ fn dispatch_fix_validation_retry_retains_each_failed_wip_tree() {
 /// must record exactly one attempt, started and completed.
 #[test]
 fn dispatch_fix_one_shot_success_records_one_attempt() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -3479,7 +3483,7 @@ fn dispatch_fix_one_shot_success_records_one_attempt() {
 /// spin-up.
 #[test]
 fn dispatch_runs_validation_gate_once_per_config_change_then_skips() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let state_path = tmp.path().join("validation_check.json");
 
@@ -3548,67 +3552,13 @@ fn dispatch_runs_validation_gate_once_per_config_change_then_skips() {
         .stdout(predicate::str::contains("Baseline validation on pristine worktree").not());
 }
 
-/// TICKET-073: a broken validation_commands entry is caught as a distinct,
-/// clear VALIDATION GATE FAILED failure — not conflated with the dispatched
-/// ticket's own outcome — and dispatch refuses to proceed (no backend run).
-#[test]
-fn dispatch_refuses_on_broken_validation_gate() {
-    let tmp = tempfile::tempdir().unwrap();
-    // validation_commands here is the deliberately-broken gate config.
-    let (_repo, home, cfg) =
-        setup_fix_dispatch_repo(&tmp, "validation_commands = [\"sh -c 'exit 1'\"]\n");
-    let state_path = tmp.path().join("validation_check.json");
-
-    let fake_bin = tmp.path().join("bin");
-    fs::create_dir_all(&fake_bin).unwrap();
-    // If the gate were bypassed, codex would run — make it record so we can
-    // prove it never did.
-    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\ntouch codex_ran\n");
-
-    bin()
-        .args([
-            "dispatch",
-            "--profile",
-            "real",
-            "--mode",
-            "fix",
-            "--config-path",
-            cfg.to_str().unwrap(),
-            "--target",
-            "noop",
-            "--retries",
-            "0",
-        ])
-        .env("PATH", prepend_path(&fake_bin))
-        .env("HOME", &home)
-        .env("GITHUB_TOKEN", "token")
-        .env("GAH_VALIDATION_CHECK_PATH", &state_path)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("VALIDATION GATE FAILED"));
-
-    // The broken gate must be persisted as last_verified_ok = false.
-    let state_text = fs::read_to_string(&state_path).unwrap();
-    assert!(
-        state_text.contains("\"last_verified_ok\": false"),
-        "broken gate must be recorded as not-ok: {}",
-        state_text
-    );
-
-    // The backend must never have run — the gate short-circuited dispatch.
-    assert!(
-        !tmp.path().join("codex_ran").exists(),
-        "backend must not run when the validation gate fails"
-    );
-}
-
 /// TICKET-073: --skip-validation-gate deliberately bypasses the gate even when
 /// validation_commands is broken, recording nothing new and letting dispatch
 /// proceed (so an operator who has acknowledged a known-broken gate can still
 /// dispatch real work).
 #[test]
 fn dispatch_skip_validation_gate_bypasses_gate() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     // validation_commands passes baseline; we are only testing that the
     // --skip-validation-gate opt-out suppresses the gate self-check entirely.
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
@@ -3668,7 +3618,7 @@ fn dispatch_skip_validation_gate_bypasses_gate() {
 /// genuinely unknown (None), never a fabricated zero.
 #[test]
 fn dispatch_fix_records_per_attempt_usage_from_backend_output() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -3716,7 +3666,7 @@ fn dispatch_fix_records_per_attempt_usage_from_backend_output() {
 
 #[test]
 fn dispatch_fix_shutdown_records_cancelled_shutdown_and_dispatch_finished_event() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
     let events_path = tmp.path().join("events.jsonl");
@@ -3781,7 +3731,7 @@ fn dispatch_fix_shutdown_records_cancelled_shutdown_and_dispatch_finished_event(
 /// the very first attempt.
 #[test]
 fn dispatch_fix_escalate_flag_picks_stronger_backend_on_first_attempt() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     // setup_fix_dispatch_repo always appends its own single-line
     // `[profiles.real.routing]` table (a second header would be invalid
@@ -3847,7 +3797,7 @@ fn dispatch_fix_escalate_flag_picks_stronger_backend_on_first_attempt() {
 /// both preserved — not just the final outcome.
 #[test]
 fn dispatch_fix_fail_then_success_records_two_attempts() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         "validation_commands = [\"cat marker.txt; grep -q '^done$' marker.txt\"]\n",
@@ -3915,7 +3865,7 @@ fn dispatch_fix_fail_then_success_records_two_attempts() {
 
 #[test]
 fn dispatch_backend_retry_continues_checkpointed_progress() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
     let counter = tmp.path().join("codex-call-count");
@@ -3985,7 +3935,7 @@ fn dispatch_backend_retry_continues_checkpointed_progress() {
 /// since attempt 1 already matches the baseline.
 #[test]
 fn dispatch_fix_no_progress_abort_records_exact_consumed_attempts() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"false\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -4040,7 +3990,7 @@ fn dispatch_fix_no_progress_abort_records_exact_consumed_attempts() {
 /// attempt-2 session directory is ever created.
 #[test]
 fn dispatch_fix_aborts_on_first_attempt_when_failure_matches_baseline() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"false\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -4102,7 +4052,7 @@ fn dispatch_fix_aborts_on_first_attempt_when_failure_matches_baseline() {
 /// stopping (the default for an unconfigured/unknown_red baseline).
 #[test]
 fn dispatch_fix_expected_red_baseline_can_still_succeed() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         "validation_commands = [\"cat marker.txt; grep -q '^done$' marker.txt\"]\nknown_baseline_failure_markers = [\"marker.txt: No such file or directory\"]\n",
@@ -4177,7 +4127,7 @@ fn dispatch_fix_expected_red_baseline_can_still_succeed() {
 /// unknown_red, not harness/environment errors).
 #[test]
 fn dispatch_fix_harness_error_baseline_always_stops() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         "validation_commands = [\"definitely-not-a-real-command-xyz\"]\n",
@@ -4231,7 +4181,7 @@ fn dispatch_fix_harness_error_baseline_always_stops() {
 /// dependency signature) must also stop dispatch before any attempt runs.
 #[test]
 fn dispatch_fix_environment_error_baseline_stops() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         "validation_commands = [\"echo 'ModuleNotFoundError: No module named repo_thing'; exit 1\"]\n",
@@ -4283,7 +4233,7 @@ fn dispatch_fix_environment_error_baseline_stops() {
 /// a no-op.
 #[test]
 fn dispatch_fix_unknown_red_baseline_stops_without_override() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"false\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -4330,7 +4280,7 @@ fn dispatch_fix_unknown_red_baseline_stops_without_override() {
 /// entry, not just the old free-text error_summary.
 #[test]
 fn dispatch_fix_backend_nonzero_exit_records_structured_failure_attribution() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -4370,7 +4320,7 @@ fn dispatch_fix_backend_nonzero_exit_records_structured_failure_attribution() {
 /// provider's own error text surfaced.
 #[test]
 fn dispatch_fix_provider_cli_nonzero_after_successful_push() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -4424,7 +4374,7 @@ fn dispatch_fix_provider_cli_nonzero_after_successful_push() {
 
 #[test]
 fn dispatch_dry_run_ticket_metadata_feeds_routing() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let availability_path = tmp.path().join("availability.json");
     fs::create_dir_all(&repo).unwrap();
@@ -4465,7 +4415,7 @@ fn dispatch_dry_run_ticket_metadata_feeds_routing() {
 
 #[test]
 fn route_approval_cli_records_exact_grant_and_revoke() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4520,7 +4470,7 @@ fn route_approval_cli_records_exact_grant_and_revoke() {
 
 #[test]
 fn sync_classifies_open_gah_prs() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4553,7 +4503,7 @@ fn sync_classifies_open_gah_prs() {
 
 #[test]
 fn sync_classifies_closed_unmerged_github_prs() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4598,7 +4548,7 @@ fn make_fake_glab(dir: &std::path::Path, mr_list_json: &str) {
 
 #[test]
 fn sync_gitlab_classifies_open_mr() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4628,7 +4578,7 @@ fn sync_gitlab_classifies_open_mr() {
 
 #[test]
 fn sync_gitlab_classifies_merged_mr() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4659,7 +4609,7 @@ fn sync_gitlab_classifies_merged_mr() {
 
 #[test]
 fn sync_gitlab_closed_unmerged_mr_is_terminal() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4690,7 +4640,7 @@ fn sync_gitlab_closed_unmerged_mr_is_terminal() {
 
 #[test]
 fn status_json_reports_closed_unmerged_mr_consistently() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4727,7 +4677,7 @@ fn status_json_reports_closed_unmerged_mr_consistently() {
 
 #[test]
 fn sync_gitlab_malformed_json_fails_loudly() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4756,7 +4706,7 @@ fn sync_gitlab_malformed_json_fails_loudly() {
 
 #[test]
 fn sync_gitlab_no_matching_mr() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4787,7 +4737,7 @@ fn sync_gitlab_no_matching_mr() {
 
 #[test]
 fn sync_gitlab_fails_when_glab_missing() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4809,7 +4759,7 @@ fn sync_gitlab_fails_when_glab_missing() {
 
 #[test]
 fn sync_gitlab_fails_when_glab_fails() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4843,7 +4793,7 @@ fn sync_gitlab_fails_when_glab_fails() {
 
 #[test]
 fn sync_json_outputs_machine_readable_classification() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4886,7 +4836,7 @@ fn sync_json_outputs_machine_readable_classification() {
 /// pure JSON on stdout.
 #[test]
 fn sync_json_includes_id_state_draft_and_merge_status() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -4928,7 +4878,7 @@ fn sync_json_includes_id_state_draft_and_merge_status() {
 
 #[test]
 fn ledger_summary_json_outputs_machine_readable_counts() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let ledger_path = tmp.path().join("ledger.jsonl");
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -4959,7 +4909,7 @@ fn ledger_summary_json_outputs_machine_readable_counts() {
 
 #[test]
 fn ledger_summary_json_includes_model_and_failure_class_breakdown() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let ledger_path = tmp.path().join("ledger.jsonl");
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -5162,7 +5112,7 @@ fn status_reports_human_and_json_views() {
 
 #[test]
 fn dispatch_agy_multi_instance_isolated_execution() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
 
@@ -5316,7 +5266,7 @@ fn dispatch_agy_multi_instance_isolated_execution() {
 /// rewrite `ledger.jsonl` itself.
 #[test]
 fn ledger_reconcile_appends_entry_when_mr_state_changed() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -5412,7 +5362,7 @@ fn loop_without_once_is_accepted_as_recurring_mode() {
 /// must report NoOp and exit successfully -- not error, not hang.
 #[test]
 fn loop_once_reports_noop_when_nothing_actionable() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -5451,7 +5401,7 @@ fn loop_once_reports_noop_when_nothing_actionable() {
 
 #[test]
 fn loop_once_prunes_clean_closed_worktree_before_observing() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -5504,7 +5454,7 @@ fn loop_once_prunes_clean_closed_worktree_before_observing() {
 /// not just the decision in isolation.
 #[test]
 fn loop_once_dispatches_an_eligible_ticket() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let home = tmp.path().join("home");
     let github_root = tmp.path().join("github-root");
@@ -5618,7 +5568,7 @@ fn loop_once_dispatches_an_eligible_ticket() {
 /// (only reachable from slot 3) never gets dispatched.
 #[test]
 fn parallel_loop_slot_terminal_action_does_not_abort_later_slots() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let home = tmp.path().join("home");
     let github_root = tmp.path().join("github-root");
@@ -5757,7 +5707,7 @@ fn parallel_loop_slot_terminal_action_does_not_abort_later_slots() {
 /// wrote, and `--profile` filters to just that profile's events.
 #[test]
 fn events_reads_back_loop_once_output_and_filters_by_profile() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -5828,7 +5778,7 @@ fn events_reads_back_loop_once_output_and_filters_by_profile() {
 /// forever.
 #[test]
 fn loop_once_stops_on_stuck_loop_instead_of_repeating_forever() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -5895,7 +5845,7 @@ fn loop_once_stops_on_stuck_loop_instead_of_repeating_forever() {
 /// issued and the run stops at a deterministic human handoff.
 #[test]
 fn publishing_disabled_blocks_pr_creation_and_emits_handoff() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         "validation_commands = [\"true\"]\n[profiles.real.publishing]\nallow_pull_request_creation = false\n",
@@ -5970,7 +5920,7 @@ fn publishing_disabled_blocks_pr_creation_and_emits_handoff() {
 /// no commit was attempted.
 #[test]
 fn commit_message_generation_disabled_leaves_worktree_uncommitted() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         "validation_commands = [\"true\"]\n[profiles.real.publishing]\nallow_pull_request_creation = true\nallow_commit_message_generation = false\n",
@@ -6037,7 +5987,7 @@ fn commit_message_generation_disabled_leaves_worktree_uncommitted() {
 /// disabled. The reviewer runs and a deterministic verdict is produced.
 #[test]
 fn publishing_disabled_still_runs_reviewer() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let prompt_log = tmp.path().join("review-prompt.txt");
     fs::create_dir_all(&repo).unwrap();
@@ -6104,7 +6054,7 @@ fn publishing_disabled_still_runs_reviewer() {
 /// controller.
 #[test]
 fn approve_with_pr_disabled_skips_auto_merge_in_loop() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         concat!(
@@ -6167,7 +6117,7 @@ fn approve_with_pr_disabled_skips_auto_merge_in_loop() {
 /// even though review still runs and produces a verdict.
 #[test]
 fn issue_comments_disabled_skips_tracker_comment() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     let prompt_log = tmp.path().join("review-prompt.txt");
     fs::create_dir_all(&repo).unwrap();
@@ -6242,7 +6192,7 @@ fn issue_comments_disabled_skips_tracker_comment() {
 /// the default flipping to restrictive.
 #[test]
 fn pet_project_publishing_enabled_creates_pr() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         concat!(
@@ -6305,7 +6255,7 @@ fn pet_project_publishing_enabled_creates_pr() {
 /// metadata (branch, changed files, validation status, artifact paths, verdict).
 #[test]
 fn restricted_profile_emits_deterministic_handoff_metadata() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         "validation_commands = [\"true\"]\n[profiles.real.publishing]\nallow_pull_request_creation = false\n",

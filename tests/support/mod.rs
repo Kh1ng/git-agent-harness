@@ -31,6 +31,33 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use tempfile::TempDir;
+
+/// Keep integration-test repositories and child-process temporary files on
+/// the same filesystem as Cargo's build output. Some development hosts mount
+/// `/tmp` as a small tmpfs; production dispatch capacity checks must remain
+/// strict without making the test suite depend on that unrelated filesystem's
+/// current free-space level.
+pub fn test_temp_root() -> PathBuf {
+    let root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent()?.parent().map(Path::to_path_buf))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+        .join("gah-integration-test-tmp");
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+pub fn test_tempdir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("gah-test-")
+        .tempdir_in(test_temp_root())
+        .unwrap()
+}
 
 /// Process-wide lock serializing "write/chmod a temp binary, then exec it"
 /// against any other fork() in this test binary.
