@@ -18,7 +18,7 @@ use super::super::publish::{
     ensure_issue_open_for_publish, publishing_allows_publish, MrRenderContext,
 };
 use super::super::repair_context;
-use super::super::text::utf8_safe_prefix;
+use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::validation::{
     classify_validation_failure_progress, run_auto_fix_commands, should_skip_per_dispatch_baseline,
     validation_env, validation_failure_no_progress_reason,
@@ -204,6 +204,26 @@ pub(crate) fn improve(
     apply_authoritative_work_identity(ledger, ticket_meta.as_ref(), &branch);
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
+    if args.existing_branch.is_some() {
+        match classify_git_operation_result(
+            ledger,
+            crate::ledger::FailureStage::Preflight,
+            worktree::refresh_existing_branch_from_target(&wt, &profile.default_target_branch),
+        ) {
+            Ok(true) => println!(
+                "Refreshed repair branch from origin/{} before baseline validation.",
+                profile.default_target_branch
+            ),
+            Ok(false) => println!(
+                "Repair branch already contains origin/{}.",
+                profile.default_target_branch
+            ),
+            Err(err) => {
+                worktree::cleanup(&wt, repo);
+                return Err(err);
+            }
+        }
+    }
     let repair_context = if args.existing_branch.is_some() {
         match repair_context::load(
             cfg,
@@ -289,7 +309,7 @@ pub(crate) fn improve(
                 anyhow::bail!(
                     "baseline validation stopped ({}): {}",
                     baseline_disposition.as_str(),
-                    utf8_safe_prefix(b, 4_000),
+                    bounded_validation_failure(b, 4_000),
                 );
             }
             BD::UnknownRed if !args.allow_unknown_red_baseline => {
@@ -300,7 +320,7 @@ pub(crate) fn improve(
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!(
                     "baseline validation stopped (unknown_red): {}\n\nUse --allow-unknown-red-baseline to proceed anyway.",
-                    utf8_safe_prefix(b, 4_000),
+                    bounded_validation_failure(b, 4_000),
                 );
             }
             BD::UnknownRed | BD::ExpectedRed => {
@@ -1337,6 +1357,59 @@ pub(crate) fn improve(
     clear_wip_checkpoints(repo, &wip_checkpoints);
     worktree::cleanup(&wt, repo);
     Ok(())
+}
+
+fn bounded_validation_failure(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut selected = std::collections::BTreeSet::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let high_signal = line.contains(" ... FAILED")
+            || line.contains(" panicked at ")
+            || trimmed == "failures:"
+            || trimmed.starts_with("test result: FAILED")
+            || trimmed.starts_with("error:")
+            || trimmed.starts_with("error[")
+            || trimmed.starts_with("npm error")
+            || trimmed.starts_with("fatal:")
+            || trimmed.contains("AssertionError")
+            || trimmed.contains("TypeError:");
+        if high_signal {
+            for context_index in index.saturating_sub(2)..=(index + 2).min(lines.len() - 1) {
+                selected.insert(context_index);
+            }
+        }
+    }
+    if !selected.is_empty() {
+        let command = lines
+            .iter()
+            .find(|line| line.trim_start().starts_with("$ "))
+            .copied()
+            .unwrap_or("validation failed");
+        let evidence = selected
+            .into_iter()
+            .map(|index| lines[index])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let focused = format!("{command}\n... failure evidence ...\n{evidence}");
+        if focused.len() <= max_bytes {
+            return focused;
+        }
+        return utf8_safe_suffix(&focused, max_bytes).to_string();
+    }
+    let separator = "\n... validation output omitted ...\n";
+    let available = max_bytes.saturating_sub(separator.len());
+    let head_bytes = available / 3;
+    let tail_bytes = available.saturating_sub(head_bytes);
+    format!(
+        "{}{}{}",
+        utf8_safe_prefix(text, head_bytes),
+        separator,
+        utf8_safe_suffix(text, tail_bytes)
+    )
 }
 
 /// TICKET-091 AC4: when no authoritative external ticket exists, fall back
