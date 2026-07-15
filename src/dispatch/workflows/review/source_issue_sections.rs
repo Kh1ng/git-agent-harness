@@ -148,7 +148,7 @@ fn nonempty(value: String) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-fn section_entries_from_text(text: &str) -> Vec<String> {
+pub(super) fn section_entries_from_text(text: &str) -> Vec<String> {
     let mut entries = Vec::new();
     let mut current = String::new();
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {

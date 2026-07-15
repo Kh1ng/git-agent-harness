@@ -903,6 +903,133 @@ fn grounded_approve_from_strong_tier_is_not_forced_to_human_review() {
 }
 
 #[test]
+fn approval_admitting_live_acceptance_state_was_not_checked_becomes_needs_fix() {
+    let json = r#"{
+        "verdict":"APPROVE",
+        "confidence":"high",
+        "human_required":false,
+        "blocking_findings":[],
+        "non_blocking_findings":["The current executable queue was not re-verified and could be stale"],
+        "risk_notes":[],
+        "evidence":["file:docs/queue.md","ac:1:file:docs/queue.md"]
+    }"#;
+    let route = route_decision("claude", Some("sonnet"), false);
+    let context = ReviewGateContext::from_diff_bundle(
+        &ReviewDiffBundle {
+            files: "docs/queue.md\n".to_string(),
+            diff: "+# Current executable queue\n".to_string(),
+        },
+        Some("passed"),
+    )
+    .with_source_acceptance(
+        vec!["List the current live GitLab issue queue".to_string()],
+        "gitlab",
+    );
+
+    let verdict = parse_review_verdict_with_context(
+        json,
+        &route,
+        &crate::ledger::LedgerUsage::default(),
+        ReviewerTier::Strong,
+        &context,
+    )
+    .unwrap();
+
+    assert_eq!(verdict.verdict, "NEEDS_FIX");
+    assert!(!verdict.human_required);
+    assert!(verdict.blocking_findings.iter().any(|finding| finding
+        .contains("required current/external acceptance state remained unverified")));
+    assert_eq!(
+        verdict.safety_gate_reason,
+        verdict.blocking_findings.first().cloned()
+    );
+}
+
+#[test]
+fn approval_requires_a_grounded_mapping_for_every_source_acceptance_criterion() {
+    let json = r#"{
+        "verdict":"APPROVE",
+        "confidence":"high",
+        "human_required":false,
+        "blocking_findings":[],
+        "non_blocking_findings":[],
+        "risk_notes":[],
+        "evidence":["file:src/lib.rs","ac:1:file:src/lib.rs"]
+    }"#;
+    let route = route_decision("claude", Some("sonnet"), false);
+    let context = ReviewGateContext::from_diff_bundle(
+        &ReviewDiffBundle {
+            files: "src/lib.rs\n".to_string(),
+            diff: "+fn complete() {}\n".to_string(),
+        },
+        Some("passed"),
+    )
+    .with_source_acceptance(
+        vec![
+            "Implement the behavior".to_string(),
+            "Add regression coverage".to_string(),
+        ],
+        "github",
+    );
+
+    let verdict = parse_review_verdict_with_context(
+        json,
+        &route,
+        &crate::ledger::LedgerUsage::default(),
+        ReviewerTier::Strong,
+        &context,
+    )
+    .unwrap();
+
+    assert_eq!(verdict.verdict, "NEEDS_FIX");
+    assert!(verdict.blocking_findings[0].contains("acceptance criterion 2"));
+}
+
+#[test]
+fn live_acceptance_can_be_approved_with_direct_matching_provider_evidence() {
+    let json = r#"{
+        "verdict":"APPROVE",
+        "confidence":"high",
+        "human_required":false,
+        "blocking_findings":[],
+        "non_blocking_findings":[],
+        "risk_notes":[],
+        "evidence":[
+            "file:docs/queue.md",
+            "ac:1:provider:gitlab:GET /projects/5/issues?state=opened returned #146",
+            "ac:2:file:docs/queue.md"
+        ]
+    }"#;
+    let route = route_decision("claude", Some("sonnet"), false);
+    let context = ReviewGateContext::from_diff_bundle(
+        &ReviewDiffBundle {
+            files: "docs/queue.md\n".to_string(),
+            diff: "+- #146 is ready\n".to_string(),
+        },
+        Some("passed"),
+    )
+    .with_source_acceptance(
+        vec![
+            "List the current live GitLab issue queue".to_string(),
+            "Document the result".to_string(),
+        ],
+        "gitlab",
+    );
+
+    let verdict = parse_review_verdict_with_context(
+        json,
+        &route,
+        &crate::ledger::LedgerUsage::default(),
+        ReviewerTier::Strong,
+        &context,
+    )
+    .unwrap();
+
+    assert_eq!(verdict.verdict, "APPROVE");
+    assert!(!verdict.human_required);
+}
+
+#[test]
 fn approve_without_evidence_is_forced_to_human_review() {
     let json = r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[]}"#;
     let usage = crate::ledger::LedgerUsage::default();

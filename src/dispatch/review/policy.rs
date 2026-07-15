@@ -1,4 +1,4 @@
-use super::super::text::extract_first_json_object;
+use super::super::text::{extract_first_json_object, utf8_safe_prefix};
 use super::context::ReviewDiffBundle;
 use crate::config::{CandidateConfig, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
@@ -289,6 +289,8 @@ pub(in crate::dispatch) struct ReviewGateContext {
     ci_passed: bool,
     contract_files: Vec<String>,
     compatibility_mechanisms: Vec<&'static str>,
+    acceptance_criteria: Vec<String>,
+    source_provider: String,
     enforce_grounding: bool,
 }
 
@@ -346,12 +348,111 @@ impl ReviewGateContext {
             }),
             contract_files,
             compatibility_mechanisms,
+            acceptance_criteria: Vec::new(),
+            source_provider: String::new(),
             enforce_grounding: true,
         }
     }
 
     fn has_contract_surface_change(&self) -> bool {
         !self.contract_files.is_empty()
+    }
+
+    pub(in crate::dispatch) fn with_source_acceptance(
+        mut self,
+        acceptance_criteria: Vec<String>,
+        provider: &str,
+    ) -> Self {
+        self.acceptance_criteria = acceptance_criteria;
+        self.source_provider = provider.trim().to_ascii_lowercase();
+        self
+    }
+
+    fn acceptance_gate_reason(&self, verdict: &crate::models::ReviewVerdict) -> Option<String> {
+        if self.acceptance_criteria.is_empty() {
+            return None;
+        }
+
+        if self
+            .acceptance_criteria
+            .iter()
+            .any(|criterion| criterion_requires_external_state(criterion))
+            && verdict
+                .non_blocking_findings
+                .iter()
+                .chain(&verdict.risk_notes)
+                .any(|finding| admits_unverified_state(finding))
+        {
+            return Some(
+                "APPROVE admitted that required current/external acceptance state remained unverified"
+                    .to_string(),
+            );
+        }
+
+        for (index, criterion) in self.acceptance_criteria.iter().enumerate() {
+            let number = index + 1;
+            let prefix = format!("ac:{number}:");
+            let mappings = verdict
+                .evidence
+                .iter()
+                .filter_map(|item| item.trim().strip_prefix(&prefix))
+                .collect::<Vec<_>>();
+            if mappings.is_empty() {
+                return Some(format!(
+                    "APPROVE omitted evidence for source acceptance criterion {number}: {}",
+                    utf8_safe_prefix(criterion, 160)
+                ));
+            }
+            let external = criterion_requires_external_state(criterion);
+            let valid = mappings
+                .iter()
+                .any(|mapping| self.acceptance_mapping_is_grounded(mapping, external));
+            if !valid {
+                return Some(format!(
+                    "APPROVE evidence for source acceptance criterion {number} was not grounded{}",
+                    if external {
+                        " in direct provider evidence or a testable changed snapshot"
+                    } else {
+                        " in a changed file or concrete test result"
+                    }
+                ));
+            }
+        }
+        None
+    }
+
+    fn acceptance_mapping_is_grounded(&self, mapping: &str, external: bool) -> bool {
+        if let Some(rest) = mapping.strip_prefix("provider:") {
+            let Some((provider, reference)) = rest.split_once(':') else {
+                return false;
+            };
+            return external
+                && !reference.trim().is_empty()
+                && provider.trim().eq_ignore_ascii_case(&self.source_provider);
+        }
+        if let Some(rest) = mapping.strip_prefix("snapshot:") {
+            let Some((path, verification)) = rest.split_once(':') else {
+                return false;
+            };
+            return external
+                && !verification.trim().is_empty()
+                && self
+                    .changed_files
+                    .iter()
+                    .any(|candidate| candidate == path.trim());
+        }
+        if external {
+            return false;
+        }
+        if let Some(path) = mapping.strip_prefix("file:") {
+            return self
+                .changed_files
+                .iter()
+                .any(|candidate| candidate == path.trim());
+        }
+        mapping
+            .strip_prefix("test:")
+            .is_some_and(|detail| !detail.trim().is_empty())
     }
 
     fn evidence_is_grounded(&self, evidence: &[String]) -> bool {
@@ -603,6 +704,16 @@ fn enforce_review_evidence_gate(
         return;
     }
 
+    if let Some(reason) = gate_context.acceptance_gate_reason(verdict) {
+        verdict.verdict = "NEEDS_FIX".to_string();
+        verdict.human_required = false;
+        if !verdict.blocking_findings.contains(&reason) {
+            verdict.blocking_findings.push(reason.clone());
+        }
+        verdict.safety_gate_reason = Some(reason);
+        return;
+    }
+
     let reason = if !verdict.blocking_findings.is_empty() {
         Some("APPROVE contradicted non-empty blocking_findings".to_string())
     } else if review_text_has_substantive_prose(review_text, reviewer_backend) {
@@ -642,6 +753,45 @@ fn enforce_review_evidence_gate(
     verdict.verdict = "HUMAN_REVIEW".to_string();
     verdict.human_required = true;
     verdict.safety_gate_reason = Some(reason);
+}
+
+fn criterion_requires_external_state(criterion: &str) -> bool {
+    let lower = criterion.to_ascii_lowercase();
+    [
+        "current",
+        "live",
+        "latest",
+        "stale",
+        "open issue",
+        "closed issue",
+        "queue",
+        "backlog",
+        "github",
+        "gitlab",
+        "provider state",
+        "remaining quota",
+        "availability",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn admits_unverified_state(finding: &str) -> bool {
+    let lower = finding.to_ascii_lowercase();
+    [
+        "not verified",
+        "not re-verified",
+        "not reverified",
+        "unverified",
+        "not checked",
+        "could be stale",
+        "may be stale",
+        "might be stale",
+        "unable to verify",
+        "could not verify",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn review_text_has_substantive_prose(review_text: &str, reviewer_backend: &str) -> bool {
