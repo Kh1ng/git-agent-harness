@@ -29,6 +29,10 @@ struct SourceIssueIdentity {
 pub(super) struct SourceIssueContext {
     pub(super) prompt_section: Option<String>,
     pub(super) contract: Option<String>,
+    /// The exact acceptance criteria rendered into the bounded source
+    /// contract, in prompt order. The deterministic review gate uses this
+    /// list so it never requires evidence for text the reviewer could not see.
+    pub(super) acceptance_criteria: Vec<String>,
     pub(super) lookup_report: serde_json::Value,
 }
 
@@ -71,15 +75,21 @@ pub(super) fn resolve_source_issue_context(
 
     match fetch_issue_details(profile, &identity.issue_number, false) {
         Ok(issue) => {
+            let acceptance_criteria = bounded_source_issue_entries(
+                &source_issue_acceptance_criteria(&issue),
+                SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES,
+            );
             let contract = render_source_issue_contract(&issue);
             Ok(SourceIssueContext {
                 prompt_section: Some(contract.clone()),
                 contract: Some(contract.clone()),
+                acceptance_criteria: acceptance_criteria.clone(),
                 lookup_report: json!({
                     "state": "fetched",
                     "source": identity.resolved_from,
                     "issue_number": identity.issue_number,
                     "contract_bytes": contract.len(),
+                    "acceptance_criteria_count": acceptance_criteria.len(),
                 }),
             })
         }
@@ -91,6 +101,7 @@ pub(super) fn resolve_source_issue_context(
             Ok(SourceIssueContext {
                 prompt_section: Some(format!("## Source Issue Lookup\n\n{message}")),
                 contract: None,
+                acceptance_criteria: Vec::new(),
                 lookup_report: json!({
                     "state": "lookup_failed",
                     "source": identity.resolved_from,
@@ -109,6 +120,7 @@ fn missing_source_issue_context() -> SourceIssueContext {
                 .to_string(),
         ),
         contract: None,
+        acceptance_criteria: Vec::new(),
         lookup_report: json!({
             "state": "missing",
             "source": "none",
@@ -208,12 +220,7 @@ pub(super) fn render_source_issue_contract(issue: &IssueDetails) -> String {
         .filter(|path| !issue.labels.iter().any(|label| label == path.as_str()))
         .cloned()
         .collect();
-    let mut acceptance_criteria = meta.acceptance_criteria.clone();
-    for criterion in &unheaded_sections.acceptance_criteria {
-        if !acceptance_criteria.contains(criterion) {
-            acceptance_criteria.push(criterion.clone());
-        }
-    }
+    let acceptance_criteria = source_issue_acceptance_criteria(issue);
     let mut verification_commands = meta.verification_commands.clone();
     for command in &unheaded_sections.verification_commands {
         if !verification_commands.contains(command) {
@@ -378,24 +385,15 @@ fn render_additional_contract_details(body: &str) -> String {
 }
 
 fn render_source_issue_list(entries: &[String], max_bytes: usize) -> String {
+    let bounded = bounded_source_issue_entries(entries, max_bytes);
     let mut out = String::new();
-    let mut truncated = false;
-    let start = out.len();
-    for entry in entries {
+    for entry in &bounded {
         let value =
             indent_untrusted_text(utf8_safe_prefix(entry, SOURCE_ISSUE_LIST_ITEM_MAX_BYTES));
         let line = format!("- {value}\n");
-        if out.len().saturating_sub(start) + line.len() > max_bytes {
-            let remaining = max_bytes.saturating_sub(out.len().saturating_sub(start));
-            if remaining > 3 {
-                out.push_str(utf8_safe_prefix(&line, remaining));
-            }
-            truncated = true;
-            break;
-        }
         out.push_str(&line);
     }
-    if truncated {
+    if bounded.len() < entries.len() {
         out.push_str(&format!(
             "[List truncated at {max_bytes} bytes; retrieve the source issue for remaining detail.]\n"
         ));
@@ -403,12 +401,56 @@ fn render_source_issue_list(entries: &[String], max_bytes: usize) -> String {
     out
 }
 
+fn source_issue_acceptance_criteria(issue: &IssueDetails) -> Vec<String> {
+    let meta = parse_ticket_metadata_from_issue(issue);
+    let unheaded_sections = source_issue_sections::extract(&issue.body);
+    let mut criteria = meta.acceptance_criteria;
+    for criterion in unheaded_sections.acceptance_criteria {
+        if !criteria.contains(&criterion) {
+            criteria.push(criterion);
+        }
+    }
+    // Operator-authored incident tickets in both managed projects commonly
+    // call their merge contract "Required outcome". Treat that heading as
+    // acceptance criteria rather than silently dropping the requirements
+    // from the deterministic review gate.
+    for heading in ["Required outcome", "Required outcomes"] {
+        let Some(section) = extract_markdown_section(&issue.body, heading) else {
+            continue;
+        };
+        for criterion in source_issue_sections::section_entries_from_text(&section) {
+            if !criteria.contains(&criterion) {
+                criteria.push(criterion);
+            }
+        }
+    }
+    criteria
+}
+
+fn bounded_source_issue_entries(entries: &[String], max_bytes: usize) -> Vec<String> {
+    let mut used = 0usize;
+    entries
+        .iter()
+        .take_while(|entry| {
+            let value =
+                indent_untrusted_text(utf8_safe_prefix(entry, SOURCE_ISSUE_LIST_ITEM_MAX_BYTES));
+            let line_bytes = format!("- {value}\n").len();
+            if used.saturating_add(line_bytes) > max_bytes {
+                return false;
+            }
+            used += line_bytes;
+            true
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod source_issue_tests {
     use super::{
-        extract_issue_number_from_text, missing_source_issue_context, render_source_issue_contract,
-        render_untrusted_inline_review_text, render_untrusted_review_text,
-        verified_post_budget_source_contract,
+        bounded_source_issue_entries, extract_issue_number_from_text, missing_source_issue_context,
+        render_source_issue_contract, render_untrusted_inline_review_text,
+        render_untrusted_review_text, verified_post_budget_source_contract,
     };
     use crate::context::{self, ContextConfig};
     use crate::dispatch::issues::IssueDetails;
@@ -492,6 +534,37 @@ mod source_issue_tests {
     }
 
     #[test]
+    fn bounded_acceptance_gate_never_requires_a_partially_rendered_criterion() {
+        let criteria = vec![
+            "first criterion".to_string(),
+            "second criterion".to_string(),
+        ];
+        let first_line_bytes = "-   first criterion\n".len();
+
+        assert_eq!(
+            bounded_source_issue_entries(&criteria, first_line_bytes),
+            vec!["first criterion"]
+        );
+    }
+
+    #[test]
+    fn required_outcome_heading_is_part_of_the_review_acceptance_contract() {
+        let issue = IssueDetails {
+            number: "593".into(),
+            title: "Fail closed on stale approval".into(),
+            body: "## Problem\n\nA stale inventory was approved.\n\n## Required outcome\n\n- Verify the current live provider state\n- Keep the finding usable by FixMr\n"
+                .into(),
+            labels: vec![],
+            state: None,
+        };
+
+        let contract = render_source_issue_contract(&issue);
+        assert!(contract.contains("### Acceptance Criteria"));
+        assert!(contract.contains("Verify the current live provider state"));
+        assert!(contract.contains("Keep the finding usable by FixMr"));
+    }
+
+    #[test]
     fn source_issue_reference_parsing_is_unicode_safe_and_accepts_closing_keyword_forms() {
         assert_eq!(
             extract_issue_number_from_text(Some(
@@ -524,6 +597,7 @@ mod source_issue_tests {
             "source issue identity not found"
         );
         assert!(context.contract.is_none());
+        assert!(context.acceptance_criteria.is_empty());
     }
 
     #[test]

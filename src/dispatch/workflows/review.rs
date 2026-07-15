@@ -88,8 +88,6 @@ pub(in crate::dispatch) fn review(
         diff_bundle.diff.len(),
         diff_bundle.files.lines().count()
     );
-    let review_gate_context =
-        ReviewGateContext::from_diff_bundle(&diff_bundle, target.ci_status.as_deref());
     let source_issue_context = resolve_source_issue_context(
         cfg,
         profile,
@@ -97,6 +95,12 @@ pub(in crate::dispatch) fn review(
         ledger.work_id.as_deref(),
         &target,
     )?;
+    let review_gate_context =
+        ReviewGateContext::from_diff_bundle(&diff_bundle, target.ci_status.as_deref())
+            .with_source_acceptance(
+                source_issue_context.acceptance_criteria.clone(),
+                &profile.provider,
+            );
     fs::write(
         bundle.join("source-issue-lookup.json"),
         serde_json::to_string_pretty(&source_issue_context.lookup_report)?,
@@ -110,6 +114,7 @@ pub(in crate::dispatch) fn review(
          The JSON object fields are: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes, evidence, compatibility_evidence.\n\
          blocking_findings, non_blocking_findings, risk_notes, evidence, and compatibility_evidence must be JSON arrays of strings, even when empty or when only one item exists.\n\
          For an APPROVE, evidence must include exactly one or more file:<changed-path> entries copied from Changed files below. You may include ci:passed only when the displayed control-plane CI status is passed. An APPROVE without grounded file evidence is invalid.\n\
+         Every source acceptance criterion is blocking until verified. For criterion N, include a separate evidence entry using `ac:N:file:<changed-path>` or `ac:N:test:<command and result>`. If the criterion claims current, live, latest, exact, open/closed, queued, or other external provider state, file/test evidence alone is insufficient: use `ac:N:provider:<provider>:<queried reference and result>` or `ac:N:snapshot:<changed-path>:<verification command and result>`. The provider must match this profile. If any criterion remains unmet or materially unverified, return NEEDS_FIX with a concrete blocking finding; never hide that admission in non_blocking_findings or risk_notes while approving.\n\
          If a contract surface is changed, do not APPROVE unless compatibility_evidence includes file:<changed-contract-path> and mechanism:<schema-version|backward-compatible-default|migration> that is actually present in the diff.\n\
          Verdict must be one of APPROVE, NEEDS_FIX, REJECT, HUMAN_REVIEW, defined as:\n\
          - APPROVE: you believe the change is correct, safe, and complete enough to merge. Report your ACTUAL confidence honestly in the separate `confidence` field (high/medium/low) -- do not inflate confidence to sound more certain, and do not downgrade to NEEDS_FIX just to hedge when you'd otherwise approve. A low-confidence approval is a real, useful signal (insufficient context, a domain you couldn't fully verify, a partial review) and will correctly route to a human -- it is not a failure to be avoided.\n\
