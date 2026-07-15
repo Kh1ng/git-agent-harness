@@ -1,12 +1,13 @@
 mod entry;
 mod jsonl;
+
 #[allow(unused_imports)]
-pub use entry::{
+pub use self::entry::{
     AttemptRecord, FailureClass, FailureStage, LedgerEntry, LedgerUsage,
     RoutingCandidateDiagnostic, RoutingDiagnostics, LEDGER_SCHEMA_VERSION,
 };
 #[allow(unused_imports)]
-pub use jsonl::{
+pub use self::jsonl::{
     active_paid_route_approvals, active_paid_route_approvals_from_entries,
     active_review_hold_work_ids, active_review_hold_work_ids_from_entries, append,
     backfill_review_verdict, entries_for_work_id, index_entries_by_work_id, read_entries,
@@ -15,14 +16,14 @@ pub use jsonl::{
 };
 #[cfg(test)]
 #[allow(unused_imports)]
-pub(crate) use jsonl::{read_entries_call_count, reset_read_entries_call_count};
+pub(crate) use self::jsonl::{read_entries_call_count, reset_read_entries_call_count};
 
 /// SQLite mirror of the JSONL ledger. `ledger.jsonl` remains the sole
 /// source of truth (every read path in this file still reads it); this is
 /// a redundant copy for evaluating SQLite as ledger storage without
 /// committing to a migration yet -- see the module's `sync_from_jsonl` doc
 /// for the tradeoff this makes.
-#[path = "ledger/sqlite.rs"]
+#[path = "sqlite.rs"]
 pub mod sqlite_store;
 
 /// TICKET-072: append-only reconciliation of dispatched work with later
@@ -34,7 +35,7 @@ pub mod reconcile;
 
 pub mod summary;
 #[allow(unused_imports)]
-pub use summary::{is_strong_model, usage_summary_for_backend, BackendUsageSummary, GroupBy};
+pub use self::summary::{is_strong_model, usage_summary_for_backend, BackendUsageSummary, GroupBy};
 
 #[cfg(test)]
 pub(crate) mod test_util;

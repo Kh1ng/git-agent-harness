@@ -957,7 +957,7 @@ fn normalize_repo_path(repo: &str) -> String {
 /// still what got written to `requested_backend`/`effective_backend` and
 /// from there into the ledger). Applied both where new dispatches are
 /// routed (dispatch.rs) and when grouping the ledger for the quota page
-/// (ledger.rs), so it also merges pre-existing historical entries recorded
+/// (ledger/mod.rs), so it also merges pre-existing historical entries recorded
 /// under the old alias rather than only preventing new duplicates.
 /// Deliberately does NOT touch "auto": that backend's *effective* backend
 /// is resolved dynamically per-attempt by `routing::decide`, not a fixed
