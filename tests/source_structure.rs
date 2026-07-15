@@ -1,8 +1,10 @@
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 const DEFAULT_MAX_LINES: usize = 1500;
 
@@ -435,241 +437,234 @@ fn lowering_a_baseline_preserves_the_ratchet() {
 /// Add to this list only after confirming the file is truly unreachable by design.
 const ORPHAN_EXCEPTIONS: &[&str] = &[];
 
-/// Check if a module is declared in a file
-fn is_module_declared_in_file(
-    module_name: &str,
-    file_path: &Path,
-    repo_root: &Path,
-    all_files: &[PathBuf],
-) -> bool {
-    // file_path is an absolute path, but all_files contains relative paths
-    // We need to check if the relative version of file_path is in all_files
-    let relative_file = file_path.strip_prefix(repo_root).unwrap_or(file_path);
-    if !all_files.iter().any(|p| *p == relative_file) {
-        return false;
-    }
+/// A single `mod name;` (or `#[path = ...] mod name;`) declaration discovered
+/// in a source file. `path_attr` is `Some` when the declaration is annotated
+/// with `#[path = "..."]`, in which case that explicit path (resolved relative
+/// to the declaring file) identifies the module's source file.
+struct ModDecl {
+    name: String,
+    path_attr: Option<String>,
+}
 
-    // Read from the absolute path
-    if let Ok(content) = fs::read_to_string(file_path) {
-        // Check for `mod name;` or `pub mod name;`
-        let pattern = format!("mod {}", module_name);
-        if content.contains(&pattern) {
-            return true;
+fn mod_decl_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // `mod name;` — a file/module declaration. Requires a trailing `;` so
+        // that inline `mod name { ... }` blocks (which carry no separate source
+        // file) are never treated as a file reference. Visibility prefixes
+        // (`pub`, `pub(crate)`, `pub(super)`, ...) and preceding `#[...]`
+        // attributes are tolerated and ignored.
+        Regex::new(
+            r"(?x)^\s*
+            (?:pub\s*(?:\([^)]*\))?\s*)?
+            mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+        )
+        .unwrap()
+    })
+}
+
+fn path_attr_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        // Matches `#[path = "rel/path.rs"]`. Intentionally NOT a raw string so
+        // the bracket is a real regex escape rather than a literal backslash.
+        Regex::new(r#"#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]"#).unwrap()
+    })
+}
+
+fn attr_token_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"#\s*\[[^\]]*\]").unwrap())
+}
+
+/// Parse the `mod` declarations out of a source file's content, with proper
+/// word-boundary matching and comment/attribute awareness.
+///
+/// This is the core anti-fabrication routine: a declaration is only recognized
+/// as an exact module name (`mod foo;` does not match a lookup for `foobar`),
+/// commented-out declarations are ignored, and `#[path = ...]` attributes are
+/// captured so the explicit file location can be resolved.
+fn parse_mod_decls(content: &str) -> Vec<ModDecl> {
+    let mut decls = Vec::new();
+    let mut pending_path: Option<String> = None;
+    let path_re = path_attr_re();
+    let mod_re = mod_decl_re();
+    let attr_re = attr_token_re();
+
+    for raw_line in content.lines() {
+        // A `#[path = "..."]` attribute applies to the very next `mod` decl.
+        if let Some(cap) = path_re.captures(raw_line) {
+            pending_path = Some(cap.get(1).unwrap().as_str().to_string());
         }
-        let pub_pattern = format!("pub mod {}", module_name);
-        if content.contains(&pub_pattern) {
-            return true;
+
+        // Strip line comments before any further inspection so that
+        // `// mod foo;` is never treated as a live declaration.
+        let line_no_comment = match raw_line.find("//") {
+            Some(i) => &raw_line[..i],
+            None => raw_line,
+        };
+        // Drop `#[...]` attribute tokens (e.g. `#[cfg(test)]`) so they don't
+        // interfere with the `mod` regex. The `path` attribute was already
+        // captured above.
+        let stripped = attr_re.replace_all(line_no_comment, "");
+
+        if let Some(cap) = mod_re.captures(&stripped) {
+            let name = cap.get(1).unwrap().as_str().to_string();
+            decls.push(ModDecl {
+                name,
+                path_attr: pending_path.take(),
+            });
+        } else {
+            // A non-attribute, non-comment code line ends any pending path
+            // attribute (it only ever applies to the immediately following decl).
+            let trimmed = line_no_comment.trim();
+            if !trimmed.starts_with('#') && !trimmed.is_empty() {
+                pending_path = None;
+            }
         }
-        // Check for #[path] attributes
-        let path_pattern = format!(r#"#\[path = "{}"\]"#, module_name);
-        if content.contains(&path_pattern) {
-            return true;
-        }
-        let path_pattern_rs = format!(r#"#\[path = "{}.rs"\]"#, module_name);
-        if content.contains(&path_pattern_rs) {
-            return true;
-        }
+    }
+    decls
+}
+
+/// A crate root owns its own directory: its submodules live in the same
+/// directory rather than a sibling `name/` directory.
+///   * `src/main.rs` / `src/lib.rs` -> `src/`
+///   * a direct integration test root `tests/foo.rs` -> `tests/`
+fn is_crate_root(relative: &Path) -> bool {
+    let s = relative.to_string_lossy();
+    if s == "src/main.rs" || s == "src/lib.rs" {
+        return true;
+    }
+    if let Some(rest) = s.strip_prefix("tests/") {
+        return !rest.contains('/') && rest.ends_with(".rs");
     }
     false
 }
 
-/// Check if a source file is reachable from crate roots
+/// The directory a submodule declared in `declaring_file` resolves within.
+///
+/// In Rust a *directory* module (`foo/mod.rs`) owns the `foo/` directory, while
+/// a *file* module (`foo.rs`) owns the sibling `foo/` directory. Mixing these
+/// up is exactly how orphaned files slip through, so we distinguish them by the
+/// declaring file's own name, except for crate roots:
+///   * `src/dispatch/mod.rs`  -> `src/dispatch/`
+///   * `src/ledger.rs`        -> `src/ledger/`
+///   * `src/main.rs`          -> `src/`          (crate root)
+///   * `tests/gah_cli.rs`     -> `tests/`        (crate root)
+fn module_dir(declaring_file: &Path, repo_root: &Path) -> PathBuf {
+    let parent = declaring_file.parent().unwrap_or_else(|| Path::new("."));
+    let relative = strip_repo_prefix(declaring_file, repo_root);
+    if is_crate_root(&relative) {
+        return parent.to_path_buf();
+    }
+    match declaring_file.file_stem().and_then(|s| s.to_str()) {
+        Some("mod") => parent.to_path_buf(),
+        Some(stem) => parent.join(stem),
+        None => parent.to_path_buf(),
+    }
+}
+
+/// Resolve a module declaration to the absolute source-file path it refers to,
+/// or `None` if no tracked file corresponds to it.
+fn resolve_module(
+    declaring_file: &Path,
+    decl: &ModDecl,
+    repo_root: &Path,
+    all_files: &[PathBuf],
+) -> Option<PathBuf> {
+    // `#[path = "..."]` is resolved relative to the directory of the source
+    // file that carries the attribute (Rust's rule), independent of whether the
+    // declaring module is a file module or a directory module.
+    let file_dir = declaring_file.parent()?;
+
+    // Candidate locations, in resolution priority (Rust prefers the file
+    // module `<name>.rs` over the directory module `<name>/mod.rs`).
+    let candidates: Vec<PathBuf> = if let Some(path_attr) = &decl.path_attr {
+        let mut p = file_dir.join(path_attr);
+        if p.extension().is_none() {
+            p = p.with_extension("rs");
+        }
+        vec![p]
+    } else {
+        let mdir = module_dir(declaring_file, repo_root);
+        vec![
+            mdir.join(format!("{}.rs", decl.name)),
+            mdir.join(decl.name.clone()).join("mod.rs"),
+        ]
+    };
+
+    for cand in candidates {
+        let rel = strip_repo_prefix(&cand, repo_root);
+        if all_files.contains(&rel) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+fn strip_repo_prefix(path: &Path, repo_root: &Path) -> PathBuf {
+    path.strip_prefix(repo_root).unwrap_or(path).to_path_buf()
+}
+
+/// Compute the set of source files reachable from every crate root by following
+/// module declarations (`mod` + `#[path]`).
+///
+/// Crate roots:
+///   * `src/main.rs` and `src/lib.rs` (the lib/bin crate)
+///   * every direct `tests/*.rs` integration-test root
+///
+/// A `.rs` file nested under `tests/<subdir>/` is only reachable if some test
+/// root declares the `<subdir>` module (e.g. `mod support;` in `tests/gah_cli.rs`)
+/// and the file is then reachable through that subtree's `mod` declarations — the
+/// exact PR #325 scenario (an unreferenced test file cargo silently ignores).
+fn compute_reachable(repo_root: &Path, all_files: &[PathBuf]) -> BTreeSet<PathBuf> {
+    let mut reachable: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut queue: Vec<PathBuf> = Vec::new();
+
+    for root in [PathBuf::from("src/main.rs"), PathBuf::from("src/lib.rs")] {
+        if all_files.contains(&root) {
+            queue.push(repo_root.join(&root));
+        }
+    }
+
+    for f in all_files {
+        let s = f.to_string_lossy();
+        if let Some(rest) = s.strip_prefix("tests/") {
+            if !rest.contains('/') && rest.ends_with(".rs") {
+                queue.push(repo_root.join(f));
+            }
+        }
+    }
+
+    while let Some(file) = queue.pop() {
+        if !reachable.insert(file.clone()) {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(&file) {
+            for decl in parse_mod_decls(&content) {
+                if let Some(target) = resolve_module(&file, &decl, repo_root, all_files) {
+                    queue.push(target);
+                }
+            }
+        }
+    }
+
+    reachable
+}
+
+/// Check if a source file is reachable from a crate root.
+///
+/// `path` may be either absolute or relative to the repository; it is normalized
+/// against `repo_root` before lookup so that callers passing git-tracked relative
+/// paths (as the `all_rust_modules_are_reachable_from_crate_roots` test does) and
+/// callers passing absolute fixture paths (as the isolation tests do) both work.
 fn is_reachable_from_crate(path: &Path, repo_root: &Path, all_files: &[PathBuf]) -> bool {
-    let relative = path.strip_prefix(repo_root).unwrap_or(path);
-    let relative_str = relative.to_string_lossy();
-
-    // Crate roots are always reachable
-    if relative_str == "src/main.rs" || relative_str == "src/lib.rs" {
-        return true;
-    }
-
-    // Integration test roots are always reachable
-    // Files directly in tests/ (no nested path like tests/foo.rs)
-    let path_str = relative.to_string_lossy();
-    if let Some(rest) = path_str.strip_prefix("tests/") {
-        if !rest.contains('/') {
-            return true;
-        }
-    }
-
-    // Files in tests/support/ are special - they're helper modules
-    if relative_str.starts_with("tests/support/") {
-        // support directory has mod.rs, so files in it are reachable
-        // if gah_cli.rs declares `mod support;`
-        let gah_cli_rs = repo_root.join("tests/gah_cli.rs");
-        if all_files.contains(&gah_cli_rs) {
-            if let Ok(content) = fs::read_to_string(&gah_cli_rs) {
-                if content.contains("mod support;") || content.contains("pub mod support;") {
-                    // Now check if the specific file is declared in support/mod.rs or reachable
-                    // support/mod.rs should declare its submodules
-                    let support_mod = repo_root.join("tests/support/mod.rs");
-                    if all_files.contains(&support_mod) {
-                        return true; // mod.rs makes it a module, cargo will find it
-                    }
-
-                    return true;
-                }
-            }
-        }
-        return true; // Be conservative - cargo test discovers these
-    }
-
-    // For nested test files like tests/gah_cli/something.rs
-    if relative_str.starts_with("tests/") {
-        // These would need to be declared in a test file
-        // But for now, we're conservative and skip this check
-        return true;
-    }
-
-    // For src/ files
-    if relative_str.starts_with("src/") {
-        let components: Vec<&str> = relative_str
-            .strip_prefix("src/")
-            .unwrap_or("")
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if components.is_empty() {
-            return false;
-        }
-
-        let file_name = components.last().unwrap();
-        let is_mod_rs = *file_name == "mod.rs";
-
-        if is_mod_rs {
-            // This is a mod.rs file - check if its parent directory is declared in the parent's module
-            if components.len() == 1 {
-                // src/mod.rs - this is non-standard, but check main.rs
-                return is_module_declared_in_file(
-                    "mod",
-                    &repo_root.join("src/main.rs"),
-                    repo_root,
-                    all_files,
-                ) || is_module_declared_in_file(
-                    "mod",
-                    &repo_root.join("src/lib.rs"),
-                    repo_root,
-                    all_files,
-                );
-            }
-
-            // For src/dispatch/review/mod.rs, we need to check if `review` is declared in src/dispatch/mod.rs
-            // For src/routing/mod.rs, check if `routing` is declared in src/main.rs or src/lib.rs
-            let module_name = components[components.len() - 2];
-            let parent_components = &components[..components.len() - 2];
-
-            if parent_components.is_empty() {
-                // Directly under src/, e.g., src/routing/mod.rs
-                return is_module_declared_in_file(
-                    module_name,
-                    &repo_root.join("src/main.rs"),
-                    repo_root,
-                    all_files,
-                ) || is_module_declared_in_file(
-                    module_name,
-                    &repo_root.join("src/lib.rs"),
-                    repo_root,
-                    all_files,
-                );
-            } else {
-                // Nested, e.g., src/dispatch/review/mod.rs - check if `review` is in src/dispatch/mod.rs
-                let parent_dir_path = format!("src/{}", parent_components.join("/"));
-
-                // Check parent's mod.rs
-                let parent_mod_path = format!("{}/mod.rs", parent_dir_path);
-                let parent_mod = repo_root.join(&parent_mod_path);
-                let parent_mod_relative = PathBuf::from(&parent_mod_path);
-                if all_files.contains(&parent_mod_relative)
-                    && is_module_declared_in_file(module_name, &parent_mod, repo_root, all_files)
-                {
-                    return true;
-                }
-
-                // Check parent's .rs file
-                let parent_rs_path = format!("{}.rs", parent_dir_path);
-                let parent_rs = repo_root.join(&parent_rs_path);
-                let parent_rs_relative = PathBuf::from(&parent_rs_path);
-                if all_files.contains(&parent_rs_relative)
-                    && is_module_declared_in_file(module_name, &parent_rs, repo_root, all_files)
-                {
-                    return true;
-                }
-
-                return false;
-            }
-        } else {
-            // Regular file - check if declared in parent's mod.rs
-            if components.len() == 1 {
-                // Top-level src file like src/ledger.rs
-                // Strip the .rs extension for module name
-                let module_name = file_name.strip_suffix(".rs").unwrap_or(file_name);
-                return is_module_declared_in_file(
-                    module_name,
-                    &repo_root.join("src/main.rs"),
-                    repo_root,
-                    all_files,
-                ) || is_module_declared_in_file(
-                    module_name,
-                    &repo_root.join("src/lib.rs"),
-                    repo_root,
-                    all_files,
-                );
-            } else {
-                // Nested file like src/routing/diagnostics.rs or src/controller/decision/tests.rs
-                // Strip the .rs extension for module name
-                let module_name = file_name.strip_suffix(".rs").unwrap_or(file_name);
-                let parent_dir = &components[..components.len() - 1];
-                let parent_dir_path = format!("src/{}", parent_dir.join("/"));
-
-                // Check if there's a mod.rs in the parent directory
-                let mod_rs_path = format!("{}/mod.rs", parent_dir_path);
-                let parent_mod = repo_root.join(&mod_rs_path);
-                let parent_mod_relative = PathBuf::from(&mod_rs_path);
-                if all_files.contains(&parent_mod_relative)
-                    && is_module_declared_in_file(module_name, &parent_mod, repo_root, all_files)
-                {
-                    return true;
-                }
-
-                // Check if there's a .rs file in the parent directory (the parent is a file module, not a directory module)
-                // e.g., for src/controller/decision/tests.rs, the parent is src/controller/decision.rs
-                let rs_path = format!("{}.rs", parent_dir_path);
-                let parent_rs = repo_root.join(&rs_path);
-                let parent_rs_relative = PathBuf::from(&rs_path);
-                if all_files.contains(&parent_rs_relative)
-                    && is_module_declared_in_file(module_name, &parent_rs, repo_root, all_files)
-                {
-                    return true;
-                }
-
-                // Also check all .rs files in the parent directory for declarations
-                // (e.g., src/controller/ledger_read_tests.rs might be declared in src/controller/runtime.rs)
-                for ancestor_file in all_files {
-                    let ancestor_str = ancestor_file.to_string_lossy().to_string();
-                    // Check if this file is in the parent directory
-                    if ancestor_str.starts_with(&parent_dir_path) && ancestor_str.ends_with(".rs") {
-                        // Check if it's not mod.rs or the file itself
-                        if ancestor_str != mod_rs_path && ancestor_str != rs_path {
-                            let ancestor_path = repo_root.join(ancestor_file);
-                            if is_module_declared_in_file(
-                                module_name,
-                                &ancestor_path,
-                                repo_root,
-                                all_files,
-                            ) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-
-                return false;
-            }
-        }
-    }
-
-    false
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    };
+    compute_reachable(repo_root, all_files).contains(&abs)
 }
 
 #[test]
@@ -843,39 +838,151 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
     assert_test_filter_matches_at_least_one(zero_test_output, "ticket_118");
 }
 
-/// Check reachability for a hypothetical orphaned file equivalent to PR #325
-/// This simulates having a test file that exists but is not declared anywhere
+/// PR #325 scenario: an unreferenced integration-test file nested under a
+/// `tests/` subdirectory must be flagged as orphaned. Cargo silently ignores
+/// such files — a test root (`tests/*.rs`) only compiles a subdirectory when
+/// it declares it as a module.
 #[test]
-fn orphaned_test_file_is_detected_in_isolation() {
-    // This test creates a minimal scenario to verify the detection logic works
-    // We use a temp directory to create a crate with an orphaned file
+fn orphaned_nested_test_file_is_detected() {
     use std::fs::File;
     use std::io::Write;
 
     let temp = tempfile::tempdir().unwrap();
-    let src_dir = temp.path().join("src");
-    std::fs::create_dir(&src_dir).unwrap();
+    let repo_root = temp.path();
+    let tests_dir = repo_root.join("tests");
+    std::fs::create_dir(&tests_dir).unwrap();
 
-    // Create main.rs
-    let mut main_rs = File::create(src_dir.join("main.rs")).unwrap();
-    writeln!(main_rs, "fn main() {{}}").unwrap();
+    // A real test root that declares nothing about the orphaned subtree.
+    let mut gah_cli = File::create(tests_dir.join("gah_cli.rs")).unwrap();
+    writeln!(gah_cli, "fn smoke() {{}}").unwrap();
 
-    // Create an orphaned file
-    let orphan_path = src_dir.join("orphaned_test.rs");
-    let mut orphan = File::create(&orphan_path).unwrap();
+    // An undeclared nested test file — the exact cargo-ignored shape.
+    let orphan_dir = tests_dir.join("orphaned");
+    std::fs::create_dir(&orphan_dir).unwrap();
+    let mut orphan = File::create(orphan_dir.join("foo.rs")).unwrap();
     writeln!(orphan, "#[test]\nfn test_orphan() {{}}").unwrap();
 
-    // This file is not declared in main.rs, so it's orphaned
-    // We would need to run the check against this temp directory to verify
-    // For now, we verify that the helper function would detect it
-    // by checking that main.rs doesn't declare it
-    let main_content = std::fs::read_to_string(src_dir.join("main.rs")).unwrap();
-    assert!(
-        !main_content.contains("mod orphaned_test"),
-        "main.rs should not declare orphaned_test"
-    );
+    let all_files = vec![
+        PathBuf::from("tests/gah_cli.rs"),
+        PathBuf::from("tests/orphaned/foo.rs"),
+    ];
 
-    // The actual check would be done by is_reachable_from_crate
-    // but that requires setting up a git repo and other infrastructure
-    // For now, this test verifies the basic file structure is as expected
+    assert!(
+        !is_reachable_from_crate(&orphan_dir.join("foo.rs"), repo_root, &all_files),
+        "an undeclared nested test file must be flagged as orphaned (PR #325)"
+    );
+}
+
+/// PR #378 scenario: a `src/` module that no crate root declares must be
+/// flagged as orphaned, while a properly declared sibling module stays reachable.
+#[test]
+fn undeclared_src_module_is_detected() {
+    use std::fs::File;
+    use std::io::Write;
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+    let src_dir = repo_root.join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+    std::fs::create_dir(src_dir.join("routing")).unwrap();
+
+    let mut main_rs = File::create(src_dir.join("main.rs")).unwrap();
+    writeln!(main_rs, "fn main() {{}}").unwrap();
+    writeln!(main_rs, "mod config;").unwrap();
+
+    let mut config = File::create(src_dir.join("config.rs")).unwrap();
+    writeln!(config, "// declared").unwrap();
+
+    let mut diagnostics = File::create(src_dir.join("routing/diagnostics.rs")).unwrap();
+    writeln!(diagnostics, "// undeclared").unwrap();
+
+    let all_files = vec![
+        PathBuf::from("src/main.rs"),
+        PathBuf::from("src/config.rs"),
+        PathBuf::from("src/routing/diagnostics.rs"),
+    ];
+
+    assert!(
+        is_reachable_from_crate(&src_dir.join("config.rs"), repo_root, &all_files),
+        "a properly declared src module must be reachable"
+    );
+    assert!(
+        !is_reachable_from_crate(
+            &src_dir.join("routing/diagnostics.rs"),
+            repo_root,
+            &all_files
+        ),
+        "an undeclared src submodule must be flagged as orphaned (PR #378)"
+    );
+}
+
+/// A module reachable through a `tests/` root declaring a subdirectory (as
+/// `gah_cli.rs` does for `support`) must NOT be flagged as orphaned.
+#[test]
+fn declared_nested_test_module_is_reachable() {
+    use std::fs::File;
+    use std::io::Write;
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path();
+    let tests_dir = repo_root.join("tests");
+    std::fs::create_dir(&tests_dir).unwrap();
+    std::fs::create_dir(tests_dir.join("support")).unwrap();
+
+    let mut gah_cli = File::create(tests_dir.join("gah_cli.rs")).unwrap();
+    writeln!(gah_cli, "mod support;").unwrap();
+
+    let mut support_mod = File::create(tests_dir.join("support/mod.rs")).unwrap();
+    writeln!(support_mod, "pub mod fake_ledger;").unwrap();
+
+    let mut fake_ledger = File::create(tests_dir.join("support/fake_ledger.rs")).unwrap();
+    writeln!(fake_ledger, "// support helper").unwrap();
+
+    let all_files = vec![
+        PathBuf::from("tests/gah_cli.rs"),
+        PathBuf::from("tests/support/mod.rs"),
+        PathBuf::from("tests/support/fake_ledger.rs"),
+    ];
+
+    assert!(
+        is_reachable_from_crate(
+            &tests_dir.join("support/fake_ledger.rs"),
+            repo_root,
+            &all_files
+        ),
+        "a test module declared through a test-root subtree must be reachable"
+    );
+}
+
+/// `mod foobar;` must not satisfy a lookup for the module `foo`: the declaration
+/// parser matches exact module names via word boundaries, so prefix substrings
+/// do not produce false "declared" results (anti-fabrication guarantee).
+#[test]
+fn module_declaration_match_is_not_a_prefix_substring() {
+    let content =
+        "mod foo;\n// mod bar;\nmod foobar;\n/* mod baz; */\npub mod qux;\nmod quux { }\n";
+    let decls = parse_mod_decls(content);
+    let names: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+
+    assert_eq!(
+        names,
+        vec!["foo", "foobar", "qux"],
+        "only live file-module declarations should be parsed, as exact names"
+    );
+}
+
+/// `#[path = \"...\"]` attributes are recognized and bound to the following
+/// `mod` declaration, so explicit file locations are honored by resolution.
+#[test]
+fn module_declaration_recognizes_path_attribute() {
+    let content = "#[cfg(test)]\n#[path = \"decision/tests.rs\"]\nmod tests;\n";
+    let decls = parse_mod_decls(content);
+
+    assert_eq!(decls.len(), 1);
+    assert_eq!(decls[0].name, "tests");
+    assert_eq!(
+        decls[0].path_attr.as_deref(),
+        Some("decision/tests.rs"),
+        "the #[path] attribute must be captured for the following mod decl"
+    );
 }
