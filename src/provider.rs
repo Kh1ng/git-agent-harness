@@ -2,6 +2,14 @@ use crate::config::Profile;
 use anyhow::{Context, Result};
 use std::process::{Command, Output};
 
+const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
+    "gah-needs-fix",
+    "gah-ready-for-human",
+    "gah-human-review",
+    "gah-review-weak",
+    "gah-review-escalating",
+];
+
 fn redacted_stderr(out: &Output) -> String {
     crate::redact::redact(&String::from_utf8_lossy(&out.stderr))
         .trim()
@@ -99,6 +107,25 @@ pub fn post_review_comment(
     match profile.provider.as_str() {
         "gitlab" => gitlab_post_review_comment(profile, branch, &body, labels),
         "github" => github_post_review_comment(profile, branch, &body, labels),
+        other => anyhow::bail!("unsupported provider: {}", other),
+    }
+}
+
+/// Replace the mutually-exclusive GAH review/controller labels while
+/// preserving every unrelated provider label. Review state is a state
+/// machine, not an append-only set: leaving `gah-needs-fix` attached after a
+/// repair makes it outrank `gah-review-escalating` forever and exhausts the
+/// fix cap without reviewing the new source commit.
+pub fn set_review_state_labels(profile: &Profile, branch: &str, labels: &[&str]) -> Result<()> {
+    match profile.provider.as_str() {
+        "gitlab" => {
+            let mr = gitlab_find_mr_by_branch(profile, branch)?;
+            gitlab_set_review_state_labels(profile, &mr.id, labels)
+        }
+        "github" => {
+            let pr_number = github_find_pr_number_by_branch(profile, branch)?;
+            github_set_review_state_labels(profile, &pr_number, labels)
+        }
         other => anyhow::bail!("unsupported provider: {}", other),
     }
 }
@@ -224,26 +251,8 @@ fn gitlab_post_review_comment(
         &payload.to_string(),
         &note_url,
     ])?;
-    if !labels.is_empty() {
-        let labels_url = format!(
-            "{}/projects/{}/merge_requests/{}",
-            api_base, project_id, mr.id
-        );
-        let payload = serde_json::json!({ "add_labels": labels.join(",") });
-        run_curl_json(&[
-            "-s",
-            "-X",
-            "PUT",
-            "-H",
-            &format!("PRIVATE-TOKEN: {}", pat),
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &payload.to_string(),
-            &labels_url,
-        ])
+    gitlab_set_review_state_labels(profile, &mr.id, labels)
         .with_context(|| format!("applying review labels to MR {}", mr.id))?;
-    }
     Ok(())
 }
 
@@ -269,31 +278,110 @@ fn github_post_review_comment(
     if !out.status.success() {
         anyhow::bail!("gh pr comment failed: {}", redacted_stderr(&out));
     }
-    if !labels.is_empty() {
-        // ponytail: `gh pr edit --add-label` mutates via a GraphQL path that
-        // fails on this repo every time with a "Projects (classic)" sunset
-        // error, regardless of the label. The REST labels endpoint doesn't
-        // go through that mutation shape, so use it instead. Confirmed live:
-        // `gh api repos/<repo>/issues/<n>/labels -f "labels[]=<label>"`
-        // succeeds where `gh pr edit --add-label` fails.
-        let mut args = vec![
-            "api".to_string(),
-            format!("repos/{}/issues/{}/labels", profile.repo, pr_number),
-        ];
-        for label in labels {
-            args.push("-f".to_string());
-            args.push(format!("labels[]={}", label));
+    github_set_review_state_labels(profile, &pr_number, labels)
+        .with_context(|| format!("applying review labels to PR {}", pr_number))?;
+    Ok(())
+}
+
+fn gitlab_set_review_state_labels(profile: &Profile, iid: &str, labels: &[&str]) -> Result<()> {
+    let api_base = profile
+        .provider_api_base
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let pat = profile.pat();
+    let labels_url = format!("{api_base}/projects/{project_id}/merge_requests/{iid}");
+    let remove_labels = GAH_REVIEW_STATE_LABELS
+        .iter()
+        .copied()
+        .filter(|candidate| !labels.contains(candidate))
+        .collect::<Vec<_>>()
+        .join(",");
+    let payload = serde_json::json!({
+        "add_labels": labels.join(","),
+        "remove_labels": remove_labels,
+    });
+    run_curl_json(&[
+        "-s",
+        "-X",
+        "PUT",
+        "-H",
+        &format!("PRIVATE-TOKEN: {}", pat),
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        &payload.to_string(),
+        &labels_url,
+    ])?;
+    Ok(())
+}
+
+fn github_set_review_state_labels(
+    profile: &Profile,
+    pr_number: &str,
+    labels: &[&str],
+) -> Result<()> {
+    // `gh pr edit` uses a GraphQL mutation that fails on repositories with
+    // the retired Projects (classic) surface. Keep this state transition on
+    // the REST issue-label endpoints used successfully by review publishing.
+    let endpoint = format!("repos/{}/issues/{}/labels", profile.repo, pr_number);
+    let current = provider_command("gh")
+        .args(["api", &endpoint, "--jq", ".[].name"])
+        .output()
+        .context("gh api current review labels")?;
+    if !current.status.success() {
+        anyhow::bail!(
+            "reading current review labels failed: {}",
+            redacted_stderr(&current)
+        );
+    }
+    // Let `gh` parse provider JSON and emit one name per line. An empty,
+    // successful response is the valid "no labels" state; malformed provider
+    // JSON still makes `gh api` fail before this point.
+    let current_text = String::from_utf8_lossy(&current.stdout);
+    let current = current_text
+        .lines()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .collect::<std::collections::HashSet<_>>();
+
+    for stale in GAH_REVIEW_STATE_LABELS
+        .iter()
+        .copied()
+        .filter(|label| current.contains(label) && !labels.contains(label))
+    {
+        let remove = provider_command("gh")
+            .args(["api", "--method", "DELETE", &format!("{endpoint}/{stale}")])
+            .output()
+            .context("gh api remove stale review label")?;
+        if !remove.status.success() {
+            anyhow::bail!(
+                "removing stale review label {stale} failed: {}",
+                redacted_stderr(&remove)
+            );
         }
-        let out = provider_command("gh")
+    }
+
+    let missing = labels
+        .iter()
+        .copied()
+        .filter(|label| !current.contains(label))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let mut args = vec!["api".to_string(), endpoint];
+        for label in missing {
+            args.push("-f".to_string());
+            args.push(format!("labels[]={label}"));
+        }
+        let add = provider_command("gh")
             .args(&args)
             .output()
-            .context("gh api review labels")?;
-        if !out.status.success() {
-            anyhow::bail!(
-                "applying review labels to PR {} failed: {}",
-                pr_number,
-                redacted_stderr(&out)
-            );
+            .context("gh api add review labels")?;
+        if !add.status.success() {
+            anyhow::bail!("adding review labels failed: {}", redacted_stderr(&add));
         }
     }
     Ok(())
@@ -1176,7 +1264,11 @@ case "$1" in
     esac
     ;;
   api)
-    echo "$@" > "${0%/*}/label_call.txt"
+    if [ "$3" = "--jq" ]; then
+      printf 'gah-needs-fix\nunrelated\n'
+    else
+      echo "$@" >> "${0%/*}/label_call.txt"
+    fi
     exit 0
     ;;
   *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
@@ -1195,7 +1287,80 @@ esac
 
         let call = fs::read_to_string(bin_dir.join("label_call.txt")).unwrap();
         assert!(call.contains("repos/owner/repo/issues/42/labels"));
+        assert!(call.contains("--method DELETE"));
+        assert!(call.contains("gah-needs-fix"));
         assert!(call.contains("labels[]=gah-ready-for-human"));
+    }
+
+    #[test]
+    fn github_repaired_state_removes_needs_fix_and_preserves_unrelated_labels() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "gh",
+            r#"#!/bin/sh
+case "$1" in
+  pr) printf '[{"number":42}]\n' ;;
+  api)
+    if [ "$3" = "--jq" ]; then
+      printf 'gah-needs-fix\nbug\n'
+    else
+      echo "$@" >> "${0%/*}/calls.txt"
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        super::set_review_state_labels(&github_profile(), "gah/test", &["gah-review-escalating"])
+            .unwrap();
+
+        let calls = fs::read_to_string(bin_dir.join("calls.txt")).unwrap();
+        assert!(calls.contains("--method DELETE"));
+        assert!(calls.contains("gah-needs-fix"));
+        assert!(calls.contains("labels[]=gah-review-escalating"));
+        assert!(
+            !calls.contains("/bug"),
+            "unrelated labels must be preserved"
+        );
+    }
+
+    #[test]
+    fn gitlab_review_state_adds_desired_and_removes_stale_labels() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let tmp = TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        make_fake_bin(
+            &bin_dir,
+            "curl",
+            r#"#!/bin/sh
+case "$*" in
+  *"merge_requests?state=opened"*)
+    printf '[{"iid":7,"web_url":"https://gitlab.example/x/7","source_branch":"gah/test","target_branch":"main"}]\n'
+    ;;
+  *)
+    echo "$@" > "${0%/*}/label_call.txt"
+    printf '{}\n'
+    ;;
+esac
+"#,
+        );
+        let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+        super::set_review_state_labels(&gitlab_profile(), "gah/test", &["gah-review-escalating"])
+            .unwrap();
+
+        let call = fs::read_to_string(bin_dir.join("label_call.txt")).unwrap();
+        assert!(call.contains("add_labels"));
+        assert!(call.contains("gah-review-escalating"));
+        assert!(call.contains("remove_labels"));
+        assert!(call.contains("gah-needs-fix"));
     }
 
     #[test]
