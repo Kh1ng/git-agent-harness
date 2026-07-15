@@ -294,23 +294,31 @@ Doctor checks:
 
 ## First Dispatch
 
-### GitHub issue intake allowlist
+### Trusted issue intake
 
-GitHub issue bodies are worker-prompt input. By default, GAH accepts issues
-only from the owner in `profile.repo` (for example, `alice/repo` accepts
-`alice`). To define the exact trusted authors for one profile, set the
-allowlist under its publishing policy:
+Issue bodies are worker-prompt input. Configure trusted humans and provider
+bots independently for each GitHub or GitLab profile:
 
 ```toml
 [profiles.my_profile.publishing]
-github_issue_author_allowlist = ["alice", "teammate-login"]
+trusted_issue_human_authors = ["alice", "teammate-login"]
+trusted_issue_bot_authors = ["project_5_bot_deadbeef"]
+issue_intake_mode = "canonical_autonomous_only"
+canonical_autonomous_label = "exec:autonomous"
 ```
 
-Configuring the allowlist replaces the owner-only default, so include `alice`
-when they should remain trusted; add or remove team members by editing this
-list. An explicit empty list disables GitHub issue intake for that profile.
-The same policy applies to loop discovery and an explicit
-`gah dispatch --target #123`.
+`canonical_autonomous_only` is opt-in and makes recurring discovery require the
+canonical label. Owner-decision, blocked, and planning labels still win when
+labels conflict. Explicit dispatch of a trusted but held or unlabelled issue
+requires the visible `--issue-intake-override` flag; it never bypasses author
+trust.
+
+For backward compatibility, a GitHub profile without the new human list still
+uses `github_issue_author_allowlist`; if neither list is configured, only the
+repository owner is trusted. That compatibility field never grants GitLab
+trust. GitLab project access-token users are recognized from the project-scoped
+`project_<project-id>_bot_*` username and must still be listed exactly in
+`trusted_issue_bot_authors`. Explicit empty lists deny that author class.
 
 Start with a dry run:
 

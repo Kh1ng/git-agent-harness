@@ -38,6 +38,7 @@ pub use self::attempts::review_preflight;
 use self::claims::check_duplicate_work;
 pub(crate) use self::claims::duplicate_work_error;
 pub use self::claims::{merge_branch, scan_available_tickets};
+pub(crate) use self::issues::discover_open_issues;
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
 
 /// A parallel sibling reached routing after another worker reserved the only
@@ -89,9 +90,8 @@ pub struct DispatchArgs {
     pub model: Option<String>,
     pub retries: u32,
     pub allow_draft_fail: bool,
-    /// Require explicit --prod flag to load production env_file_prod.
-    /// Without this flag, only env_file (dev) is loaded.
     pub prod: bool,
+    pub issue_intake_override: bool,
     /// TICKET-111: proceed despite a baseline validation failure that the
     /// classifier could not attribute to harness/environment/expected-red
     /// (`BaselineDisposition::UnknownRed`). Named for exactly what it

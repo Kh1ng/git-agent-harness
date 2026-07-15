@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+mod issue_intake;
+pub use issue_intake::IssueIntakeMode;
+
 /// TICKET-127/Issue #124: per-repo merge policy controlling what the
 /// controller does once an MR is `READY_FOR_HUMAN` (strong reviewer approved)
 /// and CI has been evaluated.
@@ -170,33 +173,24 @@ impl Defaults {
 /// behavior unless they opt into a restricted profile explicitly.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct PublishingPolicy {
-    /// When false, GAH must not create a PR/MR, and must not generate a
-    /// PR/MR title or body as a fallback side effect. The run stops at a
-    /// deterministic human handoff after code generation + validation.
     #[serde(default = "default_true")]
     pub allow_pull_request_creation: bool,
-    /// When false, GAH must not ask an LLM to generate commit text nor
-    /// synthesize prose commit messages from task context. The worktree is
-    /// left uncommitted for human completion.
     #[serde(default = "default_true")]
     pub allow_commit_message_generation: bool,
-    /// When false, GAH must not post status summaries, review findings,
-    /// completion messages, or other agent-generated prose to issue trackers.
     #[serde(default = "default_true")]
     pub allow_issue_comments: bool,
-    /// When false, reconciliation must never close a source issue after a
-    /// merged PR/MR, even when authoritative closure evidence exists.
-    /// Defaults to false so this new remote-write path is opt-in.
     #[serde(default)]
     pub allow_source_issue_closure: bool,
-    /// GitHub logins allowed to supply issues for automatic discovery and
-    /// explicit issue-number dispatch. `None` means the repository owner
-    /// only; `Some(...)` replaces that default with the exact trusted set, and
-    /// `Some([])` denies all GitHub issue intake. This keeps issue text from
-    /// untrusted authors out of worker prompts while allowing a profile to
-    /// define its trusted team deliberately.
     #[serde(default)]
     pub github_issue_author_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    pub trusted_issue_human_authors: Option<Vec<String>>,
+    #[serde(default)]
+    pub trusted_issue_bot_authors: Option<Vec<String>>,
+    #[serde(default = "issue_intake::default_issue_intake_mode")]
+    pub issue_intake_mode: IssueIntakeMode,
+    #[serde(default = "issue_intake::default_canonical_autonomous_label")]
+    pub canonical_autonomous_label: String,
 }
 
 impl Default for PublishingPolicy {
@@ -207,6 +201,10 @@ impl Default for PublishingPolicy {
             allow_issue_comments: true,
             allow_source_issue_closure: false,
             github_issue_author_allowlist: None,
+            trusted_issue_human_authors: None,
+            trusted_issue_bot_authors: None,
+            issue_intake_mode: issue_intake::default_issue_intake_mode(),
+            canonical_autonomous_label: issue_intake::default_canonical_autonomous_label(),
         }
     }
 }

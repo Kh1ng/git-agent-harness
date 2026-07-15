@@ -44,6 +44,28 @@ pub struct AvailableTicket {
     pub has_active_claim: bool,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct IssueIntakePolicy {
+    pub mode: String,
+    pub canonical_autonomous_label: String,
+    pub trusted_human_authors: Vec<String>,
+    pub trusted_bot_authors: Vec<String>,
+    pub github_issue_author_allowlist: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct IssueIntakeRejection {
+    pub ticket_path: String,
+    pub work_id: Option<String>,
+    pub title: Option<String>,
+    pub provider: String,
+    pub author_login: Option<String>,
+    pub author_kind: Option<String>,
+    pub reason_code: String,
+    pub reason: String,
+    pub labels: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct WorkMetadata {
     #[serde(default)]

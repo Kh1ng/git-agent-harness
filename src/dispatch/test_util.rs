@@ -53,7 +53,10 @@ pub(super) fn profile(local_path: &Path) -> Profile {
         notify_command: None,
         routing: RoutingPolicy::default(),
         pacing: Default::default(),
-        publishing: Default::default(),
+        publishing: crate::config::PublishingPolicy {
+            issue_intake_mode: crate::config::IssueIntakeMode::Legacy,
+            ..Default::default()
+        },
     }
 }
 

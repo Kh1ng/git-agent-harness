@@ -158,6 +158,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const activeSessions = sessions.filter((s) => ['starting', 'running'].includes(s.status));
   const recentSessions = sessions.filter((s) => ['stopped', 'error'].includes(s.status)).slice(0, 5);
   const tickets = status.data?.available_tickets ?? [];
+  const issueIntakeRejections = status.data?.issue_intake_rejections ?? [];
   const activeClaims = status.data?.active_claims ?? [];
 
   const formatClaimAge = (ageSeconds: number): string => {
@@ -303,6 +304,60 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                         </button>
                       )}
                     </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h3 className="text-sm font-semibold text-primary mb-3">
+          Issue intake rejections ({issueIntakeRejections.length})
+        </h3>
+        {status.loading && !status.data ? (
+          <LoadingState label="Loading intake policy…" />
+        ) : issueIntakeRejections.length === 0 ? (
+          <EmptyState
+            icon={ListChecks}
+            title="No issue intake rejections"
+            description="Every discovered issue currently satisfies the intake policy."
+          />
+        ) : (
+          <div className="card overflow-x-auto">
+            <table className="table-base min-w-[720px]">
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Author</th>
+                  <th>Disposition</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {issueIntakeRejections.map((rejection) => (
+                  <tr key={`${rejection.provider}-${rejection.ticket_path}`}>
+                    <td className="text-primary">
+                      {rejection.work_id && (
+                        <span className="font-mono text-xs text-muted mr-1.5">{rejection.work_id}</span>
+                      )}
+                      {rejection.title ?? rejection.ticket_path}
+                    </td>
+                    <td>
+                      <span className="text-secondary">
+                        {rejection.author_login ?? 'unknown'}
+                      </span>
+                      {rejection.author_kind && (
+                        <span className="ml-2 text-xs text-muted font-mono">
+                          {rejection.author_kind}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <StatusBadge tone="warning" label={rejection.reason_code} />
+                    </td>
+                    <td className="text-sm text-muted">{rejection.reason}</td>
                   </tr>
                 ))}
               </tbody>

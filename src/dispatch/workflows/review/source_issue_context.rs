@@ -69,7 +69,7 @@ pub(super) fn resolve_source_issue_context(
         return Ok(missing_source_issue_context());
     };
 
-    match fetch_issue_details(profile, &identity.issue_number) {
+    match fetch_issue_details(profile, &identity.issue_number, false) {
         Ok(issue) => {
             let contract = render_source_issue_contract(&issue);
             Ok(SourceIssueContext {

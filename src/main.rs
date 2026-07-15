@@ -288,6 +288,10 @@ enum Commands {
         /// Without this flag, only the dev env_file is loaded.
         #[arg(long, default_value_t = false)]
         prod: bool,
+        /// Visible operator override for explicit issue dispatch when intake
+        /// policy would otherwise reject the issue.
+        #[arg(long, default_value_t = false)]
+        issue_intake_override: bool,
         /// Proceed despite a baseline validation failure the classifier
         /// could not attribute to harness/environment/expected-red.
         #[arg(long, default_value_t = false)]
@@ -1191,6 +1195,7 @@ fn main() -> Result<()> {
             retries,
             allow_draft_fail,
             prod,
+            issue_intake_override,
             allow_unknown_red_baseline,
             escalate,
             existing_branch,
@@ -1198,20 +1203,7 @@ fn main() -> Result<()> {
         } => {
             runner::install_shutdown_handler()?;
             let cfg = config::load(config_path.as_deref())?;
-            // Generate a stable run id so the dispatch_started /
-            // dispatch_finished controller events correlate with each other
-            // and with the on-disk session directory. This is what lets the
-            // dashboard's controller-activity panel observe a live dispatch
-            // launched here (e.g. by the supervisor's parallel workers),
-            // not just sessions started from the dashboard itself -- see
-            // issue #197.
             let run_id = Uuid::new_v4().to_string();
-            // A manual `gah dispatch` does real execution (spawns a backend,
-            // may claim a ticket, writes ledger entries) just like the loop
-            // daemon does, so it must coordinate via the same per-profile
-            // lock -- otherwise a manual dispatch can run uncoordinated
-            // alongside a `gah loop --profile <profile>` daemon already
-            // owning that profile.
             let resolved_config_path = config::resolve_config_path(config_path.as_deref());
             let _lock = controller::acquire_profile_lock(&profile, &resolved_config_path)?;
             let args = dispatch::DispatchArgs {
@@ -1230,6 +1222,7 @@ fn main() -> Result<()> {
                 retries,
                 allow_draft_fail,
                 prod,
+                issue_intake_override,
                 allow_unknown_red_baseline,
                 escalate,
                 existing_branch,

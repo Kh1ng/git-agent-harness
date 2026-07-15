@@ -10,7 +10,7 @@ pub(super) fn ensure_issue_open_for_publish(
     profile: &Profile,
     issue: &IssueDetails,
 ) -> anyhow::Result<()> {
-    let fresh = fetch_issue_details(profile, &issue.number)?;
+    let fresh = fetch_issue_details(profile, &issue.number, false)?;
     match fresh.state.as_deref() {
         Some(state) if issue_state_is_open(state) => Ok(()),
         Some(state) => anyhow::bail!(

@@ -30,6 +30,16 @@ export interface ProfileIdentity {
   /** Resolved per-repo merge policy (inherits canonical/defaults policy
    * when the profile doesn't set its own). */
   merge_policy: string;
+  /** Effective issue intake policy for this profile. */
+  issue_intake_policy: IssueIntakePolicy;
+}
+
+export interface IssueIntakePolicy {
+  mode: string;
+  canonical_autonomous_label: string;
+  trusted_human_authors: string[];
+  trusted_bot_authors: string[];
+  github_issue_author_allowlist: string[];
 }
 
 export type ObservationStatusValue = 'ok' | 'error';
@@ -169,6 +179,18 @@ export interface AvailableTicket {
   human_required_reason_code?: string | null;
 }
 
+export interface IssueIntakeRejection {
+  ticket_path: string;
+  work_id: string | null;
+  title: string | null;
+  provider: string;
+  author_login: string | null;
+  author_kind: string | null;
+  reason_code: string;
+  reason: string;
+  labels: string[];
+}
+
 export interface ActiveClaim {
   work_id: string;
   pid: number;
@@ -196,6 +218,8 @@ export interface StatusSnapshot {
    * affect -- other eligible work stays dispatchable. This is where a
    * ticket-level human_required review verdict shows up, NOT `blockers`. */
   blocked_work_items: Blocker[];
+  /** Issue intake rejections observed during recurring discovery. */
+  issue_intake_rejections: IssueIntakeRejection[];
   errors: StatusError[];
   available_tickets: AvailableTicket[];
   active_claims: ActiveClaim[];

@@ -1,5 +1,5 @@
 use crate::availability;
-use crate::config::GahConfig;
+use crate::config::{GahConfig, Profile};
 use crate::controller::HumanRequiredReason;
 use crate::ledger::{self, LedgerEntry, RoutingDiagnostics};
 use crate::sync;
@@ -8,6 +8,47 @@ use chrono::Utc;
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+fn effective_issue_intake_policy(profile: &Profile) -> crate::models::IssueIntakePolicy {
+    let trusted_human_authors = profile
+        .publishing
+        .trusted_issue_human_authors
+        .clone()
+        .or_else(|| {
+            profile
+                .provider
+                .eq_ignore_ascii_case("github")
+                .then(|| profile.publishing.github_issue_author_allowlist.clone())
+                .flatten()
+        })
+        .unwrap_or_else(|| {
+            if profile.provider.eq_ignore_ascii_case("github") {
+                profile
+                    .repo
+                    .split_once('/')
+                    .map(|(owner, _)| vec![owner.to_string()])
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        });
+    let trusted_bot_authors = profile
+        .publishing
+        .trusted_issue_bot_authors
+        .clone()
+        .unwrap_or_default();
+    crate::models::IssueIntakePolicy {
+        mode: profile.publishing.issue_intake_mode.as_str().to_string(),
+        canonical_autonomous_label: profile.publishing.canonical_autonomous_label.clone(),
+        trusted_human_authors,
+        trusted_bot_authors,
+        github_issue_author_allowlist: profile
+            .publishing
+            .github_issue_author_allowlist
+            .clone()
+            .unwrap_or_default(),
+    }
+}
 
 #[derive(Serialize, Clone)]
 pub struct StatusSnapshot {
@@ -30,6 +71,10 @@ pub struct StatusSnapshot {
     /// `gah status` and the controller can distinguish a global freeze from
     /// a single blocked ticket.
     pub blocked_work_items: Vec<Blocker>,
+    /// Issue intake rejections observed during recurring discovery. These are
+    /// surfaced alongside the accepted tickets so a triage operator can see
+    /// why a particular issue was not deemed dispatchable.
+    pub issue_intake_rejections: Vec<crate::models::IssueIntakeRejection>,
     pub errors: Vec<StatusError>,
     /// TICKET-078: dispatch candidates from `docs/tickets/`, feeding
     /// `decide_next_action`'s DispatchTicket/Retry/Escalate rules.
@@ -86,6 +131,8 @@ pub struct ProfileIdentity {
     /// Genuine implementation failures allowed while walking the configured
     /// backend/model ladder. Separate from post-review repairs.
     pub max_implementation_failures_per_ticket: u32,
+    /// Effective issue intake policy for this profile.
+    pub issue_intake_policy: crate::models::IssueIntakePolicy,
 }
 
 #[derive(Serialize, Clone)]
@@ -214,6 +261,7 @@ fn build_snapshot_inner(
         max_fix_attempts_per_mr: effective_routing.max_fix_attempts_per_mr(),
         max_implementation_failures_per_ticket: effective_routing
             .max_implementation_failures_per_ticket(),
+        issue_intake_policy: effective_issue_intake_policy(profile),
     };
 
     let mut errors = Vec::new();
@@ -436,6 +484,8 @@ fn build_snapshot_inner(
         }
     }
 
+    let issue_intake_rejections = crate::dispatch::discover_open_issues(profile).rejected;
+
     // TICKET-human-required-scoping: after the per-ticket human_required is
     // derived (in scan_available_tickets via ledger_lookup_for_ticket), record
     // each blocked work item in `blocked_work_items` so it stays visible in
@@ -522,6 +572,7 @@ fn build_snapshot_inner(
         constraints,
         blockers,
         blocked_work_items,
+        issue_intake_rejections,
         errors,
         available_tickets,
         active_claims,
@@ -671,6 +722,21 @@ default_target_branch = "main"
         assert!(snap.recent_ledger.is_none());
         assert!(snap.blockers.is_empty());
         assert!(snap.constraints.is_empty());
+    }
+
+    #[test]
+    fn effective_intake_policy_does_not_invent_a_gitlab_owner_allowlist() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = make_test_cfg(&tmp);
+        let profile = cfg.profiles.get_mut("test").unwrap();
+        profile.provider = "gitlab".into();
+        profile.repo = "group/project".into();
+        profile.publishing.github_issue_author_allowlist = Some(vec!["github-only".into()]);
+
+        let policy = effective_issue_intake_policy(profile);
+
+        assert!(policy.trusted_human_authors.is_empty());
+        assert_eq!(policy.github_issue_author_allowlist, vec!["github-only"]);
     }
 
     #[test]

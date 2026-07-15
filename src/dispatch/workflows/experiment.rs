@@ -91,7 +91,11 @@ pub(crate) fn experiment(
     let _cargo_target =
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
 
-    let issue_details = resolve_target_to_issue_or_string(profile, &args.target)?;
+    let issue_details =
+        resolve_target_to_issue_or_string(profile, &args.target, args.issue_intake_override)?;
+    if issue_details.is_some() && args.issue_intake_override {
+        println!("Issue intake override enabled for explicit issue dispatch");
+    }
     let task = build_task(
         profile,
         &wt,

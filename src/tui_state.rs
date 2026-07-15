@@ -202,6 +202,13 @@ mod tests {
                 merge_policy: crate::config::MergePolicy::default(),
                 max_fix_attempts_per_mr: 2,
                 max_implementation_failures_per_ticket: 8,
+                issue_intake_policy: crate::models::IssueIntakePolicy {
+                    mode: "canonical_autonomous_only".into(),
+                    canonical_autonomous_label: "exec:autonomous".into(),
+                    trusted_human_authors: vec![],
+                    trusted_bot_authors: vec![],
+                    github_issue_author_allowlist: vec![],
+                },
             },
             observations: Observations {
                 sync: ObservationStatus { status: "ok" },
@@ -214,6 +221,7 @@ mod tests {
             constraints: vec![],
             blockers: vec![],
             blocked_work_items: vec![],
+            issue_intake_rejections: vec![],
             errors: vec![],
             available_tickets: vec![],
             active_claims: vec![],

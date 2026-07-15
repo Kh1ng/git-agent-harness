@@ -64,6 +64,7 @@ pub(in crate::dispatch) fn dry_run(
             }
             println!("Retries:      {}", args.retries);
             println!("Allow draft fail: {}", args.allow_draft_fail);
+            println!("Issue intake override: {}", args.issue_intake_override);
             println!("Prod env:         {}", args.prod);
             if !profile.validation_commands.is_empty() {
                 println!("Validation:");
