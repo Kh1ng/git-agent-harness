@@ -1330,6 +1330,8 @@ pub(crate) fn improve(
         let existing = provider::find_review_target_by_branch(profile, &branch)
             .with_context(|| format!("resolving existing PR/MR for repaired branch '{branch}'"))?;
         ledger.mr_url = Some(existing.url.clone());
+        provider::set_review_state_labels(profile, &branch, &["gah-review-escalating"])
+            .context("transitioning repaired PR/MR back to review")?;
         println!("Updated existing MR: {}", existing.url);
     } else {
         ledger.mr_attempted = true;
