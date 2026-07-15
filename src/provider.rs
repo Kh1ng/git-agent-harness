@@ -72,6 +72,37 @@ pub(crate) fn gitlab_api(
         .with_context(|| format!("parsing GitLab API response for {endpoint}"))
 }
 
+#[allow(dead_code)]
+pub(crate) fn github_api(
+    _profile: &Profile,
+    endpoint: &str,
+    method: &str,
+    raw_fields: &[(&str, &str)],
+) -> Result<serde_json::Value> {
+    let mut command = provider_command("gh");
+    command.arg("api").arg(endpoint).args(["-X", method]);
+    for (name, value) in raw_fields {
+        command.args(["-f", &format!("{name}={value}")]);
+    }
+    let out = command.output().context("gh api GitHub request")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh api GitHub request failed for {}: {}",
+            endpoint,
+            redacted_provider_output(&out)
+        );
+    }
+    serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("parsing GitHub API response for {endpoint}"))
+}
+
+mod planning_issue;
+#[allow(unused_imports)]
+pub use planning_issue::{
+    apply_planning_issue, preview_planning_issue, PlanningIssuePacket, PlanningIssuePreview,
+    PlanningIssueRecord, PlanningIssueWriteResult,
+};
+
 #[cfg(test)]
 thread_local! {
     /// Per-thread PATH override for provider CLI tests. Thread-local (not a

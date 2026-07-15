@@ -1,6 +1,7 @@
 use super::{
-    create_draft_mr, find_review_target_by_mr, github_review_target_by_number,
-    gitlab_target_from_value, mark_ready_for_review, merge_mr, TEST_PATH_OVERRIDE,
+    apply_planning_issue, create_draft_mr, find_review_target_by_mr,
+    github_review_target_by_number, gitlab_target_from_value, mark_ready_for_review, merge_mr,
+    preview_planning_issue, PlanningIssuePacket, PlanningIssueWriteResult, TEST_PATH_OVERRIDE,
 };
 use crate::config::{Profile, RoutingPolicy};
 use std::fs;
@@ -101,6 +102,28 @@ fn gitlab_profile() -> Profile {
         provider_project_id: Some("42".into()),
         ..github_profile()
     }
+}
+
+fn planning_packet() -> PlanningIssuePacket {
+    PlanningIssuePacket {
+        target_project: "owner/repo".into(),
+        plan_id: "PLAN-123".into(),
+        packet_key: "packet-001".into(),
+        title: "Fix auth".into(),
+        body: "Tighten auth checks\n\nReview the edge cases.".into(),
+        labels: vec![
+            "P1".into(),
+            "Area:Provider".into(),
+            "risk:Medium".into(),
+            "Exec:Autonomous".into(),
+            "docs".into(),
+        ],
+        dependency_references: vec!["#21".into(), "22".into()],
+    }
+}
+
+fn shell_escape_single_quotes(value: &str) -> String {
+    value.replace('\'', "'\\''")
 }
 
 #[test]
@@ -653,4 +676,247 @@ esac
     )
     .unwrap_err();
     assert!(err.to_string().contains("applying review labels"));
+}
+
+#[test]
+fn planning_issue_preview_is_deterministic_and_canonicalizes_labels() {
+    let packet = planning_packet();
+    let preview = match preview_planning_issue(&packet) {
+        PlanningIssueWriteResult::Previewed(preview) => preview,
+        other => panic!("unexpected preview result: {other:?}"),
+    };
+
+    assert_eq!(preview.target_project, "owner/repo");
+    assert_eq!(preview.title, "Fix auth");
+    assert_eq!(
+        preview.labels,
+        vec![
+            "priority:p1",
+            "area:provider",
+            "risk:medium",
+            "exec:autonomous",
+            "docs",
+        ]
+    );
+    assert_eq!(preview.dependency_references, vec!["#21", "22"]);
+    assert!(preview.body.contains("## Planning Metadata"));
+    assert!(preview.body.contains("Plan ID: PLAN-123"));
+    assert!(preview.body.contains("Packet Key: packet-001"));
+    assert!(preview.body.contains("Target Project: owner/repo"));
+    assert!(preview
+        .body
+        .contains("Idempotency Key: project=owner/repo;plan=PLAN-123;packet=packet-001"));
+    assert!(preview.body.contains("## Dependency References"));
+    assert!(preview.body.contains("- #21"));
+    assert!(preview.body.contains("- 22"));
+}
+
+#[test]
+fn github_planning_issue_apply_is_idempotent() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let packet = planning_packet();
+    let preview = match preview_planning_issue(&packet) {
+        PlanningIssueWriteResult::Previewed(preview) => preview,
+        other => panic!("unexpected preview result: {other:?}"),
+    };
+    let issue_json = serde_json::json!({
+        "number": 77,
+        "html_url": "https://github.com/owner/repo/issues/77",
+        "title": preview.title,
+        "body": preview.body,
+        "labels": preview.labels.iter().map(|label| serde_json::json!({"name": label})).collect::<Vec<_>>(),
+        "state": "OPEN"
+    })
+    .to_string();
+    let escaped_issue_json = shell_escape_single_quotes(&issue_json);
+    let state_file = tmp.path().join("github-issue.json");
+    let create_count_file = tmp.path().join("github-create-count.txt");
+    let script = format!(
+        r#"#!/bin/sh
+state_file="{state_file}"
+create_count_file="{create_count_file}"
+case "$1 $2" in
+  "api repos/owner/repo/issues?state=all&per_page=100&page=1")
+    if [ -f "$state_file" ]; then
+      printf '[%s]\n' "$(cat "$state_file")"
+    else
+      printf '[]\n'
+    fi
+    exit 0
+    ;;
+  "api repos/owner/repo/issues")
+    if [ "$3" = "-X" ] && [ "$4" = "POST" ]; then
+      count=0
+      if [ -f "$create_count_file" ]; then count=$(cat "$create_count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$create_count_file"
+      if [ "$count" -gt 1 ]; then
+        echo "duplicate create" >&2
+        exit 1
+      fi
+      printf '%s\n' '{json}'
+      printf '%s\n' '{json}' > "$state_file"
+      exit 0
+    fi
+    ;;
+  "api repos/owner/repo/issues/77")
+    echo "unexpected update" >&2
+    exit 1
+    ;;
+esac
+echo "unexpected gh invocation: $@" >&2
+exit 1
+"#,
+        json = escaped_issue_json,
+        state_file = state_file.display(),
+        create_count_file = create_count_file.display()
+    );
+    make_fake_bin(&bin_dir, "gh", &script);
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let first = apply_planning_issue(&github_profile(), &packet, true, true);
+    assert!(matches!(first, PlanningIssueWriteResult::Created(_)));
+    assert!(state_file.exists());
+    assert!(fs::read_to_string(&state_file)
+        .unwrap()
+        .contains("project=owner/repo;plan=PLAN-123;packet=packet-001"));
+}
+
+#[test]
+fn gitlab_planning_issue_apply_is_idempotent_and_links_dependencies() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let packet = planning_packet();
+    let preview = match preview_planning_issue(&packet) {
+        PlanningIssueWriteResult::Previewed(preview) => preview,
+        other => panic!("unexpected preview result: {other:?}"),
+    };
+    let issue_json = serde_json::json!({
+        "iid": 7,
+        "web_url": "https://gitlab.example.com/group/repo/-/issues/7",
+        "title": preview.title,
+        "description": preview.body,
+        "labels": preview.labels,
+        "state": "opened"
+    })
+    .to_string();
+    let escaped_issue_json = shell_escape_single_quotes(&issue_json);
+    let links_json = serde_json::json!([
+        {
+            "iid": 21,
+            "link_type": "is_blocked_by"
+        },
+        {
+            "iid": 22,
+            "link_type": "is_blocked_by"
+        }
+    ])
+    .to_string();
+    let escaped_links_json = shell_escape_single_quotes(&links_json);
+    let state_file = tmp.path().join("gitlab-issue.json");
+    let links_file = tmp.path().join("gitlab-links.json");
+    let create_count_file = tmp.path().join("gitlab-create-count.txt");
+    let link_create_count_file = tmp.path().join("gitlab-link-create-count.txt");
+    let script = format!(
+        r#"#!/bin/sh
+state_file="{state_file}"
+links_file="{links_file}"
+create_count_file="{create_count_file}"
+link_create_count_file="{link_create_count_file}"
+case "$1 $2" in
+  "api projects/42/issues?state=all&per_page=100&page=1")
+    if [ -f "$state_file" ]; then
+      printf '[%s]\n' "$(cat "$state_file")"
+    else
+      printf '[]\n'
+    fi
+    exit 0
+    ;;
+  "api projects/42/issues")
+    case "$*" in
+      *"--method POST"*)
+      count=0
+      if [ -f "$create_count_file" ]; then count=$(cat "$create_count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$create_count_file"
+      if [ "$count" -gt 1 ]; then
+        echo "duplicate create" >&2
+        exit 1
+      fi
+      printf '%s\n' '{json}'
+      printf '%s\n' '{json}' > "$state_file"
+      exit 0
+      ;;
+    esac
+    ;;
+  "api projects/42/issues/7")
+    case "$*" in
+      *"--method PUT"*)
+      echo "unexpected update" >&2
+      exit 1
+      ;;
+    esac
+    ;;
+  "api projects/42/issues/7/links")
+    case "$*" in
+      *"--method GET"*)
+      if [ -f "$links_file" ]; then
+        printf '%s\n' "$(cat "$links_file")"
+      else
+        printf '[]\n'
+      fi
+      exit 0
+      ;;
+      *"--method POST"*)
+      count=0
+      if [ -f "$link_create_count_file" ]; then count=$(cat "$link_create_count_file"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$link_create_count_file"
+      if [ "$count" -gt 2 ]; then
+        echo "duplicate link create" >&2
+        exit 1
+      fi
+      printf '%s\n' '{links}' > "$links_file"
+      printf '%s\n' '{links}'
+      exit 0
+      ;;
+    esac
+    ;;
+esac
+echo "unexpected glab invocation: $@" >&2
+exit 1
+"#,
+        json = escaped_issue_json,
+        links = escaped_links_json,
+        state_file = state_file.display(),
+        links_file = links_file.display(),
+        create_count_file = create_count_file.display(),
+        link_create_count_file = link_create_count_file.display()
+    );
+    make_fake_bin(&bin_dir, "glab", &script);
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let first = apply_planning_issue(&gitlab_profile(), &packet, true, true);
+    assert!(matches!(first, PlanningIssueWriteResult::Created(_)));
+    assert!(state_file.exists());
+    assert!(fs::read_to_string(&state_file)
+        .unwrap()
+        .contains("project=owner/repo;plan=PLAN-123;packet=packet-001"));
+}
+
+#[test]
+fn planning_issue_apply_denies_without_required_authorization() {
+    let packet = planning_packet();
+    let denied = apply_planning_issue(&github_profile(), &packet, true, false);
+    assert!(matches!(denied, PlanningIssueWriteResult::Denied { .. }));
+
+    let denied = apply_planning_issue(&github_profile(), &packet, false, true);
+    assert!(matches!(denied, PlanningIssueWriteResult::Denied { .. }));
 }
