@@ -24,9 +24,11 @@ pub(super) struct RepairContext {
     pub compatibility_evidence: Vec<String>,
 }
 
-/// Load the latest completed review for this exact repair identity. Provider
-/// comments are deliberately not consulted: the ledger is the durable,
-/// provider-neutral source for both GitHub and GitLab repairs.
+/// Load the latest applicable structured review for this exact repair
+/// identity. Provider comments are deliberately not consulted: the ledger is
+/// the durable, provider-neutral source for both GitHub and GitLab repairs.
+/// Structured review verdicts may live on either a dedicated review entry or a
+/// backfilled implementation entry, so both are considered.
 pub(super) fn load(
     cfg: &GahConfig,
     profile_name: &str,
@@ -54,7 +56,7 @@ fn latest_from_entries(
         .filter(|entry| {
             entry.profile == profile_name
                 && entry.repo_id == repo_id
-                && entry.mode == "review"
+                && matches!(entry.mode.as_str(), "review" | "fix" | "improve")
                 && entry.branch.as_deref() == Some(branch)
                 && aliases.as_ref().is_none_or(|aliases| {
                     entry
@@ -196,6 +198,7 @@ fn append_list(prompt: &mut String, title: &str, items: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::test_util as ledger_tests;
     use crate::ledger::LedgerEntry;
     use std::fs;
 
@@ -264,6 +267,71 @@ mod tests {
                 .unwrap();
         assert_eq!(selected.verdict, "NEEDS_FIX");
         assert_eq!(selected.blocking_findings, ["src/lib.rs: fix retry"]);
+    }
+
+    #[test]
+    fn existing_branch_preflight_uses_backfilled_implementation_review_context() {
+        let (_tmp, cfg) = ledger_tests::test_config();
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = repo.path().join("repo");
+        crate::dispatch::test_util::init_repo(&repo_path);
+
+        let source_sha = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(source_sha.status.success());
+        let source_sha = String::from_utf8(source_sha.stdout).unwrap();
+        let source_sha = source_sha.trim().to_string();
+
+        fs::write(repo_path.join("README.md"), "updated\n").unwrap();
+        let add = Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(add.status.success());
+        let commit = Command::new("git")
+            .args(["commit", "-m", "repair branch"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(commit.status.success());
+
+        let profile = crate::dispatch::test_util::profile(&repo_path);
+        let mut entry =
+            LedgerEntry::new("test", &profile, "claude", "improve", "target", None, None);
+        entry.branch = Some("gah/fix".to_string());
+        entry.work_id = Some("#493".to_string());
+        entry.review_verdict = Some("NEEDS_FIX".to_string());
+        entry.review_confidence = Some("high".to_string());
+        entry.reviewer_backend = Some("claude".to_string());
+        entry.reviewer_model = Some("claude-sonnet-4".to_string());
+        entry.reviewer_tier = Some("strong".to_string());
+        entry.review_source_sha = Some(source_sha.clone());
+        entry.review_blocking_findings = vec!["src/lib.rs: fix retry".to_string()];
+        entry.review_non_blocking_findings = vec!["consider a smaller helper".to_string()];
+        entry.review_risk_notes = vec!["retry state can be lost".to_string()];
+        entry.review_evidence = vec!["file:src/lib.rs".to_string()];
+        crate::ledger::append(&cfg, &entry).unwrap();
+
+        let context = load(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "gah/fix",
+            Some("#493"),
+            &repo_path,
+        )
+        .unwrap();
+
+        assert_eq!(context.work_id, "#493");
+        assert_eq!(context.verdict, "NEEDS_FIX");
+        assert_eq!(context.source_sha, source_sha);
+        assert_eq!(context.reviewer_backend, "claude");
+        assert_eq!(context.reviewer_model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(context.blocking_findings, ["src/lib.rs: fix retry"]);
     }
 
     #[test]
