@@ -345,7 +345,7 @@ fn append_bounded_text(task: &mut String, text: &str, max_bytes: usize, label: &
     }
 }
 
-fn indent_untrusted_text(text: &str) -> String {
+pub(super) fn indent_untrusted_text(text: &str) -> String {
     text.lines()
         .map(|line| format!("  {line}"))
         .collect::<Vec<_>>()

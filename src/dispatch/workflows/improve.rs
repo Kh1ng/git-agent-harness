@@ -17,6 +17,7 @@ use super::super::publish::{
     build_fix_or_improve_mr_body, build_mr_title, emit_human_handoff,
     ensure_issue_open_for_publish, publishing_allows_publish, MrRenderContext,
 };
+use super::super::repair_context;
 use super::super::text::utf8_safe_prefix;
 use super::super::validation::{
     classify_validation_failure_progress, run_auto_fix_commands, should_skip_per_dispatch_baseline,
@@ -194,11 +195,38 @@ pub(crate) fn improve(
     apply_authoritative_work_identity(ledger, ticket_meta.as_ref(), &branch);
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
+    let repair_context = if args.existing_branch.is_some() {
+        match repair_context::load(
+            cfg,
+            &args.profile,
+            &profile.repo_id,
+            &branch,
+            ledger.work_id.as_deref(),
+            &wt,
+        ) {
+            Ok(context) => Some(context),
+            Err(err) => {
+                ledger.set_failure(
+                    crate::ledger::FailureClass::HarnessError,
+                    crate::ledger::FailureStage::Preflight,
+                );
+                worktree::cleanup(&wt, repo);
+                return Err(err.context(
+                    "FixMr requires structured findings from the latest applicable review",
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let _cargo_target =
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
     let validation_environment = validation_env(profile, session_dir);
 
     let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
+    if let Some(repair_context) = repair_context.as_ref() {
+        repair_context::append_to_prompt(&mut base_task, repair_context);
+    }
     let timeout = std::time::Duration::from_secs(profile.validation_timeout_seconds());
 
     let (baseline_failure, baseline_exit_code) = if should_skip_per_dispatch_baseline(

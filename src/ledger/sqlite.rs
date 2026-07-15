@@ -250,6 +250,12 @@ mod tests {
                 reviewer_model: Some("claude-sonnet-4"),
                 reviewer_tier: None,
                 review_gate_reason: None,
+                review_source_sha: None,
+                blocking_findings: &[],
+                non_blocking_findings: &[],
+                risk_notes: &[],
+                evidence: &[],
+                compatibility_evidence: &[],
             },
         )
         .unwrap();

@@ -337,6 +337,12 @@ pub struct ReviewVerdictBackfill<'a> {
     pub reviewer_model: Option<&'a str>,
     pub reviewer_tier: Option<&'a str>,
     pub review_gate_reason: Option<&'a str>,
+    pub review_source_sha: Option<&'a str>,
+    pub blocking_findings: &'a [String],
+    pub non_blocking_findings: &'a [String],
+    pub risk_notes: &'a [String],
+    pub evidence: &'a [String],
+    pub compatibility_evidence: &'a [String],
 }
 
 pub fn backfill_review_verdict(
@@ -378,10 +384,18 @@ pub fn backfill_review_verdict(
     entries[idx].reviewer_model = backfill.reviewer_model.map(str::to_string);
     entries[idx].reviewer_tier = backfill.reviewer_tier.map(str::to_string);
     entries[idx].review_gate_reason = backfill.review_gate_reason.map(str::to_string);
+    entries[idx].review_source_sha = backfill.review_source_sha.map(str::to_string);
+    entries[idx].review_blocking_findings = backfill.blocking_findings.to_vec();
+    entries[idx].review_non_blocking_findings = backfill.non_blocking_findings.to_vec();
+    entries[idx].review_risk_notes = backfill.risk_notes.to_vec();
+    entries[idx].review_evidence = backfill.evidence.to_vec();
+    entries[idx].review_compatibility_evidence = backfill.compatibility_evidence.to_vec();
 
     let mut out = String::new();
     for entry in &entries {
-        out.push_str(&serde_json::to_string(entry).context("serializing ledger entry")?);
+        let mut value = serde_json::to_value(entry).context("serializing ledger entry")?;
+        crate::redact::redact_json_value(&mut value);
+        out.push_str(&serde_json::to_string(&value).context("serializing ledger entry")?);
         out.push('\n');
     }
     fs::write(&path, out).with_context(|| format!("rewriting ledger {}", path.display()))?;
@@ -665,6 +679,15 @@ mod tests {
                 reviewer_model: Some("claude-sonnet-4"),
                 reviewer_tier: None,
                 review_gate_reason: Some("test review evidence gate"),
+                review_source_sha: Some("abc123"),
+                blocking_findings: &["src/lib.rs: broken retry".to_string()],
+                non_blocking_findings: &["consider a smaller helper".to_string()],
+                risk_notes: &["retry state can be lost".to_string()],
+                evidence: &[
+                    "file:src/lib.rs".to_string(),
+                    "ghp_abcdefghijklmnopqrstuvwxyz".to_string(),
+                ],
+                compatibility_evidence: &[],
             },
         )
         .unwrap();
@@ -682,6 +705,12 @@ mod tests {
             updated_impl.review_gate_reason.as_deref(),
             Some("test review evidence gate")
         );
+        assert_eq!(updated_impl.review_source_sha.as_deref(), Some("abc123"));
+        assert_eq!(
+            updated_impl.review_blocking_findings,
+            ["src/lib.rs: broken retry"]
+        );
+        assert_eq!(updated_impl.review_evidence[1], "[REDACTED:GITHUB_TOKEN]");
 
         let review_entry_after = entries
             .iter()
@@ -706,6 +735,12 @@ mod tests {
                 reviewer_model: None,
                 reviewer_tier: None,
                 review_gate_reason: None,
+                review_source_sha: None,
+                blocking_findings: &[],
+                non_blocking_findings: &[],
+                risk_notes: &[],
+                evidence: &[],
+                compatibility_evidence: &[],
             },
         )
         .unwrap();
