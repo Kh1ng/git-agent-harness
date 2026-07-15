@@ -260,8 +260,6 @@ pub struct LedgerEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub human_required_reason_code: Option<String>,
     #[serde(default)]
-    pub human_required_reason_code: Option<String>,
-    #[serde(default)]
     pub routing_diagnostics: Option<RoutingDiagnostics>,
     pub mode: String,
     pub target_summary: Option<String>,

@@ -506,11 +506,9 @@ pub(in crate::dispatch) fn review(
             ledger.backend_exit_code = Some(0);
             ledger.validation_result = Some(verdict.verdict.clone());
             ledger.human_required = verdict.human_required;
-            ledger.human_required_reason_code = verdict.human_required.then(|| {
-                HumanRequiredReason::ReviewEvidenceGate
-                    .as_str()
-                    .to_string()
-            });
+            ledger.human_required_reason_code = verdict
+                .human_required
+                .then(|| HumanRequiredReason::ReviewEvidenceGate.as_str().to_string());
             ledger.confidence_impact = Some(verdict.confidence.clone());
             ledger.review_verdict = Some(verdict.verdict.clone());
             ledger.review_confidence = Some(verdict.confidence.clone());
@@ -673,11 +671,7 @@ pub(in crate::dispatch) fn review(
     Ok(())
 }
 
-fn mark_review_budget_exhausted(
-    ledger: &mut LedgerEntry,
-    route: &RouteDecision,
-    reason: &str,
-) {
+fn mark_review_budget_exhausted(ledger: &mut LedgerEntry, route: &RouteDecision, reason: &str) {
     apply_route_to_ledger(ledger, route);
     ledger.set_failure(
         crate::ledger::FailureClass::HumanBlocked,
@@ -685,8 +679,11 @@ fn mark_review_budget_exhausted(
     );
     ledger.validation_result = Some("review_budget_exhausted".into());
     ledger.human_required = true;
-    ledger.human_required_reason_code =
-        Some(HumanRequiredReason::RetryBudgetExhausted.as_str().to_string());
+    ledger.human_required_reason_code = Some(
+        HumanRequiredReason::RetryBudgetExhausted
+            .as_str()
+            .to_string(),
+    );
     ledger.error_summary = Some(reason.to_string());
 }
 

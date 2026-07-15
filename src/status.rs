@@ -392,9 +392,7 @@ fn build_snapshot_inner(
             let reason_code = ticket.human_required_reason_code.clone();
             blocked_work_items.push(Blocker {
                 kind: "human_required".into(),
-                reason: reason_code
-                    .clone()
-                    .or(Some("ledger_human_required".into())),
+                reason: reason_code.clone().or(Some("ledger_human_required".into())),
                 message: Some("Ledger indicates human intervention required".into()),
                 backend: None,
                 model: None,
