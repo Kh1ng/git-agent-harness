@@ -247,7 +247,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
              ticket's fault. Fix validation_commands (or run with --skip-validation-gate to \
              proceed anyway once you've acknowledged it).\n\n\
              Self-check recorded last_verified_ok=false (hash {}).\n\n\
-             Failure output:\n{}",
+             Failure output:\n{:#}",
             profile.repo_id,
             profile.default_target_branch,
             &hash[..hash.len().min(8)],
