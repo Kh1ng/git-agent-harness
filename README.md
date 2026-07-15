@@ -64,6 +64,10 @@ local_path = "/path/to/local/clone"
 artifact_root = "/home/you/.local/share/gah/artifacts/my-repo"
 default_target_branch = "main"
 validation_commands = []
+# Review inactivity is a stall; continuous progress may run longer.
+review_timeout_seconds = 300
+# Optional independent wall-clock ceiling; omit to disable.
+review_hard_timeout_seconds = 3600
 ```
 
 GitLab adds:

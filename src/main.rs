@@ -58,8 +58,7 @@ struct Cli {
 /// Sub-actions of `gah availability`.
 #[derive(Subcommand)]
 enum AvailabilityAction {
-    /// Issue #179: operator override for a stale availability/quota-exhaustion
-    /// record once the backend is confirmed actually healthy again. Appends a
+    /// Issue #179: override stale availability once the backend is healthy. Appends a
     /// `status: available, source: manual` record for the given scope via the
     /// same lock-protected read-modify-write as every other availability
     /// write, so it's safe against concurrent parallel workers. Use --model to
@@ -1439,6 +1438,7 @@ fn main() -> Result<()> {
                     model_pm: None,
                     model_review: None,
                     review_timeout_seconds: None,
+                    review_hard_timeout_seconds: None,
                     validation_timeout_seconds: None,
                     routing: config::RoutingPolicy::default(),
                     publishing: Default::default(),

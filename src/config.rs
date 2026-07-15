@@ -399,9 +399,11 @@ pub struct Profile {
     /// Model override for `review` mode
     #[serde(default)]
     pub model_review: Option<String>,
-    /// Review subprocess timeout in seconds (default 300).
+    /// Review idle timeout in seconds (default 300).
     #[serde(default)]
     pub review_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub review_hard_timeout_seconds: Option<u64>,
     /// Per-command validation timeout in seconds (default 300).
     #[serde(default)]
     pub validation_timeout_seconds: Option<u64>,
@@ -801,13 +803,9 @@ impl Profile {
     /// override* and is consumed by `resolve_backend_executable` to find the
     /// literal binary to run. OpenHands has no such override (its CLI is
     /// always resolved on PATH); its "configured" signal is instead whether
-    /// this profile sets an `oh_profile`. Settings' "configured for this
-    /// profile" display (issue #157) should call this, not
-    /// `configured_backend_path`, for exactly this reason -- an earlier
-    /// version conflated the two and made openhands's `oh_profile` name
-    /// (e.g. "nous-hy3") look like an executable path to
-    /// `resolve_backend_executable`, which then failed `is_executable_path`
-    /// and made routing treat openhands as unavailable for every explicit
+    /// this profile sets an `oh_profile`. Settings should call this instead of
+    /// `configured_backend_path`; an earlier version made OpenHands
+    /// unavailable for every explicit
     /// `--backend openhands` dispatch.
     pub fn is_backend_configured(&self, backend: &str) -> bool {
         if backend == "openhands" {
@@ -1321,6 +1319,7 @@ pub mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            review_hard_timeout_seconds: None,
             validation_timeout_seconds: None,
             routing: RoutingPolicy::default(),
             publishing: Default::default(),
@@ -1375,6 +1374,7 @@ pub mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            review_hard_timeout_seconds: None,
             validation_timeout_seconds: None,
             routing: RoutingPolicy::default(),
             publishing: Default::default(),

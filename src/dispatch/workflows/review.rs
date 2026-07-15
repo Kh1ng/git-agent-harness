@@ -35,6 +35,10 @@ use source_issue_context::{
     resolve_source_issue_context, verified_post_budget_source_contract,
 };
 
+fn review_outcome_allows_reroute(outcome: &runner::ReviewProcessOutcome) -> bool {
+    matches!(outcome, runner::ReviewProcessOutcome::NonZeroExit(_))
+}
+
 pub(in crate::dispatch) fn review(
     cfg: &GahConfig,
     profile: &Profile,
@@ -385,11 +389,24 @@ pub(in crate::dispatch) fn review(
                 ),
                 Some(crate::ledger::FailureStage::Review.as_str().to_string()),
             ),
-            runner::ReviewProcessOutcome::Timeout => (
+            runner::ReviewProcessOutcome::IdleTimeout => (
                 None,
-                Some("not_run_timeout".to_string()),
+                Some("not_run_idle_timeout".to_string()),
                 Some(
-                    crate::ledger::FailureClass::BackendError
+                    crate::ledger::FailureClass::AgentNoProgress
+                        .as_str()
+                        .to_string(),
+                ),
+                Some(crate::ledger::FailureStage::Review.as_str().to_string()),
+            ),
+            runner::ReviewProcessOutcome::HardTimeout => (
+                None,
+                Some("not_run_hard_timeout".to_string()),
+                // A healthy reviewer that merely exceeded the hard safety ceiling
+                // is NOT a backend failure; classify it so it never triggers
+                // retry/escalation to a paid reviewer (issue #540).
+                Some(
+                    crate::ledger::FailureClass::HumanBlocked
                         .as_str()
                         .to_string(),
                 ),
@@ -413,7 +430,7 @@ pub(in crate::dispatch) fn review(
             prior_review_context = utf8_safe_suffix(&attempt.stdout, 20_000).to_string();
         }
         let is_last_attempt = attempt_number + 1 == MAX_REVIEW_ATTEMPTS;
-        if !is_last_attempt {
+        if !is_last_attempt && review_outcome_allows_reroute(&attempt.outcome) {
             if let runner::ReviewProcessOutcome::NonZeroExit(_) = attempt.outcome {
                 // Provider CLIs commonly put quota/auth diagnostics on stderr
                 // while keeping stdout empty.  Routing availability must see
@@ -481,6 +498,9 @@ pub(in crate::dispatch) fn review(
         break;
     }
     let result = result.expect("loop always runs at least one attempt (MAX_REVIEW_ATTEMPTS > 0)");
+    ledger.review_idle_timeout_seconds = Some(result.idle_timeout_seconds);
+    ledger.review_hard_timeout_seconds = result.hard_timeout_seconds;
+    ledger.review_last_progress_secs = result.last_progress_secs;
     println!("Review backend duration: {:.1}s", result.duration_secs);
     let report_path = session_dir.join("review-report.md");
     let verdict_path = session_dir.join("review-verdict.json");
@@ -694,20 +714,51 @@ pub(in crate::dispatch) fn review(
                 route.effective_backend
             )
         }
-        runner::ReviewProcessOutcome::Timeout => {
+        runner::ReviewProcessOutcome::IdleTimeout => {
             ledger.set_failure(
-                crate::ledger::FailureClass::BackendError,
+                crate::ledger::FailureClass::AgentNoProgress,
                 crate::ledger::FailureStage::Review,
             );
-            ledger.validation_result = Some("not_run".into());
+            ledger.validation_result = Some("not_run_idle_timeout".into());
+            ledger.review_timeout_class = Some("idle".to_string());
             println!(
-                "Review backend timed out after {} seconds.",
-                profile.review_timeout_seconds()
+                "Review backend stalled (no progress) and was killed after the {}s idle budget.",
+                result.idle_timeout_seconds
             );
             println!("Review bundle written to: {}", bundle.display());
             anyhow::bail!(
-                "review backend timed out after {} seconds",
-                profile.review_timeout_seconds()
+                "review backend stalled (no progress) after {}s idle budget",
+                result.idle_timeout_seconds
+            )
+        }
+        runner::ReviewProcessOutcome::HardTimeout => {
+            // A healthy reviewer exceeded the explicit hard safety ceiling. This
+            // is NOT a backend failure and must not trigger retry/escalation to
+            // a paid reviewer (issue #540).
+            ledger.set_failure(
+                crate::ledger::FailureClass::HumanBlocked,
+                crate::ledger::FailureStage::Review,
+            );
+            ledger.validation_result = Some("not_run_hard_timeout".into());
+            ledger.human_required = true;
+            ledger.human_required_reason_code = Some(
+                HumanRequiredReason::ReviewCeilingExhausted
+                    .as_str()
+                    .to_string(),
+            );
+            ledger.review_timeout_class = Some("hard".to_string());
+            if let Some(hard) = result.hard_timeout_seconds {
+                println!(
+                    "Review backend hit the {}s hard safety ceiling (still making progress); not treating as a backend failure.",
+                    hard
+                );
+            }
+            println!("Review bundle written to: {}", bundle.display());
+            anyhow::bail!(
+                "review backend exceeded the {}s hard safety ceiling",
+                result
+                    .hard_timeout_seconds
+                    .unwrap_or(result.idle_timeout_seconds)
             )
         }
     }
@@ -804,12 +855,26 @@ fn stop_for_exhausted_review_escalation(
 mod reservation_tests {
     use super::{
         mark_review_budget_exhausted, mark_review_shutdown_cancelled, reserve_review_route,
+        review_outcome_allows_reroute,
     };
     use crate::config::tests::test_profile_for_notifications;
     use crate::ledger::LedgerEntry;
     use crate::routing::{current_concurrent, RouteDecision};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn healthy_hard_ceiling_does_not_retry_or_escalate() {
+        assert!(!review_outcome_allows_reroute(
+            &crate::runner::ReviewProcessOutcome::HardTimeout
+        ));
+        assert!(!review_outcome_allows_reroute(
+            &crate::runner::ReviewProcessOutcome::IdleTimeout
+        ));
+        assert!(review_outcome_allows_reroute(
+            &crate::runner::ReviewProcessOutcome::NonZeroExit(1)
+        ));
+    }
 
     #[test]
     fn shutdown_clears_provisional_fallback_confidence_and_human_hold() {

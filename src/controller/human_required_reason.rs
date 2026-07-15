@@ -35,6 +35,10 @@ pub enum HumanRequiredReason {
     /// Review evidence gate: a reviewer's verdict explicitly marked the work as
     /// requiring human judgment (READY_FOR_HUMAN with human_required=true in ledger).
     ReviewEvidenceGate,
+    /// Review hard-ceiling exhaustion: a healthy reviewer that kept making
+    /// progress but exceeded the explicit wall-clock safety ceiling (issue #540).
+    /// Deliberately NOT a backend failure, so it must not trigger retry/escalation.
+    ReviewCeilingExhausted,
     /// Merge policy forbids auto-merge (StopForHuman) even with strong approval
     /// and green CI.
     MergePolicy,
@@ -62,6 +66,7 @@ impl HumanRequiredReason {
             Self::PolicyApproval => "policy_approval",
             Self::RetryBudgetExhausted => "retry_budget_exhausted",
             Self::ReviewEvidenceGate => "review_evidence_gate",
+            Self::ReviewCeilingExhausted => "review_ceiling_exhausted",
             Self::MergePolicy => "merge_policy",
             Self::PublishingRestriction => "publishing_restriction",
             Self::ConfigurationInfra => "configuration_infra",
@@ -78,6 +83,7 @@ impl HumanRequiredReason {
             Self::PolicyApproval => "Policy or approval requires human judgment",
             Self::RetryBudgetExhausted => "Retry budget exhausted",
             Self::ReviewEvidenceGate => "Review evidence gate requires human judgment",
+            Self::ReviewCeilingExhausted => "Review hard-ceiling exhausted",
             Self::MergePolicy => "Merge policy forbids auto-merge",
             Self::PublishingRestriction => "Publishing policy forbids PR/MR creation",
             Self::ConfigurationInfra => "Configuration or infrastructure failure",
@@ -95,6 +101,7 @@ impl HumanRequiredReason {
             "policy_approval" => Self::PolicyApproval,
             "retry_budget_exhausted" => Self::RetryBudgetExhausted,
             "review_evidence_gate" => Self::ReviewEvidenceGate,
+            "review_ceiling_exhausted" => Self::ReviewCeilingExhausted,
             "merge_policy" => Self::MergePolicy,
             "publishing_restriction" => Self::PublishingRestriction,
             "configuration_infra" => Self::ConfigurationInfra,
@@ -111,6 +118,7 @@ impl HumanRequiredReason {
             Self::PolicyApproval,
             Self::RetryBudgetExhausted,
             Self::ReviewEvidenceGate,
+            Self::ReviewCeilingExhausted,
             Self::MergePolicy,
             Self::PublishingRestriction,
             Self::ConfigurationInfra,

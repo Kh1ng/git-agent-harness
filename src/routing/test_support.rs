@@ -103,6 +103,7 @@ pub(super) fn profile() -> Profile {
         model_pm: None,
         model_review: None,
         review_timeout_seconds: None,
+        review_hard_timeout_seconds: None,
         validation_timeout_seconds: None,
         notify_command: None,
         routing: RoutingPolicy {

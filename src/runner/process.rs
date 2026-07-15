@@ -108,7 +108,7 @@ pub(crate) fn write_redacted_task(session_dir: &Path, task: &str) -> Result<()> 
 /// progress to stdout. Treating that silence as a hang kills an agent that is
 /// still editing source. `git diff` makes those edits observable without
 /// walking ignored build output such as `target/` or `node_modules/`.
-fn worktree_progress_snapshot(worktree: &Path) -> Option<Vec<u8>> {
+pub(crate) fn worktree_progress_snapshot(worktree: &Path) -> Option<Vec<u8>> {
     let diff = Command::new("git")
         .args(["diff", "--no-ext-diff", "--binary", "HEAD", "--"])
         .current_dir(worktree)
@@ -153,7 +153,9 @@ fn worktree_progress_snapshot(worktree: &Path) -> Option<Vec<u8>> {
 /// or I/O activity proves that the backend is still executing; mere process
 /// existence or idle child churn does not, so a sleeping/hung backend expires.
 #[cfg(target_os = "linux")]
-fn process_group_activity_snapshot(process_group: u32) -> Option<Vec<(u32, u64, u64, u64)>> {
+pub(crate) fn process_group_activity_snapshot(
+    process_group: u32,
+) -> Option<Vec<(u32, u64, u64, u64)>> {
     let mut members = Vec::new();
     for entry in fs::read_dir("/proc").ok()? {
         let Ok(entry) = entry else { continue };
@@ -212,11 +214,13 @@ fn process_group_activity_snapshot(process_group: u32) -> Option<Vec<(u32, u64, 
 }
 
 #[cfg(not(target_os = "linux"))]
-fn process_group_activity_snapshot(_process_group: u32) -> Option<Vec<(u32, u64, u64, u64)>> {
+pub(crate) fn process_group_activity_snapshot(
+    _process_group: u32,
+) -> Option<Vec<(u32, u64, u64, u64)>> {
     None
 }
 
-fn process_group_activity_advanced(
+pub(crate) fn process_group_activity_advanced(
     previous: Option<&[(u32, u64, u64, u64)]>,
     current: &[(u32, u64, u64, u64)],
 ) -> bool {

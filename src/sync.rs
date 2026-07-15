@@ -1014,6 +1014,7 @@ mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            review_hard_timeout_seconds: None,
             validation_timeout_seconds: None,
             routing: crate::config::RoutingPolicy::default(),
             pacing: crate::quota::PacingConfig::default(),

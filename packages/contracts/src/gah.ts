@@ -108,6 +108,10 @@ export interface RecentLedgerSummary {
   attempts_started: number | null;
   attempts_completed: number | null;
   human_required: boolean;
+  review_timeout_class: string | null;
+  review_idle_timeout_seconds: number | null;
+  review_hard_timeout_seconds: number | null;
+  review_last_progress_secs: number | null;
   routing_diagnostics?: RoutingDiagnostics | null;
 }
 
@@ -531,6 +535,10 @@ export interface LedgerEntry {
   reviewer_backend?: string | null;
   reviewer_model?: string | null;
   review_gate_reason?: string | null;
+  review_timeout_class?: string | null;
+  review_idle_timeout_seconds?: number | null;
+  review_hard_timeout_seconds?: number | null;
+  review_last_progress_secs?: number | null;
   commit_attempted: boolean;
   commit_created: boolean;
   push_attempted: boolean;

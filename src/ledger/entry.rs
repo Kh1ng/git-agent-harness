@@ -339,6 +339,25 @@ pub struct LedgerEntry {
     pub review_evidence: Vec<String>,
     #[serde(default)]
     pub review_compatibility_evidence: Vec<String>,
+    /// TICKET-540: review supervision classification. `Some("idle")` when the
+    /// reviewer was killed after the idle budget with no progress; `Some("hard")`
+    /// when it hit the optional wall-clock hard ceiling while still making
+    /// progress. `None` for any other outcome. Distinct so a healthy reviewer
+    /// exceeding the old flat clock is never conflated with a backend failure.
+    #[serde(default)]
+    pub review_timeout_class: Option<String>,
+    /// TICKET-540: configured review idle supervision budget (seconds), surfaced
+    /// for telemetry/status even on a successful review.
+    #[serde(default)]
+    pub review_idle_timeout_seconds: Option<u64>,
+    /// TICKET-540: configured review hard safety ceiling (seconds), if any.
+    #[serde(default)]
+    pub review_hard_timeout_seconds: Option<u64>,
+    /// TICKET-540: elapsed seconds since dispatch start at last observed review
+    /// progress (stdout/stderr activity, worktree update, or child process
+    /// CPU/I/O). `None` when the reviewer never produced progress.
+    #[serde(default)]
+    pub review_last_progress_secs: Option<f64>,
     pub commit_attempted: bool,
     pub commit_created: bool,
     pub push_attempted: bool,
@@ -455,6 +474,10 @@ impl LedgerEntry {
             review_risk_notes: Vec::new(),
             review_evidence: Vec::new(),
             review_compatibility_evidence: Vec::new(),
+            review_timeout_class: None,
+            review_idle_timeout_seconds: None,
+            review_last_progress_secs: None,
+            review_hard_timeout_seconds: None,
             commit_attempted: false,
             commit_created: false,
             push_attempted: false,
@@ -544,6 +567,10 @@ impl LedgerEntry {
             review_risk_notes: Vec::new(),
             review_evidence: Vec::new(),
             review_compatibility_evidence: Vec::new(),
+            review_timeout_class: None,
+            review_idle_timeout_seconds: None,
+            review_last_progress_secs: None,
+            review_hard_timeout_seconds: None,
             commit_attempted: false,
             commit_created: false,
             push_attempted: false,
@@ -716,6 +743,7 @@ mod tests {
             model_pm: None,
             model_review: None,
             review_timeout_seconds: None,
+            review_hard_timeout_seconds: None,
             validation_timeout_seconds: None,
             notify_command: None,
             routing: RoutingPolicy::default(),
