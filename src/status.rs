@@ -177,6 +177,10 @@ pub struct RecentLedgerSummary {
     pub attempts_started: Option<u32>,
     pub attempts_completed: Option<u32>,
     pub human_required: bool,
+    pub review_timeout_class: Option<String>,
+    pub review_idle_timeout_seconds: Option<u64>,
+    pub review_hard_timeout_seconds: Option<u64>,
+    pub review_last_progress_secs: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_diagnostics: Option<RoutingDiagnostics>,
 }
@@ -399,6 +403,10 @@ fn build_snapshot_inner(
                 attempts_started: entry.attempts_started,
                 attempts_completed: entry.attempts_completed,
                 human_required: entry.human_required,
+                review_timeout_class: entry.review_timeout_class.clone(),
+                review_idle_timeout_seconds: entry.review_idle_timeout_seconds,
+                review_hard_timeout_seconds: entry.review_hard_timeout_seconds,
+                review_last_progress_secs: entry.review_last_progress_secs,
                 routing_diagnostics: entry.routing_diagnostics.clone(),
             });
         }
@@ -1071,6 +1079,10 @@ default_target_branch = "main"
         entry.failure_stage = Some("agent_run".into());
         entry.attempts_started = Some(3);
         entry.attempts_completed = Some(2);
+        entry.review_timeout_class = Some("idle".into());
+        entry.review_idle_timeout_seconds = Some(300);
+        entry.review_hard_timeout_seconds = Some(3600);
+        entry.review_last_progress_secs = Some(42.5);
         entry.timestamp = "2026-07-04T00:00:00Z".into();
         fs::write(&ledger_path, serde_json::to_string(&entry).unwrap() + "\n").unwrap();
 
@@ -1088,6 +1100,10 @@ default_target_branch = "main"
         );
         assert_eq!(summary.attempts_started, Some(3));
         assert_eq!(summary.attempts_completed, Some(2));
+        assert_eq!(summary.review_timeout_class.as_deref(), Some("idle"));
+        assert_eq!(summary.review_idle_timeout_seconds, Some(300));
+        assert_eq!(summary.review_hard_timeout_seconds, Some(3600));
+        assert_eq!(summary.review_last_progress_secs, Some(42.5));
     }
 
     #[test]

@@ -134,6 +134,19 @@ export function AttemptTimeline({ entries }: { entries: LedgerEntry[] }) {
                 </p>
               )}
 
+              {isReview && (
+                <p className="mt-2 text-xs text-secondary">
+                  Supervision: {entry.review_timeout_class ?? 'completed'}
+                  {entry.review_idle_timeout_seconds != null ? ` · idle ${entry.review_idle_timeout_seconds}s` : ''}
+                  {entry.review_hard_timeout_seconds != null
+                    ? ` · hard ${entry.review_hard_timeout_seconds}s`
+                    : ' · no hard ceiling'}
+                  {entry.review_last_progress_secs != null
+                    ? ` · last progress +${Math.round(entry.review_last_progress_secs)}s`
+                    : ' · no observed progress'}
+                </p>
+              )}
+
               {entry.attempts && entry.attempts.length > 0 && (
                 <div className="mt-3 pt-3 border-t border-subtle space-y-2">
                   {entry.attempts.map((attempt) => (

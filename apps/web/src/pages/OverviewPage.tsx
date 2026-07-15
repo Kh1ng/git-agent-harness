@@ -375,6 +375,20 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
               </p>
             </div>
           </div>
+          {snapshot.recent_ledger.most_recent_mode === 'review' && (
+            <p className="mt-3 text-xs text-secondary">
+              Review supervision: {snapshot.recent_ledger.review_timeout_class ?? 'completed'}
+              {snapshot.recent_ledger.review_idle_timeout_seconds != null
+                ? ` · idle ${snapshot.recent_ledger.review_idle_timeout_seconds}s`
+                : ''}
+              {snapshot.recent_ledger.review_hard_timeout_seconds != null
+                ? ` · hard ${snapshot.recent_ledger.review_hard_timeout_seconds}s`
+                : ' · no hard ceiling'}
+              {snapshot.recent_ledger.review_last_progress_secs != null
+                ? ` · last progress +${Math.round(snapshot.recent_ledger.review_last_progress_secs)}s`
+                : ' · no observed progress'}
+            </p>
+          )}
         </section>
       )}
     </div>
