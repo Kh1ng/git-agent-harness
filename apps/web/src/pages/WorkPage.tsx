@@ -158,6 +158,16 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const activeSessions = sessions.filter((s) => ['starting', 'running'].includes(s.status));
   const recentSessions = sessions.filter((s) => ['stopped', 'error'].includes(s.status)).slice(0, 5);
   const tickets = status.data?.available_tickets ?? [];
+  const activeClaims = status.data?.active_claims ?? [];
+
+  const formatClaimAge = (ageSeconds: number): string => {
+    const minutes = Math.floor(ageSeconds / 60);
+    const seconds = ageSeconds % 60;
+    if (minutes > 0) {
+      return `${minutes}m ${seconds}s`;
+    }
+    return `${seconds}s`;
+  };
 
   return (
     <div className="space-y-6">
@@ -183,6 +193,41 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
             {activeSessions.map((session) => (
               <SessionCard key={session.id} session={session} onClick={() => onSelectSession(session)} />
             ))}
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h3 className="text-sm font-semibold text-primary mb-3">
+          Active durable claims ({activeClaims.length})
+        </h3>
+        {activeClaims.length === 0 ? (
+          <EmptyState icon={ListChecks} title="No active claims" description="No in-flight claims are being tracked." />
+        ) : (
+          <div className="card overflow-x-auto">
+            <table className="table-base min-w-[720px]">
+              <thead>
+                <tr>
+                  <th>Work ID</th>
+                  <th>PID / Scope</th>
+                  <th>Hostname</th>
+                  <th>Claim age</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeClaims.map((claim) => (
+                  <tr key={`${claim.scope}-${claim.work_id}-${claim.pid}`}>
+                    <td className="text-primary font-mono text-xs">{claim.work_id}</td>
+                    <td>
+                      <span className="font-mono text-xs text-muted mr-2">{claim.pid}</span>
+                      <span className="font-mono text-xs">{claim.scope}</span>
+                    </td>
+                    <td>{claim.hostname}</td>
+                    <td>{formatClaimAge(claim.age_seconds)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </section>
@@ -238,6 +283,8 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                     <td>
                       {t.human_required ? (
                         <StatusBadge tone="warning" label="Human required" />
+                      ) : t.has_active_claim ? (
+                        <StatusBadge tone="warning" label="Claimed" />
                       ) : t.has_active_mr ? (
                         <StatusBadge tone="good" label="Active MR" />
                       ) : t.prior_attempt_count > 0 ? (

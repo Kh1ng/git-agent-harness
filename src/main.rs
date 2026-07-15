@@ -802,24 +802,16 @@ enum QuotaCommands {
     },
 }
 
-/// Work claim management (issue #234).
+#[rustfmt::skip]
 #[derive(Subcommand)]
 enum ClaimsCommands {
-    /// List all active work claims across profiles
-    List {
-        #[arg(long, default_value_t = false)]
-        json: bool,
-        #[arg(long)]
-        profile: Option<String>,
-    },
-    /// Clear a specific work claim
+    List { #[arg(long, default_value_t = false)] json: bool, #[arg(long)] profile: Option<String>, #[arg(long, name = "config")] config_path: Option<String> },
     Clear {
         #[arg(long)]
         work_id: String,
         #[arg(long)]
         profile: String,
     },
-    /// Reclaim all stale claims for a profile
     Reclaim {
         #[arg(long)]
         profile: String,
@@ -1869,21 +1861,29 @@ fn main() -> Result<()> {
             }
         },
         Commands::Claims { command } => match command {
-            ClaimsCommands::List { json, profile } => {
-                work_claim::handle_claims_list(profile.as_deref(), json)?;
+            ClaimsCommands::List {
+                json,
+                profile,
+                config_path,
+            } => {
+                let scope = profile
+                    .map(|profile| {
+                        work_claim::canonical_scope_for_profile(&profile, config_path.as_deref())
+                    })
+                    .transpose()?;
+                work_claim::handle_claims_list(scope.as_deref(), json)?;
             }
             ClaimsCommands::Clear { work_id, profile } => {
-                work_claim::handle_claims_clear(&profile, &work_id)?;
-                println!(
-                    "Cleared claim for work_id {} on profile {}",
-                    work_id, profile
-                );
+                let scope = work_claim::canonical_scope_for_profile(&profile, None)?;
+                work_claim::handle_claims_clear(&scope, &work_id)?;
+                println!("Cleared claim for work_id {work_id} on profile {profile}");
             }
             ClaimsCommands::Reclaim {
                 profile,
                 max_age_secs,
             } => {
-                let reclaimed = work_claim::handle_claims_reclaim(&profile, max_age_secs)?;
+                let scope = work_claim::canonical_scope_for_profile(&profile, None)?;
+                let reclaimed = work_claim::handle_claims_reclaim(&scope, max_age_secs)?;
                 if reclaimed.is_empty() {
                     println!("No stale claims to reclaim for profile {}", profile);
                 } else {
