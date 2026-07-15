@@ -1254,6 +1254,10 @@ mod source_issue_tests {
         .unwrap();
 
         assert!(built.compacted);
+        assert_eq!(
+            verified_post_budget_source_contract(Some(&contract), &built.prompt).unwrap(),
+            Some(contract.as_str())
+        );
         assert!(built
             .prompt
             .contains("Include the canonical source issue contract"));
