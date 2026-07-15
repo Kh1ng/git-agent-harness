@@ -333,6 +333,12 @@ fn ledger_lookup_for_ticket(
         if e.validation_result.as_deref() == Some("deferred_capacity") {
             continue;
         }
+        // Review holds are manager-control records, not execution attempts.
+        // They control auto-review/merge but must not affect attempt counts,
+        // retry budgets, success rates, or cost-per-attempt metrics.
+        if e.mode == "review_hold" || e.mode == "review_hold_release" {
+            continue;
+        }
         count += 1;
         // A real completion entry (of any outcome) means whatever claim
         // preceded this attempt has resolved -- this ticket is no longer

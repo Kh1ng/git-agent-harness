@@ -1018,3 +1018,83 @@ fn check_duplicate_work_blocks_on_active_claim() {
     let res = super::check_duplicate_work(&cfg, &prof, &args);
     assert!(res.is_ok());
 }
+
+#[test]
+fn review_hold_entries_do_not_count_as_attempts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ticket_dir = tmp.path().join("docs/tickets");
+    fs::create_dir_all(&ticket_dir).unwrap();
+    fs::write(
+        ticket_dir.join("TICKET-441-test.md"),
+        "# TICKET-441: Test review hold counting
+\nGoal: test review hold not counting as attempt
+",
+    )
+    .unwrap();
+
+    let mut prof = profile(tmp.path());
+    prof.local_path = tmp.path().display().to_string();
+    prof.provider = String::new();
+
+    // Create a real attempt entry
+    let mut attempt_entry = LedgerEntry::new("test", &prof, "codex", "fix", "x", None, None);
+    attempt_entry.work_id = Some("TICKET-441".into());
+    attempt_entry.failure_class = Some("agent_failure".into());
+
+    // Create review_hold entry
+    let review_hold = LedgerEntry::new_review_hold("test", &prof, "TICKET-441", None);
+
+    // Create review_hold_release entry
+    let review_hold_release = LedgerEntry::new_review_hold_release("test", &prof, "TICKET-441");
+
+    let index =
+        crate::ledger::index_entries_by_work_id(&[attempt_entry, review_hold, review_hold_release]);
+    let candidates = scan_available_tickets(&prof, &[], &index);
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].prior_attempt_count, 1,
+        "only the real attempt should count, not review_hold or review_hold_release"
+    );
+    assert_eq!(
+        candidates[0].genuine_agent_failure_count, 1,
+        "the real attempt was a genuine agent failure"
+    );
+}
+
+#[test]
+fn review_hold_only_entries_show_zero_attempts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ticket_dir = tmp.path().join("docs/tickets");
+    fs::create_dir_all(&ticket_dir).unwrap();
+    fs::write(
+        ticket_dir.join("TICKET-442-test.md"),
+        "# TICKET-442: Test review hold only
+\nGoal: test review hold only scenario
+",
+    )
+    .unwrap();
+
+    let mut prof = profile(tmp.path());
+    prof.local_path = tmp.path().display().to_string();
+    prof.provider = String::new();
+
+    // Create review_hold entry
+    let review_hold = LedgerEntry::new_review_hold("test", &prof, "TICKET-442", None);
+
+    // Create review_hold_release entry
+    let review_hold_release = LedgerEntry::new_review_hold_release("test", &prof, "TICKET-442");
+
+    let index = crate::ledger::index_entries_by_work_id(&[review_hold, review_hold_release]);
+    let candidates = scan_available_tickets(&prof, &[], &index);
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].prior_attempt_count, 0,
+        "review_hold and review_hold_release entries should not count as attempts"
+    );
+    assert_eq!(
+        candidates[0].genuine_agent_failure_count, 0,
+        "no genuine agent failures when only review control records exist"
+    );
+}
