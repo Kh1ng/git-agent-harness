@@ -440,8 +440,16 @@ pub fn review_already_exists(
                 .is_some_and(|id| aliases.iter().any(|alias| alias == id))
             && entry.review_source_sha.as_deref() == Some(source_sha)
             && entry.reviewer_class.as_deref() == Some(reviewer_class)
-            && entry.review_verdict.is_some()
+            && review_is_dedup_eligible(&entry)
     }))
+}
+
+fn review_is_dedup_eligible(entry: &LedgerEntry) -> bool {
+    match entry.review_verdict.as_deref() {
+        Some("NEEDS_FIX" | "REJECT") => !entry.review_blocking_findings.is_empty(),
+        Some(_) => true,
+        None => false,
+    }
 }
 
 pub type LedgerEntriesByWorkId = BTreeMap<String, Vec<LedgerEntry>>;
@@ -485,7 +493,7 @@ mod tests {
     use super::{
         active_paid_route_approvals, active_review_hold_work_ids, append, backfill_review_verdict,
         entries_for_work_id, index_entries_by_work_id, read_entries, repair_truncated_tail_at,
-        review_already_exists, ReviewVerdictBackfill,
+        review_already_exists, review_is_dedup_eligible, ReviewVerdictBackfill,
     };
     use crate::ledger::test_util as ledger_tests;
     use std::fs;
@@ -568,6 +576,22 @@ mod tests {
         assert!(!review_already_exists(&cfg, "#109", "def456", "strong").unwrap());
         assert!(!review_already_exists(&cfg, "#109", "abc123", "weak").unwrap());
         assert!(!review_already_exists(&cfg, "#110", "abc123", "strong").unwrap());
+    }
+
+    #[test]
+    fn review_dedup_retries_legacy_repairs_but_suppresses_structured_ones() {
+        let profile = ledger_tests::profile();
+        let mut entry =
+            super::super::LedgerEntry::new("test", &profile, "claude", "review", "x", None, None);
+        entry.review_verdict = Some("NEEDS_FIX".into());
+        assert!(!review_is_dedup_eligible(&entry));
+
+        entry.review_blocking_findings = vec!["src/lib.rs: broken retry".into()];
+        assert!(review_is_dedup_eligible(&entry));
+
+        entry.review_verdict = Some("APPROVE".into());
+        entry.review_blocking_findings.clear();
+        assert!(review_is_dedup_eligible(&entry));
     }
 
     #[test]
