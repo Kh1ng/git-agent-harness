@@ -988,6 +988,10 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
         ticket_id: Some(issue_identity.clone()),
         work_id: Some(issue_identity),
         issue_number: Some(issue.number.clone()),
+        // The provider's issue title is the authoritative title. Structured
+        // body fields such as `Goal:` describe the work, but must never
+        // replace the title used for publication.
+        title: Some(normalize_ticket_title(issue.title.trim().to_string())),
         ..TicketMetadata::default()
     };
 
@@ -1015,9 +1019,6 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
             let value = value.trim();
             if !value.is_empty() {
                 meta.goal = Some(value.to_string());
-            }
-            if meta.title.is_none() && !value.is_empty() {
-                meta.title = Some(value.to_string());
             }
         } else if let Some(value) = line.strip_prefix("Suggested MR Title:") {
             meta.suggested_mr_title = Some(value.trim().to_string());
@@ -1068,9 +1069,6 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
         }
     }
 
-    if meta.title.is_none() {
-        meta.title = Some(normalize_ticket_title(issue.title.trim().to_string()));
-    }
     meta.summary = meta.title.clone();
 
     meta

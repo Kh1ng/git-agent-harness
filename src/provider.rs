@@ -10,6 +10,19 @@ const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
     "gah-review-escalating",
 ];
 const PROVIDER_ERROR_MAX_CHARS: usize = 4_096;
+const PROVIDER_MR_TITLE_MAX_CHARS: usize = 255;
+
+fn draft_mr_title(title: &str) -> String {
+    let prefixed = format!("Draft: {title}");
+    if prefixed.chars().count() <= PROVIDER_MR_TITLE_MAX_CHARS {
+        return prefixed;
+    }
+
+    let keep = PROVIDER_MR_TITLE_MAX_CHARS - 3;
+    let mut truncated: String = prefixed.chars().take(keep).collect();
+    truncated.push_str("...");
+    truncated
+}
 
 fn redacted_stderr(out: &Output) -> String {
     crate::redact::redact(&String::from_utf8_lossy(&out.stderr))
@@ -215,7 +228,9 @@ fn gitlab_mr(profile: &Profile, branch: &str, title: &str, body: &str) -> Result
     let endpoint = format!("projects/{project_id}/merge_requests");
     let source_branch = format!("source_branch={branch}");
     let target_branch = format!("target_branch={}", profile.default_target_branch);
-    let title = format!("title=Draft: {title}");
+    // Apply the provider boundary after adding the draft prefix. Truncating
+    // the unprefixed title first can still produce an invalid provider value.
+    let title = format!("title={}", draft_mr_title(title));
     let description = format!("description={body}");
 
     // Use the same host-scoped provider CLI session that `gah doctor`
@@ -265,7 +280,7 @@ fn github_mr(profile: &Profile, branch: &str, title: &str, body: &str) -> Result
             "--head",
             branch,
             "--title",
-            &format!("Draft: {}", title),
+            &draft_mr_title(title),
             "--body",
             body,
             "--draft",

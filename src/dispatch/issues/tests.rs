@@ -293,7 +293,26 @@ fn parse_ticket_metadata_from_issue_handles_metadata_fields() {
     assert_eq!(meta.risk.as_deref(), Some("Medium"));
     assert_eq!(meta.recommended_backend.as_deref(), Some("agy"));
     assert_eq!(meta.goal.as_deref(), Some("Fix everything"));
+    assert_eq!(meta.title.as_deref(), Some("Test Issue"));
     assert_eq!(meta.work_id.as_deref(), Some("#42"));
+}
+
+#[test]
+fn parse_ticket_metadata_from_issue_never_uses_goal_as_provider_title() {
+    let issue = IssueDetails {
+        number: "159".to_string(),
+        title: "Migrate cache unification runbook".to_string(),
+        body: format!("Goal: {}", "a long implementation goal ".repeat(20)),
+        labels: vec![],
+        state: None,
+    };
+
+    let meta = parse_ticket_metadata_from_issue(&issue);
+    assert_eq!(
+        meta.title.as_deref(),
+        Some("Migrate cache unification runbook")
+    );
+    assert!(meta.goal.as_deref().unwrap().len() > 255);
 }
 
 #[test]
