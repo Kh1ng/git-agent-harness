@@ -584,6 +584,7 @@ mod tests {
             cost_per_approve_strong: None,
             input_tokens: None,
             output_tokens: None,
+            reasoning_tokens: None,
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: None,

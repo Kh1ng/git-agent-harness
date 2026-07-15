@@ -173,6 +173,8 @@ pub struct LedgerUsage {
     pub observed_at: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -183,6 +185,13 @@ pub struct LedgerUsage {
     pub quota_used_percent: Option<f64>,
     pub quota_remaining_percent: Option<f64>,
     pub quota_reset_at: Option<String>,
+    /// Exact token counters were not exposed for this execution. Distinct
+    /// from zero tokens, which must only be recorded when the backend says 0.
+    #[serde(default)]
+    pub token_usage_unknown_reason: Option<String>,
+    /// Quota state was unavailable for a quota-backed execution.
+    #[serde(default)]
+    pub quota_unknown_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
@@ -239,7 +248,9 @@ pub struct RoutingCandidateDiagnostic {
 /// - `2`: attempt counters became `Option<u32>` so unknown stays unknown
 ///   (never coerced to `0`), honoring the standing "unknown remains unknown"
 ///   usage rule.
-pub const LEDGER_SCHEMA_VERSION: u32 = 2;
+/// - `3`: usage distinguishes reasoning tokens and records explicit reasons
+///   when exact token or quota telemetry is unavailable.
+pub const LEDGER_SCHEMA_VERSION: u32 = 3;
 
 fn default_ledger_schema_version() -> u32 {
     1

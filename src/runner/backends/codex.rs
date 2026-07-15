@@ -68,17 +68,19 @@ pub fn run_codex_with_executable(
         "launching codex; is it installed and on PATH?",
     )?;
 
+    let output_text = fs::read_to_string(&log_path).unwrap_or_default();
+    let transcript_path =
+        crate::runner::review_usage::find_codex_transcript(env_vars, &output_text)
+            .map(|path| path.to_string_lossy().into_owned());
     Ok(RunResult {
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
-        final_summary: fs::read_to_string(&log_path)
-            .ok()
-            .and_then(|text| output::extract_codex_jsonl_summary(&text)),
+        final_summary: output::extract_codex_jsonl_summary(&output_text),
         agy_cli_log_delta: None,
         internal_log_delta: None,
         internal_log_path: None,
-        transcript_path: None,
+        transcript_path,
         agy_version: None,
     })
 }

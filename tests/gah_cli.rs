@@ -3648,7 +3648,7 @@ fn dispatch_fix_records_per_attempt_usage_from_backend_output() {
     assert_eq!(attempts[0]["usage"]["input_tokens"], 500);
     assert_eq!(attempts[0]["usage"]["output_tokens"], 120);
     assert_eq!(attempts[0]["usage"]["total_tokens"], 620);
-    assert_eq!(attempts[0]["usage"]["estimated_cost_usd"], 0.02);
+    assert_eq!(attempts[0]["usage"]["estimated_cost_usd"], Value::Null);
 }
 
 #[test]

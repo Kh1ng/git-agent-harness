@@ -164,6 +164,37 @@ pub(crate) fn normalize_attempt_usage(
             "backend_launch_failed".to_string()
         });
     }
+    if usage.input_tokens.is_none()
+        && usage.output_tokens.is_none()
+        && usage.reasoning_tokens.is_none()
+        && usage.cache_read_tokens.is_none()
+        && usage.cache_write_tokens.is_none()
+        && usage.total_tokens.is_none()
+    {
+        usage.token_usage_unknown_reason =
+            Some("run-scoped backend artifact did not expose exact token counters".to_string());
+    } else {
+        usage.token_usage_unknown_reason = None;
+    }
+    if usage.usage_classification.as_deref() == Some("quota_backed")
+        && usage.quota_used_percent.is_none()
+        && usage.quota_remaining_percent.is_none()
+        && usage.quota_reset_at.is_none()
+    {
+        usage.quota_unknown_reason =
+            Some("subscription backend did not expose exact per-execution quota state".to_string());
+    } else {
+        usage.quota_unknown_reason = None;
+    }
+    // Provider-reported API-equivalent costs from subscription CLIs are not
+    // direct spend. Keep quota usage and API dollars separate even when the
+    // transcript includes a hypothetical cost field.
+    if usage.usage_classification.as_deref() == Some("quota_backed") {
+        usage.actual_cost_usd = None;
+        usage.estimated_cost_usd = None;
+        usage.pricing_source = None;
+        usage.pricing_version = None;
+    }
     if usage.usage_classification.as_deref() == Some("local_unmetered")
         && usage.actual_cost_usd.is_none()
         && usage.estimated_cost_usd.is_none()
@@ -191,6 +222,7 @@ pub(crate) fn usage_has_observation(usage: &LedgerUsage) -> bool {
     usage.usage_source.is_some()
         || usage.input_tokens.is_some()
         || usage.output_tokens.is_some()
+        || usage.reasoning_tokens.is_some()
         || usage.cache_read_tokens.is_some()
         || usage.cache_write_tokens.is_some()
         || usage.total_tokens.is_some()
@@ -264,6 +296,7 @@ pub(crate) fn aggregate_attempt_usage(attempts: &[AttemptRecord]) -> LedgerUsage
     }
     aggregated.input_tokens = sum_optional!(input_tokens, 0_u64);
     aggregated.output_tokens = sum_optional!(output_tokens, 0_u64);
+    aggregated.reasoning_tokens = sum_optional!(reasoning_tokens, 0_u64);
     aggregated.cache_read_tokens = sum_optional!(cache_read_tokens, 0_u64);
     aggregated.cache_write_tokens = sum_optional!(cache_write_tokens, 0_u64);
     aggregated.total_tokens = sum_optional!(total_tokens, 0_u64);
@@ -341,6 +374,16 @@ pub(crate) fn aggregate_attempt_usage(attempts: &[AttemptRecord]) -> LedgerUsage
     } else {
         None
     };
+    aggregated.token_usage_unknown_reason = aggregate_label(
+        observed
+            .iter()
+            .map(|usage| usage.token_usage_unknown_reason.as_deref()),
+    );
+    aggregated.quota_unknown_reason = aggregate_label(
+        observed
+            .iter()
+            .map(|usage| usage.quota_unknown_reason.as_deref()),
+    );
     aggregated.usage_source = Some("attempt_aggregate".to_string());
     aggregated
 }
@@ -375,6 +418,52 @@ mod tests {
         assert!(usage.actual_model.is_none());
         assert!(usage.actual_model_unknown_reason.is_some());
         assert!(usage.cost_unknown_reason.is_some());
+    }
+
+    #[test]
+    fn paid_route_keeps_provider_reported_exact_cost() {
+        let usage = normalize_attempt_usage(
+            LedgerUsage {
+                actual_cost_usd: Some(0.01825),
+                pricing_source: Some("opencode_session_provider_reported".into()),
+                input_tokens: Some(100),
+                output_tokens: Some(20),
+                ..LedgerUsage::default()
+            },
+            UsageAttribution::routed(
+                "opencode",
+                "nous-portal/z-ai/glm-5.2",
+                "nous-portal-api",
+                "paid",
+            ),
+            true,
+        );
+
+        assert_eq!(usage.actual_cost_usd, Some(0.01825));
+        assert!(usage.cost_unknown_reason.is_none());
+    }
+
+    #[test]
+    fn quota_route_never_reports_api_equivalent_transcript_cost_as_spend() {
+        let usage = normalize_attempt_usage(
+            LedgerUsage {
+                actual_cost_usd: Some(12.34),
+                pricing_source: Some("backend_api_equivalent".into()),
+                input_tokens: Some(100),
+                output_tokens: Some(20),
+                ..LedgerUsage::default()
+            },
+            UsageAttribution::routed("claude", "sonnet", "claude-main", "included_quota"),
+            true,
+        );
+
+        assert_eq!(usage.actual_cost_usd, None);
+        assert_eq!(usage.estimated_cost_usd, None);
+        assert_eq!(usage.pricing_source, None);
+        assert!(usage
+            .cost_unknown_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("subscription")));
     }
 
     #[test]

@@ -78,7 +78,7 @@ pub(crate) fn agy_empty_output_diagnosis(
 /// Detect AGY CLI version by running `agy --version`. Returns `None` on any
 /// failure (missing binary, non-zero exit, unparseable output). Cheap and used
 /// for log-path selection and upstream log-format drift detection (TICKET-242).
-fn detect_agy_version(
+pub(crate) fn detect_agy_version(
     executable: &Path,
     worktree: &Path,
     env_vars: &[(String, String)],
@@ -175,7 +175,7 @@ fn agy_log_candidates(version: Option<&str>) -> Vec<&'static str> {
 /// known layout is tried. Returns `None` only when no HOME is discoverable or
 /// no candidate log exists -- in which case there is no cli.log to delta
 /// against.
-fn agy_cli_log_path(
+pub(crate) fn agy_cli_log_path(
     env_vars: &[(String, String)],
     _executable: &Path,
     version: Option<&str>,

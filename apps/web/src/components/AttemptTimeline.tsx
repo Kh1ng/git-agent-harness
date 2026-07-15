@@ -50,6 +50,25 @@ function attributionUnknownReason(usage: LedgerUsage): string | null {
   return usage.actual_model_unknown_reason ?? usage.provider_unknown_reason ?? null;
 }
 
+function usageUnknownReasons(usage: LedgerUsage): string[] {
+  return [
+    usage.token_usage_unknown_reason ? `Tokens: ${usage.token_usage_unknown_reason}` : null,
+    usage.quota_unknown_reason ? `Quota: ${usage.quota_unknown_reason}` : null,
+    usage.cost_unknown_reason ? `Cost: ${usage.cost_unknown_reason}` : null
+  ].filter((reason): reason is string => reason !== null);
+}
+
+function tokenBreakdown(usage: LedgerUsage): string | null {
+  const parts = [
+    usage.input_tokens != null ? `in ${formatTokens(usage.input_tokens)}` : null,
+    usage.output_tokens != null ? `out ${formatTokens(usage.output_tokens)}` : null,
+    usage.reasoning_tokens != null ? `reasoning ${formatTokens(usage.reasoning_tokens)}` : null,
+    usage.cache_read_tokens != null ? `cache read ${formatTokens(usage.cache_read_tokens)}` : null,
+    usage.cache_write_tokens != null ? `cache write ${formatTokens(usage.cache_write_tokens)}` : null
+  ].filter((part): part is string => part !== null);
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
 /**
  * One work item's full ledger history, in order. Each `LedgerEntry` is one
  * dispatch (initial / post_review_repair / review / stuck_loop_gate); each
@@ -126,6 +145,12 @@ export function AttemptTimeline({ entries }: { entries: LedgerEntry[] }) {
               {attributionUnknownReason(entry.usage) && (
                 <p className="mt-1 text-xs text-muted">Attribution: {attributionUnknownReason(entry.usage)}</p>
               )}
+              {tokenBreakdown(entry.usage) && (
+                <p className="mt-1 text-xs text-muted">Token detail: {tokenBreakdown(entry.usage)}</p>
+              )}
+              {usageUnknownReasons(entry.usage).map((reason) => (
+                <p key={reason} className="mt-1 text-xs text-muted">{reason}</p>
+              ))}
 
               {entry.failure_class && (
                 <p className="mt-2 text-xs text-critical">
@@ -166,6 +191,12 @@ export function AttemptTimeline({ entries }: { entries: LedgerEntry[] }) {
                       {attributionUnknownReason(attempt.usage) && (
                         <p className="mt-1 text-muted">Attribution: {attributionUnknownReason(attempt.usage)}</p>
                       )}
+                      {tokenBreakdown(attempt.usage) && (
+                        <p className="mt-1 text-muted">Token detail: {tokenBreakdown(attempt.usage)}</p>
+                      )}
+                      {usageUnknownReasons(attempt.usage).map((reason) => (
+                        <p key={reason} className="mt-1 text-muted">{reason}</p>
+                      ))}
                     </div>
                   ))}
                 </div>

@@ -23,6 +23,9 @@ mod tests {
 
     #[test]
     fn apply_diff_stats_reports_zero_before_commit_but_correct_after() {
+        // Other tests temporarily replace PATH with fake backend binaries.
+        // Keep every git invocation in this test on the real executable.
+        let _exec_guard = crate::test_support::ExecGuard::new();
         // Regression: diff_stats compares origin/<target> against HEAD, so
         // calling apply_diff_stats while real changes are still uncommitted
         // working-tree modifications (HEAD hasn't moved) always reports

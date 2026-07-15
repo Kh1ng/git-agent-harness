@@ -12,6 +12,7 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
         text,
         &["output_tokens", "output tokens", "completion_tokens"],
     );
+    let reasoning_tokens = find_u64(text, &["reasoning_tokens", "reasoning tokens"]);
     let cache_read_tokens = find_u64(text, &["cache_read_tokens", "cache read tokens"]);
     let cache_write_tokens = find_u64(text, &["cache_write_tokens", "cache write tokens"]);
     let total_tokens = find_u64(text, &["total_tokens", "total tokens"]);
@@ -32,6 +33,7 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
     let mut usage = LedgerUsage {
         input_tokens,
         output_tokens,
+        reasoning_tokens,
         cache_read_tokens,
         cache_write_tokens,
         total_tokens,
@@ -54,12 +56,14 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
     if usage.requests_count.is_none()
         && (usage.input_tokens.is_some()
             || usage.output_tokens.is_some()
+            || usage.reasoning_tokens.is_some()
             || usage.total_tokens.is_some())
     {
         usage.requests_count = Some(1);
     }
     if usage.input_tokens.is_some()
         || usage.output_tokens.is_some()
+        || usage.reasoning_tokens.is_some()
         || usage.total_tokens.is_some()
         || usage.estimated_cost_usd.is_some()
         || usage.actual_cost_usd.is_some()
@@ -259,6 +263,7 @@ pub fn parse_opencode_session_metadata(metadata_json: &str) -> LedgerUsage {
         .get("providerID")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let actual_cost_usd = root.get("actual_cost_usd").and_then(Value::as_f64);
     let observed_at = root
         .get("time_updated")
         .and_then(Value::as_i64)
@@ -270,6 +275,7 @@ pub fn parse_opencode_session_metadata(metadata_json: &str) -> LedgerUsage {
         && cache_read_tokens.is_none()
         && cache_write_tokens.is_none()
         && actual_model.is_none()
+        && actual_cost_usd.is_none()
     {
         return LedgerUsage::default();
     }
@@ -281,10 +287,14 @@ pub fn parse_opencode_session_metadata(metadata_json: &str) -> LedgerUsage {
         observed_at,
         input_tokens,
         output_tokens,
+        reasoning_tokens,
         cache_read_tokens,
         cache_write_tokens,
         total_tokens,
         requests_count: Some(1),
+        actual_cost_usd,
+        pricing_source: actual_cost_usd.map(|_| "opencode_session_provider_reported".to_string()),
+        pricing_version: actual_cost_usd.map(|_| "provider_reported".to_string()),
         ..LedgerUsage::default()
     }
 }
@@ -385,6 +395,7 @@ pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
         cost_unknown_reason: base.cost_unknown_reason.or(other.cost_unknown_reason),
         input_tokens: base.input_tokens.or(other.input_tokens),
         output_tokens: base.output_tokens.or(other.output_tokens),
+        reasoning_tokens: base.reasoning_tokens.or(other.reasoning_tokens),
         cache_read_tokens: base.cache_read_tokens.or(other.cache_read_tokens),
         cache_write_tokens: base.cache_write_tokens.or(other.cache_write_tokens),
         total_tokens: base.total_tokens.or(other.total_tokens),
@@ -397,6 +408,10 @@ pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
             .or(other.quota_remaining_percent),
         quota_window: base.quota_window.or(other.quota_window),
         quota_reset_at: base.quota_reset_at.or(other.quota_reset_at),
+        token_usage_unknown_reason: base
+            .token_usage_unknown_reason
+            .or(other.token_usage_unknown_reason),
+        quota_unknown_reason: base.quota_unknown_reason.or(other.quota_unknown_reason),
         usage_source: match (base.usage_source, other.usage_source) {
             (Some(a), Some(b)) => Some(format!("{a}+{b}")),
             (Some(a), None) => Some(a),
@@ -456,6 +471,7 @@ fn find_header_u64(text: &str, keys: &[&str]) -> Option<u64> {
 pub fn parse_codex_exec_json(output: &str) -> LedgerUsage {
     let mut input_tokens: Option<u64> = None;
     let mut output_tokens: Option<u64> = None;
+    let mut reasoning_tokens: Option<u64> = None;
     let mut cache_read_tokens: Option<u64> = None;
     let mut turns_found = 0u64;
 
@@ -488,12 +504,13 @@ pub fn parse_codex_exec_json(output: &str) -> LedgerUsage {
         {
             cache_read_tokens = Some(cache_read_tokens.unwrap_or(0) + v);
         }
-        // reasoning_output_tokens are billed as output tokens — add them in
+        // Keep reasoning distinct. Providers may price it like output, but
+        // collapsing the categories destroys the exact billable evidence.
         if let Some(v) = usage_obj
             .get("reasoning_output_tokens")
             .and_then(|v| v.as_u64())
         {
-            output_tokens = Some(output_tokens.unwrap_or(0) + v);
+            reasoning_tokens = Some(reasoning_tokens.unwrap_or(0) + v);
         }
     }
 
@@ -504,17 +521,55 @@ pub fn parse_codex_exec_json(output: &str) -> LedgerUsage {
     let mut usage = LedgerUsage {
         input_tokens,
         output_tokens,
+        reasoning_tokens,
         cache_read_tokens,
         ..LedgerUsage::default()
     };
 
-    usage.total_tokens = match (usage.input_tokens, usage.output_tokens) {
-        (Some(input), Some(output)) => Some(input + output),
-        _ => usage.total_tokens,
-    };
+    usage.total_tokens = [
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.reasoning_tokens,
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(u64::saturating_add);
     usage.requests_count = Some(turns_found);
     usage.usage_source = Some("codex_exec_json".to_string());
 
+    usage
+}
+
+/// Parse backend/model attribution from the exact Codex rollout transcript
+/// associated with one `thread.started` id. Token counters stay sourced from
+/// `codex exec --json`; this parser supplies the actual model selected after
+/// aliases/config resolution.
+pub fn parse_codex_transcript_attribution(transcript: &str) -> LedgerUsage {
+    let mut usage = LedgerUsage::default();
+    for line in transcript.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("session_meta") => {
+                if let Some(provider) = value
+                    .pointer("/payload/model_provider")
+                    .and_then(Value::as_str)
+                {
+                    usage.provider = Some(provider.to_string());
+                }
+            }
+            Some("turn_context") => {
+                if let Some(model) = value.pointer("/payload/model").and_then(Value::as_str) {
+                    usage.actual_model = Some(model.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if usage.actual_model.is_some() || usage.provider.is_some() {
+        usage.usage_source = Some("codex_transcript".to_string());
+    }
     usage
 }
 
@@ -674,6 +729,7 @@ mod tests {
     use super::parse_agy_cli_log_delta;
     use super::parse_codex_exec_json;
     use super::parse_codex_status_json;
+    use super::parse_codex_transcript_attribution;
     use super::parse_generic_usage;
     use super::parse_opencode_session_metadata;
     use super::parse_openhands_usage;
@@ -687,11 +743,24 @@ mod tests {
     fn codex_exec_json_aggregates_usage_across_turns() {
         let usage = parse_codex_exec_json(CODEX_EXEC_JSON);
         assert_eq!(usage.input_tokens, Some(14230 + 5200));
-        assert_eq!(usage.output_tokens, Some(2150 + 890 + 340));
+        assert_eq!(usage.output_tokens, Some(2150 + 890));
+        assert_eq!(usage.reasoning_tokens, Some(340));
         assert_eq!(usage.cache_read_tokens, Some(11800));
         assert_eq!(usage.total_tokens, Some(14230 + 5200 + 2150 + 890 + 340));
         assert_eq!(usage.requests_count, Some(2));
         assert_eq!(usage.usage_source.as_deref(), Some("codex_exec_json"));
+    }
+
+    #[test]
+    fn codex_transcript_reports_the_actual_selected_model() {
+        let usage = parse_codex_transcript_attribution(
+            r#"{"type":"session_meta","payload":{"model_provider":"openai"}}
+{"type":"turn_context","payload":{"model":"gpt-5.3-codex-spark"}}
+{"type":"turn_context","payload":{"model":"gpt-5.4-mini"}}"#,
+        );
+        assert_eq!(usage.provider.as_deref(), Some("openai"));
+        assert_eq!(usage.actual_model.as_deref(), Some("gpt-5.4-mini"));
+        assert_eq!(usage.usage_source.as_deref(), Some("codex_transcript"));
     }
 
     #[test]
@@ -722,6 +791,7 @@ mod tests {
               "tokens_reasoning":20,
               "tokens_cache_read":15360,
               "tokens_cache_write":0,
+              "actual_cost_usd":0.01825,
               "time_updated":1783824274016
             }"#,
         );
@@ -733,8 +803,14 @@ mod tests {
         assert_eq!(usage.actual_model.as_deref(), Some("hy3-free"));
         assert_eq!(usage.input_tokens, Some(775));
         assert_eq!(usage.output_tokens, Some(140));
+        assert_eq!(usage.reasoning_tokens, Some(20));
         assert_eq!(usage.cache_read_tokens, Some(15360));
         assert_eq!(usage.total_tokens, Some(16295));
+        assert_eq!(usage.actual_cost_usd, Some(0.01825));
+        assert_eq!(
+            usage.pricing_source.as_deref(),
+            Some("opencode_session_provider_reported")
+        );
     }
 
     #[test]

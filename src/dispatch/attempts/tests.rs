@@ -115,7 +115,9 @@ fn review_usage_records_an_agy_review_without_token_counters() {
 
     let usage = review_usage(
         path.to_str().unwrap(),
+        None,
         UsageAttribution::backend(Some("agy"), Some("Claude Sonnet 4.6 (Thinking)")),
+        None,
         None,
     );
 
@@ -128,8 +130,119 @@ fn review_usage_records_an_agy_review_without_token_counters() {
         Some("Claude Sonnet 4.6 (Thinking)")
     );
     assert_eq!(usage.requests_count, Some(1));
+    assert!(usage.token_usage_unknown_reason.is_some());
     assert_eq!(usage.input_tokens, None);
     assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
+}
+
+#[test]
+fn review_usage_consumes_each_backends_run_scoped_artifact() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let claude_log = tmp.path().join("claude.log");
+    let claude_transcript = tmp.path().join("claude.jsonl");
+    fs::write(&claude_log, "review complete\n").unwrap();
+    fs::write(
+        &claude_transcript,
+        r#"{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":40}},"cost_usd":9.99}"#,
+    )
+    .unwrap();
+    let claude = review_usage(
+        claude_log.to_str().unwrap(),
+        None,
+        UsageAttribution::routed("claude", "sonnet", "claude-main", "included_quota"),
+        claude_transcript.to_str(),
+        None,
+    );
+    assert_eq!(claude.actual_model.as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(claude.input_tokens, Some(100));
+    assert_eq!(claude.actual_cost_usd, None);
+
+    let codex_log = tmp.path().join("codex.jsonl");
+    let codex_transcript = tmp.path().join("codex-transcript.jsonl");
+    fs::write(
+        &codex_log,
+        r#"{"type":"turn.completed","usage":{"input_tokens":80,"output_tokens":12,"reasoning_output_tokens":3}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &codex_transcript,
+        "{\"type\":\"session_meta\",\"payload\":{\"model_provider\":\"openai\"}}\n{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.4-mini\"}}\n",
+    )
+    .unwrap();
+    let codex = review_usage(
+        codex_log.to_str().unwrap(),
+        None,
+        UsageAttribution::routed("codex", "gpt-5.4-mini", "codex-main", "included_quota"),
+        codex_transcript.to_str(),
+        None,
+    );
+    assert_eq!(codex.actual_model.as_deref(), Some("gpt-5.4-mini"));
+    assert_eq!(codex.reasoning_tokens, Some(3));
+
+    let vibe_meta = tmp.path().join("vibe-meta.json");
+    fs::write(
+        &vibe_meta,
+        r#"{"config":{"active_model":"mistral-medium-3.5"},"stats":{"session_prompt_tokens":70,"session_completion_tokens":11,"steps":2}}"#,
+    )
+    .unwrap();
+    let vibe = review_usage(
+        claude_log.to_str().unwrap(),
+        None,
+        UsageAttribution::routed(
+            "vibe",
+            "mistral-medium-3.5",
+            "vibe-monthly",
+            "included_quota",
+        ),
+        vibe_meta.to_str(),
+        None,
+    );
+    assert_eq!(vibe.actual_model.as_deref(), Some("mistral-medium-3.5"));
+    assert_eq!(vibe.total_tokens, Some(81));
+
+    let opencode_meta = tmp.path().join("opencode-session.json");
+    fs::write(
+        &opencode_meta,
+        r#"{"model":{"id":"glm-5.2","providerID":"z-ai"},"tokens_input":60,"tokens_output":10,"tokens_reasoning":4,"tokens_cache_read":0,"tokens_cache_write":0,"actual_cost_usd":0.0042}"#,
+    )
+    .unwrap();
+    let opencode = review_usage(
+        claude_log.to_str().unwrap(),
+        None,
+        UsageAttribution::routed(
+            "opencode",
+            "nous-portal/z-ai/glm-5.2",
+            "nous-portal-api",
+            "paid",
+        ),
+        opencode_meta.to_str(),
+        None,
+    );
+    assert_eq!(opencode.actual_model.as_deref(), Some("glm-5.2"));
+    assert_eq!(opencode.actual_cost_usd, Some(0.0042));
+
+    let agy = review_usage(
+        claude_log.to_str().unwrap(),
+        Some("Quota exceeded. Resets in 16m44s."),
+        UsageAttribution::routed(
+            "agy-second",
+            "Claude Sonnet 4.8 (Thinking)",
+            "agy-account-2",
+            "included_quota",
+        ),
+        None,
+        None,
+    );
+    assert_eq!(
+        agy.backend_instance.as_deref(),
+        Some("agy-second:agy-account-2")
+    );
+    assert!(agy
+        .usage_source
+        .as_deref()
+        .is_some_and(|source| source.contains("agy_cli_log_delta")));
+    assert!(agy.quota_reset_at.is_some());
 }
 
 #[test]

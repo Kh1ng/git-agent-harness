@@ -8,6 +8,7 @@ use crate::runner::process::{
 use crate::runner::resolve::{
     codex_model_args, filtered_codex_args, resolve_backend_executable, ExecutableResolution,
 };
+use crate::runner::review_usage::ReviewUsageCapture;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -51,6 +52,11 @@ pub struct ReviewRunResult {
     /// progress (stdout/stderr activity, worktree update, or child process
     /// CPU/I/O). `None` when the reviewer never produced progress.
     pub last_progress_secs: Option<f64>,
+    /// Backend-owned structured artifact for this exact invocation (Claude
+    /// transcript, Codex transcript, Vibe metadata, or OpenCode snapshot).
+    pub usage_artifact_path: Option<String>,
+    /// Bytes appended to AGY's own cli.log during this exact review attempt.
+    pub agy_cli_log_delta: Option<String>,
 }
 
 pub fn run_review_backend(
@@ -81,6 +87,8 @@ pub fn run_review_backend(
                 idle_timeout_seconds: profile.review_timeout_seconds(),
                 hard_timeout_seconds,
                 last_progress_secs: None,
+                usage_artifact_path: None,
+                agy_cli_log_delta: None,
             };
         }
         ExecutableResolution::UnknownBackend(_) => {
@@ -92,6 +100,8 @@ pub fn run_review_backend(
                 idle_timeout_seconds: profile.review_timeout_seconds(),
                 hard_timeout_seconds,
                 last_progress_secs: None,
+                usage_artifact_path: None,
+                agy_cli_log_delta: None,
             };
         }
     };
@@ -105,6 +115,8 @@ pub fn run_review_backend(
             idle_timeout_seconds: profile.review_timeout_seconds(),
             hard_timeout_seconds,
             last_progress_secs: None,
+            usage_artifact_path: None,
+            agy_cli_log_delta: None,
         };
     }
     if let Err(err) = fs::File::create(&stderr_path) {
@@ -116,19 +128,27 @@ pub fn run_review_backend(
             idle_timeout_seconds: profile.review_timeout_seconds(),
             hard_timeout_seconds,
             last_progress_secs: None,
+            usage_artifact_path: None,
+            agy_cli_log_delta: None,
         };
     }
 
+    let usage_capture = ReviewUsageCapture::begin(backend, &executable, worktree, env_vars);
     let mut cmd = Command::new(&executable);
     match backend {
         "claude" => {
-            cmd.args(["-p", prompt]).args(&profile.claude_args);
+            cmd.args(["-p", prompt, "--output-format", "text", "--verbose"])
+                .args(&profile.claude_args);
+            if let Some(session_id) = usage_capture.claude_session_id() {
+                cmd.args(["--session-id", session_id]);
+            }
             if let Some(model) = effective_model {
                 cmd.args(["--model", model]);
             }
         }
         "codex" => {
             cmd.arg("exec")
+                .arg("--json")
                 .arg(prompt)
                 .args(filtered_codex_args(&profile.codex_args))
                 .args(codex_model_args(effective_model));
@@ -162,6 +182,8 @@ pub fn run_review_backend(
                 idle_timeout_seconds: profile.review_timeout_seconds(),
                 hard_timeout_seconds,
                 last_progress_secs: None,
+                usage_artifact_path: None,
+                agy_cli_log_delta: None,
             };
         }
     }
@@ -189,6 +211,8 @@ pub fn run_review_backend(
                 idle_timeout_seconds: profile.review_timeout_seconds(),
                 hard_timeout_seconds,
                 last_progress_secs: None,
+                usage_artifact_path: None,
+                agy_cli_log_delta: None,
             };
         }
     };
@@ -330,7 +354,9 @@ pub fn run_review_backend(
         last_progress_elapsed_secs = Some(start.elapsed().as_secs_f64());
     }
 
-    let mut stdout = read_text_file(&stdout_path);
+    let raw_stdout = read_text_file(&stdout_path);
+    let usage_artifacts = usage_capture.finish(worktree, session_dir, &raw_stdout, env_vars);
+    let mut stdout = usage_artifacts.review_text.unwrap_or(raw_stdout);
     let mut stderr = read_text_file(&stderr_path);
     if let Some(extra) = supplemental_stderr {
         if !stderr.is_empty() {
@@ -363,6 +389,8 @@ pub fn run_review_backend(
         idle_timeout_seconds,
         hard_timeout_seconds,
         last_progress_secs: last_progress_elapsed_secs,
+        usage_artifact_path: usage_artifacts.artifact_path,
+        agy_cli_log_delta: usage_artifacts.agy_cli_log_delta,
     }
 }
 
@@ -593,6 +621,38 @@ mod tests {
         let argv = recorded_argv(&f.record_dir);
         assert!(argv.contains(&"--model".to_string()));
         assert!(argv.contains(&"haiku".to_string()));
+    }
+
+    #[test]
+    fn run_review_backend_requests_codex_json_usage_and_extracts_verdict() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "codex",
+            &format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\nprintf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"review-thread\"}}' '{{\"type\":\"turn.started\"}}' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"{{\\\"verdict\\\":\\\"APPROVE\\\"}}\"}}}}' '{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":5}}}}'\n",
+                f.record_dir.join("argv.txt").display()
+            ),
+        );
+        let profile = test_profile();
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let result = run_review_backend(
+            &profile,
+            "codex",
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            Some("gpt-5.4-mini"),
+            &[],
+        );
+
+        assert_eq!(result.outcome, ReviewProcessOutcome::Success);
+        assert_eq!(result.stdout, r#"{"verdict":"APPROVE"}"#);
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv.contains(&"--json".to_string()));
+        assert!(argv.contains(&"gpt-5.4-mini".to_string()));
     }
 
     #[test]

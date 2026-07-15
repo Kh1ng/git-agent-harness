@@ -344,7 +344,9 @@ pub(in crate::dispatch) fn review(
                     .join("review-stdout.log")
                     .display()
                     .to_string(),
+                attempt.agy_cli_log_delta.as_deref(),
                 attribution,
+                attempt.usage_artifact_path.as_deref(),
                 profile.claude_path.as_deref(),
             )
         };
