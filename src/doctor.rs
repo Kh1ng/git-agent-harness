@@ -1,4 +1,5 @@
 use crate::config::{self, Defaults, GahConfig, Profile};
+use crate::provider::provider_command;
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
@@ -265,7 +266,7 @@ fn run_provider_cli_preflight(
             "{cli} not found on PATH and no {provider} token env var set"
         )));
     }
-    let output = match Command::new(cli)
+    let output = match provider_command(cli)
         .args(["api", "--hostname", host, api_path])
         .output()
     {
@@ -293,7 +294,9 @@ fn classify_provider_cli_failure(output: &str, cli: &str) -> ProviderAuthFailure
     let text = output.to_lowercase();
 
     // Transport/network failure reaching the provider host.
-    if text.contains("could not resolve")
+    if text.contains("error connecting to")
+        || text.contains("check your internet connection")
+        || text.contains("could not resolve")
         || text.contains("no such host")
         || text.contains("dial tcp")
         || text.contains("connection refused")

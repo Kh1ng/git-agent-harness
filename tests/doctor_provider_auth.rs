@@ -249,7 +249,7 @@ fn doctor_github_network_error_fails_classified() {
         &tmp,
         "github",
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then echo \"dial tcp: lookup github.com: no such host\" >&2; exit 1; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then echo \"error connecting to github.com\" >&2; echo \"check your internet connection or https://www.githubstatus.com\" >&2; exit 1; fi\nexit 0\n",
     )
     .failure()
     .stdout(
@@ -269,6 +269,10 @@ fn doctor_gitlab_no_token_no_cli_fails_closed() {
     init_git_repo(&repo);
     let cfg = write_real_repo_config(&tmp, &repo, "gitlab");
 
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(&fake_bin, "which", "#!/bin/sh\nexit 1\n");
+
     bin()
         .args([
             "doctor",
@@ -277,7 +281,7 @@ fn doctor_gitlab_no_token_no_cli_fails_closed() {
             "--config-path",
             cfg.to_str().unwrap(),
         ])
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("PATH", fake_bin)
         .env_remove("GITLAB_PAT")
         .env_remove("GITLAB_PAT2")
         .assert()
@@ -285,9 +289,6 @@ fn doctor_gitlab_no_token_no_cli_fails_closed() {
         .stdout(
             predicate::str::contains("[FAIL]")
                 .and(predicate::str::contains("provider auth"))
-                .and(
-                    predicate::str::contains("not found on PATH")
-                        .or(predicate::str::contains("authenticate")),
-                ),
+                .and(predicate::str::contains("not found on PATH")),
         );
 }
