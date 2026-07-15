@@ -1,6 +1,7 @@
 use super::command::which;
 use super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
+use crate::controller::HumanRequiredReason;
 use crate::ledger::{self, LedgerEntry};
 use crate::models::WorkMetadata;
 use crate::routing::{
@@ -565,6 +566,8 @@ pub(super) fn decide_route(
                     }
                     RouteError::ApprovalRequired { backend, model, .. } => {
                         ledger.human_required = true;
+                        ledger.human_required_reason_code =
+                            Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
                         ledger.error_summary = Some(format!(
                             "paid route approval required; run: gah route-approval grant --profile {} {} --backend {}{}",
                             ledger.profile,

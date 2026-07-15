@@ -302,6 +302,8 @@ pub fn run_once(
                 );
                 gate.work_id = Some(wid.to_string());
                 gate.human_required = true;
+                gate.human_required_reason_code =
+                    Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
                 gate.dispatch_reason = Some("stuck_loop_gate".to_string());
                 gate.error_summary = Some(reason.clone());
                 if let Err(e) = crate::ledger::append(cfg, &gate) {
@@ -505,6 +507,8 @@ fn run_parallel_once(
                     );
                     gate.work_id = Some(wid.to_string());
                     gate.human_required = true;
+                    gate.human_required_reason_code =
+                        Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
                     gate.dispatch_reason = Some("stuck_loop_gate".to_string());
                     gate.error_summary = Some(reason.clone());
                     let _ = crate::ledger::append(cfg, &gate);

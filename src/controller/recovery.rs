@@ -162,15 +162,19 @@ pub(super) fn record_action_events(
     original_action: &NextAction,
     effective_action: &NextAction,
 ) -> Result<()> {
-    crate::events::record(
+    let original_reason_code = original_action.human_required_reason_code();
+    let effective_reason_code = effective_action.human_required_reason_code();
+
+    crate::events::record_with_reason_code(
         cfg,
         crate::events::EventType::ActionDecided,
         Some(profile_name),
         original_action.work_id(),
         format!("{}: {}", original_action.kind(), original_action.reason()),
+        original_reason_code,
     )?;
     if original_action != effective_action {
-        crate::events::record(
+        crate::events::record_with_reason_code(
             cfg,
             crate::events::EventType::ActionOverridden,
             Some(profile_name),
@@ -181,6 +185,7 @@ pub(super) fn record_action_events(
                 effective_action.kind(),
                 effective_action.reason()
             ),
+            effective_reason_code,
         )?;
     }
     Ok(())
@@ -374,6 +379,7 @@ mod tests {
             profile: Some(profile.into()),
             work_id: Some(work_id.into()),
             run_id: None,
+            reason_code: None,
             details: format!("{kind}: test"),
         }
     }
@@ -496,6 +502,7 @@ mod tests {
             profile: Some("real".into()),
             work_id: Some("TICKET-500".into()),
             run_id: Some("deferred-run".into()),
+            reason_code: None,
             details: "fix_existing: deferred_capacity: claude/sonnet busy".into(),
         });
 

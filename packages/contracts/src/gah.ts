@@ -382,6 +382,7 @@ export interface ControllerEvent {
   profile: string | null;
   work_id: string | null;
   run_id?: string | null;
+  reason_code?: string | null;
   details: string;
 }
 
@@ -476,6 +477,7 @@ export interface LedgerEntry {
   fallback_used: boolean;
   confidence_impact: string | null;
   human_required: boolean;
+  human_required_reason_code?: string | null;
   routing_diagnostics?: RoutingDiagnostics | null;
   mode: string;
   target_summary: string | null;

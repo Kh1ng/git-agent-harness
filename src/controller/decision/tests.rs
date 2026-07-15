@@ -1314,79 +1314,104 @@ fn nothing_actionable_is_noop() {
 #[test]
 fn every_human_required_constructor_has_a_reason_code() {
     use super::super::HumanRequiredReason;
+    let mut cases: Vec<(HumanRequiredReason, StatusSnapshot)> = vec![];
 
-    // Map of known reason codes from all HumanRequired constructors
-    let mut reason_codes = std::collections::HashSet::new();
+    let mut profile_blocker = empty_snapshot();
+    profile_blocker.blockers.push(Blocker {
+        kind: "backend_unavailable".into(),
+        reason: Some("no capacity".into()),
+        message: Some("infrastructure unavailable".into()),
+        backend: Some("claude".into()),
+        model: None,
+        until: None,
+        source_reference: None,
+        reason_code: None,
+    });
+    cases.push((HumanRequiredReason::ConfigurationInfra, profile_blocker));
 
-    // 1. Profile-wide blockers (decision.rs line ~95)
-    // ConfigurationInfra
-    reason_codes.insert("configuration_infra");
+    let mut merge_policy = empty_snapshot();
+    merge_policy.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
+    merge_policy
+        .merge_requests
+        .push(mr_with_ci("gah/ready-still", "READY_FOR_HUMAN", true));
+    cases.push((HumanRequiredReason::MergePolicy, merge_policy));
 
-    // 2. Merge policy StopForHuman (decision.rs line ~237)
-    // MergePolicy
-    reason_codes.insert("merge_policy");
+    let mut publishing_restricted = empty_snapshot();
+    publishing_restricted.publishing_allow_pr = false;
+    publishing_restricted.merge_requests.push(mr_with_ci(
+        "gah/ready-publish",
+        "READY_FOR_HUMAN",
+        true,
+    ));
+    cases.push((
+        HumanRequiredReason::PublishingRestriction,
+        publishing_restricted,
+    ));
 
-    // 3. Publishing restriction (decision.rs line ~251)
-    // PublishingRestriction
-    reason_codes.insert("publishing_restriction");
+    let mut review_evidence = empty_snapshot();
+    review_evidence.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
+    review_evidence.blocked_work_items.push(Blocker {
+        kind: "human_required".into(),
+        reason: Some("review hold".into()),
+        message: Some("review hold active".into()),
+        backend: None,
+        model: None,
+        until: None,
+        source_reference: Some("TICKET-EVIDENCE".into()),
+        reason_code: None,
+    });
+    let mut review_mr = mr("gah/evidence", "NEEDS_REVIEW");
+    review_mr.work_id = Some("TICKET-EVIDENCE".into());
+    review_evidence.merge_requests.push(review_mr);
+    cases.push((HumanRequiredReason::ReviewEvidenceGate, review_evidence));
 
-    // 4. Human-blocked MRs under StopForHuman (decision.rs line ~313)
-    // This can be various codes: PolicyApproval, MergePolicy, FixRetryCapExceeded,
-    // MergeRetryCapExceeded, ReviewEvidenceGate
-    reason_codes.insert("policy_approval");
-    reason_codes.insert("fix_retry_cap_exceeded");
-    reason_codes.insert("merge_retry_cap_exceeded");
-    reason_codes.insert("review_evidence_gate");
+    let mut fix_retry_exhausted = empty_snapshot();
+    fix_retry_exhausted.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
+    fix_retry_exhausted.fix_attempt_counts.insert(
+        "gah/fix".into(),
+        fix_retry_exhausted.profile.max_fix_attempts_per_mr as usize,
+    );
+    fix_retry_exhausted
+        .merge_requests
+        .push(mr("gah/fix", "CI_FAILED"));
+    cases.push((
+        HumanRequiredReason::FixRetryCapExceeded,
+        fix_retry_exhausted,
+    ));
 
-    // 5. Exhausted tickets - retry budget (decision.rs line ~372)
-    // RetryBudgetExhausted
-    reason_codes.insert("retry_budget_exhausted");
+    let mut merge_retry_exhausted = empty_snapshot();
+    merge_retry_exhausted.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
+    merge_retry_exhausted
+        .merge_attempt_counts
+        .insert("gah/merge".into(), super::AUTO_RETRY_CAP);
+    merge_retry_exhausted
+        .merge_requests
+        .push(mr_with_ci("gah/merge", "READY_FOR_HUMAN", true));
+    cases.push((
+        HumanRequiredReason::MergeRetryCapExceeded,
+        merge_retry_exhausted,
+    ));
 
-    // 6. Stuck loop recovery (runtime.rs and recovery.rs)
-    // PolicyApproval (for stuck loop gates)
-    // Already added above
+    let mut retry_budget = empty_snapshot();
+    retry_budget.available_tickets.push(ticket(
+        "docs/tickets/TICKET-RETRY.md",
+        Some("TICKET-RETRY"),
+        retry_budget.profile.max_implementation_failures_per_ticket as usize,
+        Some("agent_no_progress"),
+        false,
+        false,
+    ));
+    cases.push((HumanRequiredReason::RetryBudgetExhausted, retry_budget));
 
-    // 7. Review evidence gate (dispatch/workflows/review.rs)
-    // review_evidence_gate - already added above
-
-    // Verify all expected codes are present
-    let expected_codes = [
-        "policy_approval",
-        "retry_budget_exhausted",
-        "review_evidence_gate",
-        "merge_policy",
-        "publishing_restriction",
-        "configuration_infra",
-        "fix_retry_cap_exceeded",
-        "merge_retry_cap_exceeded",
-        "unknown",
-    ];
-
-    for code in expected_codes {
-        // Verify each code can be parsed
-        let reason = HumanRequiredReason::from_code(code);
+    for (expected, snapshot) in cases {
+        let action = decide_next_action(&snapshot);
+        let NextAction::HumanRequired { reason_code, .. } = action else {
+            panic!("expected HumanRequired, got {action:?}");
+        };
         assert_eq!(
-            reason.as_str(),
-            code,
-            "Code {code} should round-trip through from_str"
-        );
-
-        // Verify it's in our collected set (except unknown which may not be explicitly constructed)
-        if code != "unknown" {
-            assert!(
-                reason_codes.contains(code),
-                "Code {code} should be constructed by at least one transition"
-            );
-        }
-    }
-
-    // Verify all collected codes are valid
-    for code in &reason_codes {
-        let reason = HumanRequiredReason::from_code(code);
-        assert_ne!(
-            reason,
-            HumanRequiredReason::Unknown,
-            "Collected code {code} should be valid"
+            reason_code,
+            Some(expected.as_str().to_string()),
+            "snapshot expected {expected:?} but got {reason_code:?}",
         );
     }
 }

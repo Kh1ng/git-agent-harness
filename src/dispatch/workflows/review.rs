@@ -15,6 +15,7 @@ use super::super::review::policy::{
 use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
+use crate::controller::HumanRequiredReason;
 use crate::ledger::LedgerEntry;
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::routing::{ConcurrencyGuard, RouteDecision, RouteRequest};
@@ -195,6 +196,8 @@ pub(in crate::dispatch) fn review(
         );
         ledger.validation_result = Some("review_budget_exhausted".into());
         ledger.human_required = true;
+        ledger.human_required_reason_code =
+            Some(HumanRequiredReason::ReviewEvidenceGate.as_str().to_string());
         ledger.error_summary = Some(block.reason.clone());
         apply_route_to_ledger(ledger, &route);
         notify_event(
@@ -203,7 +206,7 @@ pub(in crate::dispatch) fn review(
             NotifyEvent::HumanRequired {
                 reason: "review budget exhausted",
                 reference: target.mr_url.as_deref(),
-                reason_code: Some("review_evidence_gate"),
+                reason_code: Some(HumanRequiredReason::ReviewEvidenceGate.as_str()),
                 failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
                 failure_stage: ledger.failure_stage.as_deref(),
                 error_summary: ledger.error_summary.as_deref(),
@@ -566,13 +569,15 @@ pub(in crate::dispatch) fn review(
                 },
             );
             if verdict.human_required {
+                ledger.human_required_reason_code =
+                    Some(HumanRequiredReason::ReviewEvidenceGate.as_str().to_string());
                 notify_event(
                     cfg,
                     profile,
                     NotifyEvent::HumanRequired {
                         reason: "review verdict requires human attention",
                         reference: mr_url.as_deref(),
-                        reason_code: Some("review_evidence_gate"),
+                        reason_code: Some(HumanRequiredReason::ReviewEvidenceGate.as_str()),
                         failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
                         failure_stage: ledger.failure_stage.as_deref(),
                         error_summary: ledger.error_summary.as_deref(),
@@ -706,6 +711,8 @@ fn stop_for_exhausted_review_escalation(
     ledger.validation_result = Some("review_escalation_exhausted".into());
     ledger.review_verdict = Some("HUMAN_REVIEW".into());
     ledger.human_required = true;
+    ledger.human_required_reason_code =
+        Some(HumanRequiredReason::ReviewEvidenceGate.as_str().to_string());
     ledger.error_summary = Some(message.clone());
     notify_event(
         cfg,
@@ -713,7 +720,7 @@ fn stop_for_exhausted_review_escalation(
         NotifyEvent::HumanRequired {
             reason: "review escalation exhausted",
             reference: target.mr_url.as_deref(),
-            reason_code: Some("review_evidence_gate"),
+            reason_code: Some(HumanRequiredReason::ReviewEvidenceGate.as_str()),
             failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
             failure_stage: ledger.failure_stage.as_deref(),
             error_summary: ledger.error_summary.as_deref(),

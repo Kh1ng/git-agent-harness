@@ -128,7 +128,6 @@ impl NextAction {
 
     /// TICKET-505: Returns the stable reason code for HumanRequired actions.
     /// Returns None for non-HumanRequired actions.
-    #[allow(dead_code)]
     pub fn human_required_reason_code(&self) -> Option<&str> {
         match self {
             Self::HumanRequired { reason_code, .. } => reason_code.as_deref(),

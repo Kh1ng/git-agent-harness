@@ -1,5 +1,6 @@
 use crate::availability;
 use crate::config::GahConfig;
+use crate::controller::HumanRequiredReason;
 use crate::ledger::{self, LedgerEntry, RoutingDiagnostics};
 use crate::sync;
 use anyhow::Result;
@@ -396,7 +397,7 @@ fn build_snapshot_inner(
                 model: None,
                 until: None,
                 source_reference: ticket.work_id.clone(),
-                reason_code: Some("review_evidence_gate".into()),
+                reason_code: Some(HumanRequiredReason::ReviewEvidenceGate.as_str().into()),
             });
         }
     }
@@ -422,7 +423,7 @@ fn build_snapshot_inner(
                     model: None,
                     until: None,
                     source_reference: Some(mr.branch.clone()),
-                    reason_code: Some("fix_retry_cap_exceeded".into()),
+                    reason_code: Some(HumanRequiredReason::FixRetryCapExceeded.as_str().into()),
                 });
             }
         }
