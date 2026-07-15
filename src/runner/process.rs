@@ -8,6 +8,8 @@
 //! resolution, usage/log discovery, and review invocation stay in the facade.
 
 use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -21,6 +23,7 @@ use std::time::{Duration, Instant};
 /// poll it and terminate their dedicated process group, allowing the caller to
 /// write the normal terminal event and ledger record before exiting.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+pub(crate) const PROCESS_CLEANUP_FAILED_EXIT_CODE: i32 = -3;
 
 pub fn install_shutdown_handler() -> Result<()> {
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
@@ -50,12 +53,151 @@ pub(crate) fn prepare_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 pub(crate) fn prepare_process_group(_cmd: &mut Command) {}
 
-pub(crate) fn kill_process_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
+pub(crate) fn kill_process_group(child: &mut std::process::Child) -> Option<String> {
+    #[cfg(not(target_os = "linux"))]
+    let cleanup_error = None;
+    #[cfg(target_os = "linux")]
+    let cleanup_error = {
+        let survivors = kill_linux_process_tree(child.id());
+        if survivors.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "backend descendants still alive after SIGKILL: {survivors:?}"
+            ))
+        }
+    };
+    #[cfg(all(unix, not(target_os = "linux")))]
     unsafe {
         let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
     }
     let _ = child.kill();
+    cleanup_error
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ProcessIdentity {
+    pid: u32,
+    start_ticks: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug)]
+struct ProcessSnapshot {
+    identity: ProcessIdentity,
+    parent_pid: u32,
+    zombie: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat[stat.rfind(") ")? + 2..]
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    Some(ProcessSnapshot {
+        identity: ProcessIdentity {
+            pid,
+            start_ticks: fields.get(19)?.parse().ok()?,
+        },
+        parent_pid: fields.get(1)?.parse().ok()?,
+        zombie: fields.first().is_some_and(|state| *state == "Z"),
+    })
+}
+
+/// Snapshot every live descendant by PPID, not process group. Agent CLIs may
+/// launch tool commands with `setsid`, which deliberately escapes the backend
+/// process group while remaining in its process tree.
+#[cfg(target_os = "linux")]
+fn linux_descendants(root_pid: u32) -> Vec<ProcessIdentity> {
+    let snapshots = fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter_map(linux_process_snapshot)
+        .filter(|snapshot| !snapshot.zombie)
+        .collect::<Vec<_>>();
+    let mut ancestors = HashSet::from([root_pid]);
+    let mut descendants = Vec::new();
+    loop {
+        let mut added = false;
+        for snapshot in &snapshots {
+            if ancestors.contains(&snapshot.parent_pid) && ancestors.insert(snapshot.identity.pid) {
+                descendants.push(snapshot.identity);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    descendants
+}
+
+#[cfg(target_os = "linux")]
+fn signal_process(identity: ProcessIdentity, signal: libc::c_int) {
+    let Some(current) = linux_process_snapshot(identity.pid) else {
+        return;
+    };
+    if current.identity != identity || current.zombie {
+        return;
+    }
+    unsafe {
+        let _ = libc::kill(identity.pid as libc::pid_t, signal);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kill_linux_process_tree(root_pid: u32) -> Vec<u32> {
+    let mut descendants = linux_descendants(root_pid);
+    // Freeze the original group first so the backend cannot race cleanup by
+    // spawning more children. Freeze escaped descendants by exact PID, then
+    // rescan once to catch a fork that landed between the first scan/signals.
+    unsafe {
+        let _ = libc::kill(-(root_pid as libc::pid_t), libc::SIGSTOP);
+    }
+    for identity in &descendants {
+        signal_process(*identity, libc::SIGSTOP);
+    }
+    // Reach a fixed point. A descendant can fork between the first snapshot
+    // and receiving SIGSTOP; each newly discovered process is frozen before
+    // the next scan, so eventually no runnable member of the tree remains.
+    loop {
+        let mut added = false;
+        for identity in linux_descendants(root_pid) {
+            if !descendants.contains(&identity) {
+                signal_process(identity, libc::SIGSTOP);
+                descendants.push(identity);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    unsafe {
+        let _ = libc::kill(-(root_pid as libc::pid_t), libc::SIGKILL);
+    }
+    for identity in descendants.iter().rev() {
+        signal_process(*identity, libc::SIGKILL);
+    }
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        let survivors = descendants
+            .iter()
+            .filter_map(|identity| {
+                linux_process_snapshot(identity.pid)
+                    .filter(|process| process.identity == *identity && !process.zombie)
+                    .map(|process| process.identity.pid)
+            })
+            .collect::<Vec<_>>();
+        if survivors.is_empty() || Instant::now() >= deadline {
+            return survivors;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 pub(crate) fn copy_stream_to_file<R: Read + Send + 'static>(
@@ -252,7 +394,8 @@ pub(crate) fn process_group_activity_advanced(
 ///
 /// `spawn_context` labels a spawn failure (e.g. "launching vibe; is it
 /// installed and on PATH?"). Returns `(exit_code, duration_secs)`; on an
-/// idle kill, exit_code is -1 and a trailing note is appended to the log.
+/// idle kill, exit_code is -1; failed descendant cleanup uses -3. Both append
+/// an explicit diagnostic to the log.
 pub(crate) fn spawn_with_idle_watch(
     cmd: Command,
     log_path: &Path,
@@ -333,12 +476,13 @@ fn spawn_with_idle_watch_with_shutdown(
     let mut saw_progress = false;
     let mut killed_for_idle = false;
     let mut killed_for_shutdown = false;
-    let exit_code = loop {
+    let mut cleanup_error = None;
+    let mut exit_code = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code().unwrap_or(-1),
             Ok(None) => {
                 if shutdown_requested.load(Ordering::SeqCst) {
-                    kill_process_group(&mut child);
+                    cleanup_error = kill_process_group(&mut child);
                     let _ = child.wait();
                     killed_for_shutdown = true;
                     break -2;
@@ -389,7 +533,7 @@ fn spawn_with_idle_watch_with_shutdown(
                     start.elapsed() >= startup_grace
                 };
                 if stalled {
-                    kill_process_group(&mut child);
+                    cleanup_error = kill_process_group(&mut child);
                     let _ = child.wait();
                     killed_for_idle = true;
                     break -1;
@@ -400,18 +544,28 @@ fn spawn_with_idle_watch_with_shutdown(
                 // try_wait() itself erroring is rare, but the child may
                 // still be alive -- kill and reap rather than risk leaking
                 // it (same pattern as the idle-kill branch above).
-                kill_process_group(&mut child);
+                cleanup_error = kill_process_group(&mut child);
                 let _ = child.wait();
                 break -1;
             }
         }
     };
     let duration = start.elapsed();
-    if let Some(handle) = stdout_thread {
-        let _ = handle.join();
+    // A surviving descendant may still own the inherited pipe descriptors.
+    // Never turn a bounded cleanup failure into an unbounded thread join.
+    if cleanup_error.is_none() {
+        if let Some(handle) = stdout_thread {
+            let _ = handle.join();
+        }
+        if let Some(handle) = stderr_thread {
+            let _ = handle.join();
+        }
     }
-    if let Some(handle) = stderr_thread {
-        let _ = handle.join();
+    if let Some(error) = cleanup_error {
+        exit_code = PROCESS_CLEANUP_FAILED_EXIT_CODE;
+        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(log_path) {
+            let _ = writeln!(file, "GAH: harness process cleanup failed: {error}");
+        }
     }
 
     if killed_for_idle {
@@ -479,6 +633,108 @@ mod tests {
         assert!(log.contains("started"));
         assert!(!log.contains("should not complete"));
         assert!(log.contains("shutdown requested; terminated backend process group"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_kills_descendant_that_escaped_with_setsid() {
+        let _exec_guard = ExecGuard::new();
+        let f = fixture();
+        let escaped_pid_path = f.session_dir.join("escaped.pid");
+        make_fake_bin(
+            &f.bin_dir,
+            "backend",
+            &format!(
+                "#!/bin/sh\nsetsid sh -c 'echo $$ > \"{}\"; sleep 30' &\nwait\n",
+                escaped_pid_path.display()
+            ),
+        );
+        let mut command = Command::new(f.bin_dir.join("backend"));
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        prepare_process_group(&mut command);
+        let mut child = command.spawn().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !escaped_pid_path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let escaped_pid = fs::read_to_string(&escaped_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert!(linux_process_snapshot(escaped_pid).is_some());
+
+        let cleanup_error = kill_process_group(&mut child);
+        let _ = child.wait();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while linux_process_snapshot(escaped_pid).is_some_and(|process| !process.zombie)
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            linux_process_snapshot(escaped_pid).is_none_or(|process| process.zombie),
+            "setsid descendant {escaped_pid} survived backend cleanup"
+        );
+        assert_eq!(cleanup_error, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shutdown_watch_kills_escaped_session_and_grandchild() {
+        let _exec_guard = ExecGuard::new();
+        let f = fixture();
+        let escaped_pid_path = f.session_dir.join("escaped-session.pid");
+        let grandchild_pid_path = f.session_dir.join("escaped-grandchild.pid");
+        make_fake_bin(
+            &f.bin_dir,
+            "backend",
+            &format!(
+                "#!/bin/sh\nsetsid sh -c 'echo $$ > \"{}\"; sleep 30 & echo $! > \"{}\"; wait' &\nwait\n",
+                escaped_pid_path.display(),
+                grandchild_pid_path.display()
+            ),
+        );
+        let shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let trigger = std::sync::Arc::clone(&shutdown);
+        let ready_path = escaped_pid_path.clone();
+        let ready_grandchild_path = grandchild_pid_path.clone();
+        let trigger_thread = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while (!ready_path.exists() || !ready_grandchild_path.exists())
+                && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let log_path = f.session_dir.join("backend-output.log");
+
+        let result = spawn_with_idle_watch_with_shutdown(
+            Command::new(f.bin_dir.join("backend")),
+            &log_path,
+            &f.worktree,
+            60,
+            "launching escaped-session test backend",
+            &shutdown,
+            true,
+        )
+        .unwrap();
+        trigger_thread.join().unwrap();
+
+        assert_eq!(result.0, -2);
+        for pid_path in [&escaped_pid_path, &grandchild_pid_path] {
+            let pid = fs::read_to_string(pid_path)
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            assert!(
+                linux_process_snapshot(pid).is_none_or(|process| process.zombie),
+                "escaped descendant {pid} survived watched shutdown"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
