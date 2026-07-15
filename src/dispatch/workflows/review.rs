@@ -31,6 +31,8 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 
+mod source_issue_sections;
+
 pub(in crate::dispatch) fn review(
     cfg: &GahConfig,
     profile: &Profile,
@@ -891,6 +893,40 @@ fn extract_issue_number_from_text(text: Option<&str>) -> Option<String> {
 
 fn render_source_issue_contract(issue: &IssueDetails) -> String {
     let meta = parse_ticket_metadata_from_issue(issue);
+    let unheaded_sections = source_issue_sections::extract(&issue.body);
+    let non_label_constraints: Vec<String> = meta
+        .constraints
+        .iter()
+        .filter(|constraint| {
+            !issue
+                .labels
+                .iter()
+                .any(|label| label == constraint.as_str())
+        })
+        .cloned()
+        .collect();
+    let non_label_affected_files: Vec<String> = meta
+        .affected_files
+        .iter()
+        .filter(|path| !issue.labels.iter().any(|label| label == path.as_str()))
+        .cloned()
+        .collect();
+    let mut acceptance_criteria = meta.acceptance_criteria.clone();
+    for criterion in &unheaded_sections.acceptance_criteria {
+        if !acceptance_criteria.contains(criterion) {
+            acceptance_criteria.push(criterion.clone());
+        }
+    }
+    let mut verification_commands = meta.verification_commands.clone();
+    for command in &unheaded_sections.verification_commands {
+        if !verification_commands.contains(command) {
+            verification_commands.push(command.clone());
+        }
+    }
+    let has_unheaded_contract_content = unheaded_sections.problem.is_some()
+        || !unheaded_sections.acceptance_criteria.is_empty()
+        || !unheaded_sections.verification_commands.is_empty()
+        || unheaded_sections.non_goals.is_some();
     let mut sections = vec![format!(
         "## Source Issue Contract\n\nIssue: #{}\nTitle: {}",
         issue.number,
@@ -900,7 +936,8 @@ fn render_source_issue_contract(issue: &IssueDetails) -> String {
         )),
     )];
 
-    if let Some(problem) = meta.problem.as_deref().or(meta.goal.as_deref()) {
+    let primary_problem = meta.problem.as_deref().or(meta.goal.as_deref());
+    if let Some(problem) = primary_problem.or(unheaded_sections.problem.as_deref()) {
         sections.push(format!(
             "### Problem\n\n{}",
             indent_untrusted_text(utf8_safe_prefix(
@@ -909,10 +946,23 @@ fn render_source_issue_contract(issue: &IssueDetails) -> String {
             ))
         ));
     }
-    if !meta.acceptance_criteria.is_empty() {
+    if let Some(expected) = unheaded_sections
+        .problem
+        .as_deref()
+        .filter(|expected| primary_problem.is_some_and(|problem| problem.trim() != expected.trim()))
+    {
+        sections.push(format!(
+            "### Expected Behavior\n\n{}",
+            indent_untrusted_text(utf8_safe_prefix(
+                expected.trim(),
+                SOURCE_ISSUE_PROBLEM_MAX_BYTES
+            ))
+        ));
+    }
+    if !acceptance_criteria.is_empty() {
         sections.push(format!(
             "### Acceptance Criteria\n\n{}",
-            render_source_issue_list(&meta.acceptance_criteria, SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES)
+            render_source_issue_list(&acceptance_criteria, SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES)
         ));
     }
     if !meta.constraints.is_empty() {
@@ -921,10 +971,10 @@ fn render_source_issue_contract(issue: &IssueDetails) -> String {
             render_source_issue_list(&meta.constraints, SOURCE_ISSUE_LIST_MAX_BYTES)
         ));
     }
-    if !meta.verification_commands.is_empty() {
+    if !verification_commands.is_empty() {
         sections.push(format!(
             "### Verification Commands\n\n{}",
-            render_source_issue_list(&meta.verification_commands, SOURCE_ISSUE_LIST_MAX_BYTES)
+            render_source_issue_list(&verification_commands, SOURCE_ISSUE_LIST_MAX_BYTES)
         ));
     }
     if !meta.affected_files.is_empty() {
@@ -939,11 +989,45 @@ fn render_source_issue_contract(issue: &IssueDetails) -> String {
             indent_untrusted_text(utf8_safe_prefix(source.trim(), SOURCE_ISSUE_LIST_MAX_BYTES))
         ));
     }
-    let contract_details = render_additional_contract_details(&issue.body);
-    if !contract_details.is_empty() {
+    let mut contract_details = render_additional_contract_details(&issue.body);
+    if let Some(non_goals) = unheaded_sections.non_goals.as_deref() {
+        let rendered = format!(
+            "### Non-goals\n\n{}",
+            indent_untrusted_text(utf8_safe_prefix(
+                non_goals.trim(),
+                SOURCE_ISSUE_DETAIL_MAX_BYTES
+            ))
+        );
+        if !contract_details.contains(&rendered) {
+            let separator = if contract_details.is_empty() {
+                ""
+            } else {
+                "\n\n"
+            };
+            let remaining = SOURCE_ISSUE_DETAILS_MAX_BYTES.saturating_sub(contract_details.len());
+            if remaining > separator.len() {
+                contract_details.push_str(separator);
+                contract_details.push_str(utf8_safe_prefix(
+                    &rendered,
+                    remaining.saturating_sub(separator.len()),
+                ));
+            }
+        }
+    }
+    let has_contract_details = !contract_details.is_empty();
+    if has_contract_details {
         sections.push(contract_details);
     }
-    if sections.len() == 1 {
+    let has_structured_contract = meta.problem.is_some()
+        || meta.goal.is_some()
+        || !acceptance_criteria.is_empty()
+        || !non_label_constraints.is_empty()
+        || !verification_commands.is_empty()
+        || !non_label_affected_files.is_empty()
+        || meta.source.is_some()
+        || has_unheaded_contract_content
+        || has_contract_details;
+    if !has_structured_contract {
         sections.push(format!(
             "### Issue Description\n\n{}",
             indent_untrusted_text(utf8_safe_prefix(
