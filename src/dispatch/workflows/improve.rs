@@ -1335,7 +1335,18 @@ pub(crate) fn improve(
         println!("Updated existing MR: {}", existing.url);
     } else {
         ledger.mr_attempted = true;
-        let mr = provider::create_draft_mr(profile, &branch, &mr_title, &mr_body)?;
+        let mr = match provider::create_draft_mr(profile, &branch, &mr_title, &mr_body) {
+            Ok(mr) => mr,
+            Err(err) => {
+                if profile.provider == "gitlab" {
+                    ledger.set_failure(
+                        crate::ledger::FailureClass::EnvironmentError,
+                        crate::ledger::FailureStage::MrCreate,
+                    );
+                }
+                return Err(err);
+            }
+        };
         ledger.mr_created = true;
         ledger.mr_url = Some(mr.url.clone());
         println!("Draft MR: {}", mr.url);
