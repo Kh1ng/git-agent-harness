@@ -41,6 +41,37 @@ fn gitlab_hostname(api_base: &str) -> Result<&str> {
     Ok(hostname)
 }
 
+pub(crate) fn gitlab_api(
+    profile: &Profile,
+    endpoint: &str,
+    method: &str,
+    raw_fields: &[(&str, &str)],
+) -> Result<serde_json::Value> {
+    let api_base = profile
+        .provider_api_base
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
+    let hostname = gitlab_hostname(api_base)?;
+    let mut command = provider_command("glab");
+    command
+        .arg("api")
+        .arg(endpoint)
+        .args(["--hostname", hostname, "--method", method]);
+    for (name, value) in raw_fields {
+        command.args(["--raw-field", &format!("{name}={value}")]);
+    }
+    let out = command.output().context("glab api GitLab request")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "glab api GitLab request failed for {}: {}",
+            endpoint,
+            redacted_provider_output(&out)
+        );
+    }
+    serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("parsing GitLab API response for {endpoint}"))
+}
+
 #[cfg(test)]
 thread_local! {
     /// Per-thread PATH override for provider CLI tests. Thread-local (not a
@@ -258,33 +289,13 @@ fn gitlab_post_review_comment(
     body: &str,
     labels: &[&str],
 ) -> Result<()> {
-    let api_base = profile
-        .provider_api_base
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
     let project_id = profile
         .provider_project_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
-    let pat = profile.pat();
     let mr = gitlab_find_mr_by_branch(profile, branch)?;
-    let note_url = format!(
-        "{}/projects/{}/merge_requests/{}/notes",
-        api_base, project_id, mr.id
-    );
-    let payload = serde_json::json!({ "body": body });
-    run_curl_json(&[
-        "-s",
-        "-X",
-        "POST",
-        "-H",
-        &format!("PRIVATE-TOKEN: {}", pat),
-        "-H",
-        "Content-Type: application/json",
-        "-d",
-        &payload.to_string(),
-        &note_url,
-    ])?;
+    let endpoint = format!("projects/{project_id}/merge_requests/{}/notes", mr.id);
+    gitlab_api(profile, &endpoint, "POST", &[("body", body)])?;
     gitlab_set_review_state_labels(profile, &mr.id, labels)
         .with_context(|| format!("applying review labels to MR {}", mr.id))?;
     Ok(())
@@ -318,38 +329,26 @@ fn github_post_review_comment(
 }
 
 fn gitlab_set_review_state_labels(profile: &Profile, iid: &str, labels: &[&str]) -> Result<()> {
-    let api_base = profile
-        .provider_api_base
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
     let project_id = profile
         .provider_project_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
-    let pat = profile.pat();
-    let labels_url = format!("{api_base}/projects/{project_id}/merge_requests/{iid}");
+    let endpoint = format!("projects/{project_id}/merge_requests/{iid}");
     let remove_labels = GAH_REVIEW_STATE_LABELS
         .iter()
         .copied()
         .filter(|candidate| !labels.contains(candidate))
         .collect::<Vec<_>>()
         .join(",");
-    let payload = serde_json::json!({
-        "add_labels": labels.join(","),
-        "remove_labels": remove_labels,
-    });
-    run_curl_json(&[
-        "-s",
-        "-X",
+    gitlab_api(
+        profile,
+        &endpoint,
         "PUT",
-        "-H",
-        &format!("PRIVATE-TOKEN: {}", pat),
-        "-H",
-        "Content-Type: application/json",
-        "-d",
-        &payload.to_string(),
-        &labels_url,
-    ])?;
+        &[
+            ("add_labels", &labels.join(",")),
+            ("remove_labels", &remove_labels),
+        ],
+    )?;
     Ok(())
 }
 
@@ -541,33 +540,12 @@ pub fn github_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
 
 /// Close a GitLab issue by number.
 pub fn gitlab_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
-    let api_base = profile
-        .provider_api_base
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
     let project_id = profile
         .provider_project_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
-    let pat = profile.pat();
-    let url = format!(
-        "{}/projects/{}/issues/{}",
-        api_base, project_id, issue_number
-    );
-    let payload = serde_json::json!({ "state_event": "close" });
-
-    run_curl_json(&[
-        "-s",
-        "-X",
-        "PUT",
-        "-H",
-        &format!("PRIVATE-TOKEN: {}", pat),
-        "-H",
-        "Content-Type: application/json",
-        "-d",
-        &payload.to_string(),
-        &url,
-    ])?;
+    let endpoint = format!("projects/{project_id}/issues/{issue_number}");
+    gitlab_api(profile, &endpoint, "PUT", &[("state_event", "close")])?;
 
     Ok(())
 }
@@ -594,31 +572,12 @@ pub fn github_get_issue_state(profile: &Profile, issue_number: &str) -> Result<O
 
 /// Get the state of a GitLab issue.
 pub fn gitlab_get_issue_state(profile: &Profile, issue_number: &str) -> Result<Option<String>> {
-    let api_base = profile
-        .provider_api_base
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
     let project_id = profile
         .provider_project_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
-    let pat = profile.pat();
-    let url = format!(
-        "{}/projects/{}/issues/{}",
-        api_base, project_id, issue_number
-    );
-
-    let out = provider_command("curl")
-        .args(["-s", "-H", &format!("PRIVATE-TOKEN: {}", pat), &url])
-        .output()
-        .context("curl get gitlab issue")?;
-
-    if !out.status.success() {
-        return Ok(None);
-    }
-
-    let resp: serde_json::Value =
-        serde_json::from_slice(&out.stdout).context("parsing gitlab issue response")?;
+    let endpoint = format!("projects/{project_id}/issues/{issue_number}");
+    let resp = gitlab_api(profile, &endpoint, "GET", &[])?;
     let state = resp["state"].as_str().map(|s| s.to_string());
     Ok(state)
 }
@@ -695,21 +654,17 @@ pub fn mr_url_for_branch(profile: &Profile, branch: &str) -> Option<String> {
 }
 
 fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<ReviewTarget> {
-    let api_base = profile
-        .provider_api_base
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
     let project_id = profile
         .provider_project_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
-    let pat = profile.pat();
-    let url = format!(
-        "{}/projects/{}/merge_requests?state=opened&source_branch={}",
-        api_base, project_id, branch
-    );
-    let out = run_curl_json(&["-s", "-H", &format!("PRIVATE-TOKEN: {}", pat), &url])?;
-    let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let endpoint = format!("projects/{project_id}/merge_requests");
+    let resp = gitlab_api(
+        profile,
+        &endpoint,
+        "GET",
+        &[("state", "opened"), ("source_branch", branch)],
+    )?;
     let first = resp
         .as_array()
         .and_then(|items| items.first())
@@ -718,18 +673,12 @@ fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<Rev
 }
 
 fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarget> {
-    let api_base = profile
-        .provider_api_base
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
     let project_id = profile
         .provider_project_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
-    let pat = profile.pat();
-    let url = format!("{}/projects/{}/merge_requests/{}", api_base, project_id, mr);
-    let out = run_curl_json(&["-s", "-H", &format!("PRIVATE-TOKEN: {}", pat), &url])?;
-    let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let endpoint = format!("projects/{project_id}/merge_requests/{mr}");
+    let resp = gitlab_api(profile, &endpoint, "GET", &[])?;
     gitlab_target_from_value(&resp)
 }
 
@@ -811,13 +760,10 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
 }
 
 fn gitlab_target_from_value(value: &serde_json::Value) -> Result<ReviewTarget> {
-    // A failed/unauthenticated GitLab API call still returns 200-shaped JSON
-    // like {"message":"404 Project Not Found"} (e.g. an empty PRIVATE-TOKEN
-    // from a missing GITLAB_PAT env var) -- silently defaulting the branch
-    // fields to "" let that flow all the way into a git fetch refspec
-    // several layers downstream with no indication the real problem was
-    // auth. `iid`/`source_branch`/`target_branch` are always present on a
-    // genuine MR object, so their absence means this wasn't one.
+    // A provider/API proxy can still return an error-shaped JSON object;
+    // silently defaulting branch fields to "" would turn that into an invalid
+    // git refspec several layers downstream. Genuine MRs always carry these
+    // fields, so their absence must fail at this boundary.
     if value["iid"].is_null()
         || value["source_branch"].is_null()
         || value["target_branch"].is_null()
@@ -874,17 +820,6 @@ fn gitlab_mr_result_from_value(value: &serde_json::Value) -> Result<MrResult> {
             crate::redact::redact(&value.to_string())
         ),
     }
-}
-
-fn run_curl_json(args: &[&str]) -> Result<std::process::Output> {
-    let out = provider_command("curl")
-        .args(args)
-        .output()
-        .context("curl request")?;
-    if !out.status.success() {
-        anyhow::bail!("curl failed: {}", redacted_stderr(&out));
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

@@ -149,12 +149,11 @@ fn dry_run_reports_would_close_and_performs_no_close_write() {
 fn gitlab_dry_run_observes_open_issue_without_writing() {
     let tmp = TempDir::new().unwrap();
     let glab = FakeBackend::new(tmp.path(), "glab");
-    glab.install_sequence(vec![Scenario::success().with_stdout(
-        r#"[{"title":"[GAH] Fix: TICKET-72","description":"Closes #42","source_branch":"gah/improve-example-123456","web_url":"https://gitlab.example.com/group/repo/-/merge_requests/72","labels":[],"iid":72,"state":"merged","draft":false,"merged_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","head_pipeline":{"status":"success"}}]"#,
-    )]);
-    let curl = FakeBackend::new(tmp.path(), "curl");
-    curl.install_sequence(vec![
-        Scenario::success().with_stdout(r#"{"state":"opened"}"#)
+    glab.install_sequence(vec![
+        Scenario::success().with_stdout(
+            r#"[{"title":"[GAH] Fix: TICKET-72","description":"Closes #42","source_branch":"gah/improve-example-123456","web_url":"https://gitlab.example.com/group/repo/-/merge_requests/72","labels":[],"iid":72,"state":"merged","draft":false,"merged_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","head_pipeline":{"status":"success"}}]"#,
+        ),
+        Scenario::success().with_stdout(r#"{"state":"opened"}"#),
     ]);
 
     let mut harness = ScenarioHarness::new("gitlab")
@@ -163,14 +162,13 @@ fn gitlab_dry_run_observes_open_issue_without_writing() {
         )
         .with_ledger(support::fake_ledger::TestLedger::new().with_entry(ledger_entry(None)));
     harness.install_custom_glab(&glab);
-    harness.install_custom_worker("curl", &curl);
 
     let report = harness.run_ledger_reconcile_json(true).unwrap();
     assert_eq!(
         report["issue_closure"]["would_close"],
         serde_json::json!(["42"])
     );
-    assert_eq!(glab.call_count(), 1);
+    assert_eq!(glab.call_count(), 2);
     assert_eq!(
         glab.argv_for_call(1),
         vec![
@@ -183,7 +181,11 @@ fn gitlab_dry_run_observes_open_issue_without_writing() {
             "json"
         ]
     );
-    assert_eq!(curl.call_count(), 1);
+    assert_eq!(
+        glab.argv_for_call(2)[..2],
+        ["api", "projects/123/issues/42"]
+    );
+    assert!(glab.argv_for_call(2).contains(&"--hostname".to_string()));
 }
 
 #[test]

@@ -2494,7 +2494,7 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
     );
 
     let fake_bin = tmp.path().join("bin");
-    let curl_log = tmp.path().join("curl.log");
+    let glab_log = tmp.path().join("glab.log");
     fs::create_dir_all(&fake_bin).unwrap();
     make_fake_bin_with_body(
         &fake_bin,
@@ -2503,10 +2503,10 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
     );
     make_fake_bin_with_body(
         &fake_bin,
-        "curl",
+        "glab",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *\"merge_requests?state=opened&source_branch=feature/review\"*)\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}]'\n    ;;\n  *\"/merge_requests/7/notes\"*)\n    printf '%s\\n' '{{\"id\":1}}'\n    ;;\n  *\"/merge_requests/7\"*)\n    printf '%s\\n' '{{\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}'\n    ;;\n  *)\n    printf '%s\\n' '{{}}'\n    ;;\n esac\n",
-            curl_log.display()
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$1 $2\" in\n  \"api projects/42/merge_requests\")\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}]'\n    ;;\n  \"api projects/42/merge_requests/7/notes\")\n    printf '%s\\n' '{{\"id\":1}}'\n    ;;\n  \"api projects/42/merge_requests/7\")\n    printf '%s\\n' '{{\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}'\n    ;;\n  *) echo \"unexpected glab invocation: $*\" >&2; exit 1 ;;\n esac\n",
+            glab_log.display()
         ),
     );
 
@@ -2523,32 +2523,23 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
             cfg.to_str().unwrap(),
         ])
         .env("PATH", prepend_path(&fake_bin))
-        .env("GITLAB_PAT", "token")
+        .env_remove("GITLAB_PAT")
+        .env_remove("GITLAB_PAT2")
         .assert()
         .success()
         .stdout(predicate::str::contains(
             "Resolved MR: https://gitlab.example.com/owner/real/-/merge_requests/7",
         ));
 
-    let curl_log = fs::read_to_string(curl_log).unwrap();
-    assert!(curl_log.contains("merge_requests?state=opened&source_branch=feature/review"));
-    assert!(curl_log.contains("/merge_requests/7/notes"));
-    assert!(curl_log.contains("add_labels\":\"gah-ready-for-human\""));
+    let glab_log = fs::read_to_string(glab_log).unwrap();
+    assert!(glab_log.contains("source_branch=feature/review"));
+    assert!(glab_log.contains("projects/42/merge_requests/7/notes"));
+    assert!(glab_log.contains("add_labels=gah-ready-for-human"));
+    assert!(!glab_log.contains("PRIVATE-TOKEN"));
 }
 
 #[test]
-fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
-    // Regression: profile.pat() reads GITLAB_PAT/GITLAB_PAT2 via std::env::var
-    // directly. Loading the profile's env_file into a Vec<(String,String)>
-    // for the *backend subprocess*'s environment (done later, per mode)
-    // never reached provider.rs's own curl calls (MR lookup, review-target
-    // resolution) -- those ran before any backend spawned, with an empty
-    // PRIVATE-TOKEN, and a live dispatch failed 3 layers downstream with a
-    // git refspec error as a result. dispatch::run now exports env_file into
-    // the real process env immediately after resolving the profile, before
-    // any provider call. This test deliberately does NOT set GITLAB_PAT via
-    // `.env(...)` on the test harness itself -- only via a profile env_file
-    // -- to prove the token actually comes from that config-driven path.
+fn review_gitlab_uses_host_scoped_glab_session_without_pat() {
     let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -2556,21 +2547,16 @@ fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
     add_origin_and_feature_commit(&repo);
     checkout_branch(&repo, "main");
 
-    let env_file = tmp.path().join("real.env");
-    fs::write(&env_file, "GITLAB_PAT=from-env-file-secret\n").unwrap();
     let cfg = write_real_repo_config_with_extra(
         &tmp,
         &repo,
         "gitlab",
-        &format!(
-            "env_file = \"{}\"\n[profiles.real.routing]\nreview_backend = \"claude\"\n",
-            env_file.display()
-        ),
+        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
         "",
     );
 
     let fake_bin = tmp.path().join("bin");
-    let curl_log = tmp.path().join("curl.log");
+    let glab_log = tmp.path().join("glab.log");
     fs::create_dir_all(&fake_bin).unwrap();
     make_fake_bin_with_body(
         &fake_bin,
@@ -2579,10 +2565,10 @@ fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
     );
     make_fake_bin_with_body(
         &fake_bin,
-        "curl",
+        "glab",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *\"merge_requests?state=opened&source_branch=feature/review\"*)\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}]'\n    ;;\n  *\"/merge_requests/7/notes\"*)\n    printf '%s\\n' '{{\"id\":1}}'\n    ;;\n  *\"/merge_requests/7\"*)\n    printf '%s\\n' '{{\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}'\n    ;;\n  *)\n    printf '%s\\n' '{{}}'\n    ;;\n esac\n",
-            curl_log.display()
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$1 $2\" in\n  \"api projects/42/merge_requests\")\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}]'\n    ;;\n  \"api projects/42/merge_requests/7/notes\") printf '%s\\n' '{{\"id\":1}}' ;;\n  \"api projects/42/merge_requests/7\") printf '%s\\n' '{{\"iid\":7}}' ;;\n  *) echo \"unexpected glab invocation: $*\" >&2; exit 1 ;;\n esac\n",
+            glab_log.display()
         ),
     );
 
@@ -2607,8 +2593,9 @@ fn review_gitlab_reads_pat_from_profile_env_file_not_inherited_process_env() {
             "Resolved MR: https://gitlab.example.com/owner/real/-/merge_requests/7",
         ));
 
-    let curl_log = fs::read_to_string(curl_log).unwrap();
-    assert!(curl_log.contains("PRIVATE-TOKEN: from-env-file-secret"));
+    let glab_log = fs::read_to_string(glab_log).unwrap();
+    assert!(glab_log.contains("--hostname gitlab.example.com"));
+    assert!(!glab_log.contains("PRIVATE-TOKEN"));
 
     let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
     let verdict = fs::read_to_string(session_dir.join("review-verdict.json")).unwrap();
@@ -2644,8 +2631,8 @@ fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
     );
     make_fake_bin_with_body(
         &fake_bin,
-        "curl",
-        "#!/bin/sh\ncase \"$*\" in\n  *\"/merge_requests/7\"*) printf '%s\\n' '{\"iid\":7,\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"source_branch\":\"feature/review\",\"target_branch\":\"main\",\"title\":\"Draft: [GAH] Fix\",\"description\":\"MR body\",\"detailed_merge_status\":\"mergeable\"}' ;;\n  *\"merge_requests?state=opened&source_branch=feature/review\"*) printf '%s\\n' '[{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\",\"title\":\"Draft: [GAH] Fix\",\"description\":\"MR body\",\"detailed_merge_status\":\"mergeable\"}]' ;;\n  *\"/merge_requests/7/notes\"*) printf '%s\\n' '{\"id\":1}' ;;\n  *) printf '%s\\n' '{}' ;;\n esac\n",
+        "glab",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"api projects/42/merge_requests/7\") printf '%s\\n' '{\"iid\":7,\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"source_branch\":\"feature/review\",\"target_branch\":\"main\",\"title\":\"Draft: [GAH] Fix\",\"description\":\"MR body\",\"detailed_merge_status\":\"mergeable\"}' ;;\n  \"api projects/42/merge_requests\") printf '%s\\n' '[{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\",\"title\":\"Draft: [GAH] Fix\",\"description\":\"MR body\",\"detailed_merge_status\":\"mergeable\"}]' ;;\n  \"api projects/42/merge_requests/7/notes\") printf '%s\\n' '{\"id\":1}' ;;\n  *) echo \"unexpected glab invocation: $*\" >&2; exit 1 ;;\n esac\n",
     );
 
     bin()
@@ -2661,7 +2648,7 @@ fn review_by_mr_uses_provider_metadata_even_when_repo_is_on_main() {
             cfg.to_str().unwrap(),
         ])
         .env("PATH", prepend_path(&fake_bin))
-        .env("GITLAB_PAT", "token")
+        .env_remove("GITLAB_PAT")
         .assert()
         .success();
 

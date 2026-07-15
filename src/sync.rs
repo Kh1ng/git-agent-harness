@@ -462,7 +462,7 @@ struct GitlabPipeline {
 }
 
 fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
-    let out = Command::new("glab")
+    let out = crate::provider::provider_command("glab")
         .args([
             "mr",
             "list",
@@ -481,36 +481,65 @@ fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
         );
     }
     let mrs: Vec<GitlabMr> = serde_json::from_slice(&out.stdout)?;
-    Ok(mrs
+    let mut synced = Vec::new();
+    for mr in mrs
         .into_iter()
         .filter(|mr| mr.source_branch.starts_with("gah/"))
-        .map(|mr| {
-            // Previously always `false` -- GitLab CI failures were
-            // invisible to classify()/decide_next_action, so a red
-            // pipeline never triggered an automatic FixMr. `head_pipeline`
-            // is GitLab's own terminal-status field for the MR's latest
-            // pipeline (success/failed/canceled/running/pending/...).
-            let pipeline_status = mr.head_pipeline.as_ref().and_then(|p| p.status.as_deref());
-            SyncMr {
-                work_id: extract_work_id_from_title(&mr.title),
-                title: mr.title,
-                body: mr.description,
-                branch: mr.source_branch,
-                labels: mr.labels,
-                url: mr.web_url,
-                id: mr.iid.map(|v| v.to_string().trim_matches('"').to_string()),
-                state: mr.state,
-                draft: mr.draft,
-                merge_status: mr.detailed_merge_status.or(mr.merge_status),
-                merged: mr.merged_at.is_some(),
-                updated_at: mr.updated_at,
-                merged_at: mr.merged_at,
-                ci_failed: gitlab_ci_failed(pipeline_status),
-                ci_passed: gitlab_ci_passed(pipeline_status),
-                ci_pending: gitlab_ci_pending(pipeline_status),
+    {
+        let iid = mr
+            .iid
+            .as_ref()
+            .map(|value| value.to_string().trim_matches('"').to_string());
+        let mut pipeline_status = mr.head_pipeline.and_then(|pipeline| pipeline.status);
+        if pipeline_status.is_none() && mr.state.as_deref() == Some("opened") {
+            if let Some(iid) = iid.as_deref() {
+                pipeline_status = gitlab_latest_pipeline_status(profile, iid)?;
             }
-        })
-        .collect())
+        }
+        synced.push(SyncMr {
+            work_id: extract_work_id_from_title(&mr.title),
+            title: mr.title,
+            body: mr.description,
+            branch: mr.source_branch,
+            labels: mr.labels,
+            url: mr.web_url,
+            id: iid,
+            state: mr.state,
+            draft: mr.draft,
+            merge_status: mr.detailed_merge_status.or(mr.merge_status),
+            merged: mr.merged_at.is_some(),
+            updated_at: mr.updated_at,
+            merged_at: mr.merged_at,
+            ci_failed: gitlab_ci_failed(pipeline_status.as_deref()),
+            ci_passed: gitlab_ci_passed(pipeline_status.as_deref()),
+            ci_pending: gitlab_ci_pending(pipeline_status.as_deref()),
+        });
+    }
+    Ok(synced)
+}
+
+fn gitlab_latest_pipeline_status(
+    profile: &crate::config::Profile,
+    iid: &str,
+) -> Result<Option<String>> {
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let endpoint = format!("projects/{project_id}/merge_requests/{iid}/pipelines");
+    let response = crate::provider::gitlab_api(profile, &endpoint, "GET", &[("per_page", "1")])?;
+    let pipelines = response.as_array().ok_or_else(|| {
+        anyhow::anyhow!(
+            "GitLab pipeline lookup returned a non-list response for MR !{}: {}",
+            iid,
+            crate::redact::redact(&response.to_string())
+        )
+    })?;
+    Ok(pipelines
+        .first()
+        .and_then(|pipeline| pipeline.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string))
 }
 
 fn gitlab_ci_failed(pipeline_status: Option<&str>) -> bool {
