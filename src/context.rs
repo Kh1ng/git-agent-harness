@@ -236,12 +236,15 @@ fn split_sections(prompt: &str) -> Vec<Section> {
         if let Some(name) = line.strip_prefix("## ") {
             sections.push(current);
             let protected = [
+                "Review Pack",
                 "Focus",
                 "Live Task Pack",
                 "Safety",
                 "Acceptance Criteria",
                 "Verification Commands",
                 "Repair Findings",
+                "Source Issue Contract",
+                "Source Issue Lookup",
                 "Warning",
                 "Current Git",
                 "Unresolved",
@@ -270,7 +273,12 @@ fn render_sections(sections: &[Section]) -> String {
         } else {
             out.push_str("## ");
             out.push_str(&section.name);
-            out.push_str("\n\n");
+            // `split_sections` retains every line after the heading,
+            // including the conventional blank line. Add only the heading's
+            // own newline here so untouched protected sections round-trip
+            // byte-for-byte instead of accumulating an extra blank line on
+            // every compaction pass.
+            out.push('\n');
             out.push_str(&section.body);
         }
     }
@@ -399,6 +407,29 @@ mod tests {
             .sources
             .iter()
             .any(|source| source.name == "Repair Findings"));
+    }
+
+    #[test]
+    fn protected_review_sections_round_trip_exactly_during_compaction() {
+        let cfg = ContextConfig {
+            soft_limit_tokens: 45,
+            hard_limit_tokens: 120,
+            ..Default::default()
+        };
+        let review_pack = "## Review Pack\n\nReturn the required structured verdict.\n";
+        let contract =
+            "## Source Issue Contract\n\nIssue: #573\nAcceptance: preserve this exactly.\n";
+        let prompt = format!(
+            "{review_pack}{contract}## Manager Memory\n\n{}\n",
+            "old context ".repeat(30)
+        );
+
+        let result = enforce(&prompt, &cfg).unwrap();
+
+        assert!(result.compacted);
+        assert!(result.prompt.contains(review_pack));
+        assert!(result.prompt.contains(contract));
+        assert_eq!(result.prompt.matches("## Source Issue Contract").count(), 1);
     }
 
     #[test]
