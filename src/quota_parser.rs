@@ -104,6 +104,16 @@ fn generic_rate_limit_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)rate limit").unwrap())
 }
 
+fn authentication_error_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(invalid api key|api key (?:is )?(?:invalid|expired|revoked)|missing [A-Z0-9_-]*api key|authentication failed|not authenticated)",
+        )
+        .unwrap()
+    })
+}
+
 /// Shape: "Feb 23rd, 2026 9:01 PM" / "Apr 7th, 2026 1:07 AM" — full date
 /// and time, no timezone.
 fn full_date_time_re() -> &'static Regex {
@@ -325,6 +335,19 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
         }
     }
 
+    if let Some(m) = authentication_error_re().find(text) {
+        return Some(ParsedFailure {
+            backend: backend.to_string(),
+            kind: FailureKind::AuthenticationError,
+            retryable: false,
+            reset_at: None,
+            retry_after_seconds: None,
+            confidence: Confidence::High,
+            matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+            unresolved_timezone: None,
+        });
+    }
+
     // Highest precedence: an explicit "not your usage limit" disclaimer
     // must never be classified as quota exhaustion, even though the phrase
     // itself contains the substring "usage limit".
@@ -444,6 +467,8 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/agy_auth_not_logged_in.txt");
     const OPENCODE_HY3_RATE_LIMIT: &str =
         include_str!("../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
+    const VIBE_INVALID_API_KEY: &str =
+        include_str!("../tests/fixtures/quota-logs/vibe_invalid_api_key.txt");
 
     // ── Codex: full date+time, no timezone (openai/codex #12299) ───────────
 
@@ -691,6 +716,16 @@ mod tests {
         assert_eq!(parsed.kind, FailureKind::AuthenticationError);
         assert!(parsed.retryable);
         assert_eq!(parsed.confidence, Confidence::High);
+    }
+
+    #[test]
+    fn vibe_invalid_api_key_classifies_as_non_retryable_authentication_error() {
+        let now = utc(2026, Month::July, 15, 21, 29);
+        let parsed = parse("vibe", VIBE_INVALID_API_KEY, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::AuthenticationError);
+        assert!(!parsed.retryable);
+        assert_eq!(parsed.confidence, Confidence::High);
+        assert_eq!(parsed.reset_at, None);
     }
 
     #[test]
