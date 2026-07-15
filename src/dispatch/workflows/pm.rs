@@ -104,6 +104,7 @@ pub(crate) fn pm(
         fs::create_dir_all(&attempt_dir)?;
         fs::write(attempt_dir.join("task.md"), crate::redact::redact(&task))?;
 
+        record_route_attempt(ledger, &plan_route);
         let result = run_backend(
             &plan_route.effective_backend,
             profile,
@@ -120,12 +121,6 @@ pub(crate) fn pm(
         );
         ledger.backend_exit_code = Some(result.exit_code);
         ledger.validation_result = Some("not_run".into());
-        record_route_attempt(
-            ledger,
-            &plan_route.effective_backend,
-            plan_route.effective_model.as_deref(),
-        );
-
         let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
         if result.exit_code == 0 {
             break log_text;

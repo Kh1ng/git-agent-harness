@@ -491,11 +491,21 @@ pub(super) fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecis
     ledger.routing_diagnostics = route.routing_diagnostics.clone();
 }
 
-pub(super) fn record_route_attempt(ledger: &mut LedgerEntry, backend: &str, model: Option<&str>) {
+pub(super) fn record_route_attempt(ledger: &mut LedgerEntry, route: &RouteDecision) {
+    let backend = &route.effective_backend;
+    let model = route.effective_model.as_deref();
     ledger
         .routing_runtime
         .dispatch_attempted
         .insert(CandidateIdentity::new(backend, model));
+    ledger
+        .attempt_routing
+        .push(crate::ledger::AttemptRoutingRecord {
+            attempt_number: ledger.attempt_routing.len() as u32 + 1,
+            backend_instance: backend.clone(),
+            effective_model: route.effective_model.clone(),
+            routing_diagnostics: route.routing_diagnostics.clone(),
+        });
 }
 
 /// Live-observed bug: `worktree::create`/`create_existing` failures (e.g. a

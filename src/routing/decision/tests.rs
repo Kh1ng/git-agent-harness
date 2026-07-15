@@ -5,6 +5,7 @@ use super::super::test_support::{
 use super::{decide_with, decide_with_runtime, RouteError, RouteRequest};
 use super::{CandidateIdentity, RoutingRuntimeState};
 use crate::availability::{Reason, Source};
+use crate::config::RoutingPolicy;
 use tempfile::TempDir;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -885,4 +886,89 @@ fn validation_retry_returns_structured_no_route_when_all_candidates_were_tried()
         Some(RouteError::NoEligibleBackend { skipped, .. })
             if skipped.iter().all(|candidate| candidate.reason == "already_attempted_after_capability_failure")
     ));
+}
+
+#[test]
+fn explicit_retry_preserves_configured_backend_model_pairs() {
+    let tmp = TempDir::new().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let mut profile = profile();
+    profile.routing.allow_implementation_fallback = true;
+    profile.routing.improve_candidates = Some(vec![
+        candidate_config("codex", Some("gpt-5.4-mini"), None),
+        candidate_config("opencode", Some("opencode/hy3-free"), None),
+        candidate_config("agy", Some("Gemini 3.5 Flash (Medium)"), None),
+    ]);
+    let mut runtime = RoutingRuntimeState::default();
+    runtime
+        .dispatch_attempted
+        .insert(CandidateIdentity::new("codex", Some("gpt-5.4-mini")));
+
+    let decision = decide_with_runtime(
+        &defaults(),
+        &profile,
+        RouteRequest {
+            last_failure_class: Some("validation_failure"),
+            mode: "improve",
+            requested_backend: "codex",
+            requested_model: Some("gpt-5.4-mini"),
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: None,
+            usage_summary: None,
+        },
+        &runtime,
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+
+    assert_eq!(decision.effective_backend, "opencode");
+    assert_eq!(
+        decision.effective_model.as_deref(),
+        Some("opencode/hy3-free")
+    );
+}
+
+#[test]
+fn auto_fallback_does_not_transplant_requested_model_to_another_runner() {
+    let tmp = TempDir::new().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let mut profile = profile();
+    profile.routing = RoutingPolicy::default();
+    profile.routing.allow_implementation_fallback = true;
+    record_unavailable(
+        &path(&tmp),
+        "codex",
+        Some("gpt-5.4-mini"),
+        Reason::RateLimited,
+        Source::BackendError,
+        Some(now + time::Duration::minutes(10)),
+        None,
+        now,
+    )
+    .unwrap();
+
+    let decision = decide_with(
+        &defaults(),
+        &profile,
+        RouteRequest {
+            last_failure_class: None,
+            mode: "improve",
+            requested_backend: "auto",
+            requested_model: Some("gpt-5.4-mini"),
+            recommended_backend: Some("codex"),
+            recommended_model: Some("gpt-5.4-mini"),
+            session_id: None,
+            usage_summary: None,
+        },
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+
+    assert_ne!(decision.effective_backend, "codex");
+    assert_ne!(decision.effective_model.as_deref(), Some("gpt-5.4-mini"));
 }

@@ -265,6 +265,7 @@ pub(in crate::dispatch) fn review(
 
         let attempt_session = session_dir.join(format!("review-attempt-{}", attempt_number + 1));
         fs::create_dir_all(&attempt_session)?;
+        record_route_attempt(ledger, &route);
         let attempt = runner::run_review_backend(
             profile,
             &route.effective_backend,
@@ -284,11 +285,6 @@ pub(in crate::dispatch) fn review(
                 | runner::ReviewProcessOutcome::SpawnFailure
         ) {
             ledger.attempts_completed = Some(ledger.attempts_completed.unwrap_or(0) + 1);
-            record_route_attempt(
-                ledger,
-                &route.effective_backend,
-                route.effective_model.as_deref(),
-            );
         }
         let attribution = UsageAttribution::from_route(&route);
         let usage = if matches!(

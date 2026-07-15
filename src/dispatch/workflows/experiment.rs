@@ -107,6 +107,7 @@ pub(crate) fn experiment(
     } else {
         None
     };
+    record_route_attempt(ledger, &route);
     let result = match run_backend(
         &route.effective_backend,
         profile,
@@ -140,12 +141,6 @@ pub(crate) fn experiment(
         result.exit_code, result.duration_secs, result.log_path
     );
     ledger.backend_exit_code = Some(result.exit_code);
-    record_route_attempt(
-        ledger,
-        &route.effective_backend,
-        route.effective_model.as_deref(),
-    );
-
     let backend_summary = runner::output::publishable_summary(
         result.final_summary.as_deref(),
         ledger.target_summary.as_deref(),

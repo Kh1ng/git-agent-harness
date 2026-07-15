@@ -115,7 +115,7 @@ pub(super) fn auto_candidates(
             });
         }
     }
-    extend_remaining_candidates(routing, &mut candidates, mode, primary.model.clone());
+    extend_default_backend_candidates(routing, &mut candidates, mode);
     dedupe_candidates(candidates)
 }
 
@@ -128,31 +128,31 @@ pub(super) fn explicit_candidates(
     allow_impl_fallback: bool,
 ) -> Vec<RouteCandidate> {
     let mut candidates = vec![primary.clone()];
-    if mode == "review" && allow_review_fallback {
-        // An explicit review request is still a request for a *reviewer*, not
-        // permission to fall through to an arbitrary implementation backend.
-        // When the requested reviewer belongs to the declared review pool,
-        // preserve the remainder of that ordered pool.  This matters for an
-        // escalated review: Claude -> GLM must not fall back to AGY again and
-        // silently lose the intended second opinion.
-        let configured_remainder = routing.review_candidates.as_ref().and_then(|configured| {
-            configured
-                .iter()
-                .position(|candidate| {
-                    candidate.backend == primary.backend
-                        && (candidate.model.is_none()
-                            || primary.model.is_none()
-                            || candidate.model == primary.model)
-                })
-                .map(|position| route_candidates(&configured[position + 1..]))
-        });
-        if let Some(remainder) = configured_remainder {
-            candidates.extend(remainder);
-        } else {
+    let fallback_allowed = if mode == "review" {
+        allow_review_fallback
+    } else {
+        allow_impl_fallback
+    };
+    if fallback_allowed {
+        // Candidate identity is a backend/model pair. If the explicit route
+        // belongs to the configured pool, continue with only the remainder of
+        // that ordered pool. For an ad-hoc explicit route, fall back to the
+        // complete configured pool. Never copy the explicit model onto a
+        // different runner: that was the source of codex aliases reaching
+        // OpenHands/Claude and being reported as exit-0 no-progress.
+        if let Some(configured) = policy_candidates(routing, mode) {
+            if let Some(position) = configured.iter().position(|candidate| {
+                candidate.backend == primary.backend && candidate.model == primary.model
+            }) {
+                candidates.extend(configured.into_iter().skip(position + 1));
+            } else {
+                candidates.extend(configured);
+            }
+        }
+
+        if mode == "review" {
             if let Some(weak_backend) = review_fallback_backend {
-                let weak_model = review_fallback_model(routing)
-                    .map(str::to_string)
-                    .or_else(|| primary.model.clone());
+                let weak_model = review_fallback_model(routing).map(str::to_string);
                 let quota_pool =
                     routing.find_quota_pool(mode, &weak_backend, weak_model.as_deref());
                 candidates.push(RouteCandidate {
@@ -168,30 +168,21 @@ pub(super) fn explicit_candidates(
                     original_order: candidates.len(),
                 });
             }
-            // Ad-hoc explicit reviewers retain the legacy generic fallback.
-            // A reviewer that matched the configured ordered pool must stop
-            // at the end of that pool; appending arbitrary backends here can
-            // launch an incompatible model name on the wrong CLI and can
-            // bypass a paid-route approval failure.
-            extend_remaining_candidates(routing, &mut candidates, mode, primary.model.clone());
         }
-    } else if mode != "review" && allow_impl_fallback {
-        extend_remaining_candidates(routing, &mut candidates, mode, primary.model.clone());
     }
     dedupe_candidates(candidates)
 }
 
-fn extend_remaining_candidates(
+fn extend_default_backend_candidates(
     routing: &RoutingPolicy,
     candidates: &mut Vec<RouteCandidate>,
     mode: &str,
-    model: Option<String>,
 ) {
     for backend in mode_backend_preference(mode) {
-        let quota_pool = routing.find_quota_pool(mode, backend, model.as_deref());
+        let quota_pool = routing.find_quota_pool(mode, backend, None);
         candidates.push(RouteCandidate {
             backend: backend.to_string(),
-            model: model.clone(),
+            model: None,
             quota_pool,
             priority: 0,
             included_in_quota: false,

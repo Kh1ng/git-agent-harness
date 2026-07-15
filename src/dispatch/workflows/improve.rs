@@ -391,6 +391,7 @@ pub(crate) fn improve(
         } else {
             None
         };
+        record_route_attempt(ledger, &route);
         let result = run_backend_with_reserved_route(
             &route.effective_backend,
             profile,
@@ -437,12 +438,6 @@ pub(crate) fn improve(
         // of what that code was — "completed" tracks whether the attempt
         // got a fair shot, not whether it succeeded.
         ledger.attempts_completed = Some(ledger.attempts_completed.unwrap_or(0) + 1);
-        record_route_attempt(
-            ledger,
-            &route.effective_backend,
-            route.effective_model.as_deref(),
-        );
-
         println!(
             "Backend finished: exit={} duration={:.0}s log={}",
             result.exit_code, result.duration_secs, result.log_path

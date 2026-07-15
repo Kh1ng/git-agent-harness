@@ -125,6 +125,18 @@ pub struct AttemptRecord {
     pub usage: LedgerUsage,
 }
 
+/// Route selected for one launched attempt inside a dispatch. Unlike the
+/// top-level routing fields, this list preserves earlier route decisions and
+/// their skip diagnostics when a later retry changes backend.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
+pub struct AttemptRoutingRecord {
+    pub attempt_number: u32,
+    pub backend_instance: String,
+    pub effective_model: Option<String>,
+    #[serde(default)]
+    pub routing_diagnostics: Option<RoutingDiagnostics>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
@@ -359,6 +371,8 @@ pub struct LedgerEntry {
     pub attempts_completed: Option<u32>,
     #[serde(default)]
     pub attempts: Vec<AttemptRecord>,
+    #[serde(default)]
+    pub attempt_routing: Vec<AttemptRoutingRecord>,
     /// Live routing state for the current dispatch only.
     #[serde(skip, default)]
     pub routing_runtime: RoutingRuntimeState,
@@ -457,6 +471,7 @@ impl LedgerEntry {
             attempts_started: Some(0),
             attempts_completed: Some(0),
             attempts: Vec::new(),
+            attempt_routing: Vec::new(),
             routing_runtime: RoutingRuntimeState::default(),
             dispatch_reason: None,
             context_phase: None,
@@ -545,6 +560,7 @@ impl LedgerEntry {
             attempts_started: Some(0),
             attempts_completed: Some(0),
             attempts: Vec::new(),
+            attempt_routing: Vec::new(),
             routing_runtime: RoutingRuntimeState::default(),
             dispatch_reason: None,
             context_phase: None,

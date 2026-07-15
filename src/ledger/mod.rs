@@ -3,7 +3,7 @@ mod jsonl;
 
 #[allow(unused_imports)]
 pub use self::entry::{
-    AttemptRecord, FailureClass, FailureStage, LedgerEntry, LedgerUsage,
+    AttemptRecord, AttemptRoutingRecord, FailureClass, FailureStage, LedgerEntry, LedgerUsage,
     RoutingCandidateDiagnostic, RoutingDiagnostics, LEDGER_SCHEMA_VERSION,
 };
 #[allow(unused_imports)]

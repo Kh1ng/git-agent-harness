@@ -169,7 +169,7 @@ where
         evaluation,
         backend_available,
     )?;
-    if let Some(model) = auto_model_override {
+    if let Some(model) = auto_model_override.filter(|_| !decision.fallback_used) {
         // The requested model may not match any configured candidate at all
         // (an ad-hoc override unrelated to the routing config) -- that's
         // fine, nothing gates it. But if it DOES match a configured
