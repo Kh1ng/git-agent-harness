@@ -528,7 +528,7 @@ fn gitlab_status_reports_only_open_merge_requests() {
             title: format!("Draft: TICKET-{iid} open"),
             branch: format!("gah/open-{iid}"),
             labels: vec![],
-            pipeline_status: None,
+            pipeline_status: Some("success".into()),
             url: None,
             iid: Some(iid),
             draft: Some(true),

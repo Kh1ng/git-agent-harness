@@ -264,18 +264,14 @@ fn gitlab_mr_valid_response_returns_id_and_url() {
 #[test]
 fn gitlab_review_target_errors_loudly_on_api_error_response() {
     let _exec_guard = crate::test_support::ExecGuard::new();
-    // Regression: a live review dispatch crashed several layers downstream
-    // with "invalid refspec ':refs/remotes/origin/'" because an empty/
-    // invalid PRIVATE-TOKEN (missing GITLAB_PAT env var -- profile.pat()
-    // reads the real process environment, not a loaded-but-unexported
-    // env file) got a 200-shaped GitLab error body back, and the old
-    // code silently defaulted source_branch/target_branch to "".
+    // Even a successful provider process must fail closed when its body is
+    // not an MR. This protects the fetch refspec from empty branch fields.
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     make_fake_bin(
         &bin_dir,
-        "curl",
+        "glab",
         "#!/bin/sh\necho '{\"message\":\"404 Project Not Found\"}'\nexit 0\n",
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
@@ -283,6 +279,32 @@ fn gitlab_review_target_errors_loudly_on_api_error_response() {
     let err = find_review_target_by_mr(&gitlab_profile(), "235").unwrap_err();
 
     assert!(format!("{:#}", err).contains("did not return a merge request"));
+}
+
+#[test]
+fn gitlab_review_target_uses_authenticated_glab_session_and_surfaces_api_failure() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let args_path = bin_dir.join("glab-args.txt");
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho '401 Unauthorized' >&2\nexit 1\n",
+            args_path.display()
+        ),
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let err = find_review_target_by_mr(&gitlab_profile(), "235").unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("401 Unauthorized"));
+    let args = fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("--hostname\ngitlab.example.com"));
+    assert!(!args.contains("PRIVATE-TOKEN"));
 }
 
 #[test]
@@ -422,16 +444,10 @@ fn merge_mr_gitlab_un_drafts_then_merges() {
     fs::create_dir_all(&bin_dir).unwrap();
     make_fake_bin(
         &bin_dir,
-        "curl",
-        r#"#!/bin/sh
-printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main"}]\n'
-"#,
-    );
-    make_fake_bin(
-        &bin_dir,
         "glab",
         r#"#!/bin/sh
 case "$1 $2" in
+  "api projects/42/merge_requests") printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main"}]\n' ;;
   "mr update") exit 0 ;;
   "mr merge") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
   *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;
@@ -456,16 +472,10 @@ fn mark_ready_for_review_gitlab_un_drafts_only() {
     fs::create_dir_all(&bin_dir).unwrap();
     make_fake_bin(
         &bin_dir,
-        "curl",
-        r#"#!/bin/sh
-printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main"}]\n'
-"#,
-    );
-    make_fake_bin(
-        &bin_dir,
         "glab",
         r#"#!/bin/sh
 case "$1 $2" in
+  "api projects/42/merge_requests") printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main"}]\n' ;;
   "mr update") echo "$@" > "${0%/*}/ready_call.txt"; exit 0 ;;
   *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;
 esac
@@ -579,16 +589,17 @@ fn gitlab_review_state_adds_desired_and_removes_stale_labels() {
     fs::create_dir_all(&bin_dir).unwrap();
     make_fake_bin(
         &bin_dir,
-        "curl",
+        "glab",
         r#"#!/bin/sh
-case "$*" in
-  *"merge_requests?state=opened"*)
+case "$1 $2" in
+  "api projects/42/merge_requests")
     printf '[{"iid":7,"web_url":"https://gitlab.example/x/7","source_branch":"gah/test","target_branch":"main"}]\n'
     ;;
-  *)
+  "api projects/42/merge_requests/7")
     echo "$@" > "${0%/*}/label_call.txt"
     printf '{}\n'
     ;;
+  *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;
 esac
 "#,
     );
@@ -602,6 +613,7 @@ esac
     assert!(call.contains("gah-review-escalating"));
     assert!(call.contains("remove_labels"));
     assert!(call.contains("gah-needs-fix"));
+    assert!(!call.contains("PRIVATE-TOKEN"));
 }
 
 #[test]
