@@ -28,6 +28,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             duration_seconds REAL,
             failure_class TEXT,
             total_tokens INTEGER,
+            human_required_reason_code TEXT,
             actual_cost_usd REAL,
             estimated_cost_usd REAL,
             raw_json TEXT NOT NULL
@@ -42,7 +43,31 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_ledger_entries_work_id
             ON ledger_entries(work_id);",
     )?;
+    ensure_human_required_reason_code_column(conn)?;
     Ok(())
+}
+
+fn ensure_human_required_reason_code_column(conn: &Connection) -> Result<()> {
+    if !has_column(conn, "ledger_entries", "human_required_reason_code")? {
+        conn.execute(
+            "ALTER TABLE ledger_entries ADD COLUMN human_required_reason_code TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn load_sync_state(conn: &Connection) -> Result<Option<(u64, u64)>> {
@@ -169,8 +194,8 @@ fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
             timestamp, profile, work_id, mode, backend, effective_backend,
             effective_model, requested_model, validation_result, review_verdict,
             human_required, duration_seconds, failure_class, total_tokens,
-            actual_cost_usd, estimated_cost_usd, raw_json
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            human_required_reason_code, actual_cost_usd, estimated_cost_usd, raw_json
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
         params![
             entry.timestamp,
             entry.profile,
@@ -186,6 +211,7 @@ fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
             entry.duration_seconds,
             entry.failure_class,
             entry.usage.total_tokens.map(|v| v as i64),
+            entry.human_required_reason_code,
             entry.usage.actual_cost_usd,
             entry.usage.estimated_cost_usd,
             raw_json,

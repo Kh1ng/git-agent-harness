@@ -3,7 +3,7 @@
 //! No LLM, no I/O, no provider/backend/systemd execution -- see
 //! `controller::runtime` for everything that actually executes an action.
 
-use super::NextAction;
+use super::{HumanRequiredReason, NextAction};
 use crate::status::StatusSnapshot;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -98,6 +98,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 .clone()
                 .unwrap_or_else(|| blocker.kind.clone()),
             reference: blocker.source_reference.clone(),
+            reason_code: Some(HumanRequiredReason::ConfigurationInfra.as_str().to_string()),
         };
     }
 
@@ -114,7 +115,8 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut ready_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut fix_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     let mut merge_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
-    let mut human_blocked_mrs: Vec<&crate::sync::SyncMrJson> = Vec::new();
+    // Track human-blocked MRs along with their specific reason code
+    let mut human_blocked_mrs: Vec<(&crate::sync::SyncMrJson, HumanRequiredReason)> = Vec::new();
     // A final review handoff is recorded against a work item in the ledger.
     // The provider label deliberately still classifies the MR as NEEDS_REVIEW
     // so provisional escalations can continue, but a *final* ledger handoff
@@ -138,7 +140,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     .as_deref()
                     .is_some_and(|work_id| final_review_holds.contains(work_id))
                 {
-                    human_blocked_mrs.push(mr);
+                    human_blocked_mrs.push((mr, HumanRequiredReason::ReviewEvidenceGate));
                 } else {
                     review_candidates.push(mr);
                 }
@@ -151,7 +153,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     .unwrap_or(0);
                 if fix_attempts >= snapshot.profile.max_fix_attempts_per_mr as usize {
                     // Exhausted fix attempts -> work-item block, not a profile freeze.
-                    human_blocked_mrs.push(mr);
+                    human_blocked_mrs.push((mr, HumanRequiredReason::FixRetryCapExceeded));
                 } else {
                     fix_candidates.push(mr);
                 }
@@ -180,14 +182,15 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                         if merge_attempts < AUTO_RETRY_CAP {
                             merge_candidates.push(mr);
                         } else {
-                            human_blocked_mrs.push(mr);
+                            human_blocked_mrs
+                                .push((mr, HumanRequiredReason::MergeRetryCapExceeded));
                         }
                     }
                 } else if merge_policy == crate::config::MergePolicy::StopForHuman {
                     // TICKET-127: under stop_for_human, a READY_FOR_HUMAN
                     // MR without CI passed still defers to the human
                     // immediately — no CI gate needed.
-                    human_blocked_mrs.push(mr);
+                    human_blocked_mrs.push((mr, HumanRequiredReason::MergePolicy));
                 } else if mr.ci_pending {
                     // Issue #156: CI is non-terminal / unknown (running,
                     // pending, or no pipeline reported yet — GitLab's
@@ -200,7 +203,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 } else {
                     // CI conclusively failed (or is otherwise not pending):
                     // re-check later (no_op fallback).
-                    human_blocked_mrs.push(mr);
+                    human_blocked_mrs.push((mr, HumanRequiredReason::MergePolicy));
                 }
             }
             _ => {}
@@ -239,6 +242,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     mr.branch
                 ),
                 reference: mr.url.clone(),
+                reason_code: Some(HumanRequiredReason::MergePolicy.as_str().to_string()),
             };
         }
         // TICKET-128: a restricted profile (allow_pull_request_creation
@@ -253,6 +257,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     mr.branch
                 ),
                 reference: mr.url.clone(),
+                reason_code: Some(HumanRequiredReason::PublishingRestriction.as_str().to_string()),
             };
         }
         return NextAction::MergeMr {
@@ -306,13 +311,14 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         && fix_candidates.is_empty()
         && snapshot.profile.merge_policy == crate::config::MergePolicy::StopForHuman
     {
-        let mr = human_blocked_mrs[0];
+        let (mr, reason_code) = human_blocked_mrs[0];
         return NextAction::HumanRequired {
             reason: format!(
                 "MR on branch '{}' classified {} (human decision required)",
                 mr.branch, mr.classification
             ),
             reference: mr.url.clone(),
+            reason_code: Some(reason_code.as_str().to_string()),
         };
     }
 
@@ -378,6 +384,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     .work_id
                     .clone()
                     .or_else(|| Some(first_exhausted.ticket_path.clone())),
+                reason_code: Some(HumanRequiredReason::RetryBudgetExhausted.as_str().to_string()),
             };
         }
     }

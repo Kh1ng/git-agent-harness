@@ -109,6 +109,8 @@ export interface Blocker {
   model?: string | null;
   until?: string | null;
   source_reference?: string | null;
+  /** TICKET-505: stable reason code for HumanRequired blockers. */
+  reason_code?: string | null;
 }
 
 export interface StatusError {
@@ -159,10 +161,12 @@ export interface AvailableTicket {
   recommended_backend: string | null;
   recommended_model: string | null;
   prior_attempt_count: number;
+  genuine_agent_failure_count: number;
   last_failure_class: string | null;
   has_active_mr: boolean;
   has_active_claim: boolean;
   human_required: boolean;
+  human_required_reason_code?: string | null;
 }
 
 export interface ActiveClaim {
@@ -391,8 +395,21 @@ export interface ControllerEvent {
   profile: string | null;
   work_id: string | null;
   run_id?: string | null;
+  reason_code?: string | null;
   details: string;
 }
+
+// TICKET-505: HumanRequired reason codes
+export type HumanRequiredReasonCode =
+  | 'policy_approval'
+  | 'retry_budget_exhausted'
+  | 'review_evidence_gate'
+  | 'merge_policy'
+  | 'publishing_restriction'
+  | 'configuration_infra'
+  | 'fix_retry_cap_exceeded'
+  | 'merge_retry_cap_exceeded'
+  | 'unknown';
 
 export type ControllerActivityStatus = 'running' | 'finished' | 'failed';
 
@@ -473,6 +490,7 @@ export interface LedgerEntry {
   fallback_used: boolean;
   confidence_impact: string | null;
   human_required: boolean;
+  human_required_reason_code?: string | null;
   routing_diagnostics?: RoutingDiagnostics | null;
   mode: string;
   target_summary: string | null;

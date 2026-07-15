@@ -602,6 +602,7 @@ mod telemetry_tests {
             fallback_used: false,
             confidence_impact: None,
             human_required: false,
+            human_required_reason_code: None,
             routing_diagnostics: None,
             mode: "fix".to_string(),
             target_summary: Some("test target".to_string()),

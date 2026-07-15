@@ -29,6 +29,13 @@ pub struct AvailableTicket {
     /// `human_required`). Scoped to this ticket only; it does NOT block the
     /// profile. `None` work items (no work_id) are treated as not blocked.
     pub human_required: bool,
+    /// Work-item-scoped reason for `human_required`, when available.
+    /// `review_evidence_gate` covers review verdict gates, while
+    /// `policy_approval` covers paid-route approval and similar policy
+    /// blocks. Unknown or synthetic reasons are represented as
+    /// `human_required` for backward compatibility.
+    #[serde(default)]
+    pub human_required_reason_code: Option<String>,
     /// Parallel workers: another concurrent `gah loop`/`gah dispatch`
     /// process claimed this work_id recently and hasn't finished (or been
     /// abandoned long enough to ignore) it yet. Excluded from selection

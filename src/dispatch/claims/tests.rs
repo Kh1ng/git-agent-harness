@@ -148,6 +148,7 @@ fn human_required_is_not_cleared_by_a_later_non_review_entry() {
     let mut exhausted = LedgerEntry::new("test", &prof, "claude", "review", "x", None, None);
     exhausted.work_id = Some("TICKET-300".into());
     exhausted.human_required = true;
+    exhausted.human_required_reason_code = Some("review_evidence_gate".into());
     crate::ledger::append(&cfg, &exhausted).unwrap();
 
     // A racing worker's unrelated fix dispatch completes afterward with a
@@ -167,6 +168,11 @@ fn human_required_is_not_cleared_by_a_later_non_review_entry() {
     assert!(
         candidates[0].human_required,
         "a later non-review entry must not clear a human_required hold"
+    );
+    assert_eq!(
+        candidates[0].human_required_reason_code.as_deref(),
+        Some("review_evidence_gate"),
+        "the durable reason must follow the latched work-item hold"
     );
 }
 

@@ -70,6 +70,9 @@ pub enum NextAction {
         reason: String,
         #[serde(default)]
         reference: Option<String>,
+        /// TICKET-505: stable reason code for why autonomy stopped.
+        #[serde(default)]
+        reason_code: Option<String>,
     },
     NoOp {
         reason: String,
@@ -120,6 +123,15 @@ impl NextAction {
             Self::DispatchTicket { work_id, .. } => work_id.as_deref(),
             Self::Retry { work_id, .. } | Self::Escalate { work_id, .. } => Some(work_id),
             Self::WaitUntil { .. } | Self::HumanRequired { .. } | Self::NoOp { .. } => None,
+        }
+    }
+
+    /// TICKET-505: Returns the stable reason code for HumanRequired actions.
+    /// Returns None for non-HumanRequired actions.
+    pub fn human_required_reason_code(&self) -> Option<&str> {
+        match self {
+            Self::HumanRequired { reason_code, .. } => reason_code.as_deref(),
+            _ => None,
         }
     }
 }
@@ -203,7 +215,19 @@ mod tests {
         let human = NextAction::HumanRequired {
             reason: "MR ready for human decision".into(),
             reference: Some("https://example/pull/2".into()),
+            reason_code: Some("merge_policy".into()),
         };
         assert_eq!(human.work_id(), None);
+        assert_eq!(human.human_required_reason_code(), Some("merge_policy"));
+    }
+
+    #[test]
+    fn human_required_without_reason_code() {
+        let human = NextAction::HumanRequired {
+            reason: "MR ready for human decision".into(),
+            reference: Some("https://example/pull/2".into()),
+            reason_code: None,
+        };
+        assert_eq!(human.human_required_reason_code(), None);
     }
 }

@@ -253,6 +253,12 @@ pub struct LedgerEntry {
     pub fallback_used: bool,
     pub confidence_impact: Option<String>,
     pub human_required: bool,
+    /// Work-item-specific reason for `human_required` when the hold is known.
+    /// This intentionally remains optional so historical and opportunistically
+    /// produced entries do not infer a reason they never observed.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub human_required_reason_code: Option<String>,
     #[serde(default)]
     pub routing_diagnostics: Option<RoutingDiagnostics>,
     pub mode: String,
@@ -404,6 +410,7 @@ impl LedgerEntry {
             fallback_used: false,
             confidence_impact: None,
             human_required: false,
+            human_required_reason_code: None,
             routing_diagnostics: None,
             mode: mode.to_string(),
             target_summary: summarize_target(target),
@@ -490,6 +497,7 @@ impl LedgerEntry {
             fallback_used: false,
             confidence_impact: None,
             human_required: false,
+            human_required_reason_code: None,
             routing_diagnostics: None,
             mode: "clear_attempts".to_string(),
             target_summary: None,

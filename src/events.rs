@@ -83,6 +83,8 @@ pub struct ControllerEvent {
     pub run_id: Option<String>,
     #[serde(default)]
     pub details: String,
+    #[serde(default)]
+    pub reason_code: Option<String>,
 }
 
 pub fn append(cfg: &GahConfig, event: &ControllerEvent) -> Result<()> {
@@ -123,7 +125,7 @@ pub fn record(
     work_id: Option<&str>,
     details: impl Into<String>,
 ) -> Result<()> {
-    record_with_run_id(cfg, event_type, profile, work_id, None, details)
+    record_with_run_id_and_reason_code(cfg, event_type, profile, work_id, None, details, None)
 }
 
 pub fn record_with_run_id(
@@ -133,6 +135,37 @@ pub fn record_with_run_id(
     work_id: Option<&str>,
     run_id: Option<&str>,
     details: impl Into<String>,
+) -> Result<()> {
+    record_with_run_id_and_reason_code(cfg, event_type, profile, work_id, run_id, details, None)
+}
+
+pub fn record_with_reason_code(
+    cfg: &GahConfig,
+    event_type: EventType,
+    profile: Option<&str>,
+    work_id: Option<&str>,
+    details: impl Into<String>,
+    reason_code: Option<&str>,
+) -> Result<()> {
+    record_with_run_id_and_reason_code(
+        cfg,
+        event_type,
+        profile,
+        work_id,
+        None,
+        details,
+        reason_code,
+    )
+}
+
+pub fn record_with_run_id_and_reason_code(
+    cfg: &GahConfig,
+    event_type: EventType,
+    profile: Option<&str>,
+    work_id: Option<&str>,
+    run_id: Option<&str>,
+    details: impl Into<String>,
+    reason_code: Option<&str>,
 ) -> Result<()> {
     append(
         cfg,
@@ -145,6 +178,7 @@ pub fn record_with_run_id(
             work_id: work_id.map(str::to_string),
             run_id: run_id.map(str::to_string),
             details: details.into(),
+            reason_code: reason_code.map(str::to_string),
         },
     )
 }
@@ -366,6 +400,7 @@ mod tests {
             profile: None,
             work_id: None,
             run_id: None,
+            reason_code: None,
             details: String::new(),
         };
         append(&cfg, &event).unwrap();
