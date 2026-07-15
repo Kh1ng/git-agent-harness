@@ -62,11 +62,13 @@ fn latest_from_entries(
                         .as_deref()
                         .is_some_and(|id| aliases.iter().any(|alias| alias == id))
                 })
-                && entry
-                    .review_verdict
-                    .as_deref()
-                    .or(entry.validation_result.as_deref())
-                    .is_some()
+                && matches!(
+                    entry
+                        .review_verdict
+                        .as_deref()
+                        .or(entry.validation_result.as_deref()),
+                    Some("APPROVE" | "NEEDS_FIX" | "REJECT" | "HUMAN_REVIEW")
+                )
         })
         .max_by_key(|entry| entry.timestamp.as_str())
         .with_context(|| {
@@ -246,6 +248,22 @@ mod tests {
         let err = latest_from_entries(&[older, approved], "gah", "repo", "gah/fix", Some("#493"))
             .unwrap_err();
         assert!(err.to_string().contains("not NEEDS_FIX/REJECT"));
+    }
+
+    #[test]
+    fn capacity_deferral_does_not_supersede_latest_repair_opinion() {
+        let repair = review_entry("gah/fix", "#493", "2026-01-01T00:00:00Z");
+        let mut deferred = review_entry("gah/fix", "#493", "2026-01-02T00:00:00Z");
+        deferred.review_verdict = None;
+        deferred.validation_result = Some("deferred_capacity".to_string());
+        deferred.review_source_sha = None;
+        deferred.review_blocking_findings.clear();
+
+        let selected =
+            latest_from_entries(&[repair, deferred], "gah", "repo", "gah/fix", Some("#493"))
+                .unwrap();
+        assert_eq!(selected.verdict, "NEEDS_FIX");
+        assert_eq!(selected.blocking_findings, ["src/lib.rs: fix retry"]);
     }
 
     #[test]
