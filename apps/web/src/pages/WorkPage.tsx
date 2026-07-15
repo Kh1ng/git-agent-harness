@@ -209,7 +209,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
               <thead>
                 <tr>
                   <th>Work ID</th>
-                  <th>PID / Scope</th>
+                  <th>Owner PID / Scope</th>
                   <th>Hostname</th>
                   <th>Claim age</th>
                 </tr>
