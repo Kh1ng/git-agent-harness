@@ -71,6 +71,45 @@ fn codex_stale_args_do_not_override_resolved_model() {
 }
 
 #[test]
+fn explicit_cross_mode_route_preserves_configured_usage_class() {
+    let tmp = TempDir::new().unwrap();
+    let defaults = defaults();
+    let mut profile = profile();
+    let mut hy3 = candidate_config("opencode", Some("opencode/hy3-free"), None);
+    hy3.included_in_quota = true;
+    profile.routing.improve_candidates = Some(vec![hy3]);
+
+    let decision = decide_with(
+        &defaults,
+        &profile,
+        RouteRequest {
+            mode: "review",
+            requested_backend: "opencode",
+            requested_model: Some("opencode/hy3-free"),
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: None,
+            usage_summary: None,
+            last_failure_class: None,
+        },
+        &path(&tmp),
+        OffsetDateTime::now_utc(),
+        backend_available,
+    )
+    .unwrap();
+
+    assert_eq!(decision.effective_backend, "opencode");
+    assert_eq!(
+        decision
+            .routing_diagnostics
+            .unwrap()
+            .selected_cost_class
+            .as_deref(),
+        Some("included_quota")
+    );
+}
+
+#[test]
 fn auto_backend_honors_cli_model_override_in_effective_identity() {
     let tmp = TempDir::new().unwrap();
     let defaults = defaults();

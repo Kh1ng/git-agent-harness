@@ -518,6 +518,55 @@ fn route_candidates(raw: &[crate::config::CandidateConfig]) -> Vec<RouteCandidat
         .collect()
 }
 
+/// Recover the billing/quota metadata for an explicitly selected backend/model.
+///
+/// Billing identity does not change with dispatch mode. A model configured as
+/// subscription-backed for implementation is still subscription-backed when an
+/// operator directly dogfoods it as a reviewer. Prefer the current mode's
+/// declaration, then search the remaining configured pools. This keeps direct
+/// CLI dispatches from silently degrading to `standard`/unknown attribution.
+pub(super) fn configured_route_candidate(
+    routing: &RoutingPolicy,
+    mode: &str,
+    backend: &str,
+    model: Option<&str>,
+) -> Option<RouteCandidate> {
+    let matches = |candidate: &&crate::config::CandidateConfig| {
+        candidate.backend == backend && candidate.model.as_deref() == model
+    };
+    let mode_candidates = match mode {
+        "pm" => routing.pm_candidates.as_deref(),
+        "review" => routing.review_candidates.as_deref(),
+        "improve" | "fix" | "experiment" => routing.improve_candidates.as_deref(),
+        _ => None,
+    };
+
+    let configured = mode_candidates
+        .into_iter()
+        .flatten()
+        .find(matches)
+        .or_else(|| {
+            routing
+                .pm_candidates
+                .iter()
+                .chain(routing.improve_candidates.iter())
+                .chain(routing.review_candidates.iter())
+                .flat_map(|candidates| candidates.iter())
+                .find(matches)
+        })
+        .or_else(|| routing.routine_reviewer.iter().find(matches))
+        .or_else(|| routing.escalatory_reviewers.iter().find(matches))
+        .or_else(|| {
+            routing
+                .task_routing_rules
+                .iter()
+                .flat_map(|rule| rule.candidates.iter())
+                .find(matches)
+        })?;
+
+    route_candidates(std::slice::from_ref(configured)).pop()
+}
+
 impl RouteCandidate {
     fn has_cost_policy(&self) -> bool {
         self.priority != 0

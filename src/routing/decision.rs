@@ -3,9 +3,9 @@
 use super::diagnostics::build_routing_diagnostics;
 use super::policy::{
     any_available_backend, append_reorder_reason, auto_candidates, builtin_backend,
-    configured_route_requires_approval, explicit_candidates, is_genuine_agent_failure,
-    order_candidates, policy_backend_model, policy_candidates, review_fallback_backend,
-    review_fallback_model, task_rule_candidates, RouteCandidate,
+    configured_route_candidate, configured_route_requires_approval, explicit_candidates,
+    is_genuine_agent_failure, order_candidates, policy_backend_model, policy_candidates,
+    review_fallback_backend, review_fallback_model, task_rule_candidates, RouteCandidate,
 };
 use super::reservation::max_concurrent_skip;
 use super::types::{
@@ -508,18 +508,20 @@ where
         }
     }
 
-    let primary = RouteCandidate {
-        backend: backend.clone(),
-        model: model.clone(),
-        quota_pool: effective_routing.find_quota_pool(req.mode, &backend, model.as_deref()),
-        priority: 0,
-        included_in_quota: false,
-        marginal_cost_usd: None,
-        quota_usage_percent: None,
-        quota_days_remaining: None,
-        requires_approval: false,
-        original_order: 0,
-    };
+    let primary =
+        configured_route_candidate(&effective_routing, req.mode, &backend, model.as_deref())
+            .unwrap_or(RouteCandidate {
+                backend: backend.clone(),
+                model: model.clone(),
+                quota_pool: None,
+                priority: 0,
+                included_in_quota: false,
+                marginal_cost_usd: None,
+                quota_usage_percent: None,
+                quota_days_remaining: None,
+                requires_approval: false,
+                original_order: 0,
+            });
     let candidates = auto_candidates(&effective_routing, req.mode, &primary);
     let candidates_for_diagnostics = candidates.clone();
     let (selected, skipped) = pick_route_candidate(
@@ -593,14 +595,16 @@ where
         None
     };
 
-    let primary = RouteCandidate {
+    let primary = configured_route_candidate(
+        effective_routing,
+        req.mode,
+        &requested_backend,
+        requested_model.as_deref(),
+    )
+    .unwrap_or(RouteCandidate {
         backend: requested_backend.clone(),
         model: requested_model.clone(),
-        quota_pool: effective_routing.find_quota_pool(
-            req.mode,
-            &requested_backend,
-            requested_model.as_deref(),
-        ),
+        quota_pool: None,
         priority: 0,
         included_in_quota: false,
         marginal_cost_usd: None,
@@ -613,7 +617,7 @@ where
             requested_model.as_deref(),
         ),
         original_order: 0,
-    };
+    });
     let candidates = explicit_candidates(
         effective_routing,
         req.mode,
