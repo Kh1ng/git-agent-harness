@@ -511,7 +511,12 @@ pub(crate) fn improve(
                 && log_text.contains("(stalled, not just slow).");
             let semantic_no_progress = stalled
                 && log_text.contains("with no new worktree progress (stalled, not just slow).");
-            let failure_class = if semantic_no_progress {
+            let cleanup_failed = result.exit_code
+                == crate::runner::process::PROCESS_CLEANUP_FAILED_EXIT_CODE
+                || log_text.contains("GAH: harness process cleanup failed:");
+            let failure_class = if cleanup_failed {
+                crate::ledger::FailureClass::HarnessError
+            } else if semantic_no_progress {
                 crate::ledger::FailureClass::AgentNoProgress
             } else if stalled {
                 crate::ledger::FailureClass::HarnessError
@@ -519,7 +524,10 @@ pub(crate) fn improve(
                 crate::ledger::FailureClass::BackendError
             };
             ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
-            if stalled {
+            if cleanup_failed {
+                ledger.validation_result = Some("not_run_process_cleanup_failed".into());
+                ledger.error_summary = Some("backend descendant cleanup failed".into());
+            } else if stalled {
                 ledger.validation_result = Some("not_run_backend_stalled".into());
             }
             ledger.attempts.push(crate::ledger::AttemptRecord {
@@ -527,7 +535,9 @@ pub(crate) fn improve(
                 backend: route.effective_backend.clone(),
                 effective_model: Some(llm.model.clone()),
                 exit_code: Some(result.exit_code),
-                validation_result: stalled.then(|| "not_run_backend_stalled".into()),
+                validation_result: cleanup_failed
+                    .then(|| "not_run_process_cleanup_failed".into())
+                    .or_else(|| stalled.then(|| "not_run_backend_stalled".into())),
                 failure_class: Some(failure_class.as_str().into()),
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
@@ -552,6 +562,19 @@ pub(crate) fn improve(
                         duration_seconds: result.duration_secs,
                     },
                 );
+            }
+            if cleanup_failed {
+                worktree::preserve_wip(
+                    &wt,
+                    &profile.default_target_branch,
+                    &format!(
+                        "gah: WIP cleanup-failed {} attempt {}",
+                        args.mode,
+                        attempt + 1
+                    ),
+                )?;
+                worktree::cleanup(&wt, repo);
+                anyhow::bail!("backend descendant cleanup failed; refusing to retry");
             }
             if semantic_no_progress {
                 worktree::preserve_wip(

@@ -389,6 +389,16 @@ pub(in crate::dispatch) fn review(
                 ),
                 Some(crate::ledger::FailureStage::Review.as_str().to_string()),
             ),
+            runner::ReviewProcessOutcome::CleanupFailure(_) => (
+                Some(crate::runner::process::PROCESS_CLEANUP_FAILED_EXIT_CODE),
+                Some("not_run_process_cleanup_failed".to_string()),
+                Some(
+                    crate::ledger::FailureClass::HarnessError
+                        .as_str()
+                        .to_string(),
+                ),
+                Some(crate::ledger::FailureStage::Review.as_str().to_string()),
+            ),
             runner::ReviewProcessOutcome::IdleTimeout => (
                 None,
                 Some("not_run_idle_timeout".to_string()),
@@ -713,6 +723,19 @@ pub(in crate::dispatch) fn review(
                 "shutdown requested while {} was running",
                 route.effective_backend
             )
+        }
+        runner::ReviewProcessOutcome::CleanupFailure(error) => {
+            ledger.set_failure(
+                crate::ledger::FailureClass::HarnessError,
+                crate::ledger::FailureStage::Review,
+            );
+            ledger.backend_exit_code =
+                Some(crate::runner::process::PROCESS_CLEANUP_FAILED_EXIT_CODE);
+            ledger.validation_result = Some("not_run_process_cleanup_failed".into());
+            ledger.error_summary = Some(error.clone());
+            println!("Review backend descendant cleanup failed: {error}");
+            println!("Review bundle written to: {}", bundle.display());
+            anyhow::bail!("review backend descendant cleanup failed: {error}")
         }
         runner::ReviewProcessOutcome::IdleTimeout => {
             ledger.set_failure(

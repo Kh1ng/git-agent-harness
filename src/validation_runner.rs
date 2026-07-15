@@ -133,7 +133,7 @@ fn run_shell_command_with_shutdown(
             break status;
         }
         if started.elapsed() >= timeout {
-            crate::runner::kill_process_group(&mut child);
+            let cleanup_error = crate::runner::kill_process_group(&mut child);
             let _ = child.wait();
             let _ = stdout_reader
                 .join()
@@ -141,6 +141,9 @@ fn run_shell_command_with_shutdown(
             let _ = stderr_reader
                 .join()
                 .map_err(|_| anyhow::anyhow!("validation stderr reader panicked"))??;
+            if let Some(error) = cleanup_error {
+                bail!("validation process cleanup failed: {error}");
+            }
             bail!(
                 "validation command '{command_text}' timed out after {:.1}s (configured timeout {:.1}s)",
                 started.elapsed().as_secs_f64(),
@@ -148,7 +151,7 @@ fn run_shell_command_with_shutdown(
             );
         }
         if shutdown_requested() {
-            crate::runner::kill_process_group(&mut child);
+            let cleanup_error = crate::runner::kill_process_group(&mut child);
             let _ = child.wait();
             let _ = stdout_reader
                 .join()
@@ -156,6 +159,9 @@ fn run_shell_command_with_shutdown(
             let _ = stderr_reader
                 .join()
                 .map_err(|_| anyhow::anyhow!("validation stderr reader panicked"))??;
+            if let Some(error) = cleanup_error {
+                bail!("validation process cleanup failed during shutdown: {error}");
+            }
             bail!("shutdown requested during validation command '{command_text}'");
         }
         thread::sleep(Duration::from_millis(50));

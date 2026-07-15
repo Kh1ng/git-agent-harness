@@ -23,6 +23,9 @@ pub enum ReviewProcessOutcome {
     SpawnFailure,
     NonZeroExit(i32),
     SignalTermination(i32),
+    /// GAH could not prove that every backend descendant was terminated.
+    /// This is a harness containment failure, not a backend or timeout error.
+    CleanupFailure(String),
     /// The reviewer went silent for the configured idle budget (no stdout/stderr
     /// activity, review artifact updates, or backend-specific structured
     /// progress). This is a stall, classified separately from `HardTimeout`.
@@ -217,6 +220,8 @@ pub fn run_review_backend(
     let mut last_progress_at = Instant::now();
     let mut last_progress_elapsed_secs = None;
     let mut saw_progress = false;
+    let mut cleanup_error = None;
+    let mut supplemental_stderr = None;
     let outcome = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -237,7 +242,7 @@ pub fn run_review_backend(
             }
             Ok(None) => {
                 if shutdown_requested() {
-                    kill_process_group(&mut child);
+                    cleanup_error = kill_process_group(&mut child);
                     let _ = child.wait();
                     break ReviewProcessOutcome::SignalTermination(libc::SIGTERM);
                 }
@@ -288,7 +293,7 @@ pub fn run_review_backend(
                     start.elapsed() >= startup_grace
                 };
                 if stalled {
-                    kill_process_group(&mut child);
+                    cleanup_error = kill_process_group(&mut child);
                     let _ = child.wait();
                     break ReviewProcessOutcome::IdleTimeout;
                 }
@@ -296,44 +301,51 @@ pub fn run_review_backend(
                 // a continuously-active reviewer is killed here -- but classified
                 // as HardTimeout, never as a backend failure.
                 if hard_timeout.is_some_and(|timeout| start.elapsed() >= timeout) {
-                    kill_process_group(&mut child);
+                    cleanup_error = kill_process_group(&mut child);
                     let _ = child.wait();
                     break ReviewProcessOutcome::HardTimeout;
                 }
                 thread::sleep(poll_interval);
             }
             Err(err) => {
-                kill_process_group(&mut child);
+                cleanup_error = kill_process_group(&mut child);
                 let _ = child.wait();
-                let mut stderr = read_text_file(&stderr_path);
-                if !stderr.is_empty() {
-                    stderr.push('\n');
-                }
-                stderr.push_str(&err.to_string());
-                return ReviewRunResult {
-                    outcome: ReviewProcessOutcome::SpawnFailure,
-                    duration_secs: start.elapsed().as_secs_f64(),
-                    stdout: read_text_file(&stdout_path),
-                    stderr,
-                    idle_timeout_seconds,
-                    hard_timeout_seconds,
-                    last_progress_secs: last_progress_elapsed_secs,
-                };
+                supplemental_stderr = Some(err.to_string());
+                break ReviewProcessOutcome::SpawnFailure;
             }
         }
     };
-    if let Some(handle) = stdout_thread {
-        let _ = handle.join();
-    }
-    if let Some(handle) = stderr_thread {
-        let _ = handle.join();
+    // A surviving descendant may still own the inherited pipe descriptors.
+    // Do not let joining the stream-copy threads turn a bounded cleanup
+    // failure into another hang; dropping the handles detaches them.
+    if cleanup_error.is_none() {
+        if let Some(handle) = stdout_thread {
+            let _ = handle.join();
+        }
+        if let Some(handle) = stderr_thread {
+            let _ = handle.join();
+        }
     }
     if progress_rx.try_iter().last().is_some() {
         last_progress_elapsed_secs = Some(start.elapsed().as_secs_f64());
     }
 
     let mut stdout = read_text_file(&stdout_path);
-    let outcome = if matches!(backend, "agy" | "agy-main" | "agy-second")
+    let mut stderr = read_text_file(&stderr_path);
+    if let Some(extra) = supplemental_stderr {
+        if !stderr.is_empty() {
+            stderr.push('\n');
+        }
+        stderr.push_str(&extra);
+    }
+    let outcome = if let Some(error) = cleanup_error {
+        if !stderr.is_empty() {
+            stderr.push('\n');
+        }
+        stderr.push_str("GAH: harness process cleanup failed: ");
+        stderr.push_str(&error);
+        ReviewProcessOutcome::CleanupFailure(error)
+    } else if matches!(backend, "agy" | "agy-main" | "agy-second")
         && matches!(outcome, ReviewProcessOutcome::Success)
         && stdout.trim().is_empty()
     {
@@ -347,7 +359,7 @@ pub fn run_review_backend(
         outcome,
         duration_secs: start.elapsed().as_secs_f64(),
         stdout,
-        stderr: read_text_file(&stderr_path),
+        stderr,
         idle_timeout_seconds,
         hard_timeout_seconds,
         last_progress_secs: last_progress_elapsed_secs,
