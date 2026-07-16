@@ -11,7 +11,17 @@
  */
 import { create } from 'zustand';
 import { gahApi, GahApiError } from '../api/client.js';
-import type { StatusSnapshot, QuotaSnapshot, ReportData, ReportSeriesData, ReportGroupBy, LedgerEntry, ControllerEvent, ProfileSummary } from '@git-agent-harness/contracts';
+import type {
+  StatusSnapshot,
+  QuotaSnapshot,
+  ReportData,
+  ReportSeriesData,
+  ReportGroupBy,
+  LedgerEntry,
+  ControllerEvent,
+  ProfileSummary,
+  ConfigProfileSummary
+} from '@git-agent-harness/contracts';
 import type { ProfileAddData, ProfileUpdateData, ProfileRemoveParams, LoopStatus } from '../api/client.js';
 import type { ConfigSummary, ConfigSetData } from '@git-agent-harness/contracts';
 
@@ -53,10 +63,12 @@ interface GahStoreState {
   profiles: Resource<ProfileSummary[]>;
   profileCrud: ProfileCrudState;
   config: Resource<ConfigSummary>;
+  profileConfig: Resource<ConfigProfileSummary>;
   loopStatus: Resource<LoopStatus>;
   loopAction: { pending: boolean; error: string | null };
 
   fetchConfig: (opts?: { force?: boolean }) => Promise<void>;
+  fetchProfileConfig: (profile: string, opts?: { force?: boolean }) => Promise<void>;
   setConfig: (data: ConfigSetData) => Promise<void>;
   clearConfigErrors: () => void;
   fetchStatus: (profile?: string, opts?: { force?: boolean }) => Promise<void>;
@@ -99,6 +111,7 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
   workTimelines: {},
   profiles: emptyResource(),
   config: emptyResource(),
+  profileConfig: emptyResource(),
   loopStatus: emptyResource(),
   loopAction: { pending: false, error: null },
   profileCrud: {
@@ -369,6 +382,20 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
       await get().fetchConfig({ force: true });
     } catch (error) {
       set({ config: { ...get().config, loading: false, error: errorMessage(error) } });
+    }
+  },
+
+  async fetchProfileConfig(profile, opts) {
+    const key = profile ?? '';
+    if (!profile) return;
+    const current = get().profileConfig;
+    if (current.loading || (!opts?.force && isFresh(current, key))) return;
+    set({ profileConfig: { ...current, loading: true, error: null } });
+    try {
+      const data = await gahApi.getProfileConfig(profile);
+      set({ profileConfig: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
+    } catch (error) {
+      set({ profileConfig: { ...get().profileConfig, loading: false, error: errorMessage(error), key } });
     }
   },
 

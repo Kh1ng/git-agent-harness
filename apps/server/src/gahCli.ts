@@ -18,6 +18,9 @@ import type {
   ReportSeriesData,
   ReportGroupBy,
   LedgerEntry,
+  ConfigSummary,
+  ConfigSetData,
+  ConfigProfileSummary,
   ProfileSummary,
 } from '@git-agent-harness/contracts';
 
@@ -891,6 +894,26 @@ export async function runConfigShow(config?: string): Promise<{ current_manager:
     args.push('--config', config);
   }
   return runJsonCommand<{ current_manager: string | null }>(args, config);
+}
+
+interface ConfigShowResponse {
+  current_manager: string | null;
+  profile?: ConfigProfileSummary;
+}
+
+export async function runConfigShowProfile(
+  profile: string,
+  config?: string
+): Promise<ConfigProfileSummary> {
+  const args = ['config', 'show', '--json', '--profile', profile];
+  if (config) {
+    args.push('--config-path', config);
+  }
+  const response = await runJsonCommand<ConfigShowResponse>(args, config);
+  if (!response.profile) {
+    throw new Error(`gah config show returned no profile data for '${profile}'`);
+  }
+  return response.profile;
 }
 
 // ---------------------------------------------------------------------------

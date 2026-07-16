@@ -441,6 +441,66 @@ export interface ConfigSummary {
   current_manager: string | null;
 }
 
+export interface RoutingCandidateSummary {
+  backend: string;
+  model: string | null;
+  quota_pool: string | null;
+  priority: number;
+  included_in_quota: boolean;
+  marginal_cost_usd: number | null;
+  quota_usage_percent: number | null;
+  quota_days_remaining: number | null;
+  requires_approval: boolean;
+}
+
+export interface ContextOverrideBudgetSummary {
+  enabled?: boolean | null;
+  soft_limit_tokens?: number | null;
+  hard_limit_tokens?: number | null;
+  compact_after_tool_calls?: number | null;
+  fresh_context_on_review?: boolean | null;
+  fresh_context_on_fix?: boolean | null;
+  include_full_git_history?: boolean | null;
+  include_full_worker_transcript_in_review?: boolean | null;
+  recent_history_tokens?: number | null;
+}
+
+export interface ContextBudgetSummary {
+  enabled: boolean;
+  soft_limit_tokens: number;
+  hard_limit_tokens: number;
+  compact_after_tool_calls: number;
+  fresh_context_on_review: boolean;
+  fresh_context_on_fix: boolean;
+  include_full_git_history: boolean;
+  include_full_worker_transcript_in_review: boolean;
+  recent_history_tokens: number;
+}
+
+export interface ConfigProfileContextSummary {
+  global: ContextBudgetSummary;
+  effective: ContextBudgetSummary;
+  profile_override: ContextOverrideBudgetSummary | null;
+}
+
+/** Effective read-only profile configuration for Settings’ "effective config"
+ * view. Values reflect inheritance through defaults + canonical + repo config
+ * for the requested profile. */
+export interface ConfigProfileSummary {
+  profile: string;
+  merge_policy: string;
+  max_fix_attempts_per_mr: number;
+  max_implementation_failures_per_ticket: number;
+  max_review_cycles_per_ticket: number;
+  max_paid_reviews_per_ticket: number;
+  pm_candidates: RoutingCandidateSummary[];
+  improve_candidates: RoutingCandidateSummary[];
+  review_candidates: RoutingCandidateSummary[];
+  routine_reviewer: RoutingCandidateSummary | null;
+  escalatory_reviewers: RoutingCandidateSummary[];
+  context: ConfigProfileContextSummary;
+}
+
 /** Payload for `gah config set` (POST /api/config). `current_manager: null`
  * clears the field. */
 export interface ConfigSetData {
