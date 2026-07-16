@@ -566,13 +566,32 @@ fn find_review_target_by_mr_prefers_pipeline_status_for_ci_status_on_draft_mr() 
     make_fake_bin(
         &bin_dir,
         "glab",
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"api projects/42/merge_requests/235\") printf '{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"pipeline-source-sha\",\"detailed_merge_status\":\"draft\",\"head_pipeline\":{\"sha\":\"pipeline-source-sha\",\"status\":\"success\"}}\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
+        "#!/bin/sh\nendpoint=\"${2%%\\?*}\"\ncase \"$1 $endpoint\" in\n  \"api projects/42/merge_requests/235\") printf '{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"pipeline-source-sha\",\"detailed_merge_status\":\"draft\",\"head_pipeline\":{\"sha\":\"pipeline-source-sha\",\"status\":\"success\"}}\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
     let target = find_review_target_by_mr(&gitlab_profile(), "235").unwrap();
 
-    assert_eq!(target.ci_status.as_deref(), Some("success"));
+    assert_eq!(target.ci_status.as_deref(), Some("passed"));
+    assert_eq!(target.merge_status.as_deref(), Some("draft"));
+}
+
+#[test]
+fn find_review_target_by_mr_prefers_skipped_pipeline_status_on_draft_mr() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        "#!/bin/sh\nendpoint=\"${2%%\\?*}\"\ncase \"$1 $endpoint\" in\n  \"api projects/42/merge_requests/235\") printf '{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"pipeline-source-sha\",\"detailed_merge_status\":\"draft\",\"head_pipeline\":{\"sha\":\"pipeline-source-sha\",\"status\":\"skipped\"}}\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let target = find_review_target_by_mr(&gitlab_profile(), "235").unwrap();
+
+    assert_eq!(target.ci_status.as_deref(), Some("skipped"));
     assert_eq!(target.merge_status.as_deref(), Some("draft"));
 }
 
@@ -585,7 +604,7 @@ fn find_review_target_by_mr_ignores_stale_pipeline_status_not_matching_source_sh
     make_fake_bin(
         &bin_dir,
         "glab",
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"api projects/42/merge_requests/235\") printf '{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"current-sha\",\"detailed_merge_status\":\"can_be_merged\",\"head_pipeline\":{\"sha\":\"old-sha\",\"status\":\"success\"}}\\n' ;;\n  \"api projects/42/merge_requests/235/pipelines\") printf '[{\"sha\":\"old-sha\",\"status\":\"success\"}]\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
+        "#!/bin/sh\nendpoint=\"${2%%\\?*}\"\ncase \"$1 $endpoint\" in\n  \"api projects/42/merge_requests/235\") printf '{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"current-sha\",\"detailed_merge_status\":\"can_be_merged\",\"head_pipeline\":{\"sha\":\"old-sha\",\"status\":\"success\"}}\\n' ;;\n  \"api projects/42/merge_requests/235/pipelines\") printf '[{\"sha\":\"old-sha\",\"status\":\"success\"}]\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 

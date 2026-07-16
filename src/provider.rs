@@ -977,7 +977,10 @@ fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarg
     let endpoint = format!("projects/{project_id}/merge_requests/{iid}");
     let resp = gitlab_api(profile, &endpoint, "GET", &[])?;
     let mut target = gitlab_target_from_value(&resp)?;
-    target.ci_status = gitlab_ci_status_for_merge_request(profile, project_id, &target.id, &resp)?;
+    // Keep caller-supplied MR identifier as the pipelines lookup key; this
+    // avoids coupling CI status probing to any potential future fallback
+    // representation changes inside `ReviewTarget::id`.
+    target.ci_status = gitlab_ci_status_for_merge_request(profile, project_id, mr, &resp)?;
     Ok(target)
 }
 
@@ -1031,6 +1034,8 @@ fn normalize_gitlab_ci_status(status: &str) -> String {
     match status.trim().to_ascii_lowercase().as_str() {
         "running" | "created" | "pending" | "manual" => "pending".into(),
         "canceled" | "cancelled" => "canceled".into(),
+        "success" => "passed".into(),
+        "skipped" => "skipped".into(),
         status => status.into(),
     }
 }
