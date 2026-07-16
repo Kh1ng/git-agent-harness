@@ -10,67 +10,44 @@ use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
-use support::{test_temp_root, test_tempdir, FakeBackend, Scenario};
+use support::{isolate_command, test_tempdir, FakeBackend, IsolatedCommand, Scenario};
 use tempfile::TempDir;
 
-fn bin() -> Command {
-    static COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let invocation_id = COMMAND_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut cmd = Command::cargo_bin("gah").unwrap();
+fn bin() -> IsolatedCommand<Command> {
+    let cmd = Command::cargo_bin("gah").unwrap();
     // CLI integration tests may run under the real systemd loop, which sets
     // XDG_STATE_HOME to the operator's persistent state directory. Never let
     // fake profiles and work claims leak into (or inherit from) that state.
-    cmd.env(
-        "XDG_STATE_HOME",
-        std::env::temp_dir().join(format!(
-            "gah-cli-test-state-{}-{invocation_id}",
-            std::process::id()
-        )),
-    );
-    cmd.env(
-        "GAH_AVAILABILITY_PATH",
-        "/nonexistent-availability-path.json",
-    );
-    cmd.env(
-        "GAH_VALIDATION_CHECK_PATH",
-        std::env::temp_dir().join(format!(
-            "gah-cli-test-validation-{}-{invocation_id}.json",
-            std::process::id(),
-        )),
-    );
-    cmd.env("TMPDIR", test_temp_root());
-    cmd
+    isolate_command(cmd, |cmd, root| {
+        let tmp = root.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        cmd.env("XDG_STATE_HOME", root.join("xdg-state"));
+        cmd.env("GAH_AVAILABILITY_PATH", root.join("availability.json"));
+        cmd.env(
+            "GAH_VALIDATION_CHECK_PATH",
+            root.join("validation-check.json"),
+        );
+        cmd.env("TMPDIR", tmp);
+    })
 }
 
-fn spawn_bin() -> ProcessCommand {
-    static COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let invocation_id = COMMAND_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut cmd = ProcessCommand::new(
+fn spawn_bin() -> IsolatedCommand<ProcessCommand> {
+    let cmd = ProcessCommand::new(
         std::env::var("CARGO_BIN_EXE_gah").unwrap_or_else(|_| "target/debug/gah".into()),
     );
-    cmd.env(
-        "XDG_STATE_HOME",
-        std::env::temp_dir().join(format!(
-            "gah-cli-test-state-{}-{invocation_id}",
-            std::process::id()
-        )),
-    );
-    cmd.env(
-        "GAH_AVAILABILITY_PATH",
-        "/nonexistent-availability-path.json",
-    );
-    cmd.env(
-        "GAH_VALIDATION_CHECK_PATH",
-        std::env::temp_dir().join(format!(
-            "gah-cli-test-validation-{}-{invocation_id}.json",
-            std::process::id(),
-        )),
-    );
-    cmd.env("TMPDIR", test_temp_root());
-    cmd
+    isolate_command(cmd, |cmd, root| {
+        let tmp = root.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        cmd.env("XDG_STATE_HOME", root.join("xdg-state"));
+        cmd.env("GAH_AVAILABILITY_PATH", root.join("availability.json"));
+        cmd.env(
+            "GAH_VALIDATION_CHECK_PATH",
+            root.join("validation-check.json"),
+        );
+        cmd.env("TMPDIR", tmp);
+    })
 }
 
 fn write_fixture_dir() -> TempDir {
@@ -2370,7 +2347,9 @@ fn review_shutdown_records_cancelled_shutdown_and_dispatch_finished_event() {
     let ledger_path = tmp.path().join("ledger.jsonl");
     let events_path = tmp.path().join("events.jsonl");
 
-    let mut child = spawn_bin()
+    // Keep the isolated environment alive until the spawned process exits.
+    let mut command = spawn_bin();
+    let mut child = command
         .args([
             "dispatch",
             "--profile",
@@ -3666,7 +3645,9 @@ fn dispatch_fix_shutdown_records_cancelled_shutdown_and_dispatch_finished_event(
         "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
     );
 
-    let mut child = spawn_bin()
+    // Keep the isolated environment alive until the spawned process exits.
+    let mut command = spawn_bin();
+    let mut child = command
         .args([
             "dispatch",
             "--profile",
