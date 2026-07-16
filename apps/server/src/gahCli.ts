@@ -727,14 +727,11 @@ export async function runProfileSet(options: ProfileSetOptions): Promise<void> {
   } else if (options.clear?.includes('manager_wake_autonomy')) {
     args.push('--clear', 'manager_wake_autonomy');
   }
-  if (options.clear?.length) {
-    // Only forward generic clear entries that aren't already handled above.
-    const already = new Set(['max_parallel_workers', 'manager_wake_autonomy']);
-    const remaining = [...new Set(options.clear.filter((c) => !already.has(c)))];
-    if (remaining.length) {
-      args.push('--clear', remaining.join(','));
-    }
-  }
+  appendClearArgs(
+    args,
+    options.clear,
+    new Set(['max_parallel_workers', 'manager_wake_autonomy'])
+  );
   
   if (options.config) {
     args.push('--config', options.config);
@@ -825,13 +822,7 @@ export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
     args.push('--clear', 'current_manager');
   }
 
-  if (options.clear?.length) {
-    const already = new Set(['current_manager']);
-    const remaining = [...new Set(options.clear.filter((c) => !already.has(c)))];
-    if (remaining.length) {
-      args.push('--clear', remaining.join(','));
-    }
-  }
+  appendClearArgs(args, options.clear, new Set(['current_manager']));
 
   if (options.config) {
     args.push('--config-path', options.config);
@@ -881,7 +872,7 @@ export async function runConfigShow(config?: string): Promise<{ current_manager:
  * so the PID file lives next to gah's own lock file.
  * When config is unavailable, retain previous fallback behavior for parity
  * with older environments where discovery fails. */
-function loopStateDir(): string {
+export function loopStateDir(): string {
   const configPath = getConfigPath();
   if (!configPath) {
     const base =
@@ -890,6 +881,21 @@ function loopStateDir(): string {
     return resolve(base, 'gah');
   }
   return resolve(dirname(configPath), '.gah-locks');
+}
+
+function appendClearArgs(
+  args: string[],
+  clearValues: string[] | undefined,
+  excluded: Set<string>
+): void {
+  if (!clearValues?.length) return;
+
+  const seen = new Set<string>();
+  for (const key of clearValues) {
+    if (excluded.has(key) || seen.has(key)) continue;
+    args.push('--clear', key);
+    seen.add(key);
+  }
 }
 
 /** A durable acknowledgement that the operator intentionally stopped this
