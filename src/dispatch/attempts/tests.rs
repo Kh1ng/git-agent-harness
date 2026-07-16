@@ -1083,7 +1083,7 @@ fn harness_idle_watchdog_marks_backend_outage_not_rate_limit() {
         "vibe",
         Some("mistral-medium-3.5"),
         Some("vibe-monthly"),
-        "GAH: killed after 600s with no new backend output or worktree progress (stalled, not just slow).",
+        "GAH: killed after 600s with no new backend output or worktree progress (stalled before changes, not just slow).",
         "/tmp/vibe.log",
     )
     .unwrap()

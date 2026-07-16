@@ -19,7 +19,7 @@ use super::super::publish::{
     ensure_issue_open_for_publish, publishing_allows_publish, MrRenderContext,
 };
 use super::super::repair_context;
-use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
+use super::super::text::utf8_safe_prefix;
 use super::super::validation::{
     classify_validation_failure_progress, run_auto_fix_commands, should_skip_per_dispatch_baseline,
     validation_env, validation_failure_no_progress_reason,
@@ -35,6 +35,9 @@ use crate::{provider, runner, worktree};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+mod bounded_validation;
+pub(crate) use bounded_validation::bounded_validation_failure;
 
 pub(crate) fn improve(
     cfg: &GahConfig,
@@ -508,15 +511,22 @@ pub(crate) fn improve(
                 .as_deref()
                 .unwrap_or(&result.log_path);
             let stalled = log_text.contains("GAH: killed after ")
-                && log_text.contains("(stalled, not just slow).");
-            let semantic_no_progress = stalled
-                && log_text.contains("with no new worktree progress (stalled, not just slow).");
+                && log_text.contains("(stalled")
+                && log_text.contains("not just slow).");
+            // Issue #579: a backend killed after producing a repository diff is
+            // not agent no-progress — it was a productive worker whose long
+            // validation run was mistaken for a hang. `stalled_before_changes`
+            // (no diff) is the genuine AgentNoProgress signal;
+            // `stalled_during_validation` (diff present) must be preserved.
+            let stalled_before_changes = stalled && log_text.contains("stalled before changes");
+            let stalled_during_validation =
+                stalled && log_text.contains("stalled during validation with checkpointed changes");
             let cleanup_failed = result.exit_code
                 == crate::runner::process::PROCESS_CLEANUP_FAILED_EXIT_CODE
                 || log_text.contains("GAH: harness process cleanup failed:");
             let failure_class = if cleanup_failed {
                 crate::ledger::FailureClass::HarnessError
-            } else if semantic_no_progress {
+            } else if stalled_before_changes {
                 crate::ledger::FailureClass::AgentNoProgress
             } else if stalled {
                 crate::ledger::FailureClass::HarnessError
@@ -527,8 +537,10 @@ pub(crate) fn improve(
             if cleanup_failed {
                 ledger.validation_result = Some("not_run_process_cleanup_failed".into());
                 ledger.error_summary = Some("backend descendant cleanup failed".into());
-            } else if stalled {
+            } else if stalled_before_changes {
                 ledger.validation_result = Some("not_run_backend_stalled".into());
+            } else if stalled_during_validation {
+                ledger.validation_result = Some("not_run_backend_stalled_during_validation".into());
             }
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
@@ -576,7 +588,7 @@ pub(crate) fn improve(
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!("backend descendant cleanup failed; refusing to retry");
             }
-            if semantic_no_progress {
+            if stalled_before_changes {
                 worktree::preserve_wip(
                     &wt,
                     &profile.default_target_branch,
@@ -584,7 +596,36 @@ pub(crate) fn improve(
                 )?;
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!(
-                    "{} made no repository progress on attempt {}; not retrying blindly",
+                    "{} made no repository progress (stalled before any changes) on attempt {}; not retrying blindly",
+                    route.effective_backend,
+                    attempt + 1
+                );
+            }
+            if stalled_during_validation {
+                // Issue #579: backend produced a diff and was validating when
+                // the watchdog fired. Checkpoint the WIP diff on a repo-local
+                // branch (the worktree is removed by cleanup) so a later
+                // attempt can resume it instead of losing the work.
+                let checkpoint = wip_checkpoint_branch(&branch, attempt + 1);
+                let resumed = worktree::checkpoint_wip(
+                    &wt,
+                    &profile.default_target_branch,
+                    &checkpoint,
+                    &format!(
+                        "gah: WIP checkpointed {} attempt {} (stalled during validation)",
+                        args.mode,
+                        attempt + 1
+                    ),
+                )?;
+                if resumed {
+                    println!(
+                        "Backend stalled during validation; preserved WIP diff on local branch {checkpoint} before cleanup"
+                    );
+                    wip_checkpoints.push(checkpoint.clone());
+                }
+                worktree::cleanup(&wt, repo);
+                anyhow::bail!(
+                    "{} stalled during validation after producing changes on attempt {}; WIP checkpointed for a continuation attempt",
                     route.effective_backend,
                     attempt + 1
                 );
@@ -1406,59 +1447,6 @@ pub(crate) fn improve(
     clear_wip_checkpoints(repo, &wip_checkpoints);
     worktree::cleanup(&wt, repo);
     Ok(())
-}
-
-fn bounded_validation_failure(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    let lines = text.lines().collect::<Vec<_>>();
-    let mut selected = std::collections::BTreeSet::new();
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        let high_signal = line.contains(" ... FAILED")
-            || line.contains(" panicked at ")
-            || trimmed == "failures:"
-            || trimmed.starts_with("test result: FAILED")
-            || trimmed.starts_with("error:")
-            || trimmed.starts_with("error[")
-            || trimmed.starts_with("npm error")
-            || trimmed.starts_with("fatal:")
-            || trimmed.contains("AssertionError")
-            || trimmed.contains("TypeError:");
-        if high_signal {
-            for context_index in index.saturating_sub(2)..=(index + 2).min(lines.len() - 1) {
-                selected.insert(context_index);
-            }
-        }
-    }
-    if !selected.is_empty() {
-        let command = lines
-            .iter()
-            .find(|line| line.trim_start().starts_with("$ "))
-            .copied()
-            .unwrap_or("validation failed");
-        let evidence = selected
-            .into_iter()
-            .map(|index| lines[index])
-            .collect::<Vec<_>>()
-            .join("\n");
-        let focused = format!("{command}\n... failure evidence ...\n{evidence}");
-        if focused.len() <= max_bytes {
-            return focused;
-        }
-        return utf8_safe_suffix(&focused, max_bytes).to_string();
-    }
-    let separator = "\n... validation output omitted ...\n";
-    let available = max_bytes.saturating_sub(separator.len());
-    let head_bytes = available / 3;
-    let tail_bytes = available.saturating_sub(head_bytes);
-    format!(
-        "{}{}{}",
-        utf8_safe_prefix(text, head_bytes),
-        separator,
-        utf8_safe_suffix(text, tail_bytes)
-    )
 }
 
 /// TICKET-091 AC4: when no authoritative external ticket exists, fall back
