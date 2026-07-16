@@ -66,6 +66,29 @@ pub struct IssueIntakeRejection {
     pub labels: Vec<String>,
 }
 
+/// One same-project prerequisite observed while deciding whether an issue is
+/// safe to dispatch. Provider state is retained verbatim for auditability;
+/// normalized state drives the fail-closed controller policy.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct DependencyObservation {
+    pub identity: String,
+    pub provider: String,
+    pub provider_state: Option<String>,
+    pub normalized_state: String,
+}
+
+/// A native issue excluded from autonomous intake by its declared
+/// prerequisites. This is status data, not a provider-label mutation.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct DependencyBlocker {
+    pub ticket_path: String,
+    pub work_id: String,
+    pub title: String,
+    pub reason_code: String,
+    pub reason: String,
+    pub dependencies: Vec<DependencyObservation>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct WorkMetadata {
     #[serde(default)]

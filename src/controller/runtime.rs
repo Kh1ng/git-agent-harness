@@ -1191,6 +1191,7 @@ default_target_branch = "main"
             blockers: vec![],
             blocked_work_items: vec![],
             issue_intake_rejections: vec![],
+            dependency_blockers: vec![],
             errors: vec![],
             available_tickets: vec![],
             active_claims: vec![],
@@ -1198,6 +1199,7 @@ default_target_branch = "main"
             merge_attempt_counts: std::collections::HashMap::new(),
             review_held_work_ids: std::collections::HashSet::new(),
             publishing_allow_pr: true,
+            generated_artifact_deny_patterns: vec![],
             max_parallel_workers: 1,
             backend_configured: std::collections::HashMap::new(),
         }

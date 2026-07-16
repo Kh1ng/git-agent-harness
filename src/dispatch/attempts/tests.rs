@@ -7,6 +7,7 @@ use crate::routing::{CandidateIdentity, RouteRequest};
 use crate::test_support::PathGuard;
 use std::fs;
 use std::path::Path;
+use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 const CODEX_FULL_RESET: &str =
@@ -15,6 +16,8 @@ const OPENCODE_HY3_RATE_LIMIT: &str =
     include_str!("../../../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
 const VIBE_INVALID_API_KEY: &str =
     include_str!("../../../tests/fixtures/quota-logs/vibe_invalid_api_key.txt");
+const CLAUDE_SESSION_LIMIT_TZ_RESET: &str =
+    include_str!("../../../tests/fixtures/quota-logs/claude_session_limit_tz_reset.txt");
 
 #[test]
 fn review_preflight_fails_with_backend_unavailable_when_executable_missing() {
@@ -1011,6 +1014,52 @@ fn backend_failure_fixture_marks_unavailability() {
     assert_eq!(state.records[0].model.as_deref(), Some("local/test"));
     assert_eq!(state.records[0].reason, Reason::QuotaExhausted);
     assert!(state.records[0].unavailable_until.is_some());
+}
+
+#[test]
+fn claude_session_limit_marks_exact_claude_model_unavailable_without_blocking_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_path = tmp.path().join("availability.json");
+    let now = OffsetDateTime::now_utc();
+    let parsed = mark_backend_unavailable_from_output_at(
+        &state_path,
+        "claude",
+        Some("sonnet"),
+        None,
+        CLAUDE_SESSION_LIMIT_TZ_RESET,
+        "/tmp/backend-output.log",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        parsed.kind,
+        crate::quota_parser::FailureKind::QuotaExhausted
+    );
+    assert!(!parsed.retryable);
+
+    let state = load_state(&state_path).unwrap();
+    assert_eq!(state.records[0].backend, "claude");
+    assert_eq!(state.records[0].model.as_deref(), Some("sonnet"));
+    assert!(state.records[0].unavailable_until.is_some());
+
+    let unavailable_until = state.records[0]
+        .unavailable_until
+        .as_ref()
+        .and_then(|v| OffsetDateTime::parse(v, &Rfc3339).ok())
+        .unwrap_or(now);
+    let before_reset = unavailable_until - time::Duration::minutes(1);
+
+    let backend_available =
+        availability_for(&state_path, "claude", None, None, before_reset).unwrap();
+    assert!(
+        backend_available.eligible,
+        "model-only mark must not block backend-wide scope"
+    );
+
+    let model_available =
+        availability_for(&state_path, "claude", Some("sonnet"), None, before_reset).unwrap();
+    assert!(!model_available.eligible, "model should be unavailable");
 }
 
 #[test]

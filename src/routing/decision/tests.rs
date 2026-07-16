@@ -640,6 +640,65 @@ fn candidate_list_skips_unavailable_candidates() {
 }
 
 #[test]
+fn session_limit_marks_model_scope_and_reroutes_to_alternate_backend() {
+    let tmp = TempDir::new().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let mut profile = profile();
+    profile.routing.pm_candidates = Some(vec![
+        candidate_config("claude", Some("sonnet"), None),
+        candidate_config("codex", Some("gpt-4"), None),
+    ]);
+    let request = RouteRequest {
+        last_failure_class: None,
+        mode: "pm",
+        requested_backend: "auto",
+        requested_model: None,
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+    };
+
+    let first = decide_with(
+        &defaults(),
+        &profile,
+        request.clone(),
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+    assert_eq!(first.effective_backend, "claude");
+    assert_eq!(first.effective_model.as_deref(), Some("sonnet"));
+
+    record_unavailable(
+        &path(&tmp),
+        "claude",
+        Some("sonnet"),
+        Reason::QuotaExhausted,
+        Source::BackendError,
+        Some(now + time::Duration::minutes(10)),
+        Some("session-limit cooldown".into()),
+        now,
+    )
+    .unwrap();
+
+    let second = decide_with(
+        &defaults(),
+        &profile,
+        request,
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+    assert_eq!(second.effective_backend, "codex");
+    assert_eq!(second.effective_model.as_deref(), Some("gpt-4"));
+    assert!(second.routing_reason.contains("model-specific"));
+    assert!(second.fallback_used);
+}
+
+#[test]
 fn candidate_list_expired_availability_re_enters() {
     let tmp = TempDir::new().unwrap();
     let observed = OffsetDateTime::now_utc() - time::Duration::hours(2);

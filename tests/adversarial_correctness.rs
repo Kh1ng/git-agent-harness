@@ -226,7 +226,7 @@ fn two_tickets_independent_progress() {
 // ── terminal merge (detects MUT5) ────────────────────────────────────
 
 #[test]
-fn terminal_merge_precludes_further_action() {
+fn recurring_status_excludes_terminal_merges() {
     let pr = support::scenario::github_pr_json(GithubPrParams {
         title: "Draft: TICKET-001 Merged".into(),
         branch: "gah/merged-1".into(),
@@ -251,10 +251,10 @@ fn terminal_merge_precludes_further_action() {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    assert_eq!(mrs.len(), 1, "{mrs:?}");
-    assert_eq!(mrs[0]["classification"], "MERGED", "got {}", mrs[0]);
-    assert_eq!(mrs[0]["recommended_action"], "NONE");
-    assert_eq!(mrs[0]["merged"], true);
+    assert!(
+        mrs.is_empty(),
+        "active observations must exclude terminal history; got {mrs:?}"
+    );
 }
 
 // ── crash/restart continuity ─────────────────────────────────────────

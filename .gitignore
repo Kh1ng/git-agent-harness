@@ -10,9 +10,16 @@
 /apps/desktop/gen
 
 # TypeScript/JavaScript
-/node_modules
+node_modules/
 /pnpm-lock.yaml
-/apps/web/node_modules/
+**/.vite/
+**/.vitest/
+coverage/
+**/.nyc_output/
+**/.cache/
+**/.next/
+**/.pytest_cache/
+**/__pycache__/
 
 # Build outputs
 /dist

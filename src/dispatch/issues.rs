@@ -19,6 +19,16 @@ pub(crate) struct IssueDetails {
     pub(super) state: Option<String>,
 }
 
+/// Minimal provider record used for dependency graph resolution. Unlike
+/// autonomous intake, prerequisite lookup intentionally does not require the
+/// dependency issue itself to carry an execution label or trusted author.
+#[derive(Debug, Clone)]
+pub(super) struct DependencyIssue {
+    pub(super) number: String,
+    pub(super) body: String,
+    pub(super) state: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueAuthorKind {
     Human,
@@ -517,6 +527,68 @@ fn fetch_gitlab_issue(
     issue_details_from_gitlab_response(profile, issue_number, &resp, allow_label_override)
 }
 
+pub(super) fn fetch_dependency_issue(
+    profile: &Profile,
+    issue_number: &str,
+) -> Result<DependencyIssue> {
+    let cli = profile.provider_cli().ok_or_else(|| {
+        anyhow::anyhow!(
+            "provider '{}' does not support dependency lookup",
+            profile.provider
+        )
+    })?;
+    let output = match cli {
+        "gh" => provider_command("gh")
+            .args([
+                "issue",
+                "view",
+                issue_number,
+                "--repo",
+                &profile.repo,
+                "--json",
+                "number,body,state",
+            ])
+            .output()
+            .context("gh dependency issue view")?,
+        "glab" => provider_command("glab")
+            .args([
+                "issue",
+                "view",
+                issue_number,
+                "--repo",
+                &profile.repo,
+                "-F",
+                "json",
+            ])
+            .output()
+            .context("glab dependency issue view")?,
+        other => anyhow::bail!("unsupported provider CLI: {other}"),
+    };
+    if !output.status.success() {
+        anyhow::bail!(
+            "{} dependency issue #{} query failed: {}",
+            profile.provider,
+            issue_number,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("parsing {} dependency issue response", profile.provider))?;
+    let number = if cli == "gh" {
+        value["number"].as_i64()
+    } else {
+        value["iid"].as_i64()
+    }
+    .map(|number| number.to_string())
+    .unwrap_or_else(|| issue_number.to_string());
+    let body_key = if cli == "gh" { "body" } else { "description" };
+    Ok(DependencyIssue {
+        number,
+        body: value[body_key].as_str().unwrap_or_default().to_string(),
+        state: value["state"].as_str().map(str::to_string),
+    })
+}
+
 fn issue_record_from_github_value(resp: &serde_json::Value) -> IssueRecord {
     let number = resp["number"]
         .as_i64()
@@ -692,20 +764,7 @@ fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery
     Ok(IssueIntakeDiscovery { allowed, rejected })
 }
 
-pub(super) fn list_open_issues(profile: &Profile) -> Vec<IssueDetails> {
-    let result = match profile.provider_cli() {
-        Some("gh") => discover_open_github_issues(profile),
-        Some("glab") => discover_open_gitlab_issues(profile),
-        _ => return vec![],
-    };
-    result
-        .map(|discovery| discovery.allowed)
-        .unwrap_or_else(|e| {
-            eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
-            vec![]
-        })
-}
-
+#[cfg(test)]
 pub(crate) fn discover_open_issues(profile: &Profile) -> IssueIntakeDiscovery {
     match profile.provider_cli() {
         Some("gh") => discover_open_github_issues(profile).unwrap_or_else(|e| {
@@ -726,6 +785,18 @@ pub(crate) fn discover_open_issues(profile: &Profile) -> IssueIntakeDiscovery {
             allowed: vec![],
             rejected: vec![],
         },
+    }
+}
+
+pub(super) fn try_discover_open_issues(profile: &Profile) -> Result<IssueIntakeDiscovery> {
+    match profile.provider_cli() {
+        Some("gh") => discover_open_github_issues(profile),
+        Some("glab") => discover_open_gitlab_issues(profile),
+        Some(other) => anyhow::bail!("unsupported provider CLI: {other}"),
+        None => anyhow::bail!(
+            "provider '{}' does not support native issue discovery",
+            profile.provider
+        ),
     }
 }
 
@@ -1053,9 +1124,25 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
         meta.constraints
             .extend(extract_markdown_requirement_items(&issue.body, heading));
     }
-    meta.verification_commands =
+    let mut verification_commands =
         extract_markdown_code_list_section(&issue.body, "Verification Commands");
-    meta.affected_files = extract_markdown_list_section(&issue.body, "Affected Files");
+    // Issue #425: `Verification` is another common heading spelling used in
+    // live tickets. It should stay in-band as verification commands so it is
+    // not silently dropped.
+    append_unique_strings(
+        &mut verification_commands,
+        extract_markdown_code_list_section(&issue.body, "Verification"),
+    );
+    meta.verification_commands = verification_commands;
+
+    let mut affected_files = extract_markdown_list_section(&issue.body, "Affected Files");
+    // Issue #425: `Move only` is a structured file-list heading that should
+    // map directly to the same destination as `Affected Files`.
+    append_unique_strings(
+        &mut affected_files,
+        extract_markdown_list_section(&issue.body, "Move only"),
+    );
+    meta.affected_files = affected_files;
 
     if !issue.labels.is_empty() {
         for label in &issue.labels {
@@ -1072,6 +1159,14 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
     meta.summary = meta.title.clone();
 
     meta
+}
+
+fn append_unique_strings(target: &mut Vec<String>, source: Vec<String>) {
+    for item in source {
+        if !target.iter().any(|value| value == &item) {
+            target.push(item);
+        }
+    }
 }
 
 pub(super) fn issue_is_auto_dispatch_blocked(labels: &[String]) -> bool {

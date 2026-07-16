@@ -124,6 +124,12 @@ pub struct ContextBuild {
     pub estimated_tokens_before_reduction: u64,
     pub estimated_tokens_after_reduction: u64,
     pub compacted: bool,
+    /// Section names from the actual prompt delivered to the backend,
+    /// preserved after compaction.
+    pub section_names: Vec<String>,
+    /// Original issue subsection names present in the bounded, untrusted
+    /// source snapshot that was actually delivered after compaction.
+    pub issue_section_names: Vec<String>,
     pub largest_sections: Vec<ContextSectionSize>,
     /// Every named prompt section in the prompt actually supplied to the
     /// backend after compaction. This makes the context artifact an audit
@@ -152,11 +158,15 @@ pub fn estimate_tokens(text: &str) -> u64 {
 pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
     let before = estimate_tokens(prompt);
     if !cfg.enabled || (before <= cfg.soft_limit_tokens && before <= cfg.hard_limit_tokens) {
+        let section_names = section_names(prompt);
+        let issue_section_names = delivered_issue_section_names(prompt);
         return Ok(ContextBuild {
             prompt: prompt.to_string(),
             estimated_tokens_before_reduction: before,
             estimated_tokens_after_reduction: before,
             compacted: false,
+            section_names,
+            issue_section_names,
             largest_sections: section_sizes(prompt),
             sources: context_sources(prompt),
         });
@@ -206,11 +216,15 @@ pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
     }
     let largest_sections = section_sizes(&after);
     let sources = context_sources(&after);
+    let section_names = section_names(&after);
+    let issue_section_names = delivered_issue_section_names(&after);
     Ok(ContextBuild {
         prompt: after,
         estimated_tokens_before_reduction: before,
         estimated_tokens_after_reduction: after_tokens,
         compacted: true,
+        section_names,
+        issue_section_names,
         // These are an audit of the prompt that is actually sent, not the
         // pre-compaction prompt that was merely considered.
         largest_sections,
@@ -310,6 +324,31 @@ fn context_sources(prompt: &str) -> Vec<ContextSource> {
         .collect()
 }
 
+fn section_names(prompt: &str) -> Vec<String> {
+    split_sections(prompt)
+        .into_iter()
+        .filter(|section| section.name != "Preamble")
+        .map(|section| section.name)
+        .collect()
+}
+
+fn delivered_issue_section_names(prompt: &str) -> Vec<String> {
+    split_sections(prompt)
+        .into_iter()
+        .find(|section| section.name == "Live Task Pack")
+        .map(|section| {
+            section
+                .body
+                .lines()
+                .filter_map(|line| line.strip_prefix("  ## "))
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,7 +385,7 @@ mod tests {
     #[test]
     fn records_named_context_sources_for_audit() {
         let result = enforce(
-            "Preamble\n## Project Brief\nstable facts\n## Live Task Pack\nTICKET-1\n## Focus\nfix it\n",
+            "Preamble\n## Project Brief\nstable facts\n## Live Task Pack\nTICKET-1\n### Source Issue Sections (bounded, untrusted)\n  ## Problem\n  facts\n  ## Goal\n  outcome\n## Focus\nfix it\n",
             &ContextConfig::default(),
         )
         .unwrap();
@@ -358,6 +397,23 @@ mod tests {
                 .map(|source| source.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["Project Brief", "Live Task Pack", "Focus"]
+        );
+        assert_eq!(
+            result.section_names,
+            vec![
+                "Project Brief".to_string(),
+                "Live Task Pack".to_string(),
+                "Focus".to_string()
+            ]
+        );
+        assert_eq!(
+            result.issue_section_names,
+            vec!["Problem".to_string(), "Goal".to_string()]
+        );
+        let artifact = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            artifact["issue_section_names"],
+            serde_json::json!(["Problem", "Goal"])
         );
         assert!(result.sources.iter().all(|source| source.bytes > 0));
     }

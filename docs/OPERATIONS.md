@@ -421,7 +421,7 @@ Primary triage commands:
 
 ```bash
 gah status --profile <profile> --json    # single machine-readable snapshot of all state
-gah sync   --profile <profile> --json    # classify open GAH-created PRs/MRs
+gah sync   --profile <profile> --json    # explicit current + historical PR/MR reconciliation
 gah events --profile <profile> --since 7d # controller event stream
 gah ledger work <WORK_ID>                # full history for one work item
 ```
@@ -429,6 +429,14 @@ gah ledger work <WORK_ID>                # full history for one work item
 `gah sync` classifications: `CI_FAILED`, `NEEDS_REVIEW`, `NEEDS_FIX`,
 `READY_FOR_HUMAN`, `MERGED`, `STALE`, `UNKNOWN`. It only reports; it does not
 auto-merge or auto-dispatch.
+
+Recurring `gah status` and controller observations query at most 100 open pull
+requests, never the repository's full history. Reaching that cap is an
+incomplete observation and fails closed. Full-history provider queries are
+reserved for explicit `gah sync`, ledger reconciliation, and pruning. This
+boundary prevents the July 16, 2026 incident where polling up to 1,000
+historical GitHub PRs every 30 seconds exhausted the user's shared 5,000-point
+GraphQL allowance.
 
 Two safety invariants to keep in mind while triaging: a failed *observation* is
 not a healthy empty state, and a closed-unmerged PR/MR is terminal, not active

@@ -57,6 +57,32 @@ pub(super) fn publishing_allows_publish(profile: &Profile) -> bool {
         && profile.publishing.allow_commit_message_generation
 }
 
+/// Stage the complete candidate tree and fail closed when a newly tracked path
+/// matches the profile's generated-artifact policy. Staging is deliberate:
+/// it makes unstaged additions, force-added ignored files, backend commits,
+/// and rename destinations observable through one index-vs-target diff.
+pub(super) fn enforce_generated_artifact_policy(
+    profile: &Profile,
+    ledger: &mut LedgerEntry,
+    worktree_path: &Path,
+) -> anyhow::Result<()> {
+    if crate::worktree::has_uncommitted_changes(worktree_path)? {
+        crate::worktree::stage_all(worktree_path)?;
+    }
+    if let Err(error) = crate::generated_artifacts::enforce_index_policy(
+        worktree_path,
+        &profile.default_target_branch,
+        &profile.publishing.generated_artifact_deny_patterns,
+    ) {
+        ledger.set_failure(
+            crate::ledger::FailureClass::HarnessError,
+            crate::ledger::FailureStage::Push,
+        );
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(super) fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
     let Some(ticket) = ticket else {
         return "n/a".into();
@@ -442,6 +468,56 @@ mod tests {
                 "expected terminal state: {state}"
             );
         }
+    }
+
+    #[test]
+    fn generated_artifact_guard_marks_a_typed_push_failure_before_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::worktree::git(&["init", "-q"], temp.path()).unwrap();
+        crate::worktree::git(
+            &["config", "user.email", "gah@example.invalid"],
+            temp.path(),
+        )
+        .unwrap();
+        crate::worktree::git(&["config", "user.name", "GAH Test"], temp.path()).unwrap();
+        std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+        crate::worktree::git(&["add", "."], temp.path()).unwrap();
+        crate::worktree::git(&["commit", "-q", "-m", "base"], temp.path()).unwrap();
+        crate::worktree::git(&["branch", "-M", "main"], temp.path()).unwrap();
+        crate::worktree::git(&["remote", "add", "origin", "."], temp.path()).unwrap();
+        crate::worktree::git(
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+            temp.path(),
+        )
+        .unwrap();
+        let generated = temp
+            .path()
+            .join("apps/server/node_modules/.vite/vitest/results.json");
+        std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        std::fs::write(generated, "{}\n").unwrap();
+
+        let profile = profile(temp.path());
+        let mut ledger = LedgerEntry::new(
+            "real",
+            &profile,
+            "codex",
+            "fix",
+            "target",
+            Some("session-artifact-guard".into()),
+            None,
+        );
+        let error = enforce_generated_artifact_policy(&profile, &mut ledger, temp.path())
+            .expect_err("generated dependency cache must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("apps/server/node_modules/.vite/vitest/results.json"));
+        assert!(error
+            .to_string()
+            .contains(crate::generated_artifacts::POLICY_SOURCE));
+        assert_eq!(ledger.failure_class.as_deref(), Some("harness_error"));
+        assert_eq!(ledger.failure_stage.as_deref(), Some("push"));
+        assert!(crate::worktree::has_uncommitted_changes(temp.path()).unwrap());
     }
 
     #[test]

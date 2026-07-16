@@ -13,6 +13,7 @@ pub mod controller;
 pub mod dispatch;
 pub mod doctor;
 pub mod events;
+pub mod generated_artifacts;
 pub mod init;
 pub mod ledger;
 pub mod models;

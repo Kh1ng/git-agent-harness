@@ -61,7 +61,34 @@ fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
     }
     failed |= !check_manager_memory(profile);
     failed |= !check_candidate_model_consistency(defaults, profile);
+    failed |= !check_generated_artifact_policy(profile);
     !failed
+}
+
+fn check_generated_artifact_policy(profile: &Profile) -> bool {
+    let patterns = &profile.publishing.generated_artifact_deny_patterns;
+    if patterns.is_empty() {
+        print_check(
+            CheckStatus::Warn,
+            "generated artifact policy",
+            "disabled by explicit empty pattern list",
+        );
+        return true;
+    }
+    if let Err(error) = crate::generated_artifacts::validate_patterns(patterns) {
+        print_check(
+            CheckStatus::Fail,
+            "generated artifact policy",
+            &format!("{error:#}"),
+        );
+        return false;
+    }
+    print_check(
+        CheckStatus::Pass,
+        "generated artifact policy",
+        &format!("{} pattern(s): {}", patterns.len(), patterns.join(", ")),
+    );
+    true
 }
 
 fn check_repo(profile: &Profile) -> bool {

@@ -52,6 +52,9 @@ fn effective_issue_intake_policy(profile: &Profile) -> crate::models::IssueIntak
 
 #[derive(Serialize, Clone)]
 pub struct StatusSnapshot {
+    /// Status schema v1 permits additive fields; consumers must ignore fields
+    /// they do not recognize. Increment this only for an incompatible removal,
+    /// rename, or semantic/type change.
     pub schema_version: u32,
     pub generated_at: String,
     pub profile: ProfileIdentity,
@@ -75,6 +78,9 @@ pub struct StatusSnapshot {
     /// surfaced alongside the accepted tickets so a triage operator can see
     /// why a particular issue was not deemed dispatchable.
     pub issue_intake_rejections: Vec<crate::models::IssueIntakeRejection>,
+    /// Native issues excluded because their canonical same-project
+    /// prerequisites are unresolved or invalid.
+    pub dependency_blockers: Vec<crate::models::DependencyBlocker>,
     pub errors: Vec<StatusError>,
     /// TICKET-078: dispatch candidates from `docs/tickets/`, feeding
     /// `decide_next_action`'s DispatchTicket/Retry/Escalate rules.
@@ -97,6 +103,10 @@ pub struct StatusSnapshot {
     /// when a strong reviewer has approved and CI is green. This is an
     /// independent axis from reviewer routing and merge policy.
     pub publishing_allow_pr: bool,
+    /// Effective pre-publication generated-artifact deny patterns for this
+    /// profile. Exposed so CLI/API/dashboard clients can explain a blocked
+    /// commit without reimplementing config defaults.
+    pub generated_artifact_deny_patterns: Vec<String>,
     /// How many `gah loop` workers may run concurrently for this profile
     /// (see `Profile::max_parallel_workers`). Read by `gah-supervisor.sh`
     /// to decide how many worker loops to launch when not given explicitly
@@ -289,20 +299,8 @@ fn build_snapshot_inner(
     // Ledger read is hoisted above the sync step so recently-merged MRs can be
     // enriched with their backend/model and review verdict (TICKET-198).
     let ledger_entries_by_work_id = ledger::index_entries_by_work_id(entries);
-    match sync::fetch_mrs(profile) {
+    match sync::fetch_active_mrs(profile) {
         Ok(mrs) => {
-            let mrs = if profile.provider == "gitlab" {
-                mrs.into_iter()
-                    .filter(|mr| {
-                        mr.state
-                            .as_deref()
-                            .is_some_and(|state| state.eq_ignore_ascii_case("opened"))
-                            && !mr.merged
-                    })
-                    .collect()
-            } else {
-                mrs
-            };
             merge_requests = mrs
                 .iter()
                 .map(|mr| sync::sync_mr_to_json(mr, None, &ledger_entries_by_work_id))
@@ -448,8 +446,23 @@ fn build_snapshot_inner(
 
     // 5. Available tickets (TICKET-078): reuses the already-fetched `raw_mrs`
     // rather than calling sync::fetch_mrs a second time.
-    let mut available_tickets =
-        crate::dispatch::scan_available_tickets(profile, &raw_mrs, &ledger_entries_by_work_id);
+    let ticket_scan = crate::dispatch::scan_available_tickets_with_dependencies(
+        profile,
+        &raw_mrs,
+        &ledger_entries_by_work_id,
+    );
+    let mut available_tickets = ticket_scan.available_tickets;
+    let dependency_blockers = ticket_scan.dependency_blockers;
+    let issue_intake_rejections = ticket_scan.issue_intake_rejections;
+    if let Some(error) = ticket_scan.provider_error {
+        errors.push(StatusError {
+            subsystem: "issue_intake".into(),
+            message: error,
+            // Ticket intake is fail-closed below, but MR review/repair must
+            // remain processable from the independently successful sync.
+            incomplete_snapshot: false,
+        });
+    }
     // Load durable claim state once and apply active-claim flags directly from
     // the canonical `<profile>@<repo_id>` scope to avoid stale CLI/runtime
     // mismatch and per-ticket file reads.
@@ -492,8 +505,6 @@ fn build_snapshot_inner(
         }
     }
 
-    let issue_intake_rejections = crate::dispatch::discover_open_issues(profile).rejected;
-
     // TICKET-human-required-scoping: after the per-ticket human_required is
     // derived (in scan_available_tickets via ledger_lookup_for_ticket), record
     // each blocked work item in `blocked_work_items` so it stays visible in
@@ -513,6 +524,18 @@ fn build_snapshot_inner(
                 reason_code,
             });
         }
+    }
+    for dependency in &dependency_blockers {
+        blocked_work_items.push(Blocker {
+            kind: "dependency".into(),
+            reason: Some(dependency.reason_code.clone()),
+            message: Some(dependency.reason.clone()),
+            backend: None,
+            model: None,
+            until: None,
+            source_reference: Some(dependency.work_id.clone()),
+            reason_code: Some(dependency.reason_code.clone()),
+        });
     }
 
     // Project retry-cap-blocked MRs into blocked_work_items. An MR classified
@@ -581,6 +604,7 @@ fn build_snapshot_inner(
         blockers,
         blocked_work_items,
         issue_intake_rejections,
+        dependency_blockers,
         errors,
         available_tickets,
         active_claims,
@@ -588,6 +612,10 @@ fn build_snapshot_inner(
         merge_attempt_counts,
         review_held_work_ids,
         publishing_allow_pr: profile.publishing.allow_pull_request_creation,
+        generated_artifact_deny_patterns: profile
+            .publishing
+            .generated_artifact_deny_patterns
+            .clone(),
         max_parallel_workers: profile.max_parallel_workers(),
         backend_configured,
     };
@@ -640,6 +668,36 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
             println!("Errors:");
             for e in &snapshot.errors {
                 println!("  - [{}] {}", e.subsystem, e.message);
+            }
+        }
+
+        if !snapshot.dependency_blockers.is_empty() {
+            println!("Dependency-blocked work:");
+            for blocked in &snapshot.dependency_blockers {
+                let states = blocked
+                    .dependencies
+                    .iter()
+                    .map(|dependency| {
+                        format!(
+                            "{}={} ({})",
+                            dependency.identity,
+                            dependency.normalized_state,
+                            dependency.provider_state.as_deref().unwrap_or("unknown")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "  - {} [{}]: {}{}",
+                    blocked.work_id,
+                    blocked.reason_code,
+                    blocked.reason,
+                    if states.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; {states}")
+                    }
+                );
             }
         }
 

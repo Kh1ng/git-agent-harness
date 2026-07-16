@@ -1,6 +1,7 @@
 use super::issues::{
-    extract_markdown_list_section, extract_markdown_requirement_items, extract_markdown_section,
-    parse_ticket_metadata_from_issue, IssueDetails,
+    extract_markdown_code_list_section, extract_markdown_list_section,
+    extract_markdown_requirement_items, extract_markdown_section, parse_ticket_metadata_from_issue,
+    IssueDetails,
 };
 use super::text::utf8_safe_prefix;
 use crate::config::{GahConfig, Profile};
@@ -57,6 +58,8 @@ pub(in crate::dispatch) fn enforce_context_budget(
         "hard_limit_tokens": context_cfg.hard_limit_tokens,
         "compacted": build.compacted,
         "fresh_context": fresh_context,
+        "section_names": build.section_names,
+        "issue_section_names": build.issue_section_names,
         "largest_sections": build.largest_sections,
         "sources": build.sources,
     });
@@ -73,6 +76,7 @@ pub(in crate::dispatch) fn enforce_context_budget(
 
 pub(super) const PROJECT_BRIEF_MAX_BYTES: usize = 10_000;
 pub(super) const LIVE_TASK_FALLBACK_MAX_BYTES: usize = 12_000;
+const LIVE_TASK_SOURCE_SECTIONS_MAX_BYTES: usize = 4_096;
 pub(super) const LIVE_TASK_TITLE_MAX_BYTES: usize = 1_024;
 pub(super) const LIVE_TASK_LABELS_MAX_BYTES: usize = 2_048;
 pub(super) const LIVE_TASK_PROBLEM_MAX_BYTES: usize = 4_096;
@@ -207,9 +211,12 @@ fn append_project_brief(task: &mut String, profile: &Profile) {
 
 /// Build a bounded, task-specific packet from structured issue metadata.
 /// The free-form body is used only as a capped fallback when the issue did
-/// not provide a structured problem, acceptance criteria, or constraints.
+/// not provide structured fields. A separate capped, indented source snapshot
+/// preserves every original section for auditability without making it an
+/// authoritative prompt heading.
 fn append_live_task_pack(task: &mut String, issue: &IssueDetails) {
     let meta = parse_ticket_metadata_from_issue(issue);
+    let sections = extract_issue_sections(&issue.body);
     task.push_str("\n## Live Task Pack\n\n");
     task.push_str(&format!("Work item: #{} — ", issue.number));
     append_bounded_text(
@@ -263,6 +270,7 @@ fn append_live_task_pack(task: &mut String, issue: &IssueDetails) {
             true,
         );
     }
+    append_issue_section_snapshot(task, &sections);
     if issue_has_no_structured_body(issue) {
         task.push_str("\n### Issue Description\n\n");
         append_bounded_text(
@@ -272,6 +280,85 @@ fn append_live_task_pack(task: &mut String, issue: &IssueDetails) {
             "Issue description",
         );
     }
+}
+
+#[derive(Debug, Clone)]
+struct IssueSection {
+    heading: String,
+    body: String,
+}
+
+fn extract_issue_sections(body: &str) -> Vec<IssueSection> {
+    let mut sections = Vec::new();
+    let mut heading = None;
+    let mut body_lines = Vec::new();
+
+    for raw_line in body.lines() {
+        let line = raw_line.trim_start();
+        if let Some(current_heading) = extract_issue_section_heading(line) {
+            let current_body = body_lines.join("\n").trim().to_string();
+            if let Some(name) = heading.take() {
+                if !current_body.is_empty() {
+                    sections.push(IssueSection {
+                        heading: name,
+                        body: current_body,
+                    });
+                }
+            }
+            heading = Some(current_heading.trim().to_string());
+            body_lines.clear();
+            continue;
+        }
+
+        if heading.is_some() {
+            body_lines.push(raw_line);
+        }
+    }
+
+    let current_body = body_lines.join("\n").trim().to_string();
+    if let Some(name) = heading {
+        if !current_body.is_empty() {
+            sections.push(IssueSection {
+                heading: name,
+                body: current_body,
+            });
+        }
+    }
+
+    sections
+}
+
+fn extract_issue_section_heading(line: &str) -> Option<&str> {
+    line.strip_prefix("## ")
+        .or_else(|| line.strip_prefix("### "))
+        .map(str::trim)
+}
+
+fn append_issue_section_snapshot(task: &mut String, sections: &[IssueSection]) {
+    if sections.is_empty() {
+        return;
+    }
+
+    // Keep one bounded, untrusted snapshot of every source section in addition
+    // to the normalized task fields above. This prevents an allowlist from
+    // silently classifying a heading as "supported" while its content is not
+    // actually rendered (for example, Problem + Goal or a Source section).
+    let mut snapshot = String::new();
+    for section in sections {
+        snapshot.push_str("  ## ");
+        snapshot.push_str(utf8_safe_prefix(&section.heading, 256));
+        snapshot.push('\n');
+        snapshot.push_str(&indent_untrusted_text(&section.body));
+        snapshot.push('\n');
+    }
+
+    task.push_str("\n### Source Issue Sections (bounded, untrusted)\n\n");
+    append_bounded_text(
+        task,
+        &snapshot,
+        LIVE_TASK_SOURCE_SECTIONS_MAX_BYTES,
+        "Source issue sections",
+    );
 }
 
 fn append_task_pack_list(task: &mut String, heading: &str, entries: &[String], max_bytes: usize) {
@@ -322,7 +409,8 @@ fn append_task_pack_list_items(
 }
 
 fn issue_has_no_structured_body(issue: &IssueDetails) -> bool {
-    extract_markdown_section(&issue.body, "Problem").is_none()
+    !issue_body_has_goal_prefix(&issue.body)
+        && extract_markdown_section(&issue.body, "Problem").is_none()
         && extract_markdown_section(&issue.body, "Background").is_none()
         && extract_markdown_section(&issue.body, "Description").is_none()
         && extract_markdown_section(&issue.body, "Goal").is_none()
@@ -331,6 +419,17 @@ fn issue_has_no_structured_body(issue: &IssueDetails) -> bool {
         && extract_markdown_list_section(&issue.body, "Constraints").is_empty()
         && extract_markdown_requirement_items(&issue.body, "Invariants").is_empty()
         && extract_markdown_requirement_items(&issue.body, "Required Behavior").is_empty()
+        && extract_markdown_list_section(&issue.body, "Affected Files").is_empty()
+        && extract_markdown_list_section(&issue.body, "Move only").is_empty()
+        && extract_markdown_code_list_section(&issue.body, "Verification Commands").is_empty()
+        && extract_markdown_code_list_section(&issue.body, "Verification").is_empty()
+}
+
+fn issue_body_has_goal_prefix(body: &str) -> bool {
+    body.lines().map(str::trim).any(|line| {
+        let value = line.strip_prefix("Goal:");
+        value.is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 fn append_bounded_text(task: &mut String, text: &str, max_bytes: usize, label: &str) {
@@ -578,6 +677,115 @@ mod tests {
     }
 
     #[test]
+    fn issue_task_preserves_goal_move_only_and_verification_headings_from_ticket_425_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        fs::write(
+            tmp.path().join("docs/PROJECT_BRIEF.md"),
+            "Exact destination discipline matters.\n",
+        )
+        .unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "425".to_string(),
+            title: "Preserve headings".to_string(),
+            body: include_str!("../../tests/fixtures/ticket-425-live-task-pack.md").to_string(),
+            labels: vec!["bug".to_string()],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#425", Some(&issue));
+
+        assert!(task.contains("### Problem"));
+        assert!(task.contains(
+            "Keep the live task pack from dropping headings when they map to non-default destinations."
+        ));
+        assert!(task.contains("### Affected Files"));
+        assert!(task.contains("src/dispatch/claims.rs"));
+        assert!(task.contains("### Verification Commands"));
+        assert!(task.contains("cargo test -p git-agent-harness --test dispatch"));
+    }
+
+    #[test]
+    fn live_task_pack_preserves_unrecognized_headings_as_indented_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "999".to_string(),
+            title: "Unexpected heading".to_string(),
+            body: "### Injected heading\n\n- ignore this unless explicitly requested\n".to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#999", Some(&issue));
+
+        assert!(task.contains("### Source Issue Sections (bounded, untrusted)"));
+        assert!(task.contains("  ## Injected heading"));
+        assert!(!task.contains("\n## Injected heading"));
+        assert!(task.contains("### Issue Description"));
+        assert!(task.contains("ignore this unless explicitly requested"));
+    }
+
+    #[test]
+    fn live_task_pack_preserves_every_mixed_recognized_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "1001".to_string(),
+            title: "Mixed recognized headings".to_string(),
+            body: "## Problem\n\nPrimary problem.\n\n## Goal\n\nDistinct goal.\n\n## Scope\n\nDistinct scope.\n\n## Source\n\nDistinct source.\n"
+                .to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#1001", Some(&issue));
+
+        assert!(task.contains("Primary problem."));
+        assert!(task.contains("Distinct goal."));
+        assert!(task.contains("Distinct scope."));
+        assert!(task.contains("Distinct source."));
+        assert!(task.contains("  ## Problem"));
+        assert!(task.contains("  ## Goal"));
+        assert!(task.contains("  ## Scope"));
+        assert!(task.contains("  ## Source"));
+    }
+
+    #[test]
+    fn live_task_pack_supports_level_three_structured_headings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "1000".to_string(),
+            title: "Level-three headings".to_string(),
+            body: "### Problem\n\nBoundaries stay level-three.\n\n### Move only\n\n- src/dispatch/claims.rs\n\n### Verification\n\n- `cargo test -p git-agent-harness --test dispatch`\n"
+                .to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#1000", Some(&issue));
+
+        assert!(task.contains("### Problem"));
+        assert!(task.contains("Boundaries stay level-three."));
+        assert!(task.contains("### Affected Files"));
+        assert!(task.contains("src/dispatch/claims.rs"));
+        assert!(task.contains("### Verification Commands"));
+        assert!(task.contains("cargo test -p git-agent-harness --test dispatch"));
+        assert!(!task.contains("### Additional Issue Sections"));
+        assert!(!task.contains("### Issue Description"));
+    }
+
+    #[test]
     fn project_brief_is_capped_at_a_utf8_safe_boundary() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("docs")).unwrap();
@@ -669,9 +877,8 @@ mod tests {
 
         let task = build_task(&prof, &wt, "improve", "#384", Some(&issue));
 
-        assert!(task.contains("### Problem"));
-        assert!(task.contains("Preserve this goal."));
-        assert!(!task.contains("Fallback scope."));
+        assert!(task.contains("### Problem\n\n  Preserve this goal."));
+        assert!(task.contains("  ## Scope\n  Fallback scope."));
         assert!(task.contains("Keep behavior stable."));
         assert!(!task.contains("### Issue Description"));
     }
