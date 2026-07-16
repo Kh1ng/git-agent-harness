@@ -9,7 +9,10 @@ use crate::config::{GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
 use crate::models::{AvailableTicket, DependencyBlocker, IssueIntakeRejection};
-use crate::notifications::{notify_event, notify_terminal_failure_resolved, NotifyEvent};
+use crate::notifications::{
+    notify_event, notify_terminal_failure_resolved, notify_terminal_failure_resolved_with_run_id,
+    NotifyEvent,
+};
 use crate::provider;
 use anyhow::{Context, Result};
 use std::fmt;
@@ -672,7 +675,20 @@ pub fn merge_branch(
                 },
             );
             if let Some(work_id) = work_id.as_deref() {
-                notify_terminal_failure_resolved(cfg, profile, profile_name, work_id);
+                match run_id {
+                    Some(run_id) => {
+                        notify_terminal_failure_resolved_with_run_id(
+                            cfg,
+                            profile,
+                            profile_name,
+                            work_id,
+                            Some(run_id),
+                        );
+                    }
+                    None => {
+                        notify_terminal_failure_resolved(cfg, profile, profile_name, work_id);
+                    }
+                }
             }
         }
         Err(e) => {

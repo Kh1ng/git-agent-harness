@@ -239,6 +239,134 @@ fn notify_terminal_failure_events_are_recorded_with_dedupe() {
 }
 
 #[test]
+fn notify_terminal_failure_dedupe_falls_back_to_memory_when_event_log_is_unreadable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out.txt");
+    let mut profile = crate::config::tests::test_profile_for_notifications();
+    profile.notify_command = Some(format!("cat >> {}", out.display()));
+    let mut cfg = test_gah_config(None);
+    cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
+    let events_path = cfg.defaults.events_path();
+    std::fs::create_dir_all(&events_path).unwrap();
+
+    notify_terminal_failure(
+        &cfg,
+        &profile,
+        TerminalFailurePayload {
+            profile: "profile-cache",
+            work_id: "WORK-CACHE",
+            run_id: "run-1",
+            failure_class: "validation_failure",
+            failure_stage: Some("agent_run"),
+            attempt_count: Some(1),
+            error_summary: Some("same summary"),
+            mr_url: None,
+        },
+    );
+    notify_terminal_failure(
+        &cfg,
+        &profile,
+        TerminalFailurePayload {
+            profile: "profile-cache",
+            work_id: "WORK-CACHE",
+            run_id: "run-1",
+            failure_class: "validation_failure",
+            failure_stage: Some("agent_run"),
+            attempt_count: Some(1),
+            error_summary: Some("same summary"),
+            mr_url: None,
+        },
+    );
+    let got = std::fs::read_to_string(&out).unwrap_or_default();
+    assert_eq!(
+        got.lines().count(),
+        1,
+        "I/O-failed event log read should still dedupe via in-memory cache"
+    );
+}
+
+#[test]
+fn notify_terminal_failure_reemits_after_dedupe_window_has_elapsed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out.txt");
+    let mut profile = crate::config::tests::test_profile_for_notifications();
+    profile.notify_command = Some(format!("cat >> {}", out.display()));
+    let mut cfg = test_gah_config(None);
+    cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
+
+    notify_terminal_failure(
+        &cfg,
+        &profile,
+        TerminalFailurePayload {
+            profile: "profile-window",
+            work_id: "WORK-WINDOW",
+            run_id: "run-1",
+            failure_class: "validation_failure",
+            failure_stage: Some("agent_run"),
+            attempt_count: Some(1),
+            error_summary: Some("same summary"),
+            mr_url: None,
+        },
+    );
+
+    let mut events = crate::events::read_events(&cfg).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == crate::events::EventType::TerminalFailure.as_str())
+            .count(),
+        1
+    );
+    let stale_timestamp = (time::OffsetDateTime::now_utc() - time::Duration::seconds(901))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let mut rewrote = false;
+    for event in &mut events {
+        if event.event_type == crate::events::EventType::TerminalFailure.as_str() {
+            event.timestamp = stale_timestamp.to_string();
+            rewrote = true;
+        }
+    }
+    assert!(
+        rewrote,
+        "test setup failed to capture emitted terminal failure event"
+    );
+    let serialized = events
+        .into_iter()
+        .map(|event| serde_json::to_string(&event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(cfg.defaults.events_path(), format!("{serialized}\n")).unwrap();
+
+    notify_terminal_failure(
+        &cfg,
+        &profile,
+        TerminalFailurePayload {
+            profile: "profile-window",
+            work_id: "WORK-WINDOW",
+            run_id: "run-1",
+            failure_class: "validation_failure",
+            failure_stage: Some("agent_run"),
+            attempt_count: Some(1),
+            error_summary: Some("same summary"),
+            mr_url: None,
+        },
+    );
+
+    let events = crate::events::read_events(&cfg).unwrap();
+    let terminal_count = events
+        .iter()
+        .filter(|event| event.event_type == crate::events::EventType::TerminalFailure.as_str())
+        .count();
+    assert_eq!(
+        terminal_count, 2,
+        "stale terminal failure should emit again after window"
+    );
+    let got = std::fs::read_to_string(&out).unwrap_or_default();
+    assert_eq!(got.lines().count(), 2);
+}
+
+#[test]
 fn notify_terminal_failure_distinct_class_generates_additional_notification() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("out.txt");

@@ -34,8 +34,13 @@
 use crate::config::{GahConfig, Profile, WakeAutonomy};
 use crate::events;
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+type TerminalFailureCacheKey = (String, String, String);
+type TerminalFailureCache = HashMap<TerminalFailureCacheKey, Option<TerminalFailureRecord>>;
 
 const NOTIFICATION_ERROR_SUMMARY_MAX_BYTES: usize = 300;
 const TERMINAL_FAILURE_EVENT_DEDUPE_SECONDS: i64 = 900;
@@ -533,10 +538,10 @@ fn strip_ansi(text: &str) -> String {
     osc.replace_all(&ansi_text, "").into_owned()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TerminalFailureRecord {
-    _profile: String,
-    _work_id: String,
+    profile: String,
+    work_id: String,
     run_id: String,
     failure_class: String,
     failure_stage: Option<String>,
@@ -594,12 +599,12 @@ fn parse_terminal_failure_timestamp(raw: &str) -> Option<OffsetDateTime> {
 fn terminal_failure_from_event(event: &events::ControllerEvent) -> Option<TerminalFailureRecord> {
     let value = serde_json::from_str::<serde_json::Value>(&event.details).ok()?;
     Some(TerminalFailureRecord {
-        _profile: value
+        profile: value
             .get("profile")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string(),
-        _work_id: value
+        work_id: value
             .get("work_id")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
@@ -629,24 +634,80 @@ fn terminal_failure_from_event(event: &events::ControllerEvent) -> Option<Termin
     })
 }
 
+fn terminal_failure_state_cache() -> &'static Mutex<TerminalFailureCache> {
+    static CACHE: OnceLock<Mutex<TerminalFailureCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn terminal_failure_cache_key(
+    cfg: &GahConfig,
+    profile: &str,
+    work_id: &str,
+) -> TerminalFailureCacheKey {
+    (
+        cfg.defaults.events_path().to_string_lossy().to_string(),
+        profile.to_string(),
+        work_id.to_string(),
+    )
+}
+
+fn cache_terminal_failure_record(
+    cfg: &GahConfig,
+    profile: &str,
+    work_id: &str,
+    failure: Option<TerminalFailureRecord>,
+) {
+    let key = terminal_failure_cache_key(cfg, profile, work_id);
+    let mut cache = terminal_failure_state_cache()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    cache.insert(key, failure);
+}
+
+fn latest_unresolved_terminal_failure_from_events(
+    events: &[events::ControllerEvent],
+    profile: &str,
+    work_id: &str,
+) -> Option<TerminalFailureRecord> {
+    for event in events.iter().rev() {
+        let Some(failure) = terminal_failure_from_event(event) else {
+            continue;
+        };
+        if failure.profile != profile || failure.work_id != work_id {
+            continue;
+        }
+        match event.event_type.as_str() {
+            t if t == events::EventType::TerminalFailureResolved.as_str() => return None,
+            t if t == events::EventType::TerminalFailure.as_str() => return Some(failure),
+            _ => continue,
+        }
+    }
+    None
+}
+
 fn latest_unresolved_terminal_failure_record(
     cfg: &GahConfig,
     profile: &str,
     work_id: &str,
 ) -> Option<TerminalFailureRecord> {
-    let events = events::read_events(cfg).ok()?;
-    for event in events.iter().rev() {
-        if event.profile.as_deref() != Some(profile) || event.work_id.as_deref() != Some(work_id) {
-            continue;
+    let events = match events::read_events(cfg) {
+        Ok(events) => events,
+        Err(error) => {
+            eprintln!(
+                "[gah] terminal failure dedupe fallback for profile={profile}, work_id={work_id}: {error:#}"
+            );
+            let key = terminal_failure_cache_key(cfg, profile, work_id);
+            return terminal_failure_state_cache()
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .get(&key)
+                .and_then(Clone::clone);
         }
-        if event.event_type == events::EventType::TerminalFailureResolved.as_str() {
-            return None;
-        }
-        if event.event_type == events::EventType::TerminalFailure.as_str() {
-            return terminal_failure_from_event(event);
-        }
-    }
-    None
+    };
+
+    let latest = latest_unresolved_terminal_failure_from_events(&events, profile, work_id);
+    cache_terminal_failure_record(cfg, profile, work_id, latest.clone());
+    latest
 }
 
 fn should_emit_terminal_failure(cfg: &GahConfig, current: &TerminalFailureState<'_>) -> bool {
@@ -706,6 +767,21 @@ fn record_terminal_failure_event(cfg: &GahConfig, failure: &TerminalFailureState
         })
         .to_string(),
     );
+    cache_terminal_failure_record(
+        cfg,
+        event_profile,
+        event_work_id,
+        Some(TerminalFailureRecord {
+            profile: event_profile.to_string(),
+            work_id: event_work_id.to_string(),
+            run_id: event_run_id.to_string(),
+            failure_class: event_failure_class.to_string(),
+            failure_stage: event_failure_stage.map(str::to_string),
+            attempt_count: event_attempt_count,
+            error_summary: event_error_summary.map(str::to_string),
+            timestamp: terminal_failure_timestamp_now(),
+        }),
+    );
 }
 
 fn record_terminal_failure_resolved(
@@ -715,12 +791,19 @@ fn record_terminal_failure_resolved(
     resolved_run_id: &str,
     failure_class: &str,
     failure_stage: Option<&str>,
+    resolved_by_run_id: Option<&str>,
 ) {
-    let _ = events::record(
-        cfg,
-        events::EventType::TerminalFailureResolved,
-        Some(profile),
-        Some(work_id),
+    let details = if let Some(resolved_by_run_id) = resolved_by_run_id {
+        json!({
+            "profile": profile,
+            "work_id": work_id,
+            "resolved_run_id": resolved_run_id,
+            "failure_class": failure_class,
+            "failure_stage": failure_stage,
+            "resolved_by_run_id": resolved_by_run_id,
+        })
+        .to_string()
+    } else {
         json!({
             "profile": profile,
             "work_id": work_id,
@@ -728,8 +811,30 @@ fn record_terminal_failure_resolved(
             "failure_class": failure_class,
             "failure_stage": failure_stage,
         })
-        .to_string(),
-    );
+        .to_string()
+    };
+    match resolved_by_run_id {
+        Some(resolved_by_run_id) => {
+            let _ = events::record_with_run_id(
+                cfg,
+                events::EventType::TerminalFailureResolved,
+                Some(profile),
+                Some(work_id),
+                Some(resolved_by_run_id),
+                details,
+            );
+        }
+        None => {
+            let _ = events::record(
+                cfg,
+                events::EventType::TerminalFailureResolved,
+                Some(profile),
+                Some(work_id),
+                details,
+            );
+        }
+    }
+    cache_terminal_failure_record(cfg, profile, work_id, None);
 }
 
 fn event_name(event: &NotifyEvent<'_>) -> &'static str {
@@ -816,6 +921,16 @@ pub(crate) fn notify_terminal_failure_resolved(
     profile_name: &str,
     work_id: &str,
 ) {
+    notify_terminal_failure_resolved_with_run_id(cfg, profile, profile_name, work_id, None);
+}
+
+pub(crate) fn notify_terminal_failure_resolved_with_run_id(
+    cfg: &GahConfig,
+    profile: &Profile,
+    profile_name: &str,
+    work_id: &str,
+    resolved_by_run_id: Option<&str>,
+) {
     let Some(failure) = latest_unresolved_terminal_failure_record(cfg, profile_name, work_id)
     else {
         return;
@@ -830,6 +945,7 @@ pub(crate) fn notify_terminal_failure_resolved(
         resolved_run_id,
         &failure.failure_class,
         failure.failure_stage.as_deref(),
+        resolved_by_run_id,
     );
     notify_event(
         cfg,

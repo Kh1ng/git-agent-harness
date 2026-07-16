@@ -7,7 +7,9 @@
 use crate::config::{self, GahConfig};
 use crate::ledger::{read_entries, LedgerEntry};
 use crate::models::PolicyConfig;
-use crate::notifications::notify_terminal_failure_resolved;
+use crate::notifications::{
+    notify_terminal_failure_resolved, notify_terminal_failure_resolved_with_run_id,
+};
 use crate::sync;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -240,7 +242,29 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
             // A terminal reconciliation state means prior terminal dispatch
             // failures for this work_id are no longer actionable; resolve the
             // outstanding operator notification once.
-            notify_terminal_failure_resolved(cfg, profile, profile_name, work_id);
+            let dispatch_entries = entries_by_work_id
+                .get(work_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let resolved_by_run_id = dispatch_entries
+                .iter()
+                .rev()
+                .find(|entry| entry.mode == "merge")
+                .and_then(|entry| entry.session_id.as_deref());
+            match resolved_by_run_id {
+                Some(run_id) => {
+                    notify_terminal_failure_resolved_with_run_id(
+                        cfg,
+                        profile,
+                        profile_name,
+                        work_id,
+                        Some(run_id),
+                    );
+                }
+                None => {
+                    notify_terminal_failure_resolved(cfg, profile, profile_name, work_id);
+                }
+            }
             let dispatch_entries = entries_by_work_id
                 .get(work_id)
                 .map(Vec::as_slice)
@@ -593,7 +617,16 @@ fn record_issue_closure_report(
 mod tests {
     use super::*;
     use crate::ledger::test_util::test_config;
+    use serde_json::Value;
     use std::fs;
+
+    struct ProviderPathGuard;
+
+    impl Drop for ProviderPathGuard {
+        fn drop(&mut self) {
+            crate::provider::clear_test_provider_path();
+        }
+    }
 
     #[test]
     fn reconciliation_log_is_empty_when_file_does_not_exist() {
@@ -648,5 +681,84 @@ mod tests {
 
         let result = read_reconciliation_entries(&cfg);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reconcile_run_resolves_terminal_failure_with_resolution_run_id() {
+        let (_tmp, mut cfg) = test_config();
+        let profile = crate::ledger::test_util::profile();
+        cfg.profiles.insert("test".to_string(), profile.clone());
+
+        let bin_dir = _tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
+        crate::provider::set_test_provider_path(bin_dir.to_str().unwrap());
+        let _provider_guard = ProviderPathGuard;
+
+        let gh_path = bin_dir.join("gh");
+        let response = r#"[{"title":"Fix #12","headRefName":"gah/reconcile-work","url":"https://github.com/owner/repo/pull/7","labels":[],"number":7,"state":"MERGED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":"2026-07-16T12:00:00-05:00","updatedAt":"2026-07-16T12:00:00-05:00","statusCheckRollup":[]}]"#;
+        std::fs::write(
+            &gh_path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                response.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&gh_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&gh_path, perms).unwrap();
+        }
+
+        let mut failure_profile = profile.clone();
+        failure_profile.notify_command = None;
+        crate::notifications::notify_terminal_failure(
+            &cfg,
+            &failure_profile,
+            crate::notifications::TerminalFailurePayload {
+                profile: "test",
+                work_id: "WORK-RECONCILE",
+                run_id: "run-failure",
+                failure_class: "validation_failure",
+                failure_stage: Some("agent_run"),
+                attempt_count: Some(1),
+                error_summary: Some("summary"),
+                mr_url: Some("https://github.com/owner/repo/pull/7"),
+            },
+        );
+
+        let mut merge_entry = crate::ledger::LedgerEntry::new(
+            "repo",
+            &profile,
+            "codex",
+            "merge",
+            "gah/reconcile-work",
+            Some("run-merge".to_string()),
+            None,
+        );
+        merge_entry.work_id = Some("WORK-RECONCILE".into());
+        merge_entry.mr_url = Some("https://github.com/owner/repo/pull/7".into());
+        merge_entry.branch = Some("gah/reconcile-work".into());
+        crate::ledger::append(&cfg, &merge_entry).unwrap();
+
+        run(&cfg, "test", false, false).unwrap();
+
+        let events = crate::events::read_events(&cfg).unwrap();
+        let resolved: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == crate::events::EventType::TerminalFailureResolved.as_str()
+            })
+            .collect();
+        assert_eq!(resolved.len(), 1);
+
+        let resolved = resolved[0];
+        assert_eq!(resolved.run_id.as_deref(), Some("run-merge"));
+        let details: Value = serde_json::from_str(&resolved.details).unwrap();
+        assert_eq!(details["resolved_run_id"], "run-failure");
+        assert_eq!(details["failure_class"], "validation_failure");
     }
 }

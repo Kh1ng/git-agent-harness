@@ -3,6 +3,7 @@ use super::*;
 use crate::ledger::LedgerEntry;
 use crate::test_support::PathGuard;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -23,6 +24,23 @@ fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
         perms.set_mode(0o755);
         fs::set_permissions(&gh_path, perms).unwrap();
     }
+}
+
+fn setup_fake_gh_merge(bin_dir: &Path) {
+    let gh_path = bin_dir.join("gh");
+    let content = r#"#!/bin/sh
+case "$1 $2" in
+  "pr list") printf '[{"number":7}]' ;;
+  "pr view") printf '{"number":7,"url":"https://github.com/owner/repo/pull/7","headRefName":"gah/merge-work","baseRefName":"main"}' ;;
+  "pr ready") exit 0 ;;
+  "pr merge") exit 0 ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#;
+    fs::write(&gh_path, content).unwrap();
+    let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&gh_path, perms).unwrap();
 }
 
 #[test]
@@ -1108,4 +1126,81 @@ fn review_hold_only_entries_show_zero_attempts() {
         candidates[0].genuine_agent_failure_count, 0,
         "no genuine agent failures when only review control records exist"
     );
+}
+
+#[test]
+fn merge_branch_resolves_terminal_failure_with_merge_run_id() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    setup_fake_gh_merge(&bin_dir);
+    let _guard = PathGuard::set(&bin_dir);
+
+    let mut prof = profile(tmp.path());
+    prof.local_path = tmp.path().display().to_string();
+
+    let cfg = crate::config::GahConfig {
+        context: Default::default(),
+        defaults: crate::config::Defaults {
+            current_manager: None,
+            artifact_root: tmp.path().to_string_lossy().to_string(),
+            worktree_base: tmp.path().to_string_lossy().to_string(),
+            llm_base_url: String::new(),
+            llm_model_local: String::new(),
+            llm_model_cloud: String::new(),
+            routing: crate::config::RoutingPolicy::default(),
+        },
+        profiles: std::collections::HashMap::new(),
+    };
+
+    let mut failure_profile = prof.clone();
+    failure_profile.notify_command = None;
+    crate::notifications::notify_terminal_failure(
+        &cfg,
+        &failure_profile,
+        crate::notifications::TerminalFailurePayload {
+            profile: "test-profile",
+            work_id: "WORK-MERGE-1",
+            run_id: "run-failure",
+            failure_class: "validation_failure",
+            failure_stage: Some("agent_run"),
+            attempt_count: Some(1),
+            error_summary: Some("summary"),
+            mr_url: Some("https://github.com/owner/repo/pull/7"),
+        },
+    );
+
+    let branch = "gah/merge-work";
+    merge_branch(
+        &cfg,
+        &prof,
+        "test-profile",
+        branch,
+        &Some("WORK-MERGE-1".to_string()),
+        &Some("https://github.com/owner/repo/pull/7".to_string()),
+        Some("run-merge"),
+    )
+    .unwrap();
+
+    let events = crate::events::read_events(&cfg).unwrap();
+    let terminal_count = events
+        .iter()
+        .filter(|event| event.event_type == crate::events::EventType::TerminalFailure.as_str())
+        .count();
+    let resolved_events: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event.event_type == crate::events::EventType::TerminalFailureResolved.as_str()
+        })
+        .collect();
+    assert_eq!(terminal_count, 1);
+    assert_eq!(resolved_events.len(), 1);
+
+    let resolved = resolved_events[0];
+    assert_eq!(resolved.run_id.as_deref(), Some("run-merge"));
+    let details: serde_json::Value =
+        serde_json::from_str(&resolved.details).expect("failed to parse resolved details");
+    assert_eq!(details["resolved_run_id"], "run-failure");
+    assert_eq!(details["failure_class"], "validation_failure");
 }
