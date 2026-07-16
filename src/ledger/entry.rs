@@ -32,6 +32,13 @@ pub enum FailureClass {
     /// the dispatched ticket's work failed the gate -- conflating the two
     /// would make a broken config look like the ticket's fault.
     ValidationGate,
+    /// Issue #584: a backend returned a structured disposition reporting that
+    /// the source issue's requirements are already satisfied in the target
+    /// branch, with grounded file/test evidence and *no* repository diff. This
+    /// is deliberately distinct from `AgentNoProgress` (the agent tried and
+    /// could not make progress) so GAH never forces an agent to manufacture a
+    /// change just to close an already-completed task.
+    AlreadySatisfied,
     HumanBlocked,
     Unknown,
 }
@@ -48,6 +55,7 @@ impl FailureClass {
             Self::ContextLimitExceeded => "context_limit_exceeded",
             Self::ValidationFailure => "validation_failure",
             Self::ValidationGate => "validation_gate",
+            Self::AlreadySatisfied => "already_satisfied",
             Self::HumanBlocked => "human_blocked",
             Self::Unknown => "unknown",
         }

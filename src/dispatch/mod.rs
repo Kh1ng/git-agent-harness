@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
+mod already_satisfied;
 mod attempts;
 mod claims;
 mod command;

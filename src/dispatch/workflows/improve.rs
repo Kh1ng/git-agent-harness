@@ -24,6 +24,7 @@ use super::super::validation::{
     validation_env, validation_failure_no_progress_reason,
 };
 use super::super::DispatchArgs;
+use super::already_satisfied_reconcile::reconcile_already_satisfied_publish as reconcile_already_satisfied;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};
@@ -1298,9 +1299,7 @@ pub(crate) fn improve(
         worktree::has_changes(&wt, &profile.default_target_branch),
     )?;
     if !has_changes {
-        // Defensive backstop: auto-fix commands or a future post-validation
-        // transform could remove every change after the normal early check.
-        // Do not let that become a successful no-op dispatch either.
+        // Defensive backstop: a later transform must not turn this into a no-op.
         ledger.validation_result = Some("passed_no_changes".into());
         ledger.set_failure(
             crate::ledger::FailureClass::AgentNoProgress,
@@ -1316,6 +1315,22 @@ pub(crate) fn improve(
         worktree::cleanup(&wt, repo);
         anyhow::bail!("all worktree changes disappeared before publish");
     }
+
+    // Issue #584: reconcile an already-satisfied disposition (rejects test-only
+    // coverage regressions) before publishing; `Ok(true)` short-circuits publish.
+    if reconcile_already_satisfied(
+        profile,
+        ledger,
+        &wt,
+        repo,
+        &branch,
+        args,
+        &backend_summary,
+        &wip_checkpoints,
+    )? {
+        return Ok(());
+    }
+
     let commit_title = if validation_failed {
         format!(
             "gah: {} changes for {} [validation-failing draft]",
@@ -1339,8 +1354,7 @@ pub(crate) fn improve(
     // and merge policy: review still runs, the worktree is still cleaned up,
     // only the autonomous publish step is suppressed.
     if !publishing_allows_publish(profile) {
-        // Commit only if the policy still permits agent-authored commit text;
-        // otherwise leave the worktree uncommitted for human completion.
+        // Commit only if the policy still permits agent-authored commit text.
         if profile.publishing.allow_commit_message_generation {
             if worktree::has_uncommitted_changes(&wt)? {
                 ledger.commit_attempted = true;

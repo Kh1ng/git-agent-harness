@@ -1,5 +1,9 @@
 //! Publishing policy, source freshness checks, and deterministic handoff/MR rendering.
 
+use super::already_satisfied::{
+    classify_backend_disposition, reconcile_already_satisfied, AlreadySatisfiedEvidence,
+    Disposition,
+};
 use super::issues::{fetch_issue_details, IssueDetails, TicketMetadata};
 use crate::config::Profile;
 use crate::ledger::LedgerEntry;
@@ -81,6 +85,54 @@ pub(super) fn enforce_generated_artifact_policy(
         return Err(error);
     }
     Ok(())
+}
+
+/// Issue #584: the decision taken before a completion MR is published, when the
+/// backend's disposition indicates the source work may already be satisfied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AlreadySatisfiedPublishOutcome {
+    /// Proceed with the normal completion-MR publication (the disposition was
+    /// genuine agent-no-progress or a real, acceptable change).
+    Proceed,
+    /// The work is already satisfied and this profile is a trusted autonomous
+    /// provider issue: post the grounded evidence and close the issue
+    /// idempotently instead of publishing a completion MR.
+    CloseIdempotently(AlreadySatisfiedEvidence),
+    /// The work is already satisfied (or only a test-only regression diff exists)
+    /// but GAH must not autonomously close. Emit a bounded operator handoff
+    /// rather than a regressive completion MR.
+    BoundedHandoff(String),
+}
+
+/// Issue #584: classify the backend's completion disposition and decide whether
+/// a completion MR should be published, or whether an already-satisfied
+/// disposition should be reconciled (idempotent close for trusted autonomous
+/// provider issues, otherwise a bounded operator handoff). A test-only diff
+/// that removes/weakens coverage is never accepted as completion of an
+/// already-implemented production task.
+pub(super) fn reconcile_before_publish(
+    profile: &Profile,
+    backend_summary: &str,
+    diff: &super::already_satisfied::DiffSummary,
+) -> AlreadySatisfiedPublishOutcome {
+    match classify_backend_disposition(backend_summary, diff) {
+        Disposition::AlreadySatisfied(evidence) => {
+            match reconcile_already_satisfied(profile, &evidence) {
+                super::already_satisfied::ReconciliationDecision::PostEvidenceAndClose {
+                    ..
+                } => AlreadySatisfiedPublishOutcome::CloseIdempotently(evidence),
+                super::already_satisfied::ReconciliationDecision::BoundedOperatorHandoff {
+                    reason,
+                } => AlreadySatisfiedPublishOutcome::BoundedHandoff(reason),
+            }
+        }
+        Disposition::RegressiveCompletion(_) => AlreadySatisfiedPublishOutcome::BoundedHandoff(
+            "backend produced only a test-only diff that removes/weakens coverage; \
+                 refusing to publish it as completion of an already-implemented production task"
+                .into(),
+        ),
+        Disposition::AgentNoProgress => AlreadySatisfiedPublishOutcome::Proceed,
+    }
 }
 
 pub(super) fn render_ticket_label(ticket: Option<&TicketMetadata>) -> String {
