@@ -195,6 +195,22 @@ export interface IssueIntakeRejection {
   labels: string[];
 }
 
+export interface DependencyObservation {
+  identity: string;
+  provider: string;
+  provider_state: string | null;
+  normalized_state: 'open' | 'closed' | 'unknown' | 'missing' | 'inaccessible';
+}
+
+export interface DependencyBlocker {
+  ticket_path: string;
+  work_id: string;
+  title: string;
+  reason_code: string;
+  reason: string;
+  dependencies: DependencyObservation[];
+}
+
 export interface ActiveClaim {
   work_id: string;
   pid: number;
@@ -224,6 +240,9 @@ export interface StatusSnapshot {
   blocked_work_items: Blocker[];
   /** Issue intake rejections observed during recurring discovery. */
   issue_intake_rejections: IssueIntakeRejection[];
+  /** Native issues excluded by unresolved canonical prerequisites. Optional
+   * while status schema v1 clients may still be connected to an older CLI. */
+  dependency_blockers?: DependencyBlocker[];
   errors: StatusError[];
   available_tickets: AvailableTicket[];
   active_claims: ActiveClaim[];

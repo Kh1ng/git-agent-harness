@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::{Defaults, GahConfig, IssueIntakeMode, Profile, RoutingPolicy};
-use crate::dispatch::scan_available_tickets;
+use crate::dispatch::{scan_available_tickets, scan_available_tickets_with_dependencies};
 use crate::ledger;
 use crate::test_support::{ExecGuard, PathGuard};
 use std::collections::HashMap;
@@ -705,6 +705,221 @@ fn scan_available_tickets_includes_open_github_issues() {
     assert_eq!(candidates[0].recommended_backend.as_deref(), Some("agy"));
     assert_eq!(candidates[0].prior_attempt_count, 0);
     assert!(!candidates[0].has_active_mr);
+}
+
+#[test]
+fn github_dependency_chain_excludes_653_while_652_is_open() {
+    let _exec_guard = ExecGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let issues = serde_json::json!([
+        {"number": 652, "title": "Approval scope", "body": "", "labels": [], "author": {"login": "owner", "type": "User", "is_bot": false}, "state": "OPEN"},
+        {"number": 653, "title": "Approval notifications", "body": "Blocked by: #652", "labels": [], "author": {"login": "owner", "type": "User", "is_bot": false}, "state": "OPEN"}
+    ]);
+    let gh_path = bin_dir.join("gh");
+    fs::write(
+        &gh_path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            issues.to_string().replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_path, perms).unwrap();
+    }
+    let _guard = PathGuard::set(&bin_dir);
+    let cfg = ticket_cfg(tmp.path());
+    let mut prof = profile(tmp.path());
+    prof.provider = "github".into();
+    prof.repo = "owner/repo".into();
+
+    let scan = scan_available_tickets_with_dependencies(
+        &prof,
+        &[],
+        &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
+    );
+    assert!(scan
+        .available_tickets
+        .iter()
+        .any(|ticket| ticket.work_id.as_deref() == Some("#652")));
+    assert!(!scan
+        .available_tickets
+        .iter()
+        .any(|ticket| ticket.work_id.as_deref() == Some("#653")));
+    assert_eq!(scan.dependency_blockers[0].work_id, "#653");
+    assert_eq!(
+        scan.dependency_blockers[0].dependencies[0]
+            .provider_state
+            .as_deref(),
+        Some("OPEN")
+    );
+}
+
+#[test]
+fn github_dependency_query_fixture_releases_653_when_652_closes() {
+    let _exec_guard = ExecGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let dependency_path = tmp.path().join("dependency.json");
+    let issues = serde_json::json!([{
+        "number": 653,
+        "title": "Approval notifications",
+        "body": "Blocked by: #652",
+        "labels": [],
+        "author": {"login": "owner", "type": "User", "is_bot": false},
+        "state": "OPEN"
+    }]);
+    let gh_path = bin_dir.join("gh");
+    fs::write(
+        &gh_path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  cat '{}'\nelse\n  exit 2\nfi\n",
+            issues.to_string().replace('\'', "'\\''"),
+            dependency_path.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_path, perms).unwrap();
+    }
+    let _guard = PathGuard::set(&bin_dir);
+    let cfg = ticket_cfg(tmp.path());
+    let mut prof = profile(tmp.path());
+    prof.provider = "github".into();
+    prof.repo = "owner/repo".into();
+    let ledger = ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap());
+
+    fs::write(
+        &dependency_path,
+        r#"{"number":652,"body":"","state":"OPEN"}"#,
+    )
+    .unwrap();
+    let blocked = scan_available_tickets_with_dependencies(&prof, &[], &ledger);
+    assert!(blocked.available_tickets.is_empty());
+    assert_eq!(
+        blocked.dependency_blockers[0].reason_code,
+        "dependency_open"
+    );
+    assert_eq!(
+        blocked.dependency_blockers[0].dependencies[0]
+            .provider_state
+            .as_deref(),
+        Some("OPEN")
+    );
+
+    fs::write(
+        &dependency_path,
+        r#"{"number":652,"body":"","state":"CLOSED"}"#,
+    )
+    .unwrap();
+    let released = scan_available_tickets_with_dependencies(&prof, &[], &ledger);
+    assert!(released.dependency_blockers.is_empty());
+    assert_eq!(
+        released.available_tickets[0].work_id.as_deref(),
+        Some("#653")
+    );
+}
+
+#[test]
+fn gitlab_provider_fixture_reproduces_sportsball_dependency_chains() {
+    let _exec_guard = ExecGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let issues = serde_json::json!([
+        {"iid": 96, "title": "Diagnose scoring outputs", "description": "Blocked by: #147, #148", "labels": [], "author": {"username": "Khing", "bot": false}, "state": "opened"},
+        {"iid": 148, "title": "Promote NFL artifacts", "description": "Blocked by: #147", "labels": [], "author": {"username": "Khing", "bot": false}, "state": "opened"},
+        {"iid": 149, "title": "Cut over services", "description": "Blocked by: #147, #148, #155", "labels": [], "author": {"username": "Khing", "bot": false}, "state": "opened"},
+        {"iid": 150, "title": "Backfill resolved props", "description": "Blocked by: #147, #148", "labels": [], "author": {"username": "Khing", "bot": false}, "state": "opened"},
+        {"iid": 166, "title": "Execute news backfill", "description": "Blocked by: #158, #147", "labels": [], "author": {"username": "Khing", "bot": false}, "state": "opened"}
+    ]);
+    let glab_path = bin_dir.join("glab");
+    fs::write(
+        &glab_path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  case \"$3\" in\n    147) printf '%s\\n' '{{\"iid\":147,\"description\":\"\",\"state\":\"opened\"}}' ;;\n    155) printf '%s\\n' '{{\"iid\":155,\"description\":\"\",\"state\":\"closed\"}}' ;;\n    158) printf '%s\\n' '{{\"iid\":158,\"description\":\"\",\"state\":\"opened\"}}' ;;\n    *) printf '%s\\n' '404 not found' >&2; exit 1 ;;\n  esac\nelse\n  exit 2\nfi\n",
+            issues.to_string().replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&glab_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&glab_path, perms).unwrap();
+    }
+    let _guard = PathGuard::set(&bin_dir);
+    let cfg = ticket_cfg(tmp.path());
+    let mut prof = profile(tmp.path());
+    prof.provider = "gitlab".into();
+    prof.repo = "Khing/sportsball-bets".into();
+    prof.publishing.trusted_issue_human_authors = Some(vec!["Khing".into()]);
+
+    let scan = scan_available_tickets_with_dependencies(
+        &prof,
+        &[],
+        &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
+    );
+    assert!(scan.available_tickets.is_empty());
+    assert_eq!(scan.dependency_blockers.len(), 5);
+    assert!(scan
+        .dependency_blockers
+        .iter()
+        .all(|blocker| blocker.reason_code == "dependency_open"));
+    assert!(scan.dependency_blockers.iter().any(|blocker| {
+        blocker.work_id == "#149"
+            && blocker.dependencies.iter().any(|dependency| {
+                dependency.identity == "#155" && dependency.normalized_state == "closed"
+            })
+    }));
+}
+
+#[test]
+fn provider_list_failure_is_visible_and_fails_native_intake_closed() {
+    let _exec_guard = ExecGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let gh_path = bin_dir.join("gh");
+    fs::write(
+        &gh_path,
+        "#!/bin/sh\nprintf 'provider offline\\n' >&2\nexit 17\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_path, perms).unwrap();
+    }
+    let _guard = PathGuard::set(&bin_dir);
+    let cfg = ticket_cfg(tmp.path());
+    let mut prof = profile(tmp.path());
+    prof.provider = "github".into();
+    prof.repo = "owner/repo".into();
+    let scan = scan_available_tickets_with_dependencies(
+        &prof,
+        &[],
+        &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
+    );
+    assert!(scan.available_tickets.is_empty());
+    assert!(scan
+        .provider_error
+        .as_deref()
+        .is_some_and(|error| error.contains("provider offline")));
 }
 
 #[test]
