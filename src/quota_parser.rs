@@ -16,8 +16,11 @@
 //! pure function over text, complete and tested on its own.
 #![allow(dead_code)]
 
+use chrono::{DateTime, Duration as ChronoDuration, NaiveTime, TimeZone, Utc};
+use chrono_tz::Tz;
 use regex::Regex;
 use std::sync::OnceLock;
+use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,10 +68,10 @@ pub struct ParsedFailure {
     /// trails and debugging false positives/negatives.
     pub matched_evidence: String,
     /// Set when the message named an explicit IANA-style timezone (e.g.
-    /// "America/Santiago") that this module cannot resolve to an absolute
-    /// instant without a timezone database — a dependency deliberately
-    /// not added for this ticket. `reset_at` is left `None` in that case
-    /// rather than guessing an offset.
+    /// "America/Santiago") that we could not resolve to an absolute
+    /// instant (invalid identifier, ambiguous/invalid local datetime, or
+    /// conversion failure). `reset_at` is left `None` in that case rather
+    /// than guessing an offset.
     pub unresolved_timezone: Option<String>,
 }
 
@@ -132,6 +135,15 @@ fn time_only_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)\bat\s+(\d{1,2}):(\d{2})\s*(AM|PM)\b").unwrap())
 }
 
+/// Shape: "2:30 PM (America/Santiago)" — minute-bearing reset with explicit
+/// IANA timezone.
+fn time_only_with_tz_minute_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(\d{1,2}):(\d{2})\s*(AM|PM)\s*\(([A-Za-z_]+/[A-Za-z_]+)\)").unwrap()
+    })
+}
+
 /// Shape: "3pm (America/Santiago)" — hour only (no minutes), explicit
 /// named timezone in parens.
 fn time_only_with_tz_re() -> &'static Regex {
@@ -169,6 +181,59 @@ fn agy_auth_re() -> &'static Regex {
         Regex::new(r"(?i)(not logged into Antigravity|not logged in|AGY not authenticated)")
             .unwrap()
     })
+}
+
+fn claude_session_limit_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\byour session limit\b.*\bresets\b").unwrap())
+}
+
+fn to_zoned_reset_at(
+    now: OffsetDateTime,
+    hour12: u8,
+    minute: u8,
+    ampm: &str,
+    zone_name: &str,
+) -> (Option<String>, Option<String>) {
+    let zone: Tz = match zone_name.parse() {
+        Ok(zone) => zone,
+        Err(_) => return (None, Some(zone_name.to_string())),
+    };
+
+    let Some(now_utc) = DateTime::<Utc>::from_timestamp(now.unix_timestamp(), now.nanosecond())
+    else {
+        return (None, Some(zone_name.to_string()));
+    };
+
+    let local_now = now_utc.with_timezone(&zone);
+    let hour = to_24h(hour12, ampm);
+    let Some(local_time) = NaiveTime::from_hms_opt(hour.into(), minute.into(), 0) else {
+        return (None, Some(zone_name.to_string()));
+    };
+
+    let mut local_candidate = local_now.date_naive().and_time(local_time);
+    if local_candidate <= local_now.naive_local() {
+        local_candidate += ChronoDuration::days(1);
+    }
+
+    let utc_candidate = match zone.from_local_datetime(&local_candidate) {
+        chrono::LocalResult::Single(candidate) => Some(candidate.with_timezone(&Utc)),
+        // A wall-clock time during the fall-back hour identifies two real
+        // instants. Picking either would fabricate precision the provider
+        // did not supply, so keep the timezone unresolved and fail closed.
+        chrono::LocalResult::Ambiguous(_, _) | chrono::LocalResult::None => None,
+    };
+
+    let Some(utc_candidate) = utc_candidate else {
+        return (None, Some(zone_name.to_string()));
+    };
+
+    (
+        OffsetDateTime::from_unix_timestamp(utc_candidate.timestamp())
+            .ok()
+            .and_then(|ts| ts.format(&Rfc3339).ok()),
+        None,
+    )
 }
 
 fn parse_agy_cooldown_seconds(text: &str) -> Option<u64> {
@@ -239,6 +304,13 @@ fn extract_reset(text: &str, now: OffsetDateTime) -> (Option<String>, Option<Str
     // Named-timezone shapes take priority and are checked first: if a
     // timezone is explicitly present, never fall through to a no-timezone
     // shape that would silently assume `now`'s offset instead.
+    if let Some(caps) = time_only_with_tz_minute_re().captures(text) {
+        if let (Ok(hour12), Ok(minute)) = (caps[1].parse::<u8>(), caps[2].parse::<u8>()) {
+            return to_zoned_reset_at(now, hour12, minute, &caps[3], &caps[4]);
+        }
+        return (None, Some(caps[4].to_string()));
+    }
+
     if let Some(caps) = month_day_time_with_tz_re().captures(text) {
         return (None, Some(caps[5].to_string()));
     }
@@ -331,6 +403,22 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
                 confidence: Confidence::High,
                 matched_evidence: extract_evidence_line(text, m.start(), m.end()),
                 unresolved_timezone: None,
+            });
+        }
+    }
+
+    if matches!(backend, "claude") {
+        if let Some(m) = claude_session_limit_re().find(text) {
+            let (reset_at, unresolved_timezone) = extract_reset(text, now);
+            return Some(ParsedFailure {
+                backend: backend.to_string(),
+                kind: FailureKind::QuotaExhausted,
+                retryable: false,
+                reset_at,
+                retry_after_seconds: None,
+                confidence: Confidence::High,
+                matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+                unresolved_timezone,
             });
         }
     }
@@ -455,6 +543,8 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_time_only.txt");
     const CLAUDE_TZ_RESET: &str =
         include_str!("../tests/fixtures/quota-logs/claude_usage_exhausted_tz_reset.txt");
+    const CLAUDE_SESSION_LIMIT_TZ_RESET: &str =
+        include_str!("../tests/fixtures/quota-logs/claude_session_limit_tz_reset.txt");
     const CLAUDE_WEEKLY_LIMIT: &str =
         include_str!("../tests/fixtures/quota-logs/claude_weekly_limit_structured.json");
     const CLAUDE_GENERIC_RATE_LIMIT: &str =
@@ -541,6 +631,50 @@ mod tests {
         assert_eq!(
             parsed.unresolved_timezone.as_deref(),
             Some("America/Santiago")
+        );
+    }
+
+    #[test]
+    fn claude_session_limit_tz_reset_parses_exact_reset_time() {
+        let now = utc(2026, Month::January, 15, 10, 0);
+        let parsed = parse("claude", CLAUDE_SESSION_LIMIT_TZ_RESET, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+        assert!(!parsed.retryable);
+        assert_eq!(parsed.unresolved_timezone, None);
+        assert_eq!(parsed.reset_at.as_deref(), Some("2026-01-15T20:30:00Z"));
+        assert_eq!(parsed.confidence, Confidence::High);
+    }
+
+    #[test]
+    fn claude_session_limit_tz_reset_respects_summertime_offsets() {
+        let now = utc(2026, Month::July, 15, 10, 0);
+        let parsed = parse("claude", CLAUDE_SESSION_LIMIT_TZ_RESET, now).unwrap();
+        assert_eq!(parsed.reset_at.as_deref(), Some("2026-07-15T19:30:00Z"));
+    }
+
+    #[test]
+    fn claude_session_limit_does_not_guess_unknown_or_ambiguous_timezone() {
+        let now = utc(2026, Month::November, 1, 0, 0);
+
+        let unknown = parse(
+            "claude",
+            "You've hit your session limit · resets 2:30pm (Mars/Olympus).",
+            now,
+        )
+        .unwrap();
+        assert_eq!(unknown.reset_at, None);
+        assert_eq!(unknown.unresolved_timezone.as_deref(), Some("Mars/Olympus"));
+
+        let ambiguous = parse(
+            "claude",
+            "You've hit your session limit · resets 1:30am (America/Chicago).",
+            now,
+        )
+        .unwrap();
+        assert_eq!(ambiguous.reset_at, None);
+        assert_eq!(
+            ambiguous.unresolved_timezone.as_deref(),
+            Some("America/Chicago")
         );
     }
 

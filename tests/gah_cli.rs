@@ -1581,7 +1581,7 @@ fn dispatch_pm_skips_unavailable_preferred_backend() {
 }
 
 #[test]
-fn dispatch_pm_quota_failure_updates_availability_and_reroutes() {
+fn dispatch_pm_claude_session_limit_marks_model_and_reroutes_once() {
     let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -1590,13 +1590,13 @@ fn dispatch_pm_quota_failure_updates_availability_and_reroutes() {
         &tmp,
         &repo,
         "github",
-        "[profiles.real.routing]\npm_backend = \"claude\"\n",
+        "[profiles.real.routing]\npm_backend = \"claude\"\npm_candidates = [{ backend = \"claude\", model = \"haiku\" }, { backend = \"codex\", model = \"gpt-5.4-mini\" }]\n",
         "",
     );
 
     let claude = FakeBackend::new(&tmp.path().join("claude-backend"), "claude");
     claude.install(Scenario::failure(1).with_stderr(include_str!(
-        "fixtures/quota-logs/claude_generic_rate_limit.json"
+        "fixtures/quota-logs/claude_session_limit_tz_reset.txt"
     )));
     let codex = FakeBackend::new(&tmp.path().join("codex-backend"), "codex");
     codex.install(Scenario::success().with_stdout(
@@ -1629,18 +1629,18 @@ fn dispatch_pm_quota_failure_updates_availability_and_reroutes() {
         .env("GAH_LEDGER_PATH", &ledger_path)
         .assert()
         .success()
-        .stdout(predicate::str::contains("PM rerouting: claude -> codex"));
+        .stdout(predicate::str::contains(
+            "PM rerouting: claude/haiku -> codex/gpt-5.4-mini (QuotaExhausted)",
+        ));
 
     assert_eq!(claude.call_count(), 1);
     assert_eq!(codex.call_count(), 1);
-
     let availability: Value =
         serde_json::from_str(&fs::read_to_string(&availability_path).unwrap()).unwrap();
     let records = availability["records"].as_array().unwrap();
-    assert!(!records.is_empty());
     assert_eq!(records[0]["backend"], "claude");
-    assert_eq!(records[0]["reason"], "rate_limited");
-
+    assert_eq!(records[0]["model"], "haiku");
+    assert_eq!(records[0]["reason"], "quota_exhausted");
     let ledger = fs::read_to_string(&ledger_path).unwrap();
     let entry: Value = serde_json::from_str(ledger.lines().next().unwrap()).unwrap();
     assert_eq!(entry["effective_backend"], "codex");
