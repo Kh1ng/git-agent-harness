@@ -774,6 +774,7 @@ pub fn gitlab_mr_json(params: GitlabMrParams) -> serde_json::Value {
     serde_json::json!({
         "title": params.title,
         "source_branch": params.branch,
+        "target_branch": "main",
         "web_url": params.url.unwrap_or("https://gitlab.example.com/group/repo/-/merge_requests/1".into()),
         "labels": params.labels,
         "iid": params.iid.unwrap_or(1),
@@ -882,6 +883,23 @@ fn load_github_fixture(name: &str) -> Scenario {
             })])
             .unwrap(),
         ),
+        // Manual `gah dispatch --mode fix --mr <id>` path for provider/manual fixture.
+        // The resolved MR is assumed to target this branch, so resolver + repair
+        // context can reuse it without passing --existing-branch.
+        "manual_fix_needs_fix" => Scenario::success().with_stdout(
+            serde_json::to_string(&github_pr_json(GithubPrParams {
+                title: "Draft: TICKET-269 Fix race".into(),
+                branch: "gah/fix-needs-fix".into(),
+                labels: vec!["gah-needs-fix".into()],
+                ci_conclusion: Some("SUCCESS".into()),
+                url: None,
+                number: Some(269),
+                draft: None,
+                merged_at: None,
+                updated_at: None,
+            }))
+            .unwrap(),
+        ),
         _ => Scenario::failure(127).with_stderr(format!("unknown github scenario: {name}")),
     }
 }
@@ -891,6 +909,21 @@ fn load_gitlab_fixture(name: &str) -> Scenario {
         "empty" => Scenario::success().with_stdout("[]"),
         "malformed" => Scenario::success().with_stdout("not json"),
         "non_zero_exit" => Scenario::failure(1),
+        // Manual `gah dispatch --mode fix --mr <id>` path for GitLab provider.
+        "manual_fix_needs_fix" => Scenario::success().with_stdout(
+            serde_json::to_string(&gitlab_mr_json(GitlabMrParams {
+                title: "TICKET-269 Fix race".into(),
+                branch: "gah/fix-needs-fix".into(),
+                labels: vec!["gah-needs-fix".into()],
+                pipeline_status: None,
+                url: None,
+                iid: Some(269),
+                draft: Some(false),
+                merged_at: None,
+                updated_at: None,
+            }))
+            .unwrap(),
+        ),
         _ => Scenario::failure(127).with_stderr(format!("unknown gitlab scenario: {name}")),
     }
 }

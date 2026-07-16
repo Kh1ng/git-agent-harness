@@ -44,8 +44,9 @@ use shutdown::record_cancelled_attempt;
 mod stall;
 use stall::record_exact_route_unavailability;
 mod work_identity;
+#[cfg(test)]
 use work_identity::apply_authoritative_work_identity;
-
+use work_identity::{apply_manual_fix_context_to_ledger, resolve_manual_fix_context};
 pub(crate) fn improve(
     cfg: &GahConfig,
     profile: &Profile,
@@ -93,6 +94,15 @@ pub(crate) fn improve(
     if issue_details.is_some() && args.issue_intake_override {
         println!("Issue intake override enabled for explicit issue dispatch");
     }
+
+    let manual_fix = resolve_manual_fix_context(
+        cfg,
+        &args.profile,
+        profile,
+        &args.mode,
+        args.existing_branch.clone(),
+        args.mr.as_deref(),
+    )?;
     let ticket_meta = if let Some(ref issue) = issue_details {
         Some(parse_ticket_metadata_from_issue(issue))
     } else {
@@ -171,7 +181,7 @@ pub(crate) fn improve(
     }
 
     let ts = timestamp();
-    let branch = if let Some(ref existing_branch) = args.existing_branch {
+    let branch = if let Some(ref existing_branch) = manual_fix.existing_branch {
         existing_branch.clone()
     } else {
         format!("gah/{}-{}", profile.repo_id, ts)
@@ -181,7 +191,7 @@ pub(crate) fn improve(
     ensure_dispatch_capacity(profile, &worktree_base)?;
 
     // TICKET-118: Handle existing branch for FixMr action
-    let (branch, wt) = if let Some(ref existing_branch) = args.existing_branch {
+    let (branch, wt) = if let Some(ref existing_branch) = manual_fix.existing_branch {
         println!(
             "Creating worktree from existing branch '{}'...",
             existing_branch
@@ -208,11 +218,11 @@ pub(crate) fn improve(
         (branch, wt)
     };
     ledger.branch = Some(branch.clone());
-    apply_authoritative_work_identity(ledger, ticket_meta.as_ref(), &branch);
+    apply_manual_fix_context_to_ledger(ledger, ticket_meta.as_ref(), &branch, &manual_fix);
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
     let conflict_session = conflict_resolution::ConflictSession::prepare(
-        args.existing_branch.is_some(),
+        manual_fix.existing_branch.is_some(),
         ledger,
         &wt,
         repo,
@@ -228,7 +238,15 @@ pub(crate) fn improve(
         issue_details.as_ref().map(|issue| issue.number.as_str()),
     );
     let repair_context = repair::load_context(
-        repair::LoadContext::new(args, cfg, profile, &branch, &wt, repo),
+        repair::LoadContext::new(
+            manual_fix.existing_branch.is_some(),
+            args,
+            cfg,
+            profile,
+            &branch,
+            &wt,
+            repo,
+        ),
         ledger,
     )?;
     let _cargo_target =
@@ -245,7 +263,7 @@ pub(crate) fn improve(
     let (baseline_failure, baseline_exit_code) = if conflict_session.is_active()
         || should_skip_per_dispatch_baseline(
             profile.validation_commands.is_empty(),
-            args.existing_branch.is_some(),
+            manual_fix.existing_branch.is_some(),
             args.skip_validation_gate,
         ) {
         (None, None)
@@ -1442,7 +1460,7 @@ pub(crate) fn improve(
         &mr_ctx,
         !validation_failed,
     );
-    if args.existing_branch.is_some() {
+    if manual_fix.existing_branch.is_some() {
         // FixMr is repairing a provider MR that the controller already
         // observed. The pushed branch is the publication; trying to create a
         // second MR converts a successful repair into a false dispatch
