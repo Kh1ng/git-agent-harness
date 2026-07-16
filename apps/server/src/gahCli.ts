@@ -9,6 +9,7 @@ import { userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accessSync, constants, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { AsyncTtlCache } from './asyncTtlCache.js';
 import type {
   StatusSnapshot,
   QuotaSnapshot,
@@ -59,6 +60,8 @@ function findGahBinary(): string {
 }
 
 const GAH_BINARY = findGahBinary();
+const STATUS_CACHE_TTL_MS = 30_000;
+const statusCache = new AsyncTtlCache<string, StatusSnapshot>(STATUS_CACHE_TTL_MS);
 
 /**
  * Get the path to the GAH config file
@@ -111,6 +114,11 @@ function getSpawnOptions(config?: string): SpawnOptions {
  * Run `gah status --profile <profile> --json` and parse the output
  */
 export async function runStatus(profile: string, config?: string): Promise<StatusSnapshot> {
+  const key = JSON.stringify([profile, config ?? null]);
+  return statusCache.get(key, () => runStatusUncached(profile, config));
+}
+
+async function runStatusUncached(profile: string, config?: string): Promise<StatusSnapshot> {
   const args = ['status', '--profile', profile, '--json'];
   
   if (config) {

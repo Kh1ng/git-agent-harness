@@ -15,9 +15,11 @@
     "build:contracts": "npm run --workspace=packages/contracts build",
     "build:shared": "npm run --workspace=packages/shared build",
     "build:server": "npm run build:contracts && npm run build:shared && npm run --workspace=apps/server build",
+    "prebuild:web": "npm run test:server",
     "build:web": "npm run --workspace=apps/web build",
     "build:all": "npm run build && npm run build:desktop",
     "build:desktop": "npm run --workspace=apps/desktop build",
+    "test:server": "npm run --workspace=apps/server test",
     "typecheck": "npm run build:contracts && npm run build:shared && npm run --workspace=apps/server typecheck && npm run --workspace=apps/web typecheck",
     "lint": "npm run --workspace=apps/server lint && npm run --workspace=apps/web lint && npm run --workspace=apps/desktop lint",
     "clean": "rm -rf apps/*/node_modules apps/*/dist packages/*/dist"
