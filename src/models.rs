@@ -256,14 +256,75 @@ pub struct RepoPolicy {
     pub allow_project_write: bool,
 }
 
+/// TICKET-544: bounded, provider-neutral planner work packet.
+///
+/// Replaces the underspecified PM ticket payload (`WorkMetadata`) with a
+/// schema where every field the controller/routing layer consumes is
+/// explicit and validated. Recommended routing expresses capability and
+/// difficulty tier rather than a hard-coded (temporary) model name, so the
+/// dispatcher stays free to map the request onto whatever backend instance
+/// currently satisfies the capability.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct PlannerWorkPacket {
+    /// Plan-local stable key, unique within the plan. Used to express
+    /// dependencies between packets via `depends_on`.
+    pub key: String,
+    pub title: String,
+    /// The objective the packet should achieve (the "why"), distinct from the
+    /// machine summary used for de-duplication.
+    pub objective: String,
+    /// Provider-neutral task classification: fix | feature | refactor |
+    /// docs | test | chore.
+    pub task_class: String,
+    /// easy | medium | hard.
+    pub difficulty: String,
+    /// low | medium | high.
+    pub risk: String,
+    /// How the packet should be executed: autonomous | supervised |
+    /// human_required.
+    pub execution_disposition: String,
+    /// Capability/difficulty-based routing hint. Does NOT name a model.
+    pub recommended_routing: RecommendedRouting,
+    /// Repo areas touched (e.g. "area:controller", "auth").
+    #[serde(default)]
+    pub affected_areas: Vec<String>,
+    /// Files expected to change.
+    #[serde(default)]
+    pub affected_files: Vec<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub verification_commands: Vec<String>,
+    /// Plan-local keys of packets that must complete first.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// Prior evidence the planner cited for why this isn't duplicate work.
+    #[serde(default)]
+    pub duplicate_evidence: Vec<String>,
+    /// Why this gap isn't already covered.
+    #[serde(default)]
+    pub uncovered_reason: String,
+}
+
+/// TICKET-544: recommended routing expressed as a capability requirement and
+/// a difficulty tier, intentionally provider/model-neutral.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct RecommendedRouting {
+    /// Capability the backend must provide: edit | plan | review | research.
+    pub capability: String,
+    /// Minimum capability tier implied by difficulty/risk: standard | strong.
+    #[serde(default = "default_routing_tier")]
+    pub min_tier: String,
+}
+
+fn default_routing_tier() -> String {
+    "standard".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PmPlan {
     pub title: String,
     pub summary: String,
-    // TICKET-092: unified onto WorkMetadata (was a separate PmPlanTicket
-    // struct duplicating title/summary/difficulty/risk/etc).
     #[serde(default)]
-    pub tickets: Vec<WorkMetadata>,
+    pub tickets: Vec<PlannerWorkPacket>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

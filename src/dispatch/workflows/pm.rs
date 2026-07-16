@@ -9,7 +9,7 @@ use super::super::text::{extract_first_json_object, first_markdown_heading, norm
 use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
-use crate::models::{PmPlan, WorkMetadata};
+use crate::models::{PlannerWorkPacket, PmPlan, RecommendedRouting};
 use crate::routing::RouteRequest;
 use crate::worktree;
 use anyhow::{Context, Result};
@@ -201,8 +201,24 @@ fn build_pm_plan_task(profile: &Profile, ctx: &PmPreflight, target: &str) -> Res
          You are a project manager. Use only the preflight context below plus the target request. \
          Do not assume you will remember to inspect the repo yourself.\n\
          Do not write code in PM mode.\n\
-         Return only valid JSON matching this schema:\n\
-         {{\"title\":string,\"summary\":string,\"tickets\":[{{\"title\":string,\"summary\":string,\"difficulty\":\"easy|medium|hard\",\"risk\":\"low|medium|high\",\"recommended_backend\":string|null,\"duplicate_evidence\":[string],\"affected_files\":[string],\"acceptance_criteria\":[string],\"verification_commands\":[string],\"uncovered_reason\":string}}]}}\n\n\
+         Return only valid JSON matching this bounded schema:\n\
+         {{\"title\":string,\"summary\":string,\"tickets\":[{{\n  \
+         \"key\":string (plan-local stable key, unique within the plan),\n  \
+         \"title\":string,\n  \
+         \"objective\":string (the why, distict from title),\n  \
+         \"task_class\":\"fix|feature|refactor|docs|test|chore\",\n  \
+         \"difficulty\":\"easy|medium|hard\",\n  \
+         \"risk\":\"low|medium|high\",\n  \
+         \"execution_disposition\":\"autonomous|supervised|human_required\",\n  \
+         \"recommended_routing\":{{\"capability\":\"edit|plan|review|research\",\"min_tier\":\"standard|strong\"}},\n  \
+         \"affected_areas\":[string],\n  \
+         \"affected_files\":[string],\n  \
+         \"acceptance_criteria\":[string],\n  \
+         \"verification_commands\":[string],\n  \
+         \"depends_on\":[string] (plan-local keys of prerequisite packets),\n  \
+         \"duplicate_evidence\":[string],\n  \
+         \"uncovered_reason\":string\n}}]}}\n\
+         Recommended routing MUST express a capability and difficulty tier, never a literal model name.\n\n\
          Rules:\n\
          - Default action is to avoid creating new tickets.\n\
          - Do not create a ticket if an open MR already covers the issue.\n\
@@ -213,7 +229,8 @@ fn build_pm_plan_task(profile: &Profile, ctx: &PmPreflight, target: &str) -> Res
          - If creating tickets, create only genuinely uncovered, atomic work.\n\
          - Cite the relevant MR or ticket evidence whenever you decide work is already covered.\n\
          - If the work is already covered, return an empty tickets array.\n\
-         - Each new ticket must be independently completable in one session.\n\n\
+         - Each new ticket must be independently completable in one session.\n\
+         - Every `key` must be unique within the plan; `depends_on` references only keys present in the plan.\n\n\
          ## Preflight Context\n\n{}\n\n\
          ## Target Request\n\n{}\n",
         profile.display_name,
@@ -353,7 +370,77 @@ fn parse_pm_plan(log_text: &str) -> Result<PmPlan> {
     if plan.title.trim().is_empty() || plan.summary.trim().is_empty() {
         anyhow::bail!("PM plan missing title or summary");
     }
+    validate_plan(&plan)?;
     Ok(plan)
+}
+
+/// TICKET-544: validate the bounded plan schema end-to-end before any ticket
+/// is written. This is the authoritative check that the planner produced a
+/// coherent, provider-neutral work packet set.
+fn validate_plan(plan: &PmPlan) -> Result<()> {
+    let mut seen_keys = std::collections::HashSet::new();
+    for packet in &plan.tickets {
+        if packet.key.trim().is_empty() {
+            anyhow::bail!("work packet missing plan-local key");
+        }
+        if !seen_keys.insert(packet.key.trim().to_string()) {
+            anyhow::bail!("duplicate work packet key '{}' within plan", packet.key);
+        }
+        validate_packet(packet)?;
+    }
+    let keys: std::collections::HashSet<&str> = plan.tickets.iter().map(|p| p.key.trim()).collect();
+    for packet in &plan.tickets {
+        for dep in &packet.depends_on {
+            if !keys.contains(dep.trim()) {
+                anyhow::bail!(
+                    "work packet '{}' depends on unknown key '{}'",
+                    packet.key,
+                    dep
+                );
+            }
+        }
+    }
+    let mut remaining: std::collections::HashMap<String, std::collections::HashSet<String>> = plan
+        .tickets
+        .iter()
+        .map(|packet| {
+            (
+                packet.key.trim().to_string(),
+                packet
+                    .depends_on
+                    .iter()
+                    .map(|dependency| dependency.trim().to_string())
+                    .collect(),
+            )
+        })
+        .collect();
+    loop {
+        let ready: Vec<String> = remaining
+            .iter()
+            .filter(|(_, dependencies)| dependencies.is_empty())
+            .map(|(key, _)| key.clone())
+            .collect();
+        if ready.is_empty() {
+            break;
+        }
+        for key in &ready {
+            remaining.remove(key);
+        }
+        for dependencies in remaining.values_mut() {
+            for key in &ready {
+                dependencies.remove(key);
+            }
+        }
+    }
+    if !remaining.is_empty() {
+        let mut cyclic_keys: Vec<&str> = remaining.keys().map(String::as_str).collect();
+        cyclic_keys.sort_unstable();
+        anyhow::bail!(
+            "work packet dependency cycle involving: {}",
+            cyclic_keys.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<PathBuf>> {
@@ -367,8 +454,8 @@ fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<Pa
         if should_skip_ticket(ctx, ticket) {
             continue;
         }
-        validate_ticket(ticket)?;
-        let slug = slugify(ticket.title.as_deref().unwrap_or(""));
+        validate_packet(ticket)?;
+        let slug = slugify(&ticket.title);
         let filename = format!("TICKET-{:03}-{}.md", id, slug);
         let path = tickets_dir.join(filename);
         fs::write(&path, render_ticket(ticket, id))?;
@@ -378,8 +465,8 @@ fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<Pa
     Ok(written)
 }
 
-fn should_skip_ticket(ctx: &PmPreflight, ticket: &WorkMetadata) -> bool {
-    let title = normalize_match(ticket.title.as_deref().unwrap_or(""));
+fn should_skip_ticket(ctx: &PmPreflight, ticket: &PlannerWorkPacket) -> bool {
+    let title = normalize_match(&ticket.title);
     if title.is_empty() {
         return true;
     }
@@ -390,48 +477,108 @@ fn should_skip_ticket(ctx: &PmPreflight, ticket: &WorkMetadata) -> bool {
         || normalize_match(&ctx.merged_mrs).contains(&title)
 }
 
-fn validate_ticket(ticket: &WorkMetadata) -> Result<()> {
-    let title = ticket.title.as_deref().unwrap_or("");
-    if title.trim().is_empty() || ticket.summary.as_deref().unwrap_or("").trim().is_empty() {
-        anyhow::bail!("ticket missing title or summary");
+fn validate_packet(ticket: &PlannerWorkPacket) -> Result<()> {
+    if ticket.title.trim().is_empty() || ticket.objective.trim().is_empty() {
+        anyhow::bail!("work packet missing title or objective");
     }
     if !matches!(
-        ticket.difficulty.as_deref(),
-        Some("easy" | "medium" | "hard")
+        ticket.task_class.as_str(),
+        "fix" | "feature" | "refactor" | "docs" | "test" | "chore"
     ) {
-        anyhow::bail!("ticket '{}' has invalid difficulty", title);
+        anyhow::bail!(
+            "work packet '{}' has invalid task_class '{}'",
+            ticket.title,
+            ticket.task_class
+        );
     }
-    if !matches!(ticket.risk.as_deref(), Some("low" | "medium" | "high")) {
-        anyhow::bail!("ticket '{}' has invalid risk", title);
+    if !matches!(ticket.difficulty.as_str(), "easy" | "medium" | "hard") {
+        anyhow::bail!("work packet '{}' has invalid difficulty", ticket.title);
     }
+    if !matches!(ticket.risk.as_str(), "low" | "medium" | "high") {
+        anyhow::bail!("work packet '{}' has invalid risk", ticket.title);
+    }
+    if !matches!(
+        ticket.execution_disposition.as_str(),
+        "autonomous" | "supervised" | "human_required"
+    ) {
+        anyhow::bail!(
+            "work packet '{}' has invalid execution_disposition",
+            ticket.title
+        );
+    }
+    validate_routing(&ticket.recommended_routing, &ticket.title)?;
     if ticket.acceptance_criteria.is_empty() || ticket.verification_commands.is_empty() {
-        anyhow::bail!("ticket '{}' missing acceptance or verification", title);
+        anyhow::bail!(
+            "work packet '{}' missing acceptance or verification",
+            ticket.title
+        );
     }
     Ok(())
 }
 
-fn render_ticket(ticket: &WorkMetadata, id: usize) -> String {
+fn validate_routing(routing: &RecommendedRouting, title: &str) -> Result<()> {
+    if !matches!(
+        routing.capability.as_str(),
+        "edit" | "plan" | "review" | "research"
+    ) {
+        anyhow::bail!(
+            "work packet '{}' has invalid recommended_routing.capability '{}'",
+            title,
+            routing.capability
+        );
+    }
+    if !matches!(routing.min_tier.as_str(), "standard" | "strong") {
+        anyhow::bail!(
+            "work packet '{}' has invalid recommended_routing.min_tier '{}'",
+            title,
+            routing.min_tier
+        );
+    }
+    Ok(())
+}
+
+fn render_ticket(ticket: &PlannerWorkPacket, id: usize) -> String {
     let mut out = format!(
         "# TICKET-{id:03}: {title}\n\n\
-Goal: {summary}\n\n\
-Difficulty: {difficulty}\n\
-Risk: {risk}\n\
-Recommended backend: {backend}\n\n\
-## Why This Is Uncovered\n{reason}\n\n\
-## Affected Files\n",
+        Plan key: {key}\n\
+        Objective: {objective}\n\n\
+        Task class: {task_class}\n\
+        Difficulty: {difficulty}\n\
+        Risk: {risk}\n\
+        Execution disposition: {disposition}\n\
+        Recommended routing: capability={capability} min_tier={tier}\n\n\
+        ## Why This Is Uncovered\n{reason}\n\n\
+        ## Affected Areas\n",
         id = id,
-        title = ticket.title.as_deref().unwrap_or(""),
-        summary = ticket.summary.as_deref().unwrap_or(""),
-        difficulty = ticket.difficulty.as_deref().unwrap_or(""),
-        risk = ticket.risk.as_deref().unwrap_or(""),
-        backend = ticket
-            .recommended_backend
-            .as_deref()
-            .unwrap_or("unspecified"),
-        reason = ticket.uncovered_reason.as_deref().unwrap_or(""),
+        title = ticket.title,
+        key = ticket.key,
+        objective = ticket.objective,
+        task_class = ticket.task_class,
+        difficulty = ticket.difficulty,
+        risk = ticket.risk,
+        disposition = ticket.execution_disposition,
+        capability = ticket.recommended_routing.capability,
+        tier = ticket.recommended_routing.min_tier,
+        reason = ticket.uncovered_reason,
     );
+    if ticket.affected_areas.is_empty() {
+        out.push_str("(none specified)\n");
+    }
+    for area in &ticket.affected_areas {
+        out.push_str(&format!("- {}\n", area));
+    }
+    out.push_str("\n## Affected Files\n");
+    if ticket.affected_files.is_empty() {
+        out.push_str("(none specified)\n");
+    }
     for file in &ticket.affected_files {
         out.push_str(&format!("- {}\n", file));
+    }
+    if !ticket.depends_on.is_empty() {
+        out.push_str("\n## Depends On\n");
+        for dep in &ticket.depends_on {
+            out.push_str(&format!("- {}\n", dep));
+        }
     }
     if !ticket.duplicate_evidence.is_empty() {
         out.push_str("\n## Duplicate Evidence Considered\n");

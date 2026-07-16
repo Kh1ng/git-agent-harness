@@ -1500,7 +1500,7 @@ fn dispatch_pm_target_parses_structured_plan_and_writes_ticket() {
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
-        "#!/bin/sh\nprintf '%s\n' '{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Fix auth\",\"summary\":\"Tighten auth checks\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"codex\",\"duplicate_evidence\":[],\"affected_files\":[\"src/auth.rs\"],\"acceptance_criteria\":[\"auth rejects invalid token\"],\"verification_commands\":[\"pytest tests/test_auth.py -x\"],\"uncovered_reason\":\"No open MR or ticket covers this auth edge case.\"}]}'\n",
+        "#!/bin/sh\nprintf '%s\n' '{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"key\":\"fix-auth\",\"title\":\"Fix auth\",\"objective\":\"Tighten auth checks\",\"task_class\":\"fix\",\"difficulty\":\"easy\",\"risk\":\"low\",\"execution_disposition\":\"autonomous\",\"recommended_routing\":{\"capability\":\"edit\",\"min_tier\":\"standard\"},\"duplicate_evidence\":[],\"affected_files\":[\"src/auth.rs\"],\"acceptance_criteria\":[\"auth rejects invalid token\"],\"verification_commands\":[\"pytest tests/test_auth.py -x\"],\"uncovered_reason\":\"No open MR or ticket covers this auth edge case.\"}]}'\n",
     );
 
     bin()
@@ -1557,7 +1557,7 @@ fn dispatch_pm_skips_unavailable_preferred_backend() {
     make_fake_bin_with_body(
         &fake_bin,
         "codex",
-        "#!/bin/sh\nprintf '%s\n' '{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Fallback ticket\",\"summary\":\"Handled by codex fallback\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"codex\",\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"test -f docs/tickets\"],\"uncovered_reason\":\"No duplicate work found.\"}]}'\n",
+        "#!/bin/sh\nprintf '%s\n' '{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"key\":\"fallback\",\"title\":\"Fallback ticket\",\"objective\":\"Handled by codex fallback\",\"task_class\":\"fix\",\"difficulty\":\"easy\",\"risk\":\"low\",\"execution_disposition\":\"autonomous\",\"recommended_routing\":{\"capability\":\"edit\",\"min_tier\":\"standard\"},\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"test -f docs/tickets\"],\"uncovered_reason\":\"No duplicate work found.\"}]}'\n",
     );
 
     let availability_path = tmp.path().join("availability.json");
@@ -1621,7 +1621,7 @@ fn dispatch_pm_quota_failure_updates_availability_and_reroutes() {
     )));
     let codex = FakeBackend::new(&tmp.path().join("codex-backend"), "codex");
     codex.install(Scenario::success().with_stdout(
-        "{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"title\":\"Fallback ticket\",\"summary\":\"Handled by reroute\",\"difficulty\":\"easy\",\"risk\":\"low\",\"recommended_backend\":\"claude\",\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"test -d docs/tickets\"],\"uncovered_reason\":\"No duplicate work found.\"}]}",
+        "{\"title\":\"Plan\",\"summary\":\"Summary\",\"tickets\":[{\"key\":\"fallback\",\"title\":\"Fallback ticket\",\"objective\":\"Handled by reroute\",\"task_class\":\"fix\",\"difficulty\":\"easy\",\"risk\":\"low\",\"execution_disposition\":\"autonomous\",\"recommended_routing\":{\"capability\":\"edit\",\"min_tier\":\"standard\"},\"duplicate_evidence\":[],\"affected_files\":[],\"acceptance_criteria\":[\"ticket exists\"],\"verification_commands\":[\"test -d docs/tickets\"],\"uncovered_reason\":\"No duplicate work found.\"}]}",
     ));
 
     let path = format!(
