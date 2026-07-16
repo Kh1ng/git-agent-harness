@@ -40,6 +40,7 @@ fn empty_snapshot() -> StatusSnapshot {
         blockers: vec![],
         blocked_work_items: vec![],
         issue_intake_rejections: vec![],
+        dependency_blockers: vec![],
         errors: vec![],
         available_tickets: vec![],
         active_claims: vec![],
@@ -153,6 +154,27 @@ fn incomplete_observation_stops_safely() {
     let action = decide_next_action(&snapshot);
     assert_eq!(action.kind(), "no_op");
     assert!(action.reason().contains("sync"));
+}
+
+#[test]
+fn issue_intake_error_blocks_ticket_dispatch_but_not_mr_review() {
+    let mut snapshot = empty_snapshot();
+    snapshot.errors.push(StatusError {
+        subsystem: "issue_intake".into(),
+        message: "provider query failed".into(),
+        incomplete_snapshot: false,
+    });
+    snapshot
+        .available_tickets
+        .push(ticket("12", Some("#12"), 0, None, false, false));
+    let action = decide_next_action(&snapshot);
+    assert_eq!(action.kind(), "no_op");
+    assert!(action.reason().contains("ticket intake incomplete"));
+
+    snapshot
+        .merge_requests
+        .push(mr("gah/review", "NEEDS_REVIEW"));
+    assert_eq!(decide_next_action(&snapshot).kind(), "review_mr");
 }
 
 #[test]

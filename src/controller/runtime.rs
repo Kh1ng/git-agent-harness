@@ -1191,6 +1191,7 @@ default_target_branch = "main"
             blockers: vec![],
             blocked_work_items: vec![],
             issue_intake_rejections: vec![],
+            dependency_blockers: vec![],
             errors: vec![],
             available_tickets: vec![],
             active_claims: vec![],

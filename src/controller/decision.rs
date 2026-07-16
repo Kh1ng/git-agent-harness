@@ -334,6 +334,19 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         };
     }
 
+    // Native issue discovery/dependency resolution is independent from MR
+    // sync. A provider failure must fail closed for new ticket dispatch while
+    // still allowing all review, merge, and repair actions above to proceed.
+    if let Some(error) = snapshot
+        .errors
+        .iter()
+        .find(|error| error.subsystem == "issue_intake")
+    {
+        return NextAction::NoOp {
+            reason: format!("ticket intake incomplete: {}", error.message),
+        };
+    }
+
     let some_backend_eligible = snapshot.availability.iter().any(|a| a.eligible_now);
     let mut failed_tickets: Vec<_> = snapshot
         .available_tickets

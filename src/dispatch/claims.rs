@@ -1,13 +1,14 @@
 use super::command::command_output;
+use super::dependencies::evaluate_issue_dependencies;
 use super::issues::{
-    issue_is_auto_dispatch_blocked, list_open_issues, parse_ticket_metadata,
-    parse_ticket_metadata_from_issue, ticket_number_prefix,
+    issue_is_auto_dispatch_blocked, parse_ticket_metadata, parse_ticket_metadata_from_issue,
+    ticket_number_prefix, try_discover_open_issues,
 };
 use super::{DispatchArgs, MIN_DISPATCH_FREE_BYTES};
 use crate::config::{GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
-use crate::models::AvailableTicket;
 use crate::models::CandidateArtifact;
+use crate::models::{AvailableTicket, DependencyBlocker, IssueIntakeRejection};
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::provider;
 use anyhow::{Context, Result};
@@ -457,11 +458,28 @@ fn closed_ticket_numbers(profile: &Profile) -> std::collections::HashSet<String>
     ids
 }
 
+pub(crate) struct TicketScan {
+    pub(crate) available_tickets: Vec<AvailableTicket>,
+    pub(crate) dependency_blockers: Vec<DependencyBlocker>,
+    pub(crate) issue_intake_rejections: Vec<IssueIntakeRejection>,
+    pub(crate) provider_error: Option<String>,
+}
+
+#[allow(dead_code)]
 pub fn scan_available_tickets(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
 ) -> Vec<AvailableTicket> {
+    scan_available_tickets_with_dependencies(profile, all_mrs, ledger_entries_by_work_id)
+        .available_tickets
+}
+
+pub(crate) fn scan_available_tickets_with_dependencies(
+    profile: &Profile,
+    all_mrs: &[crate::sync::SyncMr],
+    ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
+) -> TicketScan {
     let mut candidates = vec![];
     let closed_ids = closed_ticket_numbers(profile);
 
@@ -514,6 +532,25 @@ pub fn scan_available_tickets(
         }
     }
 
+    let (issues, issue_intake_rejections, provider_error) = match try_discover_open_issues(profile)
+    {
+        Ok(discovery) => (
+            discovery
+                .allowed
+                .into_iter()
+                .filter(|issue| !issue_is_auto_dispatch_blocked(&issue.labels))
+                .collect::<Vec<_>>(),
+            discovery.rejected,
+            None,
+        ),
+        Err(error) => (Vec::new(), Vec::new(), Some(format!("{error:#}"))),
+    };
+    let dependency_blockers = evaluate_issue_dependencies(profile, &issues);
+    let dependency_blocked_ids: std::collections::HashSet<&str> = dependency_blockers
+        .iter()
+        .map(|blocker| blocker.ticket_path.as_str())
+        .collect();
+
     // Native issue tracker (GitHub/GitLab): the migration from docs/tickets
     // to real issues only wired up manual `--target
     // <issue-number>` dispatch -- `gah loop`'s own automatic ticket
@@ -523,7 +560,7 @@ pub fn scan_available_tickets(
     // is the bare issue number string -- DispatchTicket/Retry/Escalate pass
     // it straight through as `--target`, and `resolve_target_to_issue_or_string`
     // already treats a numeric target as an issue reference.
-    for issue in list_open_issues(profile) {
+    for issue in issues {
         // Every issue uses its provider-visible `#<number>` identity even
         // without a structured title, so is_authoritative is always
         // true here -- unlike docs/tickets files, there's no way for an
@@ -534,7 +571,7 @@ pub fn scan_available_tickets(
         // needs the owner's decision) --
         // without it, gah loop would burn real dispatch cycles on issues
         // no agent can meaningfully act on before HumanRequired kicks in.
-        if issue_is_auto_dispatch_blocked(&issue.labels) {
+        if dependency_blocked_ids.contains(issue.number.as_str()) {
             continue;
         }
         let meta = parse_ticket_metadata_from_issue(&issue);
@@ -592,7 +629,12 @@ pub fn scan_available_tickets(
         });
     }
 
-    candidates
+    TicketScan {
+        available_tickets: candidates,
+        dependency_blockers,
+        issue_intake_rejections,
+        provider_error,
+    }
 }
 
 /// TICKET-127: execute an auto-merge decided by `controller::decide_next_action`.
