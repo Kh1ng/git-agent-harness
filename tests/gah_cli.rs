@@ -5184,7 +5184,7 @@ fn ledger_reconcile_appends_entry_when_mr_state_changed() {
         .env("GAH_RECONCILIATION_PATH", &reconciliation_path)
         .assert()
         .success()
-        .stdout("{\"new_entries\":[],\"issue_closure\":{\"already_closed\":[],\"would_close\":[],\"closed\":[],\"ambiguous\":[],\"unmapped\":[\"unknown\"],\"leave_open\":[],\"observation_failed\":[],\"policy_blocked\":[]}}\n");
+        .stdout("{\"new_entries\":[],\"issue_closure\":{\"already_closed\":[],\"would_close\":[],\"closed\":[],\"ambiguous\":[],\"unmapped\":[\"unknown\"],\"leave_open\":[],\"observation_failed\":[],\"policy_blocked\":[],\"skipped\":[]}}\n");
 
     let reconciliation_text = fs::read_to_string(&reconciliation_path).unwrap();
     assert_eq!(reconciliation_text.lines().count(), 1);

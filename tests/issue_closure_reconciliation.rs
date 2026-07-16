@@ -233,6 +233,89 @@ fn multiple_explicit_references_without_matching_structured_source_ambiguous() {
 }
 
 #[test]
+fn reconcile_twice_over_same_closed_fixture_writes_zero_records_second_run() {
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install_sequence(vec![
+        Scenario::success().with_stdout(merged_github_pr_json("Closes #42")),
+        Scenario::success().with_stdout("closed\n"),
+        Scenario::success().with_stdout(merged_github_pr_json("Closes #42")),
+        Scenario::success().with_stdout("closed\n"),
+    ]);
+
+    let mut harness = ScenarioHarness::new("github")
+        .with_config_append(closure_enabled_toml())
+        .with_ledger(support::fake_ledger::TestLedger::new().with_entry(ledger_entry(None)));
+    harness.install_custom_gh(&gh);
+
+    let first = harness.run_ledger_reconcile_json(false).unwrap();
+    assert_eq!(
+        first["issue_closure"]["already_closed"],
+        serde_json::json!(["42"])
+    );
+    let first_written = harness.reconciliation_entry_count();
+
+    let second = harness.run_ledger_reconcile_json(false).unwrap();
+    assert_eq!(
+        second["issue_closure"]["already_closed"],
+        serde_json::json!(["42"])
+    );
+    assert_eq!(
+        second["new_entries"].as_array().unwrap().len(),
+        0,
+        "second reconcile must write zero records"
+    );
+    let second_written = harness.reconciliation_entry_count();
+    assert_eq!(
+        second_written, first_written,
+        "no new records written on second run"
+    );
+}
+
+#[test]
+fn gah_closed_then_already_closed_is_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install_sequence(vec![
+        Scenario::success().with_stdout(merged_github_pr_json("Closes #42")),
+        Scenario::success().with_stdout("open\n"),
+        Scenario::success(),
+        Scenario::success().with_stdout(merged_github_pr_json("Closes #42")),
+        Scenario::success().with_stdout("closed\n"),
+    ]);
+
+    let mut harness = ScenarioHarness::new("github")
+        .with_config_append(closure_enabled_toml())
+        .with_ledger(support::fake_ledger::TestLedger::new().with_entry(ledger_entry(None)));
+    harness.install_custom_gh(&gh);
+
+    let first = harness.run_ledger_reconcile_json(false).unwrap();
+    assert_eq!(first["issue_closure"]["closed"], serde_json::json!(["42"]));
+    let first_written = harness.reconciliation_entry_count();
+
+    let second = harness.run_ledger_reconcile_json(false).unwrap();
+    assert_eq!(
+        second["issue_closure"]["already_closed"],
+        serde_json::json!(["42"])
+    );
+    assert_eq!(
+        second["issue_closure"]["skipped"],
+        serde_json::json!(["42"]),
+        "second reconcile must report the duplicate as skipped"
+    );
+    assert_eq!(
+        second["new_entries"].as_array().unwrap().len(),
+        0,
+        "second reconcile after gah close must write zero records"
+    );
+    let second_written = harness.reconciliation_entry_count();
+    assert_eq!(
+        second_written, first_written,
+        "no duplicate issue_closure written after mode transition"
+    );
+}
+
+#[test]
 fn explicit_reference_matching_structured_source_takes_precedence() {
     let tmp = TempDir::new().unwrap();
     let gh = FakeBackend::new(tmp.path(), "gh");

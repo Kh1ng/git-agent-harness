@@ -533,6 +533,15 @@ impl ScenarioHarness {
         serde_json::from_slice(&out.stdout).map_err(|e| format!("parse reconcile json: {e}"))
     }
 
+    pub fn reconciliation_entry_count(&self) -> usize {
+        let path = self.artifacts_dir.join("reconciliation.jsonl");
+        if !path.exists() {
+            return 0;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        text.lines().filter(|l| !l.trim().is_empty()).count()
+    }
+
     pub fn run_report_json(&mut self, group_by: &str) -> Result<serde_json::Value, String> {
         self.setup_env();
         self.install_fakes();
