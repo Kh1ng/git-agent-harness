@@ -1156,6 +1156,11 @@ fn merge_branch_resolves_terminal_failure_with_merge_run_id() {
 
     let mut failure_profile = prof.clone();
     failure_profile.notify_command = None;
+    crate::notifications::clear_terminal_failure_cache_for_test(
+        &cfg,
+        "test-profile",
+        "WORK-MERGE-1",
+    );
     crate::notifications::notify_terminal_failure(
         &cfg,
         &failure_profile,
@@ -1202,5 +1207,6 @@ fn merge_branch_resolves_terminal_failure_with_merge_run_id() {
     let details: serde_json::Value =
         serde_json::from_str(&resolved.details).expect("failed to parse resolved details");
     assert_eq!(details["resolved_run_id"], "run-failure");
+    assert_eq!(details["resolved_by_run_id"], "run-merge");
     assert_eq!(details["failure_class"], "validation_failure");
 }

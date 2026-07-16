@@ -639,6 +639,15 @@ fn terminal_failure_state_cache() -> &'static Mutex<TerminalFailureCache> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(test)]
+pub(crate) fn clear_terminal_failure_cache_for_test(cfg: &GahConfig, profile: &str, work_id: &str) {
+    let key = terminal_failure_cache_key(cfg, profile, work_id);
+    let mut cache = terminal_failure_state_cache()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    cache.remove(&key);
+}
+
 fn terminal_failure_cache_key(
     cfg: &GahConfig,
     profile: &str,
@@ -788,7 +797,7 @@ fn record_terminal_failure_resolved(
     cfg: &GahConfig,
     profile: &str,
     work_id: &str,
-    resolved_run_id: &str,
+    failure_run_id: &str,
     failure_class: &str,
     failure_stage: Option<&str>,
     resolved_by_run_id: Option<&str>,
@@ -797,7 +806,7 @@ fn record_terminal_failure_resolved(
         json!({
             "profile": profile,
             "work_id": work_id,
-            "resolved_run_id": resolved_run_id,
+            "resolved_run_id": failure_run_id,
             "failure_class": failure_class,
             "failure_stage": failure_stage,
             "resolved_by_run_id": resolved_by_run_id,
@@ -807,7 +816,7 @@ fn record_terminal_failure_resolved(
         json!({
             "profile": profile,
             "work_id": work_id,
-            "resolved_run_id": resolved_run_id,
+            "resolved_run_id": failure_run_id,
             "failure_class": failure_class,
             "failure_stage": failure_stage,
         })
@@ -937,12 +946,12 @@ pub(crate) fn notify_terminal_failure_resolved_with_run_id(
     };
     let timestamp = terminal_failure_timestamp_now();
 
-    let resolved_run_id = failure.run_id.as_str();
+    let failure_run_id = failure.run_id.as_str();
     record_terminal_failure_resolved(
         cfg,
         profile_name,
         work_id,
-        resolved_run_id,
+        failure_run_id,
         &failure.failure_class,
         failure.failure_stage.as_deref(),
         resolved_by_run_id,
@@ -956,7 +965,7 @@ pub(crate) fn notify_terminal_failure_resolved_with_run_id(
             failure_class: failure.failure_class.as_str(),
             failure_stage: failure.failure_stage.as_deref(),
             work_id,
-            run_id: resolved_run_id,
+            run_id: resolved_by_run_id.unwrap_or(failure_run_id),
         },
     );
 }
@@ -974,20 +983,23 @@ pub fn notify_event(cfg: &GahConfig, profile: &Profile, event: NotifyEvent) {
         let message = crate::redact::redact(&format_message(&event));
         if let Err(err) = run_notify_command(command, &message) {
             eprintln!("[gah] notify_command failed (swallowed): {err:#}");
-            let _ = events::record(
+            let event_profile = event_profile(&event).unwrap_or(profile.display_name.as_str());
+            if let Err(record_err) = events::record(
                 cfg,
                 events::EventType::NotificationDeliveryFailed,
-                Some(event_profile(&event).unwrap_or(profile.display_name.as_str())),
+                Some(event_profile),
                 event_work_id(&event),
                 json!({
                     "event_name": event_name(&event),
-                    "profile": event_profile(&event).unwrap_or(profile.display_name.as_str()),
+                    "profile": event_profile,
                     "work_id": event_work_id(&event),
                     "run_id": event_run_id(&event),
                     "error": format!("{err:#}"),
                 })
                 .to_string(),
-            );
+            ) {
+                eprintln!("[gah] failed to record notification delivery failure event (swallowed): {record_err:#}");
+            }
         }
     }
 

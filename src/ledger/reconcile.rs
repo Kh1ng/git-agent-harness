@@ -238,7 +238,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
             new_entries.push(entry);
         }
 
-        if new_state.as_str() == "MERGED" || new_state.as_str() == "CLOSED_UNMERGED" {
+        if new_state.as_str() == "MERGED" {
             // A terminal reconciliation state means prior terminal dispatch
             // failures for this work_id are no longer actionable; resolve the
             // outstanding operator notification once.
@@ -715,6 +715,7 @@ mod tests {
 
         let mut failure_profile = profile.clone();
         failure_profile.notify_command = None;
+        crate::notifications::clear_terminal_failure_cache_for_test(&cfg, "test", "WORK-RECONCILE");
         crate::notifications::notify_terminal_failure(
             &cfg,
             &failure_profile,
@@ -759,6 +760,76 @@ mod tests {
         assert_eq!(resolved.run_id.as_deref(), Some("run-merge"));
         let details: Value = serde_json::from_str(&resolved.details).unwrap();
         assert_eq!(details["resolved_run_id"], "run-failure");
+        assert_eq!(details["resolved_by_run_id"], "run-merge");
         assert_eq!(details["failure_class"], "validation_failure");
+    }
+
+    #[test]
+    fn reconcile_run_does_not_resolve_terminal_failure_for_closed_unmerged_mr() {
+        let (_tmp, mut cfg) = test_config();
+        let profile = crate::ledger::test_util::profile();
+        cfg.profiles.insert("test".to_string(), profile.clone());
+
+        let bin_dir = _tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
+        crate::provider::set_test_provider_path(bin_dir.to_str().unwrap());
+        let _provider_guard = ProviderPathGuard;
+
+        let gh_path = bin_dir.join("gh");
+        let response = r#"[{"title":"Fix #12","headRefName":"gah/reconcile-work","url":"https://github.com/owner/repo/pull/7","labels":[],"number":7,"state":"CLOSED_UNMERGED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":null,"updatedAt":"2026-07-16T12:00:00-05:00","statusCheckRollup":[] }]"#;
+        std::fs::write(
+            &gh_path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                response.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&gh_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&gh_path, perms).unwrap();
+        }
+
+        let mut failure_profile = profile.clone();
+        failure_profile.notify_command = None;
+        crate::notifications::clear_terminal_failure_cache_for_test(
+            &cfg,
+            "test",
+            "WORK-RECONCILE-CLOSED",
+        );
+        crate::notifications::notify_terminal_failure(
+            &cfg,
+            &failure_profile,
+            crate::notifications::TerminalFailurePayload {
+                profile: "test",
+                work_id: "WORK-RECONCILE-CLOSED",
+                run_id: "run-failure",
+                failure_class: "validation_failure",
+                failure_stage: Some("agent_run"),
+                attempt_count: Some(1),
+                error_summary: Some("summary"),
+                mr_url: Some("https://github.com/owner/repo/pull/7"),
+            },
+        );
+
+        run(&cfg, "test", false, false).unwrap();
+
+        let events = crate::events::read_events(&cfg).unwrap();
+        let terminal_count = events
+            .iter()
+            .filter(|event| event.event_type == crate::events::EventType::TerminalFailure.as_str())
+            .count();
+        assert_eq!(terminal_count, 1);
+        let resolved_count = events
+            .iter()
+            .filter(|event| {
+                event.event_type == crate::events::EventType::TerminalFailureResolved.as_str()
+            })
+            .count();
+        assert_eq!(resolved_count, 0);
     }
 }

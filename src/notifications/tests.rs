@@ -196,6 +196,7 @@ fn notify_terminal_failure_events_are_recorded_with_dedupe() {
     profile.notify_command = Some(format!("cat > {}", out.display()));
     let mut cfg = test_gah_config(None);
     cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
+    clear_terminal_failure_cache_for_test(&cfg, "profile-a", "WORK-1");
 
     notify_terminal_failure(
         &cfg,
@@ -247,6 +248,7 @@ fn notify_terminal_failure_dedupe_falls_back_to_memory_when_event_log_is_unreada
     let mut cfg = test_gah_config(None);
     cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
     let events_path = cfg.defaults.events_path();
+    clear_terminal_failure_cache_for_test(&cfg, "profile-cache", "WORK-CACHE");
     std::fs::create_dir_all(&events_path).unwrap();
 
     notify_terminal_failure(
@@ -293,6 +295,7 @@ fn notify_terminal_failure_reemits_after_dedupe_window_has_elapsed() {
     profile.notify_command = Some(format!("cat >> {}", out.display()));
     let mut cfg = test_gah_config(None);
     cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
+    clear_terminal_failure_cache_for_test(&cfg, "profile-window", "WORK-WINDOW");
 
     notify_terminal_failure(
         &cfg,
@@ -374,6 +377,7 @@ fn notify_terminal_failure_distinct_class_generates_additional_notification() {
     profile.notify_command = Some(format!("cat >> {}", out.display()));
     let mut cfg = test_gah_config(None);
     cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
+    clear_terminal_failure_cache_for_test(&cfg, "profile-b", "WORK-2");
 
     notify_terminal_failure(
         &cfg,
@@ -424,6 +428,7 @@ fn notify_terminal_failure_resolved_emits_once() {
     profile.notify_command = Some(format!("cat >> {}", out.display()));
     let mut cfg = test_gah_config(None);
     cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
+    clear_terminal_failure_cache_for_test(&cfg, "profile-c", "WORK-3");
 
     notify_terminal_failure(
         &cfg,
@@ -471,6 +476,7 @@ fn notify_command_failure_is_recorded_as_observable_event() {
     profile.notify_command = Some("does-not-exist-123".to_string());
     let mut cfg = test_gah_config(None);
     cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
+    clear_terminal_failure_cache_for_test(&cfg, "profile-d", "WORK-4");
 
     notify_terminal_failure(
         &cfg,
@@ -592,6 +598,23 @@ fn wake_instruction_is_none_when_autonomy_off() {
     ] {
         assert!(format_wake_instruction(&event, WakeAutonomy::Off).is_none());
     }
+}
+
+#[test]
+fn wake_instruction_includes_paused_non_spending_for_human_route_failures() {
+    let event = NotifyEvent::DispatchFailed {
+        timestamp: "2026-07-01T00:00:00Z",
+        profile: "p",
+        failure_class: "human_blocked",
+        failure_stage: Some("route"),
+        run_id: "run-1",
+        work_id: "WORK-HR",
+        attempt_count: Some(1),
+        error_summary: None,
+        mr_url: None,
+    };
+    let instruction = format_wake_instruction(&event, WakeAutonomy::ReviewOnly).unwrap();
+    assert!(instruction.contains("[state=paused_non_spending]"));
 }
 
 #[test]
