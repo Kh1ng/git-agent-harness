@@ -1,7 +1,7 @@
 use super::{
-    create_draft_mr, draft_mr_title, find_review_target_by_mr, github_review_target_by_number,
-    gitlab_target_from_value, mark_ready_for_review, merge_mr, parse_gitlab_mr_reference,
-    MrReferenceError, TEST_PATH_OVERRIDE,
+    create_draft_mr, draft_mr_title, find_review_target_by_branch, find_review_target_by_mr,
+    github_review_target_by_number, gitlab_target_from_value, mark_ready_for_review, merge_mr,
+    parse_gitlab_mr_reference, MrReferenceError, TEST_PATH_OVERRIDE,
 };
 use crate::config::{Profile, RoutingPolicy};
 use std::fs;
@@ -609,6 +609,45 @@ fn find_review_target_by_mr_ignores_stale_pipeline_status_not_matching_source_sh
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
     let target = find_review_target_by_mr(&gitlab_profile(), "235").unwrap();
+
+    assert_eq!(target.ci_status.as_deref(), Some("missing"));
+    assert_eq!(target.merge_status.as_deref(), Some("can_be_merged"));
+}
+
+#[test]
+fn find_review_target_by_branch_prefers_pipeline_status_for_ci_status_on_draft_mr() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        "#!/bin/sh\nendpoint=\"${2%%\\?*}\"\ncase \"$1 $endpoint\" in\n  \"api projects/42/merge_requests\") printf '[{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"pipeline-source-sha\",\"detailed_merge_status\":\"draft\",\"head_pipeline\":{\"sha\":\"pipeline-source-sha\",\"status\":\"success\"}}]\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let target = find_review_target_by_branch(&gitlab_profile(), "gah/235").unwrap();
+
+    assert_eq!(target.ci_status.as_deref(), Some("passed"));
+    assert_eq!(target.merge_status.as_deref(), Some("draft"));
+}
+
+#[test]
+fn find_review_target_by_branch_ignores_stale_pipeline_status_not_matching_source_sha_when_pipelines_empty(
+) {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        "#!/bin/sh\nendpoint=\"${2%%\\?*}\"\ncase \"$1 $endpoint\" in\n  \"api projects/42/merge_requests\") printf '[{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"current-sha\",\"detailed_merge_status\":\"can_be_merged\",\"head_pipeline\":{\"sha\":\"old-sha\",\"status\":\"success\"}}]\\n' ;;\n  \"api projects/42/merge_requests/235/pipelines\") printf '[]' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let target = find_review_target_by_branch(&gitlab_profile(), "gah/235").unwrap();
 
     assert_eq!(target.ci_status.as_deref(), Some("missing"));
     assert_eq!(target.merge_status.as_deref(), Some("can_be_merged"));
