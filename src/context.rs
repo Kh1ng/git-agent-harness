@@ -410,6 +410,11 @@ mod tests {
             result.issue_section_names,
             vec!["Problem".to_string(), "Goal".to_string()]
         );
+        let artifact = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            artifact["issue_section_names"],
+            serde_json::json!(["Problem", "Goal"])
+        );
         assert!(result.sources.iter().all(|source| source.bytes > 0));
     }
 
