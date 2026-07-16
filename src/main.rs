@@ -1123,11 +1123,11 @@ fn main() -> Result<()> {
             runner::install_shutdown_handler()?;
             let cfg = config::load(config_path.as_deref())?;
             let resolved_config_path = config::resolve_config_path(config_path.as_deref());
-            let parallel = if parallel == 0 {
-                config::get_profile(&cfg, &profile)?.max_parallel_workers() as usize
-            } else {
-                parallel
-            };
+            let parallel = controller::loop_parallel_argument(
+                once,
+                parallel,
+                config::get_profile(&cfg, &profile)?.max_parallel_workers() as usize,
+            );
             if once {
                 // `--once` still does real execution (spawns backends, claims
                 // tickets, writes ledger entries) so it must coordinate via

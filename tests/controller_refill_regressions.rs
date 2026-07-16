@@ -305,3 +305,79 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn parallel_loop_does_not_refill_after_shutdown() {
+    let tmp = test_tempdir();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    for id in 501..=503 {
+        fs::write(
+            repo.join(format!("docs/tickets/TICKET-{id}-shutdown.md")),
+            format!("# TICKET-{id}: Shutdown refill guard\n\nGoal: prove shutdown stops refill.\nRecommended backend: codex\n"),
+        )
+        .unwrap();
+    }
+
+    let fake_bin = tmp.path().join("bin");
+    let calls = tmp.path().join("codex-calls");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; fi\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nprintf 'call\\n' >> '{}'\nwhile :; do sleep 0.05; done\n",
+            calls.display()
+        ),
+    );
+
+    let child = spawn_bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+            "--parallel",
+            "2",
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while fs::read_to_string(&calls)
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+        < 2
+    {
+        assert!(
+            Instant::now() < deadline,
+            "two initial workers did not start"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 2);
+}

@@ -115,6 +115,22 @@ fn reload_config_for_profile(
     Ok(loaded)
 }
 
+/// Resolve the CLI parallel argument without consuming recurring mode's zero
+/// sentinel. A daemon must reload the profile limit each iteration; `--once`
+/// resolves it once for its bounded invocation.
+#[allow(dead_code)]
+pub(crate) fn loop_parallel_argument(
+    once: bool,
+    cli_parallel: usize,
+    configured_parallel: usize,
+) -> usize {
+    if once && cli_parallel == 0 {
+        configured_parallel
+    } else {
+        cli_parallel
+    }
+}
+
 /// Run the controller continuously in one process. The process lock is held
 /// for the lifetime of the loop so a second manager for the same profile
 /// cannot create a competing worker pool.
@@ -455,6 +471,9 @@ fn run_parallel_once(
 
         loop {
             while active < effective_parallel_limit && fill_attempts_remaining > 0 {
+                if crate::runner::shutdown_requested() {
+                    break;
+                }
                 fill_attempts_remaining -= 1;
                 let claimed_work_ids = crate::work_claim::get_claimed_work_ids(&claim_scope)?;
                 let ledger_entries = crate::ledger::read_entries(cfg)?;
@@ -977,8 +996,16 @@ mod ledger_read_tests;
 mod tests {
     use super::{
         acquire_profile_lock, action_waits_for_route, is_validation_gate_failure, loop_lock_path,
-        reload_config_for_profile, wait_interruptibly,
+        loop_parallel_argument, reload_config_for_profile, wait_interruptibly,
     };
+
+    #[test]
+    fn recurring_loop_preserves_live_config_sentinel_but_once_resolves_it() {
+        assert_eq!(loop_parallel_argument(false, 0, 2), 0);
+        assert_eq!(loop_parallel_argument(true, 0, 2), 2);
+        assert_eq!(loop_parallel_argument(false, 3, 2), 3);
+        assert_eq!(loop_parallel_argument(true, 3, 2), 3);
+    }
 
     #[test]
     fn review_actions_wait_until_the_selected_route_is_reserved() {
