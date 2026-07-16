@@ -97,6 +97,8 @@ export interface ProfileAddData {
   auto_fix_commands?: string[];
   /** Max concurrent tickets `gah loop` may run for this profile. */
   max_parallel_workers?: number;
+  /** Validation command timeout in seconds. */
+  validation_timeout_seconds?: number;
   /** Manager-wake autonomy: 'off' | 'review_only' | 'full'. */
   manager_wake_autonomy?: WakeAutonomyValue;
 }
@@ -128,6 +130,8 @@ export interface ProfileUpdateData {
   env_file_prod?: string | null;
   validation_commands?: string[];
   auto_fix_commands?: string[];
+  /** Validation command timeout in seconds. */
+  validation_timeout_seconds?: number | null;
   max_parallel_workers?: number;
   manager_wake_autonomy?: WakeAutonomyValue;
   clear?: string[];

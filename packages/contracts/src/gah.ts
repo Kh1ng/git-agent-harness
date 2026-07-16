@@ -421,6 +421,10 @@ export interface ProfileSummary {
   max_parallel_workers: number | null;
   /** Manager-wake autonomy for this profile (null = unset -> off). */
   manager_wake_autonomy: WakeAutonomyValue | null;
+  /** Effective validation command timeout in seconds for this profile (defaults
+   * to 300). If unset in TOML, this is computed and returned as the effective
+   * timeout. */
+  validation_timeout_seconds: number;
 }
 
 // ---------------------------------------------------------------------------
