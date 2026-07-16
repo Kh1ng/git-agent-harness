@@ -40,7 +40,7 @@ function formatQuotaUsage(q: {
     : null;
 
   const source = q.usage_source ? ` · source: ${q.usage_source}` : '';
-  return `${q.quota_window ?? 'unknown'}: ${limit}${reset ? ` · resets ${reset}` : ''}${source}`;
+  return `${limit}${reset ? ` · resets ${reset}` : ''}${source}`;
 }
 
 export function QuotaPage() {
