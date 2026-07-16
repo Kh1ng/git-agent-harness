@@ -13,6 +13,7 @@
   "scripts": {
     "dev": "tsx --watch src/bin.ts",
     "build": "tsc",
+    "test": "tsx --test src/*.test.ts",
     "start": "node dist/bin.js",
     "typecheck": "tsc --noEmit"
   },
