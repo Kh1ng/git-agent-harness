@@ -523,10 +523,13 @@ fn review_targets_capture_provider_source_and_target_shas() {
         "web_url": "https://gitlab.test/group/repo/-/merge_requests/42",
         "source_branch": "gah/42",
         "target_branch": "main",
+        "detailed_merge_status": "draft",
         "sha": "source-gitlab-sha",
         "diff_refs": { "base_sha": "target-gitlab-sha" }
     });
     let gitlab_target = gitlab_target_from_value(&gitlab).unwrap();
+    assert_eq!(gitlab_target.ci_status, None);
+    assert_eq!(gitlab_target.merge_status.as_deref(), Some("draft"));
     assert_eq!(
         gitlab_target.source_sha.as_deref(),
         Some("source-gitlab-sha")
@@ -552,6 +555,44 @@ fn review_targets_capture_provider_source_and_target_shas() {
         Some("source-github-sha")
     );
     assert_eq!(github_target.target_sha, None);
+}
+
+#[test]
+fn find_review_target_by_mr_prefers_pipeline_status_for_ci_status_on_draft_mr() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"api projects/42/merge_requests/235\") printf '{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"pipeline-source-sha\",\"detailed_merge_status\":\"draft\",\"head_pipeline\":{\"sha\":\"pipeline-source-sha\",\"status\":\"success\"}}\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let target = find_review_target_by_mr(&gitlab_profile(), "235").unwrap();
+
+    assert_eq!(target.ci_status.as_deref(), Some("success"));
+    assert_eq!(target.merge_status.as_deref(), Some("draft"));
+}
+
+#[test]
+fn find_review_target_by_mr_ignores_stale_pipeline_status_not_matching_source_sha() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"api projects/42/merge_requests/235\") printf '{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"current-sha\",\"detailed_merge_status\":\"can_be_merged\",\"head_pipeline\":{\"sha\":\"old-sha\",\"status\":\"success\"}}\\n' ;;\n  \"api projects/42/merge_requests/235/pipelines\") printf '[{\"sha\":\"old-sha\",\"status\":\"success\"}]\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let target = find_review_target_by_mr(&gitlab_profile(), "235").unwrap();
+
+    assert_eq!(target.ci_status.as_deref(), Some("missing"));
+    assert_eq!(target.merge_status.as_deref(), Some("can_be_merged"));
 }
 
 #[test]
