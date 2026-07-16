@@ -7,7 +7,10 @@ Wants=network-online.target
 Type=oneshot
 User=khing
 Group=khing
-ExecStart=/bin/sh -c 'msg=$$(/usr/bin/python3 /home/khing/workspace/agent-lab/scripts/gah-watchdog.py); if [ -n "$$msg" ]; then printf "%s\\n" "$$msg" | /usr/local/bin/hermes send -t telegram -q; fi'
+# systemd expands percent specifiers before invoking the shell. Escape the
+# printf placeholder so `%s` reaches /bin/sh instead of becoming the user's
+# login shell path.
+ExecStart=/bin/sh -c 'msg=$$(/usr/bin/python3 /home/khing/workspace/agent-lab/scripts/gah-watchdog.py); if [ -n "$$msg" ]; then printf "%%s\\n" "$$msg" | /usr/local/bin/hermes send -t telegram -q; fi'
 TimeoutStartSec=90
 StandardOutput=journal
 StandardError=journal

@@ -12,3 +12,11 @@ fn unattended_loop_unit_owns_and_kills_the_worker_control_group() {
     assert!(!unit.contains("nohup"));
     assert!(!unit.contains("--once"));
 }
+
+#[test]
+fn watchdog_unit_preserves_its_printf_placeholder_through_systemd_expansion() {
+    let unit = fs::read_to_string("packaging/systemd/gah-watchdog.service").unwrap();
+
+    assert!(unit.contains(r#"printf "%%s\\n" "$$msg""#));
+    assert!(!unit.contains(r#"printf "%s\\n" "$$msg""#));
+}
