@@ -83,4 +83,17 @@ test('Settings exposes validation timeout and sends it to profile update API', a
   expect(updatePayload).toMatchObject({
     validation_timeout_seconds: 900
   });
+
+  updatePayload = null;
+  await validationTimeoutInput.fill('');
+  await page.getByRole('button', { name: 'Save dispatch settings' }).click();
+
+  await expect
+    .poll(() => updatePayload)
+    .not.toBeNull();
+
+  expect(updatePayload).toMatchObject({
+    clear: ['validation_timeout_seconds']
+  });
+  expect(updatePayload).not.toHaveProperty('validation_timeout_seconds');
 });

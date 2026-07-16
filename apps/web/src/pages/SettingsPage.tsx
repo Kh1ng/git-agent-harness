@@ -159,7 +159,7 @@ interface DispatchSettingsSectionProps {
   selectedName: string;
   selected?: {
     max_parallel_workers: number | null;
-    validation_timeout_seconds: number | null;
+    validation_timeout_seconds?: number | null;
     manager_wake_autonomy: WakeAutonomyValue | null;
   };
   profileLoading: boolean;
@@ -208,11 +208,14 @@ function DispatchSettingsSection({
 
   const handleSave = async () => {
     const parsed = parallel.trim() === '' ? undefined : Math.max(1, parseInt(parallel, 10) || 1);
-    const parsedValidationTimeout = validationTimeout.trim() === '' ? undefined : Math.max(1, parseInt(validationTimeout, 10) || 1);
+    const hasValidationTimeout = validationTimeout.trim() !== '';
+    const parsedValidationTimeout = hasValidationTimeout ? Math.max(1, parseInt(validationTimeout, 10) || 1) : undefined;
     await updateProfile(selectedName, {
       max_parallel_workers: parsed,
-      validation_timeout_seconds: parsedValidationTimeout,
       manager_wake_autonomy: autonomy,
+      ...(hasValidationTimeout
+        ? { validation_timeout_seconds: parsedValidationTimeout }
+        : { clear: ['validation_timeout_seconds'] }),
     });
   };
 

@@ -77,7 +77,7 @@ fn profile_set_validation_timeout_round_trip() {
             "test-repo",
             "--validation-timeout-seconds",
             "900",
-            "--config-path",
+            "--config",
             cfg.to_str().unwrap(),
         ])
         .assert()
@@ -123,7 +123,7 @@ fn profile_set_validation_timeout_clears_to_default_when_unset() {
             "test-repo",
             "--clear",
             "validation_timeout_seconds",
-            "--config-path",
+            "--config",
             cfg.to_str().unwrap(),
         ])
         .assert()

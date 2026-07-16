@@ -424,7 +424,7 @@ export interface ProfileSummary {
   /** Effective validation command timeout in seconds for this profile (defaults
    * to 300). If unset in TOML, this is computed and returned as the effective
    * timeout. */
-  validation_timeout_seconds: number;
+  validation_timeout_seconds?: number;
 }
 
 // ---------------------------------------------------------------------------
