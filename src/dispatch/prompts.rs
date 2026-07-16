@@ -211,7 +211,9 @@ fn append_project_brief(task: &mut String, profile: &Profile) {
 
 /// Build a bounded, task-specific packet from structured issue metadata.
 /// The free-form body is used only as a capped fallback when the issue did
-/// not provide a structured problem, acceptance criteria, or constraints.
+/// not provide structured fields. A separate capped, indented source snapshot
+/// preserves every original section for auditability without making it an
+/// authoritative prompt heading.
 fn append_live_task_pack(task: &mut String, issue: &IssueDetails) {
     let meta = parse_ticket_metadata_from_issue(issue);
     let sections = extract_issue_sections(&issue.body);
@@ -875,9 +877,8 @@ mod tests {
 
         let task = build_task(&prof, &wt, "improve", "#384", Some(&issue));
 
-        assert!(task.contains("### Problem"));
-        assert!(task.contains("Preserve this goal."));
-        assert!(!task.contains("Fallback scope."));
+        assert!(task.contains("### Problem\n\n  Preserve this goal."));
+        assert!(task.contains("  ## Scope\n  Fallback scope."));
         assert!(task.contains("Keep behavior stable."));
         assert!(!task.contains("### Issue Description"));
     }
