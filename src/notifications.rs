@@ -32,8 +32,14 @@
 //! this feature existed.
 
 use crate::config::{GahConfig, Profile, WakeAutonomy};
+use crate::events;
+use serde_json::json;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 const NOTIFICATION_ERROR_SUMMARY_MAX_BYTES: usize = 300;
+const TERMINAL_FAILURE_EVENT_DEDUPE_SECONDS: i64 = 900;
+const TERMINAL_FAILURE_EVENT_DEDUPE_SECONDS_ENV: &str = "GAH_TERMINAL_FAILURE_DEDUPE_SECONDS";
 
 /// A notification-worthy controller/dispatch event. All fields are borrowed
 /// from the live dispatch/controller state to avoid cloning.
@@ -71,12 +77,25 @@ pub enum NotifyEvent<'a> {
     MrMerged { url: &'a str, work_id: &'a str },
     /// A dispatch failed terminally (retries exhausted).
     DispatchFailed {
+        timestamp: &'a str,
+        profile: &'a str,
         failure_class: &'a str,
         failure_stage: Option<&'a str>,
+        run_id: &'a str,
         work_id: &'a str,
         attempt_count: Option<u32>,
         error_summary: Option<&'a str>,
         mr_url: Option<&'a str>,
+    },
+    /// A terminal dispatch failure for the same `(profile, work_id)` was resolved
+    /// by later merge/close/reconcile activity.
+    DispatchFailureResolved {
+        timestamp: &'a str,
+        profile: &'a str,
+        failure_class: &'a str,
+        failure_stage: Option<&'a str>,
+        work_id: &'a str,
+        run_id: &'a str,
     },
     /// A backend was killed by GAH's idle watchdog. This is actionable even
     /// when the dispatch still has another route to try.
@@ -161,26 +180,43 @@ pub fn format_message(event: &NotifyEvent) -> String {
             format!("[gah] auto-merged {url} (work_id={work_id})")
         }
         NotifyEvent::DispatchFailed {
+            timestamp,
+            profile,
             failure_class,
             failure_stage,
+            run_id,
             work_id,
             attempt_count,
             error_summary,
             mr_url,
         } => {
             let mut msg = format!(
-                "[gah] dispatch failed [class={failure_class}] [stage={}] [attempts={}] work_id={work_id}",
+                "[gah] dispatch terminal failure [ts={timestamp}] [profile={profile}] [class={failure_class}] [stage={}] [run_id={run_id}] [attempts={}] work_id={work_id}",
                 failure_stage.unwrap_or("unknown"),
                 format_attempt_count(*attempt_count),
             );
             if let Some(mr_url) = mr_url {
                 msg.push_str(&format!(" ref={mr_url}"));
             }
+            if *failure_class == "human_blocked" && failure_stage == &Some("route") {
+                msg.push_str(" [state=paused_non_spending]");
+            }
             if let Some(summary) = summarize_error_summary(*error_summary) {
                 msg.push_str(&format!(" summary={summary}"));
             }
             msg
         }
+        NotifyEvent::DispatchFailureResolved {
+            timestamp,
+            profile,
+            failure_class,
+            failure_stage,
+            work_id,
+            run_id,
+        } => format!(
+            "[gah] terminal failure resolved [ts={timestamp}] [profile={profile}] [class={failure_class}] [stage={}] [run_id={run_id}] work_id={work_id}",
+            failure_stage.unwrap_or("unknown"),
+        ),
         NotifyEvent::BackendStalled {
             work_id,
             backend,
@@ -213,8 +249,14 @@ fn run_notify_command(command: &str, message: &str) -> std::io::Result<()> {
         let _ = stdin.write_all(message.as_bytes());
         let _ = stdin.write_all(b"\n");
     }
-    let _ = child.wait()?;
-    Ok(())
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "notify command exited with status: {status}"
+        )))
+    }
 }
 
 /// Build the instruction text for a woken manager agent, given the same
@@ -283,12 +325,16 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
             attempt_count,
             error_summary,
             mr_url,
+            ..
         } => {
             let mut context = format!(
                 "A dispatch failed terminally: [class={failure_class}] [stage={}] [attempts={}] work_id={work_id}.",
                 failure_stage.unwrap_or("unknown"),
                 format_attempt_count(*attempt_count),
             );
+            if *failure_class == "human_blocked" && failure_stage == &Some("route") {
+                context.push_str(" [state=paused_non_spending]");
+            }
             if let Some(mr_url) = mr_url {
                 context.push_str(&format!(" ref={mr_url}"));
             }
@@ -297,6 +343,7 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
             }
             context
         }
+        NotifyEvent::DispatchFailureResolved { .. } => return None,
         NotifyEvent::BackendStalled {
             work_id,
             backend,
@@ -486,6 +533,318 @@ fn strip_ansi(text: &str) -> String {
     osc.replace_all(&ansi_text, "").into_owned()
 }
 
+#[derive(Debug)]
+struct TerminalFailureRecord {
+    _profile: String,
+    _work_id: String,
+    run_id: String,
+    failure_class: String,
+    failure_stage: Option<String>,
+    attempt_count: Option<u32>,
+    error_summary: Option<String>,
+    timestamp: String,
+}
+
+#[derive(Debug)]
+struct TerminalFailureState<'a> {
+    profile: &'a str,
+    work_id: &'a str,
+    run_id: &'a str,
+    failure_class: &'a str,
+    failure_stage: Option<&'a str>,
+    attempt_count: Option<u32>,
+    error_summary: Option<&'a str>,
+    timestamp: &'a str,
+    mr_url: Option<&'a str>,
+}
+
+#[derive(Debug)]
+pub(crate) struct TerminalFailurePayload<'a> {
+    pub(crate) profile: &'a str,
+    pub(crate) work_id: &'a str,
+    pub(crate) run_id: &'a str,
+    pub(crate) failure_class: &'a str,
+    pub(crate) failure_stage: Option<&'a str>,
+    pub(crate) attempt_count: Option<u32>,
+    pub(crate) error_summary: Option<&'a str>,
+    pub(crate) mr_url: Option<&'a str>,
+}
+
+fn terminal_failure_dedupe_window() -> time::Duration {
+    let configured = std::env::var(TERMINAL_FAILURE_EVENT_DEDUPE_SECONDS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok());
+    time::Duration::seconds(configured.unwrap_or(TERMINAL_FAILURE_EVENT_DEDUPE_SECONDS))
+}
+
+fn terminal_failure_timestamp_now() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default()
+}
+
+fn parse_terminal_failure_timestamp(raw: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(raw, &Rfc3339).ok().or_else(|| {
+        raw.parse::<i64>()
+            .ok()
+            .and_then(|secs| OffsetDateTime::from_unix_timestamp(secs).ok())
+    })
+}
+
+fn terminal_failure_from_event(event: &events::ControllerEvent) -> Option<TerminalFailureRecord> {
+    let value = serde_json::from_str::<serde_json::Value>(&event.details).ok()?;
+    Some(TerminalFailureRecord {
+        _profile: value
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        _work_id: value
+            .get("work_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        run_id: value
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        failure_class: value
+            .get("failure_class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        failure_stage: value
+            .get("failure_stage")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        attempt_count: value
+            .get("attempt_count")
+            .and_then(|v| v.as_u64().and_then(|v| v.try_into().ok())),
+        error_summary: value
+            .get("error_summary")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        timestamp: event.timestamp.clone(),
+    })
+}
+
+fn latest_unresolved_terminal_failure_record(
+    cfg: &GahConfig,
+    profile: &str,
+    work_id: &str,
+) -> Option<TerminalFailureRecord> {
+    let events = events::read_events(cfg).ok()?;
+    for event in events.iter().rev() {
+        if event.profile.as_deref() != Some(profile) || event.work_id.as_deref() != Some(work_id) {
+            continue;
+        }
+        if event.event_type == events::EventType::TerminalFailureResolved.as_str() {
+            return None;
+        }
+        if event.event_type == events::EventType::TerminalFailure.as_str() {
+            return terminal_failure_from_event(event);
+        }
+    }
+    None
+}
+
+fn should_emit_terminal_failure(cfg: &GahConfig, current: &TerminalFailureState<'_>) -> bool {
+    let Some(prior) =
+        latest_unresolved_terminal_failure_record(cfg, current.profile, current.work_id)
+    else {
+        return true;
+    };
+
+    if prior.failure_class != current.failure_class {
+        return true;
+    }
+    if prior.failure_stage.as_deref() != current.failure_stage {
+        return true;
+    }
+    if prior.attempt_count != current.attempt_count {
+        return true;
+    }
+    if prior.error_summary.as_deref() != current.error_summary {
+        return true;
+    }
+
+    let now = match parse_terminal_failure_timestamp(current.timestamp) {
+        Some(ts) => ts,
+        None => return true,
+    };
+    let prior_ts = match parse_terminal_failure_timestamp(&prior.timestamp) {
+        Some(ts) => ts,
+        None => return true,
+    };
+    now - prior_ts > terminal_failure_dedupe_window()
+}
+
+fn record_terminal_failure_event(cfg: &GahConfig, failure: &TerminalFailureState<'_>) {
+    let event_profile = failure.profile;
+    let event_work_id = failure.work_id;
+    let event_run_id = failure.run_id;
+    let event_failure_class = failure.failure_class;
+    let event_failure_stage = failure.failure_stage;
+    let event_attempt_count = failure.attempt_count;
+    let event_error_summary = failure.error_summary;
+    let event_mr_url = failure.mr_url;
+    let _ = events::record(
+        cfg,
+        events::EventType::TerminalFailure,
+        Some(failure.profile),
+        Some(failure.work_id),
+        json!({
+            "profile": event_profile,
+            "work_id": event_work_id,
+            "run_id": event_run_id,
+            "failure_class": event_failure_class,
+            "failure_stage": event_failure_stage,
+            "attempt_count": event_attempt_count,
+            "error_summary": event_error_summary,
+            "mr_url": event_mr_url,
+        })
+        .to_string(),
+    );
+}
+
+fn record_terminal_failure_resolved(
+    cfg: &GahConfig,
+    profile: &str,
+    work_id: &str,
+    resolved_run_id: &str,
+    failure_class: &str,
+    failure_stage: Option<&str>,
+) {
+    let _ = events::record(
+        cfg,
+        events::EventType::TerminalFailureResolved,
+        Some(profile),
+        Some(work_id),
+        json!({
+            "profile": profile,
+            "work_id": work_id,
+            "resolved_run_id": resolved_run_id,
+            "failure_class": failure_class,
+            "failure_stage": failure_stage,
+        })
+        .to_string(),
+    );
+}
+
+fn event_name(event: &NotifyEvent<'_>) -> &'static str {
+    match event {
+        NotifyEvent::HumanRequired { .. } => "human_required",
+        NotifyEvent::MrCreated { .. } => "mr_created",
+        NotifyEvent::ReviewVerdict { .. } => "review_verdict",
+        NotifyEvent::MrMerged { .. } => "mr_merged",
+        NotifyEvent::DispatchFailed { .. } => "dispatch_failed",
+        NotifyEvent::DispatchFailureResolved { .. } => "dispatch_failure_resolved",
+        NotifyEvent::BackendStalled { .. } => "backend_stalled",
+    }
+}
+
+fn event_work_id<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
+    match event {
+        NotifyEvent::MrMerged { work_id, .. } => Some(work_id),
+        NotifyEvent::DispatchFailed { work_id, .. } => Some(work_id),
+        NotifyEvent::DispatchFailureResolved { work_id, .. } => Some(work_id),
+        _ => None,
+    }
+}
+
+fn event_run_id<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
+    match event {
+        NotifyEvent::DispatchFailed { run_id, .. }
+        | NotifyEvent::DispatchFailureResolved { run_id, .. } => Some(run_id),
+        _ => None,
+    }
+}
+
+fn event_profile<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
+    match event {
+        NotifyEvent::DispatchFailed { profile, .. }
+        | NotifyEvent::DispatchFailureResolved { profile, .. } => Some(profile),
+        _ => None,
+    }
+}
+
+pub(crate) fn notify_terminal_failure(
+    cfg: &GahConfig,
+    profile: &Profile,
+    input: TerminalFailurePayload<'_>,
+) {
+    let timestamp = terminal_failure_timestamp_now();
+    let safe_summary = summarize_error_summary(input.error_summary);
+    let terminal_failure = TerminalFailureState {
+        profile: input.profile,
+        work_id: input.work_id,
+        run_id: input.run_id,
+        failure_class: input.failure_class,
+        failure_stage: input.failure_stage,
+        attempt_count: input.attempt_count,
+        error_summary: safe_summary.as_deref(),
+        timestamp: &timestamp,
+        mr_url: input.mr_url,
+    };
+    if !should_emit_terminal_failure(cfg, &terminal_failure) {
+        return;
+    }
+
+    record_terminal_failure_event(cfg, &terminal_failure);
+
+    notify_event(
+        cfg,
+        profile,
+        NotifyEvent::DispatchFailed {
+            timestamp: &timestamp,
+            profile: terminal_failure.profile,
+            failure_class: terminal_failure.failure_class,
+            failure_stage: terminal_failure.failure_stage,
+            run_id: terminal_failure.run_id,
+            work_id: terminal_failure.work_id,
+            attempt_count: terminal_failure.attempt_count,
+            error_summary: terminal_failure.error_summary,
+            mr_url: terminal_failure.mr_url,
+        },
+    );
+}
+
+pub(crate) fn notify_terminal_failure_resolved(
+    cfg: &GahConfig,
+    profile: &Profile,
+    profile_name: &str,
+    work_id: &str,
+) {
+    let Some(failure) = latest_unresolved_terminal_failure_record(cfg, profile_name, work_id)
+    else {
+        return;
+    };
+    let timestamp = terminal_failure_timestamp_now();
+
+    let resolved_run_id = failure.run_id.as_str();
+    record_terminal_failure_resolved(
+        cfg,
+        profile_name,
+        work_id,
+        resolved_run_id,
+        &failure.failure_class,
+        failure.failure_stage.as_deref(),
+    );
+    notify_event(
+        cfg,
+        profile,
+        NotifyEvent::DispatchFailureResolved {
+            timestamp: &timestamp,
+            profile: profile_name,
+            failure_class: failure.failure_class.as_str(),
+            failure_stage: failure.failure_stage.as_deref(),
+            work_id,
+            run_id: resolved_run_id,
+        },
+    );
+}
+
 /// Fire a notification for `event`: the existing `notify_command` hook (if
 /// the profile defines one), and additionally wake the configured manager
 /// agent (if the profile opts in via `manager_wake_autonomy` and
@@ -499,6 +858,20 @@ pub fn notify_event(cfg: &GahConfig, profile: &Profile, event: NotifyEvent) {
         let message = crate::redact::redact(&format_message(&event));
         if let Err(err) = run_notify_command(command, &message) {
             eprintln!("[gah] notify_command failed (swallowed): {err:#}");
+            let _ = events::record(
+                cfg,
+                events::EventType::NotificationDeliveryFailed,
+                Some(event_profile(&event).unwrap_or(profile.display_name.as_str())),
+                event_work_id(&event),
+                json!({
+                    "event_name": event_name(&event),
+                    "profile": event_profile(&event).unwrap_or(profile.display_name.as_str()),
+                    "work_id": event_work_id(&event),
+                    "run_id": event_run_id(&event),
+                    "error": format!("{err:#}"),
+                })
+                .to_string(),
+            );
         }
     }
 
@@ -511,545 +884,4 @@ pub fn notify_event(cfg: &GahConfig, profile: &Profile, event: NotifyEvent) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn human_required_includes_reason_and_reference() {
-        let msg = format_message(&NotifyEvent::HumanRequired {
-            reason: "MR ready for human decision",
-            reference: Some("https://github.com/owner/repo/pull/7"),
-            reason_code: Some("merge_policy"),
-            failure_class: "human_blocked",
-            failure_stage: Some("review"),
-            error_summary: None,
-            attempt_count: Some(2),
-            mr_url: None,
-        });
-        assert_eq!(
-            msg,
-            "[gah] human required: MR ready for human decision [class=human_blocked] [stage=review] [attempts=2] (https://github.com/owner/repo/pull/7) [code=merge_policy]"
-        );
-    }
-
-    #[test]
-    fn human_required_without_reference() {
-        let msg = format_message(&NotifyEvent::HumanRequired {
-            reason: "waiting on operator",
-            reference: None,
-            reason_code: None,
-            failure_class: "human_blocked",
-            failure_stage: Some("review"),
-            error_summary: None,
-            attempt_count: Some(2),
-            mr_url: Some("https://github.com/owner/repo/branch/feature"),
-        });
-        assert_eq!(
-            msg,
-            "[gah] human required: waiting on operator [class=human_blocked] [stage=review] [attempts=2] (https://github.com/owner/repo/branch/feature)"
-        );
-    }
-
-    #[test]
-    fn mr_created_includes_url_work_id_and_route() {
-        let msg = format_message(&NotifyEvent::MrCreated {
-            url: "https://example.com/mr/1",
-            work_id: "WORK-X",
-            backend: "agy",
-            model: "opus",
-        });
-        assert_eq!(
-            msg,
-            "[gah] MR created https://example.com/mr/1 (work_id=WORK-X, agy/opus)"
-        );
-    }
-
-    #[test]
-    fn mr_created_collapses_duplicate_backend_prefix_in_model_name() {
-        // Live-observed: opencode's own model names already carry
-        // "opencode/" as a namespace prefix (e.g. "opencode/hy3-free"),
-        // producing "opencode/opencode/hy3-free" if backend/model were
-        // naively concatenated.
-        let msg = format_message(&NotifyEvent::MrCreated {
-            url: "https://example.com/mr/1",
-            work_id: "WORK-X",
-            backend: "opencode",
-            model: "opencode/hy3-free",
-        });
-        assert_eq!(
-            msg,
-            "[gah] MR created https://example.com/mr/1 (work_id=WORK-X, opencode/hy3-free)"
-        );
-    }
-
-    #[test]
-    fn review_verdict_includes_verdict_and_url() {
-        let msg = format_message(&NotifyEvent::ReviewVerdict {
-            verdict: "APPROVE",
-            mr_url: "https://example.com/mr/2",
-        });
-        assert_eq!(msg, "[gah] review APPROVE on https://example.com/mr/2");
-    }
-
-    #[test]
-    fn invalid_review_output_is_reported_as_rerouting_not_dispatch_failure() {
-        let msg = format_message(&NotifyEvent::ReviewOutputInvalid {
-            mr_url: "https://example.com/mr/2",
-            backend: "agy-second",
-            model: "sonnet",
-            reason: "actionable finding 1 was explicitly withdrawn",
-        });
-        assert_eq!(
-            msg,
-            "[gah] review output invalid on https://example.com/mr/2 route=agy-second/sonnet summary=actionable finding 1 was explicitly withdrawn; rerouting"
-        );
-    }
-
-    #[test]
-    fn dispatch_failed_includes_failure_class_and_work_id() {
-        let msg = format_message(&NotifyEvent::DispatchFailed {
-            failure_class: "validation_failure",
-            failure_stage: Some("agent_run"),
-            work_id: "WORK-Y",
-            attempt_count: Some(3),
-            error_summary: None,
-            mr_url: Some("https://example.com/mr/4"),
-        });
-        assert_eq!(
-            msg,
-            "[gah] dispatch failed [class=validation_failure] [stage=agent_run] [attempts=3] work_id=WORK-Y ref=https://example.com/mr/4"
-        );
-    }
-
-    #[test]
-    fn dispatch_failed_without_summary_renders_without_none() {
-        let msg = format_message(&NotifyEvent::DispatchFailed {
-            failure_class: "unknown",
-            failure_stage: None,
-            work_id: "WORK-Z",
-            attempt_count: None,
-            error_summary: None,
-            mr_url: None,
-        });
-        assert_eq!(
-            msg,
-            "[gah] dispatch failed [class=unknown] [stage=unknown] [attempts=unknown] work_id=WORK-Z"
-        );
-        assert!(!msg.contains("None"));
-    }
-
-    #[test]
-    fn dispatch_failed_truncates_and_strips_ansi_from_summary() {
-        let long_summary = format!(
-            "\u{1b}[31m{}\nsecond\tline\rthird\u{1b}[0m",
-            "x".repeat(400)
-        );
-        let msg = format_message(&NotifyEvent::DispatchFailed {
-            failure_class: "validation_failure",
-            failure_stage: Some("agent_run"),
-            work_id: "WORK-Y",
-            attempt_count: None,
-            error_summary: Some(&long_summary),
-            mr_url: None,
-        });
-        let summary = msg
-            .split(" summary=")
-            .nth(1)
-            .expect("summary field should be present");
-        assert!(!summary.contains('\u{1b}'));
-        assert!(!summary.contains(['\n', '\r', '\t']));
-        assert!(summary.len() <= 300);
-    }
-
-    fn test_gah_config(current_manager: Option<&str>) -> GahConfig {
-        GahConfig {
-            context: Default::default(),
-            defaults: crate::config::Defaults {
-                current_manager: current_manager.map(String::from),
-                ..Default::default()
-            },
-            profiles: std::collections::HashMap::new(),
-        }
-    }
-
-    #[test]
-    fn notify_event_is_a_noop_when_command_unset() {
-        // No command -> no spawn, no panic, no output.
-        let profile = crate::config::tests::test_profile_for_notifications();
-        let cfg = test_gah_config(None);
-        notify_event(
-            &cfg,
-            &profile,
-            NotifyEvent::HumanRequired {
-                reason: "x",
-                reference: None,
-                reason_code: None,
-                failure_class: "human_blocked",
-                failure_stage: Some("review"),
-                error_summary: None,
-                attempt_count: None,
-                mr_url: None,
-            },
-        );
-    }
-
-    #[test]
-    fn notify_event_pipes_message_and_swallows_failure() {
-        // A real capture command must receive the one-line message; a missing
-        // command must be swallowed rather than propagated (verified by the
-        // noop test above). Order: write to a temp file via `cat > out`.
-        let out = std::env::temp_dir().join(format!("gah-notify-test-{}.txt", std::process::id()));
-        let command = format!("cat > {}", out.display());
-        let mut profile = crate::config::tests::test_profile_for_notifications();
-        profile.notify_command = Some(command);
-        let cfg = test_gah_config(None);
-        notify_event(
-            &cfg,
-            &profile,
-            NotifyEvent::MrCreated {
-                url: "https://example.com/mr/1",
-                work_id: "WORK-X",
-                backend: "agy",
-                model: "opus",
-            },
-        );
-        let got = std::fs::read_to_string(&out).unwrap_or_default();
-        std::fs::remove_file(&out).ok();
-        assert!(
-            got.contains("[gah] MR created https://example.com/mr/1 (work_id=WORK-X, agy/opus)")
-        );
-    }
-
-    // ── format_wake_instruction ──────────────────────────────────────────
-
-    #[test]
-    fn wake_instruction_is_none_when_autonomy_off() {
-        for event in [
-            NotifyEvent::HumanRequired {
-                reason: "x",
-                reference: None,
-                reason_code: None,
-                failure_class: "human_blocked",
-                failure_stage: Some("review"),
-                error_summary: None,
-                attempt_count: None,
-                mr_url: None,
-            },
-            NotifyEvent::MrCreated {
-                url: "u",
-                work_id: "w",
-                backend: "b",
-                model: "m",
-            },
-            NotifyEvent::ReviewVerdict {
-                verdict: "APPROVE",
-                mr_url: "u",
-            },
-            NotifyEvent::DispatchFailed {
-                failure_class: "c",
-                failure_stage: Some("agent_run"),
-                work_id: "w",
-                attempt_count: Some(1),
-                error_summary: None,
-                mr_url: None,
-            },
-        ] {
-            assert!(format_wake_instruction(&event, WakeAutonomy::Off).is_none());
-        }
-    }
-
-    #[test]
-    fn wake_instruction_is_none_for_mr_merged_regardless_of_autonomy() {
-        let event = NotifyEvent::MrMerged {
-            url: "u",
-            work_id: "w",
-        };
-        assert!(format_wake_instruction(&event, WakeAutonomy::Full).is_none());
-        assert!(format_wake_instruction(&event, WakeAutonomy::ReviewOnly).is_none());
-    }
-
-    #[test]
-    fn wake_instruction_full_includes_merge_authorization() {
-        let event = NotifyEvent::MrCreated {
-            url: "https://example.com/mr/1",
-            work_id: "WORK-X",
-            backend: "agy",
-            model: "opus",
-        };
-        let instruction = format_wake_instruction(&event, WakeAutonomy::Full).unwrap();
-        assert!(instruction.contains("https://example.com/mr/1"));
-        assert!(instruction.contains("merge it if CI is green"));
-    }
-
-    #[test]
-    fn wake_instruction_collapses_duplicate_backend_prefix_in_model_name() {
-        let event = NotifyEvent::MrCreated {
-            url: "https://example.com/mr/1",
-            work_id: "WORK-X",
-            backend: "opencode",
-            model: "opencode/hy3-free",
-        };
-        let instruction = format_wake_instruction(&event, WakeAutonomy::Full).unwrap();
-        assert!(instruction.contains("dispatched via opencode/hy3-free"));
-        assert!(!instruction.contains("opencode/opencode"));
-    }
-
-    #[test]
-    fn wake_instruction_review_only_forbids_merge() {
-        let event = NotifyEvent::MrCreated {
-            url: "https://example.com/mr/1",
-            work_id: "WORK-X",
-            backend: "agy",
-            model: "opus",
-        };
-        let instruction = format_wake_instruction(&event, WakeAutonomy::ReviewOnly).unwrap();
-        assert!(instruction.contains("https://example.com/mr/1"));
-        assert!(instruction.contains("Do not merge"));
-    }
-
-    #[test]
-    fn wake_instruction_human_required_includes_reason_and_reference() {
-        let event = NotifyEvent::HumanRequired {
-            reason: "MR ready for human decision",
-            reference: Some("https://example.com/mr/7"),
-            reason_code: Some("merge_policy"),
-            failure_class: "human_blocked",
-            failure_stage: Some("review"),
-            error_summary: None,
-            attempt_count: Some(1),
-            mr_url: None,
-        };
-        let instruction = format_wake_instruction(&event, WakeAutonomy::Full).unwrap();
-        assert!(instruction.contains("MR ready for human decision"));
-        assert!(instruction.contains("https://example.com/mr/7"));
-        assert!(instruction.contains("[code=merge_policy]"));
-    }
-
-    // ── manager wake integration (real spawn via a fake `claude` binary) ──
-
-    fn make_fake_wake_bin(dir: &std::path::Path, name: &str, capture: &std::path::Path) {
-        std::fs::create_dir_all(dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$2\" > '{}'\n",
-                capture.display()
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms).unwrap();
-        }
-    }
-
-    #[test]
-    fn notify_event_wakes_configured_manager_when_autonomy_set() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        let capture = tmp.path().join("captured-instruction.txt");
-        make_fake_wake_bin(&bin_dir, "claude", &capture);
-        let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
-
-        let mut profile = crate::config::tests::test_profile_for_notifications();
-        profile.manager_wake_autonomy = WakeAutonomy::Full;
-        let mut cfg = test_gah_config(Some("claude"));
-        cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
-
-        notify_event(
-            &cfg,
-            &profile,
-            NotifyEvent::MrCreated {
-                url: "https://example.com/mr/9",
-                work_id: "WORK-9",
-                backend: "codex",
-                model: "gpt",
-            },
-        );
-
-        // Fire-and-forget: give the fake binary a moment to write its capture.
-        for _ in 0..50 {
-            if capture.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let got = std::fs::read_to_string(&capture).unwrap_or_default();
-        assert!(
-            got.contains("https://example.com/mr/9"),
-            "expected woken claude to receive the instruction, got: {got:?}"
-        );
-
-        // The audit log (this fix's whole point) must exist and contain the
-        // instruction -- a wake must never again be unobservable.
-        let log_dir = cfg.defaults.manager_wake_log_dir();
-        let log_entries: Vec<_> = std::fs::read_dir(&log_dir)
-            .unwrap_or_else(|err| panic!("expected log dir {log_dir:?} to exist: {err:#}"))
-            .collect();
-        assert_eq!(
-            log_entries.len(),
-            1,
-            "expected exactly one wake log file in {log_dir:?}"
-        );
-        let log_contents = std::fs::read_to_string(log_entries[0].as_ref().unwrap().path())
-            .expect("read wake log file");
-        assert!(
-            log_contents.contains("https://example.com/mr/9"),
-            "expected wake log to record the instruction, got: {log_contents:?}"
-        );
-    }
-
-    /// Regression: the spawned manager-wake child must actually be reaped,
-    /// not left as a `[claude] <defunct>` zombie under the still-running
-    /// caller. The fake binary reports its own pid before exiting; once it
-    /// has exited we poll `/proc/<pid>` -- a reaped process's entry
-    /// disappears entirely, while an un-waited zombie keeps a `Z` (zombie)
-    /// stat entry around indefinitely (until *this test process* exits).
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn notify_event_manager_wake_does_not_leave_a_zombie() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let pid_file = tmp.path().join("child.pid");
-        let bin_path = bin_dir.join("claude");
-        std::fs::write(
-            &bin_path,
-            format!("#!/bin/sh\necho $$ > '{}'\nexit 0\n", pid_file.display()),
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&bin_path, perms).unwrap();
-        }
-        let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
-
-        let mut profile = crate::config::tests::test_profile_for_notifications();
-        profile.manager_wake_autonomy = WakeAutonomy::Full;
-        let mut cfg = test_gah_config(Some("claude"));
-        cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
-
-        notify_event(
-            &cfg,
-            &profile,
-            NotifyEvent::MrCreated {
-                url: "https://example.com/mr/9",
-                work_id: "WORK-9",
-                backend: "codex",
-                model: "gpt",
-            },
-        );
-
-        // Wait for the fake binary to report its pid and exit.
-        let mut pid = None;
-        for _ in 0..100 {
-            if let Ok(text) = std::fs::read_to_string(&pid_file) {
-                if let Ok(p) = text.trim().parse::<i32>() {
-                    pid = Some(p);
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let pid = pid.expect("fake claude binary never reported its pid");
-
-        // Give the background reaper thread a moment to call wait() after
-        // the child exits, then confirm the process is fully gone -- not
-        // lingering as a zombie (stat state 'Z').
-        let proc_path = format!("/proc/{pid}");
-        let mut reaped = false;
-        for _ in 0..100 {
-            match std::fs::read_to_string(format!("{proc_path}/stat")) {
-                Ok(stat) if stat.contains(") Z ") => {
-                    // still a zombie, keep polling
-                }
-                Ok(_) => {
-                    // Unlikely (would mean the pid got reused already), but
-                    // not a zombie either way -- treat as reaped.
-                    reaped = true;
-                    break;
-                }
-                Err(_) => {
-                    reaped = true; // /proc entry gone entirely: fully reaped
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(
-            reaped,
-            "expected child pid {pid} to be reaped (no zombie), but {proc_path} is still a zombie"
-        );
-    }
-
-    #[test]
-    fn notify_event_does_not_wake_when_autonomy_off() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        let capture = tmp.path().join("captured-instruction.txt");
-        make_fake_wake_bin(&bin_dir, "claude", &capture);
-        let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
-
-        // Default profile has manager_wake_autonomy == Off.
-        let profile = crate::config::tests::test_profile_for_notifications();
-        let cfg = test_gah_config(Some("claude"));
-
-        notify_event(
-            &cfg,
-            &profile,
-            NotifyEvent::MrCreated {
-                url: "https://example.com/mr/9",
-                work_id: "WORK-9",
-                backend: "codex",
-                model: "gpt",
-            },
-        );
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(
-            !capture.exists(),
-            "autonomy Off must never spawn the manager wake"
-        );
-    }
-
-    #[test]
-    fn notify_event_does_not_wake_when_current_manager_unset() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        let capture = tmp.path().join("captured-instruction.txt");
-        make_fake_wake_bin(&bin_dir, "claude", &capture);
-        let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
-
-        let mut profile = crate::config::tests::test_profile_for_notifications();
-        profile.manager_wake_autonomy = WakeAutonomy::Full;
-        // No current_manager configured at all.
-        let cfg = test_gah_config(None);
-
-        notify_event(
-            &cfg,
-            &profile,
-            NotifyEvent::MrCreated {
-                url: "https://example.com/mr/9",
-                work_id: "WORK-9",
-                backend: "codex",
-                model: "gpt",
-            },
-        );
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(
-            !capture.exists(),
-            "autonomy set but no current_manager configured must not spawn a wake"
-        );
-    }
-}
+mod tests;

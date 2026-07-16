@@ -9,7 +9,7 @@ use crate::config::{GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
 use crate::models::{AvailableTicket, DependencyBlocker, IssueIntakeRejection};
-use crate::notifications::{notify_event, NotifyEvent};
+use crate::notifications::{notify_event, notify_terminal_failure_resolved, NotifyEvent};
 use crate::provider;
 use anyhow::{Context, Result};
 use std::fmt;
@@ -638,6 +638,7 @@ pub(crate) fn scan_available_tickets_with_dependencies(
 pub fn merge_branch(
     cfg: &GahConfig,
     profile: &Profile,
+    profile_name: &str,
     branch: &str,
     work_id: &Option<String>,
     mr_url: &Option<String>,
@@ -670,6 +671,9 @@ pub fn merge_branch(
                     work_id: work_id.as_deref().unwrap_or("unknown"),
                 },
             );
+            if let Some(work_id) = work_id.as_deref() {
+                notify_terminal_failure_resolved(cfg, profile, profile_name, work_id);
+            }
         }
         Err(e) => {
             entry.failure_class = Some("merge_failed".to_string());

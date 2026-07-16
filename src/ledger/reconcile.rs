@@ -7,6 +7,7 @@
 use crate::config::{self, GahConfig};
 use crate::ledger::{read_entries, LedgerEntry};
 use crate::models::PolicyConfig;
+use crate::notifications::notify_terminal_failure_resolved;
 use crate::sync;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -235,7 +236,11 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
             new_entries.push(entry);
         }
 
-        if new_state.as_str() == "MERGED" {
+        if new_state.as_str() == "MERGED" || new_state.as_str() == "CLOSED_UNMERGED" {
+            // A terminal reconciliation state means prior terminal dispatch
+            // failures for this work_id are no longer actionable; resolve the
+            // outstanding operator notification once.
+            notify_terminal_failure_resolved(cfg, profile, profile_name, work_id);
             let dispatch_entries = entries_by_work_id
                 .get(work_id)
                 .map(Vec::as_slice)

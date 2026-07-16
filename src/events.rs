@@ -45,6 +45,9 @@ pub enum EventType {
     /// failure. Distinct from `LoopStopped` so dashboards/operators can tell a
     /// transient branch conflict apart from a genuine profile stall.
     WorkDeferred,
+    TerminalFailure,
+    TerminalFailureResolved,
+    NotificationDeliveryFailed,
 }
 
 impl EventType {
@@ -63,6 +66,9 @@ impl EventType {
             Self::DuplicateGuardTriggered => "duplicate_guard_triggered",
             Self::LoopStopped => "loop_stopped",
             Self::WorkDeferred => "work_deferred",
+            Self::TerminalFailure => "terminal_failure",
+            Self::TerminalFailureResolved => "terminal_failure_resolved",
+            Self::NotificationDeliveryFailed => "notification_delivery_failed",
         }
     }
 }
@@ -351,6 +357,15 @@ mod tests {
             "duplicate_guard_triggered"
         );
         assert_eq!(EventType::LoopStopped.as_str(), "loop_stopped");
+        assert_eq!(EventType::TerminalFailure.as_str(), "terminal_failure");
+        assert_eq!(
+            EventType::TerminalFailureResolved.as_str(),
+            "terminal_failure_resolved"
+        );
+        assert_eq!(
+            EventType::NotificationDeliveryFailed.as_str(),
+            "notification_delivery_failed"
+        );
     }
 
     #[test]
