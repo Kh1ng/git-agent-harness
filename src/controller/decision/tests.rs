@@ -1226,6 +1226,46 @@ fn stuck_loop_gate_unrelated_ticket_eligible() {
     }
 }
 
+#[test]
+fn stuck_loop_gated_needs_fix_mr_is_not_selected_again() {
+    let mut snapshot = empty_snapshot();
+    snapshot.merge_requests.push(mr("branch-A", "NEEDS_FIX"));
+    snapshot.blocked_work_items.push(Blocker {
+        kind: "human_required".into(),
+        reason: Some("stuck_loop_gate".into()),
+        message: Some("repair repeatedly selected without progress".into()),
+        backend: None,
+        model: None,
+        until: None,
+        source_reference: Some("TICKET-branch-A".into()),
+        reason_code: Some("stuck_loop_gate".into()),
+    });
+
+    assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
+}
+
+#[test]
+fn stuck_loop_gated_mr_does_not_block_unrelated_mr() {
+    let mut snapshot = empty_snapshot();
+    snapshot.merge_requests.push(mr("branch-A", "NEEDS_FIX"));
+    snapshot.merge_requests.push(mr("branch-B", "NEEDS_REVIEW"));
+    snapshot.blocked_work_items.push(Blocker {
+        kind: "human_required".into(),
+        reason: Some("stuck_loop_gate".into()),
+        message: Some("repair repeatedly selected without progress".into()),
+        backend: None,
+        model: None,
+        until: None,
+        source_reference: Some("TICKET-branch-A".into()),
+        reason_code: Some("stuck_loop_gate".into()),
+    });
+
+    match decide_next_action(&snapshot) {
+        NextAction::ReviewMr { branch, .. } => assert_eq!(branch, "branch-B"),
+        other => panic!("expected unrelated ReviewMr, got {other:?}"),
+    }
+}
+
 // ===== Bug 3: retry-cap HumanRequired projects into blocked_work_items =====
 #[test]
 fn retry_cap_projects_into_blocked_work_items() {
