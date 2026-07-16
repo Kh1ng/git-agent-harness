@@ -18,6 +18,14 @@ pub struct RouteRequest<'a> {
     /// toward a stronger model; harness/environment/backend (auth/quota)
     /// failures must not, since a stronger model doesn't fix those.
     pub last_failure_class: Option<&'a str>,
+    /// Issue #607: when set, the requested backend/model is an exact,
+    /// pre-selected route (e.g. the next identity in an ordered review
+    /// escalation chain) that must be used as-is. Routing must not apply
+    /// generic availability/paid-route fallback to a different reviewer; if
+    /// the exact route is unavailable or requires approval, routing reports a
+    /// typed deferral/pause instead of silently substituting a previously
+    /// used reviewer.
+    pub exact_route_required: bool,
 }
 
 /// Dynamic, per-dispatch facts that must not be baked into static routing

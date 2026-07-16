@@ -1015,6 +1015,8 @@ fn decide_route_classifies_no_eligible_backend_as_backend_error() {
         session_id: None,
         usage_summary: None,
         last_failure_class: None,
+
+        exact_route_required: false,
     };
 
     let err = decide_route(&cfg, &prof, req, None, &mut ledger).unwrap_err();

@@ -320,6 +320,8 @@ fn load_balancing_does_not_reorder_review_candidates() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &runtime,
         &path(&tmp),
@@ -435,6 +437,8 @@ fn explicit_internal_review_route_cannot_bypass_paid_approval_gate() {
         recommended_model: None,
         session_id: None,
         usage_summary: None,
+
+        exact_route_required: false,
     };
 
     let err = decide_with_runtime(
@@ -476,6 +480,148 @@ fn explicit_internal_review_route_cannot_bypass_paid_approval_gate() {
     );
 }
 
+/// Issue #607, regression 1: an ordered escalation selects an exact next
+/// reviewer (GLM) that requires paid-route approval. Routing must report the
+/// approval pause for that exact identity and must NOT silently fall back to a
+/// previously used reviewer (Claude/sonnet) from the configured review pool.
+#[test]
+fn exact_escalatory_route_requiring_approval_pauses_for_exact_identity() {
+    let tmp = TempDir::new().unwrap();
+    let mut profile = profile();
+    let routine = candidate_config("claude", Some("sonnet"), None);
+    let mut paid = candidate_config(
+        "opencode",
+        Some("nous-portal/z-ai/glm-5.2"),
+        Some("nous-portal-api"),
+    );
+    paid.requires_approval = true;
+    profile.routing.review_candidates = Some(vec![routine.clone(), paid.clone()]);
+    profile.routing.escalatory_reviewers = vec![paid.clone()];
+
+    let mut runtime = RoutingRuntimeState::default();
+    runtime
+        .attempted
+        .insert(CandidateIdentity::new("claude", Some("sonnet")));
+
+    let request = RouteRequest {
+        last_failure_class: None,
+        mode: "review",
+        requested_backend: "opencode",
+        requested_model: Some("nous-portal/z-ai/glm-5.2"),
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+        exact_route_required: true,
+    };
+
+    let err = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request,
+        &runtime,
+        &path(&tmp),
+        OffsetDateTime::now_utc(),
+        backend_available,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::ApprovalRequired { backend, model, .. })
+            if backend == "opencode"
+                && model.as_deref() == Some("nous-portal/z-ai/glm-5.2")
+    ));
+}
+
+/// Issue #607, regression 2: an ordered escalation selects an exact next
+/// reviewer that is currently unavailable (quota/auth). Routing must record a
+/// typed deferral for that exact identity and must NOT silently reuse a prior
+/// reviewer from the configured review pool.
+#[test]
+fn exact_escalatory_route_unavailable_does_not_reuse_prior_reviewer() {
+    let tmp = TempDir::new().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let mut profile = profile();
+    // Order GLM before Claude so the generic review pool's ordered fallback
+    // would otherwise substitute Claude when GLM is unavailable.
+    let routine = candidate_config("claude", Some("sonnet"), None);
+    let escalatory = candidate_config(
+        "opencode",
+        Some("nous-portal/z-ai/glm-5.2"),
+        Some("nous-portal-api"),
+    );
+    profile.routing.review_candidates = Some(vec![escalatory.clone(), routine.clone()]);
+    profile.routing.escalatory_reviewers = vec![escalatory.clone()];
+    record_unavailable(
+        &path(&tmp),
+        "opencode",
+        Some("nous-portal/z-ai/glm-5.2"),
+        Reason::QuotaExhausted,
+        Source::BackendError,
+        Some(now + time::Duration::hours(1)),
+        None,
+        now,
+    )
+    .unwrap();
+
+    let request = RouteRequest {
+        last_failure_class: None,
+        mode: "review",
+        requested_backend: "opencode",
+        requested_model: Some("nous-portal/z-ai/glm-5.2"),
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+        exact_route_required: true,
+    };
+
+    // Exact route guard: the unavailable GLM escalation identity must produce
+    // a typed deferral, never a silent reuse of Claude.
+    let err = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request,
+        &RoutingRuntimeState::default(),
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::NoEligibleBackend { preferred_backend, preferred_model, .. })
+            if preferred_backend == "opencode"
+                && preferred_model.as_deref() == Some("nous-portal/z-ai/glm-5.2")
+    ));
+
+    // Without the guard the same unavailable exact route silently falls back to
+    // the prior reviewer (Claude/sonnet) from the configured review pool.
+    let fallback_request = RouteRequest {
+        last_failure_class: None,
+        mode: "review",
+        requested_backend: "opencode",
+        requested_model: Some("nous-portal/z-ai/glm-5.2"),
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+        exact_route_required: false,
+    };
+    let fallback_decision = decide_with_runtime(
+        &defaults(),
+        &profile,
+        fallback_request,
+        &RoutingRuntimeState::default(),
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+    assert_eq!(fallback_decision.effective_backend, "claude");
+    assert_eq!(fallback_decision.effective_model.as_deref(), Some("sonnet"));
+}
+
 #[test]
 fn temporary_subscribed_capacity_precedes_paid_route_approval() {
     let tmp = TempDir::new().unwrap();
@@ -502,6 +648,8 @@ fn temporary_subscribed_capacity_precedes_paid_route_approval() {
         recommended_model: None,
         session_id: None,
         usage_summary: None,
+
+        exact_route_required: false,
     };
 
     let slot = ConcurrencyGuard::acquire("claude", Some("sonnet"));
@@ -633,6 +781,8 @@ fn missing_or_unmatched_task_metadata_preserves_generic_routing() {
         &profile,
         RouteRequest {
             mode: "review",
+
+            exact_route_required: false,
             ..implementation_request()
         },
         Some(TaskRoutingContext {
@@ -663,6 +813,8 @@ fn profile_routing_beats_global_policy() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -690,6 +842,8 @@ fn profile_routing_can_select_agy() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -724,6 +878,8 @@ fn default_candidate_list_is_inherited_when_profile_only_overrides_other_fields(
             session_id: None,
             usage_summary: None,
             last_failure_class: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -786,6 +942,8 @@ fn explicit_review_fallback_preserves_the_remaining_review_order() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -817,6 +975,8 @@ fn explicit_review_fallback_preserves_the_remaining_review_order() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -873,6 +1033,8 @@ fn explicit_review_fallback_preserves_order_when_request_omits_model() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -938,6 +1100,8 @@ fn genuine_agent_failure_escalates_to_stronger_model() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -994,6 +1158,8 @@ fn non_agent_failure_does_not_escalate() {
                 recommended_model: None,
                 session_id: None,
                 usage_summary: None,
+
+                exact_route_required: false,
             },
             &path(&tmp),
             OffsetDateTime::now_utc(),
@@ -1048,6 +1214,8 @@ fn cost_aware_ordering_prefers_underpace_included_quota() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -1123,6 +1291,8 @@ fn cost_aware_ordering_conserves_scarce_included_quota() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -1177,6 +1347,8 @@ fn cost_aware_ordering_respects_explicit_priority_override() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),

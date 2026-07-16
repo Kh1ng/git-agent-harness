@@ -155,6 +155,7 @@ pub(super) fn implementation_request() -> RouteRequest<'static> {
         recommended_model: Some("strong"),
         session_id: None,
         usage_summary: None,
+        exact_route_required: false,
     }
 }
 
