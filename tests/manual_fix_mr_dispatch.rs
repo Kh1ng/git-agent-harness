@@ -243,6 +243,33 @@ fn github_manual_fix_dispatch_rejects_merged_mr() {
 }
 
 #[test]
+fn github_manual_fix_dispatch_rejects_closed_mr_by_state() {
+    let mut harness = ScenarioHarness::new("github").github_scenario("manual_fix_needs_fix_closed");
+    harness = harness.with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+        "gah/fix-needs-fix",
+        "#269",
+        None,
+        "2026-07-01T00:00:00Z",
+    )));
+
+    let result = harness
+        .run_dispatch(&["--mode", "fix", "--mr", "269"])
+        .unwrap();
+    assert_ne!(result.exit_code, Some(0));
+    assert!(
+        result
+            .stderr
+            .contains("MR 269 is in state closed and cannot be reused for fix repair"),
+        "{}",
+        result.stderr
+    );
+    assert!(!result
+        .stdout
+        .contains("Creating worktree from existing branch 'gah/fix-needs-fix'"));
+    assert!(!result.stdout.contains("Creating worktree from main"));
+}
+
+#[test]
 fn gitlab_manual_fix_dispatch_rejects_merged_mr() {
     let mut harness = ScenarioHarness::new("gitlab").gitlab_scenario("manual_fix_needs_fix_merged");
     harness = harness.with_config_append(
@@ -263,6 +290,36 @@ fn gitlab_manual_fix_dispatch_rejects_merged_mr() {
         result
             .stderr
             .contains("MR 269 is merged and cannot be reused for fix repair"),
+        "{}",
+        result.stderr
+    );
+    assert!(!result
+        .stdout
+        .contains("Creating worktree from existing branch 'gah/fix-needs-fix'"));
+    assert!(!result.stdout.contains("Creating worktree from main"));
+}
+
+#[test]
+fn gitlab_manual_fix_dispatch_rejects_closed_mr_by_state() {
+    let mut harness = ScenarioHarness::new("gitlab").gitlab_scenario("manual_fix_needs_fix_closed");
+    harness = harness.with_config_append(
+        "provider_api_base = \"https://gitlab.example.com\"\nprovider_project_id = \"42\"\n\n[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
+    );
+    harness = harness.with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+        "gah/fix-needs-fix",
+        "#269",
+        None,
+        "2026-07-01T00:00:00Z",
+    )));
+
+    let result = harness
+        .run_dispatch(&["--mode", "fix", "--mr", "269"])
+        .unwrap();
+    assert_ne!(result.exit_code, Some(0));
+    assert!(
+        result
+            .stderr
+            .contains("MR 269 is in state closed and cannot be reused for fix repair"),
         "{}",
         result.stderr
     );
