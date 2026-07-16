@@ -837,10 +837,12 @@ fn mark_backend_unavailable_from_output_at(
     // An idle watchdog kill is a backend outage signal, not an ordinary agent
     // failure. Keep this route out of the candidate set for a short bounded
     // cooldown so the next attempt can use another backend/model instead of
-    // burning the same five-minute stall again.
+    // burning the same five-minute stall again. Both terminal-attribution
+    // variants (stalled before changes / stalled during validation with
+    // checkpointed changes) are idle-watchdog stalls and trigger the cooldown.
     if log_text.contains("GAH: killed after ")
-        && log_text
-            .contains(" with no new backend output or worktree progress (stalled, not just slow).")
+        && log_text.contains("(stalled")
+        && log_text.contains("not just slow).")
     {
         let cooldown = now + time::Duration::minutes(15);
         crate::availability::record_unavailable(

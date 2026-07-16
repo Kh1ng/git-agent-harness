@@ -1,15 +1,14 @@
 use super::super::attempts::{
     apply_route_to_ledger, attempt_usage, classify_git_operation_result, classify_worktree_result,
     clear_wip_checkpoints, decide_route, failure_text_with_internal_log,
-    mark_backend_unavailable_from_output, mark_shutdown_cancelled, preflight, record_route_attempt,
-    reserve_backend_slot, resolve_llm, route_identity, route_label,
-    run_backend_with_reserved_route, wip_checkpoint_branch,
+    mark_backend_unavailable_from_output, preflight, record_route_attempt, reserve_backend_slot,
+    resolve_llm, route_identity, route_label, run_backend_with_reserved_route,
+    wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
 use super::super::issues::{
     parse_ticket_metadata, parse_ticket_metadata_from_issue, resolve_target_to_issue_or_string,
-    TicketMetadata,
 };
 use super::super::metrics::apply_diff_stats;
 use super::super::mutation_policy::enforce_policy;
@@ -19,7 +18,7 @@ use super::super::publish::{
     ensure_issue_open_for_publish, publishing_allows_publish, MrRenderContext,
 };
 use super::super::repair_context;
-use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
+use super::super::text::utf8_safe_prefix;
 use super::super::validation::{
     classify_validation_failure_progress, run_auto_fix_commands, should_skip_per_dispatch_baseline,
     validation_env, validation_failure_no_progress_reason,
@@ -35,6 +34,13 @@ use crate::{provider, runner, worktree};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+mod bounded_validation;
+pub(crate) use bounded_validation::bounded_validation_failure;
+mod shutdown;
+use shutdown::record_cancelled_attempt;
+mod work_identity;
+use work_identity::apply_authoritative_work_identity;
 
 pub(crate) fn improve(
     cfg: &GahConfig,
@@ -453,30 +459,23 @@ pub(crate) fn improve(
         // process group; return so the controller can write the matching
         // terminal dispatch event.
         if crate::runner::shutdown_requested() {
-            mark_shutdown_cancelled(
+            record_cancelled_attempt(
                 ledger,
+                attempt + 1,
+                &route.effective_backend,
+                &llm.model,
+                result.exit_code,
                 crate::ledger::FailureStage::AgentRun,
-                Some(result.exit_code),
-            );
-            ledger.attempts.push(crate::ledger::AttemptRecord {
-                attempt_number: attempt + 1,
-                backend: route.effective_backend.clone(),
-                effective_model: Some(llm.model.clone()),
-                exit_code: Some(result.exit_code),
-                validation_result: Some("cancelled_shutdown".into()),
-                failure_class: Some(crate::ledger::FailureClass::HarnessError.as_str().into()),
-                failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
-                duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
-                diff_path: None,
-                usage: attempt_usage(
+                attempt_start.elapsed().as_secs_f64(),
+                attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
                     UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
                     result.transcript_path.as_deref(),
                     Some(&claude_path),
                 ),
-                cli_version: result.agy_version.clone(),
-            });
+                result.agy_version.clone(),
+            );
             worktree::preserve_wip(
                 &wt,
                 &profile.default_target_branch,
@@ -508,15 +507,17 @@ pub(crate) fn improve(
                 .as_deref()
                 .unwrap_or(&result.log_path);
             let stalled = log_text.contains("GAH: killed after ")
-                && log_text.contains("(stalled, not just slow).");
-            let semantic_no_progress = stalled
-                && log_text.contains("with no new worktree progress (stalled, not just slow).");
+                && log_text.contains("(stalled")
+                && log_text.contains("not just slow).");
+            let stalled_before_changes = stalled && log_text.contains("stalled before changes");
+            let stalled_during_validation =
+                stalled && log_text.contains("stalled during validation with checkpointed changes");
             let cleanup_failed = result.exit_code
                 == crate::runner::process::PROCESS_CLEANUP_FAILED_EXIT_CODE
                 || log_text.contains("GAH: harness process cleanup failed:");
             let failure_class = if cleanup_failed {
                 crate::ledger::FailureClass::HarnessError
-            } else if semantic_no_progress {
+            } else if stalled_before_changes {
                 crate::ledger::FailureClass::AgentNoProgress
             } else if stalled {
                 crate::ledger::FailureClass::HarnessError
@@ -527,8 +528,10 @@ pub(crate) fn improve(
             if cleanup_failed {
                 ledger.validation_result = Some("not_run_process_cleanup_failed".into());
                 ledger.error_summary = Some("backend descendant cleanup failed".into());
-            } else if stalled {
+            } else if stalled_before_changes {
                 ledger.validation_result = Some("not_run_backend_stalled".into());
+            } else if stalled_during_validation {
+                ledger.validation_result = Some("not_run_backend_stalled_during_validation".into());
             }
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
@@ -537,7 +540,11 @@ pub(crate) fn improve(
                 exit_code: Some(result.exit_code),
                 validation_result: cleanup_failed
                     .then(|| "not_run_process_cleanup_failed".into())
-                    .or_else(|| stalled.then(|| "not_run_backend_stalled".into())),
+                    .or_else(|| stalled_before_changes.then(|| "not_run_backend_stalled".into()))
+                    .or_else(|| {
+                        stalled_during_validation
+                            .then(|| "not_run_backend_stalled_during_validation".into())
+                    }),
                 failure_class: Some(failure_class.as_str().into()),
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
@@ -576,7 +583,7 @@ pub(crate) fn improve(
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!("backend descendant cleanup failed; refusing to retry");
             }
-            if semantic_no_progress {
+            if stalled_before_changes {
                 worktree::preserve_wip(
                     &wt,
                     &profile.default_target_branch,
@@ -584,7 +591,51 @@ pub(crate) fn improve(
                 )?;
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!(
-                    "{} made no repository progress on attempt {}; not retrying blindly",
+                    "{} made no repository progress (stalled before any changes) on attempt {}; not retrying blindly",
+                    route.effective_backend,
+                    attempt + 1
+                );
+            }
+            if stalled_during_validation {
+                // Issue #579: backend produced a diff and was validating when
+                // the watchdog fired. Checkpoint the WIP diff on a repo-local
+                // branch (the worktree is removed by cleanup) so a later
+                // attempt can resume it instead of losing the work.
+                let checkpoint = wip_checkpoint_branch(&branch, attempt + 1);
+                let resumed = worktree::checkpoint_wip(
+                    &wt,
+                    &profile.default_target_branch,
+                    &checkpoint,
+                    &format!(
+                        "gah: WIP checkpointed {} attempt {} (stalled during validation)",
+                        args.mode,
+                        attempt + 1
+                    ),
+                )?;
+                if resumed {
+                    println!(
+                        "Backend stalled during validation; preserved WIP diff on local branch {checkpoint}"
+                    );
+                    wip_checkpoints.push(checkpoint.clone());
+                }
+                if attempt + 1 < max_attempts {
+                    prior_phase_context = Some(task.clone());
+                    task = format!(
+                        "{}\n\n## Previous attempt stalled during validation (attempt {}/{})\n\nThe backend produced changes and they remain checkpointed in this worktree. Inspect and preserve that progress, finish any incomplete verification, and complete the task.",
+                        base_task,
+                        attempt + 1,
+                        max_attempts,
+                    );
+                    println!(
+                        "Continuing checkpointed WIP with attempt {}/{}...",
+                        attempt + 2,
+                        max_attempts
+                    );
+                    continue;
+                }
+                worktree::cleanup(&wt, repo);
+                anyhow::bail!(
+                    "{} stalled during validation after producing changes on final attempt {}; WIP checkpointed for a future continuation",
                     route.effective_backend,
                     attempt + 1
                 );
@@ -930,6 +981,33 @@ pub(crate) fn improve(
                 let failure_path = attempt_session.join("validation-failure.txt");
                 fs::write(&failure_path, &failure_output)?;
                 println!("Validation failed ({})", failure_path.display());
+
+                if crate::runner::shutdown_requested() {
+                    record_cancelled_attempt(
+                        ledger,
+                        attempt + 1,
+                        &route.effective_backend,
+                        &llm.model,
+                        result.exit_code,
+                        crate::ledger::FailureStage::PostValidation,
+                        attempt_start.elapsed().as_secs_f64(),
+                        attempt_usage(
+                            &result.log_path,
+                            result.agy_cli_log_delta.as_deref(),
+                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
+                            result.transcript_path.as_deref(),
+                            Some(&claude_path),
+                        ),
+                        result.agy_version.clone(),
+                    );
+                    worktree::preserve_wip(
+                        &wt,
+                        &profile.default_target_branch,
+                        &format!("gah: WIP interrupted {} attempt {}", args.mode, attempt + 1),
+                    )?;
+                    worktree::cleanup(&wt, repo);
+                    anyhow::bail!("shutdown requested during post-validation; not retrying");
+                }
 
                 if exit_code == Some(VALIDATION_COMMAND_TIMEOUT_EXIT_CODE) {
                     ledger.set_failure(
@@ -1406,92 +1484,6 @@ pub(crate) fn improve(
     clear_wip_checkpoints(repo, &wip_checkpoints);
     worktree::cleanup(&wt, repo);
     Ok(())
-}
-
-fn bounded_validation_failure(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    let lines = text.lines().collect::<Vec<_>>();
-    let mut selected = std::collections::BTreeSet::new();
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        let high_signal = line.contains(" ... FAILED")
-            || line.contains(" panicked at ")
-            || trimmed == "failures:"
-            || trimmed.starts_with("test result: FAILED")
-            || trimmed.starts_with("error:")
-            || trimmed.starts_with("error[")
-            || trimmed.starts_with("npm error")
-            || trimmed.starts_with("fatal:")
-            || trimmed.contains("AssertionError")
-            || trimmed.contains("TypeError:");
-        if high_signal {
-            for context_index in index.saturating_sub(2)..=(index + 2).min(lines.len() - 1) {
-                selected.insert(context_index);
-            }
-        }
-    }
-    if !selected.is_empty() {
-        let command = lines
-            .iter()
-            .find(|line| line.trim_start().starts_with("$ "))
-            .copied()
-            .unwrap_or("validation failed");
-        let evidence = selected
-            .into_iter()
-            .map(|index| lines[index])
-            .collect::<Vec<_>>()
-            .join("\n");
-        let focused = format!("{command}\n... failure evidence ...\n{evidence}");
-        if focused.len() <= max_bytes {
-            return focused;
-        }
-        return utf8_safe_suffix(&focused, max_bytes).to_string();
-    }
-    let separator = "\n... validation output omitted ...\n";
-    let available = max_bytes.saturating_sub(separator.len());
-    let head_bytes = available / 3;
-    let tail_bytes = available.saturating_sub(head_bytes);
-    format!(
-        "{}{}{}",
-        utf8_safe_prefix(text, head_bytes),
-        separator,
-        utf8_safe_suffix(text, tail_bytes)
-    )
-}
-
-/// TICKET-091 AC4: when no authoritative external ticket exists, fall back
-/// to the branch name (already unique/timestamped at dispatch time) as a
-/// synthetic internal work ID rather than leaving it unset. This never
-/// collides with a real ticket's work_id in `check_duplicate_work`, which
-/// only ever computes its lookup key from a ticket file or candidate JSON.
-fn apply_authoritative_work_identity(
-    ledger: &mut LedgerEntry,
-    ticket: Option<&TicketMetadata>,
-    fallback_work_id: &str,
-) {
-    if let Some(ticket) = ticket {
-        ledger.task_class = ticket.task_class.clone();
-        ledger.difficulty = ticket.difficulty.clone();
-    }
-    match ticket {
-        Some(ticket) if ticket.is_authoritative => {
-            ledger.work_id = ticket.work_id.clone().or_else(|| ticket.ticket_id.clone());
-            ledger.source_issue_number = ticket.issue_number.clone();
-            ledger.work_title = ticket.title.clone();
-        }
-        // FixMr receives an authoritative work ID from the controller while
-        // its target is the existing branch, not an issue number. Preserve
-        // that identity instead of replacing it with the branch fallback.
-        _ if ledger
-            .work_id
-            .as_deref()
-            .is_some_and(|work_id| !work_id.trim().is_empty()) => {}
-        _ => {
-            ledger.work_id = Some(fallback_work_id.to_string());
-        }
-    }
 }
 
 #[cfg(test)]

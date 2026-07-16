@@ -1,7 +1,5 @@
 use super::*;
-
-/// A broken validation command is a distinct gate failure, not a dispatched
-/// ticket outcome, and the backend must never run.
+/// A broken validation command is a gate failure; the backend must never run.
 #[test]
 fn dispatch_refuses_on_broken_validation_gate() {
     let tmp = test_tempdir();
