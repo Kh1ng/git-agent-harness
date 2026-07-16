@@ -1,9 +1,14 @@
 use crate::config::{self, GahConfig};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MrFetchScope {
+    Active,
+    FullHistory,
+}
 
 /// TICKET-070: `json = true` prints one JSON array to stdout and nothing
 /// else (the existing human-readable output is otherwise unchanged when
@@ -166,11 +171,30 @@ fn extract_work_id_from_title(title: &str) -> Option<String> {
 }
 
 pub fn fetch_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
-    match profile.provider.as_str() {
-        "github" => github_prs(profile),
-        "gitlab" => gitlab_mrs(profile),
+    fetch_mrs_for_scope(profile, MrFetchScope::FullHistory)
+}
+
+/// Fetch only merge requests that can drive a controller action. Recurring
+/// status/controller observations must use this bounded path; full history is
+/// reserved for explicit synchronization, reconciliation, and pruning.
+pub fn fetch_active_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
+    fetch_mrs_for_scope(profile, MrFetchScope::Active)
+}
+
+fn fetch_mrs_for_scope(profile: &config::Profile, scope: MrFetchScope) -> Result<Vec<SyncMr>> {
+    let mut mrs = match profile.provider.as_str() {
+        "github" => github_prs(profile, scope),
+        "gitlab" => gitlab_mrs(profile, scope),
         other => anyhow::bail!("unsupported provider: {}", other),
+    }?;
+    if scope == MrFetchScope::Active {
+        mrs.retain(|mr| {
+            mr.state.as_deref().is_some_and(|state| {
+                state.eq_ignore_ascii_case("open") || state.eq_ignore_ascii_case("opened")
+            }) && !mr.merged
+        });
     }
+    Ok(mrs)
 }
 
 pub fn classify(mr: &SyncMr) -> &'static str {
@@ -359,20 +383,31 @@ struct GithubCheck {
     conclusion: Option<String>,
 }
 
-fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
-    let out = Command::new("gh")
-        .args([
-            "pr",
-            "list",
-            "--repo",
-            &profile.repo,
-            "--state",
-            "all",
-            "--limit",
-            "1000",
-            "--json",
-            "title,body,headRefName,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
-        ])
+fn github_pr_list_args(profile: &crate::config::Profile, scope: MrFetchScope) -> Vec<String> {
+    let (state, limit) = match scope {
+        MrFetchScope::Active => ("open", "100"),
+        MrFetchScope::FullHistory => ("all", "1000"),
+    };
+    [
+        "pr",
+        "list",
+        "--repo",
+        &profile.repo,
+        "--state",
+        state,
+        "--limit",
+        limit,
+        "--json",
+        "title,body,headRefName,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn github_prs(profile: &crate::config::Profile, scope: MrFetchScope) -> Result<Vec<SyncMr>> {
+    let out = crate::provider::provider_command("gh")
+        .args(github_pr_list_args(profile, scope))
         .output()
         .context("gh pr list")?;
     if !out.status.success() {
@@ -382,6 +417,11 @@ fn github_prs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
         );
     }
     let prs: Vec<GithubPr> = serde_json::from_slice(&out.stdout)?;
+    if scope == MrFetchScope::Active && prs.len() >= 100 {
+        anyhow::bail!(
+            "gh pr list reached the active observation cap (100); refusing an incomplete snapshot"
+        );
+    }
     Ok(prs
         .into_iter()
         .filter(|pr| pr.head_ref_name.starts_with("gah/"))
@@ -461,17 +501,24 @@ struct GitlabPipeline {
     status: Option<String>,
 }
 
-fn gitlab_mrs(profile: &crate::config::Profile) -> Result<Vec<SyncMr>> {
+fn gitlab_mr_list_args(profile: &crate::config::Profile, scope: MrFetchScope) -> Vec<String> {
+    let mut args = vec![
+        "mr".to_string(),
+        "list".to_string(),
+        "--repo".to_string(),
+        profile.repo.clone(),
+    ];
+    match scope {
+        MrFetchScope::Active => args.extend(["--per-page".into(), "100".into()]),
+        MrFetchScope::FullHistory => args.push("--all".into()),
+    }
+    args.extend(["--output".into(), "json".into()]);
+    args
+}
+
+fn gitlab_mrs(profile: &crate::config::Profile, scope: MrFetchScope) -> Result<Vec<SyncMr>> {
     let out = crate::provider::provider_command("glab")
-        .args([
-            "mr",
-            "list",
-            "--repo",
-            &profile.repo,
-            "--all",
-            "--output",
-            "json",
-        ])
+        .args(gitlab_mr_list_args(profile, scope))
         .output()
         .context("glab mr list")?;
     if !out.status.success() {

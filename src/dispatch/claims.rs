@@ -180,7 +180,7 @@ pub(super) fn check_duplicate_work(
     }
 
     // Try to fetch MRs/PRs from provider
-    let mrs = crate::sync::fetch_mrs(profile).unwrap_or_default();
+    let mrs = crate::sync::fetch_active_mrs(profile)?;
 
     for entry in matching_entries {
         if is_ledger_entry_stale(&entry) {

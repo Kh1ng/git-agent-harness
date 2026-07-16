@@ -572,6 +572,40 @@ impl ScenarioHarness {
         serde_json::from_slice(&out.stdout).map_err(|e| format!("parse report json: {e}"))
     }
 
+    pub fn run_sync_json(&mut self) -> Result<serde_json::Value, String> {
+        self.setup_env();
+        self.install_fakes();
+        let out = Command::new(&self.gah_bin)
+            .args(["sync", "--profile", &self.profile_name, "--json"])
+            .env("GAH_CONFIG", &self.config_path)
+            .env("GAH_LEDGER_PATH", &self.ledger_path)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin_dir.display(),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .map_err(|e| format!("sync spawn failed: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "sync exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse sync json: {e}"))
+    }
+
+    pub fn github_argv_for_call(&self, call: u32) -> Vec<String> {
+        self.fake_gh
+            .as_ref()
+            .map(|fake| fake.argv_for_call(call))
+            .unwrap_or_default()
+    }
+
     fn install_fakes(&self) {
         // gh/glab scripts need to be in the bin_dir since the gah
         // subprocess resolves them from PATH, not from the thread-local

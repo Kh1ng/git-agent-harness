@@ -299,20 +299,8 @@ fn build_snapshot_inner(
     // Ledger read is hoisted above the sync step so recently-merged MRs can be
     // enriched with their backend/model and review verdict (TICKET-198).
     let ledger_entries_by_work_id = ledger::index_entries_by_work_id(entries);
-    match sync::fetch_mrs(profile) {
+    match sync::fetch_active_mrs(profile) {
         Ok(mrs) => {
-            let mrs = if profile.provider == "gitlab" {
-                mrs.into_iter()
-                    .filter(|mr| {
-                        mr.state
-                            .as_deref()
-                            .is_some_and(|state| state.eq_ignore_ascii_case("opened"))
-                            && !mr.merged
-                    })
-                    .collect()
-            } else {
-                mrs
-            };
             merge_requests = mrs
                 .iter()
                 .map(|mr| sync::sync_mr_to_json(mr, None, &ledger_entries_by_work_id))

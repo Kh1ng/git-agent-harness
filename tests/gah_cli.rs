@@ -4607,7 +4607,7 @@ fn sync_gitlab_closed_unmerged_mr_is_terminal() {
 }
 
 #[test]
-fn status_json_reports_closed_unmerged_mr_consistently() {
+fn status_json_excludes_closed_unmerged_history() {
     let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -4639,8 +4639,7 @@ fn status_json_reports_closed_unmerged_mr_consistently() {
     let mrs = parsed["merge_requests"]
         .as_array()
         .expect("merge_requests must be an array");
-    assert_eq!(mrs[0]["classification"], "CLOSED_UNMERGED");
-    assert_eq!(mrs[0]["recommended_action"], "NONE");
+    assert!(mrs.is_empty());
 }
 
 #[test]
