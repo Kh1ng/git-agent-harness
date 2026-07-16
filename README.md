@@ -295,6 +295,7 @@ Doctor checks:
 - push URL can be derived
 - artifact/worktree paths are writable
 - `docs/MANAGER_MEMORY.md` exists
+- generated-artifact publication patterns are valid
 
 ## First Dispatch
 
@@ -323,6 +324,30 @@ repository owner is trusted. That compatibility field never grants GitLab
 trust. GitLab project access-token users are recognized from the project-scoped
 `project_<project-id>_bot_*` username and must still be listed exactly in
 `trusted_issue_bot_authors`. Explicit empty lists deny that author class.
+
+### Generated-artifact publication guard
+
+Before GAH creates or pushes a commit, it rejects newly tracked files matching
+the profile's generated-artifact deny patterns. The default covers nested
+`node_modules`, Vite/Vitest caches, coverage, language caches, build targets,
+and TypeScript build-info files. Existing tracked files are not removed or
+rewritten. Override the complete list per profile, or set an explicit empty
+list to disable the guard:
+
+```toml
+[profiles.my_profile.publishing]
+generated_artifact_deny_patterns = [
+  "**/node_modules/**",
+  "**/.vite/**",
+  "**/coverage/**",
+  "**/target/**",
+  "**/*.tsbuildinfo",
+]
+```
+
+The effective list is included in `gah status --json`, and `gah doctor` prints
+the active policy. A match fails before commit/push with the exact path,
+pattern, and policy source; GAH does not silently delete the worker's files.
 
 Start with a dry run:
 

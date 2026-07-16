@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 mod issue_intake;
 pub use issue_intake::IssueIntakeMode;
+mod publishing;
+pub use publishing::PublishingPolicy;
 
 /// TICKET-127/Issue #124: per-repo merge policy controlling what the
 /// controller does once an MR is `READY_FOR_HUMAN` (strong reviewer approved)
@@ -159,58 +161,6 @@ impl Defaults {
         }
         default_config_dir().join("manager-wake-logs")
     }
-}
-
-/// TICKET-128: per-profile policy for human-facing repository messaging.
-///
-/// This is an independent policy axis from reviewer routing and merge
-/// authorization. It lets a profile (e.g. a workplace repo) keep full
-/// autonomous code-execution + code-review capability while forbidding the
-/// agent from authoring or publishing coworker-facing prose: PR/MR text,
-/// generated commit messages, and issue-tracker comments.
-///
-/// All flags default to `true` so existing profiles keep their current
-/// behavior unless they opt into a restricted profile explicitly.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct PublishingPolicy {
-    #[serde(default = "default_true")]
-    pub allow_pull_request_creation: bool,
-    #[serde(default = "default_true")]
-    pub allow_commit_message_generation: bool,
-    #[serde(default = "default_true")]
-    pub allow_issue_comments: bool,
-    #[serde(default)]
-    pub allow_source_issue_closure: bool,
-    #[serde(default)]
-    pub github_issue_author_allowlist: Option<Vec<String>>,
-    #[serde(default)]
-    pub trusted_issue_human_authors: Option<Vec<String>>,
-    #[serde(default)]
-    pub trusted_issue_bot_authors: Option<Vec<String>>,
-    #[serde(default = "issue_intake::default_issue_intake_mode")]
-    pub issue_intake_mode: IssueIntakeMode,
-    #[serde(default = "issue_intake::default_canonical_autonomous_label")]
-    pub canonical_autonomous_label: String,
-}
-
-impl Default for PublishingPolicy {
-    fn default() -> Self {
-        Self {
-            allow_pull_request_creation: true,
-            allow_commit_message_generation: true,
-            allow_issue_comments: true,
-            allow_source_issue_closure: false,
-            github_issue_author_allowlist: None,
-            trusted_issue_human_authors: None,
-            trusted_issue_bot_authors: None,
-            issue_intake_mode: issue_intake::default_issue_intake_mode(),
-            canonical_autonomous_label: issue_intake::default_canonical_autonomous_label(),
-        }
-    }
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
