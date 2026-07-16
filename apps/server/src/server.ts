@@ -23,16 +23,35 @@ import {
   type ProfileRemoveOptions,
   type ConfigSetOptions
 } from './gahCli.js';
-import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
+import type {
+  ReportGroupBy,
+  ReportSeriesData,
+  ConfigProfileSummary
+} from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
 
 const SERVER_VERSION = '0.1.0';
+
+type ConfigEffectiveDeps = {
+  runConfigShowProfile: (profile: string) => Promise<ConfigProfileSummary>;
+};
+
+const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
+  runConfigShowProfile
+};
 
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
 const DEFAULT_PROFILE = 'gah';
 
-export function createServer() {
+export function createServer(
+  configDeps: Partial<ConfigEffectiveDeps> = {}
+): express.Express {
+  const configEffectiveDeps: ConfigEffectiveDeps = {
+    ...DEFAULT_CONFIG_EFFECTIVE_DEPS,
+    ...configDeps
+  };
+
   const app = express();
 
   // Middleware
@@ -266,7 +285,7 @@ export function createServer() {
   app.get('/api/config/effective', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
-      const config = await runConfigShowProfile(profile);
+      const config = await configEffectiveDeps.runConfigShowProfile(profile);
       res.json(config);
     } catch (error) {
       res.status(502).json({

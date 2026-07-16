@@ -389,12 +389,15 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
     const key = profile ?? '';
     if (!profile) return;
     const current = get().profileConfig;
-    if (current.loading || (!opts?.force && isFresh(current, key))) return;
-    set({ profileConfig: { ...current, loading: true, error: null } });
+    if (current.loading && current.key === key) return;
+    if (!opts?.force && isFresh(current, key)) return;
+    set({ profileConfig: { ...current, loading: true, error: null, key } });
     try {
       const data = await gahApi.getProfileConfig(profile);
+      if (get().profileConfig.key !== key) return;
       set({ profileConfig: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
+      if (get().profileConfig.key !== key) return;
       set({ profileConfig: { ...get().profileConfig, loading: false, error: errorMessage(error), key } });
     }
   },

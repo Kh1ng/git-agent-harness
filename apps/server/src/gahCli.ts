@@ -906,9 +906,6 @@ export async function runConfigShowProfile(
   config?: string
 ): Promise<ConfigProfileSummary> {
   const args = ['config', 'show', '--json', '--profile', profile];
-  if (config) {
-    args.push('--config-path', config);
-  }
   const response = await runJsonCommand<ConfigShowResponse>(args, config);
   if (!response.profile) {
     throw new Error(`gah config show returned no profile data for '${profile}'`);
