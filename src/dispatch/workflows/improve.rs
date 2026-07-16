@@ -1,9 +1,8 @@
 use super::super::attempts::{
     apply_route_to_ledger, attempt_usage, classify_git_operation_result, classify_worktree_result,
-    clear_wip_checkpoints, decide_route, failure_text_with_internal_log,
-    mark_backend_unavailable_from_output, preflight, record_route_attempt, reserve_backend_slot,
-    resolve_llm, route_identity, route_label, run_backend_with_reserved_route,
-    wip_checkpoint_branch,
+    clear_wip_checkpoints, decide_route, failure_text_with_internal_log, preflight,
+    record_route_attempt, reserve_backend_slot, resolve_llm, route_after_backend_unavailable,
+    route_identity, route_label, run_backend_with_reserved_route, wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
@@ -620,20 +619,15 @@ pub(crate) fn improve(
                 );
             }
             if attempt + 1 < max_attempts {
-                if let Some(parsed) = mark_backend_unavailable_from_output(
-                    &route.effective_backend,
-                    route.effective_model.as_deref(),
-                    route.effective_quota_pool.as_deref(),
-                    &log_text,
-                    failure_log_path,
+                if let Some((parsed, rerouted)) = route_after_backend_unavailable(
+                    cfg,
+                    profile,
+                    &route_req,
+                    ticket_meta.as_ref(),
+                    ledger,
+                    &route,
+                    (&log_text, failure_log_path),
                 )? {
-                    let rerouted = decide_route(
-                        cfg,
-                        profile,
-                        route_req.clone(),
-                        ticket_meta.as_ref(),
-                        ledger,
-                    )?;
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
                     let rerouted_identity = route_identity(
@@ -788,12 +782,14 @@ pub(crate) fn improve(
                 .internal_log_path
                 .as_deref()
                 .unwrap_or(&result.log_path);
-            if let Some(parsed) = mark_backend_unavailable_from_output(
-                &route.effective_backend,
-                route.effective_model.as_deref(),
-                route.effective_quota_pool.as_deref(),
-                &failure_text,
-                failure_log_path,
+            if let Some((parsed, rerouted)) = route_after_backend_unavailable(
+                cfg,
+                profile,
+                &route_req,
+                ticket_meta.as_ref(),
+                ledger,
+                &route,
+                (&failure_text, failure_log_path),
             )? {
                 ledger.set_failure(
                     crate::ledger::FailureClass::BackendError,
@@ -819,13 +815,6 @@ pub(crate) fn improve(
                     cli_version: result.agy_version.clone(),
                 });
                 if attempt + 1 < max_attempts {
-                    let rerouted = decide_route(
-                        cfg,
-                        profile,
-                        route_req.clone(),
-                        ticket_meta.as_ref(),
-                        ledger,
-                    )?;
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
                     let rerouted_identity = route_identity(

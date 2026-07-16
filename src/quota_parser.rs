@@ -107,6 +107,14 @@ fn generic_rate_limit_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)rate limit").unwrap())
 }
 
+fn codex_selected_model_capacity_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i)\"message\"\s*:\s*\"Selected model is at capacity\. Please try a different model\.\""#)
+            .unwrap()
+    })
+}
+
 fn authentication_error_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -372,6 +380,21 @@ fn extract_reset(text: &str, now: OffsetDateTime) -> (Option<String>, Option<Str
 /// must be able to tell "we saw this and don't know what it is" apart from
 /// "we're confident this isn't a quota/rate-limit failure at all".
 pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFailure> {
+    if backend == "codex" {
+        if let Some(m) = codex_selected_model_capacity_re().find(text) {
+            return Some(ParsedFailure {
+                backend: backend.to_string(),
+                kind: FailureKind::RateLimited,
+                retryable: true,
+                reset_at: None,
+                retry_after_seconds: Some(CONSERVATIVE_RATE_LIMIT_COOLDOWN_SECONDS),
+                confidence: Confidence::High,
+                matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+                unresolved_timezone: None,
+            });
+        }
+    }
+
     // AGY-specific patterns checked first: auth errors and quota exhaustion.
     if matches!(backend, "agy" | "agy-main" | "agy-second") {
         if let Some(m) = agy_auth_re().find(text) {
@@ -541,6 +564,8 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_admin_variant.txt");
     const CODEX_TIME_ONLY: &str =
         include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_time_only.txt");
+    const CODEX_SELECTED_MODEL_CAPACITY: &str =
+        include_str!("../tests/fixtures/quota-logs/codex_selected_model_at_capacity.jsonl");
     const CLAUDE_TZ_RESET: &str =
         include_str!("../tests/fixtures/quota-logs/claude_usage_exhausted_tz_reset.txt");
     const CLAUDE_SESSION_LIMIT_TZ_RESET: &str =
@@ -614,6 +639,24 @@ mod tests {
         let now = utc(2026, Month::March, 31, 18, 0);
         let parsed = parse("codex", CODEX_TIME_ONLY, now).unwrap();
         assert_eq!(parsed.reset_at.as_deref(), Some("2026-04-01T14:57:00Z"));
+    }
+
+    #[test]
+    fn codex_selected_model_capacity_is_treated_as_model_level_rate_limit() {
+        let now = utc(2026, Month::July, 15, 21, 29);
+        let parsed = parse("codex", CODEX_SELECTED_MODEL_CAPACITY, now).unwrap();
+
+        assert_eq!(parsed.kind, FailureKind::RateLimited);
+        assert!(parsed.retryable);
+        assert_eq!(parsed.reset_at, None);
+        assert_eq!(
+            parsed.retry_after_seconds,
+            Some(CONSERVATIVE_RATE_LIMIT_COOLDOWN_SECONDS)
+        );
+        assert!(parsed.matched_evidence.contains(
+            "\"message\":\"Selected model is at capacity. Please try a different model.\""
+        ),);
+        assert_eq!(parsed.unresolved_timezone, None);
     }
 
     // ── Claude: explicit IANA timezone (anthropics/claude-code #9236) ──────

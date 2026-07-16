@@ -699,6 +699,56 @@ fn session_limit_marks_model_scope_and_reroutes_to_alternate_backend() {
 }
 
 #[test]
+fn capacity_downgrade_skips_sibling_codex_model_in_next_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let now = OffsetDateTime::now_utc();
+
+    record_unavailable(
+        &path(&tmp),
+        "codex",
+        Some("gpt-4"),
+        Reason::RateLimited,
+        Source::BackendError,
+        Some(now + time::Duration::minutes(1)),
+        None,
+        now,
+    )
+    .unwrap();
+
+    let mut profile = profile();
+    profile.routing.pm_candidates = Some(vec![
+        candidate_config("codex", Some("gpt-4"), None),
+        candidate_config("codex", Some("gpt-5"), None),
+    ]);
+
+    let decision = decide_with(
+        &defaults(),
+        &profile,
+        RouteRequest {
+            last_failure_class: None,
+            mode: "pm",
+            requested_backend: "auto",
+            requested_model: None,
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: None,
+            usage_summary: None,
+        },
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+
+    assert_eq!(decision.effective_backend, "codex");
+    assert_eq!(decision.effective_model.as_deref(), Some("gpt-5"));
+    assert!(decision.fallback_used);
+    assert!(decision
+        .routing_reason
+        .contains("codex/gpt-4: model-specific rate_limited"));
+}
+
+#[test]
 fn candidate_list_expired_availability_re_enters() {
     let tmp = TempDir::new().unwrap();
     let observed = OffsetDateTime::now_utc() - time::Duration::hours(2);
