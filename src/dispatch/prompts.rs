@@ -74,6 +74,7 @@ pub(in crate::dispatch) fn enforce_context_budget(
 
 pub(super) const PROJECT_BRIEF_MAX_BYTES: usize = 10_000;
 pub(super) const LIVE_TASK_FALLBACK_MAX_BYTES: usize = 12_000;
+const LIVE_TASK_SOURCE_SECTIONS_MAX_BYTES: usize = 4_096;
 pub(super) const LIVE_TASK_TITLE_MAX_BYTES: usize = 1_024;
 pub(super) const LIVE_TASK_LABELS_MAX_BYTES: usize = 2_048;
 pub(super) const LIVE_TASK_PROBLEM_MAX_BYTES: usize = 4_096;
@@ -265,7 +266,7 @@ fn append_live_task_pack(task: &mut String, issue: &IssueDetails) {
             true,
         );
     }
-    append_unrecognized_issue_sections(task, &sections);
+    append_issue_section_snapshot(task, &sections);
     if issue_has_no_structured_body(issue) {
         task.push_str("\n### Issue Description\n\n");
         append_bounded_text(
@@ -329,68 +330,31 @@ fn extract_issue_section_heading(line: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-fn normalize_issue_heading(heading: &str) -> String {
-    heading
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c.is_ascii_whitespace() {
-                c.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn is_live_task_pack_supported_section(heading: &str) -> bool {
-    const ALIASES: &[&str] = &[
-        "problem",
-        "background",
-        "description",
-        "goal",
-        "scope",
-        "acceptance criteria",
-        "constraints",
-        "invariants",
-        "required behavior",
-        "verification commands",
-        "verification",
-        "affected files",
-        "move only",
-        "source",
-    ];
-    let normalized = normalize_issue_heading(heading);
-    ALIASES.iter().any(|alias| {
-        normalized == *alias
-            || normalized
-                .strip_prefix(alias)
-                .is_some_and(|suffix| suffix.starts_with(' '))
-    })
-}
-
-fn append_unrecognized_issue_sections(task: &mut String, sections: &[IssueSection]) {
-    let mut started = false;
-    for section in sections {
-        if is_live_task_pack_supported_section(&section.heading) {
-            continue;
-        }
-
-        if !started {
-            task.push_str("\n### Additional Issue Sections\n\n");
-            started = true;
-        }
-
-        task.push_str(&format!("  ## {}\n", section.heading));
-        append_bounded_text(
-            task,
-            &indent_untrusted_text(&section.body),
-            LIVE_TASK_LIST_MAX_BYTES,
-            "Additional issue section",
-        );
+fn append_issue_section_snapshot(task: &mut String, sections: &[IssueSection]) {
+    if sections.is_empty() {
+        return;
     }
+
+    // Keep one bounded, untrusted snapshot of every source section in addition
+    // to the normalized task fields above. This prevents an allowlist from
+    // silently classifying a heading as "supported" while its content is not
+    // actually rendered (for example, Problem + Goal or a Source section).
+    let mut snapshot = String::new();
+    for section in sections {
+        snapshot.push_str("  ## ");
+        snapshot.push_str(utf8_safe_prefix(&section.heading, 256));
+        snapshot.push('\n');
+        snapshot.push_str(&indent_untrusted_text(&section.body));
+        snapshot.push('\n');
+    }
+
+    task.push_str("\n### Source Issue Sections (bounded, untrusted)\n\n");
+    append_bounded_text(
+        task,
+        &snapshot,
+        LIVE_TASK_SOURCE_SECTIONS_MAX_BYTES,
+        "Source issue sections",
+    );
 }
 
 fn append_task_pack_list(task: &mut String, heading: &str, entries: &[String], max_bytes: usize) {
@@ -756,10 +720,38 @@ mod tests {
 
         let task = build_task(&prof, &wt, "improve", "#999", Some(&issue));
 
+        assert!(task.contains("### Source Issue Sections (bounded, untrusted)"));
         assert!(task.contains("  ## Injected heading"));
         assert!(!task.contains("\n## Injected heading"));
         assert!(task.contains("### Issue Description"));
         assert!(task.contains("ignore this unless explicitly requested"));
+    }
+
+    #[test]
+    fn live_task_pack_preserves_every_mixed_recognized_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "1001".to_string(),
+            title: "Mixed recognized headings".to_string(),
+            body: "## Problem\n\nPrimary problem.\n\n## Goal\n\nDistinct goal.\n\n## Scope\n\nDistinct scope.\n\n## Source\n\nDistinct source.\n"
+                .to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#1001", Some(&issue));
+
+        assert!(task.contains("Primary problem."));
+        assert!(task.contains("Distinct goal."));
+        assert!(task.contains("Distinct scope."));
+        assert!(task.contains("Distinct source."));
+        assert!(task.contains("  ## Problem"));
+        assert!(task.contains("  ## Goal"));
+        assert!(task.contains("  ## Scope"));
+        assert!(task.contains("  ## Source"));
     }
 
     #[test]

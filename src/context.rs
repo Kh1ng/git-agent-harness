@@ -155,7 +155,7 @@ pub fn estimate_tokens(text: &str) -> u64 {
 pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
     let before = estimate_tokens(prompt);
     if !cfg.enabled || (before <= cfg.soft_limit_tokens && before <= cfg.hard_limit_tokens) {
-        let section_names = section_names(&prompt);
+        let section_names = section_names(prompt);
         return Ok(ContextBuild {
             prompt: prompt.to_string(),
             estimated_tokens_before_reduction: before,
