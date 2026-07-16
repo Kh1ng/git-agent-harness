@@ -11,7 +11,9 @@ use super::super::review::context::{
 use super::super::review::policy::{
     check_review_budget, derive_reviewer_tier, next_escalatory_reviewer, next_review_candidate,
     parse_review_verdict_with_context, review_escalation_reason, review_output_invalid_error,
-    reviewer_dedup_class, ReviewBudgetExhausted, ReviewGateContext,
+    reviewer_dedup_class, is_retryable_format_only_violation, ReviewBudgetExhausted,
+    ReviewGateContext,
+    REVIEW_FORMAT_ONLY_VIOLATION_REASON,
 };
 use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
@@ -302,8 +304,11 @@ pub(in crate::dispatch) fn review(
     // used to fail the whole review outright even though review_candidates
     // often lists real fallbacks (agy-second, claude) that just sat unused.
     const MAX_REVIEW_ATTEMPTS: usize = 3;
+    const REVIEW_FORMAT_REPAIR_ATTEMPTS: usize = 1;
     let mut applied_capabilities = vec![];
     let mut prior_review_context = String::new();
+    let mut should_repair_format = false;
+    let mut format_only_repair_count = 0usize;
     let mut result = None;
     for attempt_number in 0..MAX_REVIEW_ATTEMPTS {
         ledger.attempts_started = Some(ledger.attempts_started.unwrap_or(0) + 1);
@@ -322,6 +327,11 @@ pub(in crate::dispatch) fn review(
             .effective(&args.profile, &route.effective_backend)
             .fresh_context_on_review;
         let mut prompt = format!("{capability_prefix}{prompt_suffix}");
+        if should_repair_format {
+            prompt.push_str("\n\n## Review Format Repair\n");
+            prompt.push_str(REVIEW_FORMAT_REPAIR_INSTRUCTIONS);
+            should_repair_format = false;
+        }
         if !fresh_context && !prior_review_context.is_empty() {
             prompt.push_str("\n\n## Prior Review Attempt\n");
             prompt.push_str(&prior_review_context);
@@ -549,6 +559,48 @@ pub(in crate::dispatch) fn review(
                 }
             }
         }
+        if matches!(attempt.outcome, runner::ReviewProcessOutcome::Success) {
+            let review_usage = ledger
+                .attempts
+                .last()
+                .map(|attempt| attempt.usage.clone())
+                .unwrap_or_default();
+            let reviewer_tier = derive_reviewer_tier(cfg, profile, &route);
+            if let Ok(verdict) = parse_review_verdict_with_context(
+                &attempt.stdout,
+                &route,
+                &review_usage,
+                reviewer_tier,
+                &review_gate_context,
+            ) {
+                if is_retryable_format_only_violation(
+                    &verdict,
+                    format_only_repair_count >= REVIEW_FORMAT_REPAIR_ATTEMPTS,
+                ) {
+                    format_only_repair_count += 1;
+                    should_repair_format = true;
+                    if let Some(attempt_record) = ledger.attempts.last_mut() {
+                        attempt_record.validation_result =
+                            Some(REVIEW_FORMAT_ONLY_VIOLATION_REASON.to_string());
+                    }
+                    continue;
+                }
+            } else {
+                ledger.set_failure(
+                    crate::ledger::FailureClass::BackendError,
+                    crate::ledger::FailureStage::Review,
+                );
+                ledger.backend_exit_code = Some(0);
+                ledger.validation_result = Some("invalid_output".into());
+                if let Some(attempt_record) = ledger.attempts.last_mut() {
+                    attempt_record.validation_result = Some("invalid_output".into());
+                    attempt_record.failure_class =
+                        Some(crate::ledger::FailureClass::BackendError.as_str().into());
+                    attempt_record.failure_stage =
+                        Some(crate::ledger::FailureStage::Review.as_str().into());
+                }
+            }
+        }
         result = Some(attempt);
         break;
     }
@@ -573,7 +625,7 @@ pub(in crate::dispatch) fn review(
                 .map(|attempt| attempt.usage.clone())
                 .unwrap_or_default();
             let reviewer_tier = derive_reviewer_tier(cfg, profile, &route);
-            let mut verdict = match parse_review_verdict_with_context(
+            let mut verdict = parse_review_verdict_with_context(
                 &result.stdout,
                 &route,
                 &review_usage,
@@ -838,6 +890,9 @@ pub(in crate::dispatch) fn review(
 const REVIEW_MR_TITLE_MAX_BYTES: usize = 1_024;
 const REVIEW_MR_BODY_MAX_BYTES: usize = 16_384;
 const REVIEW_PRIOR_STATE_MAX_BYTES: usize = 8_192;
+const REVIEW_FORMAT_REPAIR_INSTRUCTIONS: &str =
+    "Retrying: respond with ONLY the inert heading `Review notes` followed by the JSON object. \
+Include no extra prose before or after the JSON.";
 
 fn mark_review_budget_exhausted(ledger: &mut LedgerEntry, route: &RouteDecision, reason: &str) {
     apply_route_to_ledger(ledger, route);
