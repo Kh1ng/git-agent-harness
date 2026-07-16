@@ -58,6 +58,8 @@ pub(in crate::dispatch) fn enforce_context_budget(
         "hard_limit_tokens": context_cfg.hard_limit_tokens,
         "compacted": build.compacted,
         "fresh_context": fresh_context,
+        "section_names": build.section_names,
+        "issue_section_names": build.issue_section_names,
         "largest_sections": build.largest_sections,
         "sources": build.sources,
     });
