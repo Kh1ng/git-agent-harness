@@ -157,7 +157,8 @@ pub(in crate::dispatch) fn review_escalation_reason(
         .max_fix_attempts_per_mr() as usize;
 
     let entries = ledger::read_entries(cfg).ok()?;
-    let recent: Vec<&LedgerEntry> = entries
+    let active_entries = active_branch_review_entries(&entries, profile, profile_name, branch);
+    let recent: Vec<&LedgerEntry> = active_entries
         .iter()
         .rev()
         .filter(|e| {
@@ -219,9 +220,10 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
     branch: &str,
     current: Option<(&str, Option<&str>)>,
 ) -> Option<CandidateConfig> {
-    let mut attempted: HashSet<(String, Option<String>)> = ledger::read_entries(cfg)
-        .ok()?
-        .into_iter()
+    let entries = ledger::read_entries(cfg).ok()?;
+    let active_entries = active_branch_review_entries(&entries, profile, profile_name, branch);
+    let mut attempted: HashSet<(String, Option<String>)> = active_entries
+        .iter()
         .filter(|entry| {
             entry.profile == profile_name
                 && entry.mode == "review"
@@ -235,7 +237,12 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
                 // and must remain retryable after the daemon restarts.
                 && entry.validation_result.as_deref() != Some("cancelled_shutdown")
         })
-        .map(|entry| (entry.effective_backend, entry.effective_model))
+        .map(|entry| {
+            (
+                entry.effective_backend.clone(),
+                entry.effective_model.clone(),
+            )
+        })
         .collect();
     if let Some((backend, model)) = current {
         attempted.insert((backend.to_string(), model.map(str::to_string)));
@@ -259,6 +266,48 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
             };
             !attempted.contains(&(candidate.backend.clone(), effective_model))
         })
+}
+
+/// Return the append-only branch history after the latest operator reset for
+/// a work item already attributed to this branch. Review escalation is branch
+/// scoped, while `clear-attempts` tombstones are work-item scoped and carry no
+/// branch. Deriving aliases from the branch's own review records bridges those
+/// identities without allowing an identically numbered ticket in another
+/// profile/repository to reset this chain.
+fn active_branch_review_entries<'a>(
+    entries: &'a [LedgerEntry],
+    profile: &Profile,
+    profile_name: &str,
+    branch: &str,
+) -> &'a [LedgerEntry] {
+    let work_aliases: HashSet<String> = entries
+        .iter()
+        .filter(|entry| {
+            entry.profile == profile_name
+                && entry.repo_id == profile.repo_id
+                && entry.mode == "review"
+                && entry.branch.as_deref() == Some(branch)
+        })
+        .filter_map(|entry| entry.work_id.as_deref())
+        .flat_map(ledger::work_id_aliases)
+        .collect();
+
+    let reset_index = (!work_aliases.is_empty()).then(|| {
+        entries.iter().rposition(|entry| {
+            entry.profile == profile_name
+                && entry.repo_id == profile.repo_id
+                && entry.mode == "clear_attempts"
+                && entry.work_id.as_deref().is_some_and(|work_id| {
+                    ledger::work_id_aliases(work_id)
+                        .iter()
+                        .any(|alias| work_aliases.contains(alias))
+                })
+        })
+    });
+
+    reset_index
+        .flatten()
+        .map_or(entries, |index| &entries[index + 1..])
 }
 
 /// Review deduplication normally works at the authority-tier level. An
