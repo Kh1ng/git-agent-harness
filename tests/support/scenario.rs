@@ -457,6 +457,54 @@ impl ScenarioHarness {
         serde_json::from_str(&stdout[start..]).map_err(|e| format!("parse status json: {e}"))
     }
 
+    pub fn run_quota_snapshot_json(&mut self, since: &str) -> Result<serde_json::Value, String> {
+        self.setup_env();
+        self.install_fakes();
+        let out = Command::new(&self.gah_bin)
+            .args([
+                "quota",
+                "snapshot",
+                "--json",
+                "--profile",
+                &self.profile_name,
+                "--since",
+                since,
+            ])
+            .env(
+                "XDG_STATE_HOME",
+                self._temp.path().join("xdg-state").to_str().unwrap(),
+            )
+            .env("GAH_CONFIG", self.config_path.to_str().unwrap())
+            .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
+            .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin_dir.display(),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .map_err(|e| format!("quota snapshot spawn failed: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "quota snapshot exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let start = stdout.find('{').ok_or_else(|| {
+            format!(
+                "no JSON object in quota snapshot stdout: {}",
+                &stdout[..stdout.len().min(200)]
+            )
+        })?;
+        serde_json::from_str(&stdout[start..])
+            .map_err(|e| format!("parse quota snapshot json: {e}"))
+    }
+
     pub fn run_dispatch(&mut self, args: &[&str]) -> Result<CommandResult, String> {
         self.setup_env();
         self.install_fakes();

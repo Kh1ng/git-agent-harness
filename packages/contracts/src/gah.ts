@@ -27,6 +27,8 @@ export interface ProfileIdentity {
   provider: string;
   local_path: string;
   default_target_branch: string;
+  max_fix_attempts_per_mr: number;
+  max_implementation_failures_per_ticket: number;
   /** Resolved per-repo merge policy (inherits canonical/defaults policy
    * when the profile doesn't set its own). */
   merge_policy: string;
@@ -252,10 +254,12 @@ export interface StatusSnapshot {
   active_claims: ActiveClaim[];
   fix_attempt_counts: Record<string, number>;
   merge_attempt_counts: Record<string, number>;
+  review_held_work_ids: string[];
   publishing_allow_pr: boolean;
   /** Effective profile policy used to reject newly tracked generated files
    * before commit/push. */
   generated_artifact_deny_patterns: string[];
+  max_parallel_workers: number;
   /** TICKET-157: per-backend "configured for this profile" signal, keyed by
    * logical backend name. Only backends with a real Rust implementation are
    * present. A `true` value means the backend is set up for the active
