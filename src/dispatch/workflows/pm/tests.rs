@@ -165,8 +165,20 @@ fn parse_pm_plan_rejects_invalid_disposition_and_routing() {
         .to_string()
         .contains("recommended_routing"));
 
-    let ok_dep = bounded_plan(
+    let self_dep = bounded_plan(
         r#"{"key":"k1","title":"A","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"human_required","recommended_routing":{"capability":"review","min_tier":"strong"},"acceptance_criteria":["c"],"verification_commands":["v"],"depends_on":["k1"],"uncovered_reason":"x"}"#,
     );
-    assert!(parse_pm_plan(&ok_dep).is_ok());
+    assert!(parse_pm_plan(&self_dep)
+        .unwrap_err()
+        .to_string()
+        .contains("dependency cycle"));
+
+    let two_packet_cycle = bounded_plan(
+        r#"{"key":"k1","title":"A","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit"},"acceptance_criteria":["c"],"verification_commands":["v"],"depends_on":["k2"],"uncovered_reason":"x"},
+           {"key":"k2","title":"B","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit"},"acceptance_criteria":["c"],"verification_commands":["v"],"depends_on":["k1"],"uncovered_reason":"x"}"#,
+    );
+    assert!(parse_pm_plan(&two_packet_cycle)
+        .unwrap_err()
+        .to_string()
+        .contains("dependency cycle"));
 }

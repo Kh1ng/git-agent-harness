@@ -391,7 +391,7 @@ fn validate_plan(plan: &PmPlan) -> Result<()> {
     let keys: std::collections::HashSet<&str> = plan.tickets.iter().map(|p| p.key.trim()).collect();
     for packet in &plan.tickets {
         for dep in &packet.depends_on {
-            if !keys.contains(dep.as_str()) {
+            if !keys.contains(dep.trim()) {
                 anyhow::bail!(
                     "work packet '{}' depends on unknown key '{}'",
                     packet.key,
@@ -399,6 +399,46 @@ fn validate_plan(plan: &PmPlan) -> Result<()> {
                 );
             }
         }
+    }
+    let mut remaining: std::collections::HashMap<String, std::collections::HashSet<String>> = plan
+        .tickets
+        .iter()
+        .map(|packet| {
+            (
+                packet.key.trim().to_string(),
+                packet
+                    .depends_on
+                    .iter()
+                    .map(|dependency| dependency.trim().to_string())
+                    .collect(),
+            )
+        })
+        .collect();
+    loop {
+        let ready: Vec<String> = remaining
+            .iter()
+            .filter(|(_, dependencies)| dependencies.is_empty())
+            .map(|(key, _)| key.clone())
+            .collect();
+        if ready.is_empty() {
+            break;
+        }
+        for key in &ready {
+            remaining.remove(key);
+        }
+        for dependencies in remaining.values_mut() {
+            for key in &ready {
+                dependencies.remove(key);
+            }
+        }
+    }
+    if !remaining.is_empty() {
+        let mut cyclic_keys: Vec<&str> = remaining.keys().map(String::as_str).collect();
+        cyclic_keys.sort_unstable();
+        anyhow::bail!(
+            "work packet dependency cycle involving: {}",
+            cyclic_keys.join(", ")
+        );
     }
     Ok(())
 }
