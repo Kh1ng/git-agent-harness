@@ -18,6 +18,8 @@ mod recovery;
 
 mod runtime;
 pub(crate) use self::runtime::execute_action;
+#[allow(unused_imports)]
+pub(crate) use self::runtime::loop_parallel_argument;
 // `main.rs` declares its own `mod controller` tree (see the `[[bin]]` target
 // in Cargo.toml) and is the only caller of this path; that's a separate
 // compilation from this lib target, so this re-export is invisible to the
