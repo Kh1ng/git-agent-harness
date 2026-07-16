@@ -4,6 +4,8 @@ use crate::dispatch::publish::review_labels;
 use crate::dispatch::test_util::{gah_config, gah_config_with_ledger, profile};
 use crate::ledger::LedgerEntry;
 
+mod acceptance;
+
 fn review_ledger_entry(
     profile_name: &str,
     prof: &Profile,

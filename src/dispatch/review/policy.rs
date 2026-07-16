@@ -445,14 +445,26 @@ impl ReviewGateContext {
             return false;
         }
         if let Some(path) = mapping.strip_prefix("file:") {
-            return self
-                .changed_files
-                .iter()
-                .any(|candidate| candidate == path.trim());
+            return self.mapping_references_changed_file(path);
         }
         mapping
             .strip_prefix("test:")
             .is_some_and(|detail| !detail.trim().is_empty())
+    }
+
+    fn mapping_references_changed_file(&self, mapping: &str) -> bool {
+        let mapping = mapping.trim();
+        self.changed_files.iter().any(|candidate| {
+            let Some(suffix) = mapping.strip_prefix(candidate) else {
+                return false;
+            };
+            suffix.is_empty()
+                || suffix.starts_with(" — ")
+                || suffix.starts_with(" – ")
+                || suffix.starts_with(" - ")
+                || suffix.starts_with(" (")
+                || suffix.starts_with(" [")
+        })
     }
 
     fn evidence_is_grounded(&self, evidence: &[String]) -> bool {
