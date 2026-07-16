@@ -2,7 +2,7 @@
 
 mod decision;
 mod diagnostics;
-mod policy;
+pub(crate) mod policy;
 mod reservation;
 #[cfg(test)]
 mod test_support;

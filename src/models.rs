@@ -327,6 +327,85 @@ pub struct PmPlan {
     pub tickets: Vec<PlannerWorkPacket>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PmSourceWorkIdentity {
+    pub profile: String,
+    pub provider: String,
+    pub repo_id: String,
+    pub repo: String,
+    #[serde(default)]
+    pub work_id: Option<String>,
+    #[serde(default)]
+    pub source_issue_number: Option<String>,
+    #[serde(default)]
+    pub work_title: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PmChildGraphNode {
+    pub key: String,
+    pub title: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub children: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PmFailureReason {
+    pub key: String,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PmPublishState {
+    NotRun,
+    None,
+    Partial,
+    Complete,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PmPublishTicketState {
+    pub key: String,
+    pub title: String,
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub ticket_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PmPublishStatus {
+    pub total_tickets: usize,
+    pub written_tickets: usize,
+    pub skipped_tickets: usize,
+    pub state: PmPublishState,
+    #[serde(default)]
+    pub tickets: Vec<PmPublishTicketState>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PmPlanArtifact {
+    pub schema_version: u32,
+    pub generated_at: String,
+    pub profile: String,
+    pub provider: String,
+    pub source_work_identity: PmSourceWorkIdentity,
+    pub plan_title: String,
+    pub plan_summary: String,
+    #[serde(default)]
+    pub child_graph: Vec<PmChildGraphNode>,
+    pub publish_status: PmPublishStatus,
+    #[serde(default)]
+    pub failure_reasons: Vec<PmFailureReason>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReviewVerdict {
     #[serde(deserialize_with = "deserialize_review_verdict")]

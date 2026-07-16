@@ -85,9 +85,112 @@ fn apply_pm_plan_skips_duplicates() {
     )
     .unwrap();
 
-    let written = apply_pm_plan(repo, &ctx, &plan).unwrap();
-    assert_eq!(written.len(), 1);
-    assert!(written[0].display().to_string().contains("fix-auth"));
+    let publish = apply_pm_plan(repo, &ctx, &plan).unwrap();
+    assert_eq!(publish.written, 1);
+    assert_eq!(publish.skipped, 1);
+    assert_eq!(publish.tickets.len(), 2);
+    assert!(publish
+        .tickets
+        .iter()
+        .any(|ticket| ticket.status == "written"));
+    assert!(publish
+        .tickets
+        .iter()
+        .any(|ticket| ticket.status == "skipped"));
+}
+
+#[test]
+fn build_pm_plan_artifact_reports_partial_publish_and_graph() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    let profile = profile(repo);
+    let mut ledger = crate::ledger::LedgerEntry::new(
+        "test-profile",
+        &profile,
+        "codex",
+        "pm",
+        "target",
+        Some("work-123".into()),
+        None,
+    );
+    ledger.work_id = Some("work-123".into());
+    ledger.source_issue_number = Some("42".into());
+    ledger.work_title = Some("Auth hardening".into());
+
+    let ctx = super::PmPreflight {
+        rendered: String::new(),
+        existing_tickets: vec!["- TICKET-001-fix.md: Fix auth".into()],
+        open_mrs: String::new(),
+        merged_mrs: String::new(),
+    };
+    let plan = PmPlan {
+        title: "Plan title".into(),
+        summary: "Plan summary".into(),
+        tickets: vec![
+            serde_json::from_str(
+                r#"{"key":"a","title":"Fix auth","objective":"cover auth","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit","min_tier":"standard"},"depends_on":[],"affected_files":["a"],"acceptance_criteria":["auth secure"],"verification_commands":["pytest"],"duplicate_evidence":[],"uncovered_reason":"covered"}"#,
+            )
+            .unwrap(),
+            serde_json::from_str(
+                r#"{"key":"b","title":"Finish auth","objective":"ship auth","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{"capability":"edit","min_tier":"standard"},"depends_on":["a"],"affected_files":["a"],"acceptance_criteria":["auth complete"],"verification_commands":["pytest"],"duplicate_evidence":[],"uncovered_reason":"covered"}"#,
+            )
+            .unwrap(),
+        ],
+    };
+    let publish = apply_pm_plan(repo, &ctx, &plan).unwrap();
+    let artifact = build_pm_plan_artifact(&profile, &ledger, &plan, &publish);
+
+    assert_eq!(artifact.profile, "test-profile");
+    assert_eq!(artifact.provider, "github");
+    assert_eq!(
+        artifact.source_work_identity.work_id.as_deref(),
+        Some("work-123")
+    );
+    assert_eq!(
+        artifact.source_work_identity.source_issue_number.as_deref(),
+        Some("42")
+    );
+    assert_eq!(artifact.child_graph.len(), 2);
+    assert_eq!(artifact.child_graph[0].children, vec!["b".to_string()]);
+    assert_eq!(artifact.publish_status.state, PmPublishState::Partial);
+    assert_eq!(artifact.publish_status.written_tickets, 1);
+    assert_eq!(artifact.publish_status.skipped_tickets, 1);
+    assert_eq!(artifact.failure_reasons.len(), 1);
+    assert_eq!(artifact.failure_reasons[0].key, "a");
+}
+
+#[test]
+fn build_pm_plan_artifact_preserves_provider_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let mut profile = profile(repo);
+    profile.provider = "gitlab".into();
+    let mut ledger = crate::ledger::LedgerEntry::new(
+        "test-profile",
+        &profile,
+        "claude",
+        "pm",
+        "target",
+        Some("GL-99".into()),
+        None,
+    );
+    ledger.source_issue_number = Some("99".into());
+
+    let publish = PmPlanPublishResult {
+        written: 0,
+        skipped: 0,
+        tickets: vec![],
+    };
+    let plan = PmPlan {
+        title: "GitLab plan".into(),
+        summary: "GitLab summary".into(),
+        tickets: vec![],
+    };
+
+    let artifact = build_pm_plan_artifact(&profile, &ledger, &plan, &publish);
+    assert_eq!(artifact.provider, "gitlab");
+    assert_eq!(artifact.source_work_identity.profile, "test-profile");
 }
 
 #[test]

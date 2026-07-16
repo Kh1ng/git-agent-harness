@@ -26,6 +26,9 @@ import type {
   ControllerEvent,
   ControllerActivity,
   ProfileSummary,
+  PmPlanArtifact,
+  RouteApprovalRequest,
+  RouteApprovalResult,
   WakeAutonomyValue,
   ConfigSummary,
   ConfigSetData
@@ -173,6 +176,8 @@ export interface GahDataSource {
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
   getControllerActivity(params?: { profile?: string; since?: string }): Promise<ControllerActivity[]>;
   getProfiles(): Promise<ProfileSummary[]>;
+  getPmPlan(workId: string, profile: string): Promise<PmPlanArtifact>;
+  postRouteApproval(data: RouteApprovalRequest): Promise<RouteApprovalResult>;
   addProfile(data: ProfileAddData): Promise<{ success: boolean; message: string }>;
   updateProfile(name: string, data: ProfileUpdateData): Promise<{ success: boolean; message: string }>;
   removeProfile(name: string, params?: ProfileRemoveParams): Promise<{ success: boolean; message: string }>;
@@ -285,6 +290,14 @@ export const gahApi: GahDataSource = {
   },
   getProfiles() {
     return getJson<ProfileSummary[]>('/api/profiles');
+  },
+  getPmPlan(workId, profile) {
+    return getJson<PmPlanArtifact>(`/api/pm/plans/${encodeURIComponent(workId)}`, {
+      profile
+    });
+  },
+  postRouteApproval(data) {
+    return postJson<RouteApprovalResult, RouteApprovalRequest>('/api/route-approval', data);
   },
   addProfile(data) {
     return postJson<{ success: boolean; message: string }, ProfileAddData>('/api/profiles', data);

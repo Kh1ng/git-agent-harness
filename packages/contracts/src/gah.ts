@@ -565,3 +565,77 @@ export interface LedgerEntry {
   dispatch_reason?: string | null;
   usage: LedgerUsage;
 }
+
+// ---------------------------------------------------------------------------
+// PM plan artifacts (Issue #562)
+// ---------------------------------------------------------------------------
+
+export interface PmSourceWorkIdentity {
+  profile: string;
+  provider: string;
+  repo_id: string;
+  repo: string;
+  work_id: string | null;
+  source_issue_number: string | null;
+  work_title: string | null;
+}
+
+export interface PmChildGraphNode {
+  key: string;
+  title: string;
+  depends_on: string[];
+  children: string[];
+}
+
+export type PmPublishState = 'none' | 'partial' | 'complete' | 'not_run';
+
+export interface PmPublishTicketState {
+  key: string;
+  title: string;
+  status: string;
+  reason: string | null;
+  ticket_path: string | null;
+}
+
+export interface PmFailureReason {
+  key: string;
+  reasons: string[];
+}
+
+export interface PmPublishStatus {
+  total_tickets: number;
+  written_tickets: number;
+  skipped_tickets: number;
+  state: PmPublishState;
+  tickets: PmPublishTicketState[];
+}
+
+export interface PmPlanArtifact {
+  schema_version: number;
+  generated_at: string;
+  profile: string;
+  provider: string;
+  source_work_identity: PmSourceWorkIdentity;
+  plan_title: string;
+  plan_summary: string;
+  child_graph: PmChildGraphNode[];
+  publish_status: PmPublishStatus;
+  failure_reasons: PmFailureReason[];
+  dry_run: boolean;
+}
+
+export type RouteApprovalAction = 'grant' | 'revoke';
+
+export interface RouteApprovalRequest {
+  action: RouteApprovalAction;
+  profile: string;
+  work_id: string;
+  backend: string;
+  model?: string | null;
+  dry_run?: boolean;
+}
+
+export interface RouteApprovalResult {
+  success: boolean;
+  message: string;
+}

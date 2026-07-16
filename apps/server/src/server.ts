@@ -1,8 +1,37 @@
 import express from 'express';
 import cors from 'cors';
+import { readFile } from 'node:fs/promises';
 import { getServerReadiness } from './serverReadiness.js';
-import { runStatus, runQuota, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, runConfigSet, runConfigShow, getLoopStatus, startLoop, stopLoop, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions, type ConfigSetOptions } from './gahCli.js';
-import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
+import {
+  runStatus,
+  runQuota,
+  runReport,
+  runReportSeries,
+  runLedgerWork,
+  runEvents,
+  runProfileList,
+  runProfileAdd,
+  runProfileSet,
+  runProfileRemove,
+  runRouteApproval,
+  runConfigSet,
+  runConfigShow,
+  getLoopStatus,
+  startLoop,
+  stopLoop,
+  type ProfileAddOptions,
+  type ProfileSetOptions,
+  type ProfileRemoveOptions,
+  type ConfigSetOptions,
+} from './gahCli.js';
+import type {
+  ReportGroupBy,
+  ReportSeriesData,
+  PmPlanArtifact,
+  RouteApprovalRequest,
+  RouteApprovalResult,
+  LedgerEntry,
+} from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
 
 const SERVER_VERSION = '0.1.0';
@@ -10,6 +39,19 @@ const SERVER_VERSION = '0.1.0';
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
 const DEFAULT_PROFILE = 'gah';
+const PM_PLAN_ARTIFACT = 'pm-plan.json';
+
+async function assertConfiguredProfile(profile: string): Promise<void> {
+  const profiles = await runProfileList();
+  if (!profiles.some((entry) => entry.name === profile)) {
+    throw new Error(`Profile '${profile}' is not configured`);
+  }
+}
+
+function parseTimestamp(entry: LedgerEntry): number {
+  const timestamp = Date.parse(entry.timestamp);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
 
 export function createServer() {
   const app = express();
@@ -44,6 +86,8 @@ export function createServer() {
         quota: '/api/quota',
         report: '/api/report',
         work: '/api/work/:workId',
+        pmPlan: '/api/pm/plans/:workId',
+        routeApproval: '/api/route-approval',
         events: '/api/events',
         controllerActivity: '/api/controller-activity',
         profiles: '/api/profiles',
@@ -134,6 +178,99 @@ export function createServer() {
       res.status(502).json({
         error: 'Failed to load work item history',
         message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/pm/plans/:workId', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : '';
+    if (!profile) {
+      res.status(400).json({
+        error: 'Profile is required',
+        message: 'Provide ?profile=<name> to scope this plan lookup to a configured profile.'
+      });
+      return;
+    }
+
+    try {
+      await assertConfiguredProfile(profile);
+      const entries = await runLedgerWork(req.params.workId);
+      const pmEntries = entries
+        .filter((entry) => entry.profile === profile && entry.mode === 'pm' && !!entry.session_dir)
+        .sort((left, right) => parseTimestamp(left) - parseTimestamp(right));
+
+      if (pmEntries.length === 0) {
+        res.status(404).json({
+          error: 'No PM plan artifact found',
+          message: `No PM entry with session artifact for work_id '${req.params.workId}' in profile '${profile}'.`
+        });
+        return;
+      }
+
+      const latest = pmEntries[pmEntries.length - 1];
+      const sessionDir = latest.session_dir;
+      if (!sessionDir) {
+        res.status(404).json({
+          error: 'No PM session directory',
+          message: `PM entry for work_id '${req.params.workId}' in profile '${profile}' has no session_dir.`
+        });
+        return;
+      }
+      const artifactPath = `${sessionDir}/${PM_PLAN_ARTIFACT}`;
+      const artifactRaw = await readFile(artifactPath, 'utf8');
+      const artifact = JSON.parse(artifactRaw) as PmPlanArtifact;
+      res.json(artifact);
+    } catch (error) {
+      if (error && typeof error === 'object' && (error as { code?: string }).code === 'ENOENT') {
+        res.status(404).json({
+          error: 'PM plan artifact file not found',
+          message: error instanceof Error ? error.message : String(error)
+        });
+        return;
+      }
+      res.status(502).json({
+        error: 'Failed to load PM plan artifact',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/route-approval', async (req, res) => {
+    const request: RouteApprovalRequest = req.body;
+
+    if (!request?.action || !request?.profile || !request?.work_id || !request?.backend) {
+      res.status(400).json({
+        error: 'Missing required route-approval fields',
+        message: 'Expected action/profile/work_id/backend.'
+      });
+      return;
+    }
+
+    if (request.action !== 'grant' && request.action !== 'revoke') {
+      res.status(400).json({
+        error: 'Invalid approval action',
+        message: `Unsupported action '${request.action}'. Use 'grant' or 'revoke'.`
+      });
+      return;
+    }
+
+    try {
+      await assertConfiguredProfile(request.profile);
+      const result: RouteApprovalResult = await runRouteApproval({
+        action: request.action,
+        profile: request.profile,
+        workId: request.work_id,
+        backend: request.backend,
+        model: request.model ?? undefined,
+        dryRun: request.dry_run,
+      });
+      res.json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const status = message.includes('not configured to require approval') ? 400 : 502;
+      res.status(status).json({
+        error: 'Failed to process route approval request',
+        message
       });
     }
   });

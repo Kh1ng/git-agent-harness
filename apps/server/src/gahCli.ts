@@ -18,6 +18,7 @@ import type {
   ReportGroupBy,
   LedgerEntry,
   ProfileSummary,
+  RouteApprovalResult,
 } from '@git-agent-harness/contracts';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -761,6 +762,18 @@ export interface ProfileRemoveOptions {
   config?: string;
 }
 
+export type RouteApprovalAction = 'grant' | 'revoke';
+
+export interface RouteApprovalOptions {
+  action: RouteApprovalAction;
+  profile: string;
+  workId: string;
+  backend: string;
+  model?: string;
+  dryRun?: boolean;
+  config?: string;
+}
+
 export async function runProfileRemove(options: ProfileRemoveOptions): Promise<void> {
   const args = ['profile', 'remove', options.name];
   
@@ -789,6 +802,52 @@ export async function runProfileRemove(options: ProfileRemoveOptions): Promise<v
       resolve(undefined);
     });
     
+    child.on('error', (error) => {
+      reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
+    });
+  });
+}
+
+export async function runRouteApproval(
+  options: RouteApprovalOptions
+): Promise<RouteApprovalResult> {
+  const args = ['route-approval', options.action, '--profile', options.profile, options.workId, '--backend', options.backend];
+  if (options.model) {
+    args.push('--model', options.model);
+  }
+  if (options.dryRun) {
+    args.push('--dry-run');
+  }
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout?.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`gah route-approval ${options.action} failed with exit code ${code}: ${stderr}`));
+        return;
+      }
+      const output = stdout.trim();
+      resolve({
+        success: true,
+        message: output || stderr || 'Route approval update recorded.'
+      });
+    });
+
     child.on('error', (error) => {
       reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
     });

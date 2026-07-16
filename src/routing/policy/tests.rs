@@ -9,6 +9,7 @@ use super::super::{
     CandidateIdentity, ConcurrencyGuard, RouteError, RouteRequest, RoutingRuntimeState,
     TaskRoutingContext,
 };
+use super::candidate_requires_approval;
 use super::is_genuine_agent_failure;
 use crate::availability::{Reason, Source};
 use tempfile::TempDir;
@@ -1150,4 +1151,30 @@ fn cost_aware_ordering_respects_explicit_priority_override() {
     assert_eq!(decision.effective_backend, "codex");
     assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
     assert!(!decision.routing_reason.contains("cost-aware reorder"));
+}
+
+#[test]
+fn candidate_requires_approval_matches_configured_candidates() {
+    let mut profile = profile();
+    let mut paid = candidate_config("opencode", Some("openai/gpt-paid"), None);
+    paid.requires_approval = true;
+    let mut free = candidate_config("opencode", Some("openai/gpt-free"), None);
+    free.requires_approval = false;
+    profile.routing.pm_candidates = Some(vec![paid, free]);
+
+    assert!(candidate_requires_approval(
+        &profile.routing,
+        "opencode",
+        Some("openai/gpt-paid")
+    ));
+    assert!(!candidate_requires_approval(
+        &profile.routing,
+        "opencode",
+        Some("openai/gpt-free")
+    ));
+    assert!(!candidate_requires_approval(
+        &profile.routing,
+        "codex",
+        Some("openai/gpt-paid")
+    ));
 }

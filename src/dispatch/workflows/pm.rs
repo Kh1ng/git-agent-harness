@@ -9,13 +9,27 @@ use super::super::text::{extract_first_json_object, first_markdown_heading, norm
 use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
-use crate::models::{PlannerWorkPacket, PmPlan, RecommendedRouting};
+use crate::models::{
+    PlannerWorkPacket, PmChildGraphNode, PmFailureReason, PmPlan, PmPlanArtifact, PmPublishState,
+    PmPublishStatus, PmPublishTicketState, PmSourceWorkIdentity, RecommendedRouting,
+};
 use crate::routing::RouteRequest;
 use crate::worktree;
 use anyhow::{Context, Result};
+use chrono::Utc;
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+const PM_PLAN_ARTIFACT: &str = "pm-plan.json";
+const PM_PLAN_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug)]
+struct PmPlanPublishResult {
+    pub written: usize,
+    pub skipped: usize,
+    pub tickets: Vec<PmPublishTicketState>,
+}
 pub(crate) fn pm(
     cfg: &GahConfig,
     profile: &Profile,
@@ -186,10 +200,17 @@ pub(crate) fn pm(
     };
 
     let plan = parse_pm_plan(&log_text)?;
-    let written = apply_pm_plan(repo, &preflight_ctx, &plan)?;
-    println!("\nCreated {} ticket(s):", written.len());
-    for path in &written {
-        println!("  {}", path.display());
+    let publish_result = apply_pm_plan(repo, &preflight_ctx, &plan)?;
+    let artifact = build_pm_plan_artifact(profile, ledger, &plan, &publish_result);
+    let artifact_path = session_dir.join(PM_PLAN_ARTIFACT);
+    let artifact_json = serde_json::to_string_pretty(&artifact)?;
+    fs::write(&artifact_path, artifact_json)?;
+
+    println!("\nCreated {} ticket(s):", publish_result.written);
+    for state in &publish_result.tickets {
+        if let Some(path) = &state.ticket_path {
+            println!("  {}", path);
+        }
     }
 
     Ok(())
@@ -443,15 +464,27 @@ fn validate_plan(plan: &PmPlan) -> Result<()> {
     Ok(())
 }
 
-fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<PathBuf>> {
+fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<PmPlanPublishResult> {
     let tickets_dir = repo.join("docs/tickets");
     fs::create_dir_all(&tickets_dir)?;
     let manager_memory_path = repo.join("docs/MANAGER_MEMORY.md");
     let next_id = next_ticket_id(&tickets_dir, Some(&manager_memory_path))?;
-    let mut written = vec![];
+    let mut state = PmPlanPublishResult {
+        written: 0,
+        skipped: 0,
+        tickets: vec![],
+    };
     let mut id = next_id;
     for ticket in &plan.tickets {
-        if should_skip_ticket(ctx, ticket) {
+        if let Some(reason) = ticket_skip_reason(ctx, ticket) {
+            state.skipped += 1;
+            state.tickets.push(PmPublishTicketState {
+                key: ticket.key.clone(),
+                title: ticket.title.clone(),
+                status: "skipped".into(),
+                reason: Some(reason),
+                ticket_path: None,
+            });
             continue;
         }
         validate_packet(ticket)?;
@@ -459,22 +492,131 @@ fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<Pa
         let filename = format!("TICKET-{:03}-{}.md", id, slug);
         let path = tickets_dir.join(filename);
         fs::write(&path, render_ticket(ticket, id))?;
-        written.push(path);
+        let path_display = path.display().to_string();
+        state.written += 1;
+        state.tickets.push(PmPublishTicketState {
+            key: ticket.key.clone(),
+            title: ticket.title.clone(),
+            status: "written".into(),
+            reason: None,
+            ticket_path: Some(path_display),
+        });
         id += 1;
     }
-    Ok(written)
+    Ok(state)
 }
 
-fn should_skip_ticket(ctx: &PmPreflight, ticket: &PlannerWorkPacket) -> bool {
+fn build_pm_plan_artifact(
+    profile: &Profile,
+    ledger: &LedgerEntry,
+    plan: &PmPlan,
+    publish_result: &PmPlanPublishResult,
+) -> PmPlanArtifact {
+    let total = publish_result.tickets.len();
+    let written = publish_result.written;
+    let skipped = publish_result.skipped;
+    let state = if total == 0 {
+        PmPublishState::None
+    } else if written == total {
+        PmPublishState::Complete
+    } else if written == 0 {
+        PmPublishState::None
+    } else {
+        PmPublishState::Partial
+    };
+
+    let publish_status = PmPublishStatus {
+        total_tickets: total,
+        written_tickets: written,
+        skipped_tickets: skipped,
+        state,
+        tickets: publish_result.tickets.clone(),
+    };
+
+    let failure_reasons: Vec<PmFailureReason> = publish_result
+        .tickets
+        .iter()
+        .filter_map(|ticket| ticket.reason.as_ref().map(|reason| (ticket, reason)))
+        .map(|(ticket, reason)| PmFailureReason {
+            key: ticket.key.clone(),
+            reasons: vec![reason.clone()],
+        })
+        .collect();
+
+    let child_graph = build_pm_child_graph(plan);
+    let source_work_identity = PmSourceWorkIdentity {
+        profile: ledger.profile.clone(),
+        provider: profile.provider.clone(),
+        repo_id: profile.repo_id.clone(),
+        repo: profile.repo.clone(),
+        work_id: ledger.work_id.clone(),
+        source_issue_number: ledger.source_issue_number.clone(),
+        work_title: ledger.work_title.clone(),
+    };
+
+    PmPlanArtifact {
+        schema_version: PM_PLAN_SCHEMA_VERSION,
+        generated_at: Utc::now().to_rfc3339(),
+        profile: ledger.profile.clone(),
+        provider: profile.provider.clone(),
+        source_work_identity,
+        plan_title: plan.title.clone(),
+        plan_summary: plan.summary.clone(),
+        child_graph,
+        publish_status,
+        failure_reasons,
+        dry_run: false,
+    }
+}
+
+fn build_pm_child_graph(plan: &PmPlan) -> Vec<PmChildGraphNode> {
+    let mut children_by_parent: std::collections::HashMap<&str, Vec<String>> = plan
+        .tickets
+        .iter()
+        .map(|packet| (packet.key.as_str(), Vec::new()))
+        .collect();
+
+    for packet in &plan.tickets {
+        for dep in &packet.depends_on {
+            if let Some(children) = children_by_parent.get_mut(dep.as_str()) {
+                children.push(packet.key.clone());
+            }
+        }
+    }
+
+    plan.tickets
+        .iter()
+        .map(|packet| PmChildGraphNode {
+            key: packet.key.clone(),
+            title: packet.title.clone(),
+            depends_on: packet.depends_on.clone(),
+            children: children_by_parent
+                .get(packet.key.as_str())
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn ticket_skip_reason(ctx: &PmPreflight, ticket: &PlannerWorkPacket) -> Option<String> {
     let title = normalize_match(&ticket.title);
     if title.is_empty() {
-        return true;
+        return Some("ticket title is empty".into());
     }
-    ctx.existing_tickets
+    if ctx
+        .existing_tickets
         .iter()
         .any(|item| normalize_match(item).contains(&title))
-        || normalize_match(&ctx.open_mrs).contains(&title)
-        || normalize_match(&ctx.merged_mrs).contains(&title)
+    {
+        return Some("already covered by an existing ticket".into());
+    }
+    if normalize_match(&ctx.open_mrs).contains(&title) {
+        return Some("already covered by an open MR".into());
+    }
+    if normalize_match(&ctx.merged_mrs).contains(&title) {
+        return Some("already covered by a recently merged MR".into());
+    }
+    None
 }
 
 fn validate_packet(ticket: &PlannerWorkPacket) -> Result<()> {

@@ -24,6 +24,7 @@ mod quota_snapshot;
 mod quota_store;
 mod redact;
 mod report;
+mod route_approval;
 mod routing;
 mod runner;
 mod server;
@@ -667,6 +668,8 @@ enum RouteApprovalCommands {
         backend: String,
         #[arg(long)]
         model: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },
@@ -679,6 +682,8 @@ enum RouteApprovalCommands {
         backend: String,
         #[arg(long)]
         model: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },
@@ -1075,41 +1080,7 @@ fn main() -> Result<()> {
         },
 
         Commands::RouteApproval { command } => {
-            let (profile, work_id, backend, model, config_path, granted) = match command {
-                RouteApprovalCommands::Grant {
-                    profile,
-                    work_id,
-                    backend,
-                    model,
-                    config_path,
-                } => (profile, work_id, backend, model, config_path, true),
-                RouteApprovalCommands::Revoke {
-                    profile,
-                    work_id,
-                    backend,
-                    model,
-                    config_path,
-                } => (profile, work_id, backend, model, config_path, false),
-            };
-            let cfg = config::load(config_path.as_deref())?;
-            let prof = config::get_profile(&cfg, &profile)?;
-            let entry = ledger::LedgerEntry::new_paid_route_approval(
-                &profile,
-                prof,
-                &work_id,
-                &backend,
-                model.as_deref(),
-                granted,
-            );
-            let path = ledger::append(&cfg, &entry)?;
-            println!(
-                "Paid route approval {} for work_id '{}' on {}/{} ({})",
-                if granted { "granted" } else { "revoked" },
-                work_id,
-                backend,
-                model.as_deref().unwrap_or("default"),
-                path.display()
-            );
+            route_approval::run(command)?;
         }
 
         Commands::Loop {

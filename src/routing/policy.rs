@@ -471,6 +471,19 @@ pub(super) fn configured_route_requires_approval(
             }))
 }
 
+#[allow(dead_code)]
+pub(crate) fn candidate_requires_approval(
+    routing: &RoutingPolicy,
+    backend: &str,
+    model: Option<&str>,
+) -> bool {
+    configured_route_requires_approval(routing, "pm", backend, model)
+        || configured_route_requires_approval(routing, "review", backend, model)
+        || configured_route_requires_approval(routing, "improve", backend, model)
+        || configured_route_requires_approval(routing, "fix", backend, model)
+        || configured_route_requires_approval(routing, "experiment", backend, model)
+}
+
 pub(super) fn task_rule_candidates(
     routing: &RoutingPolicy,
     mode: &str,

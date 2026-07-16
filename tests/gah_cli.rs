@@ -4387,7 +4387,7 @@ fn route_approval_cli_records_exact_grant_and_revoke() {
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
-    let cfg = write_real_repo_config(&tmp, &repo, "github");
+    let cfg = write_real_repo_config_with_extra(&tmp, &repo, "github", "", "[profiles.real.routing]\nimprove_candidates=[{backend=\"opencode\",model=\"nous-portal/z-ai/glm-5.2\",requires_approval=true}]\n");
     let ledger_path = tmp.path().join("ledger.jsonl");
     let model = "nous-portal/z-ai/glm-5.2";
 
