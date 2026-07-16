@@ -27,6 +27,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -57,6 +58,55 @@ pub fn test_tempdir() -> TempDir {
         .prefix("gah-test-")
         .tempdir_in(test_temp_root())
         .unwrap()
+}
+
+/// Retains a command's isolated filesystem environment until the command is
+/// finished, then removes it with the fixture. This matters for asynchronously
+/// spawned children: dropping the temporary directory immediately after
+/// `spawn()` would race the child while leaving anything it recreated behind.
+pub struct IsolatedCommand<C> {
+    command: C,
+    state: TempDir,
+}
+
+impl<C> IsolatedCommand<C> {
+    pub fn state_path(&self) -> &Path {
+        self.state.path()
+    }
+}
+
+impl<C> Deref for IsolatedCommand<C> {
+    type Target = C;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl<C> DerefMut for IsolatedCommand<C> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
+}
+
+pub fn isolate_command<C>(
+    mut command: C,
+    set_env: impl FnOnce(&mut C, &Path),
+) -> IsolatedCommand<C> {
+    let state = test_tempdir();
+    set_env(&mut command, state.path());
+    IsolatedCommand { command, state }
+}
+
+#[test]
+fn isolated_command_removes_its_state_on_drop() {
+    let command = isolate_command((), |_, _| {});
+    let state = command.state_path().to_path_buf();
+    assert!(state.exists());
+
+    drop(command);
+
+    assert!(!state.exists());
 }
 
 /// Process-wide lock serializing "write/chmod a temp binary, then exec it"
