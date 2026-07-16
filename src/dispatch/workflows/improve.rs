@@ -44,8 +44,6 @@ use shutdown::record_cancelled_attempt;
 mod stall;
 use stall::record_exact_route_unavailability;
 mod work_identity;
-#[cfg(test)]
-use work_identity::apply_authoritative_work_identity;
 use work_identity::{apply_manual_fix_context_to_ledger, resolve_manual_fix_context};
 pub(crate) fn improve(
     cfg: &GahConfig,

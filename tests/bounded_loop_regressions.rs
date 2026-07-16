@@ -113,6 +113,7 @@ fn sync_provider_fails_then_recovers() {
         branch: "gah/feature-1".into(),
         labels: vec![],
         ci_conclusion: Some("SUCCESS".into()),
+        state: None,
         url: None,
         number: None,
         draft: None,

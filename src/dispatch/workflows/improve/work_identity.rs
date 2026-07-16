@@ -52,7 +52,10 @@ pub(super) fn resolve_manual_fix_work_identity(
             entry.profile == profile_name
                 && entry.repo_id == profile.repo_id
                 && entry.branch.as_deref() == Some(branch)
-                && matches!(entry.mode.as_str(), "review" | "fix" | "improve")
+                && matches!(
+                    entry.mode.as_str(),
+                    "review" | "fix" | "improve" | "implement"
+                )
                 && entry
                     .work_id
                     .as_deref()
@@ -130,6 +133,8 @@ pub(super) fn resolve_manual_fix_context(
                     "MR {mr} is missing a source branch; cannot resolve FixMr branch target"
                 );
             }
+            ensure_manual_fix_review_target_is_open(mr, &review_target)
+                .with_context(|| format!("validate source branch for MR {mr}"))?;
             println!(
                 "Resolved MR {} to branch {}",
                 review_target.id.as_str(),
@@ -227,6 +232,33 @@ fn canonical_source_issue(work_id_or_issue: &str) -> Option<String> {
     }
 
     None
+}
+
+fn ensure_manual_fix_review_target_is_open(
+    mr: &str,
+    review_target: &crate::provider::ReviewTarget,
+) -> Result<()> {
+    if review_target
+        .merged_at
+        .as_deref()
+        .is_some_and(|merged_at| !merged_at.trim().is_empty())
+    {
+        anyhow::bail!(
+            "MR {mr} is merged and cannot be reused for fix repair; provide an open, unmerged manual-fix MR or pass --existing-branch explicitly"
+        );
+    }
+
+    let Some(state) = review_target.state.as_deref() else {
+        return Ok(());
+    };
+    let state = state.to_ascii_lowercase();
+    if !matches!(state.as_str(), "open" | "opened") {
+        anyhow::bail!(
+            "MR {mr} is in state {state} and cannot be reused for fix repair; provide an open, unmerged manual-fix MR or pass --existing-branch explicitly"
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -345,6 +377,45 @@ mod tests {
 
         let (work_id, source_issue) =
             resolve_manual_fix_work_identity(&cfg, "test", "gah/manual-fix-2").unwrap();
+
+        assert_eq!(work_id, "TICKET-269");
+        assert_eq!(source_issue, Some("269".into()));
+    }
+
+    #[test]
+    fn resolve_manual_fix_work_identity_considers_implement_mode() {
+        let (_tmp, mut cfg) = ledger_test_util::test_config();
+        let mut profile = ledger_test_util::profile();
+        profile.repo_id = "test".into();
+        cfg.profiles.insert("test".into(), profile.clone());
+
+        let path = cfg.defaults.ledger_path();
+        let mut entry = crate::ledger::LedgerEntry::new(
+            "test",
+            &profile,
+            "openhands",
+            "implement",
+            "gah/manual-fix-3",
+            None,
+            None,
+        );
+        entry.work_id = Some("#269".into());
+        entry.review_verdict = Some("NEEDS_FIX".into());
+        entry.review_source_sha = Some("HEAD".into());
+        entry.review_blocking_findings = vec!["repro test".into()];
+        entry.branch = Some("gah/manual-fix-3".into());
+        entry.timestamp = "2026-07-01T00:00:00Z".into();
+
+        let mut content = String::new();
+        if path.exists() {
+            content = std::fs::read_to_string(&path).unwrap();
+        }
+        content.push_str(&serde_json::to_string(&entry).unwrap());
+        content.push('\n');
+        std::fs::write(&path, content).unwrap();
+
+        let (work_id, source_issue) =
+            resolve_manual_fix_work_identity(&cfg, "test", "gah/manual-fix-3").unwrap();
 
         assert_eq!(work_id, "TICKET-269");
         assert_eq!(source_issue, Some("269".into()));

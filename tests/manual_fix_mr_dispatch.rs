@@ -99,6 +99,10 @@ fn github_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
         "{}",
         result.stdout
     );
+    assert!(result
+        .stdout
+        .contains("Resolved MR 269 to branch gah/fix-needs-fix"));
+    assert!(!result.stdout.contains("Creating worktree from main"));
 
     let ledger = TestLedger::read_from(&harness.ledger_path).unwrap();
     let entry = ledger.last().unwrap();
@@ -144,6 +148,10 @@ fn gitlab_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
         "{}",
         result.stdout
     );
+    assert!(result
+        .stdout
+        .contains("Resolved MR 269 to branch gah/fix-needs-fix"));
+    assert!(!result.stdout.contains("Creating worktree from main"));
 
     let ledger = TestLedger::read_from(&harness.ledger_path).unwrap();
     let entry = ledger.last().unwrap();
@@ -167,4 +175,99 @@ fn manual_fix_dispatch_rejects_missing_work_identity() {
         "{}",
         result.stderr
     );
+    assert!(!result.stdout.contains("Creating worktree from main"));
+}
+
+#[test]
+fn manual_fix_dispatch_rejects_ambiguous_work_identity() {
+    let branch = "gah/fix-needs-fix";
+    let mut harness = ScenarioHarness::new("github").github_scenario("manual_fix_needs_fix");
+    harness = harness.with_ledger(
+        TestLedger::new()
+            .with_entry(manual_fix_review_ledger_entry(
+                branch,
+                "#269",
+                None,
+                "2026-07-01T00:00:00Z",
+            ))
+            .with_entry(manual_fix_review_ledger_entry(
+                branch,
+                "TICKET-270",
+                Some("270"),
+                "2026-07-02T00:00:00Z",
+            )),
+    );
+
+    let result = harness
+        .run_dispatch(&["--mode", "fix", "--mr", "269"])
+        .unwrap();
+    assert_ne!(result.exit_code, Some(0));
+    assert!(
+        result
+            .stderr
+            .contains("MR source branch 'gah/fix-needs-fix' has multiple work identities"),
+        "{}",
+        result.stderr
+    );
+    assert!(!result
+        .stdout
+        .contains("Creating worktree from existing branch 'gah/fix-needs-fix'"));
+    assert!(!result.stdout.contains("Creating worktree from main"));
+}
+
+#[test]
+fn github_manual_fix_dispatch_rejects_merged_mr() {
+    let mut harness = ScenarioHarness::new("github").github_scenario("manual_fix_needs_fix_merged");
+    harness = harness.with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+        "gah/fix-needs-fix",
+        "#269",
+        None,
+        "2026-07-01T00:00:00Z",
+    )));
+
+    let result = harness
+        .run_dispatch(&["--mode", "fix", "--mr", "269"])
+        .unwrap();
+    assert_ne!(result.exit_code, Some(0));
+    assert!(
+        result
+            .stderr
+            .contains("MR 269 is merged and cannot be reused for fix repair"),
+        "{}",
+        result.stderr
+    );
+    assert!(!result
+        .stdout
+        .contains("Creating worktree from existing branch 'gah/fix-needs-fix'"));
+    assert!(!result.stdout.contains("Creating worktree from main"));
+}
+
+#[test]
+fn gitlab_manual_fix_dispatch_rejects_merged_mr() {
+    let mut harness = ScenarioHarness::new("gitlab").gitlab_scenario("manual_fix_needs_fix_merged");
+    harness = harness.with_config_append(
+        "provider_api_base = \"https://gitlab.example.com\"\nprovider_project_id = \"42\"\n\n[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
+    );
+    harness = harness.with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+        "gah/fix-needs-fix",
+        "#269",
+        None,
+        "2026-07-01T00:00:00Z",
+    )));
+
+    let result = harness
+        .run_dispatch(&["--mode", "fix", "--mr", "269"])
+        .unwrap();
+    assert_ne!(result.exit_code, Some(0));
+    assert!(
+        result
+            .stderr
+            .contains("MR 269 is merged and cannot be reused for fix repair"),
+        "{}",
+        result.stderr
+    );
+    assert!(!result
+        .stdout
+        .contains("Creating worktree from existing branch 'gah/fix-needs-fix'"));
+    assert!(!result.stdout.contains("Creating worktree from main"));
 }

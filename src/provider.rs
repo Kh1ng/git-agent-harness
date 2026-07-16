@@ -187,6 +187,8 @@ pub struct ReviewTarget {
     pub url: String,
     pub source_branch: String,
     pub target_branch: String,
+    pub state: Option<String>,
+    pub merged_at: Option<String>,
     pub title: Option<String>,
     pub body: Option<String>,
     pub draft: bool,
@@ -903,7 +905,7 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
             "--repo",
             &profile.repo,
             "--json",
-            "number,url,title,body,isDraft,headRefName,baseRefName,headRefOid,statusCheckRollup",
+            "number,url,title,body,isDraft,headRefName,baseRefName,state,mergedAt,headRefOid,statusCheckRollup",
         ])
         .output()
         .context("gh pr view")?;
@@ -928,6 +930,8 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
         url: resp["url"].as_str().unwrap_or("").to_string(),
         source_branch: resp["headRefName"].as_str().unwrap_or("").to_string(),
         target_branch: resp["baseRefName"].as_str().unwrap_or("").to_string(),
+        state: resp["state"].as_str().map(str::to_string),
+        merged_at: resp["mergedAt"].as_str().map(str::to_string),
         title: resp["title"].as_str().map(str::to_string),
         body: resp["body"].as_str().map(str::to_string),
         draft: resp["isDraft"].as_bool().unwrap_or(false),
@@ -972,6 +976,8 @@ fn gitlab_target_from_value(value: &serde_json::Value) -> Result<ReviewTarget> {
         url: web_url.to_string(),
         source_branch: value["source_branch"].as_str().unwrap_or("").to_string(),
         target_branch: value["target_branch"].as_str().unwrap_or("").to_string(),
+        state: value["state"].as_str().map(str::to_string),
+        merged_at: value["merged_at"].as_str().map(str::to_string),
         title: value["title"].as_str().map(str::to_string),
         body: value["description"].as_str().map(str::to_string),
         draft: value["draft"].as_bool().unwrap_or(false),
