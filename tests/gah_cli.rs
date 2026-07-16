@@ -1,3 +1,5 @@
+#[path = "gah_cli/stall_retry.rs"]
+mod stall_retry;
 mod support;
 #[path = "gah_cli/validation_gate.rs"]
 mod validation_gate;
@@ -2890,9 +2892,7 @@ fn fix_mode_uses_ticket_title_in_mr_title() {
     assert!(gh_log.contains("## Backend / Model"));
 }
 
-/// Sets up a real local repo pushed to a bare "origin.git" that GitHub-style
-/// URLs are redirected to via git's `insteadOf`, matching the pattern in
-/// `fix_mode_uses_ticket_title_in_mr_title`. Returns (repo, home, cfg).
+/// Set up a local repo and bare origin for fix-dispatch integration tests.
 fn setup_fix_dispatch_repo(
     tmp: &TempDir,
     extra_profile: &str,

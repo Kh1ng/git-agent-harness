@@ -1,4 +1,5 @@
 use super::*;
+use crate::dispatch::issues::TicketMetadata;
 use crate::dispatch::test_util::profile;
 
 #[test]
