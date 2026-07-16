@@ -97,6 +97,10 @@ pub struct StatusSnapshot {
     /// when a strong reviewer has approved and CI is green. This is an
     /// independent axis from reviewer routing and merge policy.
     pub publishing_allow_pr: bool,
+    /// Effective pre-publication generated-artifact deny patterns for this
+    /// profile. Exposed so CLI/API/dashboard clients can explain a blocked
+    /// commit without reimplementing config defaults.
+    pub generated_artifact_deny_patterns: Vec<String>,
     /// How many `gah loop` workers may run concurrently for this profile
     /// (see `Profile::max_parallel_workers`). Read by `gah-supervisor.sh`
     /// to decide how many worker loops to launch when not given explicitly
@@ -588,6 +592,10 @@ fn build_snapshot_inner(
         merge_attempt_counts,
         review_held_work_ids,
         publishing_allow_pr: profile.publishing.allow_pull_request_creation,
+        generated_artifact_deny_patterns: profile
+            .publishing
+            .generated_artifact_deny_patterns
+            .clone(),
         max_parallel_workers: profile.max_parallel_workers(),
         backend_configured,
     };

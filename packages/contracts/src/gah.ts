@@ -230,6 +230,9 @@ export interface StatusSnapshot {
   fix_attempt_counts: Record<string, number>;
   merge_attempt_counts: Record<string, number>;
   publishing_allow_pr: boolean;
+  /** Effective profile policy used to reject newly tracked generated files
+   * before commit/push. */
+  generated_artifact_deny_patterns: string[];
   /** TICKET-157: per-backend "configured for this profile" signal, keyed by
    * logical backend name. Only backends with a real Rust implementation are
    * present. A `true` value means the backend is set up for the active

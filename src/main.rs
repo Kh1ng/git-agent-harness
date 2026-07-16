@@ -10,6 +10,7 @@ mod controller;
 mod dispatch;
 mod doctor;
 mod events;
+mod generated_artifacts;
 mod init;
 mod ledger;
 mod models;
@@ -41,7 +42,6 @@ mod validation_check;
 mod validation_runner;
 mod work_claim;
 mod worktree;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config::Profile;

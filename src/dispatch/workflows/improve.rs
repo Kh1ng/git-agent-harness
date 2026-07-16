@@ -15,7 +15,8 @@ use super::super::mutation_policy::enforce_policy;
 use super::super::prompts::{build_task, enforce_context_budget};
 use super::super::publish::{
     build_fix_or_improve_mr_body, build_mr_title, emit_human_handoff,
-    ensure_issue_open_for_publish, publishing_allows_publish, MrRenderContext,
+    enforce_generated_artifact_policy, ensure_issue_open_for_publish, publishing_allows_publish,
+    MrRenderContext,
 };
 use super::super::repair_context;
 use super::super::text::utf8_safe_prefix;
@@ -1339,6 +1340,8 @@ pub(crate) fn improve(
         commit_msg.push_str("\n\n");
         commit_msg.push_str(&backend_summary);
     }
+
+    enforce_generated_artifact_policy(profile, ledger, &wt)?;
 
     // TICKET-128: honor the per-profile publishing policy. A restricted profile
     // forbids PR/MR creation and/or LLM-generated commit messages, so we stop

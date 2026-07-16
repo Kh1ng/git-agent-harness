@@ -7,8 +7,8 @@ use super::super::issues::resolve_target_to_issue_or_string;
 use super::super::metrics::apply_diff_stats;
 use super::super::prompts::build_task;
 use super::super::publish::{
-    build_experiment_mr_body, emit_human_handoff, publishing_allows_publish,
-    ExperimentMrRenderContext,
+    build_experiment_mr_body, emit_human_handoff, enforce_generated_artifact_policy,
+    publishing_allows_publish, ExperimentMrRenderContext,
 };
 use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
@@ -193,6 +193,7 @@ pub(crate) fn experiment(
     } else {
         "partial".into()
     });
+    enforce_generated_artifact_policy(profile, ledger, &wt)?;
     // TICKET-128: honor the per-profile publishing policy (see fix/improve
     // mode for the full rationale). Experiments may still generate code and
     // artifacts; they just must not be published as an agent-authored MR.
