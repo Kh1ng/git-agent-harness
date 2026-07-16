@@ -491,7 +491,8 @@ Summary includes backend/mode counts, requested vs effective backend, fallback c
 
 ## Sync
 
-Use `gah sync --profile my-repo` to classify open GAH-created MRs/PRs without dispatching anything new.
+Use `gah sync --profile my-repo` for an explicit current and historical
+classification of GAH-created MRs/PRs without dispatching anything new.
 
 Current classifications include:
 
