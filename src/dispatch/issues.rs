@@ -1053,21 +1053,25 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
         meta.constraints
             .extend(extract_markdown_requirement_items(&issue.body, heading));
     }
-    meta.verification_commands =
+    let mut verification_commands =
         extract_markdown_code_list_section(&issue.body, "Verification Commands");
     // Issue #425: `Verification` is another common heading spelling used in
     // live tickets. It should stay in-band as verification commands so it is
     // not silently dropped.
-    meta.verification_commands
-        .extend(extract_markdown_code_list_section(
-            &issue.body,
-            "Verification",
-        ));
-    meta.affected_files = extract_markdown_list_section(&issue.body, "Affected Files");
-    // Issue #425: `Move only` is a structured file-list heading that should map
-    // directly to the same destination as `Affected Files`.
-    meta.affected_files
-        .extend(extract_markdown_list_section(&issue.body, "Move only"));
+    append_unique_strings(
+        &mut verification_commands,
+        extract_markdown_code_list_section(&issue.body, "Verification"),
+    );
+    meta.verification_commands = verification_commands;
+
+    let mut affected_files = extract_markdown_list_section(&issue.body, "Affected Files");
+    // Issue #425: `Move only` is a structured file-list heading that should
+    // map directly to the same destination as `Affected Files`.
+    append_unique_strings(
+        &mut affected_files,
+        extract_markdown_list_section(&issue.body, "Move only"),
+    );
+    meta.affected_files = affected_files;
 
     if !issue.labels.is_empty() {
         for label in &issue.labels {
@@ -1084,6 +1088,14 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
     meta.summary = meta.title.clone();
 
     meta
+}
+
+fn append_unique_strings(target: &mut Vec<String>, source: Vec<String>) {
+    for item in source {
+        if !target.iter().any(|value| value == &item) {
+            target.push(item);
+        }
+    }
 }
 
 pub(super) fn issue_is_auto_dispatch_blocked(labels: &[String]) -> bool {

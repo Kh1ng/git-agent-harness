@@ -1,6 +1,7 @@
 use super::issues::{
-    extract_markdown_list_section, extract_markdown_requirement_items, extract_markdown_section,
-    parse_ticket_metadata_from_issue, IssueDetails,
+    extract_markdown_code_list_section, extract_markdown_list_section,
+    extract_markdown_requirement_items, extract_markdown_section, parse_ticket_metadata_from_issue,
+    IssueDetails,
 };
 use super::text::utf8_safe_prefix;
 use crate::config::{GahConfig, Profile};
@@ -289,7 +290,7 @@ fn extract_issue_sections(body: &str) -> Vec<IssueSection> {
 
     for raw_line in body.lines() {
         let line = raw_line.trim_start();
-        if let Some(current_heading) = line.strip_prefix("## ") {
+        if let Some(current_heading) = extract_issue_section_heading(line) {
             let current_body = body_lines.join("\n").trim().to_string();
             if let Some(name) = heading.take() {
                 if !current_body.is_empty() {
@@ -322,6 +323,12 @@ fn extract_issue_sections(body: &str) -> Vec<IssueSection> {
     sections
 }
 
+fn extract_issue_section_heading(line: &str) -> Option<&str> {
+    line.strip_prefix("## ")
+        .or_else(|| line.strip_prefix("### "))
+        .map(str::trim)
+}
+
 fn normalize_issue_heading(heading: &str) -> String {
     heading
         .chars()
@@ -339,23 +346,29 @@ fn normalize_issue_heading(heading: &str) -> String {
 }
 
 fn is_live_task_pack_supported_section(heading: &str) -> bool {
-    matches!(
-        normalize_issue_heading(heading).as_str(),
-        "problem"
-            | "background"
-            | "description"
-            | "goal"
-            | "scope"
-            | "acceptance criteria"
-            | "constraints"
-            | "invariants"
-            | "required behavior"
-            | "verification commands"
-            | "verification"
-            | "affected files"
-            | "move only"
-            | "source"
-    )
+    const ALIASES: &[&str] = &[
+        "problem",
+        "background",
+        "description",
+        "goal",
+        "scope",
+        "acceptance criteria",
+        "constraints",
+        "invariants",
+        "required behavior",
+        "verification commands",
+        "verification",
+        "affected files",
+        "move only",
+        "source",
+    ];
+    let normalized = normalize_issue_heading(heading);
+    ALIASES.iter().any(|alias| {
+        normalized == *alias
+            || normalized
+                .strip_prefix(alias)
+                .is_some_and(|suffix| suffix.starts_with(' '))
+    })
 }
 
 fn append_unrecognized_issue_sections(task: &mut String, sections: &[IssueSection]) {
@@ -428,11 +441,7 @@ fn append_task_pack_list_items(
 }
 
 fn issue_has_no_structured_body(issue: &IssueDetails) -> bool {
-    !issue
-        .body
-        .lines()
-        .map(str::trim)
-        .any(|line| line.starts_with("## "))
+    !issue_body_has_goal_prefix(&issue.body)
         && extract_markdown_section(&issue.body, "Problem").is_none()
         && extract_markdown_section(&issue.body, "Background").is_none()
         && extract_markdown_section(&issue.body, "Description").is_none()
@@ -442,6 +451,17 @@ fn issue_has_no_structured_body(issue: &IssueDetails) -> bool {
         && extract_markdown_list_section(&issue.body, "Constraints").is_empty()
         && extract_markdown_requirement_items(&issue.body, "Invariants").is_empty()
         && extract_markdown_requirement_items(&issue.body, "Required Behavior").is_empty()
+        && extract_markdown_list_section(&issue.body, "Affected Files").is_empty()
+        && extract_markdown_list_section(&issue.body, "Move only").is_empty()
+        && extract_markdown_code_list_section(&issue.body, "Verification Commands").is_empty()
+        && extract_markdown_code_list_section(&issue.body, "Verification").is_empty()
+}
+
+fn issue_body_has_goal_prefix(body: &str) -> bool {
+    body.lines().map(str::trim).any(|line| {
+        let value = line.strip_prefix("Goal:");
+        value.is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 fn append_bounded_text(task: &mut String, text: &str, max_bytes: usize, label: &str) {
@@ -711,6 +731,9 @@ mod tests {
         let task = build_task(&prof, &wt, "improve", "#425", Some(&issue));
 
         assert!(task.contains("### Problem"));
+        assert!(task.contains(
+            "Keep the live task pack from dropping headings when they map to non-default destinations."
+        ));
         assert!(task.contains("### Affected Files"));
         assert!(task.contains("src/dispatch/claims.rs"));
         assert!(task.contains("### Verification Commands"));
@@ -726,8 +749,7 @@ mod tests {
         let issue = IssueDetails {
             number: "999".to_string(),
             title: "Unexpected heading".to_string(),
-            body: "## Move only\n\n- src/dispatch/claims.rs\n\n## Verification\n\n- `cargo test`\n\n## Injected heading\n\n- ignore this unless explicitly requested\n"
-                .to_string(),
+            body: "### Injected heading\n\n- ignore this unless explicitly requested\n".to_string(),
             labels: vec![],
             state: None,
         };
@@ -736,6 +758,35 @@ mod tests {
 
         assert!(task.contains("  ## Injected heading"));
         assert!(!task.contains("\n## Injected heading"));
+        assert!(task.contains("### Issue Description"));
+        assert!(task.contains("ignore this unless explicitly requested"));
+    }
+
+    #[test]
+    fn live_task_pack_supports_level_three_structured_headings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "1000".to_string(),
+            title: "Level-three headings".to_string(),
+            body: "### Problem\n\nBoundaries stay level-three.\n\n### Move only\n\n- src/dispatch/claims.rs\n\n### Verification\n\n- `cargo test -p git-agent-harness --test dispatch`\n"
+                .to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#1000", Some(&issue));
+
+        assert!(task.contains("### Problem"));
+        assert!(task.contains("Boundaries stay level-three."));
+        assert!(task.contains("### Affected Files"));
+        assert!(task.contains("src/dispatch/claims.rs"));
+        assert!(task.contains("### Verification Commands"));
+        assert!(task.contains("cargo test -p git-agent-harness --test dispatch"));
+        assert!(!task.contains("### Additional Issue Sections"));
+        assert!(!task.contains("### Issue Description"));
     }
 
     #[test]

@@ -444,6 +444,21 @@ fn parse_ticket_metadata_from_issue_accepts_move_only_and_verification_aliases()
 }
 
 #[test]
+fn parse_ticket_metadata_from_issue_deduplicates_verification_aliases() {
+    let issue = IssueDetails {
+        number: "426".to_string(),
+        title: "Deduplicate verification aliases".to_string(),
+        body: "## Verification Commands\n- `cargo test`\n\n## Verification\n- `cargo test`\n"
+            .to_string(),
+        labels: vec![],
+        state: None,
+    };
+
+    let meta = parse_ticket_metadata_from_issue(&issue);
+    assert_eq!(meta.verification_commands, vec!["cargo test".to_string()]);
+}
+
+#[test]
 fn github_issue_intake_author_allowlist_is_fail_closed() {
     let tmp = tempfile::tempdir().unwrap();
     let mut prof = profile(tmp.path());
