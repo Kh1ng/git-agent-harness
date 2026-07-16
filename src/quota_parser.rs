@@ -218,8 +218,10 @@ fn to_zoned_reset_at(
 
     let utc_candidate = match zone.from_local_datetime(&local_candidate) {
         chrono::LocalResult::Single(candidate) => Some(candidate.with_timezone(&Utc)),
-        chrono::LocalResult::Ambiguous(candidate, _) => Some(candidate.with_timezone(&Utc)),
-        chrono::LocalResult::None => None,
+        // A wall-clock time during the fall-back hour identifies two real
+        // instants. Picking either would fabricate precision the provider
+        // did not supply, so keep the timezone unresolved and fail closed.
+        chrono::LocalResult::Ambiguous(_, _) | chrono::LocalResult::None => None,
     };
 
     let Some(utc_candidate) = utc_candidate else {
@@ -648,6 +650,32 @@ mod tests {
         let now = utc(2026, Month::July, 15, 10, 0);
         let parsed = parse("claude", CLAUDE_SESSION_LIMIT_TZ_RESET, now).unwrap();
         assert_eq!(parsed.reset_at.as_deref(), Some("2026-07-15T19:30:00Z"));
+    }
+
+    #[test]
+    fn claude_session_limit_does_not_guess_unknown_or_ambiguous_timezone() {
+        let now = utc(2026, Month::November, 1, 0, 0);
+
+        let unknown = parse(
+            "claude",
+            "You've hit your session limit · resets 2:30pm (Mars/Olympus).",
+            now,
+        )
+        .unwrap();
+        assert_eq!(unknown.reset_at, None);
+        assert_eq!(unknown.unresolved_timezone.as_deref(), Some("Mars/Olympus"));
+
+        let ambiguous = parse(
+            "claude",
+            "You've hit your session limit · resets 1:30am (America/Chicago).",
+            now,
+        )
+        .unwrap();
+        assert_eq!(ambiguous.reset_at, None);
+        assert_eq!(
+            ambiguous.unresolved_timezone.as_deref(),
+            Some("America/Chicago")
+        );
     }
 
     // ── Claude: weekly limit, structured event (anthropics/claude-code #68816) ─
