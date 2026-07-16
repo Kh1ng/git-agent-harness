@@ -420,6 +420,30 @@ fn parse_ticket_metadata_from_issue_folds_prose_invariants_as_single_constraint(
 }
 
 #[test]
+fn parse_ticket_metadata_from_issue_accepts_move_only_and_verification_aliases() {
+    let issue = IssueDetails {
+        number: "425".to_string(),
+        title: "Preserve ticket-425 heading shape".to_string(),
+        body: "## Goal\n\nKeep the live task pack intact.\n\n## Move only\n\n- src/dispatch/claims.rs\n\n## Verification\n\n- `cargo test -p git-agent-harness --test dispatch`\n"
+            .to_string(),
+        labels: vec![],
+        state: None,
+    };
+
+    let meta = parse_ticket_metadata_from_issue(&issue);
+    assert_eq!(
+        meta.goal.as_deref(),
+        Some("Keep the live task pack intact.")
+    );
+    assert!(meta
+        .affected_files
+        .contains(&"src/dispatch/claims.rs".to_string()));
+    assert!(meta
+        .verification_commands
+        .contains(&"cargo test -p git-agent-harness --test dispatch".to_string()));
+}
+
+#[test]
 fn github_issue_intake_author_allowlist_is_fail_closed() {
     let tmp = tempfile::tempdir().unwrap();
     let mut prof = profile(tmp.path());

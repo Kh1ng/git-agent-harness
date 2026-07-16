@@ -1055,7 +1055,19 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
     }
     meta.verification_commands =
         extract_markdown_code_list_section(&issue.body, "Verification Commands");
+    // Issue #425: `Verification` is another common heading spelling used in
+    // live tickets. It should stay in-band as verification commands so it is
+    // not silently dropped.
+    meta.verification_commands
+        .extend(extract_markdown_code_list_section(
+            &issue.body,
+            "Verification",
+        ));
     meta.affected_files = extract_markdown_list_section(&issue.body, "Affected Files");
+    // Issue #425: `Move only` is a structured file-list heading that should map
+    // directly to the same destination as `Affected Files`.
+    meta.affected_files
+        .extend(extract_markdown_list_section(&issue.body, "Move only"));
 
     if !issue.labels.is_empty() {
         for label in &issue.labels {
