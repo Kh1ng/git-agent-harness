@@ -6,7 +6,7 @@
 
 import { spawn, spawnSync, SpawnOptions } from 'node:child_process';
 import { userInfo } from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accessSync, constants, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { AsyncTtlCache } from './asyncTtlCache.js';
@@ -730,14 +730,14 @@ export async function runProfileSet(options: ProfileSetOptions): Promise<void> {
   if (options.clear?.length) {
     // Only forward generic clear entries that aren't already handled above.
     const already = new Set(['max_parallel_workers', 'manager_wake_autonomy']);
-    const remaining = options.clear.filter((c) => !already.has(c));
+    const remaining = [...new Set(options.clear.filter((c) => !already.has(c)))];
     if (remaining.length) {
       args.push('--clear', remaining.join(','));
     }
   }
   
   if (options.config) {
-    args.push('--config-path', options.config);
+    args.push('--config', options.config);
   }
 
   return new Promise((resolve, reject) => {
@@ -827,7 +827,7 @@ export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
 
   if (options.clear?.length) {
     const already = new Set(['current_manager']);
-    const remaining = options.clear.filter((c) => !already.has(c));
+    const remaining = [...new Set(options.clear.filter((c) => !already.has(c)))];
     if (remaining.length) {
       args.push('--clear', remaining.join(','));
     }
@@ -878,12 +878,18 @@ export async function runConfigShow(config?: string): Promise<{ current_manager:
 // ---------------------------------------------------------------------------
 
 /** Same state-dir fallback chain as `loop_lock_path` in src/controller.rs,
- * so the PID file lives next to gah's own lock file. */
+ * so the PID file lives next to gah's own lock file.
+ * When config is unavailable, retain previous fallback behavior for parity
+ * with older environments where discovery fails. */
 function loopStateDir(): string {
-  const base =
-    process.env.XDG_STATE_HOME ||
-    (process.env.HOME ? resolve(process.env.HOME, '.local/state') : '/tmp');
-  return resolve(base, 'gah');
+  const configPath = getConfigPath();
+  if (!configPath) {
+    const base =
+      process.env.XDG_STATE_HOME ||
+      (process.env.HOME ? resolve(process.env.HOME, '.local/state') : '/tmp');
+    return resolve(base, 'gah');
+  }
+  return resolve(dirname(configPath), '.gah-locks');
 }
 
 /** A durable acknowledgement that the operator intentionally stopped this
