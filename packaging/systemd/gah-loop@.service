@@ -39,8 +39,13 @@ WorkingDirectory=%h
 Environment=HOME=%h
 Environment=GAH_CONFIG=%h/.config/gah/config.toml
 Environment=XDG_STATE_HOME=%h/.local/state
+# Keep backend/compiler temporary files off small /tmp tmpfs mounts. The
+# dispatch free-space guard follows TMPDIR, so this also measures the
+# filesystem that unattended workers will actually consume.
+Environment=TMPDIR=%h/.cache/gah/tmp
 Environment=PATH=%h/.nvm/versions/node/v22.23.1/bin:%h/.opencode/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=-%h/.config/gah/gah-loop.env
+ExecStartPre=/usr/bin/mkdir -p %h/.cache/gah/tmp
 ExecStart=%h/.cargo/bin/gah loop --profile %i
 # The operator/dashboard starts work explicitly. Never silently respawn after
 # a crash or Stop, where an automatic restart could duplicate dispatches.
