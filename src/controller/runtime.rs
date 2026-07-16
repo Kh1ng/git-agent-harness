@@ -410,8 +410,8 @@ pub fn run_once(
 fn run_parallel_once(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
-    snapshot: &crate::status::StatusSnapshot,
-    ledger_entries: &[crate::ledger::LedgerEntry],
+    _snapshot: &crate::status::StatusSnapshot,
+    _ledger_entries: &[crate::ledger::LedgerEntry],
     json: bool,
     max_parallel: usize,
     skip_validation_gate: bool,
@@ -430,243 +430,261 @@ fn run_parallel_once(
     // configured backend.
     let effective_parallel_limit = max_parallel;
 
-    // Decide actions one by one until we reach the parallel limit or run out of actions
-    let history = crate::events::read_events(cfg)?;
-    let mut results = Vec::new();
+    let mut results: Vec<(usize, LoopOnceResult)> = Vec::new();
+
+    fn observe_snapshot(
+        cfg: &crate::config::GahConfig,
+        profile_name: &str,
+        ledger_entries: &[crate::ledger::LedgerEntry],
+    ) -> Result<crate::status::StatusSnapshot> {
+        crate::status::build_snapshot_from_entries(
+            cfg,
+            profile_name,
+            time::OffsetDateTime::now_utc(),
+            ledger_entries,
+        )
+    }
 
     std::thread::scope(|scope| -> Result<()> {
-        let mut handles = Vec::new();
-        // A terminal decision (NoOp/HumanRequired/WaitUntil) for one slot only
-        // means *that slot* found nothing new to do in this batch -- it does
-        // not mean other slots wouldn't find distinct eligible work from their
-        // own fresh snapshot. So terminal actions are deferred rather than
-        // executed immediately: only the last one seen is executed/recorded,
-        // and only if no slot in the batch spawned real work, preserving the
-        // "why did we stop" signal for the genuinely-no-work case without
-        // aborting the rest of the batch for a single slot's verdict.
+        let mut active = 0usize;
+        let mut next_sequence = 0usize;
+        let mut saw_real_work = false;
         let mut pending_terminal: Option<(NextAction, NextAction)> = None;
-        for _ in 0..effective_parallel_limit {
-            // Re-fetch claimed work IDs to get fresh state (other processes might have claimed work)
-            let claimed_work_ids = crate::work_claim::get_claimed_work_ids(&claim_scope)?;
+        let mut fill_attempts_remaining = effective_parallel_limit;
+        let (done_tx, done_rx) = sync_channel::<(usize, LoopOnceResult)>(effective_parallel_limit);
 
-            // Reuse the controller snapshot for this cycle; claim filtering
-            // below removes work already taken by earlier slots or other
-            // processes.
-            let mut fresh_snapshot = snapshot.clone();
+        loop {
+            while active < effective_parallel_limit && fill_attempts_remaining > 0 {
+                fill_attempts_remaining -= 1;
+                let claimed_work_ids = crate::work_claim::get_claimed_work_ids(&claim_scope)?;
+                let ledger_entries = crate::ledger::read_entries(cfg)?;
+                let mut fresh_snapshot = observe_snapshot(cfg, profile_name, &ledger_entries)?;
 
-            // Do not let the next slot re-select a ticket claimed by an
-            // earlier slot in this batch or by another controller process.
-            // The decision function operates on snapshots, so claims must be
-            // projected out before deciding the next action.
-            fresh_snapshot.available_tickets.retain(|ticket| {
-                ticket
-                    .work_id
-                    .as_deref()
-                    .map(|id| {
-                        !claimed_work_ids.iter().any(|claimed| claimed == id)
-                            && !executed_work_ids.contains(id)
-                    })
-                    .unwrap_or(true)
-            });
-            fresh_snapshot.merge_requests.retain(|mr| {
-                mr.work_id
-                    .as_deref()
-                    .map(|id| {
-                        !claimed_work_ids.iter().any(|claimed| claimed == id)
-                            && !executed_work_ids.contains(id)
-                    })
-                    .unwrap_or(true)
-            });
+                // Do not let the next slot re-select work already claimed by
+                // another process or spawned earlier in this refill cycle.
+                fresh_snapshot.available_tickets.retain(|ticket| {
+                    ticket
+                        .work_id
+                        .as_deref()
+                        .map(|id| {
+                            !claimed_work_ids.iter().any(|claimed| claimed == id)
+                                && !executed_work_ids.contains(id)
+                        })
+                        .unwrap_or(true)
+                });
+                fresh_snapshot.merge_requests.retain(|mr| {
+                    mr.work_id
+                        .as_deref()
+                        .map(|id| {
+                            !claimed_work_ids.iter().any(|claimed| claimed == id)
+                                && !executed_work_ids.contains(id)
+                        })
+                        .unwrap_or(true)
+                });
 
-            let original_action = decide_next_action(&fresh_snapshot);
-            let mut action = original_action.clone();
+                let original_action = decide_next_action(&fresh_snapshot);
+                let mut action = original_action.clone();
 
-            // Apply stuck-loop detection (TICKET-skip-and-continue): persist the
-            // work-item-scoped gate, then skip this item and let the loop pick the
-            // next eligible work item rather than parking the whole profile.
-            let reset_after = original_action.work_id().and_then(|work_id| {
-                latest_clear_attempts_timestamp(
-                    ledger_entries,
-                    profile_name,
-                    &crate::config::get_profile(cfg, profile_name).ok()?.repo_id,
-                    work_id,
-                )
-            });
-            if let Some(reason) =
-                detect_stuck_loop(&history, profile_name, &original_action, reset_after)
-            {
-                if let Some(wid) = original_action.work_id() {
-                    let profile = crate::config::get_profile(cfg, profile_name)?;
-                    let mut gate = crate::ledger::LedgerEntry::new(
+                let reset_after = original_action.work_id().and_then(|work_id| {
+                    latest_clear_attempts_timestamp(
+                        &ledger_entries,
                         profile_name,
-                        profile,
-                        "auto",
-                        "fix",
-                        wid,
-                        None,
-                        None,
-                    );
-                    gate.work_id = Some(wid.to_string());
-                    gate.human_required = true;
-                    gate.human_required_reason_code =
-                        Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
-                    gate.dispatch_reason = Some("stuck_loop_gate".to_string());
-                    gate.human_required_reason_code = Some("stuck_loop_gate".to_string());
-                    gate.error_summary = Some(reason.clone());
-                    let _ = crate::ledger::append(cfg, &gate);
-                }
-                // Re-decide: exclude the stuck work_id, pick the next eligible one.
-                if let Some(stuck_wid) = original_action.work_id() {
-                    fresh_snapshot
-                        .merge_requests
-                        .retain(|mr| mr.work_id.as_deref() != Some(stuck_wid));
-                    fresh_snapshot
-                        .available_tickets
-                        .retain(|t| t.work_id.as_deref() != Some(stuck_wid));
-                }
-                let redispatched = decide_next_action(&fresh_snapshot);
-                if redispatched.kind() == "no_op" {
-                    action = NextAction::HumanRequired {
-                        reason,
-                        reference: original_action.work_id().map(str::to_string),
-                        reason_code: Some(HumanRequiredReason::PolicyApproval.as_str().to_string()),
-                    };
-                } else {
-                    action = redispatched;
-                }
-            }
-
-            // TICKET-282: defer a FixMr whose branch is already attached to a
-            // foreign/stale worktree and continue with the next eligible item
-            // rather than stalling the batch on a hard `git worktree add`.
-            if let Some(redispatch) = defer_if_branch_attached(cfg, profile_name, &action)? {
-                action = redispatch;
-            }
-
-            // Check if this action involves a work_id that's already claimed or executed in this batch
-            let action_work_id = action.work_id();
-            if let Some(work_id) = action_work_id {
-                if claimed_work_ids.contains(&work_id.to_string())
-                    || crate::work_claim::is_claimed(&claim_scope, work_id)?
-                    || executed_work_ids.contains(work_id)
+                        &crate::config::get_profile(cfg, profile_name).ok()?.repo_id,
+                        work_id,
+                    )
+                });
+                let history = crate::events::read_events(cfg)?;
+                if let Some(reason) =
+                    detect_stuck_loop(&history, profile_name, &original_action, reset_after)
                 {
-                    // Skip this action as it's already in flight or claimed
-                    continue;
-                }
-            }
-
-            // For terminal actions (WaitUntil, HumanRequired, NoOp), this slot
-            // found nothing to do -- record it as the current "why we might
-            // stop" candidate and let the next slot try independently, rather
-            // than aborting the whole batch (see comment above `handles`).
-            match &action {
-                NextAction::WaitUntil { .. }
-                | NextAction::HumanRequired { .. }
-                | NextAction::NoOp { .. } => {
-                    pending_terminal = Some((original_action, action));
-                }
-                _ => {
-                    // For dispatch actions, record and execute
-                    record_action_events(cfg, profile_name, &original_action, &action)?;
-
-                    // Claim this work_id before execution to prevent duplicate dispatch
-                    if let Some(work_id) = action_work_id {
-                        if !crate::work_claim::try_claim_work(&claim_scope, work_id)? {
-                            continue;
-                        }
-                        executed_work_ids.insert(work_id.to_string());
-                    }
-
-                    let action_for_thread = action.clone();
-                    let profile_for_thread = profile_name.to_string();
-                    let claim_scope_for_thread = claim_scope.clone();
-                    let work_id_for_thread = action_work_id.map(str::to_string);
-                    // A capped backend/model must be reserved before the
-                    // next slot makes its routing decision. The rendezvous
-                    // sender is dropped if dispatch fails before routing, so
-                    // that failure cannot deadlock the batch.
-                    let waits_for_route = action_waits_for_route(&action_for_thread);
-                    let (route_ready, route_receiver) = if waits_for_route {
-                        let (sender, receiver) = sync_channel(0);
-                        (Some(sender), Some(receiver))
-                    } else {
-                        (None, None)
-                    };
-                    handles.push(scope.spawn(move || {
-                        let result = execute_action(
-                            cfg,
-                            &profile_for_thread,
-                            &action_for_thread,
-                            skip_validation_gate,
-                            route_ready,
+                    if let Some(wid) = original_action.work_id() {
+                        let profile = crate::config::get_profile(cfg, profile_name)?;
+                        let mut gate = crate::ledger::LedgerEntry::new(
+                            profile_name,
+                            profile,
+                            "auto",
+                            "fix",
+                            wid,
+                            None,
+                            None,
                         );
-                        let (outcome, event_outcome) = match result {
-                            Ok(outcome) => (outcome.clone(), outcome),
-                            Err(error) => {
-                                let outcome = format!("Error: {error}");
-                                (outcome.clone(), outcome)
-                            }
+                        gate.work_id = Some(wid.to_string());
+                        gate.human_required = true;
+                        gate.human_required_reason_code =
+                            Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
+                        gate.dispatch_reason = Some("stuck_loop_gate".to_string());
+                        gate.human_required_reason_code = Some("stuck_loop_gate".to_string());
+                        gate.error_summary = Some(reason.clone());
+                        let _ = crate::ledger::append(cfg, &gate);
+                    }
+                    if let Some(stuck_wid) = original_action.work_id() {
+                        fresh_snapshot
+                            .merge_requests
+                            .retain(|mr| mr.work_id.as_deref() != Some(stuck_wid));
+                        fresh_snapshot
+                            .available_tickets
+                            .retain(|t| t.work_id.as_deref() != Some(stuck_wid));
+                    }
+                    let redispatched = decide_next_action(&fresh_snapshot);
+                    if redispatched.kind() == "no_op" {
+                        action = NextAction::HumanRequired {
+                            reason,
+                            reference: original_action.work_id().map(str::to_string),
+                            reason_code: Some(
+                                HumanRequiredReason::PolicyApproval.as_str().to_string(),
+                            ),
                         };
-                        if let Some(work_id) = work_id_for_thread.as_deref() {
-                            let _ =
-                                crate::work_claim::release_work(&claim_scope_for_thread, work_id);
+                    } else {
+                        action = redispatched;
+                    }
+                }
+
+                if let Some(redispatch) = defer_if_branch_attached(cfg, profile_name, &action)? {
+                    action = redispatch;
+                }
+
+                let action_work_id = action.work_id();
+                if let Some(work_id) = action_work_id {
+                    if claimed_work_ids.iter().any(|claimed| claimed == work_id)
+                        || executed_work_ids.contains(work_id)
+                    {
+                        continue;
+                    }
+                }
+
+                match &action {
+                    NextAction::WaitUntil { .. }
+                    | NextAction::HumanRequired { .. }
+                    | NextAction::NoOp { .. } => {
+                        if !saw_real_work {
+                            pending_terminal = Some((original_action, action));
+                            if active == 0 {
+                                continue;
+                            }
                         }
-                        let _ = crate::events::record(
-                            cfg,
-                            crate::events::EventType::LoopStopped,
-                            Some(&profile_for_thread),
-                            action_for_thread.work_id(),
-                            event_outcome,
-                        );
-                        LoopOnceResult {
-                            action: action_for_thread,
-                            outcome,
+                        if active > 0 {
+                            break;
                         }
-                    }));
-                    if let Some(receiver) = route_receiver {
-                        let _ = receiver.recv();
+                    }
+                    _ => {
+                        record_action_events(cfg, profile_name, &original_action, &action)?;
+
+                        if let Some(work_id) = action_work_id {
+                            if !crate::work_claim::try_claim_work(&claim_scope, work_id)? {
+                                continue;
+                            }
+                            executed_work_ids.insert(work_id.to_string());
+                        }
+                        pending_terminal = None;
+
+                        let action_for_thread = action.clone();
+                        let profile_for_thread = profile_name.to_string();
+                        let claim_scope_for_thread = claim_scope.clone();
+                        let work_id_for_thread = action_work_id.map(str::to_string);
+                        let sequence = next_sequence;
+                        next_sequence += 1;
+                        saw_real_work = true;
+
+                        let waits_for_route = action_waits_for_route(&action_for_thread);
+                        let (route_ready, route_receiver) = if waits_for_route {
+                            let (sender, receiver) = sync_channel(0);
+                            (Some(sender), Some(receiver))
+                        } else {
+                            (None, None)
+                        };
+                        let done_tx = done_tx.clone();
+                        active += 1;
+                        scope.spawn(move || {
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    execute_action(
+                                        cfg,
+                                        &profile_for_thread,
+                                        &action_for_thread,
+                                        skip_validation_gate,
+                                        route_ready,
+                                    )
+                                }));
+                            let (outcome, event_outcome) = match result {
+                                Ok(Ok(outcome)) => (outcome.clone(), outcome),
+                                Ok(Err(error)) => {
+                                    let outcome = format!("Error: {error}");
+                                    (outcome.clone(), outcome)
+                                }
+                                Err(_) => {
+                                    let outcome = "Error: parallel GAH worker panicked".to_string();
+                                    (outcome.clone(), outcome)
+                                }
+                            };
+                            if let Some(work_id) = work_id_for_thread.as_deref() {
+                                let _ = crate::work_claim::release_work(
+                                    &claim_scope_for_thread,
+                                    work_id,
+                                );
+                            }
+                            let _ = crate::events::record(
+                                cfg,
+                                crate::events::EventType::LoopStopped,
+                                Some(&profile_for_thread),
+                                action_for_thread.work_id(),
+                                event_outcome,
+                            );
+                            let _ = done_tx.send((
+                                sequence,
+                                LoopOnceResult {
+                                    action: action_for_thread,
+                                    outcome,
+                                },
+                            ));
+                        });
+                        if let Some(receiver) = route_receiver {
+                            let _ = receiver.recv();
+                        }
                     }
                 }
             }
-        }
 
-        // Only surface a terminal decision if the batch found no real work at
-        // all -- if any slot spawned a dispatch/review action, the terminal
-        // verdicts from other slots were just "nothing left for this slot"
-        // noise, not a reason to report the batch as stopped.
-        if handles.is_empty() {
-            if let Some((original_action, action)) = pending_terminal {
-                record_action_events(cfg, profile_name, &original_action, &action)?;
-                let outcome =
-                    execute_action(cfg, profile_name, &action, skip_validation_gate, None)?;
+            if active == 0 {
+                if !saw_real_work {
+                    if let Some((original_action, action)) = pending_terminal.take() {
+                        record_action_events(cfg, profile_name, &original_action, &action)?;
+                        let outcome =
+                            execute_action(cfg, profile_name, &action, skip_validation_gate, None)?;
 
-                let stop_event_type = match &action {
-                    NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
-                    NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
-                    NextAction::NoOp { .. } => crate::events::EventType::LoopStopped,
-                    _ => unreachable!(),
-                };
-                crate::events::record(
-                    cfg,
-                    stop_event_type,
-                    Some(profile_name),
-                    action.work_id(),
-                    outcome.clone(),
-                )?;
+                        let stop_event_type = match &action {
+                            NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
+                            NextAction::HumanRequired { .. } => {
+                                crate::events::EventType::HumanRequired
+                            }
+                            NextAction::NoOp { .. } => crate::events::EventType::LoopStopped,
+                            _ => unreachable!(),
+                        };
+                        crate::events::record(
+                            cfg,
+                            stop_event_type,
+                            Some(profile_name),
+                            action.work_id(),
+                            outcome.clone(),
+                        )?;
 
-                results.push(LoopOnceResult { action, outcome });
+                        results.push((next_sequence, LoopOnceResult { action, outcome }));
+                    }
+                }
+                break;
             }
-        }
 
-        for handle in handles {
-            results.push(
-                handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("parallel GAH worker panicked"))?,
-            );
+            let (sequence, result) = done_rx
+                .recv()
+                .map_err(|_| anyhow::anyhow!("parallel GAH worker channel closed unexpectedly"))?;
+            active -= 1;
+            results.push((sequence, result));
+            fill_attempts_remaining = effective_parallel_limit;
         }
         Ok(())
     })?;
+
+    results.sort_by_key(|(sequence, _)| *sequence);
+    let results: Vec<LoopOnceResult> = results.into_iter().map(|(_, result)| result).collect();
 
     // Output results
     if json {
