@@ -327,13 +327,21 @@ impl CodexAppServerSession {
         let old_transport = std::mem::replace(&mut self.transport, new_transport);
         old_transport.shutdown();
 
-        self.next_id = 1;
+        // `next_id` is intentionally left running rather than reset to 1:
+        // the fresh app-server process has no memory of previously issued
+        // ids, but resetting here would let a new request reuse an id a
+        // caller may still associate with a pre-reconnect response.
         self.handshake_result = Value::Null;
         self.handshake()
     }
 
     pub(crate) fn shutdown(self) {
         self.transport.shutdown();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_id_for_test(&self) -> i64 {
+        self.next_id
     }
 }
 
@@ -562,6 +570,28 @@ done
             .call("mock/overload", json!({}), Duration::from_secs(5))
             .unwrap();
         assert!(matches!(outcome, CallOutcome::Overloaded(_)));
+        session.shutdown();
+    }
+
+    #[test]
+    fn reconnect_does_not_reuse_request_ids_across_multiple_reconnects() {
+        // Regression test: `reconnect()` used to reset `next_id` to 1 on
+        // every call, so id 1 would be reissued after the 1st reconnect
+        // *and* again after the 2nd. Ids must stay unique for the life of
+        // the session so a caller that retained an id across a reconnect
+        // never sees it silently aliased to an unrelated later call.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        let mut session = connect_to_fake(&f, CodexAppServerOptions::default());
+
+        let id_before = session.next_id_for_test();
+        session.reconnect().unwrap();
+        let id_after_first_reconnect = session.next_id_for_test();
+        session.reconnect().unwrap();
+        let id_after_second_reconnect = session.next_id_for_test();
+
+        assert!(id_after_first_reconnect > id_before);
+        assert!(id_after_second_reconnect > id_after_first_reconnect);
         session.shutdown();
     }
 
