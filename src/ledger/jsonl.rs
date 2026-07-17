@@ -470,25 +470,41 @@ pub fn entries_for_work_id(cfg: &GahConfig, work_id: &str) -> Result<Vec<LedgerE
         .collect())
 }
 
-/// True only when this exact work item and immutable source commit already
-/// received a completed review from the same authority class. Missing legacy
-/// attribution fails open: it may cost a review, but never suppresses one.
+/// True only when this profile/repository's exact work item and immutable
+/// source commit already received a completed review from the same authority
+/// class after its latest operator reset. Missing legacy attribution fails
+/// open: it may cost a review, but never suppresses one.
 pub fn review_already_exists(
     cfg: &GahConfig,
+    profile_name: &str,
+    repo_id: &str,
     work_id: &str,
     source_sha: &str,
     reviewer_class: &str,
 ) -> Result<bool> {
     let aliases = work_id_aliases(work_id);
-    Ok(read_entries(cfg)?.into_iter().any(|entry| {
-        entry.mode == "review"
+    let entries = read_entries(cfg)?;
+    let reset_index = entries.iter().rposition(|entry| {
+        entry.profile == profile_name
+            && entry.repo_id == repo_id
+            && entry.mode == "clear_attempts"
+            && entry
+                .work_id
+                .as_deref()
+                .is_some_and(|id| aliases.iter().any(|alias| alias == id))
+    });
+    let active_entries = reset_index.map_or(entries.as_slice(), |index| &entries[index + 1..]);
+    Ok(active_entries.iter().any(|entry| {
+        entry.profile == profile_name
+            && entry.repo_id == repo_id
+            && entry.mode == "review"
             && entry
                 .work_id
                 .as_deref()
                 .is_some_and(|id| aliases.iter().any(|alias| alias == id))
             && entry.review_source_sha.as_deref() == Some(source_sha)
             && entry.reviewer_class.as_deref() == Some(reviewer_class)
-            && review_is_dedup_eligible(&entry)
+            && review_is_dedup_eligible(entry)
     }))
 }
 
@@ -651,6 +667,25 @@ mod tests {
     use time::format_description::well_known::Rfc3339;
     use time::OffsetDateTime;
 
+    fn dedup_exists(
+        cfg: &crate::config::GahConfig,
+        profile_name: &str,
+        repo_id: &str,
+        work_id: &str,
+        source_sha: &str,
+        reviewer_class: &str,
+    ) -> bool {
+        review_already_exists(
+            cfg,
+            profile_name,
+            repo_id,
+            work_id,
+            source_sha,
+            reviewer_class,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn repair_truncated_tail_backs_up_only_an_unterminated_invalid_last_record() {
         let dir = tempfile::tempdir().unwrap();
@@ -779,25 +814,149 @@ mod tests {
     #[test]
     fn review_dedup_requires_exact_work_sha_and_reviewer_class() {
         let (_tmp, cfg) = ledger_tests::test_config();
-        let mut entry = super::super::LedgerEntry::new(
-            "test",
-            &ledger_tests::profile(),
-            "claude",
-            "review",
-            "x",
-            None,
-            None,
-        );
+        let profile = ledger_tests::profile();
+        let mut entry =
+            super::super::LedgerEntry::new("test", &profile, "claude", "review", "x", None, None);
         entry.work_id = Some("#109".into());
         entry.review_source_sha = Some("abc123".into());
         entry.reviewer_class = Some("strong".into());
         entry.review_verdict = Some("APPROVE".into());
         append(&cfg, &entry).unwrap();
 
-        assert!(review_already_exists(&cfg, "#109", "abc123", "strong").unwrap());
-        assert!(!review_already_exists(&cfg, "#109", "def456", "strong").unwrap());
-        assert!(!review_already_exists(&cfg, "#109", "abc123", "weak").unwrap());
-        assert!(!review_already_exists(&cfg, "#110", "abc123", "strong").unwrap());
+        assert!(dedup_exists(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "#109",
+            "abc123",
+            "strong"
+        ));
+        assert!(!dedup_exists(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "#109",
+            "def456",
+            "strong"
+        ));
+        assert!(!dedup_exists(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "#109",
+            "abc123",
+            "weak"
+        ));
+        assert!(!dedup_exists(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "#110",
+            "abc123",
+            "strong"
+        ));
+        assert!(!dedup_exists(
+            &cfg,
+            "other",
+            &profile.repo_id,
+            "#109",
+            "abc123",
+            "strong"
+        ));
+        assert!(!dedup_exists(
+            &cfg,
+            "test",
+            "other-repo",
+            "#109",
+            "abc123",
+            "strong"
+        ));
+    }
+
+    #[test]
+    fn review_dedup_ignores_reviews_before_matching_clear_attempts() {
+        let (_tmp, cfg) = ledger_tests::test_config();
+        let profile = ledger_tests::profile();
+        let mut review =
+            super::super::LedgerEntry::new("test", &profile, "claude", "review", "x", None, None);
+        review.work_id = Some("#109".into());
+        review.review_source_sha = Some("abc123".into());
+        review.reviewer_class = Some("strong".into());
+        review.review_verdict = Some("APPROVE".into());
+        append(&cfg, &review).unwrap();
+
+        let mut unrelated_profile_clear = super::super::LedgerEntry::new(
+            "other-profile",
+            &profile,
+            "auto",
+            "clear_attempts",
+            "unrelated reset",
+            None,
+            None,
+        );
+        unrelated_profile_clear.work_id = Some("#109".into());
+        append(&cfg, &unrelated_profile_clear).unwrap();
+        assert!(dedup_exists(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "#109",
+            "abc123",
+            "strong"
+        ));
+
+        let mut other_repo = profile.clone();
+        other_repo.repo_id = "other-repo".into();
+        let mut unrelated_repo_clear = super::super::LedgerEntry::new(
+            "test",
+            &other_repo,
+            "auto",
+            "clear_attempts",
+            "unrelated reset",
+            None,
+            None,
+        );
+        unrelated_repo_clear.work_id = Some("#109".into());
+        append(&cfg, &unrelated_repo_clear).unwrap();
+        assert!(dedup_exists(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "#109",
+            "abc123",
+            "strong"
+        ));
+
+        let mut clear = super::super::LedgerEntry::new(
+            "test",
+            &profile,
+            "auto",
+            "clear_attempts",
+            "operator reset",
+            None,
+            None,
+        );
+        clear.work_id = Some("TICKET-109".into());
+        append(&cfg, &clear).unwrap();
+
+        assert!(!dedup_exists(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "#109",
+            "abc123",
+            "strong"
+        ));
+
+        append(&cfg, &review).unwrap();
+        assert!(dedup_exists(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "#109",
+            "abc123",
+            "strong"
+        ));
     }
 
     #[test]

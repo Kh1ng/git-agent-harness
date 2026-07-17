@@ -217,7 +217,14 @@ pub(in crate::dispatch) fn review(
     if let (Some(work_id), Some(source_sha)) =
         (ledger.work_id.as_deref(), target.source_sha.as_deref())
     {
-        if crate::ledger::review_already_exists(cfg, work_id, source_sha, &reviewer_class)? {
+        if crate::ledger::review_already_exists(
+            cfg,
+            &args.profile,
+            &profile.repo_id,
+            work_id,
+            source_sha,
+            &reviewer_class,
+        )? {
             ledger.validation_result = Some("skipped_duplicate_review".into());
             ledger.review_source_sha = Some(source_sha.to_string());
             ledger.reviewer_class = Some(reviewer_class.to_string());
