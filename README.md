@@ -104,7 +104,10 @@ max_fix_attempts_per_mr = 3
 Unless `max_review_cycles_per_ticket` is explicitly set too, GAH permits one
 additional review beyond that repair cap: initial review, up to the configured
 repairs, then a review of the final repair. This prevents a review budget from
-silently cutting short the repair budget.
+silently cutting short the repair budget. The cap bounds routine reviews; each
+explicit `escalatory_reviewers` backend/model retains one bounded attempt after
+the cap so exhausted weak/routine cycles cannot skip every strong second
+opinion. Paid escalation still requires its independent approval and budget.
 
 `weak_review_backend` is legacy compatibility configuration. Do not use it
 for normal review routing: use the ordered `review_candidates` pool and

@@ -498,9 +498,9 @@ pub struct RoutingPolicy {
     pub max_known_estimated_cost_per_week: Option<f64>,
     #[serde(default)]
     pub max_known_actual_cost_per_week: Option<f64>,
-    /// Maximum completed reviews for one work item before human escalation.
-    /// When unset, this is derived from `max_fix_attempts_per_mr + 1`, so a
-    /// configured repair budget can be exercised and followed by a review.
+    /// Maximum completed routine reviews; defaults to `max_fix_attempts_per_mr + 1`.
+    /// Each explicitly configured escalatory backend/model retains one bounded
+    /// attempt beyond this cap before human escalation.
     #[serde(default)]
     pub max_review_cycles_per_ticket: Option<u32>,
     /// Maximum post-review repair dispatches for one MR before a human must

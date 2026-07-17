@@ -578,7 +578,8 @@ No migration needed:
 [routing]
 # Initial review + one review after each permitted repair. The implicit
 # max_review_cycles_per_ticket is therefore 3; set it explicitly only to
-# override that relationship.
+# override that relationship. Each explicitly configured escalatory reviewer
+# still retains one bounded attempt after this routine-review cap.
 max_fix_attempts_per_mr = 2
 max_paid_reviews_per_ticket = 3
 

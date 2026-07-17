@@ -51,7 +51,11 @@ pub(in crate::dispatch) struct ReviewBudgetBlock {
 /// provider name or silently from unknown data. The paid cap applies only
 /// when routing has explicitly selected a candidate configured as paid;
 /// quota-backed, local, and unknown-cost routes remain eligible until the
-/// cycle cap is reached.
+/// cycle cap is reached. The ordinary cycle cap bounds routine reviewers, but
+/// each explicitly configured escalatory backend/model gets one real attempt
+/// even when routine history already reached that cap. This exception remains
+/// bounded by the finite escalation chain; an already-attempted escalatory
+/// route cannot use it again, and paid-review limits are still checked below.
 pub(in crate::dispatch) fn check_review_budget(
     cfg: &GahConfig,
     profile: &Profile,
@@ -98,7 +102,15 @@ pub(in crate::dispatch) fn check_review_budget(
 
     let cycle_count = reviews.len() as u32;
     let cycle_cap = routing.max_review_cycles_per_ticket();
-    if cycle_count >= cycle_cap {
+    let selected_tier = derive_reviewer_tier(cfg, profile, route);
+    let selected_reviewer_class = reviewer_dedup_class(selected_tier, route);
+    let selected_escalatory_reviewer_is_untried = selected_tier == ReviewerTier::Escalatory
+        && !reviews.iter().any(|entry| {
+            entry.reviewer_class.as_deref() == Some(selected_reviewer_class.as_str())
+                || (entry.effective_backend == route.effective_backend
+                    && entry.effective_model == route.effective_model)
+        });
+    if cycle_count >= cycle_cap && !selected_escalatory_reviewer_is_untried {
         return Ok(Some(ReviewBudgetBlock {
             reason: format!(
                 "review budget exhausted for {work_id}: {cycle_count}/{cycle_cap} review cycles used"
