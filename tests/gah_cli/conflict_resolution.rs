@@ -40,7 +40,22 @@ fn setup_conflicted_repair(
     std::path::PathBuf,
     std::path::PathBuf,
 ) {
-    let (repo, home, cfg) = setup_fix_dispatch_repo(tmp, "validation_commands = [\"true\"]\n");
+    setup_conflicted_repair_with_config(tmp, "")
+}
+
+fn setup_conflicted_repair_with_config(
+    tmp: &TempDir,
+    extra_config: &str,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let (repo, home, cfg) = setup_fix_dispatch_repo(
+        tmp,
+        &format!("validation_commands = [\"true\"]\n{extra_config}"),
+    );
     git_with_home(&repo, &home, &["checkout", "-b", "repair"]);
     fs::write(repo.join("README.md"), "repair version\n").unwrap();
     git_with_home(&repo, &home, &["add", "README.md"]);
@@ -100,6 +115,7 @@ fn dispatch_command(
     home: &std::path::Path,
     ledger_path: &std::path::Path,
     fake_bin: &std::path::Path,
+    retries: &str,
 ) -> IsolatedCommand<Command> {
     let mut command = bin();
     command
@@ -116,7 +132,7 @@ fn dispatch_command(
             "--existing-branch",
             "repair",
             "--retries",
-            "0",
+            retries,
             "--skip-validation-gate",
         ])
         .env("PATH", prepend_path(fake_bin))
@@ -137,7 +153,7 @@ fn conflicted_fix_is_resolved_validated_and_pushed_to_same_branch() {
         "#!/bin/sh\nprintf 'target version\\nrepair version\\n' > README.md\ngit add README.md\nexit 0\n",
     );
 
-    dispatch_command(&cfg, &home, &ledger_path, &fake_bin)
+    dispatch_command(&cfg, &home, &ledger_path, &fake_bin, "0")
         .assert()
         .success()
         .stdout(predicate::str::contains("routing the live merge"))
@@ -174,7 +190,7 @@ fn no_op_backend_reports_typed_unresolved_conflict_and_preserves_recovery() {
     let fake_bin = tmp.path().join("bin");
     make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\nexit 0\n");
 
-    dispatch_command(&cfg, &home, &ledger_path, &fake_bin)
+    dispatch_command(&cfg, &home, &ledger_path, &fake_bin, "0")
         .assert()
         .failure()
         .stderr(predicate::str::contains("unresolved merge conflicts"));
@@ -194,6 +210,46 @@ fn no_op_backend_reports_typed_unresolved_conflict_and_preserves_recovery() {
     assert!(fs::read_to_string(recovery.join("files/0000.bin"))
         .unwrap()
         .contains("<<<<<<<"));
+    assert!(!tmp.path().join("worktrees/repair").exists());
+}
+
+#[test]
+fn idle_backend_does_not_inherit_merge_conflict_progress_or_retry_same_route() {
+    let tmp = test_tempdir();
+    let (_repo, home, cfg, ledger_path) =
+        setup_conflicted_repair_with_config(&tmp, "codex_idle_timeout_seconds = 1\n");
+    let fake_bin = tmp.path().join("bin");
+    let counter = tmp.path().join("codex-call-count");
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nn=$( [ -f '{counter}' ] && cat '{counter}' || echo 0 )\nn=$((n+1))\necho \"$n\" > '{counter}'\nsleep 5\n",
+            counter = counter.display(),
+        ),
+    );
+    let availability_path = tmp.path().join("availability.json");
+
+    let mut command = dispatch_command(&cfg, &home, &ledger_path, &fake_bin, "1");
+    command
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("made no repository progress"));
+
+    assert_eq!(fs::read_to_string(counter).unwrap().trim(), "1");
+    let entries = fs::read_to_string(&ledger_path).unwrap();
+    let latest: Value = serde_json::from_str(entries.lines().last().unwrap()).unwrap();
+    assert_eq!(latest["failure_class"], "agent_no_progress");
+    assert_eq!(latest["validation_result"], "not_run_backend_stalled");
+    assert_eq!(latest["attempts_started"], 1);
+    let availability = fs::read_to_string(availability_path).unwrap();
+    assert!(availability.contains("\"backend\": \"codex\""));
+    assert!(availability.contains("backend idle watchdog stalled; cooldown=15m"));
+    let session = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    assert!(session
+        .join("conflict-recovery/attempt-1/manifest.txt")
+        .exists());
     assert!(!tmp.path().join("worktrees/repair").exists());
 }
 
