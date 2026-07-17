@@ -5,8 +5,96 @@
 
 use super::{decide_next_action, NextAction};
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+/// A route-only capacity refusal launched no backend and cannot become
+/// actionable while the observed routing state is unchanged. Suppress that
+/// work item for a bounded interval so one unroutable repair cannot monopolize
+/// a profile or make the parallel refill loop create sessions indefinitely.
+const CAPACITY_DEFERRAL_BACKOFF: time::Duration = time::Duration::minutes(5);
+
+pub(super) fn recently_capacity_deferred_work_ids(
+    events: &[crate::events::ControllerEvent],
+    entries: &[crate::ledger::LedgerEntry],
+    profile_name: &str,
+    repo_id: &str,
+    now: time::OffsetDateTime,
+    current_route_state: Option<&str>,
+) -> HashSet<String> {
+    let parse = |timestamp: &str| {
+        time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339).ok()
+    };
+
+    // An explicit retry reset or paid-route grant changes eligibility and
+    // invalidates an earlier capacity deferral immediately. A route-state
+    // fingerprint handles configuration and backend availability changes;
+    // the five-minute bound is the fallback for historical/unfingerprinted
+    // events and routing inputs GAH cannot observe directly.
+    let mut reset_at: HashMap<&str, time::OffsetDateTime> = HashMap::new();
+    for entry in entries {
+        if entry.profile != profile_name || entry.repo_id != repo_id {
+            continue;
+        }
+        if !matches!(
+            entry.mode.as_str(),
+            "clear_attempts" | "paid_route_approval_grant"
+        ) {
+            continue;
+        }
+        let (Some(work_id), Some(timestamp)) = (entry.work_id.as_deref(), parse(&entry.timestamp))
+        else {
+            continue;
+        };
+        reset_at
+            .entry(work_id)
+            .and_modify(|current| *current = (*current).max(timestamp))
+            .or_insert(timestamp);
+    }
+
+    let mut terminal_seen = HashSet::new();
+    let mut deferred = HashSet::new();
+    for event in events.iter().rev() {
+        if event.profile.as_deref() != Some(profile_name) || event.event_type != "dispatch_finished"
+        {
+            continue;
+        }
+        let Some(work_id) = event.work_id.as_deref() else {
+            continue;
+        };
+        if !terminal_seen.insert(work_id) {
+            continue;
+        }
+        if !event.details.contains(": deferred_capacity:") {
+            continue;
+        }
+        let recorded_route_state = event
+            .details
+            .split_whitespace()
+            .rev()
+            .find_map(|part| part.strip_prefix("route_state="));
+        if recorded_route_state
+            .zip(current_route_state)
+            .is_some_and(|(recorded, current)| recorded != current)
+        {
+            continue;
+        }
+        let Some(timestamp) = parse(&event.timestamp) else {
+            continue;
+        };
+        if reset_at
+            .get(work_id)
+            .is_some_and(|reset| *reset > timestamp)
+        {
+            continue;
+        }
+        let age = now - timestamp;
+        if age <= CAPACITY_DEFERRAL_BACKOFF {
+            deferred.insert(work_id.to_string());
+        }
+    }
+    deferred
+}
 
 /// Finish runs left behind by a killed controller with both durable surfaces:
 /// the event stream used for live activity and the normalized ledger used for
@@ -283,8 +371,8 @@ pub(super) fn defer_if_branch_attached(
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_stuck_loop, latest_clear_attempts_timestamp, record_action_events,
-        resolve_attached_branch_conflicts, NextAction, STUCK_LOOP_THRESHOLD,
+        detect_stuck_loop, latest_clear_attempts_timestamp, recently_capacity_deferred_work_ids,
+        record_action_events, resolve_attached_branch_conflicts, NextAction, STUCK_LOOP_THRESHOLD,
     };
     use crate::config::{Defaults, GahConfig, RoutingPolicy};
     use crate::events::ControllerEvent;
@@ -510,6 +598,121 @@ mod tests {
             detect_stuck_loop(&events, "real", &fix_mr_action(), None),
             None
         );
+    }
+
+    fn capacity_finished(profile: &str, work_id: &str, timestamp: &str) -> ControllerEvent {
+        ControllerEvent {
+            timestamp: timestamp.into(),
+            event_type: "dispatch_finished".into(),
+            profile: Some(profile.into()),
+            work_id: Some(work_id.into()),
+            run_id: Some(format!("run-{profile}-{work_id}")),
+            reason_code: None,
+            details: "fix_existing: deferred_capacity: no eligible backend".into(),
+        }
+    }
+
+    #[test]
+    fn recent_capacity_deferral_is_provider_neutral_and_bounded() {
+        let now = time::OffsetDateTime::parse(
+            "2026-07-17T08:10:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        for (provider, profile, repo_id) in [
+            ("github", "gah", "gah-repo"),
+            ("gitlab", "sportsball", "sportsball-repo"),
+        ] {
+            let recent = capacity_finished(profile, "#155", "2026-07-17T08:09:00Z");
+            let deferred =
+                recently_capacity_deferred_work_ids(&[recent], &[], profile, repo_id, now, None);
+            assert!(
+                deferred.contains("#155"),
+                "{provider} deferral was not suppressed"
+            );
+
+            let old = capacity_finished(profile, "#155", "2026-07-17T08:04:59Z");
+            assert!(
+                recently_capacity_deferred_work_ids(&[old], &[], profile, repo_id, now, None)
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn later_terminal_result_or_explicit_grant_releases_capacity_backoff() {
+        let now = time::OffsetDateTime::parse(
+            "2026-07-17T08:10:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let deferred = capacity_finished("sportsball", "#155", "2026-07-17T08:09:00Z");
+        let mut success = deferred.clone();
+        success.timestamp = "2026-07-17T08:09:10Z".into();
+        success.details = "fix_existing: success".into();
+        assert!(recently_capacity_deferred_work_ids(
+            &[deferred.clone(), success],
+            &[],
+            "sportsball",
+            "sportsball",
+            now,
+            None,
+        )
+        .is_empty());
+
+        let mut profile = crate::ledger::test_util::profile();
+        profile.repo_id = "sportsball".into();
+        profile.provider = "gitlab".into();
+        let mut grant = crate::ledger::LedgerEntry::new(
+            "sportsball",
+            &profile,
+            "auto",
+            "paid_route_approval_grant",
+            "#155",
+            None,
+            None,
+        );
+        grant.work_id = Some("#155".into());
+        grant.timestamp = "2026-07-17T08:09:30Z".into();
+        assert!(recently_capacity_deferred_work_ids(
+            &[deferred],
+            &[grant],
+            "sportsball",
+            "sportsball",
+            now,
+            None,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn changed_route_state_releases_capacity_backoff_immediately() {
+        let now = time::OffsetDateTime::parse(
+            "2026-07-17T08:10:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let mut deferred = capacity_finished("gah", "#683", "2026-07-17T08:09:59Z");
+        deferred.details.push_str(" route_state=before");
+
+        assert!(recently_capacity_deferred_work_ids(
+            std::slice::from_ref(&deferred),
+            &[],
+            "gah",
+            "gah",
+            now,
+            Some("before"),
+        )
+        .contains("#683"));
+        assert!(recently_capacity_deferred_work_ids(
+            &[deferred],
+            &[],
+            "gah",
+            "gah",
+            now,
+            Some("after"),
+        )
+        .is_empty());
     }
 
     #[test]
