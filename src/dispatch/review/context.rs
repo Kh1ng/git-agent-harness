@@ -15,6 +15,12 @@ pub(in crate::dispatch) fn resolve_review_target(
 ) -> Result<ReviewTarget> {
     if let Some(mr) = args.mr.as_deref() {
         let mr_target = provider::find_review_target_by_mr(profile, mr)?;
+        let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+            mr_target.source_sha.as_deref(),
+            mr_target.title.as_deref(),
+            mr_target.body.as_deref(),
+            mr_target.draft,
+        );
         return Ok(ReviewTarget {
             mr_id: Some(mr_target.id),
             mr_url: Some(mr_target.url),
@@ -22,6 +28,8 @@ pub(in crate::dispatch) fn resolve_review_target(
             mr_body: mr_target.body,
             ci_status: mr_target.ci_status,
             source_sha: mr_target.source_sha,
+            metadata_fingerprint: Some(metadata_fingerprint),
+            draft: mr_target.draft,
             target_sha: mr_target.target_sha,
             source_branch: mr_target.source_branch.clone(),
             target_branch: fallback_target_branch(
@@ -69,25 +77,35 @@ pub(in crate::dispatch) fn review_target_from_branch(
     branch: &str,
 ) -> Result<ReviewTarget> {
     match provider::find_review_target_by_branch(profile, branch) {
-        Ok(mr_target) => Ok(ReviewTarget {
-            mr_id: Some(mr_target.id),
-            mr_url: Some(mr_target.url),
-            source_branch: if mr_target.source_branch.is_empty() {
-                branch.to_string()
-            } else {
-                mr_target.source_branch
-            },
-            target_branch: fallback_target_branch(
-                &profile.default_target_branch,
-                Some(&mr_target.target_branch),
-            ),
-            mr_title: mr_target.title,
-            mr_body: mr_target.body,
-            ci_status: mr_target.ci_status,
-            source_sha: mr_target.source_sha,
-            target_sha: mr_target.target_sha,
-            prior_state: None,
-        }),
+        Ok(mr_target) => {
+            let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+                mr_target.source_sha.as_deref(),
+                mr_target.title.as_deref(),
+                mr_target.body.as_deref(),
+                mr_target.draft,
+            );
+            Ok(ReviewTarget {
+                mr_id: Some(mr_target.id),
+                mr_url: Some(mr_target.url),
+                source_branch: if mr_target.source_branch.is_empty() {
+                    branch.to_string()
+                } else {
+                    mr_target.source_branch
+                },
+                target_branch: fallback_target_branch(
+                    &profile.default_target_branch,
+                    Some(&mr_target.target_branch),
+                ),
+                mr_title: mr_target.title,
+                mr_body: mr_target.body,
+                ci_status: mr_target.ci_status,
+                source_sha: mr_target.source_sha,
+                metadata_fingerprint: Some(metadata_fingerprint),
+                draft: mr_target.draft,
+                target_sha: mr_target.target_sha,
+                prior_state: None,
+            })
+        }
         Err(_) => Ok(ReviewTarget {
             mr_id: None,
             mr_url: None,
@@ -95,6 +113,8 @@ pub(in crate::dispatch) fn review_target_from_branch(
             mr_body: None,
             ci_status: None,
             source_sha: None,
+            metadata_fingerprint: None,
+            draft: false,
             target_sha: None,
             source_branch: branch.to_string(),
             target_branch: profile.default_target_branch.clone(),
@@ -155,6 +175,8 @@ pub(in crate::dispatch) fn lookup_review_state(
             mr_body: None,
             ci_status: None,
             source_sha: None,
+            metadata_fingerprint: None,
+            draft: false,
             target_sha: None,
             source_branch: entry.branch.clone().unwrap_or_default(),
             target_branch: profile.default_target_branch.clone(),
@@ -302,6 +324,8 @@ pub(in crate::dispatch) struct ReviewTarget {
     pub(in crate::dispatch) mr_body: Option<String>,
     pub(in crate::dispatch) ci_status: Option<String>,
     pub(in crate::dispatch) source_sha: Option<String>,
+    pub(in crate::dispatch) metadata_fingerprint: Option<String>,
+    pub(in crate::dispatch) draft: bool,
     pub(in crate::dispatch) target_sha: Option<String>,
     pub(in crate::dispatch) source_branch: String,
     pub(in crate::dispatch) target_branch: String,
@@ -355,6 +379,8 @@ mod tests {
             mr_body: None,
             ci_status: None,
             source_sha: None,
+            metadata_fingerprint: None,
+            draft: false,
             target_sha: None,
             source_branch: "feature".to_string(),
             target_branch: "main".to_string(),

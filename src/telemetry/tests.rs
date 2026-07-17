@@ -696,6 +696,7 @@ mod telemetry_tests {
             reviewer_model: None,
             reviewer_tier: None,
             review_source_sha: None,
+            review_metadata_fingerprint: None,
             reviewer_class: None,
             review_gate_reason: None,
             review_blocking_findings: vec![],

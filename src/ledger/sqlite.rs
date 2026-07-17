@@ -277,6 +277,7 @@ mod tests {
                 reviewer_tier: None,
                 review_gate_reason: None,
                 review_source_sha: None,
+                review_metadata_fingerprint: None,
                 blocking_findings: &[],
                 non_blocking_findings: &[],
                 risk_notes: &[],

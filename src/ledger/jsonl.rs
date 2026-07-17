@@ -386,6 +386,7 @@ pub struct ReviewVerdictBackfill<'a> {
     pub reviewer_tier: Option<&'a str>,
     pub review_gate_reason: Option<&'a str>,
     pub review_source_sha: Option<&'a str>,
+    pub review_metadata_fingerprint: Option<&'a str>,
     pub blocking_findings: &'a [String],
     pub non_blocking_findings: &'a [String],
     pub risk_notes: &'a [String],
@@ -433,6 +434,8 @@ pub fn backfill_review_verdict(
     entries[idx].reviewer_tier = backfill.reviewer_tier.map(str::to_string);
     entries[idx].review_gate_reason = backfill.review_gate_reason.map(str::to_string);
     entries[idx].review_source_sha = backfill.review_source_sha.map(str::to_string);
+    entries[idx].review_metadata_fingerprint =
+        backfill.review_metadata_fingerprint.map(str::to_string);
     entries[idx].review_blocking_findings = backfill.blocking_findings.to_vec();
     entries[idx].review_non_blocking_findings = backfill.non_blocking_findings.to_vec();
     entries[idx].review_risk_notes = backfill.risk_notes.to_vec();
@@ -480,6 +483,7 @@ pub fn review_already_exists(
     repo_id: &str,
     work_id: &str,
     source_sha: &str,
+    metadata_fingerprint: &str,
     reviewer_class: &str,
 ) -> Result<bool> {
     let aliases = work_id_aliases(work_id);
@@ -503,6 +507,7 @@ pub fn review_already_exists(
                 .as_deref()
                 .is_some_and(|id| aliases.iter().any(|alias| alias == id))
             && entry.review_source_sha.as_deref() == Some(source_sha)
+            && entry.review_metadata_fingerprint.as_deref() == Some(metadata_fingerprint)
             && entry.reviewer_class.as_deref() == Some(reviewer_class)
             && review_is_dedup_eligible(entry)
     }))
@@ -703,12 +708,14 @@ mod tests {
         source_sha: &str,
         reviewer_class: &str,
     ) -> bool {
+        let metadata_fingerprint = format!("metadata-for-{source_sha}");
         review_already_exists(
             cfg,
             profile_name,
             repo_id,
             work_id,
             source_sha,
+            &metadata_fingerprint,
             reviewer_class,
         )
         .unwrap()
@@ -861,13 +868,14 @@ mod tests {
     }
 
     #[test]
-    fn review_dedup_requires_exact_work_sha_and_reviewer_class() {
+    fn review_dedup_requires_exact_work_sha_metadata_and_reviewer_class() {
         let (_tmp, cfg) = ledger_tests::test_config();
         let profile = ledger_tests::profile();
         let mut entry =
             super::super::LedgerEntry::new("test", &profile, "claude", "review", "x", None, None);
         entry.work_id = Some("#109".into());
         entry.review_source_sha = Some("abc123".into());
+        entry.review_metadata_fingerprint = Some("metadata-for-abc123".into());
         entry.reviewer_class = Some("strong".into());
         entry.review_verdict = Some("APPROVE".into());
         append(&cfg, &entry).unwrap();
@@ -880,6 +888,16 @@ mod tests {
             "abc123",
             "strong"
         ));
+        assert!(!review_already_exists(
+            &cfg,
+            "test",
+            &profile.repo_id,
+            "#109",
+            "abc123",
+            "metadata-changed-without-new-commit",
+            "strong",
+        )
+        .unwrap());
         assert!(!dedup_exists(
             &cfg,
             "test",
@@ -930,6 +948,7 @@ mod tests {
             super::super::LedgerEntry::new("test", &profile, "claude", "review", "x", None, None);
         review.work_id = Some("#109".into());
         review.review_source_sha = Some("abc123".into());
+        review.review_metadata_fingerprint = Some("metadata-for-abc123".into());
         review.reviewer_class = Some("strong".into());
         review.review_verdict = Some("APPROVE".into());
         append(&cfg, &review).unwrap();
@@ -1137,6 +1156,7 @@ mod tests {
                 reviewer_tier: None,
                 review_gate_reason: Some("test review evidence gate"),
                 review_source_sha: Some("abc123"),
+                review_metadata_fingerprint: Some("sha256:test"),
                 blocking_findings: &["src/lib.rs: broken retry".to_string()],
                 non_blocking_findings: &["consider a smaller helper".to_string()],
                 risk_notes: &["retry state can be lost".to_string()],
@@ -1163,6 +1183,10 @@ mod tests {
             Some("test review evidence gate")
         );
         assert_eq!(updated_impl.review_source_sha.as_deref(), Some("abc123"));
+        assert_eq!(
+            updated_impl.review_metadata_fingerprint.as_deref(),
+            Some("sha256:test")
+        );
         assert_eq!(
             updated_impl.review_blocking_findings,
             ["src/lib.rs: broken retry"]
@@ -1193,6 +1217,7 @@ mod tests {
                 reviewer_tier: None,
                 review_gate_reason: None,
                 review_source_sha: None,
+                review_metadata_fingerprint: None,
                 blocking_findings: &[],
                 non_blocking_findings: &[],
                 risk_notes: &[],

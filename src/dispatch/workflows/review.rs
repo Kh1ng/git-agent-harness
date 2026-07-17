@@ -28,8 +28,10 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 
+mod identity;
 mod source_issue_context;
 mod source_issue_sections;
+use identity::canonicalize_review_ledger_identity;
 use source_issue_context::{
     render_untrusted_inline_review_text, render_untrusted_review_text,
     resolve_source_issue_context, verified_post_budget_source_contract,
@@ -59,11 +61,28 @@ pub(in crate::dispatch) fn review(
         .or_else(|| args.mr.as_deref().map(|mr| format!("mr:{mr}")));
     let repo = Path::new(&profile.local_path);
     let mut target = resolve_review_target(cfg, profile, args)?;
+    canonicalize_review_ledger_identity(
+        ledger,
+        &target.source_branch,
+        target.mr_url.as_deref(),
+        target.mr_title.as_deref(),
+    );
     if target.prior_state.is_none() {
         target.prior_state =
             lookup_review_state_by_branch(cfg, &args.profile, &target.source_branch);
     }
     let diff_bundle = prepare_review_diff(repo, profile, &mut target)?;
+    if target.mr_url.is_some() {
+        // `prepare_review_diff` captures exact fetched SHAs when provider
+        // metadata omitted them, so fingerprint only after that identity is
+        // final rather than preserving a pre-fetch partial fingerprint.
+        target.metadata_fingerprint = Some(crate::sync::review_metadata_fingerprint(
+            target.source_sha.as_deref(),
+            target.mr_title.as_deref(),
+            target.mr_body.as_deref(),
+            target.draft,
+        ));
+    }
     let bundle = session_dir.join("review-bundle");
     fs::create_dir_all(&bundle)?;
     fs::write(bundle.join("diff.patch"), &diff_bundle.diff)?;
@@ -214,25 +233,30 @@ pub(in crate::dispatch) fn review(
     // the operator-relevant reason to skip, not a budget refusal, and it must
     // not consume any part of the review-cycle budget below.
     let reviewer_class = reviewer_dedup_class(derive_reviewer_tier(cfg, profile, &route), &route);
-    if let (Some(work_id), Some(source_sha)) =
-        (ledger.work_id.as_deref(), target.source_sha.as_deref())
-    {
+    if let (Some(work_id), Some(source_sha), Some(metadata_fingerprint)) = (
+        ledger.work_id.as_deref(),
+        target.source_sha.as_deref(),
+        target.metadata_fingerprint.as_deref(),
+    ) {
         if crate::ledger::review_already_exists(
             cfg,
             &args.profile,
             &profile.repo_id,
             work_id,
             source_sha,
+            metadata_fingerprint,
             &reviewer_class,
         )? {
             ledger.validation_result = Some("skipped_duplicate_review".into());
             ledger.review_source_sha = Some(source_sha.to_string());
+            ledger.review_metadata_fingerprint = Some(metadata_fingerprint.to_string());
             ledger.reviewer_class = Some(reviewer_class.to_string());
             println!("Skipping duplicate {reviewer_class} review for {work_id} at {source_sha}");
             return Ok(());
         }
     }
     ledger.review_source_sha = target.source_sha.clone();
+    ledger.review_metadata_fingerprint = target.metadata_fingerprint.clone();
     ledger.reviewer_class = Some(reviewer_class.to_string());
 
     if let Some(block) =
@@ -628,6 +652,7 @@ pub(in crate::dispatch) fn review(
                     reviewer_tier: verdict.reviewer_tier.as_deref(),
                     review_gate_reason: verdict.safety_gate_reason.as_deref(),
                     review_source_sha: ledger.review_source_sha.as_deref(),
+                    review_metadata_fingerprint: ledger.review_metadata_fingerprint.as_deref(),
                     blocking_findings: &verdict.blocking_findings,
                     non_blocking_findings: &verdict.non_blocking_findings,
                     risk_notes: &verdict.risk_notes,
