@@ -31,7 +31,10 @@ use std::ops::{Deref, DerefMut};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Output};
 use std::sync::{Mutex, MutexGuard};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// Keep integration-test repositories and child-process temporary files on
@@ -58,6 +61,64 @@ pub fn test_tempdir() -> TempDir {
         .prefix("gah-test-")
         .tempdir_in(test_temp_root())
         .unwrap()
+}
+
+/// Owns an integration child created as a process-group leader. Dropping the
+/// guard after a panic or failed assertion terminates and reaps the complete
+/// group so fake backends cannot escape under PID 1.
+pub struct ProcessGroupGuard(Option<Child>);
+
+impl ProcessGroupGuard {
+    pub fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    pub fn wait_with_output(mut self) -> std::io::Result<Output> {
+        self.0.take().unwrap().wait_with_output()
+    }
+}
+
+impl Deref for ProcessGroupGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().unwrap()
+    }
+}
+
+impl DerefMut for ProcessGroupGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().unwrap()
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        let Some(child) = self.0.as_mut() else {
+            return;
+        };
+        let process_group = -(child.id() as i32);
+        if child.try_wait().ok().flatten().is_some() {
+            unsafe {
+                libc::kill(process_group, libc::SIGKILL);
+            }
+            return;
+        }
+        unsafe {
+            libc::kill(process_group, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        unsafe {
+            libc::kill(process_group, libc::SIGKILL);
+        }
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// Retains a command's isolated filesystem environment until the command is

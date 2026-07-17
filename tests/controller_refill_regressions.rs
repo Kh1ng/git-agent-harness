@@ -5,6 +5,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use support::test_tempdir;
+use support::ProcessGroupGuard;
 
 fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
     let mut cmd = ProcessCommand::new(
@@ -20,7 +21,42 @@ fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
         state_root.join("validation.json"),
     );
     cmd.env("TMPDIR", support::test_temp_root());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd
+}
+
+#[cfg(unix)]
+#[test]
+fn process_group_guard_drop_reaps_the_entire_test_process_group() {
+    use std::os::unix::process::CommandExt;
+    let mut command = ProcessCommand::new("/bin/sh");
+    command
+        .args(["-c", "trap 'exit 0' TERM; sleep 60 & wait"])
+        .process_group(0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let guard = ProcessGroupGuard::new(command.spawn().unwrap());
+    let process_group = guard.id() as i32;
+
+    drop(guard);
+
+    // SIGKILL delivery is synchronous, but a reparented descendant can remain
+    // observable as a zombie until the CI runner's subreaper collects it.
+    // Bound that kernel/reaper delay instead of assuming kill(2) makes the
+    // process-group lookup disappear in the same instruction.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(-process_group, 0) } == 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let exists = unsafe { libc::kill(-process_group, 0) } == 0;
+    assert!(
+        !exists,
+        "test process group {process_group} survived guard drop"
+    );
 }
 
 fn make_fake_bin_with_body(dir: &std::path::Path, name: &str, body: &str) {
@@ -248,29 +284,31 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
 
     let ledger_path = tmp.path().join("ledger.jsonl");
     let events_path = tmp.path().join("events.jsonl");
-    let mut child = spawn_bin(tmp.path())
-        .args([
-            "loop",
-            "--profile",
-            "real",
-            "--config-path",
-            cfg.to_str().unwrap(),
-            "--once",
-            "--parallel",
-            "2",
-        ])
-        .env(
-            "PATH",
-            format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
-        )
-        .env("HOME", &home)
-        .env("GITHUB_TOKEN", "token")
-        .env("GAH_LEDGER_PATH", &ledger_path)
-        .env("GAH_EVENTS_PATH", &events_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = ProcessGroupGuard::new(
+        spawn_bin(tmp.path())
+            .args([
+                "loop",
+                "--profile",
+                "real",
+                "--config-path",
+                cfg.to_str().unwrap(),
+                "--once",
+                "--parallel",
+                "2",
+            ])
+            .env(
+                "PATH",
+                format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("HOME", &home)
+            .env("GITHUB_TOKEN", "token")
+            .env("GAH_LEDGER_PATH", &ledger_path)
+            .env("GAH_EVENTS_PATH", &events_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
 
     let deadline = Instant::now() + Duration::from_secs(20);
     while fs::read_to_string(&call_count_file)
@@ -396,27 +434,29 @@ fn parallel_loop_does_not_refill_after_shutdown() {
         ),
     );
 
-    let child = spawn_bin(tmp.path())
-        .args([
-            "loop",
-            "--profile",
-            "real",
-            "--config-path",
-            cfg.to_str().unwrap(),
-            "--once",
-            "--parallel",
-            "2",
-        ])
-        .env(
-            "PATH",
-            format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
-        )
-        .env("HOME", &home)
-        .env("GITHUB_TOKEN", "token")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = ProcessGroupGuard::new(
+        spawn_bin(tmp.path())
+            .args([
+                "loop",
+                "--profile",
+                "real",
+                "--config-path",
+                cfg.to_str().unwrap(),
+                "--once",
+                "--parallel",
+                "2",
+            ])
+            .env(
+                "PATH",
+                format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("HOME", &home)
+            .env("GITHUB_TOKEN", "token")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
 
     let deadline = Instant::now() + Duration::from_secs(20);
     while fs::read_to_string(&calls)
