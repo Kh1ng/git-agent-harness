@@ -318,6 +318,20 @@ pub fn create_existing(
     Ok(worktree_path)
 }
 
+/// Result of bringing an existing repair branch up to date with its target.
+/// A conflict is a repairable repository state, not a generic preflight
+/// failure: the caller may hand the live merge to a bounded repair backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetRefreshOutcome {
+    AlreadyCurrent,
+    Merged,
+    Conflicted {
+        target_ref: String,
+        files: Vec<String>,
+        details: String,
+    },
+}
+
 /// Bring an existing repair branch up to date with the exact target ref
 /// fetched immediately before its worktree was created.
 ///
@@ -328,14 +342,17 @@ pub fn create_existing(
 /// history and lets the normal successful publish push the refresh together
 /// with the repair. The caller snapshots attempt progress after this step, so
 /// this maintenance merge cannot masquerade as agent work.
-pub fn refresh_existing_branch_from_target(worktree: &Path, target_branch: &str) -> Result<bool> {
+pub fn refresh_existing_branch_from_target(
+    worktree: &Path,
+    target_branch: &str,
+) -> Result<TargetRefreshOutcome> {
     let target_ref = format!("origin/{target_branch}");
     let ancestor = git_raw(
         &["merge-base", "--is-ancestor", &target_ref, "HEAD"],
         worktree,
     )?;
     if ancestor.status.success() {
-        return Ok(false);
+        return Ok(TargetRefreshOutcome::AlreadyCurrent);
     }
     if ancestor.status.code() != Some(1) {
         anyhow::bail!(
@@ -358,21 +375,129 @@ pub fn refresh_existing_branch_from_target(worktree: &Path, target_branch: &str)
         worktree,
     )?;
     if merge.status.success() {
-        return Ok(true);
+        return Ok(TargetRefreshOutcome::Merged);
     }
 
-    // Never leave a conflicted worktree behind for baseline validation or an
-    // agent to misinterpret. Preserve the original branch and surface a
-    // deterministic preflight error instead.
     let merge_error = bounded_git_failure_details(&merge.stdout, &merge.stderr);
-    let abort = git_raw(&["merge", "--abort"], worktree)?;
-    if !abort.status.success() {
+    let files = unmerged_files(worktree)?;
+    if files.is_empty() {
+        let abort = git_raw(&["merge", "--abort"], worktree)?;
+        if !abort.status.success() {
+            anyhow::bail!(
+                "refreshing repair branch from {target_ref} failed without a resolvable conflict: {merge_error}; additionally failed to abort merge: {}",
+                crate::redact::redact(&String::from_utf8_lossy(&abort.stderr)).trim()
+            );
+        }
         anyhow::bail!(
-            "refreshing repair branch from {target_ref} failed: {merge_error}; additionally failed to abort merge: {}",
-            crate::redact::redact(&String::from_utf8_lossy(&abort.stderr)).trim()
+            "refreshing repair branch from {target_ref} failed without unmerged entries: {merge_error}"
         );
     }
-    anyhow::bail!("refreshing repair branch from {target_ref} failed: {merge_error}")
+    Ok(TargetRefreshOutcome::Conflicted {
+        target_ref,
+        files,
+        details: merge_error,
+    })
+}
+
+/// Return the unique paths whose index still contains unmerged stages.
+pub fn unmerged_files(worktree: &Path) -> Result<Vec<String>> {
+    let output = git_raw(&["diff", "--name-only", "--diff-filter=U", "-z"], worktree)?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "listing unmerged files: {}",
+            crate::redact::redact(&String::from_utf8_lossy(&output.stderr)).trim()
+        );
+    }
+    let mut files: Vec<String> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+/// A backend can stage a file while accidentally retaining conflict markers.
+/// Check only paths that Git originally reported as conflicted, avoiding a
+/// repository-wide heuristic over legitimate fixture text.
+pub fn files_with_conflict_markers(worktree: &Path, files: &[String]) -> Result<Vec<String>> {
+    let mut marked = Vec::new();
+    for file in files {
+        let path = worktree.join(file);
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        if text.lines().any(|line| {
+            line.starts_with("<<<<<<< ")
+                || line.starts_with("||||||| ")
+                || line == "======="
+                || line.starts_with(">>>>>>> ")
+        }) {
+            marked.push(file.clone());
+        }
+    }
+    Ok(marked)
+}
+
+pub fn merge_in_progress(worktree: &Path) -> Result<bool> {
+    let output = git_raw(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], worktree)?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "checking MERGE_HEAD: {}",
+        crate::redact::redact(&String::from_utf8_lossy(&output.stderr)).trim()
+    )
+}
+
+pub fn target_is_ancestor(worktree: &Path, target_branch: &str) -> Result<bool> {
+    let target_ref = format!("origin/{target_branch}");
+    let output = git_raw(
+        &["merge-base", "--is-ancestor", &target_ref, "HEAD"],
+        worktree,
+    )?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "checking target ancestry for {target_ref}: {}",
+        crate::redact::redact(&String::from_utf8_lossy(&output.stderr)).trim()
+    )
+}
+
+/// Preserve a conflicted index as a bounded, local recovery artifact before
+/// removing its worktree. Git cannot commit or stash unmerged entries, so the
+/// working and staged binary patches plus a manifest are the durable handoff.
+pub fn preserve_conflict_recovery(
+    worktree: &Path,
+    artifact_dir: &Path,
+    target_branch: &str,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(artifact_dir)?;
+    let files = unmerged_files(worktree)?;
+    let head = git(&["rev-parse", "HEAD"], worktree)?;
+    let merge_head = git(&["rev-parse", "MERGE_HEAD"], worktree)?;
+    let working = git_raw(&["diff", "--binary", "--no-ext-diff"], worktree)?;
+    let staged = git_raw(&["diff", "--cached", "--binary", "--no-ext-diff"], worktree)?;
+    std::fs::write(artifact_dir.join("working.patch"), working.stdout)?;
+    std::fs::write(artifact_dir.join("staged.patch"), staged.stdout)?;
+    std::fs::write(
+        artifact_dir.join("manifest.txt"),
+        format!(
+            "target=origin/{target_branch}\nhead={head}\nmerge_head={merge_head}\nunmerged_files={}\n",
+            files.join(",")
+        ),
+    )?;
+    Ok(artifact_dir.to_path_buf())
 }
 
 fn bounded_git_failure_details(stdout: &[u8], stderr: &[u8]) -> String {
@@ -568,6 +693,13 @@ pub fn commit_msg(worktree: &Path, msg: &str) -> Result<()> {
 /// terminal failure, while retry callers may additionally retain `HEAD` on a
 /// checkpoint branch before resetting the working branch to its target.
 pub fn preserve_wip(worktree: &Path, target_branch: &str, message: &str) -> Result<bool> {
+    // Git cannot commit or stash an unmerged index. Conflict-resolution
+    // callers preserve a binary recovery artifact before cleanup; returning
+    // false here prevents a secondary commit error from hiding the typed
+    // conflict outcome.
+    if !unmerged_files(worktree)?.is_empty() {
+        return Ok(false);
+    }
     if !has_changes(worktree, target_branch)? {
         return Ok(false);
     }
@@ -1152,7 +1284,10 @@ mod tests {
         git(&["push", "origin", "main"], &repo).unwrap();
 
         let wt = create_existing(&repo, "repair", &worktree_base).unwrap();
-        assert!(refresh_existing_branch_from_target(&wt, "main").unwrap());
+        assert_eq!(
+            refresh_existing_branch_from_target(&wt, "main").unwrap(),
+            TargetRefreshOutcome::Merged
+        );
         assert_eq!(
             fs::read_to_string(wt.join("target-fix.txt")).unwrap(),
             "fixed on main\n"
@@ -1180,12 +1315,15 @@ mod tests {
         let wt = create_existing(&repo, "repair", &worktree_base).unwrap();
         let head_before = git(&["rev-parse", "HEAD"], &wt).unwrap();
 
-        assert!(!refresh_existing_branch_from_target(&wt, "main").unwrap());
+        assert_eq!(
+            refresh_existing_branch_from_target(&wt, "main").unwrap(),
+            TargetRefreshOutcome::AlreadyCurrent
+        );
         assert_eq!(git(&["rev-parse", "HEAD"], &wt).unwrap(), head_before);
     }
 
     #[test]
-    fn refresh_existing_branch_aborts_conflicted_merge_cleanly() {
+    fn refresh_existing_branch_returns_live_conflict_for_bounded_repair() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         fs::create_dir_all(&repo).unwrap();
@@ -1205,21 +1343,38 @@ mod tests {
         git(&["push", "origin", "main"], &repo).unwrap();
 
         let wt = create_existing(&repo, "repair", &worktree_base).unwrap();
-        let head_before = git(&["rev-parse", "HEAD"], &wt).unwrap();
-        let err = refresh_existing_branch_from_target(&wt, "main").unwrap_err();
+        let outcome = refresh_existing_branch_from_target(&wt, "main").unwrap();
 
-        let message = format!("{err:#}");
-        assert!(message.contains("refreshing repair branch"));
-        assert!(message.contains("CONFLICT (content)"));
-        assert!(message.contains("f.txt"));
-        assert_eq!(git(&["rev-parse", "HEAD"], &wt).unwrap(), head_before);
-        assert_eq!(
-            fs::read_to_string(wt.join("f.txt")).unwrap(),
-            "repair version\n"
-        );
-        assert!(git(&["status", "--porcelain"], &wt).unwrap().is_empty());
-        let merge_head = git(&["rev-parse", "--git-path", "MERGE_HEAD"], &wt).unwrap();
-        assert!(!Path::new(&merge_head).exists());
+        let TargetRefreshOutcome::Conflicted {
+            target_ref,
+            files,
+            details,
+        } = outcome
+        else {
+            panic!("expected a repairable merge conflict")
+        };
+        assert_eq!(target_ref, "origin/main");
+        assert_eq!(files, vec!["f.txt"]);
+        assert!(details.contains("CONFLICT (content)"));
+        assert!(merge_in_progress(&wt).unwrap());
+        assert_eq!(unmerged_files(&wt).unwrap(), vec!["f.txt"]);
+        assert_eq!(files_with_conflict_markers(&wt, &files).unwrap(), files);
+
+        let recovery = tmp.path().join("recovery");
+        preserve_conflict_recovery(&wt, &recovery, "main").unwrap();
+        let manifest = fs::read_to_string(recovery.join("manifest.txt")).unwrap();
+        assert!(manifest.contains("target=origin/main"));
+        assert!(manifest.contains("unmerged_files=f.txt"));
+        assert!(recovery.join("working.patch").exists());
+
+        fs::write(wt.join("f.txt"), "resolved target + repair\n").unwrap();
+        git(&["add", "f.txt"], &wt).unwrap();
+        assert!(unmerged_files(&wt).unwrap().is_empty());
+        assert!(files_with_conflict_markers(&wt, &files).unwrap().is_empty());
+        assert!(merge_in_progress(&wt).unwrap());
+        assert!(!target_is_ancestor(&wt, "main").unwrap());
+        git(&["commit", "-m", "resolve target refresh"], &wt).unwrap();
+        assert!(target_is_ancestor(&wt, "main").unwrap());
     }
 
     #[test]
