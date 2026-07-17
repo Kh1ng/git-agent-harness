@@ -4,6 +4,7 @@ use crate::config::tests::test_profile_for_notifications;
 use crate::config::{Defaults, RoutingPolicy};
 use crate::routing::RouteRequest;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use time::OffsetDateTime;
 
@@ -158,4 +159,45 @@ fn concurrent_dispatch_holding_slot_forces_other_thread_to_fall_back() {
     )
     .unwrap();
     assert_eq!(decision_after_release.effective_backend, "claude");
+}
+
+#[test]
+fn shared_slot_wait_aborts_when_shutdown_is_requested() {
+    let _lock = CONCURRENCY_TEST_LOCK.lock().unwrap();
+    let backend = format!("shutdown-test-{}", uuid::Uuid::new_v4());
+    let _holder =
+        ConcurrencyGuard::acquire_shared(&backend, Some("model"), Some(1), || false).unwrap();
+    let checks = std::cell::Cell::new(0_u32);
+
+    let error = ConcurrencyGuard::acquire_shared(&backend, Some("model"), Some(1), || {
+        let current = checks.get();
+        checks.set(current + 1);
+        current > 0
+    })
+    .err()
+    .expect("shutdown must cancel the blocked slot acquisition");
+
+    assert!(error
+        .to_string()
+        .contains("shutdown requested while waiting for route capacity"));
+}
+
+#[test]
+fn shared_slot_waits_for_normal_contention_then_acquires() {
+    let _lock = CONCURRENCY_TEST_LOCK.lock().unwrap();
+    let backend = format!("wait-test-{}", uuid::Uuid::new_v4());
+    let holder =
+        ConcurrencyGuard::acquire_shared(&backend, Some("model"), Some(1), || false).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(125));
+        drop(holder);
+    });
+
+    let started = Instant::now();
+    let next =
+        ConcurrencyGuard::acquire_shared(&backend, Some("model"), Some(1), || false).unwrap();
+
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    drop(next);
+    release.join().unwrap();
 }

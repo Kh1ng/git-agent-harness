@@ -94,7 +94,12 @@ pub(super) fn reserve_backend_slot(
         .max_concurrent_per_model
         .get(&format!("{backend}/{}", effective_model.unwrap_or("")))
         .copied();
-    routing::ConcurrencyGuard::acquire_shared(backend, effective_model, concurrency_cap)
+    routing::ConcurrencyGuard::acquire_shared(
+        backend,
+        effective_model,
+        concurrency_cap,
+        crate::runner::shutdown_requested,
+    )
 }
 
 pub(super) fn apply_backend_instance_env(

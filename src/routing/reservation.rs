@@ -1,5 +1,5 @@
 use super::types::SkippedBackend;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use fs2::FileExt;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -60,7 +60,15 @@ impl ConcurrencyGuard {
     /// permanently consume quota capacity. This intentionally uses the
     /// smallest safe primitive: one lock file per slot, with a bounded slot
     /// count read from profile policy.
-    pub fn acquire_shared(backend: &str, model: Option<&str>, cap: Option<u32>) -> Result<Self> {
+    pub fn acquire_shared(
+        backend: &str,
+        model: Option<&str>,
+        cap: Option<u32>,
+        shutdown_requested: impl Fn() -> bool,
+    ) -> Result<Self> {
+        if shutdown_requested() {
+            bail!("shutdown requested before waiting for route capacity");
+        }
         let Some(cap) = cap else {
             return Ok(Self::acquire(backend, model));
         };
@@ -81,6 +89,12 @@ impl ConcurrencyGuard {
         let stem = format!("{:x}", hasher.finish());
 
         loop {
+            if shutdown_requested() {
+                bail!(
+                    "shutdown requested while waiting for route capacity on {backend}/{}",
+                    model.unwrap_or("")
+                );
+            }
             for slot in 0..cap {
                 let path = root.join(format!("{stem}-{slot}.lock"));
                 let file = OpenOptions::new()
@@ -98,6 +112,12 @@ impl ConcurrencyGuard {
                     Err(err) if err.kind() == ErrorKind::WouldBlock => {}
                     Err(err) => return Err(err.into()),
                 }
+            }
+            if shutdown_requested() {
+                bail!(
+                    "shutdown requested while waiting for route capacity on {backend}/{}",
+                    model.unwrap_or("")
+                );
             }
             thread::sleep(Duration::from_millis(100));
         }
