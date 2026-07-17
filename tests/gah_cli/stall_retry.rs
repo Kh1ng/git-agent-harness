@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn stalled_before_changes_quarantines_the_exact_backend_route() {
+    let tmp = test_tempdir();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        "validation_commands = [\"true\"]\ncodex_idle_timeout_seconds = 1\n",
+    );
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(&fake_bin, "codex", "#!/bin/sh\nsleep 5\n");
+    make_fake_bin_with_body(&fake_bin, "gh", "#!/bin/sh\nexit 0\n");
+    let availability_path = tmp.path().join("availability.json");
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--skip-validation-gate",
+            "--target",
+            "prove stalled routes are quarantined",
+            "--retries",
+            "0",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_AVAILABILITY_PATH", &availability_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("made no repository progress"));
+
+    let availability = fs::read_to_string(availability_path).unwrap();
+    assert!(availability.contains("\"backend\": \"codex\""));
+    assert!(availability.contains("\"reason\": \"backend_outage\""));
+    assert!(availability.contains("backend idle watchdog stalled; cooldown=15m"));
+}
+
+#[test]
 fn stalled_validation_continues_checkpointed_progress_and_records_exact_outcome() {
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(

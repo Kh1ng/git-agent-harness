@@ -236,6 +236,7 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
              n=$((n + 1))\n\
              echo \"$n\" > \"$call_count_file\"\n\
              inc_active\n\
+             printf 'agent edit %s\\n' \"$n\" > \"refill-$n.txt\"\n\
              case \"$n\" in\n\
              \x20\x201) while [ ! -f \"$slow_release\" ]; do sleep 0.05; done ;;\n\
              \x20\x202) : ;;\n\
@@ -304,6 +305,71 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
+    let tmp = test_tempdir();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    for (ticket_id, title) in [
+        ("411", "Slow sibling"),
+        ("412", "Terminal failure"),
+        ("413", "Must not refill"),
+    ] {
+        fs::write(
+            repo.join(format!("docs/tickets/TICKET-{ticket_id}-bounded.md")),
+            format!(
+                "# TICKET-{ticket_id}: {title}\n\nGoal: exercise bounded parallel failure handling.\nRecommended backend: codex\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let fake_bin = tmp.path().join("bin");
+    let calls = tmp.path().join("calls");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nlock='{calls}.lock'\nwhile ! mkdir \"$lock\" 2>/dev/null; do sleep 0.01; done\nn=$(cat '{calls}.count' 2>/dev/null || echo 0)\nn=$((n + 1))\necho \"$n\" > '{calls}.count'\nif [ \"$n\" -eq 2 ]; then pwd > '{calls}.failure-pwd'; fi\nrmdir \"$lock\"\nif [ \"$n\" -eq 1 ]; then printf 'slow-start\\n' >> '{calls}'; sleep 5; printf 'slow edit\\n' > slow.txt; printf 'slow-done\\n' >> '{calls}'; exit 0; fi\nif [ -f '{calls}.failure-pwd' ] && [ \"$PWD\" = \"$(cat '{calls}.failure-pwd')\" ]; then printf 'failed\\n' >> '{calls}'; exit 9; fi\nprintf 'refilled\\n' >> '{calls}'\nprintf 'unexpected\\n' > third.txt\nexit 0\n",
+            calls = calls.display(),
+        ),
+    );
+
+    let output = spawn_bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+            "--parallel",
+            "2",
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(calls.contains("slow-start"));
+    assert!(calls.contains("slow-done"));
+    assert!(calls.contains("failed"));
+    assert!(!calls.contains("refilled"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("parallel action(s) failed"));
 }
 
 #[test]

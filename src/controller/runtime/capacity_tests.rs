@@ -1,4 +1,6 @@
-use super::{route_state_fingerprint, suppress_recent_capacity_deferrals};
+use super::{
+    route_state_fingerprint, suppress_recent_capacity_deferrals, update_parallel_refill_budget,
+};
 use crate::controller::recovery::retain_snapshot_candidates;
 use crate::models::AvailableTicket;
 use std::collections::HashSet;
@@ -195,6 +197,66 @@ fn capacity_deferral_survives_stuck_action_redispatch() {
     retain_snapshot_candidates(&mut rebuilt, &inherited_exclusions, &HashSet::new());
 
     assert_eq!(super::decide_next_action(&rebuilt).work_id(), Some("#200"));
+}
+
+#[test]
+fn terminal_parallel_result_suppresses_refill_for_the_rest_of_the_iteration() {
+    let mut remaining = 0;
+    let mut suppressed = false;
+
+    assert!(!update_parallel_refill_budget(
+        "Deferred escalate because configured route capacity is busy; no backend launched",
+        2,
+        &mut remaining,
+        &mut suppressed,
+    ));
+    assert!(suppressed);
+    assert_eq!(remaining, 0);
+
+    // A later successful sibling must not reopen the refill slot.
+    assert!(!update_parallel_refill_budget(
+        "Dispatched review for branch 'gah/example'",
+        2,
+        &mut remaining,
+        &mut suppressed,
+    ));
+    assert_eq!(remaining, 0);
+}
+
+#[test]
+fn failed_parallel_result_is_distinct_from_successful_refill() {
+    let mut remaining = 0;
+    let mut suppressed = false;
+    assert!(!update_parallel_refill_budget(
+        "Dispatched ticket #1",
+        2,
+        &mut remaining,
+        &mut suppressed,
+    ));
+    assert_eq!(remaining, 2);
+
+    assert!(update_parallel_refill_budget(
+        "Error: repair preflight failed",
+        2,
+        &mut remaining,
+        &mut suppressed,
+    ));
+    assert!(suppressed);
+    assert_eq!(remaining, 0);
+}
+
+#[test]
+fn operator_shutdown_suppresses_refill_without_becoming_a_worker_failure() {
+    let mut remaining = 2;
+    let mut suppressed = false;
+    assert!(!update_parallel_refill_budget(
+        "Error: shutdown requested while codex was running",
+        2,
+        &mut remaining,
+        &mut suppressed,
+    ));
+    assert!(suppressed);
+    assert_eq!(remaining, 0);
 }
 
 #[test]
