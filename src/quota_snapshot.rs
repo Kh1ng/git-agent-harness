@@ -236,6 +236,7 @@ pub fn build_snapshot(
             max_fix_attempts_per_mr: resolved_routing.max_fix_attempts_per_mr(),
             max_implementation_failures_per_ticket: resolved_routing
                 .max_implementation_failures_per_ticket(),
+            max_open_managed_mrs: profile.max_open_managed_mrs(),
             issue_intake_policy: crate::models::IssueIntakePolicy {
                 mode: profile.publishing.issue_intake_mode.as_str().to_string(),
                 canonical_autonomous_label: profile.publishing.canonical_autonomous_label.clone(),

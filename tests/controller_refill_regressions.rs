@@ -6,24 +6,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 use support::test_tempdir;
 
-fn spawn_bin() -> ProcessCommand {
+fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
     let mut cmd = ProcessCommand::new(
         std::env::var("CARGO_BIN_EXE_gah").unwrap_or_else(|_| "target/debug/gah".into()),
     );
-    cmd.env(
-        "XDG_STATE_HOME",
-        std::env::temp_dir().join(format!("gah-controller-refill-{}", std::process::id())),
-    );
+    cmd.env("XDG_STATE_HOME", state_root.join("state"));
     cmd.env(
         "GAH_AVAILABILITY_PATH",
         "/nonexistent-availability-path.json",
     );
     cmd.env(
         "GAH_VALIDATION_CHECK_PATH",
-        std::env::temp_dir().join(format!(
-            "gah-controller-refill-validation-{}.json",
-            std::process::id(),
-        )),
+        state_root.join("validation.json"),
     );
     cmd.env("TMPDIR", support::test_temp_root());
     cmd
@@ -254,7 +248,7 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
 
     let ledger_path = tmp.path().join("ledger.jsonl");
     let events_path = tmp.path().join("events.jsonl");
-    let mut child = spawn_bin()
+    let mut child = spawn_bin(tmp.path())
         .args([
             "loop",
             "--profile",
@@ -343,7 +337,7 @@ fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
         ),
     );
 
-    let output = spawn_bin()
+    let output = spawn_bin(tmp.path())
         .args([
             "loop",
             "--profile",
@@ -402,7 +396,7 @@ fn parallel_loop_does_not_refill_after_shutdown() {
         ),
     );
 
-    let child = spawn_bin()
+    let child = spawn_bin(tmp.path())
         .args([
             "loop",
             "--profile",

@@ -35,6 +35,7 @@ fn empty_snapshot() -> crate::status::StatusSnapshot {
             merge_policy: crate::config::MergePolicy::default(),
             max_fix_attempts_per_mr: 2,
             max_implementation_failures_per_ticket: 8,
+            max_open_managed_mrs: 1,
             issue_intake_policy: crate::models::IssueIntakePolicy {
                 mode: "canonical_autonomous_only".into(),
                 canonical_autonomous_label: "exec:autonomous".into(),
@@ -65,6 +66,9 @@ fn empty_snapshot() -> crate::status::StatusSnapshot {
         publishing_allow_pr: true,
         generated_artifact_deny_patterns: vec![],
         max_parallel_workers: 1,
+        open_managed_mr_count: 0,
+        inflight_implementation_count: 0,
+        implementation_intake_paused: false,
         backend_configured: std::collections::HashMap::new(),
     }
 }

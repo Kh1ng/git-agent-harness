@@ -349,6 +349,22 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         };
     }
 
+    // Priority is not backpressure. Lifecycle candidates above always drain,
+    // but a temporarily unavailable reviewer may be removed by capacity
+    // filtering for this tick. Preserve the pre-filter status projection and
+    // refuse every action that could publish another managed MR until the
+    // profile falls below its configured limit.
+    if snapshot.implementation_intake_paused {
+        return NextAction::NoOp {
+            reason: format!(
+                "implementation intake paused: {} open managed MR(s) + {} in-flight implementation(s) reached limit {}; draining review/fix/merge work",
+                snapshot.open_managed_mr_count,
+                snapshot.inflight_implementation_count,
+                snapshot.profile.max_open_managed_mrs
+            ),
+        };
+    }
+
     let some_backend_eligible = snapshot.availability.iter().any(|a| a.eligible_now);
     let mut failed_tickets: Vec<_> = snapshot
         .available_tickets

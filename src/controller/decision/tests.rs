@@ -6,9 +6,10 @@ use crate::status::{
 };
 use crate::sync::{RecommendedAction, SyncMrJson};
 
+#[path = "tests/backpressure.rs"]
+mod backpressure;
 #[path = "tests/lifecycle_priority.rs"]
 mod lifecycle_priority;
-
 fn empty_snapshot() -> StatusSnapshot {
     StatusSnapshot {
         schema_version: 1,
@@ -23,6 +24,7 @@ fn empty_snapshot() -> StatusSnapshot {
             merge_policy: crate::config::MergePolicy::default(),
             max_fix_attempts_per_mr: 2,
             max_implementation_failures_per_ticket: 2,
+            max_open_managed_mrs: 1,
             issue_intake_policy: crate::models::IssueIntakePolicy {
                 mode: "canonical_autonomous_only".into(),
                 canonical_autonomous_label: "exec:autonomous".into(),
@@ -53,6 +55,9 @@ fn empty_snapshot() -> StatusSnapshot {
         publishing_allow_pr: true,
         generated_artifact_deny_patterns: vec![],
         max_parallel_workers: 1,
+        open_managed_mr_count: 0,
+        inflight_implementation_count: 0,
+        implementation_intake_paused: false,
         backend_configured: std::collections::HashMap::new(),
     }
 }
@@ -313,8 +318,7 @@ fn ready_for_human_mr_ci_passed_but_merge_retry_cap_exceeded_becomes_human_requi
     assert_eq!(action.kind(), "no_op");
 }
 
-// Issue #124 / TICKET-127: per-repo merge policy gates what happens for a
-// strong-approved MR whose CI has passed. Default (`auto`) merges.
+// Issue #124: default auto policy merges a strong-approved, green MR.
 #[test]
 fn merge_policy_auto_merges_approved_mr_with_ci_passed() {
     let mut snapshot = empty_snapshot();

@@ -10,6 +10,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 mod gates;
+mod intake;
 
 fn effective_issue_intake_policy(profile: &Profile) -> crate::models::IssueIntakePolicy {
     let trusted_human_authors = profile
@@ -114,6 +115,12 @@ pub struct StatusSnapshot {
     /// to decide how many worker loops to launch when not given explicitly
     /// on its own command line.
     pub max_parallel_workers: u32,
+    /// Provider-neutral implementation intake backpressure. Open managed MRs
+    /// and in-flight implementation claims consume this limit; lifecycle work
+    /// continues while intake is paused.
+    pub open_managed_mr_count: u32,
+    pub inflight_implementation_count: u32,
+    pub implementation_intake_paused: bool,
     /// TICKET-157: per-backend "configured for this profile" signal. Keyed
     /// by logical backend name. `true` means the backend has a real Rust
     /// implementation AND is set up for the active profile (an explicit
@@ -143,6 +150,8 @@ pub struct ProfileIdentity {
     /// Genuine implementation failures allowed while walking the configured
     /// backend/model ladder. Separate from post-review repairs.
     pub max_implementation_failures_per_ticket: u32,
+    /// Effective open managed PR/MR limit for this profile.
+    pub max_open_managed_mrs: u32,
     /// Effective issue intake policy for this profile.
     pub issue_intake_policy: crate::models::IssueIntakePolicy,
 }
@@ -277,6 +286,7 @@ fn build_snapshot_inner(
         max_fix_attempts_per_mr: effective_routing.max_fix_attempts_per_mr(),
         max_implementation_failures_per_ticket: effective_routing
             .max_implementation_failures_per_ticket(),
+        max_open_managed_mrs: profile.max_open_managed_mrs(),
         issue_intake_policy: effective_issue_intake_policy(profile),
     };
 
@@ -631,6 +641,12 @@ fn build_snapshot_inner(
         backend_configured.insert(backend.to_string(), configured);
     }
 
+    let intake = intake::project(
+        &merge_requests,
+        &active_claims,
+        profile_identity.max_open_managed_mrs,
+    );
+
     let snapshot = StatusSnapshot {
         schema_version: 1,
         generated_at,
@@ -660,6 +676,9 @@ fn build_snapshot_inner(
             .generated_artifact_deny_patterns
             .clone(),
         max_parallel_workers: profile.max_parallel_workers(),
+        open_managed_mr_count: intake.open_mrs,
+        inflight_implementation_count: intake.inflight_implementations,
+        implementation_intake_paused: intake.paused,
         backend_configured,
     };
 
@@ -679,6 +698,17 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
             snapshot.observations.sync.status,
             snapshot.observations.availability.status,
             snapshot.observations.ledger.status
+        );
+        println!(
+            "Implementation intake: {} (open MRs={}, in-flight={}, limit={})",
+            if snapshot.implementation_intake_paused {
+                "paused; draining lifecycle work"
+            } else {
+                "open"
+            },
+            snapshot.open_managed_mr_count,
+            snapshot.inflight_implementation_count,
+            snapshot.profile.max_open_managed_mrs
         );
 
         if snapshot.blockers.is_empty() {

@@ -17,6 +17,7 @@ mod models;
 mod notifications;
 mod policy;
 mod price_guard;
+mod profile_output;
 mod provider;
 mod prune;
 mod quota;
@@ -487,6 +488,10 @@ enum ProfileCommands {
         /// profile (defaults to 1). Exposed in the dashboard Settings UI.
         #[arg(long)]
         max_parallel_workers: Option<u32>,
+        /// Maximum open/in-flight managed PRs or MRs before implementation
+        /// intake pauses and lifecycle work drains.
+        #[arg(long)]
+        max_open_managed_mrs: Option<u32>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
@@ -553,6 +558,10 @@ enum ProfileCommands {
         /// profile (defaults to 1). Exposed in the dashboard Settings UI.
         #[arg(long)]
         max_parallel_workers: Option<u32>,
+        /// Maximum open/in-flight managed PRs or MRs before implementation
+        /// intake pauses and lifecycle work drains.
+        #[arg(long)]
+        max_open_managed_mrs: Option<u32>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
@@ -1282,42 +1291,11 @@ fn main() -> Result<()> {
         Commands::Profile { command } => match *command {
             ProfileCommands::List { config, json } => {
                 let cfg = config::load(config.as_deref())?;
-                let mut names: Vec<&str> = cfg.profiles.keys().map(String::as_str).collect();
-                names.sort_unstable();
                 if json {
-                    #[derive(serde::Serialize)]
-                    struct ProfileSummary<'a> {
-                        name: &'a str,
-                        display_name: &'a str,
-                        provider: &'a str,
-                        repo: &'a str,
-                        local_path: &'a str,
-                        web_url: Option<String>,
-                        max_parallel_workers: Option<u32>,
-                        manager_wake_autonomy: &'a str,
-                    }
-                    let summaries: Vec<ProfileSummary> = names
-                        .iter()
-                        .map(|name| {
-                            let p = &cfg.profiles[*name];
-                            ProfileSummary {
-                                name,
-                                display_name: &p.display_name,
-                                provider: &p.provider,
-                                repo: &p.repo,
-                                local_path: &p.local_path,
-                                web_url: p.web_url(),
-                                max_parallel_workers: p.max_parallel_workers,
-                                manager_wake_autonomy: match p.manager_wake_autonomy {
-                                    config::WakeAutonomy::Off => "off",
-                                    config::WakeAutonomy::ReviewOnly => "review_only",
-                                    config::WakeAutonomy::Full => "full",
-                                },
-                            }
-                        })
-                        .collect();
-                    println!("{}", serde_json::to_string(&summaries)?);
+                    println!("{}", profile_output::list_json(&cfg)?);
                 } else {
+                    let mut names: Vec<&str> = cfg.profiles.keys().map(String::as_str).collect();
+                    names.sort_unstable();
                     for name in names {
                         let p = &cfg.profiles[name];
                         println!("{:<25} {} ({})", name, p.display_name, p.provider);
@@ -1387,6 +1365,7 @@ fn main() -> Result<()> {
                 validation_commands,
                 auto_fix_commands,
                 max_parallel_workers,
+                max_open_managed_mrs,
                 manager_wake_autonomy,
             } => {
                 let mut cfg = config::load(config_path.as_deref())?;
@@ -1422,6 +1401,7 @@ fn main() -> Result<()> {
                     codex_idle_timeout_seconds: None,
                     claude_idle_timeout_seconds: None,
                     max_parallel_workers,
+                    max_open_managed_mrs,
                     notify_command,
                     manager_wake_autonomy: match &manager_wake_autonomy {
                         Some(v) => parse_wake_autonomy(v)?,
@@ -1479,6 +1459,7 @@ fn main() -> Result<()> {
                 validation_commands,
                 auto_fix_commands,
                 max_parallel_workers,
+                max_open_managed_mrs,
                 manager_wake_autonomy,
                 clear,
             } => {
@@ -1651,6 +1632,12 @@ fn main() -> Result<()> {
                     existing.max_parallel_workers = Some(v);
                 } else if should_clear("max_parallel_workers", &clear) {
                     existing.max_parallel_workers = None;
+                }
+
+                if let Some(v) = max_open_managed_mrs {
+                    existing.max_open_managed_mrs = Some(v);
+                } else if should_clear("max_open_managed_mrs", &clear) {
+                    existing.max_open_managed_mrs = None;
                 }
 
                 if let Some(v) = &manager_wake_autonomy {
