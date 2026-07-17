@@ -20,6 +20,10 @@ pub enum FailureClass {
     BackendError,
     AgentNoProgress,
     AgentFailure,
+    /// The reviewer process completed, but its structured payload could not
+    /// safely drive a repair. Kept separate from backend and agent failures so
+    /// routing can request a second opinion without blaming the code change.
+    ReviewOutputInvalid,
     ContextLimitExceeded,
     ValidationFailure,
     /// TICKET-073: the dispatch *gate* itself (a profile's
@@ -40,6 +44,7 @@ impl FailureClass {
             Self::BackendError => "backend_error",
             Self::AgentNoProgress => "agent_no_progress",
             Self::AgentFailure => "agent_failure",
+            Self::ReviewOutputInvalid => "review_output_invalid",
             Self::ContextLimitExceeded => "context_limit_exceeded",
             Self::ValidationFailure => "validation_failure",
             Self::ValidationGate => "validation_gate",
@@ -250,7 +255,12 @@ pub struct RoutingCandidateDiagnostic {
 ///   usage rule.
 /// - `3`: usage distinguishes reasoning tokens and records explicit reasons
 ///   when exact token or quota telemetry is unavailable.
-pub const LEDGER_SCHEMA_VERSION: u32 = 3;
+// v4 adds `review_metadata_fingerprint`. The field has a serde default so v1-v3
+// history remains readable; its absence deliberately makes old reviews stale.
+// v5 adds typed, machine-validated actionable review findings. The field also
+// defaults empty so historical review records remain readable but cannot
+// silently become repair instructions.
+pub const LEDGER_SCHEMA_VERSION: u32 = 5;
 
 fn default_ledger_schema_version() -> u32 {
     1
@@ -331,6 +341,11 @@ pub struct LedgerEntry {
     /// historical records, which must never be considered duplicates.
     #[serde(default)]
     pub review_source_sha: Option<String>,
+    /// Versioned digest of the provider title/body/draft state and source SHA
+    /// inspected by this review. Historical entries omit it and are therefore
+    /// intentionally re-reviewed before their verdict can drive a repair.
+    #[serde(default)]
+    pub review_metadata_fingerprint: Option<String>,
     /// Authority class (strong/standard/weak/escalatory) of the reviewer.
     #[serde(default)]
     pub reviewer_class: Option<String>,
@@ -342,6 +357,8 @@ pub struct LedgerEntry {
     /// comment so FixMr never has to scrape human-formatted Markdown.
     #[serde(default)]
     pub review_blocking_findings: Vec<String>,
+    #[serde(default)]
+    pub review_actionable_findings: Vec<crate::models::ActionableReviewFinding>,
     #[serde(default)]
     pub review_non_blocking_findings: Vec<String>,
     #[serde(default)]
@@ -478,9 +495,11 @@ impl LedgerEntry {
             reviewer_model: None,
             reviewer_tier: None,
             review_source_sha: None,
+            review_metadata_fingerprint: None,
             reviewer_class: None,
             review_gate_reason: None,
             review_blocking_findings: Vec::new(),
+            review_actionable_findings: Vec::new(),
             review_non_blocking_findings: Vec::new(),
             review_risk_notes: Vec::new(),
             review_evidence: Vec::new(),
@@ -571,9 +590,11 @@ impl LedgerEntry {
             reviewer_model: None,
             reviewer_tier: None,
             review_source_sha: None,
+            review_metadata_fingerprint: None,
             reviewer_class: None,
             review_gate_reason: None,
             review_blocking_findings: Vec::new(),
+            review_actionable_findings: Vec::new(),
             review_non_blocking_findings: Vec::new(),
             review_risk_notes: Vec::new(),
             review_evidence: Vec::new(),

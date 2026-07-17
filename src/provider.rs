@@ -189,6 +189,7 @@ pub struct ReviewTarget {
     pub target_branch: String,
     pub title: Option<String>,
     pub body: Option<String>,
+    pub draft: bool,
     pub ci_status: Option<String>,
     /// Immutable source commit that the reviewer inspected. Optional so
     /// older provider responses and local/fallback targets remain valid.
@@ -850,7 +851,7 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
             "--repo",
             &profile.repo,
             "--json",
-            "number,url,title,body,headRefName,baseRefName,headRefOid,statusCheckRollup",
+            "number,url,title,body,isDraft,headRefName,baseRefName,headRefOid,statusCheckRollup",
         ])
         .output()
         .context("gh pr view")?;
@@ -877,6 +878,7 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
         target_branch: resp["baseRefName"].as_str().unwrap_or("").to_string(),
         title: resp["title"].as_str().map(str::to_string),
         body: resp["body"].as_str().map(str::to_string),
+        draft: resp["isDraft"].as_bool().unwrap_or(false),
         ci_status,
         source_sha: resp["headRefOid"].as_str().map(str::to_string),
         // `gh pr view` does not expose baseRefOid. The dispatch review path
@@ -920,6 +922,7 @@ fn gitlab_target_from_value(value: &serde_json::Value) -> Result<ReviewTarget> {
         target_branch: value["target_branch"].as_str().unwrap_or("").to_string(),
         title: value["title"].as_str().map(str::to_string),
         body: value["description"].as_str().map(str::to_string),
+        draft: value["draft"].as_bool().unwrap_or(false),
         ci_status,
         source_sha: value["sha"].as_str().map(str::to_string),
         target_sha: value["diff_refs"]["base_sha"].as_str().map(str::to_string),

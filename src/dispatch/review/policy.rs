@@ -36,6 +36,40 @@ pub fn review_budget_exhausted_error(err: &anyhow::Error) -> Option<&ReviewBudge
     err.downcast_ref::<ReviewBudgetExhausted>()
 }
 
+/// A reviewer process completed, but its payload was not safe to use as
+/// repair context. This is neither a backend crash nor a code finding: the
+/// controller should retain the attempt and ask the next configured reviewer.
+#[derive(Debug)]
+pub struct ReviewOutputInvalid {
+    reason: String,
+}
+
+impl ReviewOutputInvalid {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    pub(in crate::dispatch) fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+impl fmt::Display for ReviewOutputInvalid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "review_output_invalid: {}", self.reason)
+    }
+}
+
+impl std::error::Error for ReviewOutputInvalid {}
+
+pub(in crate::dispatch) fn review_output_invalid_error(
+    err: &anyhow::Error,
+) -> Option<&ReviewOutputInvalid> {
+    err.downcast_ref::<ReviewOutputInvalid>()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::dispatch) struct ReviewBudgetBlock {
     pub(in crate::dispatch) reason: String,
@@ -186,7 +220,11 @@ pub(in crate::dispatch) fn review_escalation_reason(
                 && e.review_source_sha.is_some()
                 && matches!(
                     e.validation_result.as_deref(),
-                    Some("APPROVE") | Some("NEEDS_FIX") | Some("REJECT") | Some("HUMAN_REVIEW")
+                    Some("APPROVE")
+                        | Some("NEEDS_FIX")
+                        | Some("REJECT")
+                        | Some("HUMAN_REVIEW")
+                        | Some("review_output_invalid")
                 )
         })
         .take(repeated_failure_threshold)
@@ -200,6 +238,13 @@ pub(in crate::dispatch) fn review_escalation_reason(
         .is_some_and(|e| e.validation_result.as_deref() == Some("HUMAN_REVIEW"))
     {
         return Some("human_review");
+    }
+
+    if recent
+        .first()
+        .is_some_and(|e| e.validation_result.as_deref() == Some("review_output_invalid"))
+    {
+        return Some("review_output_invalid");
     }
 
     if recent
@@ -221,6 +266,56 @@ pub(in crate::dispatch) fn review_escalation_reason(
     }
 
     None
+}
+
+/// Invalid structured output is not an opinion, so it advances through the
+/// complete ordered review pool (for example AGY account 1 -> AGY account 2
+/// -> Claude) before the stronger/paid terminal escalation boundary. This is
+/// intentionally broader than `next_escalatory_reviewer`, which handles a
+/// valid but uncertain/adverse opinion.
+pub(in crate::dispatch) fn next_review_candidate(
+    cfg: &GahConfig,
+    profile: &Profile,
+    profile_name: &str,
+    branch: &str,
+    current: Option<(&str, Option<&str>)>,
+) -> Option<CandidateConfig> {
+    let entries = ledger::read_entries(cfg).ok()?;
+    let active_entries = active_branch_review_entries(&entries, profile, profile_name, branch);
+    let mut attempted: HashSet<(String, Option<String>)> = active_entries
+        .iter()
+        .filter(|entry| {
+            entry.profile == profile_name
+                && entry.mode == "review"
+                && entry.branch.as_deref() == Some(branch)
+                && entry.review_source_sha.is_some()
+                && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
+                && entry.validation_result.as_deref() != Some("cancelled_shutdown")
+        })
+        .map(|entry| {
+            (
+                entry.effective_backend.clone(),
+                entry.effective_model.clone(),
+            )
+        })
+        .collect();
+    if let Some((backend, model)) = current {
+        attempted.insert((backend.to_string(), model.map(str::to_string)));
+    }
+
+    profile
+        .effective_routing(&cfg.defaults)
+        .review_candidates
+        .unwrap_or_default()
+        .into_iter()
+        .find(|candidate| {
+            let effective_model = if candidate.backend == "codex" && candidate.model.is_none() {
+                crate::runner::extract_model_from_args(&profile.codex_args)
+            } else {
+                candidate.model.clone()
+            };
+            !attempted.contains(&(candidate.backend.clone(), effective_model))
+        })
 }
 
 /// Select the next unused reviewer from the explicitly ordered escalation
@@ -723,6 +818,7 @@ pub(in crate::dispatch) fn parse_review_verdict_with_context(
     let json = extract_first_json_object(review_text)
         .ok_or_else(|| anyhow::anyhow!("reviewer did not return verdict JSON"))?;
     let mut verdict = serde_json::from_str::<crate::models::ReviewVerdict>(&json)?;
+    normalize_actionable_findings(&mut verdict, gate_context)?;
     enforce_review_evidence_gate(
         &mut verdict,
         review_text,
@@ -762,6 +858,110 @@ pub(in crate::dispatch) fn parse_review_verdict_with_context(
     verdict.estimated_cost_usd = parsed_usage.estimated_cost_usd;
     verdict.actual_cost_usd = parsed_usage.actual_cost_usd;
     Ok(verdict)
+}
+
+fn normalize_actionable_findings(
+    verdict: &mut crate::models::ReviewVerdict,
+    gate_context: &ReviewGateContext,
+) -> Result<()> {
+    let repair_verdict = matches!(verdict.verdict.as_str(), "NEEDS_FIX" | "REJECT");
+    if repair_verdict && verdict.actionable_findings.is_empty() {
+        // The ungrounded context exists only for parser-focused unit tests and
+        // historical compatibility helpers. Production review always builds
+        // a diff-backed context and therefore takes the strict branch below.
+        if !gate_context.enforce_grounding {
+            return Ok(());
+        }
+        return Err(
+            ReviewOutputInvalid::new("NEEDS_FIX/REJECT omitted actionable_findings").into(),
+        );
+    }
+    if verdict.actionable_findings.is_empty() {
+        return Ok(());
+    }
+
+    let mut rendered = Vec::with_capacity(verdict.actionable_findings.len());
+    for (index, finding) in verdict.actionable_findings.iter().enumerate() {
+        let number = index + 1;
+        if !finding.status.trim().eq_ignore_ascii_case("confirmed") {
+            return Err(ReviewOutputInvalid::new(format!(
+                "actionable finding {number} status must be confirmed"
+            ))
+            .into());
+        }
+        let file = finding.file.trim();
+        if file.is_empty()
+            || (gate_context.enforce_grounding
+                && !gate_context.changed_files.iter().any(|path| path == file))
+        {
+            return Err(ReviewOutputInvalid::new(format!(
+                "actionable finding {number} did not name an exact changed file"
+            ))
+            .into());
+        }
+        let summary = finding.summary.trim();
+        if summary.is_empty() {
+            return Err(ReviewOutputInvalid::new(format!(
+                "actionable finding {number} omitted its summary"
+            ))
+            .into());
+        }
+        if finding_text_disclaims_actionability(summary)
+            || finding
+                .evidence
+                .iter()
+                .any(|evidence| finding_text_disclaims_actionability(evidence))
+        {
+            return Err(ReviewOutputInvalid::new(format!(
+                "actionable finding {number} explicitly withdrew, contradicted, or left the finding unverified"
+            ))
+            .into());
+        }
+        let grounded = finding.evidence.iter().any(|item| {
+            let Some(rest) = item.trim().strip_prefix("diff:") else {
+                return false;
+            };
+            let Some((evidence_file, detail)) = rest.split_once(':') else {
+                return false;
+            };
+            evidence_file.trim() == file && !detail.trim().is_empty()
+        });
+        if !grounded {
+            return Err(ReviewOutputInvalid::new(format!(
+                "actionable finding {number} omitted direct diff:{file}:<observation> evidence"
+            ))
+            .into());
+        }
+
+        let location = finding
+            .line
+            .as_deref()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map_or_else(|| file.to_string(), |line| format!("{file}:{line}"));
+        rendered.push(format!("{location}: {summary}"));
+    }
+    verdict.blocking_findings = rendered;
+    Ok(())
+}
+
+fn finding_text_disclaims_actionability(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    [
+        "withdrawn",
+        "not blocking",
+        "actually fine",
+        "no issue here",
+        "cannot be confirmed",
+        "can't be confirmed",
+        "unverified risk",
+        "unverified concern",
+        "partially unverified",
+        "may or may not",
+        "not strictly broken",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 /// A reviewer is advisory; merge safety is deterministic. In particular, an

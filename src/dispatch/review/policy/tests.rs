@@ -5,6 +5,7 @@ use crate::dispatch::test_util::{gah_config, gah_config_with_ledger, profile};
 use crate::ledger::LedgerEntry;
 
 mod acceptance;
+mod actionable;
 mod budget_reservation;
 mod reset;
 

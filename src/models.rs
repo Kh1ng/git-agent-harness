@@ -350,6 +350,23 @@ pub struct PmPlan {
     pub tickets: Vec<PlannerWorkPacket>,
 }
 
+/// One repair-driving review finding. Free-form `blocking_findings` remain in
+/// the wire model for historical ledger and provider-comment compatibility,
+/// but new reviewer output must supply these typed facts before GAH may route
+/// a FixMr. The controller, rather than the reviewer, validates `status`, the
+/// changed-file identity, and the evidence grammar.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ActionableReviewFinding {
+    pub summary: String,
+    pub file: String,
+    #[serde(default)]
+    pub line: Option<String>,
+    pub status: String,
+    #[serde(default, deserialize_with = "deserialize_string_list")]
+    pub evidence: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReviewVerdict {
     #[serde(deserialize_with = "deserialize_review_verdict")]
@@ -359,6 +376,11 @@ pub struct ReviewVerdict {
     pub human_required: bool,
     #[serde(default, deserialize_with = "deserialize_string_list")]
     pub blocking_findings: Vec<String>,
+    /// Machine-verifiable repair instructions. A NEEDS_FIX/REJECT result is
+    /// review output, not repair context, until every item in this list is
+    /// validated against the control-plane diff bundle.
+    #[serde(default)]
+    pub actionable_findings: Vec<ActionableReviewFinding>,
     #[serde(default, deserialize_with = "deserialize_string_list")]
     pub non_blocking_findings: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_list")]

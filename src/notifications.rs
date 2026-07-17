@@ -59,6 +59,14 @@ pub enum NotifyEvent<'a> {
     },
     /// A review verdict was recorded.
     ReviewVerdict { verdict: &'a str, mr_url: &'a str },
+    /// A reviewer completed but did not provide machine-safe repair context.
+    /// This is an automatic reroute signal, not a terminal human request.
+    ReviewOutputInvalid {
+        mr_url: &'a str,
+        backend: &'a str,
+        model: &'a str,
+        reason: &'a str,
+    },
     /// TICKET-127: an MR/PR was auto-merged.
     MrMerged { url: &'a str, work_id: &'a str },
     /// A dispatch failed terminally (retries exhausted).
@@ -138,6 +146,17 @@ pub fn format_message(event: &NotifyEvent) -> String {
         NotifyEvent::ReviewVerdict { verdict, mr_url } => {
             format!("[gah] review {verdict} on {mr_url}")
         }
+        NotifyEvent::ReviewOutputInvalid {
+            mr_url,
+            backend,
+            model,
+            reason,
+        } => format!(
+            "[gah] review output invalid on {mr_url} route={} summary={}; rerouting",
+            route_label(backend, model),
+            summarize_error_summary(Some(reason))
+                .unwrap_or_else(|| "invalid structured review output".to_string())
+        ),
         NotifyEvent::MrMerged { url, work_id } => {
             format!("[gah] auto-merged {url} (work_id={work_id})")
         }
@@ -253,6 +272,10 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
         NotifyEvent::ReviewVerdict { verdict, mr_url } => {
             format!("A review verdict was recorded: {verdict} on {mr_url}.")
         }
+        // The controller owns this bounded reroute. Waking a manager for each
+        // malformed intermediate opinion would recreate the notification
+        // spam this event is designed to explain.
+        NotifyEvent::ReviewOutputInvalid { .. } => return None,
         NotifyEvent::DispatchFailed {
             failure_class,
             failure_stage,
@@ -566,6 +589,20 @@ mod tests {
             mr_url: "https://example.com/mr/2",
         });
         assert_eq!(msg, "[gah] review APPROVE on https://example.com/mr/2");
+    }
+
+    #[test]
+    fn invalid_review_output_is_reported_as_rerouting_not_dispatch_failure() {
+        let msg = format_message(&NotifyEvent::ReviewOutputInvalid {
+            mr_url: "https://example.com/mr/2",
+            backend: "agy-second",
+            model: "sonnet",
+            reason: "actionable finding 1 was explicitly withdrawn",
+        });
+        assert_eq!(
+            msg,
+            "[gah] review output invalid on https://example.com/mr/2 route=agy-second/sonnet summary=actionable finding 1 was explicitly withdrawn; rerouting"
+        );
     }
 
     #[test]
