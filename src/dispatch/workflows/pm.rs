@@ -13,7 +13,7 @@ use crate::models::{PlannerWorkPacket, PmPlan, RecommendedRouting};
 use crate::routing::RouteRequest;
 use crate::worktree;
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 pub(crate) fn pm(
@@ -448,21 +448,88 @@ fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<Pa
     fs::create_dir_all(&tickets_dir)?;
     let manager_memory_path = repo.join("docs/MANAGER_MEMORY.md");
     let next_id = next_ticket_id(&tickets_dir, Some(&manager_memory_path))?;
-    let mut written = vec![];
-    let mut id = next_id;
+
+    // Decide skip/keep and assign every kept packet its final TICKET-NNN
+    // identity up front, before any file is written. This is what lets every
+    // `depends_on` reference translate to a real assigned identity: writes
+    // happen in plan order, not dependency order, so a dependent can be
+    // rendered before its prerequisite's file exists on disk. Skipped
+    // (duplicate) keys are tracked separately so a dependency on one is
+    // never silently dropped -- see `resolve_dependencies`.
+    let mut kept: Vec<&PlannerWorkPacket> = Vec::new();
+    let mut skipped_keys: HashSet<String> = HashSet::new();
     for ticket in &plan.tickets {
         if should_skip_ticket(ctx, ticket) {
-            continue;
+            skipped_keys.insert(ticket.key.trim().to_string());
+        } else {
+            kept.push(ticket);
         }
+    }
+
+    let mut identities: HashMap<String, usize> = HashMap::new();
+    for (id, ticket) in (next_id..).zip(kept.iter()) {
+        identities.insert(ticket.key.trim().to_string(), id);
+    }
+
+    let mut written = vec![];
+    for ticket in &kept {
         validate_packet(ticket)?;
+        let assigned_id = identities[ticket.key.trim()];
+        let deps = resolve_dependencies(ticket, &identities, &skipped_keys);
         let slug = slugify(&ticket.title);
-        let filename = format!("TICKET-{:03}-{}.md", id, slug);
+        let filename = format!("TICKET-{:03}-{}.md", assigned_id, slug);
         let path = tickets_dir.join(filename);
-        fs::write(&path, render_ticket(ticket, id))?;
+        // Identities were assigned above for every kept packet, so if this
+        // write fails partway through the batch, siblings already written
+        // still carry correct "Blocked by" identities (fail-closed: an
+        // unwritten prerequisite simply doesn't exist yet, it never reads as
+        // resolved), and a rerun's `next_ticket_id` scan naturally continues
+        // past whatever made it to disk.
+        fs::write(&path, render_ticket(ticket, assigned_id, &deps)).with_context(|| {
+            format!(
+                "writing {} for plan-local key '{}'",
+                path.display(),
+                ticket.key
+            )
+        })?;
         written.push(path);
-        id += 1;
     }
     Ok(written)
+}
+
+/// Resolved form of a packet's `depends_on` list: plan-local keys of kept
+/// siblings translate to their assigned `TICKET-NNN` identity; plan-local
+/// keys of packets skipped as duplicates have no identity to translate to,
+/// but the dependency must still surface for audit rather than vanish (see
+/// ticket #659 constraint: never silently drop a dependency on a
+/// duplicate-skipped packet).
+struct ResolvedDependencies {
+    blocked_by: Vec<String>,
+    unresolved_duplicate_keys: Vec<String>,
+}
+
+fn resolve_dependencies(
+    ticket: &PlannerWorkPacket,
+    identities: &HashMap<String, usize>,
+    skipped_keys: &HashSet<String>,
+) -> ResolvedDependencies {
+    let mut blocked_by = Vec::new();
+    let mut unresolved_duplicate_keys = Vec::new();
+    for dep in &ticket.depends_on {
+        let key = dep.trim();
+        if let Some(id) = identities.get(key) {
+            blocked_by.push(format!("TICKET-{:03}", id));
+        } else if skipped_keys.contains(key) {
+            unresolved_duplicate_keys.push(key.to_string());
+        }
+        // `validate_plan` already rejects any `depends_on` key absent from
+        // the whole plan, so every key reaching this point is either kept
+        // (has an identity) or skipped as a duplicate.
+    }
+    ResolvedDependencies {
+        blocked_by,
+        unresolved_duplicate_keys,
+    }
 }
 
 fn should_skip_ticket(ctx: &PmPreflight, ticket: &PlannerWorkPacket) -> bool {
@@ -537,7 +604,7 @@ fn validate_routing(routing: &RecommendedRouting, title: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_ticket(ticket: &PlannerWorkPacket, id: usize) -> String {
+fn render_ticket(ticket: &PlannerWorkPacket, id: usize, deps: &ResolvedDependencies) -> String {
     let mut out = format!(
         "# TICKET-{id:03}: {title}\n\n\
         Plan key: {key}\n\
@@ -574,10 +641,16 @@ fn render_ticket(ticket: &PlannerWorkPacket, id: usize) -> String {
     for file in &ticket.affected_files {
         out.push_str(&format!("- {}\n", file));
     }
-    if !ticket.depends_on.is_empty() {
-        out.push_str("\n## Depends On\n");
-        for dep in &ticket.depends_on {
-            out.push_str(&format!("- {}\n", dep));
+    if !deps.blocked_by.is_empty() {
+        out.push_str(&format!("\nBlocked by: {}\n", deps.blocked_by.join(", ")));
+    }
+    if !deps.unresolved_duplicate_keys.is_empty() {
+        out.push_str("\n## Unresolved Dependencies (duplicate-skipped)\n");
+        for key in &deps.unresolved_duplicate_keys {
+            out.push_str(&format!(
+                "- plan-local key '{}' was judged already covered by existing work and received no new ticket identity; confirm the existing coverage actually satisfies this prerequisite before treating this ticket as unblocked.\n",
+                key
+            ));
         }
     }
     if !ticket.duplicate_evidence.is_empty() {
