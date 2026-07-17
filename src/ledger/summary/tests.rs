@@ -685,8 +685,17 @@ fn build_grouped_summary_empty_entries() {
 #[test]
 fn legacy_fixture_summary_surfaces_attempts_as_unknown() {
     let (_tmp, cfg) = test_config();
-    let legacy = r#"{"timestamp":"2026-07-10T00:00:00Z","profile":"test","display_name":"R","repo_id":"r","repo":"o/r","local_path":"/tmp","provider":"github","backend":"codex","requested_backend":"codex","effective_backend":"codex","mode":"fix","commit_attempted":false,"commit_created":false,"push_attempted":false,"push_succeeded":false,"mr_attempted":false,"mr_created":false,"fallback_used":false,"human_required":false,"attempts":[],"usage":{}}"#;
-    let known = r#"{"timestamp":"2026-07-10T00:00:01Z","schema_version":2,"profile":"test","display_name":"R","repo_id":"r","repo":"o/r","local_path":"/tmp","provider":"github","backend":"codex","requested_backend":"codex","effective_backend":"codex","mode":"fix","commit_attempted":false,"commit_created":false,"push_attempted":false,"push_succeeded":false,"mr_attempted":false,"mr_created":false,"fallback_used":false,"human_required":false,"attempts_started":2,"attempts_completed":1,"attempts":[],"usage":{}}"#;
+    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(
+        r#"{"timestamp":"2000-01-01T00:00:00Z","profile":"test","display_name":"R","repo_id":"r","repo":"o/r","local_path":"/tmp","provider":"github","backend":"codex","requested_backend":"codex","effective_backend":"codex","mode":"fix","commit_attempted":false,"commit_created":false,"push_attempted":false,"push_succeeded":false,"mr_attempted":false,"mr_created":false,"fallback_used":false,"human_required":false,"attempts":[],"usage":{}}"#,
+    )
+    .unwrap();
+    legacy["timestamp"] = serde_json::json!(now);
+    let mut known: serde_json::Value = serde_json::from_str(
+        r#"{"timestamp":"2000-01-01T00:00:00Z","schema_version":2,"profile":"test","display_name":"R","repo_id":"r","repo":"o/r","local_path":"/tmp","provider":"github","backend":"codex","requested_backend":"codex","effective_backend":"codex","mode":"fix","commit_attempted":false,"commit_created":false,"push_attempted":false,"push_succeeded":false,"mr_attempted":false,"mr_created":false,"fallback_used":false,"human_required":false,"attempts_started":2,"attempts_completed":1,"attempts":[],"usage":{}}"#,
+    )
+    .unwrap();
+    known["timestamp"] = serde_json::json!(now);
     let path = cfg.defaults.ledger_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, format!("{legacy}\n{known}\n")).unwrap();

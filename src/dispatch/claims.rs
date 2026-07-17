@@ -18,22 +18,6 @@ use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-fn is_ledger_entry_stale(entry: &LedgerEntry) -> bool {
-    let entry_time = if let Ok(parsed) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
-        parsed
-    } else if let Ok(secs) = entry.timestamp.parse::<i64>() {
-        if let Ok(dt) = OffsetDateTime::from_unix_timestamp(secs) {
-            dt
-        } else {
-            return false;
-        }
-    } else {
-        return false;
-    };
-    let now = OffsetDateTime::now_utc();
-    now - entry_time > time::Duration::days(14)
-}
-
 /// Parallel workers: how long a "claim" entry (`LedgerEntry::new_claim`)
 /// blocks a ticket before it's treated as abandoned (worker crashed/killed
 /// mid-flight, or was force-killed by the idle-timeout watchdog after
@@ -183,7 +167,7 @@ pub(super) fn check_duplicate_work(
     let mrs = crate::sync::fetch_active_mrs(profile)?;
 
     for entry in matching_entries {
-        if is_ledger_entry_stale(&entry) {
+        if crate::ledger::is_entry_stale(&entry) {
             continue;
         }
 
@@ -282,12 +266,6 @@ fn ledger_lookup_for_ticket(
     let mut has_active_mr = false;
     let mut has_merged_mr = false;
     let mut has_active_claim = false;
-    // TICKET-human-required-scoping: effective human_required is the most
-    // recent state for this work item. A later review escalation explicitly
-    // clears an earlier provisional human handoff; OR-ing historical flags
-    // would leave the dashboard permanently blocked after automation recovers.
-    let mut human_required = false;
-    let mut human_required_reason_code = None;
     for e in entries.into_iter().flatten() {
         // The ledger is a single global file shared by every profile
         // (Defaults::ledger_path, not per-profile), and work_id is
@@ -299,7 +277,7 @@ fn ledger_lookup_for_ticket(
         if e.repo_id != profile.repo_id {
             continue;
         }
-        if is_ledger_entry_stale(e) {
+        if crate::ledger::is_entry_stale(e) {
             continue;
         }
         // Issue #95: tombstone entry from `gah clear-attempts`. When
@@ -311,8 +289,6 @@ fn ledger_lookup_for_ticket(
             agent_failure_count = 0;
             last_failure_class = None;
             has_active_claim = false;
-            human_required = false;
-            human_required_reason_code = None;
             continue;
         }
         // Parallel workers: a claim marks the ticket as currently in-flight
@@ -328,8 +304,6 @@ fn ledger_lookup_for_ticket(
         // attempts. Granting one releases the work-item human gate that asked
         // for approval; neither grant nor revoke consumes retry budget.
         if e.mode == "paid_route_approval_grant" {
-            human_required = false;
-            human_required_reason_code = None;
             last_failure_class = Some(
                 crate::ledger::FailureClass::AgentNoProgress
                     .as_str()
@@ -368,20 +342,6 @@ fn ledger_lookup_for_ticket(
             }
         }
         last_failure_class = e.failure_class.clone().or(last_failure_class);
-        // Only a review entry may CLEAR a prior human_required hold -- that is
-        // the bounded escalation chain deliberately superseding its own earlier
-        // provisional hold. Any other mode can still latch it true (e.g. a
-        // fix/improve dispatch that hit "no eligible backend"), but must never
-        // silently clear an existing hold set by something else: a racing
-        // parallel worker's unrelated completion entry must not un-block a
-        // ticket that a review already gave up on.
-        if e.mode == "review" {
-            human_required = e.human_required;
-            human_required_reason_code = e.human_required_reason_code.clone();
-        } else if e.human_required {
-            human_required = true;
-            human_required_reason_code = e.human_required_reason_code.clone();
-        }
         let matching_mr = all_mrs.iter().find(|mr| {
             e.branch.as_deref().is_some_and(|b| b == mr.branch)
                 || (e.mr_url.is_some() && e.mr_url.as_deref() == mr.url.as_deref())
@@ -420,6 +380,13 @@ fn ledger_lookup_for_ticket(
     if has_merged_mr {
         return None;
     }
+    let effective_gate = crate::ledger::effective_human_gate_from_index(
+        ledger_entries_by_work_id,
+        &profile.repo_id,
+        wid,
+    );
+    let human_required = effective_gate.is_some();
+    let human_required_reason_code = effective_gate.and_then(|gate| gate.reason_code);
     Some((
         count,
         agent_failure_count,

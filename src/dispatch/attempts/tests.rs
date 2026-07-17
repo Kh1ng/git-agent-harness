@@ -969,6 +969,19 @@ fn decide_route_classifies_no_eligible_backend_as_backend_error() {
     let err = decide_route(&cfg, &prof, req, None, &mut ledger).unwrap_err();
     assert!(err.downcast_ref::<RouteError>().is_some());
     assert_eq!(ledger.failure_class.as_deref(), Some("backend_error"));
+    let diagnostics = ledger
+        .routing_diagnostics
+        .expect("route failures must preserve structured candidates");
+    assert_eq!(diagnostics.candidates.len(), 1);
+    assert_eq!(diagnostics.candidates[0].backend, "not-a-real-backend");
+    assert_eq!(
+        diagnostics.candidates[0].skip_reason.as_deref(),
+        Some("backend CLI not installed")
+    );
+    assert!(diagnostics
+        .human_summary
+        .as_deref()
+        .is_some_and(|summary| summary.contains("no eligible backend")));
 }
 
 #[test]

@@ -586,6 +586,34 @@ pub(super) fn decide_route(
         Ok(route) => Ok(route),
         Err(err) => {
             if let Some(route_err) = err.downcast_ref::<RouteError>() {
+                let (selected_backend, selected_model, skipped) = match route_err {
+                    RouteError::ApprovalRequired {
+                        backend,
+                        model,
+                        skipped,
+                    } => (Some(backend.clone()), model.clone(), skipped),
+                    RouteError::NoEligibleBackend { skipped, .. } => (None, None, skipped),
+                };
+                ledger.routing_diagnostics = Some(crate::ledger::RoutingDiagnostics {
+                    selected_backend,
+                    selected_model,
+                    candidates: skipped
+                        .iter()
+                        .enumerate()
+                        .map(
+                            |(index, candidate)| crate::ledger::RoutingCandidateDiagnostic {
+                                backend: candidate.backend.clone(),
+                                model: candidate.model.clone(),
+                                consideration_order: Some(index),
+                                skip_reason: Some(candidate.reason.clone()),
+                                unavailable_until: candidate.unavailable_until.clone(),
+                                ..Default::default()
+                            },
+                        )
+                        .collect(),
+                    human_summary: Some(route_err.to_string()),
+                    ..Default::default()
+                });
                 // Transient: every candidate backend is momentarily unavailable
                 // (quota/cooldown), and this self-resolves once an
                 // `unavailable_until`/`earliest_reset` window passes -- same
@@ -634,6 +662,13 @@ pub(super) fn routing_runtime_state(
     current: &LedgerEntry,
 ) -> Result<RoutingRuntimeState> {
     let entries = ledger::read_entries(cfg)?;
+    Ok(routing_runtime_state_from_entries(&entries, current))
+}
+
+pub(crate) fn routing_runtime_state_from_entries(
+    entries: &[LedgerEntry],
+    current: &LedgerEntry,
+) -> RoutingRuntimeState {
     let cutoff = OffsetDateTime::now_utc() - time::Duration::days(7);
     let mut state = RoutingRuntimeState::default();
 
@@ -673,18 +708,23 @@ pub(super) fn routing_runtime_state(
     }
 
     if let Some(work_id) = current.work_id.as_deref() {
+        let aliases = ledger::work_id_aliases(work_id);
         if is_implementation_execution_mode(&current.mode) {
             for entry in entries.iter().filter(|entry| {
                 entry.profile == current.profile
                     && entry.repo_id == current.repo_id
-                    && entry.work_id.as_deref() == Some(work_id)
+                    && entry
+                        .work_id
+                        .as_deref()
+                        .is_some_and(|id| aliases.iter().any(|alias| alias == id))
                     && is_implementation_execution_mode(&entry.mode)
             }) {
                 record_genuine_failure_routes(&mut state, entry);
             }
             record_genuine_failure_routes(&mut state, current);
         }
-        for (backend, model) in ledger::active_paid_route_approvals(cfg, &current.profile, work_id)?
+        for (backend, model) in
+            ledger::active_paid_route_approvals_from_entries(entries, &current.profile, work_id)
         {
             state
                 .approved
@@ -695,7 +735,7 @@ pub(super) fn routing_runtime_state(
         .dispatch_attempted
         .extend(current.routing_runtime.dispatch_attempted.iter().cloned());
 
-    Ok(state)
+    state
 }
 
 fn record_recent_route_run(state: &mut RoutingRuntimeState, backend: &str, model: Option<&str>) {

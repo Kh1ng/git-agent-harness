@@ -17,6 +17,7 @@ static READ_ENTRIES_CALLS: LazyLock<Mutex<std::collections::HashMap<PathBuf, usi
 
 /// Resolve current paid-route grants for one work item. Later grant/revoke
 /// entries supersede earlier ones for the same exact backend/model identity.
+#[allow(dead_code)]
 pub fn active_paid_route_approvals(
     cfg: &GahConfig,
     profile_name: &str,
@@ -36,8 +37,14 @@ pub fn active_paid_route_approvals_from_entries(
     work_id: &str,
 ) -> HashSet<(String, Option<String>)> {
     let mut active = HashSet::new();
+    let aliases = work_id_aliases(work_id);
     for entry in entries {
-        if entry.profile != profile_name || entry.work_id.as_deref() != Some(work_id) {
+        if entry.profile != profile_name
+            || !entry
+                .work_id
+                .as_deref()
+                .is_some_and(|id| aliases.iter().any(|alias| alias == id))
+        {
             continue;
         }
         let identity = (
@@ -122,8 +129,7 @@ pub fn active_review_hold_work_ids_from_entries(
         .collect()
 }
 
-pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
-    let path = cfg.defaults.ledger_path();
+fn lock_ledger(path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("creating ledger directory {}", parent.display()))?;
@@ -142,8 +148,11 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
     lock_file
         .lock_exclusive()
         .with_context(|| format!("locking ledger {}", lock_path.display()))?;
+    Ok(lock_file)
+}
 
-    if let Some(offset) = truncated_tail_offset(&fs::read(&path).unwrap_or_default()) {
+fn append_locked(cfg: &GahConfig, path: &Path, entry: &LedgerEntry) -> Result<()> {
+    if let Some(offset) = truncated_tail_offset(&fs::read(path).unwrap_or_default()) {
         anyhow::bail!(
             "ledger {} has an unterminated invalid final record at byte {}; run `gah ledger repair-tail` before appending",
             path.display(),
@@ -154,7 +163,7 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("opening ledger {}", path.display()))?;
     let mut value = serde_json::to_value(entry).context("serializing ledger entry")?;
     crate::redact::redact_json_value(&mut value);
@@ -169,7 +178,46 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
         eprintln!("warning: failed to sync sqlite ledger mirror: {err:#}");
     }
 
+    Ok(())
+}
+
+pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
+    let path = cfg.defaults.ledger_path();
+    let _lock = lock_ledger(&path)?;
+    append_locked(cfg, &path, entry)?;
+
     Ok(path)
+}
+
+/// Atomically append a human gate only when the same work item has no active
+/// effective gate. The check and append share the ledger's cross-process lock,
+/// so concurrent controller slots cannot both observe "ungated" and write
+/// duplicate transitions.
+pub fn append_human_gate_if_transition(cfg: &GahConfig, entry: &LedgerEntry) -> Result<bool> {
+    anyhow::ensure!(
+        entry.human_required,
+        "conditional gate entry must require human action"
+    );
+    let work_id = entry
+        .work_id
+        .as_deref()
+        .context("conditional gate entry must have a work_id")?;
+    let path = cfg.defaults.ledger_path();
+    let _lock = lock_ledger(&path)?;
+    let existing = if path.exists() {
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        parse_jsonl_entries(&text, &path, 0)?
+    } else {
+        Vec::new()
+    };
+    if effective_human_gate_from_entries(&existing, &entry.profile, &entry.repo_id, work_id)
+        .is_some()
+    {
+        return Ok(false);
+    }
+    append_locked(cfg, &path, entry)?;
+    Ok(true)
 }
 
 /// Result of the deliberately narrow JSONL tail-repair operation.
@@ -454,6 +502,108 @@ fn review_is_dedup_eligible(entry: &LedgerEntry) -> bool {
 
 pub type LedgerEntriesByWorkId = BTreeMap<String, Vec<LedgerEntry>>;
 
+/// The current work-item-scoped human gate derived from append-only ledger
+/// history. Consumers must use this shared projection instead of inferring the
+/// state from whichever tickets happened to survive issue discovery: an open
+/// PR/MR remains gated even when its source issue is dependency-blocked,
+/// closed, or otherwise absent from the dispatchable ticket list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveHumanGate {
+    pub reason_code: Option<String>,
+    pub dispatch_reason: Option<String>,
+    pub message: Option<String>,
+    pub mode: String,
+    pub timestamp: String,
+    pub routing_diagnostics: Option<super::entry::RoutingDiagnostics>,
+}
+
+const LEDGER_ENTRY_STALE_AFTER_DAYS: i64 = 14;
+
+pub fn is_entry_stale(entry: &LedgerEntry) -> bool {
+    let entry_time = if let Ok(parsed) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
+        parsed
+    } else if let Ok(secs) = entry.timestamp.parse::<i64>() {
+        if let Ok(dt) = OffsetDateTime::from_unix_timestamp(secs) {
+            dt
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    };
+    OffsetDateTime::now_utc() - entry_time > time::Duration::days(LEDGER_ENTRY_STALE_AFTER_DAYS)
+}
+
+/// Resolve the effective human gate for one work item using the same
+/// transition semantics as ticket discovery. A review may clear its own
+/// provisional hold; unrelated non-review completions may not clear a hold.
+/// Explicit operator approval and `clear-attempts` are durable release
+/// transitions. Control-only records never create or clear a gate.
+pub fn effective_human_gate_from_entries(
+    entries: &[LedgerEntry],
+    profile_name: &str,
+    repo_id: &str,
+    work_id: &str,
+) -> Option<EffectiveHumanGate> {
+    effective_human_gate_for_scope(entries, Some(profile_name), repo_id, work_id)
+}
+
+fn effective_human_gate_for_scope(
+    entries: &[LedgerEntry],
+    profile_name: Option<&str>,
+    repo_id: &str,
+    work_id: &str,
+) -> Option<EffectiveHumanGate> {
+    let aliases = work_id_aliases(work_id);
+    let mut gate = None;
+    for entry in entries.iter().filter(|entry| {
+        profile_name.is_none_or(|profile_name| entry.profile == profile_name)
+            && entry.repo_id == repo_id
+            && entry
+                .work_id
+                .as_deref()
+                .is_some_and(|id| aliases.iter().any(|alias| alias == id))
+            && !is_entry_stale(entry)
+    }) {
+        match entry.mode.as_str() {
+            "clear_attempts" | "paid_route_approval_grant" => {
+                gate = None;
+                continue;
+            }
+            "claim" | "paid_route_approval_revoke" | "review_hold" | "review_hold_release" => {
+                continue;
+            }
+            _ if entry.validation_result.as_deref() == Some("deferred_capacity") => continue,
+            "review" if !entry.human_required => {
+                gate = None;
+                continue;
+            }
+            _ if !entry.human_required => continue,
+            _ => {}
+        }
+
+        gate = Some(EffectiveHumanGate {
+            reason_code: entry.human_required_reason_code.clone(),
+            dispatch_reason: entry.dispatch_reason.clone(),
+            message: entry.error_summary.clone(),
+            mode: entry.mode.clone(),
+            timestamp: entry.timestamp.clone(),
+            routing_diagnostics: entry.routing_diagnostics.clone(),
+        });
+    }
+    gate
+}
+
+pub fn effective_human_gate_from_index(
+    entries: &LedgerEntriesByWorkId,
+    repo_id: &str,
+    work_id: &str,
+) -> Option<EffectiveHumanGate> {
+    entries
+        .get(work_id)
+        .and_then(|entries| effective_human_gate_for_scope(entries, None, repo_id, work_id))
+}
+
 /// Native tracker issues use their provider-visible `#123` identity. Older
 /// GAH records used `TICKET-123`; retain that as a read alias so migrating to
 /// the tracker identity never forks history or re-dispatches completed work.
@@ -492,8 +642,9 @@ pub fn index_entries_by_work_id(entries: &[LedgerEntry]) -> LedgerEntriesByWorkI
 mod tests {
     use super::{
         active_paid_route_approvals, active_review_hold_work_ids, append, backfill_review_verdict,
-        entries_for_work_id, index_entries_by_work_id, read_entries, repair_truncated_tail_at,
-        review_already_exists, review_is_dedup_eligible, ReviewVerdictBackfill,
+        effective_human_gate_from_entries, entries_for_work_id, index_entries_by_work_id,
+        read_entries, repair_truncated_tail_at, review_already_exists, review_is_dedup_eligible,
+        ReviewVerdictBackfill,
     };
     use crate::ledger::test_util as ledger_tests;
     use std::fs;
@@ -552,6 +703,77 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(!text.contains("abcdefghijklmnopqrstuvwxyz"));
         assert!(text.contains("[REDACTED:TOKEN]"));
+    }
+
+    #[test]
+    fn effective_human_gate_is_latched_until_an_explicit_release_transition() {
+        let profile = ledger_tests::profile();
+        let mut gate =
+            super::super::LedgerEntry::new("test", &profile, "auto", "fix", "#639", None, None);
+        gate.work_id = Some("#639".into());
+        gate.human_required = true;
+        gate.human_required_reason_code = Some("stuck_loop_gate".into());
+        gate.dispatch_reason = Some("stuck_loop_gate".into());
+
+        let mut unrelated_completion = gate.clone();
+        unrelated_completion.mode = "fix".into();
+        unrelated_completion.human_required = false;
+        unrelated_completion.human_required_reason_code = None;
+        unrelated_completion.dispatch_reason = Some("post_review_repair".into());
+
+        let active = effective_human_gate_from_entries(
+            &[gate.clone(), unrelated_completion],
+            "test",
+            &profile.repo_id,
+            "TICKET-639",
+        )
+        .expect("a non-review completion must not clear the gate");
+        assert_eq!(active.reason_code.as_deref(), Some("stuck_loop_gate"));
+
+        let mut review_release = gate;
+        review_release.mode = "review".into();
+        review_release.human_required = false;
+        review_release.human_required_reason_code = None;
+        assert!(effective_human_gate_from_entries(
+            &[review_release],
+            "test",
+            &profile.repo_id,
+            "#639",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn paid_route_grant_releases_only_the_matching_profile_and_repository_gate() {
+        let profile = ledger_tests::profile();
+        let mut gate =
+            super::super::LedgerEntry::new("test", &profile, "auto", "review", "#650", None, None);
+        gate.work_id = Some("#650".into());
+        gate.human_required = true;
+        gate.human_required_reason_code = Some("policy_approval".into());
+        let grant = super::super::LedgerEntry::new_paid_route_approval(
+            "test",
+            &profile,
+            "#650",
+            "opencode",
+            Some("nous/glm-5.2"),
+            true,
+        );
+
+        assert!(effective_human_gate_from_entries(
+            &[gate.clone(), grant],
+            "test",
+            &profile.repo_id,
+            "#650",
+        )
+        .is_none());
+        assert!(effective_human_gate_from_entries(
+            &[gate],
+            "other-profile",
+            &profile.repo_id,
+            "#650",
+        )
+        .is_none());
     }
 
     #[test]
