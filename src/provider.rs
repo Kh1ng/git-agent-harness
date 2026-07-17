@@ -1,6 +1,8 @@
 use crate::config::Profile;
 use anyhow::{Context, Result};
 use std::process::{Command, Output};
+use std::thread;
+use std::time::Duration;
 
 const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
     "gah-needs-fix",
@@ -11,6 +13,51 @@ const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
 ];
 const PROVIDER_ERROR_MAX_CHARS: usize = 4_096;
 const PROVIDER_MR_TITLE_MAX_CHARS: usize = 255;
+const PROVIDER_NETWORK_ATTEMPTS: u8 = 3;
+#[cfg(not(test))]
+const PROVIDER_NETWORK_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+fn provider_network_retry_backoff() -> Duration {
+    #[cfg(test)]
+    {
+        Duration::ZERO
+    }
+    #[cfg(not(test))]
+    {
+        PROVIDER_NETWORK_RETRY_BACKOFF
+    }
+}
+
+/// Run a provider CLI operation with a small, bounded retry only for
+/// transport weather. Authentication, authorization, schema, and ordinary
+/// provider errors return immediately so unattended loops cannot hide a real
+/// configuration problem behind repeated writes.
+fn provider_output_with_transient_retry(
+    operation: &str,
+    mut command: impl FnMut() -> Command,
+) -> Result<Output> {
+    for attempt in 1..=PROVIDER_NETWORK_ATTEMPTS {
+        let out = command()
+            .output()
+            .with_context(|| format!("launching provider operation {operation}"))?;
+        if out.status.success()
+            || attempt == PROVIDER_NETWORK_ATTEMPTS
+            || !crate::worktree::is_transient_network_error(&redacted_provider_output(&out))
+        {
+            return Ok(out);
+        }
+
+        eprintln!(
+            "transient provider network failure during {operation}; retrying {}/{} after {}s: {}",
+            attempt + 1,
+            PROVIDER_NETWORK_ATTEMPTS,
+            provider_network_retry_backoff().as_secs(),
+            redacted_provider_output(&out)
+        );
+        thread::sleep(provider_network_retry_backoff());
+    }
+    unreachable!("bounded provider retry loop always returns")
+}
 
 fn draft_mr_title(title: &str) -> String {
     let prefixed = format!("Draft: {title}");
@@ -323,24 +370,74 @@ fn github_post_review_comment(
     labels: &[&str],
 ) -> Result<()> {
     let pr_number = github_find_pr_number_by_branch(profile, branch)?;
-    let out = provider_command("gh")
-        .args([
-            "pr",
-            "comment",
-            &pr_number,
-            "--repo",
-            &profile.repo,
-            "--body",
-            body,
-        ])
-        .output()
-        .context("gh pr comment")?;
-    if !out.status.success() {
-        anyhow::bail!("gh pr comment failed: {}", redacted_stderr(&out));
-    }
+    github_post_issue_comment(profile, &pr_number, body)
+        .with_context(|| format!("posting review comment to PR {}", pr_number))?;
     github_set_review_state_labels(profile, &pr_number, labels)
         .with_context(|| format!("applying review labels to PR {}", pr_number))?;
     Ok(())
+}
+
+fn github_post_issue_comment(profile: &Profile, pr_number: &str, body: &str) -> Result<()> {
+    let endpoint = format!("repos/{}/issues/{pr_number}/comments", profile.repo);
+
+    // A timed-out POST may still have reached GitHub. Check for this exact
+    // run's rendered comment before every POST attempt so retrying transport
+    // failures does not normally duplicate review comments.
+    for attempt in 1..=PROVIDER_NETWORK_ATTEMPTS {
+        let existing =
+            provider_output_with_transient_retry("read existing review comments", || {
+                let mut command = provider_command("gh");
+                command.args(["api", "--method", "GET", &endpoint, "-f", "per_page=100"]);
+                command
+            })?;
+        if !existing.status.success() {
+            anyhow::bail!(
+                "reading existing review comments failed: {}",
+                redacted_provider_output(&existing)
+            );
+        }
+        let comments: serde_json::Value = serde_json::from_slice(&existing.stdout)
+            .context("parsing existing GitHub review comments")?;
+        if comments.as_array().is_some_and(|comments| {
+            comments
+                .iter()
+                .any(|comment| comment["body"].as_str() == Some(body))
+        }) {
+            return Ok(());
+        }
+
+        let mut command = provider_command("gh");
+        command.args([
+            "api",
+            "--method",
+            "POST",
+            &endpoint,
+            "--raw-field",
+            &format!("body={body}"),
+        ]);
+        let post = command
+            .output()
+            .context("launching provider operation post review comment")?;
+        if post.status.success() {
+            return Ok(());
+        }
+        let output = redacted_provider_output(&post);
+        if attempt < PROVIDER_NETWORK_ATTEMPTS
+            && crate::worktree::is_transient_network_error(&output)
+        {
+            eprintln!(
+                "transient provider network failure during post review comment; retrying {}/{} after {}s: {}",
+                attempt + 1,
+                PROVIDER_NETWORK_ATTEMPTS,
+                provider_network_retry_backoff().as_secs(),
+                output
+            );
+            thread::sleep(provider_network_retry_backoff());
+            continue;
+        }
+        anyhow::bail!("posting review comment failed: {}", output);
+    }
+    unreachable!("bounded GitHub comment retry loop always returns")
 }
 
 fn gitlab_set_review_state_labels(profile: &Profile, iid: &str, labels: &[&str]) -> Result<()> {
@@ -376,10 +473,11 @@ fn github_set_review_state_labels(
     // the retired Projects (classic) surface. Keep this state transition on
     // the REST issue-label endpoints used successfully by review publishing.
     let endpoint = format!("repos/{}/issues/{}/labels", profile.repo, pr_number);
-    let current = provider_command("gh")
-        .args(["api", &endpoint, "--jq", ".[].name"])
-        .output()
-        .context("gh api current review labels")?;
+    let current = provider_output_with_transient_retry("read current review labels", || {
+        let mut command = provider_command("gh");
+        command.args(["api", &endpoint, "--jq", ".[].name"]);
+        command
+    })?;
     if !current.status.success() {
         anyhow::bail!(
             "reading current review labels failed: {}",
@@ -401,10 +499,12 @@ fn github_set_review_state_labels(
         .copied()
         .filter(|label| current.contains(label) && !labels.contains(label))
     {
-        let remove = provider_command("gh")
-            .args(["api", "--method", "DELETE", &format!("{endpoint}/{stale}")])
-            .output()
-            .context("gh api remove stale review label")?;
+        let stale_endpoint = format!("{endpoint}/{stale}");
+        let remove = provider_output_with_transient_retry("remove stale review label", || {
+            let mut command = provider_command("gh");
+            command.args(["api", "--method", "DELETE", &stale_endpoint]);
+            command
+        })?;
         if !remove.status.success() {
             anyhow::bail!(
                 "removing stale review label {stale} failed: {}",
@@ -424,10 +524,11 @@ fn github_set_review_state_labels(
             args.push("-f".to_string());
             args.push(format!("labels[]={label}"));
         }
-        let add = provider_command("gh")
-            .args(&args)
-            .output()
-            .context("gh api add review labels")?;
+        let add = provider_output_with_transient_retry("add review labels", || {
+            let mut command = provider_command("gh");
+            command.args(&args);
+            command
+        })?;
         if !add.status.success() {
             anyhow::bail!("adding review labels failed: {}", redacted_stderr(&add));
         }
@@ -698,23 +799,33 @@ fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarg
 }
 
 fn github_find_pr_number_by_branch(profile: &Profile, branch: &str) -> Result<String> {
-    let out = provider_command("gh")
-        .args([
-            "pr",
-            "list",
-            "--repo",
-            &profile.repo,
-            "--head",
-            branch,
-            "--state",
-            "open",
-            "--json",
-            "number",
-        ])
-        .output()
-        .context("gh pr list")?;
+    let (owner, _) = profile.repo.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid GitHub repo '{}': expected owner/repository",
+            profile.repo
+        )
+    })?;
+    let endpoint = format!("repos/{}/pulls", profile.repo);
+    let head = format!("head={owner}:{branch}");
+    let out = provider_output_with_transient_retry("find GitHub PR by branch", || {
+        let mut command = provider_command("gh");
+        command.args([
+            "api",
+            "--method",
+            "GET",
+            &endpoint,
+            "-f",
+            "state=open",
+            "-f",
+            &head,
+        ]);
+        command
+    })?;
     if !out.status.success() {
-        anyhow::bail!("gh pr list failed: {}", redacted_stderr(&out));
+        anyhow::bail!(
+            "GitHub REST PR lookup failed: {}",
+            redacted_provider_output(&out)
+        );
     }
     let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let number = resp
