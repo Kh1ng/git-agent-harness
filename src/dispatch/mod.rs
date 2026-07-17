@@ -34,6 +34,7 @@ pub use self::review::policy::review_budget_exhausted_error;
 pub(crate) use self::text::utf8_safe_prefix;
 
 pub use self::attempts::review_preflight;
+pub(crate) use self::attempts::routing_runtime_state_from_entries;
 
 use self::claims::check_duplicate_work;
 pub(crate) use self::claims::duplicate_work_error;
@@ -56,6 +57,14 @@ pub fn capacity_deferred_error(error: &anyhow::Error) -> bool {
 
 fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
     review_budget_exhausted_error(error).is_none() && !capacity_deferred_error(error)
+}
+
+fn is_policy_approval_gate(entry: &LedgerEntry) -> bool {
+    entry.human_required
+        && entry.human_required_reason_code.as_deref()
+            == Some(crate::controller::HumanRequiredReason::PolicyApproval.as_str())
+        && entry.failure_class.as_deref()
+            == Some(crate::ledger::FailureClass::HumanBlocked.as_str())
 }
 
 fn ensure_terminal_failure_attribution(
@@ -205,13 +214,23 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         ensure_terminal_failure_attribution(&mut ledger.failure_class, &mut ledger.failure_stage);
         ledger.error_summary = Some(error::summarize_error(err));
     }
-    if let Err(err) = crate::ledger::append(cfg, &ledger) {
+    let policy_approval_gate = is_policy_approval_gate(&ledger);
+    let mut new_policy_approval_transition = true;
+    let append_result = if policy_approval_gate {
+        crate::ledger::append_human_gate_if_transition(cfg, &ledger).map(|appended| {
+            new_policy_approval_transition = appended;
+        })
+    } else {
+        crate::ledger::append(cfg, &ledger).map(|_| ())
+    };
+    if let Err(err) = append_result {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
     }
     if result
         .as_ref()
         .err()
         .is_some_and(should_notify_dispatch_failure)
+        && (!policy_approval_gate || new_policy_approval_transition)
     {
         notify_event(
             cfg,
@@ -240,61 +259,4 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        capacity_deferred_error, ensure_terminal_failure_attribution,
-        should_notify_dispatch_failure,
-    };
-    use crate::routing::{RouteError, SkippedBackend};
-
-    fn no_eligible(reason: &str) -> anyhow::Error {
-        RouteError::NoEligibleBackend {
-            preferred_backend: "claude".into(),
-            preferred_model: Some("sonnet".into()),
-            skipped: vec![SkippedBackend {
-                backend: "claude".into(),
-                model: Some("sonnet".into()),
-                reason: reason.into(),
-                unavailable_until: None,
-            }],
-            earliest_reset: None,
-        }
-        .into()
-    }
-
-    #[test]
-    fn capacity_deferral_is_detected_through_anyhow_context_and_not_notified() {
-        let error = no_eligible("max_concurrent_reached").context("routing review");
-        assert!(capacity_deferred_error(&error));
-        assert!(!should_notify_dispatch_failure(&error));
-    }
-
-    #[test]
-    fn genuine_no_eligible_route_still_notifies_as_a_failure() {
-        let error = no_eligible("quota_exhausted");
-        assert!(!capacity_deferred_error(&error));
-        assert!(should_notify_dispatch_failure(&error));
-    }
-
-    #[test]
-    fn unattributed_terminal_error_gets_concrete_harness_fallback() {
-        let mut class = None;
-        let mut stage = None;
-
-        ensure_terminal_failure_attribution(&mut class, &mut stage);
-
-        assert_eq!(class.as_deref(), Some("harness_error"));
-        assert_eq!(stage.as_deref(), Some("dispatch"));
-    }
-
-    #[test]
-    fn terminal_error_fallback_preserves_existing_specific_attribution() {
-        let mut class = Some("validation_failure".to_string());
-        let mut stage = Some("post_validation".to_string());
-
-        ensure_terminal_failure_attribution(&mut class, &mut stage);
-
-        assert_eq!(class.as_deref(), Some("validation_failure"));
-        assert_eq!(stage.as_deref(), Some("post_validation"));
-    }
-}
+mod tests;

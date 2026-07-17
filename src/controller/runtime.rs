@@ -19,6 +19,27 @@ fn is_validation_gate_failure(error: &anyhow::Error) -> bool {
         .any(|cause| cause.is::<crate::dispatch::ValidationGateError>())
 }
 
+/// Persist a stuck-loop transition only when this work item has no active
+/// durable human gate. The profile lock serializes controller writers, while
+/// the fresh ledger read also protects parallel refill slots whose snapshot
+/// predates a sibling's gate append.
+fn append_stuck_loop_gate_if_transition(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    work_id: &str,
+    reason: &str,
+) -> Result<bool> {
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    let mut gate =
+        crate::ledger::LedgerEntry::new(profile_name, profile, "auto", "fix", work_id, None, None);
+    gate.work_id = Some(work_id.to_string());
+    gate.human_required = true;
+    gate.dispatch_reason = Some("stuck_loop_gate".to_string());
+    gate.human_required_reason_code = Some("stuck_loop_gate".to_string());
+    gate.error_summary = Some(reason.to_string());
+    crate::ledger::append_human_gate_if_transition(cfg, &gate)
+}
+
 /// TICKET-079: `gah loop --once` -- exactly one bounded controller
 /// iteration. Build a snapshot, decide one action, execute at most that
 /// one action, persist one controller event trail, exit. No daemon, no
@@ -306,24 +327,9 @@ pub fn run_once(
             // re-selecting DispatchTicket every cycle (the original
             // trip-without-latch bug).
             if let Some(wid) = original_action.work_id() {
-                let profile = crate::config::get_profile(cfg, profile_name)?;
-                let mut gate = crate::ledger::LedgerEntry::new(
-                    profile_name,
-                    profile,
-                    "auto",
-                    "fix",
-                    wid,
-                    None,
-                    None,
-                );
-                gate.work_id = Some(wid.to_string());
-                gate.human_required = true;
-                gate.human_required_reason_code =
-                    Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
-                gate.dispatch_reason = Some("stuck_loop_gate".to_string());
-                gate.human_required_reason_code = Some("stuck_loop_gate".to_string());
-                gate.error_summary = Some(reason.clone());
-                if let Err(e) = crate::ledger::append(cfg, &gate) {
+                if let Err(e) =
+                    append_stuck_loop_gate_if_transition(cfg, profile_name, wid, &reason)
+                {
                     eprintln!("warning: failed to persist stuck-loop gate: {e:#}");
                 }
             }
@@ -517,24 +523,11 @@ fn run_parallel_once(
                     detect_stuck_loop(&history, profile_name, &original_action, reset_after)
                 {
                     if let Some(wid) = original_action.work_id() {
-                        let profile = crate::config::get_profile(cfg, profile_name)?;
-                        let mut gate = crate::ledger::LedgerEntry::new(
-                            profile_name,
-                            profile,
-                            "auto",
-                            "fix",
-                            wid,
-                            None,
-                            None,
-                        );
-                        gate.work_id = Some(wid.to_string());
-                        gate.human_required = true;
-                        gate.human_required_reason_code =
-                            Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
-                        gate.dispatch_reason = Some("stuck_loop_gate".to_string());
-                        gate.human_required_reason_code = Some("stuck_loop_gate".to_string());
-                        gate.error_summary = Some(reason.clone());
-                        let _ = crate::ledger::append(cfg, &gate);
+                        if let Err(error) =
+                            append_stuck_loop_gate_if_transition(cfg, profile_name, wid, &reason)
+                        {
+                            eprintln!("warning: failed to persist stuck-loop gate: {error:#}");
+                        }
                     }
                     if let Some(stuck_wid) = original_action.work_id() {
                         fresh_snapshot
@@ -995,8 +988,9 @@ mod ledger_read_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_profile_lock, action_waits_for_route, is_validation_gate_failure, loop_lock_path,
-        loop_parallel_argument, reload_config_for_profile, wait_interruptibly,
+        acquire_profile_lock, action_waits_for_route, append_stuck_loop_gate_if_transition,
+        is_validation_gate_failure, loop_lock_path, loop_parallel_argument,
+        reload_config_for_profile, wait_interruptibly,
     };
 
     #[test]
@@ -1029,6 +1023,72 @@ mod tests {
     fn ordinary_errors_are_not_misclassified_as_validation_gate_failures() {
         let error = anyhow::anyhow!("backend command timed out");
         assert!(!is_validation_gate_failure(&error));
+    }
+
+    #[test]
+    fn stuck_loop_gate_append_is_an_idempotent_state_transition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cfg.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[defaults]
+artifact_root = "{}"
+
+[profiles.test]
+display_name = "Test"
+repo_id = "test/test"
+provider = "github"
+repo = "test/test"
+local_path = "/tmp"
+artifact_root = "{}"
+default_target_branch = "main"
+"#,
+                tmp.path().display(),
+                tmp.path().display()
+            ),
+        )
+        .unwrap();
+        let cfg = crate::config::load(Some(path.to_str().unwrap())).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let appended = std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    let cfg = &cfg;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        append_stuck_loop_gate_if_transition(
+                            cfg,
+                            "test",
+                            "#639",
+                            "same stuck decision",
+                        )
+                        .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .filter(|appended| *appended)
+                .count()
+        });
+        assert_eq!(
+            appended, 1,
+            "exactly one concurrent slot owns the transition"
+        );
+
+        let entries = crate::ledger::read_entries(&cfg).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.dispatch_reason.as_deref() == Some("stuck_loop_gate"))
+                .count(),
+            1
+        );
     }
 
     /// TICKET/incident: an autonomous session ran `gah loop --profile X

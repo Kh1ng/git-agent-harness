@@ -9,6 +9,8 @@ use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+mod gates;
+
 fn effective_issue_intake_policy(profile: &Profile) -> crate::models::IssueIntakePolicy {
     let trusted_human_authors = profile
         .publishing
@@ -463,6 +465,33 @@ fn build_snapshot_inner(
             incomplete_snapshot: false,
         });
     }
+    // A paid-route approval request is conditional, not permanent. If a
+    // subscription/local route has recovered since the failed dispatch,
+    // release the derived ticket hold without rewriting ledger history.
+    for ticket in &mut available_tickets {
+        let Some(work_id) = ticket.work_id.as_deref() else {
+            continue;
+        };
+        let Some(gate) = ledger::effective_human_gate_from_entries(
+            entries,
+            profile_name,
+            &profile.repo_id,
+            work_id,
+        ) else {
+            continue;
+        };
+        if !gates::policy_approval_still_required(
+            cfg,
+            profile_name,
+            profile,
+            entries,
+            work_id,
+            &gate,
+        ) {
+            ticket.human_required = false;
+            ticket.human_required_reason_code = None;
+        }
+    }
     // Load durable claim state once and apply active-claim flags directly from
     // the canonical `<profile>@<repo_id>` scope to avoid stale CLI/runtime
     // mismatch and per-ticket file reads.
@@ -525,6 +554,20 @@ fn build_snapshot_inner(
             });
         }
     }
+
+    // Project durable ledger gates directly onto every active PR/MR. This is
+    // deliberately independent of available_tickets: dependency filtering or
+    // issue-intake policy may hide the source issue while its already-open MR
+    // still needs repair/review. Losing the gate in that state caused the
+    // controller to redispatch and notify the same blocked MR every tick.
+    gates::project_effective_mr_gates(
+        cfg,
+        profile_name,
+        profile,
+        entries,
+        &merge_requests,
+        &mut blocked_work_items,
+    );
     for dependency in &dependency_blockers {
         blocked_work_items.push(Blocker {
             kind: "dependency".into(),
@@ -1082,7 +1125,7 @@ default_target_branch = "main"
         );
         entry.work_id = Some("TICKET-300".into());
         entry.human_required = true;
-        entry.human_required_reason_code = Some("policy_approval".into());
+        entry.human_required_reason_code = Some("stuck_loop_gate".into());
         crate::ledger::append(&cfg, &entry).unwrap();
 
         let snap = build_snapshot(&cfg, "test", OffsetDateTime::now_utc()).unwrap();
@@ -1091,8 +1134,8 @@ default_target_branch = "main"
             .iter()
             .find(|blocker| blocker.source_reference.as_deref() == Some("TICKET-300"))
             .expect("ticket-scoped human hold must be visible");
-        assert_eq!(blocker.reason.as_deref(), Some("policy_approval"));
-        assert_eq!(blocker.reason_code.as_deref(), Some("policy_approval"));
+        assert_eq!(blocker.reason.as_deref(), Some("stuck_loop_gate"));
+        assert_eq!(blocker.reason_code.as_deref(), Some("stuck_loop_gate"));
     }
 
     #[test]
