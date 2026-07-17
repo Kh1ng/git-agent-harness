@@ -1,9 +1,12 @@
 use crate::config::{self, GahConfig};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
+
+mod review_state;
+pub(crate) use review_state::review_metadata_fingerprint;
+use review_state::{latest_review_for_mr, ledger_info_for_mr, review_metadata_matches};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MrFetchScope {
@@ -184,41 +187,6 @@ pub fn fetch_active_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
     fetch_mrs_for_scope(profile, MrFetchScope::Active)
 }
 
-/// Stable identity of the provider metadata a reviewer actually inspected.
-/// Length-prefixing each field avoids ambiguous concatenation; the versioned
-/// prefix permits a future canonicalization change without silently treating
-/// old and new identities as equivalent.
-pub(crate) fn review_metadata_fingerprint(
-    source_sha: Option<&str>,
-    title: Option<&str>,
-    body: Option<&str>,
-    draft: bool,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"gah-review-metadata-v1\0");
-    for value in [
-        source_sha.unwrap_or(""),
-        title.unwrap_or(""),
-        body.unwrap_or(""),
-    ] {
-        hasher.update((value.len() as u64).to_be_bytes());
-        hasher.update(value.as_bytes());
-    }
-    hasher.update([u8::from(draft)]);
-    format!("sha256:{:x}", hasher.finalize())
-}
-
-impl SyncMr {
-    fn review_metadata_fingerprint(&self) -> String {
-        review_metadata_fingerprint(
-            self.source_sha.as_deref(),
-            Some(&self.title),
-            self.body.as_deref(),
-            self.draft,
-        )
-    }
-}
-
 fn fetch_mrs_for_scope(profile: &config::Profile, scope: MrFetchScope) -> Result<Vec<SyncMr>> {
     let mut mrs = match profile.provider.as_str() {
         "github" => github_prs(profile, scope),
@@ -294,9 +262,7 @@ pub fn sync_mr_to_json(
         ledger_info_for_mr(ledger, mr);
     if !matches!(class, "MERGED" | "CLOSED_UNMERGED" | "CI_FAILED") {
         if let Some(latest) = latest_review_for_mr(ledger, mr) {
-            if latest.review_metadata_fingerprint.as_deref()
-                != Some(mr.review_metadata_fingerprint().as_str())
-            {
+            if !review_metadata_matches(latest, mr) {
                 // The provider label reflects an opinion about older
                 // metadata. Metadata-only corrections require review, not a
                 // worktree repair or terminal human gate.
@@ -339,79 +305,6 @@ pub fn sync_mr_to_json(
         classification: class.to_string(),
         recommended_action: RecommendedAction::from_class(class),
     }
-}
-
-fn latest_review_for_mr<'a>(
-    ledger: &'a crate::ledger::LedgerEntriesByWorkId,
-    mr: &SyncMr,
-) -> Option<&'a crate::ledger::LedgerEntry> {
-    let work_id = mr.work_id.as_ref()?;
-    let entries = ledger.get(work_id)?;
-    entries.iter().rev().find(|entry| {
-        entry.branch.as_deref() == Some(mr.branch.as_str())
-            && matches!(
-                entry
-                    .review_verdict
-                    .as_deref()
-                    .or(entry.validation_result.as_deref()),
-                Some("APPROVE" | "NEEDS_FIX" | "REJECT" | "HUMAN_REVIEW")
-            )
-    })
-}
-
-/// Join an MR to its ledger entries (by `work_id`) and return the backend/model
-/// that produced it plus the latest review verdict. Attribution and review are
-/// deliberately selected independently: a metadata-only re-review appends a
-/// newer review entry without creating a new implementation attempt.
-fn ledger_info_for_mr(
-    ledger: &crate::ledger::LedgerEntriesByWorkId,
-    mr: &SyncMr,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-) {
-    let Some(work_id) = mr.work_id.as_ref() else {
-        return (None, None, None, None);
-    };
-    let Some(entries) = ledger.get(work_id) else {
-        return (None, None, None, None);
-    };
-    let implementation = entries
-        .iter()
-        .rev()
-        .find(|entry| {
-            matches!(entry.mode.as_str(), "fix" | "improve")
-                && entry.mr_url.as_deref() == mr.url.as_deref()
-                && !entry.effective_backend.is_empty()
-        })
-        .or_else(|| {
-            entries.iter().rev().find(|entry| {
-                matches!(entry.mode.as_str(), "fix" | "improve")
-                    && !entry.effective_backend.is_empty()
-            })
-        });
-    let review = entries
-        .iter()
-        .rev()
-        .find(|entry| {
-            entry.branch.as_deref() == Some(mr.branch.as_str()) && entry.review_verdict.is_some()
-        })
-        .or_else(|| {
-            entries
-                .iter()
-                .rev()
-                .find(|entry| entry.review_verdict.is_some())
-        });
-    let backend = implementation.map(|entry| entry.effective_backend.clone());
-    let model = implementation.and_then(|entry| entry.effective_model.clone());
-    (
-        backend,
-        model,
-        review.and_then(|entry| entry.review_verdict.clone()),
-        review.and_then(|entry| entry.review_gate_reason.clone()),
-    )
 }
 
 fn is_closed_unmerged(state: Option<&str>, merged: bool) -> bool {
@@ -1228,6 +1121,52 @@ mod tests {
             baseline,
             review_metadata_fingerprint(Some("sha"), Some("title"), Some("body"), true)
         );
+        assert_eq!(
+            review_metadata_fingerprint(Some("sha"), Some("Draft: title"), Some("body"), true),
+            review_metadata_fingerprint(Some("sha"), Some("title"), Some("body"), true)
+        );
+    }
+
+    #[test]
+    fn gah_draft_to_ready_transition_preserves_the_applicable_approval() {
+        let (mut mr, mut ledger) = reviewed_needs_fix_row(None);
+        mr.title = "approved title".into();
+        mr.draft = false;
+        mr.labels = vec!["gah-ready-for-human".into()];
+        let review = &mut ledger.get_mut("#701").unwrap()[0];
+        review.review_verdict = Some("APPROVE".into());
+        review.validation_result = Some("APPROVE".into());
+        review.review_metadata_fingerprint = Some(review_metadata_fingerprint(
+            mr.source_sha.as_deref(),
+            Some("Draft: approved title"),
+            mr.body.as_deref(),
+            true,
+        ));
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "READY_FOR_HUMAN");
+        assert_eq!(row.review_verdict.as_deref(), Some("APPROVE"));
+    }
+
+    #[test]
+    fn redrafting_an_approved_mr_invalidates_the_old_review() {
+        let (mut mr, mut ledger) = reviewed_needs_fix_row(None);
+        mr.draft = true;
+        let review = &mut ledger.get_mut("#701").unwrap()[0];
+        review.review_verdict = Some("APPROVE".into());
+        review.validation_result = Some("APPROVE".into());
+        review.review_metadata_fingerprint = Some(review_metadata_fingerprint(
+            mr.source_sha.as_deref(),
+            Some(&mr.title),
+            mr.body.as_deref(),
+            false,
+        ));
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "NEEDS_REVIEW");
+        assert_eq!(row.review_verdict, None);
     }
 
     #[test]
