@@ -98,6 +98,25 @@ fn make_fake_bin_with_body(dir: &std::path::Path, name: &str, body: &str) {
     fs::set_permissions(&path, perms).unwrap();
 }
 
+fn make_fake_github_review_api(dir: &std::path::Path) {
+    make_fake_bin_with_body(
+        dir,
+        "gh",
+        r#"#!/bin/sh
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/real/pulls") printf '[{"number":7}]\n' ;;
+  "pr view 7 --repo") printf '{"number":7,"url":"https://github.com/owner/real/pull/7","title":"Draft: [GAH] Fix","body":"MR body","headRefName":"feature/review","baseRefName":"main","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}\n' ;;
+  "api --method GET repos/owner/real/issues/7/comments") printf '[]\n' ;;
+  "api --method POST repos/owner/real/issues/7/comments") exit 0 ;;
+  "api repos/owner/real/issues/7/labels --jq "*) exit 0 ;;
+  "api repos/owner/real/issues/7/labels -f "*) exit 0 ;;
+  "api --method DELETE repos/owner/real/issues/7/labels/"*) exit 0 ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+}
+
 fn prepend_path(dir: &std::path::Path) -> String {
     let old = std::env::var("PATH").unwrap_or_default();
     format!("{}:{}", dir.display(), old)
@@ -1816,11 +1835,7 @@ fn review_writes_structured_verdict_and_posts_comment() {
             prompt_log.display()
         ),
     );
-    make_fake_bin_with_body(
-        &fake_bin,
-        "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
-    );
+    make_fake_github_review_api(&fake_bin);
 
     bin()
         .args([
@@ -1871,11 +1886,7 @@ fn review_routes_to_agy_candidate_and_writes_verdict() {
             prompt_log.display()
         ),
     );
-    make_fake_bin_with_body(
-        &fake_bin,
-        "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
-    );
+    make_fake_github_review_api(&fake_bin);
     let cfg = write_real_repo_config_with_extra(
         &tmp,
         &repo,
@@ -1948,11 +1959,7 @@ fn review_falls_back_to_next_candidate_on_agy_empty_output() {
         "claude",
         "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src.txt\"]}\nEOF\n",
     );
-    make_fake_bin_with_body(
-        &fake_bin,
-        "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
-    );
+    make_fake_github_review_api(&fake_bin);
     let cfg = write_real_repo_config_with_extra(
         &tmp,
         &repo,
@@ -2016,11 +2023,7 @@ fn review_falls_back_when_agy_quota_is_only_on_stderr() {
         "claude",
         "#!/bin/sh\ncat <<'EOF'\nReview notes\n{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:src.txt\"]}\nEOF\n",
     );
-    make_fake_bin_with_body(
-        &fake_bin,
-        "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
-    );
+    make_fake_github_review_api(&fake_bin);
     let cfg = write_real_repo_config_with_extra(
         &tmp,
         &repo,
@@ -2080,11 +2083,7 @@ fn review_uses_explicit_claude_path() {
             prompt_log.display()
         ),
     );
-    make_fake_bin_with_body(
-        &fake_bin,
-        "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
-    );
+    make_fake_github_review_api(&fake_bin);
     let cfg = write_real_repo_config_with_extra(
         &tmp,
         &repo,
@@ -2131,11 +2130,7 @@ fn setup_review_repo_and_gh(
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin_with_body(
-        &fake_bin,
-        "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
-    );
+    make_fake_github_review_api(&fake_bin);
     (repo, fake_bin, tmp.path().join("home"))
 }
 
@@ -2683,11 +2678,7 @@ fn review_uses_profile_repo_not_current_worktree() {
             prompt_log.display()
         ),
     );
-    make_fake_bin_with_body(
-        &fake_bin,
-        "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nexit 0\n",
-    );
+    make_fake_github_review_api(&fake_bin);
 
     bin()
         .current_dir(&worktree)
@@ -5982,11 +5973,7 @@ fn publishing_disabled_still_runs_reviewer() {
             prompt_log.display()
         ),
     );
-    make_fake_bin_with_body(
-        &fake_bin,
-        "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\"}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 0\n",
-    );
+    make_fake_github_review_api(&fake_bin);
 
     bin()
         .args([

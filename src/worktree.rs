@@ -26,6 +26,7 @@ pub fn is_transient_network_error(text: &str) -> bool {
         "connection reset",
         "could not resolve host",
         "early eof",
+        "tls handshake timeout",
         "ssh_exchange_identification",
     ]
     .iter()

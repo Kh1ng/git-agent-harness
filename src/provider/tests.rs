@@ -361,8 +361,8 @@ fn merge_mr_github_un_drafts_then_merges() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    // Handles the 3 subcommand shapes merge_mr's call chain hits, in
-    // order: `pr list` (resolve branch -> number), `pr view` (resolve
+    // Handles the subcommand shapes merge_mr's call chain hits, in
+    // order: REST pulls lookup (resolve branch -> number), `pr view` (resolve
     // full ReviewTarget), `pr ready` (un-draft), `pr merge`. Fails
     // loudly (unrecognized args) instead of a lenient default if a
     // future edit changes the call sequence without updating this test.
@@ -370,11 +370,11 @@ fn merge_mr_github_un_drafts_then_merges() {
         &bin_dir,
         "gh",
         r#"#!/bin/sh
-case "$1 $2" in
-  "pr list") printf '[{"number":42}]\n' ;;
-  "pr view") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
-  "pr ready") exit 0 ;;
-  "pr merge") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  "pr view 42 --repo") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
+  "pr ready 42 --repo") exit 0 ;;
+  "pr merge 42 --squash") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
   *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
 esac
 "#,
@@ -403,10 +403,10 @@ fn mark_ready_for_review_github_un_drafts_only() {
         &bin_dir,
         "gh",
         r#"#!/bin/sh
-case "$1 $2" in
-  "pr list") printf '[{"number":42}]\n' ;;
-  "pr view") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
-  "pr ready") echo "$@" > "${0%/*}/ready_call.txt"; exit 0 ;;
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  "pr view 42 --repo") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
+  "pr ready 42 --repo") echo "$@" > "${0%/*}/ready_call.txt"; exit 0 ;;
   *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
 esac
 "#,
@@ -430,11 +430,11 @@ fn merge_mr_github_fails_loudly_when_merge_rejected() {
         &bin_dir,
         "gh",
         r#"#!/bin/sh
-case "$1 $2" in
-  "pr list") printf '[{"number":42}]\n' ;;
-  "pr view") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
-  "pr ready") exit 0 ;;
-  "pr merge") echo "not mergeable: review required" >&2; exit 1 ;;
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  "pr view 42 --repo") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
+  "pr ready 42 --repo") exit 0 ;;
+  "pr merge 42 --squash") echo "not mergeable: review required" >&2; exit 1 ;;
   *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
 esac
 "#,
@@ -515,25 +515,16 @@ fn github_post_review_comment_applies_labels_via_rest_api_not_pr_edit() {
         &bin_dir,
         "gh",
         r#"#!/bin/sh
-case "$1" in
-  pr)
-    case "$2" in
-      list) printf '[{"number":42}]\n' ;;
-      comment) exit 0 ;;
-      edit) echo "gh pr edit must not be called" >&2; exit 1 ;;
-      *) echo "unexpected pr subcommand: $@" >&2; exit 1 ;;
-    esac
-    ;;
-  api)
-    if [ "$3" = "--jq" ]; then
-      printf 'gah-needs-fix\nunrelated\n'
-    else
-      echo "$@" >> "${0%/*}/label_call.txt"
-    fi
-    exit 0
-    ;;
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  "api repos/owner/repo/issues/42/labels --jq "*) printf 'gah-needs-fix\nunrelated\n' ;;
+  "api --method GET repos/owner/repo/issues/42/comments") printf '[]\n' ;;
+  "api --method POST repos/owner/repo/issues/42/comments") echo "$@" >> "${0%/*}/comment_call.txt" ;;
+  "api "*) echo "$@" >> "${0%/*}/label_call.txt" ;;
+  "pr "*) echo "gh pr commands must not be called: $@" >&2; exit 1 ;;
   *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
 esac
+exit 0
 "#,
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
@@ -551,6 +542,9 @@ esac
     assert!(call.contains("--method DELETE"));
     assert!(call.contains("gah-needs-fix"));
     assert!(call.contains("labels[]=gah-ready-for-human"));
+    let comment_call = fs::read_to_string(bin_dir.join("comment_call.txt")).unwrap();
+    assert!(comment_call.contains("--method POST"));
+    assert!(comment_call.contains("body=review body"));
 }
 
 #[test]
@@ -563,15 +557,10 @@ fn github_repaired_state_removes_needs_fix_and_preserves_unrelated_labels() {
         &bin_dir,
         "gh",
         r#"#!/bin/sh
-case "$1" in
-  pr) printf '[{"number":42}]\n' ;;
-  api)
-    if [ "$3" = "--jq" ]; then
-      printf 'gah-needs-fix\nbug\n'
-    else
-      echo "$@" >> "${0%/*}/calls.txt"
-    fi
-    ;;
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  "api repos/owner/repo/issues/42/labels --jq "*) printf 'gah-needs-fix\nbug\n' ;;
+  "api "*) echo "$@" >> "${0%/*}/calls.txt" ;;
   *) exit 1 ;;
 esac
 "#,
@@ -640,14 +629,21 @@ fn github_post_review_comment_reports_label_apply_failure() {
         "gh",
         r#"#!/bin/sh
 case "$1" in
-  pr)
-    case "$2" in
-      list) printf '[{"number":42}]\n' ;;
-      comment) exit 0 ;;
-      *) echo "unexpected pr subcommand: $@" >&2; exit 1 ;;
-    esac
+  api)
+    if [ "$2 $3 $4" = "--method GET repos/owner/repo/pulls" ]; then
+      printf '[{"number":42}]\n'
+      exit 0
+    fi
+    if [ "$2 $3 $4" = "--method GET repos/owner/repo/issues/42/comments" ]; then
+      printf '[]\n'
+      exit 0
+    fi
+    if [ "$2 $3 $4" = "--method POST repos/owner/repo/issues/42/comments" ]; then
+      exit 0
+    fi
+    echo "label write denied" >&2
+    exit 1
     ;;
-  api) echo "GraphQL: Projects (classic) is being deprecated" >&2; exit 1 ;;
   *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
 esac
 "#,
@@ -662,4 +658,123 @@ esac
     )
     .unwrap_err();
     assert!(err.to_string().contains("applying review labels"));
+}
+
+#[test]
+fn github_pr_lookup_retries_a_transient_tls_failure_and_uses_rest() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        r#"#!/bin/sh
+count_file="${0%/*}/count"
+count=0
+[ -f "$count_file" ] && read -r count < "$count_file"
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls")
+    if [ "$count" -eq 1 ]; then
+      echo 'net/http: TLS handshake timeout' >&2
+      exit 1
+    fi
+    printf '[{"number":42}]\n'
+    ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let number = super::github_find_pr_number_by_branch(&github_profile(), "gah/test").unwrap();
+
+    assert_eq!(number, "42");
+    assert_eq!(fs::read_to_string(bin_dir.join("count")).unwrap(), "2");
+}
+
+#[test]
+fn github_comment_retry_detects_a_timed_out_post_that_was_already_accepted() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        r#"#!/bin/sh
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  "api repos/owner/repo/issues/42/labels --jq "*) printf 'gah-review-escalating\n' ;;
+  "api --method GET repos/owner/repo/issues/42/comments")
+    if [ -f "${0%/*}/accepted" ]; then
+      printf '[{"body":"review body"}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  "api --method POST repos/owner/repo/issues/42/comments")
+    : > "${0%/*}/accepted"
+    echo post >> "${0%/*}/post_calls"
+    echo 'net/http: TLS handshake timeout' >&2
+    exit 1
+    ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    super::post_review_comment(
+        &github_profile(),
+        "gah/test",
+        "review body",
+        &["gah-review-escalating"],
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(bin_dir.join("post_calls")).unwrap(),
+        "post\n",
+        "the retry must observe the accepted comment instead of duplicating it"
+    );
+}
+
+#[test]
+fn github_review_label_read_retries_a_transient_tls_failure() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        r#"#!/bin/sh
+case "$1 $2 $3" in
+  "api repos/owner/repo/issues/42/labels --jq")
+    count=0
+    [ -f "${0%/*}/reads" ] && read -r count < "${0%/*}/reads"
+    count=$((count + 1))
+    printf '%s' "$count" > "${0%/*}/reads"
+    if [ "$count" -eq 1 ]; then
+      echo 'net/http: TLS handshake timeout' >&2
+      exit 1
+    fi
+    ;;
+  "api repos/owner/repo/issues/42/labels -f") echo "$@" > "${0%/*}/add_call" ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    super::github_set_review_state_labels(&github_profile(), "42", &["gah-review-escalating"])
+        .unwrap();
+
+    assert_eq!(fs::read_to_string(bin_dir.join("reads")).unwrap(), "2");
+    assert!(fs::read_to_string(bin_dir.join("add_call"))
+        .unwrap()
+        .contains("labels[]=gah-review-escalating"));
 }

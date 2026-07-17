@@ -509,6 +509,13 @@ pub fn review_already_exists(
 }
 
 fn review_is_dedup_eligible(entry: &LedgerEntry) -> bool {
+    // The reviewer may have completed while publication of its comment or
+    // controller labels failed. That is not a completed review from the
+    // controller's perspective: suppressing the next dispatch would leave
+    // the provider state requesting review forever.
+    if entry.failure_class.is_some() {
+        return false;
+    }
     match entry.review_verdict.as_deref() {
         Some("NEEDS_FIX" | "REJECT") => !entry.review_blocking_findings.is_empty(),
         Some(_) => true,
@@ -973,6 +980,9 @@ mod tests {
         entry.review_verdict = Some("APPROVE".into());
         entry.review_blocking_findings.clear();
         assert!(review_is_dedup_eligible(&entry));
+
+        entry.failure_class = Some("harness_error".into());
+        assert!(!review_is_dedup_eligible(&entry));
     }
 
     #[test]
