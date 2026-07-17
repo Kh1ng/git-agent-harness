@@ -289,14 +289,14 @@ pub(crate) fn worktree_progress_snapshot(worktree: &Path) -> Option<Vec<u8>> {
     Some(snapshot)
 }
 
-/// Cheap boolean variant of `worktree_progress_snapshot`: does the worktree
-/// currently carry any tracked change (staged, unstaged, or untracked)?
-///
-/// Issue #579 uses this at idle-kill time to attribute a stall: a backend
-/// killed with a non-empty diff is mid-validation (productive), while one
-/// killed with an empty diff is genuinely stalled before producing changes.
-pub(crate) fn worktree_has_diff(worktree: &Path) -> bool {
-    worktree_progress_snapshot(worktree).is_some_and(|snapshot| !snapshot.is_empty())
+/// Did this backend attempt leave durable worktree progress relative to the
+/// exact state it inherited? Existing PR changes and target-merge conflicts
+/// must not make an otherwise idle backend look productive.
+fn worktree_changed_since(initial: Option<&[u8]>, worktree: &Path) -> bool {
+    let Some(initial) = initial else {
+        return false;
+    };
+    worktree_progress_snapshot(worktree).is_some_and(|current| current != initial)
 }
 
 /// Linux activity snapshot of every live descendant of `process_group` (by
@@ -461,6 +461,10 @@ fn spawn_with_idle_watch_with_shutdown(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     prepare_process_group(&mut cmd);
 
+    // Capture the inherited state before spawn. A fast backend can write its
+    // first edit immediately; sampling after spawn would absorb that real
+    // change into the baseline and later misclassify it as no progress.
+    let initial_worktree_snapshot = worktree_progress_snapshot(worktree);
     let mut child = cmd.spawn().with_context(|| spawn_context.to_string())?;
     let (progress_tx, progress_rx) = mpsc::channel();
     let stdout_thread = child.stdout.take().map(|stdout| {
@@ -480,13 +484,13 @@ fn spawn_with_idle_watch_with_shutdown(
     let poll_interval = Duration::from_millis(500);
     let worktree_poll_interval = Duration::from_secs(1);
     let mut last_seen_len = fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
-    let mut last_worktree_snapshot = worktree_progress_snapshot(worktree);
+    let mut last_worktree_snapshot = initial_worktree_snapshot.clone();
     let process_group = child.id();
     let mut last_process_activity = process_group_activity_snapshot(process_group);
     let mut last_worktree_poll = Instant::now();
     let mut last_progress_at = Instant::now();
     let mut saw_progress = false;
-    let mut had_diff_at_kill = false;
+    let mut had_attempt_progress_at_kill = false;
     let mut killed_for_idle = false;
     let mut killed_for_shutdown = false;
     let mut cleanup_error = None;
@@ -553,7 +557,8 @@ fn spawn_with_idle_watch_with_shutdown(
                     // diff is a productive worker whose long build/test run was
                     // mistaken for a hang. The two must be attributed
                     // differently and the latter's diff must be preserved.
-                    had_diff_at_kill = worktree_has_diff(worktree);
+                    had_attempt_progress_at_kill =
+                        worktree_changed_since(initial_worktree_snapshot.as_deref(), worktree);
                     cleanup_error = kill_process_group(&mut child);
                     let _ = child.wait();
                     killed_for_idle = true;
@@ -601,7 +606,7 @@ fn spawn_with_idle_watch_with_shutdown(
             // stalled during validation after producing a diff. The latter
             // phrase signals the dispatch layer to checkpoint (preserve) the
             // WIP diff instead of discarding it.
-            let attribution = if had_diff_at_kill {
+            let attribution = if had_attempt_progress_at_kill {
                 "stalled during validation with checkpointed changes"
             } else {
                 "stalled before changes"
@@ -835,19 +840,13 @@ mod tests {
             let _exec_guard = ExecGuard::new();
             let f = fixture();
             initialize_git_worktree(&f.worktree);
-            // Create a real, stable worktree diff (like a productive worker
-            // that finished editing before running the required tests).
-            fs::write(
-                f.worktree.join("real_diff.rs"),
-                "pub fn answer() -> u32 { 42 }\n",
-            )
-            .unwrap();
             make_fake_bin(
                 &f.bin_dir,
                 "backend",
                 "#!/bin/sh\n\
                  # Produce a real diff, then run a quiet validation descendant\n\
                  # that stays busy past the idle threshold.\n\
+                 printf 'pub fn answer() -> u32 { 42 }\\n' > real_diff.rs\n\
                  git add -A >/dev/null 2>&1\n\
                  /bin/yes >/dev/null &\n\
                  backend_descendant=$!\n\
@@ -857,9 +856,11 @@ mod tests {
             );
             let log_path = f.session_dir.join("backend-output.log");
             let shutdown = AtomicBool::new(false);
+            let mut command = Command::new(f.bin_dir.join("backend"));
+            command.current_dir(&f.worktree);
 
             let result = spawn_with_idle_watch_with_shutdown(
-                Command::new(f.bin_dir.join("backend")),
+                command,
                 &log_path,
                 &f.worktree,
                 1,
@@ -889,7 +890,7 @@ mod tests {
     /// diff during validation. The kill message carries the matching phrase.
     #[cfg(target_os = "linux")]
     #[test]
-    fn idle_kill_attribution_distinguishes_diffless_from_during_validation() {
+    fn idle_kill_attribution_uses_attempt_relative_worktree_progress() {
         let _exec_guard = ExecGuard::new();
         let f = fixture();
         initialize_git_worktree(&f.worktree);
@@ -912,25 +913,50 @@ mod tests {
         assert!(log.contains("stalled before changes"), "got: {log}");
         assert!(!log.contains("checkpointed changes"), "got: {log}");
 
-        // Now with a diff present at kill time.
+        // A diff that predates the backend attempt is not backend progress.
         drop(_exec_guard);
         let _exec_guard = ExecGuard::new();
         let f = fixture();
         initialize_git_worktree(&f.worktree);
         fs::write(
             f.worktree.join("real_diff.rs"),
-            "pub fn answer() -> u32 { 42 }\n",
+            "pub fn inherited() -> u32 { 41 }\n",
         )
         .unwrap();
-        make_fake_bin(
-            &f.bin_dir,
-            "backend",
-            "#!/bin/sh\ngit add -A >/dev/null 2>&1\nsleep 5\n",
-        );
+        make_fake_bin(&f.bin_dir, "backend", "#!/bin/sh\nsleep 5\n");
         let log_path = f.session_dir.join("backend-output.log");
         let shutdown = AtomicBool::new(false);
         let result = spawn_with_idle_watch_with_shutdown(
             Command::new(f.bin_dir.join("backend")),
+            &log_path,
+            &f.worktree,
+            1,
+            "launching stalled backend with inherited changes",
+            &shutdown,
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.0, -1);
+        let log = fs::read_to_string(&log_path).unwrap();
+        assert!(log.contains("stalled before changes"), "got: {log}");
+        assert!(!log.contains("checkpointed changes"), "got: {log}");
+
+        // A change made after launch remains productive checkpointed work.
+        drop(_exec_guard);
+        let _exec_guard = ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        make_fake_bin(
+            &f.bin_dir,
+            "backend",
+            "#!/bin/sh\nprintf 'pub fn answer() -> u32 { 42 }\\n' > real_diff.rs\ngit add -A >/dev/null 2>&1\nsleep 5\n",
+        );
+        let log_path = f.session_dir.join("backend-output.log");
+        let shutdown = AtomicBool::new(false);
+        let mut command = Command::new(f.bin_dir.join("backend"));
+        command.current_dir(&f.worktree);
+        let result = spawn_with_idle_watch_with_shutdown(
+            command,
             &log_path,
             &f.worktree,
             1,
