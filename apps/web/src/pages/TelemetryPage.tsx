@@ -89,6 +89,12 @@ export function TelemetryPage() {
 
   const activeTrend = trendOptions.find((t) => t.id === trendMetric)!;
 
+  const cacheHitRatio = (row: BackendModelComparison): number | null => {
+    if (row.cache_read_tokens === null || row.cache_write_tokens === null) return null;
+    const cacheBase = row.cache_read_tokens + row.cache_write_tokens;
+    return cacheBase > 0 ? row.cache_read_tokens / cacheBase : 0;
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -163,7 +169,7 @@ export function TelemetryPage() {
           <EmptyState icon={FlaskConical} title="No report data for this window" description="Try a longer time range once more runs have completed." />
         ) : (
           <div className="card overflow-x-auto">
-            <table className="table-base min-w-[860px]">
+            <table className="table-base min-w-[980px]">
               <thead>
                 <tr>
                   <th>{groupBy === 'model' ? 'Model' : 'Backend'}</th>
@@ -171,6 +177,9 @@ export function TelemetryPage() {
                   <SortHeader label="Success rate" active={sortKey === 'success_rate'} onClick={() => toggleSort('success_rate')} />
                   <SortHeader label="Avg duration" active={sortKey === 'average_duration_seconds'} onClick={() => toggleSort('average_duration_seconds')} />
                   <SortHeader label="Total tokens" active={sortKey === 'total_tokens'} onClick={() => toggleSort('total_tokens')} />
+                  <th>Cache read tokens</th>
+                  <th>Cache write tokens</th>
+                  <th>Cache-hit ratio</th>
                   <SortHeader label="Actual cost" active={sortKey === 'actual_cost_usd'} onClick={() => toggleSort('actual_cost_usd')} />
                   <SortHeader label="Est. cost" active={sortKey === 'estimated_cost_usd'} onClick={() => toggleSort('estimated_cost_usd')} />
                   <th>Cost / success</th>
@@ -194,6 +203,9 @@ export function TelemetryPage() {
                       <td>{formatPercent(row.success_rate)}</td>
                       <td>{formatDuration(row.average_duration_seconds)}</td>
                       <td>{formatTokens(row.total_tokens)}</td>
+                      <td>{formatTokens(row.cache_read_tokens)}</td>
+                      <td>{formatTokens(row.cache_write_tokens)}</td>
+                      <td>{formatPercent(cacheHitRatio(row))}</td>
                       <td>{formatCost(row.actual_cost_usd)}</td>
                       <td>{formatCost(row.estimated_cost_usd)}</td>
                       <td>{costPerSuccess !== null ? formatCost(costPerSuccess) : 'Unknown'}</td>
