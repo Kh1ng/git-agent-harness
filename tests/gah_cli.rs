@@ -1,9 +1,10 @@
+#[path = "gah_cli/conflict_resolution.rs"]
+mod conflict_resolution;
 #[path = "gah_cli/stall_retry.rs"]
 mod stall_retry;
 mod support;
 #[path = "gah_cli/validation_gate.rs"]
 mod validation_gate;
-
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
@@ -14,7 +15,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 use support::{isolate_command, test_tempdir, FakeBackend, IsolatedCommand, Scenario};
 use tempfile::TempDir;
-
 fn bin() -> IsolatedCommand<Command> {
     let cmd = Command::cargo_bin("gah").unwrap();
     // CLI integration tests may run under the real systemd loop, which sets

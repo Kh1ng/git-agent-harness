@@ -35,9 +35,10 @@ use crate::{provider, runner, worktree};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-
 mod bounded_validation;
 pub(crate) use bounded_validation::bounded_validation_failure;
+mod conflict_resolution;
+mod repair;
 mod shutdown;
 use shutdown::record_cancelled_attempt;
 mod stall;
@@ -209,50 +210,24 @@ pub(crate) fn improve(
     apply_authoritative_work_identity(ledger, ticket_meta.as_ref(), &branch);
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
-    if args.existing_branch.is_some() {
-        match classify_git_operation_result(
-            ledger,
-            crate::ledger::FailureStage::Preflight,
-            worktree::refresh_existing_branch_from_target(&wt, &profile.default_target_branch),
-        ) {
-            Ok(true) => println!(
-                "Refreshed repair branch from origin/{} before baseline validation.",
-                profile.default_target_branch
-            ),
-            Ok(false) => println!(
-                "Repair branch already contains origin/{}.",
-                profile.default_target_branch
-            ),
-            Err(err) => {
-                worktree::cleanup(&wt, repo);
-                return Err(err);
-            }
-        }
-    }
-    let repair_context = if args.existing_branch.is_some() {
-        match repair_context::load(
-            cfg,
-            &args.profile,
-            &profile.repo_id,
-            &branch,
-            ledger.work_id.as_deref(),
-            &wt,
-        ) {
-            Ok(context) => Some(context),
-            Err(err) => {
-                ledger.set_failure(
-                    crate::ledger::FailureClass::HarnessError,
-                    crate::ledger::FailureStage::Preflight,
-                );
-                worktree::cleanup(&wt, repo);
-                return Err(err.context(
-                    "FixMr requires structured findings from the latest applicable review",
-                ));
-            }
-        }
-    } else {
-        None
-    };
+    let conflict_session = conflict_resolution::ConflictSession::prepare(
+        args.existing_branch.is_some(),
+        ledger,
+        &wt,
+        repo,
+        session_dir,
+        &profile.default_target_branch,
+    )?;
+    let repair_context = repair::load_context(
+        args.existing_branch.is_some(),
+        cfg,
+        &args.profile,
+        &profile.repo_id,
+        &branch,
+        &wt,
+        repo,
+        ledger,
+    )?;
     let _cargo_target =
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
     let validation_environment = validation_env(profile, session_dir);
@@ -261,13 +236,15 @@ pub(crate) fn improve(
     if let Some(repair_context) = repair_context.as_ref() {
         repair_context::append_to_prompt(&mut base_task, repair_context);
     }
+    conflict_session.append_prompt(&mut base_task);
     let timeout = std::time::Duration::from_secs(profile.validation_timeout_seconds());
 
-    let (baseline_failure, baseline_exit_code) = if should_skip_per_dispatch_baseline(
-        profile.validation_commands.is_empty(),
-        args.existing_branch.is_some(),
-        args.skip_validation_gate,
-    ) {
+    let (baseline_failure, baseline_exit_code) = if conflict_session.is_active()
+        || should_skip_per_dispatch_baseline(
+            profile.validation_commands.is_empty(),
+            args.existing_branch.is_some(),
+            args.skip_validation_gate,
+        ) {
         (None, None)
     } else {
         println!("Baseline validation on pristine worktree...");
@@ -456,6 +433,7 @@ pub(crate) fn improve(
             result.exit_code, result.duration_secs, result.log_path
         );
         ledger.backend_exit_code = Some(result.exit_code);
+        conflict_session.snapshot_if_unresolved(attempt + 1)?;
 
         // SIGINT/SIGTERM is an operator lifecycle event, not a backend
         // failure to retry. The runner already killed and reaped the backend
@@ -780,6 +758,28 @@ pub(crate) fn improve(
             crate::ledger::FailureStage::PostValidation,
             worktree::state_snapshot(&wt),
         )?;
+        match conflict_session.after_attempt(
+            &base_task,
+            attempt + 1,
+            max_attempts,
+            attempt_start.elapsed().as_secs_f64(),
+            ledger,
+            &route,
+            &llm.model,
+            &result,
+            &claude_path,
+        )? {
+            conflict_resolution::AttemptDisposition::Ready => {}
+            conflict_resolution::AttemptDisposition::Retry { task: retry_task } => {
+                prior_phase_context = Some(task.clone());
+                task = retry_task;
+                continue;
+            }
+            conflict_resolution::AttemptDisposition::Terminal { message } => {
+                worktree::cleanup(&wt, repo);
+                anyhow::bail!("{message}");
+            }
+        }
         if attempt_state_after == attempt_state_before {
             // OpenCode can exit successfully after a provider rejection and
             // put the useful diagnostic only in its internal log. Inspect
@@ -1416,6 +1416,7 @@ pub(crate) fn improve(
         // to stage, just push what's already on HEAD.
         ledger.commit_created = true;
     }
+    conflict_session.verify_before_publish(ledger)?;
     // Must run after the commit above -- diff_stats/changed_files compare
     // origin/<target> against HEAD, so computing them beforehand (while the
     // real changes are still uncommitted working-tree modifications) always
