@@ -446,7 +446,7 @@ pub(super) fn review_labels(verdict: &ReviewVerdict) -> Vec<&'static str> {
         "APPROVE" if is_weak_tier || is_low_confidence => vec!["gah-review-escalating"],
         "APPROVE" => vec!["gah-ready-for-human"],
         "NEEDS_FIX" | "REJECT" => vec!["gah-needs-fix"],
-        "HUMAN_REVIEW" => vec!["gah-review-escalating"],
+        "HUMAN_REVIEW" | "REVIEW_OUTPUT_INVALID" => vec!["gah-review-escalating"],
         _ => vec![],
     }
 }
@@ -468,6 +468,18 @@ mod tests {
                 "expected terminal state: {state}"
             );
         }
+    }
+
+    #[test]
+    fn invalid_review_output_keeps_provider_state_in_review_escalation() {
+        let verdict: ReviewVerdict = serde_json::from_value(serde_json::json!({
+            "verdict": "REVIEW_OUTPUT_INVALID",
+            "confidence": "unknown",
+            "human_required": false
+        }))
+        .unwrap();
+
+        assert_eq!(review_labels(&verdict), ["gah-review-escalating"]);
     }
 
     #[test]

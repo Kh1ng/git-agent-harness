@@ -279,6 +279,7 @@ mod tests {
                 review_source_sha: None,
                 review_metadata_fingerprint: None,
                 blocking_findings: &[],
+                actionable_findings: &[],
                 non_blocking_findings: &[],
                 risk_notes: &[],
                 evidence: &[],
