@@ -9,10 +9,13 @@ use anyhow::Result;
 use fs2::FileExt;
 use serde::Serialize;
 use std::fs::OpenOptions;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::time::{Duration, Instant};
+
+#[path = "runtime/route_state.rs"]
+mod route_state;
+use route_state::route_state_fingerprint;
 
 fn is_validation_gate_failure(error: &anyhow::Error) -> bool {
     error
@@ -49,26 +52,6 @@ fn suppress_recent_capacity_deferrals(
             .as_deref()
             .is_none_or(|work_id| !deferred.contains(work_id))
     });
-}
-
-/// Hash only non-secret effective configuration plus durable availability.
-/// `list_scopes` evaluates expiry against `now`, so a cooldown becoming
-/// eligible changes this fingerprint even when the state file is untouched.
-fn route_state_fingerprint(
-    cfg: &crate::config::GahConfig,
-    profile_name: &str,
-    now: time::OffsetDateTime,
-) -> Result<String> {
-    let profile = crate::config::get_profile(cfg, profile_name)?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(profile)?.hash(&mut hasher);
-    serde_json::to_string(&profile.effective_routing(&cfg.defaults))?.hash(&mut hasher);
-    format!(
-        "{:?}",
-        crate::availability::list_scopes(&crate::availability::resolve_state_path(), now)?
-    )
-    .hash(&mut hasher);
-    Ok(format!("{:016x}", hasher.finish()))
 }
 
 /// Persist a stuck-loop transition only when this work item has no active

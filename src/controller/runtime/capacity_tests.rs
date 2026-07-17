@@ -198,3 +198,43 @@ fn route_state_fingerprint_changes_when_a_cooldown_expires() {
     let recovered = route_state_fingerprint(&cfg, "real", parse("2026-07-17T08:11:00Z")).unwrap();
     assert_ne!(blocked, recovered);
 }
+
+#[test]
+fn route_state_fingerprint_is_stable_across_config_reloads_with_hash_maps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = crate::test_support::AvailabilityEnvGuard::set(
+        tmp.path().join("missing-availability.json"),
+    );
+    let source = r#"
+[profiles.real]
+display_name = "Real"
+repo_id = "real"
+provider = "github"
+repo = "owner/real"
+local_path = "/tmp/real"
+artifact_root = "/tmp/real-artifacts"
+default_target_branch = "main"
+
+[profiles.real.max_concurrent_per_model]
+"agy/model-a" = 1
+"agy-second/model-a" = 1
+"codex/model-b" = 2
+"opencode/model-c" = 1
+"vibe/model-d" = 1
+
+[profiles.real.opencode_idle_timeout_seconds_by_model]
+"model-a" = 60
+"model-b" = 120
+"model-c" = 180
+"model-d" = 240
+"model-e" = 300
+"#;
+    let now = time::OffsetDateTime::now_utc();
+    let fingerprints = (0..32)
+        .map(|_| {
+            let cfg: crate::config::GahConfig = toml::from_str(source).unwrap();
+            route_state_fingerprint(&cfg, "real", now).unwrap()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(fingerprints.len(), 1);
+}
