@@ -103,21 +103,13 @@ pub(super) fn ledger_info_for_mr(
         .or_else(|| {
             entries.iter().rev().find(|entry| {
                 matches!(entry.mode.as_str(), "fix" | "improve")
+                    && entry.branch.as_deref() == Some(mr.branch.as_str())
                     && !entry.effective_backend.is_empty()
             })
         });
-    let review = entries
-        .iter()
-        .rev()
-        .find(|entry| {
-            entry.branch.as_deref() == Some(mr.branch.as_str()) && entry.review_verdict.is_some()
-        })
-        .or_else(|| {
-            entries
-                .iter()
-                .rev()
-                .find(|entry| entry.review_verdict.is_some())
-        });
+    let review = entries.iter().rev().find(|entry| {
+        entry.branch.as_deref() == Some(mr.branch.as_str()) && entry.review_verdict.is_some()
+    });
     (
         implementation.map(|entry| entry.effective_backend.clone()),
         implementation.and_then(|entry| entry.effective_model.clone()),
