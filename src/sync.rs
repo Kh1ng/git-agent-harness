@@ -1,6 +1,7 @@
 use crate::config::{self, GahConfig};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
@@ -123,6 +124,8 @@ pub struct SyncMr {
     pub id: Option<String>,
     pub state: Option<String>,
     pub draft: bool,
+    /// Immutable source commit currently attached to the provider MR.
+    pub source_sha: Option<String>,
     pub merge_status: Option<String>,
     pub merged: bool,
     pub updated_at: Option<String>,
@@ -152,7 +155,7 @@ pub struct SyncMr {
 /// titles, while continuing to read legacy `TICKET-NNN` titles. No attempt
 /// to disambiguate authoritative vs stale IDs happens here -- that check
 /// already happened when the title was generated.
-fn extract_work_id_from_title(title: &str) -> Option<String> {
+pub(crate) fn extract_work_id_from_title(title: &str) -> Option<String> {
     if let Some(issue_id) = title.split('#').skip(1).find_map(|rest| {
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         (!digits.is_empty()).then(|| format!("#{digits}"))
@@ -179,6 +182,41 @@ pub fn fetch_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
 /// reserved for explicit synchronization, reconciliation, and pruning.
 pub fn fetch_active_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
     fetch_mrs_for_scope(profile, MrFetchScope::Active)
+}
+
+/// Stable identity of the provider metadata a reviewer actually inspected.
+/// Length-prefixing each field avoids ambiguous concatenation; the versioned
+/// prefix permits a future canonicalization change without silently treating
+/// old and new identities as equivalent.
+pub(crate) fn review_metadata_fingerprint(
+    source_sha: Option<&str>,
+    title: Option<&str>,
+    body: Option<&str>,
+    draft: bool,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gah-review-metadata-v1\0");
+    for value in [
+        source_sha.unwrap_or(""),
+        title.unwrap_or(""),
+        body.unwrap_or(""),
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.update([u8::from(draft)]);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+impl SyncMr {
+    fn review_metadata_fingerprint(&self) -> String {
+        review_metadata_fingerprint(
+            self.source_sha.as_deref(),
+            Some(&self.title),
+            self.body.as_deref(),
+            self.draft,
+        )
+    }
 }
 
 fn fetch_mrs_for_scope(profile: &config::Profile, scope: MrFetchScope) -> Result<Vec<SyncMr>> {
@@ -251,9 +289,35 @@ pub fn sync_mr_to_json(
     profile: Option<String>,
     ledger: &crate::ledger::LedgerEntriesByWorkId,
 ) -> SyncMrJson {
-    let class = classify(mr);
-    let (effective_backend, effective_model, review_verdict, review_gate_reason) =
+    let mut class = classify(mr);
+    let (effective_backend, effective_model, mut review_verdict, mut review_gate_reason) =
         ledger_info_for_mr(ledger, mr);
+    if !matches!(class, "MERGED" | "CLOSED_UNMERGED" | "CI_FAILED") {
+        if let Some(latest) = latest_review_for_mr(ledger, mr) {
+            if latest.review_metadata_fingerprint.as_deref()
+                != Some(mr.review_metadata_fingerprint().as_str())
+            {
+                // The provider label reflects an opinion about older
+                // metadata. Metadata-only corrections require review, not a
+                // worktree repair or terminal human gate.
+                class = "NEEDS_REVIEW";
+                review_verdict = None;
+                review_gate_reason = None;
+            } else {
+                // Provider label mutations can fail or lag after a completed
+                // review. Reconcile from the exact-branch, exact-metadata
+                // structured verdict so stale NEEDS_FIX labels cannot launch
+                // a repair that preflight must reject.
+                class = match latest.review_verdict.as_deref() {
+                    Some("APPROVE") => "READY_FOR_HUMAN",
+                    Some("NEEDS_FIX" | "REJECT") => "NEEDS_FIX",
+                    Some("HUMAN_REVIEW") if latest.human_required => "READY_FOR_HUMAN",
+                    Some("HUMAN_REVIEW") => "NEEDS_REVIEW",
+                    _ => class,
+                };
+            }
+        }
+    }
     SyncMrJson {
         profile,
         branch: mr.branch.clone(),
@@ -277,10 +341,28 @@ pub fn sync_mr_to_json(
     }
 }
 
-/// Join an MR to its ledger entries (by `work_id`) and return the
-/// backend/model that produced it plus the recorded review verdict. Prefers
-/// the entry whose `mr_url` matches this MR exactly, otherwise the most
-/// recent entry that recorded a backend.
+fn latest_review_for_mr<'a>(
+    ledger: &'a crate::ledger::LedgerEntriesByWorkId,
+    mr: &SyncMr,
+) -> Option<&'a crate::ledger::LedgerEntry> {
+    let work_id = mr.work_id.as_ref()?;
+    let entries = ledger.get(work_id)?;
+    entries.iter().rev().find(|entry| {
+        entry.branch.as_deref() == Some(mr.branch.as_str())
+            && matches!(
+                entry
+                    .review_verdict
+                    .as_deref()
+                    .or(entry.validation_result.as_deref()),
+                Some("APPROVE" | "NEEDS_FIX" | "REJECT" | "HUMAN_REVIEW")
+            )
+    })
+}
+
+/// Join an MR to its ledger entries (by `work_id`) and return the backend/model
+/// that produced it plus the latest review verdict. Attribution and review are
+/// deliberately selected independently: a metadata-only re-review appends a
+/// newer review entry without creating a new implementation attempt.
 fn ledger_info_for_mr(
     ledger: &crate::ledger::LedgerEntriesByWorkId,
     mr: &SyncMr,
@@ -296,33 +378,39 @@ fn ledger_info_for_mr(
     let Some(entries) = ledger.get(work_id) else {
         return (None, None, None, None);
     };
-    let chosen = entries
+    let implementation = entries
         .iter()
-        .find(|e| e.mr_url.as_deref() == mr.url.as_deref())
+        .rev()
+        .find(|entry| {
+            matches!(entry.mode.as_str(), "fix" | "improve")
+                && entry.mr_url.as_deref() == mr.url.as_deref()
+                && !entry.effective_backend.is_empty()
+        })
+        .or_else(|| {
+            entries.iter().rev().find(|entry| {
+                matches!(entry.mode.as_str(), "fix" | "improve")
+                    && !entry.effective_backend.is_empty()
+            })
+        });
+    let review = entries
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.branch.as_deref() == Some(mr.branch.as_str()) && entry.review_verdict.is_some()
+        })
         .or_else(|| {
             entries
                 .iter()
                 .rev()
-                .find(|e| !e.effective_backend.is_empty())
+                .find(|entry| entry.review_verdict.is_some())
         });
-    let Some(entry) = chosen else {
-        return (None, None, None, None);
-    };
-    let backend = if entry.effective_backend.is_empty() {
-        None
-    } else {
-        Some(entry.effective_backend.clone())
-    };
-    let model = if backend.is_some() {
-        entry.effective_model.clone()
-    } else {
-        None
-    };
+    let backend = implementation.map(|entry| entry.effective_backend.clone());
+    let model = implementation.and_then(|entry| entry.effective_model.clone());
     (
         backend,
         model,
-        entry.review_verdict.clone(),
-        entry.review_gate_reason.clone(),
+        review.and_then(|entry| entry.review_verdict.clone()),
+        review.and_then(|entry| entry.review_gate_reason.clone()),
     )
 }
 
@@ -347,6 +435,9 @@ struct GithubPr {
     body: Option<String>,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
+    #[serde(default)]
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: Option<String>,
     #[serde(default)]
     url: Option<String>,
     #[serde(default)]
@@ -398,7 +489,7 @@ fn github_pr_list_args(profile: &crate::config::Profile, scope: MrFetchScope) ->
         "--limit",
         limit,
         "--json",
-        "title,body,headRefName,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
+        "title,body,headRefName,headRefOid,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
     ]
     .into_iter()
     .map(str::to_string)
@@ -435,6 +526,7 @@ fn github_prs(profile: &crate::config::Profile, scope: MrFetchScope) -> Result<V
             id: pr.number.map(|n| n.to_string()),
             state: pr.state,
             draft: pr.is_draft,
+            source_sha: pr.head_ref_oid,
             merge_status: pr.merge_state_status,
             merged: pr.merged_at.is_some(),
             updated_at: pr.updated_at,
@@ -483,6 +575,8 @@ struct GitlabMr {
     state: Option<String>,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    sha: Option<String>,
     #[serde(default)]
     detailed_merge_status: Option<String>,
     #[serde(default)]
@@ -553,6 +647,7 @@ fn gitlab_mrs(profile: &crate::config::Profile, scope: MrFetchScope) -> Result<V
             id: iid,
             state: mr.state,
             draft: mr.draft,
+            source_sha: mr.sha,
             merge_status: mr.detailed_merge_status.or(mr.merge_status),
             merged: mr.merged_at.is_some(),
             updated_at: mr.updated_at,
@@ -773,7 +868,8 @@ fn count_branch_attempts(
 mod tests {
     use super::{
         classify, extract_work_id_from_title, github_ci_failed, github_ci_passed, gitlab_ci_failed,
-        gitlab_ci_passed, gitlab_ci_pending, recommended_action, GithubCheck, GithubPr, SyncMr,
+        gitlab_ci_passed, gitlab_ci_pending, recommended_action, review_metadata_fingerprint,
+        sync_mr_to_json, GithubCheck, GithubPr, GitlabMr, RecommendedAction, SyncMr,
     };
 
     #[test]
@@ -873,6 +969,20 @@ mod tests {
         let pr: GithubPr = serde_json::from_str(json_with_empty).unwrap();
         assert!(pr.status_check_rollup.is_some());
         assert_eq!(pr.status_check_rollup.as_ref().unwrap().len(), 0);
+
+        let with_source = r#"{"title":"Test","headRefName":"gah/test","headRefOid":"abc123"}"#;
+        let pr: GithubPr = serde_json::from_str(with_source).unwrap();
+        assert_eq!(pr.head_ref_oid.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn gitlab_list_fixture_retains_source_sha_for_review_identity() {
+        let mr: GitlabMr = serde_json::from_str(
+            r#"{"title":"Test","source_branch":"gah/test","draft":true,"sha":"def456"}"#,
+        )
+        .unwrap();
+        assert_eq!(mr.sha.as_deref(), Some("def456"));
+        assert!(mr.draft);
     }
 
     #[test]
@@ -892,6 +1002,7 @@ mod tests {
             id: None,
             state: Some("OPEN".into()),
             draft: false,
+            source_sha: None,
             merge_status: None,
             merged: false,
             updated_at: None,
@@ -947,6 +1058,7 @@ mod tests {
         review.effective_backend = "claude".into();
         review.review_verdict = Some("HUMAN_REVIEW".into());
         review.review_gate_reason = Some("APPROVE omitted grounded evidence".into());
+        review.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
         let mut ledger = crate::ledger::LedgerEntriesByWorkId::new();
         ledger.insert("TICKET-295".into(), vec![review]);
 
@@ -956,6 +1068,165 @@ mod tests {
         assert_eq!(
             row.review_gate_reason.as_deref(),
             Some("APPROVE omitted grounded evidence")
+        );
+    }
+
+    fn reviewed_needs_fix_row(
+        fingerprint: Option<String>,
+    ) -> (SyncMr, crate::ledger::LedgerEntriesByWorkId) {
+        let mut mr = base_mr();
+        mr.work_id = Some("#701".into());
+        mr.source_sha = Some("source-sha".into());
+        mr.body = Some("corrected metadata".into());
+        mr.labels = vec!["gah-needs-fix".into()];
+
+        let mut review = ledger_entry("review", "gah/test", Some("review"), Some(1));
+        review.work_id = Some("#701".into());
+        review.review_verdict = Some("NEEDS_FIX".into());
+        review.validation_result = Some("NEEDS_FIX".into());
+        review.review_source_sha = Some("source-sha".into());
+        review.review_metadata_fingerprint = fingerprint;
+        review.review_blocking_findings = vec!["MR description omitted the finding".into()];
+
+        let mut ledger = crate::ledger::LedgerEntriesByWorkId::new();
+        ledger.insert("#701".into(), vec![review]);
+        (mr, ledger)
+    }
+
+    #[test]
+    fn metadata_only_correction_invalidates_needs_fix_and_schedules_review() {
+        let old =
+            review_metadata_fingerprint(Some("source-sha"), Some("x"), Some("old metadata"), false);
+        let (mr, ledger) = reviewed_needs_fix_row(Some(old));
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "NEEDS_REVIEW");
+        assert_eq!(row.recommended_action, RecommendedAction::RunReview);
+        assert_eq!(row.review_verdict, None);
+    }
+
+    #[test]
+    fn unchanged_review_metadata_preserves_needs_fix() {
+        let (mr, mut ledger) = reviewed_needs_fix_row(None);
+        ledger.get_mut("#701").unwrap()[0].review_metadata_fingerprint =
+            Some(mr.review_metadata_fingerprint());
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "NEEDS_FIX");
+        assert_eq!(row.recommended_action, RecommendedAction::ReuseBranch);
+        assert_eq!(row.review_verdict.as_deref(), Some("NEEDS_FIX"));
+    }
+
+    #[test]
+    fn backfilled_implementation_review_identity_is_valid_review_evidence() {
+        let (mr, mut ledger) = reviewed_needs_fix_row(None);
+        let entry = &mut ledger.get_mut("#701").unwrap()[0];
+        entry.mode = "fix".into();
+        entry.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "NEEDS_FIX");
+        assert_eq!(row.review_verdict.as_deref(), Some("NEEDS_FIX"));
+    }
+
+    #[test]
+    fn stale_needs_fix_label_with_nonterminal_human_review_routes_to_review() {
+        let (mr, mut ledger) = reviewed_needs_fix_row(None);
+        let review = &mut ledger.get_mut("#701").unwrap()[0];
+        review.review_verdict = Some("HUMAN_REVIEW".into());
+        review.validation_result = Some("HUMAN_REVIEW".into());
+        review.human_required = false;
+        review.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "NEEDS_REVIEW");
+        assert_eq!(row.recommended_action, RecommendedAction::RunReview);
+        assert_eq!(row.review_verdict.as_deref(), Some("HUMAN_REVIEW"));
+    }
+
+    #[test]
+    fn terminal_human_review_hold_is_not_redispatched_or_auto_merged() {
+        let (mr, mut ledger) = reviewed_needs_fix_row(None);
+        let review = &mut ledger.get_mut("#701").unwrap()[0];
+        review.review_verdict = Some("HUMAN_REVIEW".into());
+        review.validation_result = Some("HUMAN_REVIEW".into());
+        review.human_required = true;
+        review.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "READY_FOR_HUMAN");
+        assert_eq!(
+            row.recommended_action,
+            RecommendedAction::HumanMergeDecision
+        );
+        assert_eq!(row.review_verdict.as_deref(), Some("HUMAN_REVIEW"));
+    }
+
+    #[test]
+    fn metadata_rereview_supersedes_old_backfilled_verdict_without_losing_attribution() {
+        let (mut mr, mut ledger) = reviewed_needs_fix_row(None);
+        mr.labels = vec!["gah-ready-for-human".into()];
+        mr.url = Some("https://example.test/mr/7".into());
+
+        let implementation = &mut ledger.get_mut("#701").unwrap()[0];
+        implementation.mode = "fix".into();
+        implementation.mr_url = mr.url.clone();
+        implementation.effective_backend = "hy3".into();
+        implementation.effective_model = Some("worker-model".into());
+
+        let mut rereview = ledger_entry("review", "gah/test", Some("review"), Some(2));
+        rereview.work_id = Some("#701".into());
+        rereview.mr_url = mr.url.clone();
+        rereview.review_verdict = Some("APPROVE".into());
+        rereview.validation_result = Some("APPROVE".into());
+        rereview.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+        ledger.get_mut("#701").unwrap().push(rereview);
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "READY_FOR_HUMAN");
+        assert_eq!(row.review_verdict.as_deref(), Some("APPROVE"));
+        assert_eq!(row.effective_backend.as_deref(), Some("hy3"));
+        assert_eq!(row.effective_model.as_deref(), Some("worker-model"));
+    }
+
+    #[test]
+    fn historical_review_without_metadata_identity_fails_safe_to_rereview() {
+        let (mr, ledger) = reviewed_needs_fix_row(None);
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "NEEDS_REVIEW");
+        assert_eq!(row.review_verdict, None);
+    }
+
+    #[test]
+    fn review_metadata_fingerprint_covers_source_title_body_and_draft_state() {
+        let baseline = review_metadata_fingerprint(Some("sha"), Some("title"), Some("body"), false);
+        assert_eq!(
+            baseline,
+            review_metadata_fingerprint(Some("sha"), Some("title"), Some("body"), false)
+        );
+        assert_ne!(
+            baseline,
+            review_metadata_fingerprint(Some("other"), Some("title"), Some("body"), false)
+        );
+        assert_ne!(
+            baseline,
+            review_metadata_fingerprint(Some("sha"), Some("other"), Some("body"), false)
+        );
+        assert_ne!(
+            baseline,
+            review_metadata_fingerprint(Some("sha"), Some("title"), Some("other"), false)
+        );
+        assert_ne!(
+            baseline,
+            review_metadata_fingerprint(Some("sha"), Some("title"), Some("body"), true)
         );
     }
 

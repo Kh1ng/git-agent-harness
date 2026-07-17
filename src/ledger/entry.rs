@@ -250,7 +250,9 @@ pub struct RoutingCandidateDiagnostic {
 ///   usage rule.
 /// - `3`: usage distinguishes reasoning tokens and records explicit reasons
 ///   when exact token or quota telemetry is unavailable.
-pub const LEDGER_SCHEMA_VERSION: u32 = 3;
+// v4 adds `review_metadata_fingerprint`. The field has a serde default so v1-v3
+// history remains readable; its absence deliberately makes old reviews stale.
+pub const LEDGER_SCHEMA_VERSION: u32 = 4;
 
 fn default_ledger_schema_version() -> u32 {
     1
@@ -331,6 +333,11 @@ pub struct LedgerEntry {
     /// historical records, which must never be considered duplicates.
     #[serde(default)]
     pub review_source_sha: Option<String>,
+    /// Versioned digest of the provider title/body/draft state and source SHA
+    /// inspected by this review. Historical entries omit it and are therefore
+    /// intentionally re-reviewed before their verdict can drive a repair.
+    #[serde(default)]
+    pub review_metadata_fingerprint: Option<String>,
     /// Authority class (strong/standard/weak/escalatory) of the reviewer.
     #[serde(default)]
     pub reviewer_class: Option<String>,
@@ -478,6 +485,7 @@ impl LedgerEntry {
             reviewer_model: None,
             reviewer_tier: None,
             review_source_sha: None,
+            review_metadata_fingerprint: None,
             reviewer_class: None,
             review_gate_reason: None,
             review_blocking_findings: Vec::new(),
@@ -571,6 +579,7 @@ impl LedgerEntry {
             reviewer_model: None,
             reviewer_tier: None,
             review_source_sha: None,
+            review_metadata_fingerprint: None,
             reviewer_class: None,
             review_gate_reason: None,
             review_blocking_findings: Vec::new(),
