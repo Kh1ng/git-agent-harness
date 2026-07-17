@@ -6,6 +6,9 @@ use crate::status::{
 };
 use crate::sync::{RecommendedAction, SyncMrJson};
 
+#[path = "tests/lifecycle_priority.rs"]
+mod lifecycle_priority;
+
 fn empty_snapshot() -> StatusSnapshot {
     StatusSnapshot {
         schema_version: 1,

@@ -49,11 +49,11 @@ fn now_plus(offset: Duration) -> String {
 ///
 /// 1. incomplete critical observation -> stop safely (NoOp)
 /// 2. a recorded blocker (today: ledger human_required) -> HumanRequired
-/// 3. an MR classified NEEDS_REVIEW -> ReviewMr
-/// 4. an MR classified READY_FOR_HUMAN with draft=true and conclusively-green
+/// 3. an MR classified READY_FOR_HUMAN with draft=true and conclusively-green
 ///    CI -> MarkReadyForReview
-/// 5. an MR classified READY_FOR_HUMAN with draft=false and conclusively-green
+/// 4. an MR classified READY_FOR_HUMAN with draft=false and conclusively-green
 ///    CI -> MergeMr (or HumanRequired if merge policy forbids auto-merge)
+/// 5. an MR classified NEEDS_REVIEW -> ReviewMr
 /// 6. an MR classified CI_FAILED/NEEDS_FIX -> FixMr (if retry cap not exceeded)
 /// 7. an MR classified CI_FAILED/NEEDS_FIX -> HumanRequired (if retry cap exceeded)
 /// 8. an MR classified READY_FOR_HUMAN -> HumanRequired ONLY when the merge
@@ -222,16 +222,10 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         }
     }
 
-    // Priority order: review -> merge -> fix. Each returns the first
-    // candidate; blocked MRs are skipped, not parked.
-    if let Some(mr) = review_candidates.first() {
-        return NextAction::ReviewMr {
-            work_id: mr.work_id.clone(),
-            branch: mr.branch.clone(),
-            mr_url: mr.url.clone(),
-            reason: format!("MR on branch '{}' classified NEEDS_REVIEW", mr.branch),
-        };
-    }
+    // Drain cheap terminal lifecycle actions before starting another costly
+    // review. Otherwise a large NEEDS_REVIEW queue can starve a strong-approved
+    // green MR forever. Reviews still stay ahead of repair work once ready and
+    // merge candidates are drained.
     if let Some(mr) = ready_candidates.first() {
         return NextAction::MarkReadyForReview {
             work_id: mr.work_id.clone(),
@@ -286,6 +280,14 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                     mr.branch
                 ),
             },
+        };
+    }
+    if let Some(mr) = review_candidates.first() {
+        return NextAction::ReviewMr {
+            work_id: mr.work_id.clone(),
+            branch: mr.branch.clone(),
+            mr_url: mr.url.clone(),
+            reason: format!("MR on branch '{}' classified NEEDS_REVIEW", mr.branch),
         };
     }
     if let Some(mr) = fix_candidates.first() {
