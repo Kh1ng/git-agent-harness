@@ -1,5 +1,6 @@
 use crate::config::Profile;
 use anyhow::{Context, Result};
+use std::fmt;
 use std::process::{Command, Output};
 use std::thread;
 use std::time::Duration;
@@ -282,6 +283,11 @@ pub fn find_review_target_by_branch(profile: &Profile, branch: &str) -> Result<R
     }
 }
 
+/// Resolve an explicit `--mr` dispatch to its review target. `mr` accepts
+/// either a bare numeric IID/PR number or the canonical provider MR/PR URL
+/// operators already receive in notifications and status output; GitHub's
+/// `gh pr view` accepts both natively, GitLab's IID-keyed API requires
+/// normalizing the URL first (see `parse_gitlab_mr_reference`).
 pub fn find_review_target_by_mr(profile: &Profile, mr: &str) -> Result<ReviewTarget> {
     match profile.provider.as_str() {
         "gitlab" => gitlab_review_target_by_iid(profile, mr),
@@ -843,12 +849,98 @@ fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<Rev
     gitlab_target_from_value(first)
 }
 
+/// Explicit `--mr` dispatch typed failure: the operator-supplied MR
+/// reference is not a bare IID and does not resolve to this profile's
+/// project. Kept distinct from provider API errors so it fails at
+/// argument/preflight validation, before any `glab api` call or backend
+/// launch.
+#[derive(Debug)]
+pub enum MrReferenceError {
+    MalformedUrl(String),
+    CrossProject { expected: String, found: String },
+}
+
+impl fmt::Display for MrReferenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MrReferenceError::MalformedUrl(raw) => write!(
+                f,
+                "malformed --mr value '{raw}': expected a numeric IID or a canonical GitLab MR URL (https://<host>/<namespace>/<project>/-/merge_requests/<iid>)"
+            ),
+            MrReferenceError::CrossProject { expected, found } => write!(
+                f,
+                "--mr URL does not match this profile's project: expected '{expected}', found '{found}'"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MrReferenceError {}
+
+fn is_ascii_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Normalize an explicit `--mr` value to a GitLab IID. Accepts a bare
+/// numeric IID unchanged (existing behavior), or a canonical MR URL whose
+/// host and project path must match this profile -- anything else is a
+/// typed, non-network validation failure.
+fn parse_gitlab_mr_reference(profile: &Profile, raw: &str) -> Result<String, MrReferenceError> {
+    let trimmed = raw.trim();
+    if is_ascii_digits(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?;
+    let (host, rest) = without_scheme
+        .split_once('/')
+        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?;
+
+    let (project_path, after_marker) = rest
+        .find("/-/merge_requests/")
+        .map(|idx| (&rest[..idx], &rest[idx + "/-/merge_requests/".len()..]))
+        .or_else(|| {
+            rest.find("/merge_requests/")
+                .map(|idx| (&rest[..idx], &rest[idx + "/merge_requests/".len()..]))
+        })
+        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?;
+    let iid: String = after_marker
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if iid.is_empty() || project_path.is_empty() {
+        return Err(MrReferenceError::MalformedUrl(raw.to_string()));
+    }
+
+    let expected_host = profile
+        .provider_api_base
+        .as_deref()
+        .and_then(|base| gitlab_hostname(base).ok());
+    let host_matches = match expected_host {
+        Some(expected) => expected.eq_ignore_ascii_case(host),
+        None => true,
+    };
+    let project_matches = project_path == profile.repo;
+    if !host_matches || !project_matches {
+        return Err(MrReferenceError::CrossProject {
+            expected: profile.repo.clone(),
+            found: format!("{host}/{project_path}"),
+        });
+    }
+
+    Ok(iid)
+}
+
 fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarget> {
+    let iid = parse_gitlab_mr_reference(profile, mr)?;
     let project_id = profile
         .provider_project_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
-    let endpoint = format!("projects/{project_id}/merge_requests/{mr}");
+    let endpoint = format!("projects/{project_id}/merge_requests/{iid}");
     let resp = gitlab_api(profile, &endpoint, "GET", &[])?;
     gitlab_target_from_value(&resp)
 }
