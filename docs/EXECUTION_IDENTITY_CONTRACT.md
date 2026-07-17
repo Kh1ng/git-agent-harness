@@ -25,9 +25,13 @@ before-state.
 | `runner_kind` | The agent CLI family GAH knows how to invoke (`claude`, `codex`, `openhands`, `vibe`, `opencode`, `agy`). | Implicit in `runner::backend_command_name()`; not a distinct value today. | `src/runner/resolve.rs` |
 | `executable` | The resolved on-disk path GAH actually invokes for a `runner_kind` in a given profile. | `runner::resolve_backend_executable()` / `ExecutableResolution`. | `src/runner/resolve.rs` |
 | `logical_backend` | The string used everywhere as "backend": `requested_backend`, `effective_backend`, `CandidateConfig.backend`, `AttemptRecord.backend`. May diverge from `runner_kind` for multi-account runners (`agy-second` shares the `agy` runner) or historical aliases (`cloud-coder` shares the `openhands` runner). | Plain `String` throughout config/routing/ledger. | `src/config.rs`, `src/routing/` |
-| `instance_account` / `quota_pool` | Which credential/session/home a `logical_backend` used. | Config: `Profile.agy_second_home`, `CandidateConfig.quota_pool`. Runtime: `RouteDecision.effective_quota_pool`, `AvailabilityRecord.quota_pool`. Telemetry: `LedgerUsage.account_label`, folded into `LedgerUsage.backend_instance`. | `src/config.rs`, `src/availability.rs`, `src/usage_attribution.rs` |
+| `backend_instance` | Stable, operator-chosen identity of the concrete runner installation/account binding used for the attempt (for example `agy-primary`, `agy-second`, or `opencode-nous-key-2`). It distinguishes two instances even when runner, provider, model, and quota pool are identical. | Not explicit today. `LedgerUsage.backend_instance` is a compatibility projection composed from `logical_backend` and `quota_pool`. Part 5/5 introduces the authoritative config field. | Config declares; routing selects; ledger records. |
+| `account_label` | Optional secret-safe account or billing label. It is descriptive attribution, not the route identity and not a credential. | `LedgerUsage.account_label`, currently populated from `quota_pool`. | Config declares; usage/ledger record. |
+| `auth_source_label` | Optional secret-safe label for the credential/session source (for example `claude-subscription-main` or `nous-portal-key-2`). It never contains a key, token, path, HOME, or credential value. | Not represented separately today; runner path/HOME conventions imply it. | Config declares; runner consumes the binding; ledger records only the safe label. |
+| `quota_pool` | Capacity/billing pool shared by one or more backend instances. It is a pacing/accounting scope, not an instance identifier. | `CandidateConfig.quota_pool`, `RouteDecision.effective_quota_pool`, `AvailabilityRecord.quota_pool`; currently also reused as `LedgerUsage.account_label`. | `src/config.rs`, `src/availability.rs`, `src/usage_attribution.rs` |
 | `auth_class` / `usage_classification` | `quota_backed` \| `api_key_backed` \| `local_unmetered` \| `unknown` \| `mixed` \| `mixed_or_unknown`. | `LedgerUsage.usage_classification`, derived in `usage_attribution::normalize_attempt_usage`. | `src/usage_attribution.rs` |
-| `provider` | Inferred model vendor (`anthropic`, `openai`, `google`, `mistral`, `deepseek`, `z-ai`, `tencent`, `local`), never an account identifier. | `LedgerUsage.provider`, derived in `usage_attribution::provider_for_model`. | `src/usage_attribution.rs` |
+| `provider` | Exact model vendor used (`anthropic`, `openai`, `google`, `mistral`, `deepseek`, `z-ai`, `tencent`, `local`), never an account identifier. Backend-reported truth wins; configured route metadata is next; model-string inference is a compatibility fallback, not equivalent to observation. | `LedgerUsage.provider`, currently derived in `usage_attribution::provider_for_model`. | `src/usage_attribution.rs` |
+| `provider_attribution_source` | Whether `provider` was `backend_reported`, `config_declared`, `inferred`, or `unknown`, so inferred proxy/alias attribution is never presented as directly observed truth. | Not represented separately today; `provider_unknown_reason` covers only absence. | Usage attribution declares; ledger records. |
 | `requested_model` | What routing was asked for, before any runtime substitution. | `RouteRequest.requested_model`, `RouteDecision.requested_model`, `LedgerEntry.requested_model`. | `src/routing/`, `src/ledger/entry.rs` |
 | `effective_model` | What routing decided to dispatch for this attempt/entry, after fallback and any `--model` override. | `RouteDecision.effective_model`, `LedgerEntry.effective_model`, `AttemptRecord.effective_model`, `AttemptRoutingRecord.effective_model`. | `src/routing/`, `src/ledger/entry.rs` |
 | `actual_model` | What the backend itself reported using, post-execution. May differ from `effective_model` when a proxy/alias substitutes a different concrete model. | `LedgerUsage.actual_model` (+ `actual_model_unknown_reason`). | `src/usage_attribution.rs` |
@@ -87,14 +91,23 @@ must not compute its own notion of `backend_instance` or
   pre-existing entries recorded under the old alias are merged too.
   `auto` is deliberately never folded: its effective backend is resolved
   per-attempt by `routing::decide`, not a fixed alias.
-- **`backend_instance` composition.** `logical_backend` alone when no
+- **Legacy `backend_instance` projection.** Until part 5/5 declares instances
+  explicitly, compatibility code uses `logical_backend` alone when no
   `quota_pool` is set, else `"{logical_backend}:{quota_pool}"`
-  (`usage_attribution::normalize_attempt_usage`). Never includes a raw
-  account identifier, file path, or secret.
+  (`usage_attribution::normalize_attempt_usage`). This is a migration shim,
+  not the destination identity rule: a quota pool can be shared, and two
+  instances in that pool must remain independently attributable.
+- **Declared `backend_instance`.** Once present, the operator-chosen instance
+  label is authoritative and is never reconstructed from backend, account,
+  auth source, executable, HOME, or quota pool. Labels are trimmed, non-empty,
+  secret-safe, and unique within a profile. Compatibility defaults preserve
+  today's route strings for legacy config.
 - **No implicit case-folding.** Backend/model strings are recorded verbatim
   as configured/observed; the only normalization is the explicit alias
   table above. Configs must use the canonical literal spelling.
-- **Provider inference precedence.** Exact model-substring match first
+- **Provider attribution precedence.** Use backend-reported provider for the
+  actual model first, then an explicit configured provider for the selected
+  route, then compatibility inference. Today's inference uses model-substring match first
   (`claude`/`sonnet`/`haiku`→`anthropic`, `gemini`→`google`,
   `mistral`/`devstral`→`mistral`, `deepseek`→`deepseek`,
   `glm`/`z-ai`→`z-ai`, `hy3`/`tencent`→`tencent`, `gpt-`/`openai`→`openai`,
@@ -123,8 +136,9 @@ must not compute its own notion of `backend_instance` or
 
 ## 5. Secret-safe labels
 
-Only `backend_instance`, `account_label`, `quota_pool`, and `provider` may
-appear in logs, the ledger, telemetry, or the dashboard. These are always
+Of account/auth binding data, only `backend_instance`, `account_label`,
+`auth_source_label`, and `quota_pool` may appear in logs, the ledger,
+telemetry, or the dashboard. These and the separate `provider` field are always
 operator-chosen logical strings from config (e.g. `"claude-main"`,
 `"nous-portal-api"`), never raw API keys, tokens, or filesystem paths.
 `executable` and `*_path`/`*_home` config fields (`claude_path`,
@@ -137,23 +151,24 @@ from config-declared labels so they never need redaction in the first place.
 
 ## 6. Equality / keying rules
 
-- **Availability / quota-pacing scope key:**
-  `(logical_backend, model: Option<String>, quota_pool: Option<String>)` —
-  matches `AvailabilityRecord`'s three optional-narrowing fields and
-  `BlockScope::{BackendWide, ModelSpecific, QuotaPool}`
-  (`src/availability.rs:90-134`).
-- **Routing dedup / attempt-tracking key:** `CandidateIdentity { backend,
-  model }` (derives `Eq`/`Hash`, `src/routing/types.rs:40-53`). This
-  deliberately does **not** include `quota_pool` — today two accounts of the
-  same runner sharing a model (`agy` vs `agy-second` both on the same
-  model) are treated as the *same* "already attempted" candidate for
-  retry-diversity purposes. 2/5 must explicitly decide whether to widen
-  this key to `(backend, model, quota_pool)`; this contract intentionally
-  does not silently change it.
-- **Cross-system join key for one execution:** `(work_id, attempt_number)`
-  for attempt-scoped identity (`AttemptRecord`, `AttemptRoutingRecord`);
-  `(work_id)` alone for the top-level/aggregated identity. Never
-  `(backend, model)` alone — the same pair recurs across many work items.
+- **Availability / quota-pacing scope key:** `(backend_instance,
+  model: Option<String>, quota_pool: Option<String>)`. During compatibility,
+  `backend_instance` is the legacy projection above and the persisted
+  `AvailabilityRecord { backend, model, quota_pool }` remains unchanged.
+  A future migration may narrow a block to one instance without incorrectly
+  blocking a second instance that happens to share its runner or model.
+- **Routing dedup / attempt-tracking key:** the destination key is
+  `(backend_instance, model)`. `quota_pool` is not part of candidate identity
+  because multiple independently routable instances may intentionally share
+  one capacity pool. During parts 2/5-4/5, the existing
+  `CandidateIdentity { backend, model }` compatibility key remains in force so
+  the typed-carrier migration does not silently reorder routes. Part 5/5 may
+  activate the wider instance key only with an explicit golden-test update.
+- **Cross-system join key for one execution attempt:** `(profile, repo_id,
+  work_id, run_id, attempt_number)`. The top-level execution key is
+  `(profile, repo_id, work_id, run_id)`. Neither `work_id` nor
+  `(backend, model)` is globally unique: GitHub/GitLab issue numbers collide
+  across projects, and one work item can have retries/fallback attempts.
 
 ## 7. Auth / cost class taxonomy
 
@@ -189,10 +204,11 @@ per-attempt classifications.
   the top level reflect only the **last attempt with a non-empty
   `effective_backend`** (`src/sync.rs:299-318`) — they are a summary, not
   per-attempt authoritative truth.
-- `fallback_used` is `true` exactly when `effective_backend`/
-  `effective_model` differ from `requested_backend`/`requested_model`
-  because the originally requested candidate was unavailable/unapproved and
-  a lower-priority candidate was substituted. `routing_reason` and
+- `fallback_used` is `true` when routing selects a later candidate because an
+  earlier requested/configured candidate was unavailable or unapproved. It
+  is not derived by comparing strings: resolving requested backend `auto` to
+  the first configured candidate is normal selection, not fallback.
+  `routing_reason` and
   `routing_diagnostics.human_summary` carry the human-readable why;
   `routing_diagnostics.selected_over` lists what was skipped.
 
@@ -202,7 +218,7 @@ per-attempt classifications.
 |---|---|---|
 | JSONL ledger (`ledger.jsonl`) | Source of truth. `LedgerEntry`/`AttemptRecord`/`LedgerUsage` fields added since `LEDGER_SCHEMA_VERSION 1` are all `#[serde(default)]`. | Historical lines missing any identity field must keep deserializing to `None` (never a default identity value). `schema_version` (default `1` when absent) is itself part of the contract and must not be inferred from field presence. |
 | SQLite mirror (`ledger/sqlite.rs`) | Derived, **non-authoritative** projection with a narrow column subset (`backend`, `effective_backend`, `effective_model`, `requested_model`, ...). | Migration must either extend these columns to carry the new canonical fields, or explicitly document that newly-canonical fields (e.g. `usage_classification`, `backend_instance`) remain JSONL-only and are not queryable via the SQLite mirror yet. Never treat the mirror as authoritative for identity (see `src/ledger/mod.rs:23-28`). |
-| Availability (`availability.json`) | `AvailabilityRecord{backend, model, quota_pool}`, append-only. | Already the closest existing shape to the canonical `(logical_backend, model, quota_pool)` key (§6); migration is additive only — no field renames. |
+| Availability (`availability.json`) | `AvailabilityRecord{backend, model, quota_pool}`, append-only. | Preserve the legacy three-field key during the carrier migration. Adding explicit instance scope later is additive and must retain legacy reads; no field renames. |
 | Quota (`quota.rs`, `quota_store.rs`, `quota_snapshot.rs`) | Pools keyed by string, `config::canonical_backend_name` applied ad hoc at read sites (e.g. `quota_snapshot.rs:175,534`). | Must resolve `logical_backend`/`quota_pool` through the same normalization function everywhere; migration should centralize the current per-callsite `canonical_backend_name()` calls rather than duplicate the alias table again. |
 | Config (`config.rs`) | `CandidateConfig{backend, model, quota_pool, included_in_quota, requires_approval}` is the declared-intent boundary. | `auth_class` is a **runtime-derived** fact (from `included_in_quota`/cost class), not something config stores directly — migration must not add a redundant `auth_class` config field that could disagree with the derived value. |
 | Status (`status.rs`) | `most_recent_effective_backend`/`most_recent_effective_model` are read-only projections of the ledger's last entry. | Must keep reading the already-normalized ledger fields; never re-infer identity from raw CLI strings. |
@@ -217,7 +233,9 @@ must produce from it.
 
 1. **Two accounts, one runner** — `agy` and `agy-second` share the same
    `runner_kind`/executable but are distinct `logical_backend`,
-   `instance_account`, and `quota_pool` values. Test:
+   `backend_instance`, `account_label`, `auth_source_label`, and `quota_pool`
+   values. A destination fixture also proves two explicit instances stay
+   distinct when logical backend, model, and quota pool are equal. Test:
    `execution_identity_golden_two_accounts_one_runner`.
 2. **One model through subscription and API** — the same model routed once
    with `selected_cost_class = "included_quota"` (→ `quota_backed`, cost
@@ -252,12 +270,13 @@ mapping is transcribed from, not a stand-in for, the production logic in
 public function). This is the adapter parts 2/5–5/5 must reproduce when the
 canonical type is threaded through production.
 
-Separately, `execution_identity_route_decision_regression_baseline` runs one
+Separately, `execution_identity_route_decision_alias_fold_is_byte_for_byte` runs one
 real end-to-end dispatch through `ScenarioHarness` (the same harness used by
-`tests/usage_telemetry_regression.rs`) and asserts the exact current ledger
-output (`requested_backend`, `effective_backend`, `effective_model`,
-`fallback_used`, `usage.backend_instance`, `usage.usage_classification`)
-field-for-field. This is the concrete "before" snapshot: 2/5 must keep this
+`tests/usage_telemetry_regression.rs`) and asserts an exact canonical
+projection of current ledger output (`requested_backend`,
+`effective_backend`, `effective_model`, `fallback_used`,
+`usage.backend_instance`, and `usage.usage_classification`) field-for-field.
+This is the concrete "before" snapshot: 2/5 must keep this
 test passing unmodified (or update it only alongside an explicit,
 reviewed behavior change) to demonstrate route decisions remain
 byte-for-byte equivalent under the migration.
@@ -275,9 +294,11 @@ approval). The reviewer confirms, before 2/5 begins:
       GAH currently dispatches to (`claude`, `codex`, `openhands`, `vibe`,
       `opencode`, `agy`/`agy-main`/`agy-second`) without a credential ever
       appearing in a canonical field.
-- [ ] The equality/keying rule in §6 for `CandidateIdentity` (excludes
-      `quota_pool`) is an explicit, accepted decision — not an oversight —
-      for 2/5 to build on or revisit.
+- [ ] The equality/keying transition in §6 preserves current routing during
+      the carrier migration, then makes explicit backend instances independently
+      routable without treating a shared quota pool as one instance.
+- [ ] Profile, repository, run, work, and attempt identity are all present in
+      the cross-system join key; issue numbers alone can never merge projects.
 - [ ] The legacy compatibility table in §9 has no system GAH persists
       identity/usage to that is left undocumented.
 - [ ] `cargo test execution_identity`, `cargo test --test

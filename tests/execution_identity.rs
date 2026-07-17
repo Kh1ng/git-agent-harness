@@ -25,10 +25,13 @@ use support::scenario::ScenarioHarness;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExecutionIdentity {
     logical_backend: String,
-    instance_account: Option<String>,
     backend_instance: String,
+    account_label: Option<String>,
+    auth_source_label: Option<String>,
+    quota_pool: Option<String>,
     auth_class: String,
     provider: Option<String>,
+    provider_attribution_source: String,
     requested_model: Option<String>,
     effective_model: Option<String>,
     actual_model: Option<String>,
@@ -74,6 +77,8 @@ fn infer_provider(logical_backend: &str, model: Option<&str>) -> Option<&'static
             Some("deepseek")
         } else if model.contains("glm") || model.contains("z-ai") {
             Some("z-ai")
+        } else if model.contains("hy3") || model.contains("tencent") {
+            Some("tencent")
         } else if model.contains("gpt-") || model.contains("openai") {
             Some("openai")
         } else if model.contains("ollama") || model.contains("local/") {
@@ -109,12 +114,24 @@ fn adapt_legacy_usage(
     let auth_class = classify(&logical_backend, cost_class, effective_model).to_string();
     let provider =
         infer_provider(&logical_backend, effective_model.or(actual_model)).map(str::to_string);
+    let provider_attribution_source = if provider.is_some() {
+        "inferred"
+    } else {
+        "unknown"
+    }
+    .to_string();
     ExecutionIdentity {
         logical_backend,
-        instance_account: quota_pool.map(str::to_string),
         backend_instance,
+        // Legacy production currently projects all three facts from the one
+        // quota-pool string. The canonical contract keeps them separate so
+        // part 5/5 can declare an instance and auth source independently.
+        account_label: quota_pool.map(str::to_string),
+        auth_source_label: quota_pool.map(str::to_string),
+        quota_pool: quota_pool.map(str::to_string),
         auth_class,
         provider,
+        provider_attribution_source,
         requested_model: requested_model.map(str::to_string),
         effective_model: effective_model.map(str::to_string),
         actual_model: actual_model.map(str::to_string),
@@ -146,17 +163,52 @@ fn execution_identity_golden_two_accounts_one_runner() {
     );
 
     // Same runner_kind (both invoke the `agy` executable), same model,
-    // but distinct logical_backend / instance_account / backend_instance.
+    // but distinct logical_backend / account / auth source / quota pool /
+    // backend_instance.
     assert_eq!(primary.logical_backend, "agy");
     assert_eq!(second.logical_backend, "agy-second");
     assert_ne!(primary.backend_instance, second.backend_instance);
     assert_eq!(primary.backend_instance, "agy:agy-main");
     assert_eq!(second.backend_instance, "agy-second:agy-second-account");
+    assert_ne!(primary.account_label, second.account_label);
+    assert_ne!(primary.auth_source_label, second.auth_source_label);
+    assert_ne!(primary.quota_pool, second.quota_pool);
     // Both are subscription/quota-backed classes for the built-in AGY family.
     assert_eq!(primary.auth_class, "quota_backed");
     assert_eq!(second.auth_class, "quota_backed");
     assert_eq!(primary.provider.as_deref(), Some("google"));
     assert_eq!(second.provider.as_deref(), Some("google"));
+    assert_eq!(primary.provider_attribution_source, "inferred");
+    assert_eq!(second.provider_attribution_source, "inferred");
+}
+
+#[test]
+fn execution_identity_explicit_instances_stay_distinct_in_one_quota_pool() {
+    let common = ExecutionIdentity {
+        logical_backend: "opencode".into(),
+        backend_instance: "opencode-nous-key-1".into(),
+        account_label: Some("nous-billing".into()),
+        auth_source_label: Some("nous-key-1".into()),
+        quota_pool: Some("nous-shared-budget".into()),
+        auth_class: "api_key_backed".into(),
+        provider: Some("z-ai".into()),
+        provider_attribution_source: "backend_reported".into(),
+        requested_model: Some("nous-portal/z-ai/glm-5.2".into()),
+        effective_model: Some("nous-portal/z-ai/glm-5.2".into()),
+        actual_model: Some("glm-5.2".into()),
+        cost_known: true,
+    };
+    let second = ExecutionIdentity {
+        backend_instance: "opencode-nous-key-2".into(),
+        auth_source_label: Some("nous-key-2".into()),
+        ..common.clone()
+    };
+
+    assert_eq!(common.logical_backend, second.logical_backend);
+    assert_eq!(common.quota_pool, second.quota_pool);
+    assert_eq!(common.effective_model, second.effective_model);
+    assert_ne!(common.backend_instance, second.backend_instance);
+    assert_ne!(common.auth_source_label, second.auth_source_label);
 }
 
 // ── Golden fixture 2: one model through subscription and API ─────────────
@@ -231,6 +283,7 @@ fn execution_identity_golden_proxy_alias() {
     );
     assert_eq!(proxied.logical_backend, "opencode");
     assert_eq!(proxied.provider.as_deref(), Some("z-ai"));
+    assert_eq!(proxied.provider_attribution_source, "inferred");
     assert_ne!(proxied.provider.as_deref(), Some("opencode"));
 }
 
@@ -276,8 +329,25 @@ fn execution_identity_route_decision_alias_fold_is_byte_for_byte() {
 
     let ledger_entries = TestLedger::read_from(&harness.ledger_path).unwrap();
     let entry = ledger_entries.last().unwrap();
-    assert_eq!(entry["requested_backend"], "openhands");
-    assert_eq!(entry["effective_backend"], "openhands");
+    let identity_projection = serde_json::json!({
+        "requested_backend": entry["requested_backend"].clone(),
+        "effective_backend": entry["effective_backend"].clone(),
+        "effective_model": entry["effective_model"].clone(),
+        "fallback_used": entry["fallback_used"].clone(),
+        "backend_instance": entry["usage"]["backend_instance"].clone(),
+        "usage_classification": entry["usage"]["usage_classification"].clone(),
+    });
+    assert_eq!(
+        identity_projection,
+        serde_json::json!({
+            "requested_backend": "openhands",
+            "effective_backend": "openhands",
+            "effective_model": null,
+            "fallback_used": false,
+            "backend_instance": "openhands",
+            "usage_classification": "unknown",
+        })
+    );
     assert_eq!(entry["backend"], "openhands");
 }
 
