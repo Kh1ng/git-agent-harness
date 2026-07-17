@@ -437,23 +437,28 @@ function ProfileConfigViewerSection({ selectedName, profileConfig }: ProfileConf
       <div className="mt-3 card-padded border border-subtle">
         <h4 className="text-xs font-semibold text-primary mb-2">Context budgets</h4>
         <p className="text-xs text-muted">
-          Effective context: soft limit {effective.context.effective.soft_limit_tokens} · hard limit{' '}
-          {effective.context.effective.hard_limit_tokens}
-        </p>
-        <p className="text-xs text-muted mt-1">
           Default context: soft limit {effective.context.global.soft_limit_tokens} · hard limit{' '}
           {effective.context.global.hard_limit_tokens}
         </p>
-        <p className="text-xs text-muted mt-1">
-          Fresh context on review/fix: {effective.context.effective.fresh_context_on_review ? 'yes' : 'no'} /{' '}
-          {effective.context.effective.fresh_context_on_fix ? 'yes' : 'no'}
-        </p>
-        <p className="text-xs text-muted mt-1">
-          Include full Git history: {effective.context.effective.include_full_git_history ? 'yes' : 'no'} · Transcript in
-          review: {effective.context.effective.include_full_worker_transcript_in_review ? 'yes' : 'no'}
-        </p>
         {effective.context.profile_override && (
           <p className="text-xs text-muted mt-1">Profile context override is present.</p>
+        )}
+        <p className="text-xs text-muted mt-2">
+          Effective budgets differ per routed backend when a `context.backends.&lt;name&gt;` override applies:
+        </p>
+        {effective.context.effective_by_backend.length === 0 ? (
+          <p className="text-xs text-muted mt-1">No backends are routed for this profile.</p>
+        ) : (
+          <ul className="text-xs text-secondary mt-1">
+            {effective.context.effective_by_backend.map((entry) => (
+              <li key={entry.backend} className="mt-1">
+                <span className="font-mono">{entry.backend}</span>: soft limit {entry.effective.soft_limit_tokens} · hard
+                limit {entry.effective.hard_limit_tokens} · fresh on review/fix:{' '}
+                {entry.effective.fresh_context_on_review ? 'yes' : 'no'}/{entry.effective.fresh_context_on_fix ? 'yes' : 'no'}
+                {entry.backend_override && <span className="text-muted"> (backend override applied)</span>}
+              </li>
+            ))}
+          </ul>
         )}
       </div>
     </section>

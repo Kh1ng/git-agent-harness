@@ -44,10 +44,23 @@ pub struct ContextOverrideBudgetSummary {
 }
 
 #[derive(serde::Serialize)]
+pub struct ConfigBackendContextSummary {
+    pub backend: String,
+    pub effective: ContextBudgetSummary,
+    pub backend_override: Option<ContextOverrideBudgetSummary>,
+}
+
+#[derive(serde::Serialize)]
 pub struct ConfigProfileContextSummary {
     pub global: ContextBudgetSummary,
-    pub effective: ContextBudgetSummary,
     pub profile_override: Option<ContextOverrideBudgetSummary>,
+    /// Effective context budget for every backend the profile actually
+    /// routes to (pm/improve/review candidates, routine reviewer, and
+    /// escalatory reviewers), since `context.backends.<name>` overrides are
+    /// merged in per-backend and can diverge from one routed backend to the
+    /// next. This is what dispatch actually applies -- see
+    /// `dispatch::prompts::enforce_context_budget`.
+    pub effective_by_backend: Vec<ConfigBackendContextSummary>,
 }
 
 #[derive(serde::Serialize)]
@@ -140,6 +153,27 @@ fn build_profile_summary(
         .map(|candidates| candidates.iter().map(to_summary).collect())
         .unwrap_or_default();
 
+    let mut routed_backends: Vec<&str> = routing
+        .pm_candidates
+        .iter()
+        .flatten()
+        .chain(routing.improve_candidates.iter().flatten())
+        .chain(routing.review_candidates.iter().flatten())
+        .map(|candidate| candidate.backend.as_str())
+        .chain(routine_reviewer.iter().map(|c| c.backend.as_str()))
+        .chain(escalatory_reviewers.iter().map(|c| c.backend.as_str()))
+        .collect();
+    routed_backends.sort_unstable();
+    routed_backends.dedup();
+    let effective_by_backend = routed_backends
+        .into_iter()
+        .map(|backend| ConfigBackendContextSummary {
+            backend: backend.to_string(),
+            effective: to_context(&cfg.context.effective(profile_name, backend)),
+            backend_override: cfg.context.backends.get(backend).map(to_context_override),
+        })
+        .collect();
+
     Ok(ConfigProfileSummary {
         profile: profile_name.to_string(),
         merge_policy: routing
@@ -161,12 +195,12 @@ fn build_profile_summary(
             .collect::<Vec<_>>(),
         context: ConfigProfileContextSummary {
             global: to_context(&cfg.context),
-            effective: to_context(&cfg.context.effective(profile_name, "")),
             profile_override: cfg
                 .context
                 .profiles
                 .get(profile_name)
                 .map(to_context_override),
+            effective_by_backend,
         },
     })
 }
@@ -272,6 +306,13 @@ mod tests {
                 include_full_git_history: Some(true),
                 include_full_worker_transcript_in_review: Some(true),
                 recent_history_tokens: Some(12_500),
+            },
+        );
+        context.backends.insert(
+            "claude".into(),
+            ContextOverride {
+                soft_limit_tokens: Some(50_000),
+                ..Default::default()
             },
         );
 
@@ -404,6 +445,39 @@ mod tests {
             summary.context.profile_override.unwrap().enabled,
             Some(false)
         );
+
+        // pm=claude, improve=vibe, review=openhands, routine_reviewer=codex,
+        // escalatory=ogy.
+        assert_eq!(
+            summary
+                .context
+                .effective_by_backend
+                .iter()
+                .map(|entry| entry.backend.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude", "codex", "ogy", "openhands", "vibe"]
+        );
+        let claude = summary
+            .context
+            .effective_by_backend
+            .iter()
+            .find(|entry| entry.backend == "claude")
+            .unwrap();
+        // Profile override sets soft_limit_tokens to 90_000, but the
+        // claude-specific backend override further narrows it to 50_000.
+        assert_eq!(claude.effective.soft_limit_tokens, 50_000);
+        assert_eq!(
+            claude.backend_override.as_ref().unwrap().soft_limit_tokens,
+            Some(50_000)
+        );
+        let vibe = summary
+            .context
+            .effective_by_backend
+            .iter()
+            .find(|entry| entry.backend == "vibe")
+            .unwrap();
+        assert!(vibe.backend_override.is_none());
+        assert_eq!(vibe.effective.soft_limit_tokens, 90_000);
     }
 
     #[test]

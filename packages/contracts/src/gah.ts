@@ -477,10 +477,21 @@ export interface ContextBudgetSummary {
   recent_history_tokens: number;
 }
 
+export interface ConfigBackendContextSummary {
+  backend: string;
+  effective: ContextBudgetSummary;
+  backend_override: ContextOverrideBudgetSummary | null;
+}
+
 export interface ConfigProfileContextSummary {
   global: ContextBudgetSummary;
-  effective: ContextBudgetSummary;
   profile_override: ContextOverrideBudgetSummary | null;
+  /** Effective context budget for every backend this profile actually
+   * routes to (pm/improve/review candidates, routine reviewer, escalatory
+   * reviewers). `context.backends.<name>` overrides are merged in
+   * per-backend, so different routed backends for the same profile can have
+   * different effective budgets -- this is what dispatch actually applies. */
+  effective_by_backend: ConfigBackendContextSummary[];
 }
 
 /** Effective read-only profile configuration for Settings’ "effective config"

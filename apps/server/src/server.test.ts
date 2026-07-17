@@ -30,18 +30,8 @@ function profilePayload(profile: string): ConfigProfileSummary {
         include_full_worker_transcript_in_review: false,
         recent_history_tokens: 20_000
       },
-      effective: {
-        enabled: true,
-        soft_limit_tokens: 80_000,
-        hard_limit_tokens: 150_000,
-        compact_after_tool_calls: 20,
-        fresh_context_on_review: true,
-        fresh_context_on_fix: true,
-        include_full_git_history: false,
-        include_full_worker_transcript_in_review: false,
-        recent_history_tokens: 20_000
-      },
-      profile_override: null
+      profile_override: null,
+      effective_by_backend: []
     }
   };
 }
