@@ -339,10 +339,34 @@ pub(super) fn resolve_attached_branch_conflicts(
     }
 }
 
+/// Apply work-item and branch exclusions to every candidate collection used
+/// by controller re-dispatch. Re-decisions must preserve exclusions from the
+/// original observation (capacity backoff, claims, or stuck-loop gates)
+/// instead of rebuilding an unfiltered snapshot and reviving skipped work.
+pub(super) fn retain_snapshot_candidates(
+    snapshot: &mut crate::status::StatusSnapshot,
+    excluded_work_ids: &HashSet<String>,
+    excluded_branches: &HashSet<String>,
+) {
+    snapshot.merge_requests.retain(|mr| {
+        !mr.work_id
+            .as_ref()
+            .is_some_and(|id| excluded_work_ids.contains(id))
+            && !excluded_branches.contains(&mr.branch)
+    });
+    snapshot.available_tickets.retain(|ticket| {
+        !ticket
+            .work_id
+            .as_ref()
+            .is_some_and(|id| excluded_work_ids.contains(id))
+    });
+}
+
 pub(super) fn defer_if_branch_attached(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
     action: &NextAction,
+    excluded_work_ids: &HashSet<String>,
 ) -> Result<Option<NextAction>> {
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let repo = Path::new(&profile.local_path);
@@ -366,18 +390,11 @@ pub(super) fn defer_if_branch_attached(
         |deferred_work_ids, deferred_branches| {
             let mut fresh =
                 crate::status::build_snapshot(cfg, profile_name, time::OffsetDateTime::now_utc())?;
-            fresh.merge_requests.retain(|mr| {
-                !mr.work_id
-                    .as_ref()
-                    .is_some_and(|id| deferred_work_ids.contains(id))
-                    && !deferred_branches.contains(&mr.branch)
-            });
-            fresh.available_tickets.retain(|ticket| {
-                !ticket
-                    .work_id
-                    .as_ref()
-                    .is_some_and(|id| deferred_work_ids.contains(id))
-            });
+            let all_excluded_work_ids = excluded_work_ids
+                .union(deferred_work_ids)
+                .cloned()
+                .collect();
+            retain_snapshot_candidates(&mut fresh, &all_excluded_work_ids, deferred_branches);
             Ok(decide_next_action(&fresh))
         },
     )

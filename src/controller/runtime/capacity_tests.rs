@@ -1,5 +1,7 @@
 use super::{route_state_fingerprint, suppress_recent_capacity_deferrals};
+use crate::controller::recovery::retain_snapshot_candidates;
 use crate::models::AvailableTicket;
+use std::collections::HashSet;
 
 fn controller_config() -> crate::config::GahConfig {
     toml::from_str(
@@ -106,6 +108,14 @@ fn needs_fix_mr(work_id: &str) -> crate::sync::SyncMrJson {
     }
 }
 
+fn needs_review_mr(work_id: &str) -> crate::sync::SyncMrJson {
+    let mut mr = needs_fix_mr(work_id);
+    mr.review_verdict = None;
+    mr.classification = "NEEDS_REVIEW".into();
+    mr.recommended_action = crate::sync::RecommendedAction::RunReview;
+    mr
+}
+
 fn capacity_event(work_id: &str, details: &str) -> crate::events::ControllerEvent {
     crate::events::ControllerEvent {
         timestamp: time::OffsetDateTime::now_utc()
@@ -157,6 +167,34 @@ fn capacity_deferred_gitlab_mr_does_not_starve_another_repair() {
     assert_eq!(snapshot.merge_requests.len(), 1);
     assert_eq!(snapshot.merge_requests[0].work_id.as_deref(), Some("#200"));
     assert_eq!(super::decide_next_action(&snapshot).work_id(), Some("#200"));
+}
+
+#[test]
+fn capacity_deferral_survives_stuck_action_redispatch() {
+    let cfg = controller_config();
+    let mut initial = empty_snapshot();
+    initial.merge_requests = vec![needs_review_mr("#64"), needs_fix_mr("#155")];
+    initial.available_tickets = vec![available_ticket("#200")];
+    let events = vec![capacity_event(
+        "#155",
+        "fix_existing: deferred_capacity: all subscription routes unavailable",
+    )];
+
+    let capacity_deferred =
+        suppress_recent_capacity_deferrals(&cfg, &mut initial, &events, &[], "real", "real");
+    assert_eq!(super::decide_next_action(&initial).work_id(), Some("#64"));
+
+    // A stuck-loop transition rebuilds the snapshot before selecting the next
+    // item. The rebuilt view contains #155 again, so both the original action
+    // and inherited capacity deferrals must be filtered before re-deciding.
+    let mut rebuilt = empty_snapshot();
+    rebuilt.merge_requests = vec![needs_review_mr("#64"), needs_fix_mr("#155")];
+    rebuilt.available_tickets = vec![available_ticket("#200")];
+    let mut inherited_exclusions = capacity_deferred;
+    inherited_exclusions.insert("#64".into());
+    retain_snapshot_candidates(&mut rebuilt, &inherited_exclusions, &HashSet::new());
+
+    assert_eq!(super::decide_next_action(&rebuilt).work_id(), Some("#200"));
 }
 
 #[test]

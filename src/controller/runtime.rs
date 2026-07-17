@@ -3,6 +3,7 @@ use super::human_required_reason::HumanRequiredReason;
 use super::recovery::{
     defer_if_branch_attached, detect_stuck_loop, latest_clear_attempts_timestamp,
     recently_capacity_deferred_work_ids, reconcile_abandoned_dispatches, record_action_events,
+    retain_snapshot_candidates,
 };
 use super::NextAction;
 use anyhow::Result;
@@ -30,7 +31,7 @@ fn suppress_recent_capacity_deferrals(
     entries: &[crate::ledger::LedgerEntry],
     profile_name: &str,
     repo_id: &str,
-) {
+) -> std::collections::HashSet<String> {
     let now = time::OffsetDateTime::now_utc();
     let route_state = route_state_fingerprint(cfg, profile_name, now).ok();
     let deferred = recently_capacity_deferred_work_ids(
@@ -41,17 +42,8 @@ fn suppress_recent_capacity_deferrals(
         now,
         route_state.as_deref(),
     );
-    snapshot.merge_requests.retain(|mr| {
-        mr.work_id
-            .as_deref()
-            .is_none_or(|work_id| !deferred.contains(work_id))
-    });
-    snapshot.available_tickets.retain(|ticket| {
-        ticket
-            .work_id
-            .as_deref()
-            .is_none_or(|work_id| !deferred.contains(work_id))
-    });
+    retain_snapshot_candidates(snapshot, &deferred, &std::collections::HashSet::new());
+    deferred
 }
 
 /// Persist a stuck-loop transition only when this work item has no active
@@ -327,7 +319,7 @@ pub fn run_once(
         format!("profile={profile_name}"),
     )?;
     let history = crate::events::read_events(cfg)?;
-    suppress_recent_capacity_deferrals(
+    let capacity_deferred_work_ids = suppress_recent_capacity_deferrals(
         cfg,
         &mut snapshot,
         &history,
@@ -388,14 +380,13 @@ pub fn run_once(
                 &ledger_entries,
             )?;
             let mut scoped = fresh;
-            if let Some(stuck_wid) = original_action.work_id() {
-                scoped
-                    .merge_requests
-                    .retain(|mr| mr.work_id.as_deref() != Some(stuck_wid));
-                scoped
-                    .available_tickets
-                    .retain(|t| t.work_id.as_deref() != Some(stuck_wid));
-            }
+            let mut excluded_work_ids = capacity_deferred_work_ids.clone();
+            excluded_work_ids.extend(original_action.work_id().map(str::to_string));
+            retain_snapshot_candidates(
+                &mut scoped,
+                &excluded_work_ids,
+                &std::collections::HashSet::new(),
+            );
             let redispatched = decide_next_action(&scoped);
             if redispatched.kind() == "no_op" {
                 // Nothing else actionable -> genuine stall, surface it.
@@ -412,7 +403,9 @@ pub fn run_once(
         // or stale worktree must be deferred (non-terminal) and the loop
         // continued with the next eligible item, never allowed to stall the
         // recurring loop on a hard `git worktree add` failure.
-        if let Some(redispatch) = defer_if_branch_attached(cfg, profile_name, &action)? {
+        if let Some(redispatch) =
+            defer_if_branch_attached(cfg, profile_name, &action, &capacity_deferred_work_ids)?
+        {
             action = redispatch;
         }
         record_action_events(cfg, profile_name, &original_action, &action)?;
@@ -549,7 +542,7 @@ fn run_parallel_once(
                 });
 
                 let history = crate::events::read_events(cfg)?;
-                suppress_recent_capacity_deferrals(
+                let capacity_deferred_work_ids = suppress_recent_capacity_deferrals(
                     cfg,
                     &mut fresh_snapshot,
                     &history,
@@ -601,7 +594,12 @@ fn run_parallel_once(
                     }
                 }
 
-                if let Some(redispatch) = defer_if_branch_attached(cfg, profile_name, &action)? {
+                if let Some(redispatch) = defer_if_branch_attached(
+                    cfg,
+                    profile_name,
+                    &action,
+                    &capacity_deferred_work_ids,
+                )? {
                     action = redispatch;
                 }
 
