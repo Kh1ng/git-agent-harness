@@ -27,6 +27,7 @@
 use crate::ledger::LedgerUsage;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -39,6 +40,8 @@ pub const CLAUDE_PROJECTS_DIR: &str = ".claude/projects";
 
 /// Parse a Claude Code session transcript (JSONL) and aggregate the real
 /// per-attempt token/cost usage from every assistant turn's `message.usage`.
+/// Repeated snapshots with the same non-empty message ID are counted once;
+/// input tokens exclude the separately reported cache read/write categories.
 ///
 /// Returns a default [`LedgerUsage`] (no `usage_source`) when the input
 /// contains no decodable usage, so callers can fall back to other parsers.
@@ -46,6 +49,7 @@ pub fn parse_claude_transcript_usage(transcript_jsonl: &str) -> LedgerUsage {
     let mut usage = LedgerUsage::default();
     let mut total_cost = 0.0f64;
     let mut saw_any = false;
+    let mut seen_message_ids = HashSet::new();
 
     for line in transcript_jsonl.lines() {
         let line = line.trim();
@@ -65,6 +69,15 @@ pub fn parse_claude_transcript_usage(transcript_jsonl: &str) -> LedgerUsage {
         let Some(u) = message.get("usage") else {
             continue;
         };
+        if let Some(message_id) = message
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            if !seen_message_ids.insert(message_id.to_string()) {
+                continue;
+            }
+        }
         saw_any = true;
         if usage.actual_model.is_none() {
             usage.actual_model = message

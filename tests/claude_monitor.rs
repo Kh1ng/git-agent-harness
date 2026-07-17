@@ -53,6 +53,26 @@ fn transcript_parser_sums_per_turn_tokens() {
 }
 
 #[test]
+fn transcript_parser_counts_repeated_message_snapshots_once() {
+    let text = r#"
+{"type":"assistant","message":{"id":"same","model":"claude-sonnet-5","usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}},"cost_usd":0.01}
+{"type":"assistant","message":{"id":"same","model":"claude-sonnet-5","usage":{"input_tokens":10,"output_tokens":2,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}},"cost_usd":0.01}
+{"type":"assistant","message":{"id":"distinct","model":"claude-sonnet-5","usage":{"input_tokens":5,"output_tokens":7,"cache_creation_input_tokens":11,"cache_read_input_tokens":13}},"cost_usd":0.02}
+{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":17,"output_tokens":19,"cache_creation_input_tokens":23,"cache_read_input_tokens":29}},"cost_usd":0.03}
+{"type":"assistant","message":{"id":"","model":"claude-sonnet-5","usage":{"input_tokens":31,"output_tokens":37,"cache_creation_input_tokens":41,"cache_read_input_tokens":43}},"cost_usd":0.04}
+"#;
+    let usage = parse_claude_transcript_usage(text);
+
+    assert_eq!(usage.actual_model.as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(usage.input_tokens, Some(63));
+    assert_eq!(usage.output_tokens, Some(65));
+    assert_eq!(usage.cache_write_tokens, Some(78));
+    assert_eq!(usage.cache_read_tokens, Some(89));
+    assert_eq!(usage.total_tokens, Some(128));
+    assert_eq!(usage.actual_cost_usd, Some(0.1));
+}
+
+#[test]
 fn transcript_parser_handles_empty_and_missing_usage() {
     // No assistant usage blocks at all -> no observation.
     let text = "{\"type\":\"system\",\"sessionId\":\"x\"}\n{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
