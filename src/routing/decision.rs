@@ -731,7 +731,7 @@ where
         .cloned()
         .expect("candidate list must never be empty");
     let mut skipped = Vec::new();
-    let mut included_capacity_is_busy = false;
+    let mut included_capacity_is_temporarily_blocked = false;
     for candidate in candidates {
         if let Some(reason) = skip_reason_for_candidate(
             state_path,
@@ -745,19 +745,24 @@ where
             exclude_attempted,
             candidate.requires_approval,
         )? {
-            if reason.reason == "max_concurrent_reached" && candidate.included_in_quota {
-                included_capacity_is_busy = true;
+            if candidate.included_in_quota
+                && (reason.reason == "max_concurrent_reached" || reason.unavailable_until.is_some())
+            {
+                included_capacity_is_temporarily_blocked = true;
             }
             skipped.push(reason);
             continue;
         }
         return Ok((candidate, skipped));
     }
-    // A subscribed route that is only busy is not exhausted. Defer this
-    // dispatch until its slot releases instead of turning a temporary local
-    // capacity condition into a persistent human request to spend money.
+    // A subscribed route that is busy or has a known recovery time takes
+    // precedence over an unapproved paid fallback. Defer until that capacity
+    // recovers instead of creating one persistent spend request per queued
+    // work item. Unknown-reset exhaustion and permanent failures may still
+    // reach the approval gate.
     if let Some(candidate) = skipped.iter().find(|candidate| {
-        candidate.reason == "operator_approval_required" && !included_capacity_is_busy
+        candidate.reason == "operator_approval_required"
+            && !included_capacity_is_temporarily_blocked
     }) {
         return Err(RouteError::ApprovalRequired {
             backend: candidate.backend.clone(),

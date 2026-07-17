@@ -106,15 +106,19 @@ pub enum RouteError {
 }
 
 impl RouteError {
-    /// True when routing is temporarily blocked only because a configured
-    /// backend/model has reached its local concurrency cap. No backend was
-    /// launched and a later controller iteration can retry after the active
-    /// slot releases, so this is a deferral rather than a dispatch failure.
+    /// True when routing is temporarily blocked by a local concurrency cap or
+    /// a backend/model with a known recovery time. No backend was launched and
+    /// a later controller iteration can retry after capacity recovers, so this
+    /// is a deferral rather than a dispatch failure.
     pub fn is_capacity_deferral(&self) -> bool {
         matches!(
             self,
-            Self::NoEligibleBackend { skipped, .. }
-                if skipped
+            Self::NoEligibleBackend {
+                skipped,
+                earliest_reset,
+                ..
+            } if earliest_reset.is_some()
+                || skipped
                     .iter()
                     .any(|candidate| candidate.reason == "max_concurrent_reached")
         )
@@ -231,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn only_max_concurrency_no_eligible_errors_are_capacity_deferrals() {
+    fn temporary_no_eligible_errors_are_capacity_deferrals() {
         let busy = RouteError::NoEligibleBackend {
             preferred_backend: "claude".into(),
             preferred_model: Some("sonnet".into()),
@@ -257,6 +261,19 @@ mod tests {
             earliest_reset: None,
         };
         assert!(!exhausted.is_capacity_deferral());
+
+        let resetting = RouteError::NoEligibleBackend {
+            preferred_backend: "claude".into(),
+            preferred_model: Some("sonnet".into()),
+            skipped: vec![SkippedBackend {
+                backend: "claude".into(),
+                model: Some("sonnet".into()),
+                reason: "model-specific quota_exhausted".into(),
+                unavailable_until: Some("2026-07-17T06:20:00Z".into()),
+            }],
+            earliest_reset: Some("2026-07-17T06:20:00Z".into()),
+        };
+        assert!(resetting.is_capacity_deferral());
 
         let approval = RouteError::ApprovalRequired {
             backend: "opencode".into(),

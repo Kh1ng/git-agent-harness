@@ -544,6 +544,43 @@ fn temporary_subscribed_capacity_precedes_paid_route_approval() {
         Some("sonnet"),
         Reason::QuotaExhausted,
         Source::BackendError,
+        Some(now + time::Duration::hours(1)),
+        None,
+        now,
+    )
+    .unwrap();
+    let err = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request.clone(),
+        &RoutingRuntimeState::default(),
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(route @ RouteError::NoEligibleBackend {
+            earliest_reset: Some(_),
+            skipped,
+            ..
+        }) if route.is_capacity_deferral()
+            && skipped.iter().any(|candidate| {
+                candidate.backend == "opencode"
+                    && candidate.model.as_deref() == Some("nous-portal/z-ai/glm-5.2")
+                    && candidate.reason == "operator_approval_required"
+            })
+    ));
+
+    // Without a defensible reset time, there is nothing deterministic to
+    // wait for, so the configured paid fallback still asks the operator.
+    record_unavailable(
+        &path(&tmp),
+        "claude",
+        Some("sonnet"),
+        Reason::QuotaExhausted,
+        Source::BackendError,
         None,
         None,
         now,
