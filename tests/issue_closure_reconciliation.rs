@@ -232,6 +232,9 @@ fn multiple_explicit_references_without_matching_structured_source_ambiguous() {
     assert_eq!(gh.call_count(), 1); // Only the PR list call, no issue closure
 }
 
+// Validates provider_already_closed -> provider_already_closed idempotency:
+// when an issue is already closed on the provider prior to the first reconcile run,
+// both runs observe provider_already_closed and zero new issue closure records are appended on the second run.
 #[test]
 fn reconcile_twice_over_same_closed_fixture_writes_zero_records_second_run() {
     let tmp = TempDir::new().unwrap();
@@ -272,6 +275,9 @@ fn reconcile_twice_over_same_closed_fixture_writes_zero_records_second_run() {
     );
 }
 
+// Validates gah_reconciliation_write -> provider_already_closed idempotency on GitHub:
+// Run 1 closes open issue via GAH (gah_reconciliation_write).
+// Run 2 observes issue is now closed on provider (provider_already_closed), skips append and writes zero new entries.
 #[test]
 fn gah_closed_then_already_closed_is_idempotent() {
     let tmp = TempDir::new().unwrap();
@@ -312,6 +318,70 @@ fn gah_closed_then_already_closed_is_idempotent() {
     assert_eq!(
         second_written, first_written,
         "no duplicate issue_closure written after mode transition"
+    );
+}
+
+// Validates gah_reconciliation_write -> provider_already_closed idempotency on GitLab:
+// Run 1 closes open issue via GAH (gah_reconciliation_write) using glab API.
+// Run 2 observes issue is now closed on GitLab (provider_already_closed), skips append and writes zero new entries.
+#[test]
+fn gitlab_closed_then_already_closed_is_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    let glab = FakeBackend::new(tmp.path(), "glab");
+    glab.install_sequence(vec![
+        // Run 1: MR list returns merged MR with "Closes #42" in description
+        Scenario::success().with_stdout(
+            r#"[{"title":"[GAH] Fix: TICKET-72","description":"Closes #42","source_branch":"gah/improve-example-123456","web_url":"https://gitlab.example.com/group/repo/-/merge_requests/72","labels":[],"iid":72,"state":"merged","draft":false,"merged_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","head_pipeline":{"status":"success"}}]"#,
+        ),
+        // GET issue state -> opened
+        Scenario::success().with_stdout(r#"{"state":"opened"}"#),
+        // PUT issue close -> closed
+        Scenario::success().with_stdout(r#"{"state":"closed"}"#),
+        // Run 2: MR list returns merged MR
+        Scenario::success().with_stdout(
+            r#"[{"title":"[GAH] Fix: TICKET-72","description":"Closes #42","source_branch":"gah/improve-example-123456","web_url":"https://gitlab.example.com/group/repo/-/merge_requests/72","labels":[],"iid":72,"state":"merged","draft":false,"merged_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","head_pipeline":{"status":"success"}}]"#,
+        ),
+        // GET issue state -> closed
+        Scenario::success().with_stdout(r#"{"state":"closed"}"#),
+    ]);
+
+    let mut harness = ScenarioHarness::new("gitlab")
+        .with_config_append(
+            "provider_api_base = \"https://gitlab.example.com/api/v4\"\nprovider_project_id = \"123\"\n[profiles.test.publishing]\nallow_source_issue_closure = true\n",
+        )
+        .with_ledger(support::fake_ledger::TestLedger::new().with_entry(ledger_entry(None)));
+    harness.install_custom_glab(&glab);
+
+    let first = harness.run_ledger_reconcile_json(false).unwrap();
+    assert_eq!(first["issue_closure"]["closed"], serde_json::json!(["42"]));
+    assert_eq!(glab.call_count(), 3);
+    assert_eq!(
+        glab.argv_for_call(3)[..2],
+        ["api", "projects/123/issues/42"]
+    );
+    assert!(glab.argv_for_call(3).contains(&"--method".to_string()));
+    assert!(glab.argv_for_call(3).contains(&"PUT".to_string()));
+    let first_written = harness.reconciliation_entry_count();
+
+    let second = harness.run_ledger_reconcile_json(false).unwrap();
+    assert_eq!(
+        second["issue_closure"]["already_closed"],
+        serde_json::json!(["42"])
+    );
+    assert_eq!(
+        second["issue_closure"]["skipped"],
+        serde_json::json!(["42"]),
+        "second reconcile on gitlab must report the duplicate as skipped"
+    );
+    assert_eq!(
+        second["new_entries"].as_array().unwrap().len(),
+        0,
+        "second reconcile on gitlab after close must write zero records"
+    );
+    let second_written = harness.reconciliation_entry_count();
+    assert_eq!(
+        second_written, first_written,
+        "no duplicate issue_closure written for gitlab after mode transition"
     );
 }
 
