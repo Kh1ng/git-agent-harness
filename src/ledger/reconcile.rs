@@ -49,6 +49,8 @@ pub struct ReconciliationEntry {
     pub issue_closure_classification: Option<String>,
     #[serde(default)]
     pub issue_closure_reason: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -93,12 +95,21 @@ struct IssueClosureDecision {
     resulting_issue_state: Option<String>,
 }
 
-/// Durable deduplication key for an issue closure record: the work identity,
-/// the source issue identity, and the resulting issue state. This makes
-/// reconciliation idempotent across provider/GitLab/GitHub regardless of the
+/// Durable deduplication key for an issue closure record: includes profile/repo,
+/// work identity, branch/MR identity, record type, issue number, and resulting state.
+/// This makes reconciliation idempotent across provider/GitLab/GitHub regardless of the
 /// closure *mode* (e.g. `gah_reconciliation_write` vs `provider_already_closed`)
-/// because only the durable resulting state matters for deduplication.
-type IssueClosureKey = (String, String, String);
+/// while preventing false cross-profile dedup and ensuring reopened issues can be re-closed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IssueClosureKey {
+    pub profile: String,
+    pub work_id: String,
+    pub branch: Option<String>,
+    pub mr_url: Option<String>,
+    pub record_type: String,
+    pub issue_number: String,
+    pub resulting_state: String,
+}
 
 pub fn read_reconciliation_entries(cfg: &GahConfig) -> Result<Vec<ReconciliationEntry>> {
     let path = cfg.defaults.reconciliation_path();
@@ -142,13 +153,21 @@ fn append_reconciliation_entry(cfg: &GahConfig, entry: &ReconciliationEntry) -> 
     Ok(())
 }
 
-/// Most recent recorded state per work_id (reconciliation log is
+/// Most recent recorded state per work_id for the given profile (reconciliation log is
 /// chronological, so the last entry for a given work_id wins).
-fn last_known_states(entries: &[ReconciliationEntry]) -> BTreeMap<String, String> {
+fn last_known_states(
+    entries: &[ReconciliationEntry],
+    current_profile: &str,
+) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for entry in entries {
         if entry.record_type != "mr_state" {
             continue;
+        }
+        if let Some(p) = &entry.profile {
+            if p != current_profile {
+                continue;
+            }
         }
         map.insert(entry.work_id.clone(), entry.new_state.clone());
     }
@@ -156,11 +175,13 @@ fn last_known_states(entries: &[ReconciliationEntry]) -> BTreeMap<String, String
 }
 
 /// Set of durable issue-closure facts already recorded in the reconciliation
-/// log. Keyed by `(work_id, issue_number, resulting_state)` so that closing an
-/// issue via GAH (`gah_reconciliation_write`) and later observing the provider
-/// already reports it closed (`provider_already_closed`) collapse to the same
-/// durable fact and are not appended twice.
-fn recorded_issue_closures(entries: &[ReconciliationEntry]) -> BTreeSet<IssueClosureKey> {
+/// log for the given profile. Keyed by `IssueClosureKey` (profile/repo, work_id, branch,
+/// mr_url, record_type, issue_number, resulting_state) so that observing an already-closed
+/// issue collapses to the same durable fact while preserving profile isolation.
+fn recorded_issue_closures(
+    entries: &[ReconciliationEntry],
+    current_profile: &str,
+) -> BTreeSet<IssueClosureKey> {
     let mut set = BTreeSet::new();
     for entry in entries {
         if entry.record_type != "issue_closure" {
@@ -172,7 +193,20 @@ fn recorded_issue_closures(entries: &[ReconciliationEntry]) -> BTreeSet<IssueClo
         let Some(resulting_state) = entry.resulting_issue_state.clone() else {
             continue;
         };
-        set.insert((entry.work_id.clone(), issue_number, resulting_state));
+        let profile = entry
+            .profile
+            .clone()
+            .unwrap_or_else(|| current_profile.to_string());
+
+        set.insert(IssueClosureKey {
+            profile,
+            work_id: entry.work_id.clone(),
+            branch: entry.branch.clone(),
+            mr_url: entry.mr_url.clone(),
+            record_type: entry.record_type.clone(),
+            issue_number,
+            resulting_state,
+        });
     }
     set
 }
@@ -199,8 +233,8 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
     let profile = config::get_profile(cfg, profile_name)?;
     let ledger_entries = read_entries(cfg)?;
     let history = read_reconciliation_entries(cfg)?;
-    let mut last_known = last_known_states(&history);
-    let mut recorded_closures = recorded_issue_closures(&history);
+    let mut last_known = last_known_states(&history, profile_name);
+    let mut recorded_closures = recorded_issue_closures(&history, profile_name);
     let dispatch_identity = latest_dispatch_identity(&ledger_entries);
     let entries_by_work_id = crate::ledger::index_entries_by_work_id(&ledger_entries);
 
@@ -235,6 +269,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
                 issue_closure_mode: None,
                 issue_closure_classification: None,
                 issue_closure_reason: None,
+                profile: Some(profile_name.to_string()),
             };
             if !dry_run {
                 append_reconciliation_entry(cfg, &entry)?;
@@ -291,13 +326,18 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
                     "provider_already_closed" | "gah_reconciliation_write"
                 );
                 let durable_state = decision.resulting_issue_state.clone();
-                let already_recorded = is_written_mode
+                let key = IssueClosureKey {
+                    profile: profile_name.to_string(),
+                    work_id: work_id.clone(),
+                    branch: branch.clone(),
+                    mr_url: mr.url.clone(),
+                    record_type: "issue_closure".to_string(),
+                    issue_number: issue_number.clone(),
+                    resulting_state: durable_state.clone().unwrap_or_default(),
+                };
+                let already_recorded = decision.mode == "provider_already_closed"
                     && durable_state.is_some()
-                    && recorded_closures.contains(&(
-                        work_id.clone(),
-                        issue_number.clone(),
-                        durable_state.clone().unwrap(),
-                    ));
+                    && recorded_closures.contains(&key);
                 if already_recorded {
                     issue_closure.skipped.push(issue_number.clone());
                 }
@@ -320,13 +360,14 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
                         issue_closure_mode: Some(decision.mode.to_string()),
                         issue_closure_classification: Some(decision.classification.to_string()),
                         issue_closure_reason: decision.reason.clone(),
+                        profile: Some(profile_name.to_string()),
                     };
                     if !dry_run {
                         append_reconciliation_entry(cfg, &entry)?;
                     }
                     new_entries.push(entry);
-                    if let Some(state) = durable_state {
-                        recorded_closures.insert((work_id.clone(), issue_number, state));
+                    if durable_state.is_some() {
+                        recorded_closures.insert(key);
                     }
                 }
             }
@@ -672,6 +713,7 @@ mod tests {
             issue_closure_mode: None,
             issue_closure_classification: None,
             issue_closure_reason: None,
+            profile: Some("test".into()),
         };
         fs::write(
             &path,

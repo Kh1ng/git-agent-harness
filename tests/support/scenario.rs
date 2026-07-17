@@ -492,16 +492,18 @@ impl ScenarioHarness {
         &mut self,
         dry_run: bool,
     ) -> Result<serde_json::Value, String> {
+        self.run_ledger_reconcile_json_for_profile(&self.profile_name.clone(), dry_run)
+    }
+
+    pub fn run_ledger_reconcile_json_for_profile(
+        &mut self,
+        profile_name: &str,
+        dry_run: bool,
+    ) -> Result<serde_json::Value, String> {
         self.setup_env();
         self.install_fakes();
         let mut cmd = Command::new(&self.gah_bin);
-        cmd.args([
-            "ledger",
-            "reconcile",
-            "--profile",
-            &self.profile_name,
-            "--json",
-        ]);
+        cmd.args(["ledger", "reconcile", "--profile", profile_name, "--json"]);
         if dry_run {
             cmd.arg("--dry-run");
         }
