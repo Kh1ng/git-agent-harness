@@ -1,7 +1,7 @@
 use super::super::attempts::{
-    apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output,
-    mark_shutdown_cancelled, record_route_attempt, reserve_backend_slot, review_preflight,
-    review_usage, route_identity, route_label,
+    apply_backend_instance_env, apply_route_to_ledger, decide_route,
+    mark_backend_unavailable_from_output, mark_shutdown_cancelled, record_route_attempt,
+    reserve_backend_slot, review_preflight, review_usage, route_identity, route_label,
 };
 use super::super::prompts::enforce_context_budget;
 use super::super::publish::{render_review_comment, review_labels};
@@ -311,6 +311,8 @@ pub(in crate::dispatch) fn review(
         let attempt_session = session_dir.join(format!("review-attempt-{}", attempt_number + 1));
         fs::create_dir_all(&attempt_session)?;
         record_route_attempt(ledger, &route);
+        let attempt_env_vars =
+            review_attempt_environment(profile, &route.effective_backend, &env_vars);
         let attempt = runner::run_review_backend(
             profile,
             &route.effective_backend,
@@ -318,7 +320,7 @@ pub(in crate::dispatch) fn review(
             &prompt,
             &attempt_session,
             route.effective_model.as_deref(),
-            &env_vars,
+            &attempt_env_vars,
         );
         // The slot covers the backend invocation itself. Release it before
         // parsing/rerouting so another worker can use the reviewer as soon as
@@ -833,6 +835,16 @@ fn reserve_review_route(profile: &Profile, route: &RouteDecision) -> Result<Conc
     )
 }
 
+fn review_attempt_environment(
+    profile: &Profile,
+    backend: &str,
+    base: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut env_vars = base.to_vec();
+    apply_backend_instance_env(profile, backend, &mut env_vars);
+    env_vars
+}
+
 fn stop_for_exhausted_review_escalation(
     cfg: &GahConfig,
     profile: &Profile,
@@ -885,7 +897,7 @@ fn stop_for_exhausted_review_escalation(
 mod reservation_tests {
     use super::{
         mark_review_budget_exhausted, mark_review_shutdown_cancelled, reserve_review_route,
-        review_outcome_allows_reroute,
+        review_attempt_environment, review_outcome_allows_reroute,
     };
     use crate::config::tests::test_profile_for_notifications;
     use crate::ledger::LedgerEntry;
@@ -904,6 +916,22 @@ mod reservation_tests {
         assert!(review_outcome_allows_reroute(
             &crate::runner::ReviewProcessOutcome::NonZeroExit(1)
         ));
+    }
+
+    #[test]
+    fn review_attempt_environment_isolates_only_agy_second() {
+        let mut profile = test_profile_for_notifications();
+        profile.agy_second_home = Some("/tmp/agy-account-2".into());
+        let base = vec![("HOME".to_string(), "/home/operator".to_string())];
+
+        let primary = review_attempt_environment(&profile, "agy", &base);
+        assert_eq!(primary, base);
+
+        let secondary = review_attempt_environment(&profile, "agy-second", &base);
+        assert_eq!(
+            secondary,
+            vec![("HOME".to_string(), "/tmp/agy-account-2".to_string())]
+        );
     }
 
     #[test]

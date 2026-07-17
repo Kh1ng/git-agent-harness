@@ -97,6 +97,22 @@ pub(super) fn reserve_backend_slot(
     routing::ConcurrencyGuard::acquire_shared(backend, effective_model, concurrency_cap)
 }
 
+pub(super) fn apply_backend_instance_env(
+    profile: &Profile,
+    backend: &str,
+    env_vars: &mut Vec<(String, String)>,
+) {
+    if backend == "agy-second" {
+        if let Some(home) = profile.agy_second_home.as_deref().filter(|h| !h.is_empty()) {
+            // Keep one authoritative HOME so both Command and usage/log
+            // capture resolve the same backend instance. Several capture
+            // helpers intentionally read the first matching environment key.
+            env_vars.retain(|(key, _)| key != "HOME");
+            env_vars.push(("HOME".to_string(), home.to_string()));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_backend(
     backend: &str,
@@ -153,13 +169,7 @@ pub(super) fn run_backend_with_reserved_route(
             .to_string_lossy()
             .into_owned(),
     ));
-    if backend == "agy-second" {
-        if let Some(home) = profile.agy_second_home.as_deref().filter(|h| !h.is_empty()) {
-            // Appended last so it overrides any HOME the env_file may have
-            // set -- Command::env keeps the last value for a repeated key.
-            env_vars.push(("HOME".to_string(), home.to_string()));
-        }
-    }
+    apply_backend_instance_env(profile, backend, &mut env_vars);
     let result = match backend {
         "codex" => runner::run_codex_with_executable(
             &runner::require_backend_executable(profile, backend)?,
