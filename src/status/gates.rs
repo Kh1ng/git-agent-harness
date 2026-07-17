@@ -25,6 +25,23 @@ pub(super) fn policy_approval_still_required(
     current.work_id = Some(work_id.to_string());
     let runtime = crate::dispatch::routing_runtime_state_from_entries(entries, &current);
     let route_is_eligible = |backend: &str, model: Option<&str>| {
+        // Review escalation is ordered and one-shot per backend/model for an
+        // unchanged source. A recovered reviewer that already produced the
+        // verdict which led to this paid-route gate is not a real escape
+        // route: dispatch would only write skipped_duplicate_review and ask
+        // for the same paid approval again on the next tick.
+        if mode == "review"
+            && review_route_was_already_used(
+                entries,
+                profile_name,
+                &profile.repo_id,
+                work_id,
+                backend,
+                model,
+            )
+        {
+            return false;
+        }
         let request = crate::routing::RouteRequest {
             mode,
             requested_backend: backend,
@@ -35,7 +52,19 @@ pub(super) fn policy_approval_still_required(
             usage_summary: None,
             last_failure_class: None,
         };
-        crate::routing::decide_with_state(&cfg.defaults, profile, request, &runtime).is_ok()
+        crate::routing::decide_with_state(&cfg.defaults, profile, request, &runtime)
+            .ok()
+            .is_some_and(|decision| {
+                mode != "review"
+                    || !review_route_was_already_used(
+                        entries,
+                        profile_name,
+                        &profile.repo_id,
+                        work_id,
+                        &decision.effective_backend,
+                        decision.effective_model.as_deref(),
+                    )
+            })
     };
 
     // New route failures preserve the exact candidates that were considered.
@@ -61,6 +90,40 @@ pub(super) fn policy_approval_still_required(
         return !route_is_eligible("auto", None);
     }
     true
+}
+
+fn review_route_was_already_used(
+    entries: &[LedgerEntry],
+    profile_name: &str,
+    repo_id: &str,
+    work_id: &str,
+    backend: &str,
+    model: Option<&str>,
+) -> bool {
+    let aliases = ledger::work_id_aliases(work_id);
+    let reset_index = entries.iter().rposition(|entry| {
+        entry.profile == profile_name
+            && entry.repo_id == repo_id
+            && entry.mode == "clear_attempts"
+            && entry
+                .work_id
+                .as_deref()
+                .is_some_and(|id| aliases.iter().any(|alias| alias == id))
+    });
+    let active = reset_index.map_or(entries, |index| &entries[index + 1..]);
+    active.iter().any(|entry| {
+        entry.profile == profile_name
+            && entry.repo_id == repo_id
+            && entry.mode == "review"
+            && entry
+                .work_id
+                .as_deref()
+                .is_some_and(|id| aliases.iter().any(|alias| alias == id))
+            && entry.effective_backend == backend
+            && entry.effective_model.as_deref() == model
+            && entry.review_verdict.is_some()
+            && entry.failure_class.is_none()
+    })
 }
 
 fn mr_work_id_from_ledger<'a>(
@@ -106,12 +169,24 @@ pub(super) fn project_effective_mr_gates(
         if !policy_approval_still_required(cfg, profile_name, profile, entries, work_id, &gate) {
             continue;
         }
-        if blocked_work_items.iter().any(|blocker| {
+        let reason_code = gate.reason_code.clone();
+        if let Some(blocker) = blocked_work_items.iter_mut().find(|blocker| {
             blocker.kind == "human_required" && blocker.source_reference.as_deref() == Some(work_id)
         }) {
+            // Ticket discovery can project the same gate first, but it only
+            // carries a generic message. Enrich that row with the exact MR
+            // gate details so the dashboard and notifications explain what
+            // is blocked and how to release it without adding a duplicate.
+            blocker.reason = reason_code
+                .clone()
+                .or_else(|| gate.dispatch_reason.clone())
+                .or_else(|| blocker.reason.clone());
+            if let Some(message) = gate.message.clone() {
+                blocker.message = Some(message);
+            }
+            blocker.reason_code = reason_code;
             continue;
         }
-        let reason_code = gate.reason_code.clone();
         blocked_work_items.push(Blocker {
             kind: "human_required".into(),
             reason: reason_code
@@ -222,6 +297,7 @@ default_target_branch = "main"
         gate.work_id = Some("#639".into());
         gate.human_required = true;
         gate.human_required_reason_code = Some("stuck_loop_gate".into());
+        gate.error_summary = Some("exact durable gate detail".into());
         let mut blockers = vec![Blocker {
             kind: "human_required".into(),
             reason: Some("stuck_loop_gate".into()),
@@ -243,6 +319,10 @@ default_target_branch = "main"
         );
 
         assert_eq!(blockers.len(), 1);
+        assert_eq!(
+            blockers[0].message.as_deref(),
+            Some("exact durable gate detail")
+        );
     }
 
     #[test]
@@ -307,6 +387,12 @@ requires_approval = true
             &gate,
         ));
 
+        let mut used_claude =
+            LedgerEntry::new("test", profile, "claude", "review", "#650", None, None);
+        used_claude.work_id = Some("#650".into());
+        used_claude.effective_backend = "claude".into();
+        used_claude.effective_model = Some("sonnet".into());
+        used_claude.review_verdict = Some("HUMAN_REVIEW".into());
         let unavailable = AvailabilityState {
             version: 1,
             records: vec![AvailabilityRecord {
@@ -335,6 +421,93 @@ requires_approval = true
             "#650",
             &gate,
         ));
+
+        let wrong_grant = LedgerEntry::new_paid_route_approval(
+            "test",
+            profile,
+            "#650",
+            "opencode",
+            Some("nous/other-model"),
+            true,
+        );
+        assert!(policy_approval_still_required(
+            &cfg,
+            "test",
+            profile,
+            &[used_claude.clone(), wrong_grant],
+            "#650",
+            &gate,
+        ));
+
+        let exact_grant = LedgerEntry::new_paid_route_approval(
+            "test",
+            profile,
+            "#650",
+            "opencode",
+            Some("nous/glm-5.2"),
+            true,
+        );
+        assert!(!policy_approval_still_required(
+            &cfg,
+            "test",
+            profile,
+            &[used_claude.clone(), exact_grant],
+            "#650",
+            &gate,
+        ));
+
+        fs::write(
+            &availability_path,
+            serde_json::to_string(&AvailabilityState {
+                version: 1,
+                records: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut policy_entry =
+            LedgerEntry::new("test", profile, "auto", "review", "#650", None, None);
+        policy_entry.work_id = Some("#650".into());
+        policy_entry.human_required = true;
+        policy_entry.human_required_reason_code = Some("policy_approval".into());
+        policy_entry.set_failure(
+            crate::ledger::FailureClass::HumanBlocked,
+            crate::ledger::FailureStage::Route,
+        );
+        policy_entry.routing_diagnostics = Some(crate::ledger::RoutingDiagnostics {
+            candidates: vec![
+                crate::ledger::RoutingCandidateDiagnostic {
+                    backend: "opencode".into(),
+                    model: Some("nous/glm-5.2".into()),
+                    skip_reason: Some("operator_approval_required".into()),
+                    ..Default::default()
+                },
+                crate::ledger::RoutingCandidateDiagnostic {
+                    backend: "claude".into(),
+                    model: Some("sonnet".into()),
+                    skip_reason: Some("model-specific quota_exhausted".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let mut duplicate = LedgerEntry::new("test", profile, "auto", "review", "#650", None, None);
+        duplicate.work_id = Some("#650".into());
+        duplicate.validation_result = Some("skipped_duplicate_review".into());
+        duplicate.review_source_sha = Some("same-sha".into());
+        duplicate.reviewer_class = Some("escalatory:claude/sonnet".into());
+        let entries = vec![used_claude, policy_entry, duplicate];
+        let mut blockers = Vec::new();
+        project_effective_mr_gates(
+            &cfg,
+            "test",
+            profile,
+            &entries,
+            &[test_mr(Some("#650"), "gah/review-650")],
+            &mut blockers,
+        );
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].reason_code.as_deref(), Some("policy_approval"));
     }
 
     #[test]

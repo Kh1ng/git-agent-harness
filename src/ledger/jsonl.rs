@@ -558,10 +558,12 @@ pub fn is_entry_stale(entry: &LedgerEntry) -> bool {
 }
 
 /// Resolve the effective human gate for one work item using the same
-/// transition semantics as ticket discovery. A review may clear its own
-/// provisional hold; unrelated non-review completions may not clear a hold.
-/// Explicit operator approval and `clear-attempts` are durable release
-/// transitions. Control-only records never create or clear a gate.
+/// transition semantics as ticket discovery. A completed review may clear its
+/// own provisional hold; review no-ops and unrelated completions may not clear
+/// a hold. Paid-route grants stay in the history so status can verify that the
+/// grant matches the exact blocked route before releasing it. `clear-attempts`
+/// remains the unconditional release transition. Control-only records never
+/// create a gate.
 pub fn effective_human_gate_from_entries(
     entries: &[LedgerEntry],
     profile_name: &str,
@@ -589,8 +591,22 @@ fn effective_human_gate_for_scope(
             && !is_entry_stale(entry)
     }) {
         match entry.mode.as_str() {
-            "clear_attempts" | "paid_route_approval_grant" => {
+            "clear_attempts" => {
                 gate = None;
+                continue;
+            }
+            "paid_route_approval_grant" => {
+                // Modern policy gates carry exact route diagnostics and must
+                // be released only after status verifies this grant against
+                // that route. Preserve legacy behavior for pre-reason-code
+                // handoffs, whose requested identity cannot be reconstructed.
+                if gate
+                    .as_ref()
+                    .and_then(|gate: &EffectiveHumanGate| gate.reason_code.as_deref())
+                    != Some("policy_approval")
+                {
+                    gate = None;
+                }
                 continue;
             }
             "claim" | "paid_route_approval_revoke" | "review_hold" | "review_hold_release" => {
@@ -598,7 +614,12 @@ fn effective_human_gate_for_scope(
             }
             _ if entry.validation_result.as_deref() == Some("deferred_capacity") => continue,
             "review" if !entry.human_required => {
-                gate = None;
+                // Only a real terminal review supersedes a prior review gate.
+                // Duplicate/no-op and failed publication records carry no
+                // verdict and must not erase a pending policy approval.
+                if entry.review_verdict.is_some() && entry.failure_class.is_none() {
+                    gate = None;
+                }
                 continue;
             }
             _ if !entry.human_required => continue,
@@ -802,13 +823,14 @@ mod tests {
             true,
         );
 
-        assert!(effective_human_gate_from_entries(
+        let active = effective_human_gate_from_entries(
             &[gate.clone(), grant],
             "test",
             &profile.repo_id,
             "#650",
         )
-        .is_none());
+        .expect("the raw policy gate stays latched until exact-route projection");
+        assert_eq!(active.reason_code.as_deref(), Some("policy_approval"));
         assert!(effective_human_gate_from_entries(
             &[gate],
             "other-profile",
@@ -816,6 +838,26 @@ mod tests {
             "#650",
         )
         .is_none());
+    }
+
+    #[test]
+    fn review_noop_does_not_clear_a_paid_route_policy_gate() {
+        let profile = ledger_tests::profile();
+        let mut gate =
+            super::super::LedgerEntry::new("test", &profile, "auto", "review", "#650", None, None);
+        gate.work_id = Some("#650".into());
+        gate.human_required = true;
+        gate.human_required_reason_code = Some("policy_approval".into());
+
+        let mut duplicate =
+            super::super::LedgerEntry::new("test", &profile, "auto", "review", "#650", None, None);
+        duplicate.work_id = Some("#650".into());
+        duplicate.validation_result = Some("skipped_duplicate_review".into());
+
+        let active =
+            effective_human_gate_from_entries(&[gate, duplicate], "test", &profile.repo_id, "#650")
+                .expect("an unchanged duplicate review must not release the approval hold");
+        assert_eq!(active.reason_code.as_deref(), Some("policy_approval"));
     }
 
     #[test]
