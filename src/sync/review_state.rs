@@ -53,7 +53,7 @@ pub(super) fn latest_review_for_mr<'a>(
                     .review_verdict
                     .as_deref()
                     .or(entry.validation_result.as_deref()),
-                Some("APPROVE" | "NEEDS_FIX" | "REJECT" | "HUMAN_REVIEW")
+                Some("APPROVE" | "NEEDS_FIX" | "REJECT" | "HUMAN_REVIEW" | "REVIEW_OUTPUT_INVALID")
             )
     })
 }

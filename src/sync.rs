@@ -279,6 +279,7 @@ pub fn sync_mr_to_json(
                     Some("NEEDS_FIX" | "REJECT") => "NEEDS_FIX",
                     Some("HUMAN_REVIEW") if latest.human_required => "READY_FOR_HUMAN",
                     Some("HUMAN_REVIEW") => "NEEDS_REVIEW",
+                    Some("REVIEW_OUTPUT_INVALID") => "NEEDS_REVIEW",
                     _ => class,
                 };
             }
@@ -1039,6 +1040,27 @@ mod tests {
         assert_eq!(row.classification, "NEEDS_REVIEW");
         assert_eq!(row.recommended_action, RecommendedAction::RunReview);
         assert_eq!(row.review_verdict.as_deref(), Some("HUMAN_REVIEW"));
+    }
+
+    #[test]
+    fn invalid_review_output_cannot_select_fixmr_even_with_stale_needs_fix_label() {
+        let (mr, mut ledger) = reviewed_needs_fix_row(None);
+        let review = &mut ledger.get_mut("#701").unwrap()[0];
+        review.review_verdict = Some("REVIEW_OUTPUT_INVALID".into());
+        review.validation_result = Some("review_output_invalid".into());
+        review.review_gate_reason = Some("finding explicitly withdrew itself".into());
+        review.review_blocking_findings.clear();
+        review.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+
+        let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
+
+        assert_eq!(row.classification, "NEEDS_REVIEW");
+        assert_eq!(row.recommended_action, RecommendedAction::RunReview);
+        assert_eq!(row.review_verdict.as_deref(), Some("REVIEW_OUTPUT_INVALID"));
+        assert_eq!(
+            row.review_gate_reason.as_deref(),
+            Some("finding explicitly withdrew itself")
+        );
     }
 
     #[test]

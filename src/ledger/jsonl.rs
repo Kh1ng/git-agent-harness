@@ -388,6 +388,7 @@ pub struct ReviewVerdictBackfill<'a> {
     pub review_source_sha: Option<&'a str>,
     pub review_metadata_fingerprint: Option<&'a str>,
     pub blocking_findings: &'a [String],
+    pub actionable_findings: &'a [crate::models::ActionableReviewFinding],
     pub non_blocking_findings: &'a [String],
     pub risk_notes: &'a [String],
     pub evidence: &'a [String],
@@ -417,9 +418,7 @@ pub fn backfill_review_verdict(
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            e.branch.as_deref() == Some(branch)
-                && matches!(e.mode.as_str(), "fix" | "improve")
-                && e.review_verdict.is_none()
+            e.branch.as_deref() == Some(branch) && matches!(e.mode.as_str(), "fix" | "improve")
         })
         .max_by_key(|(_, e)| e.timestamp.clone())
         .map(|(idx, _)| idx);
@@ -437,6 +436,7 @@ pub fn backfill_review_verdict(
     entries[idx].review_metadata_fingerprint =
         backfill.review_metadata_fingerprint.map(str::to_string);
     entries[idx].review_blocking_findings = backfill.blocking_findings.to_vec();
+    entries[idx].review_actionable_findings = backfill.actionable_findings.to_vec();
     entries[idx].review_non_blocking_findings = backfill.non_blocking_findings.to_vec();
     entries[idx].review_risk_notes = backfill.risk_notes.to_vec();
     entries[idx].review_evidence = backfill.evidence.to_vec();
@@ -523,6 +523,7 @@ fn review_is_dedup_eligible(entry: &LedgerEntry) -> bool {
     }
     match entry.review_verdict.as_deref() {
         Some("NEEDS_FIX" | "REJECT") => !entry.review_blocking_findings.is_empty(),
+        Some("REVIEW_OUTPUT_INVALID") => false,
         Some(_) => true,
         None => false,
     }
@@ -1158,6 +1159,7 @@ mod tests {
                 review_source_sha: Some("abc123"),
                 review_metadata_fingerprint: Some("sha256:test"),
                 blocking_findings: &["src/lib.rs: broken retry".to_string()],
+                actionable_findings: &[],
                 non_blocking_findings: &["consider a smaller helper".to_string()],
                 risk_notes: &["retry state can be lost".to_string()],
                 evidence: &[
@@ -1219,6 +1221,7 @@ mod tests {
                 review_source_sha: None,
                 review_metadata_fingerprint: None,
                 blocking_findings: &[],
+                actionable_findings: &[],
                 non_blocking_findings: &[],
                 risk_notes: &[],
                 evidence: &[],

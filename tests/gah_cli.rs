@@ -2274,7 +2274,7 @@ fn review_fails_as_degraded_when_capability_has_no_known_activation() {
 }
 
 #[test]
-fn review_parse_failure_preserves_raw_report() {
+fn review_parse_failure_preserves_raw_report_and_records_bounded_reroute() {
     let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -2285,10 +2285,9 @@ fn review_parse_failure_preserves_raw_report() {
         &tmp,
         &repo,
         "github",
-        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
+        "[profiles.real.routing]\nreview_backend = \"claude\"\n\n[profiles.real.publishing]\nallow_issue_comments = false\n",
         "",
     );
-
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
     make_fake_bin_with_body(
@@ -2301,7 +2300,6 @@ fn review_parse_failure_preserves_raw_report() {
         "gh",
         "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"number\":7}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"Draft: [GAH] Fix\",\"body\":\"MR body\",\"headRefName\":\"feature/review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nexit 0\n",
     );
-
     bin()
         .args([
             "dispatch",
@@ -2316,13 +2314,15 @@ fn review_parse_failure_preserves_raw_report() {
         ])
         .env("PATH", prepend_path(&fake_bin))
         .assert()
-        .failure();
-
+        .success()
+        .stdout(predicate::str::contains("bounded reviewer reroute"));
     let sessions = tmp.path().join("artifacts/real/sessions");
     let session = latest_child_dir(&sessions);
     let report = fs::read_to_string(session.join("review-report.md")).unwrap();
     assert!(report.contains("Review notes"));
-    assert!(!session.join("review-verdict.json").exists());
+    let verdict: serde_json::Value =
+        serde_json::from_slice(&fs::read(session.join("review-verdict.json")).unwrap()).unwrap();
+    assert_eq!(verdict["verdict"], "REVIEW_OUTPUT_INVALID");
 }
 
 #[test]

@@ -75,8 +75,8 @@ mod telemetry_tests {
     #[test]
     fn test_schema_version_in_record() {
         assert_eq!(
-            SCHEMA_VERSION, 6,
-            "reasoning tokens and explicit usage gaps require telemetry export schema version 6"
+            SCHEMA_VERSION, 7,
+            "machine-validated actionable findings require telemetry export schema version 7"
         );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
@@ -238,6 +238,7 @@ mod telemetry_tests {
             reviewer_backend: None,
             reviewer_model: None,
             review_gate_reason: None,
+            review_actionable_findings: vec![],
             commit_attempted: true,
             commit_created: true,
             push_attempted: true,
@@ -700,6 +701,7 @@ mod telemetry_tests {
             reviewer_class: None,
             review_gate_reason: None,
             review_blocking_findings: vec![],
+            review_actionable_findings: vec![],
             review_non_blocking_findings: vec![],
             review_risk_notes: vec![],
             review_evidence: vec![],

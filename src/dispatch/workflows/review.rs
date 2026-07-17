@@ -9,9 +9,9 @@ use super::super::review::context::{
     lookup_review_state_by_branch, prepare_review_diff, resolve_review_target, ReviewTarget,
 };
 use super::super::review::policy::{
-    check_review_budget, derive_reviewer_tier, next_escalatory_reviewer,
-    parse_review_verdict_with_context, review_escalation_reason, reviewer_dedup_class,
-    ReviewBudgetExhausted, ReviewGateContext,
+    check_review_budget, derive_reviewer_tier, next_escalatory_reviewer, next_review_candidate,
+    parse_review_verdict_with_context, review_escalation_reason, review_output_invalid_error,
+    reviewer_dedup_class, ReviewBudgetExhausted, ReviewGateContext,
 };
 use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
@@ -130,14 +130,15 @@ pub(in crate::dispatch) fn review(
         "## Review Pack\n\n\
          Review this diff for correctness, test coverage, and safety. \
          Return a JSON object. You may precede it only with the inert heading `Review notes`; put every substantive finding in the JSON arrays, never in prose.\n\
-         The JSON object fields are: verdict, confidence, human_required, blocking_findings, non_blocking_findings, risk_notes, evidence, compatibility_evidence.\n\
-         blocking_findings, non_blocking_findings, risk_notes, evidence, and compatibility_evidence must be JSON arrays of strings, even when empty or when only one item exists.\n\
+         The JSON object fields are: verdict, confidence, human_required, actionable_findings, non_blocking_findings, risk_notes, evidence, compatibility_evidence.\n\
+         actionable_findings must be an array of objects with exactly: summary (string), file (an exact path copied from Changed files), line (string or null), status (the literal confirmed), and evidence (an array containing at least one diff:<same-file>:<specific observation> string). non_blocking_findings, risk_notes, evidence, and compatibility_evidence must be JSON arrays of strings, even when empty or when only one item exists.\n\
+         NEEDS_FIX and REJECT require at least one actionable_findings object. Never put a withdrawn, speculative, unverified, contradicted, or explicitly non-blocking concern in actionable_findings; put uncertainty in non_blocking_findings or return HUMAN_REVIEW. GAH rejects invalid actionable findings and reroutes to another reviewer instead of dispatching a repair.\n\
          For an APPROVE, evidence must include exactly one or more file:<changed-path> entries copied from Changed files below. You may include ci:passed only when the displayed control-plane CI status is passed. An APPROVE without grounded file evidence is invalid.\n\
          Every source acceptance criterion is blocking until verified. For criterion N, include a separate evidence entry using `ac:N:file:<changed-path>` or `ac:N:test:<command and result>`. If the criterion claims current, live, latest, exact, open/closed, queued, or other external provider state, file/test evidence alone is insufficient: use `ac:N:provider:<provider>:<queried reference and result>` or `ac:N:snapshot:<changed-path>:<verification command and result>`. The provider must match this profile. If any criterion remains unmet or materially unverified, return NEEDS_FIX with a concrete blocking finding; never hide that admission in non_blocking_findings or risk_notes while approving.\n\
          If a contract surface is changed, do not APPROVE unless compatibility_evidence includes file:<changed-contract-path> and mechanism:<schema-version|backward-compatible-default|migration> that is actually present in the diff.\n\
          Verdict must be one of APPROVE, NEEDS_FIX, REJECT, HUMAN_REVIEW, defined as:\n\
          - APPROVE: you believe the change is correct, safe, and complete enough to merge. Report your ACTUAL confidence honestly in the separate `confidence` field (high/medium/low) -- do not inflate confidence to sound more certain, and do not downgrade to NEEDS_FIX just to hedge when you'd otherwise approve. A low-confidence approval is a real, useful signal (insufficient context, a domain you couldn't fully verify, a partial review) and will correctly route to a human -- it is not a failure to be avoided.\n\
-         - NEEDS_FIX: you found a concrete, real problem that should be fixed before merge. Put it in blocking_findings, even if it isn't an immediate crash -- e.g. silent data loss, a hidden failure mode, or anything that would take real effort to diagnose later if left in. Do not downgrade a genuine risk into non_blocking_findings/risk_notes just because it wouldn't break the build today.\n\
+         - NEEDS_FIX: you found a concrete, confirmed problem that should be fixed before merge. Put it in actionable_findings with direct changed-file evidence, even if it isn't an immediate crash -- e.g. silent data loss, a hidden failure mode, or anything that would take real effort to diagnose later if left in. Do not downgrade a confirmed risk into non_blocking_findings/risk_notes just because it wouldn't break the build today.\n\
          - REJECT: the change is fundamentally wrong and should not be merged as-is.\n\
          - HUMAN_REVIEW: you cannot make a confident recommendation at all.\n\
          Repo: {}. MR: {}. Source: {}. Target: {}. CI status: {}.\n\
@@ -189,10 +190,14 @@ pub(in crate::dispatch) fn review(
     // this bounded second-opinion chain, not an immediate terminal handoff.
     let escalation_reason =
         review_escalation_reason(cfg, profile, &args.profile, &target.source_branch);
-    let next_escalatory = escalation_reason.and_then(|_| {
-        next_escalatory_reviewer(cfg, profile, &args.profile, &target.source_branch, None)
+    let next_reviewer = escalation_reason.and_then(|reason| {
+        if reason == "review_output_invalid" {
+            next_review_candidate(cfg, profile, &args.profile, &target.source_branch, None)
+        } else {
+            next_escalatory_reviewer(cfg, profile, &args.profile, &target.source_branch, None)
+        }
     });
-    let (requested_backend, requested_model) = match (escalation_reason, next_escalatory.as_ref()) {
+    let (requested_backend, requested_model) = match (escalation_reason, next_reviewer.as_ref()) {
         (Some(reason), Some(esc)) => {
             println!(
                 "Escalating review to {}/{} ({reason}) for branch {}",
@@ -580,20 +585,19 @@ pub(in crate::dispatch) fn review(
                     verdict
                 }
                 Err(err) => {
-                    ledger.set_failure(
-                        crate::ledger::FailureClass::BackendError,
-                        crate::ledger::FailureStage::Review,
+                    return record_review_output_invalid(
+                        cfg,
+                        profile,
+                        args,
+                        ledger,
+                        &target,
+                        &route,
+                        reviewer_tier,
+                        &review_usage,
+                        &err,
+                        &verdict_path,
+                        session_dir,
                     );
-                    ledger.backend_exit_code = Some(0);
-                    ledger.validation_result = Some("invalid_output".into());
-                    if let Some(attempt) = ledger.attempts.last_mut() {
-                        attempt.validation_result = Some("invalid_output".into());
-                        attempt.failure_class =
-                            Some(crate::ledger::FailureClass::BackendError.as_str().into());
-                        attempt.failure_stage =
-                            Some(crate::ledger::FailureStage::Review.as_str().into());
-                    }
-                    return Err(err);
                 }
             };
             // A reviewer asking for human attention (including an APPROVE
@@ -630,6 +634,7 @@ pub(in crate::dispatch) fn review(
             ledger.reviewer_tier = Some(reviewer_tier.as_str().to_string());
             ledger.review_gate_reason = verdict.safety_gate_reason.clone();
             ledger.review_blocking_findings = verdict.blocking_findings.clone();
+            ledger.review_actionable_findings = verdict.actionable_findings.clone();
             ledger.review_non_blocking_findings = verdict.non_blocking_findings.clone();
             ledger.review_risk_notes = verdict.risk_notes.clone();
             ledger.review_evidence = verdict.evidence.clone();
@@ -654,6 +659,7 @@ pub(in crate::dispatch) fn review(
                     review_source_sha: ledger.review_source_sha.as_deref(),
                     review_metadata_fingerprint: ledger.review_metadata_fingerprint.as_deref(),
                     blocking_findings: &verdict.blocking_findings,
+                    actionable_findings: &verdict.actionable_findings,
                     non_blocking_findings: &verdict.non_blocking_findings,
                     risk_notes: &verdict.risk_notes,
                     evidence: &verdict.evidence,
@@ -877,6 +883,136 @@ fn review_attempt_environment(
     env_vars
 }
 
+#[allow(clippy::too_many_arguments)]
+fn record_review_output_invalid(
+    cfg: &GahConfig,
+    profile: &Profile,
+    args: &DispatchArgs,
+    ledger: &mut LedgerEntry,
+    target: &ReviewTarget,
+    route: &RouteDecision,
+    reviewer_tier: super::super::review::policy::ReviewerTier,
+    review_usage: &crate::ledger::LedgerUsage,
+    err: &anyhow::Error,
+    verdict_path: &Path,
+    session_dir: &Path,
+) -> Result<()> {
+    let raw_reason = review_output_invalid_error(err)
+        .map(|invalid| invalid.reason().to_string())
+        .unwrap_or_else(|| err.to_string());
+    let reason = crate::redact::redact(utf8_safe_prefix(&raw_reason, 600));
+    let verdict = "REVIEW_OUTPUT_INVALID";
+
+    ledger.set_failure(
+        crate::ledger::FailureClass::ReviewOutputInvalid,
+        crate::ledger::FailureStage::Review,
+    );
+    ledger.backend_exit_code = Some(0);
+    ledger.validation_result = Some("review_output_invalid".into());
+    ledger.human_required = false;
+    ledger.human_required_reason_code = None;
+    ledger.error_summary = Some(reason.clone());
+    ledger.confidence_impact = Some("unknown".into());
+    ledger.review_verdict = Some(verdict.into());
+    ledger.review_confidence = Some("unknown".into());
+    ledger.reviewer_backend = Some(route.effective_backend.clone());
+    ledger.reviewer_model = route.effective_model.clone();
+    ledger.reviewer_tier = Some(reviewer_tier.as_str().to_string());
+    ledger.reviewer_class = Some(reviewer_dedup_class(reviewer_tier, route));
+    ledger.review_gate_reason = Some(reason.clone());
+    ledger.review_blocking_findings.clear();
+    ledger.review_actionable_findings.clear();
+    ledger.review_non_blocking_findings.clear();
+    ledger.review_risk_notes.clear();
+    ledger.review_evidence.clear();
+    ledger.review_compatibility_evidence.clear();
+    ledger.usage = aggregate_attempt_usage(&ledger.attempts);
+    if let Some(attempt) = ledger.attempts.last_mut() {
+        attempt.validation_result = Some("review_output_invalid".into());
+        attempt.failure_class = Some(
+            crate::ledger::FailureClass::ReviewOutputInvalid
+                .as_str()
+                .into(),
+        );
+        attempt.failure_stage = Some(crate::ledger::FailureStage::Review.as_str().into());
+    }
+
+    fs::write(
+        verdict_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "verdict": verdict,
+            "confidence": "unknown",
+            "human_required": false,
+            "actionable_findings": [],
+            "review_output_invalid_reason": reason,
+            "reviewer_backend": route.effective_backend,
+            "reviewer_model": route.effective_model,
+            "reviewer_tier": reviewer_tier.as_str(),
+            "usage": review_usage,
+        }))?,
+    )?;
+
+    if let Err(backfill_err) = crate::ledger::backfill_review_verdict(
+        cfg,
+        &target.source_branch,
+        crate::ledger::ReviewVerdictBackfill {
+            verdict,
+            confidence: "unknown",
+            reviewer_backend: &route.effective_backend,
+            reviewer_model: route.effective_model.as_deref(),
+            reviewer_tier: Some(reviewer_tier.as_str()),
+            review_gate_reason: Some(&reason),
+            review_source_sha: ledger.review_source_sha.as_deref(),
+            review_metadata_fingerprint: ledger.review_metadata_fingerprint.as_deref(),
+            blocking_findings: &[],
+            actionable_findings: &[],
+            non_blocking_findings: &[],
+            risk_notes: &[],
+            evidence: &[],
+            compatibility_evidence: &[],
+        },
+    ) {
+        eprintln!(
+            "warning: failed to backfill invalid review output onto ledger: {backfill_err:#}"
+        );
+    }
+
+    let mr_url = provider::mr_url_for_branch(profile, &target.source_branch)
+        .or_else(|| target.mr_url.clone())
+        .unwrap_or_else(|| target.source_branch.clone());
+    notify_event(
+        cfg,
+        profile,
+        NotifyEvent::ReviewOutputInvalid {
+            mr_url: &mr_url,
+            backend: &route.effective_backend,
+            model: route.effective_model.as_deref().unwrap_or("default"),
+            reason: &reason,
+        },
+    );
+
+    if profile.publishing.allow_issue_comments {
+        let body = format!(
+            "GAH rejected this reviewer response as unsafe repair context: `{reason}`. No FixMr was dispatched. The next configured reviewer will be tried within the bounded review budget.\n\nSession: `{}`",
+            session_dir.display()
+        );
+        provider::post_review_comment(
+            profile,
+            &target.source_branch,
+            &body,
+            &["gah-review-escalating"],
+        )
+        .context("publishing invalid-review reroute state")?;
+    } else {
+        println!(
+            "Publishing policy forbids review comments; invalid output retained locally for profile {}.",
+            args.profile
+        );
+    }
+    println!("Review output invalid; queued for bounded reviewer reroute: {reason}");
+    Ok(())
+}
+
 fn stop_for_exhausted_review_escalation(
     cfg: &GahConfig,
     profile: &Profile,
@@ -884,26 +1020,46 @@ fn stop_for_exhausted_review_escalation(
     target: &ReviewTarget,
     reason: &str,
 ) -> Result<()> {
-    let message = format!(
-        "review escalation exhausted after {reason}; no untried escalatory reviewer remains"
-    );
+    let invalid_output_exhausted = reason == "review_output_invalid";
+    let message = if invalid_output_exhausted {
+        let chain = invalid_review_attempt_chain(cfg, profile, ledger, &target.source_branch);
+        format!(
+            "review output validation exhausted; no untried configured reviewer remains; attempts: {chain}"
+        )
+    } else {
+        format!(
+            "review escalation exhausted after {reason}; no untried escalatory reviewer remains"
+        )
+    };
     ledger.set_failure(
         crate::ledger::FailureClass::HumanBlocked,
         crate::ledger::FailureStage::Review,
     );
-    ledger.validation_result = Some("review_escalation_exhausted".into());
+    ledger.validation_result = Some(if invalid_output_exhausted {
+        "review_output_invalid_exhausted".into()
+    } else {
+        "review_escalation_exhausted".into()
+    });
     ledger.review_verdict = Some("HUMAN_REVIEW".into());
     ledger.human_required = true;
-    ledger.human_required_reason_code =
-        Some(HumanRequiredReason::ReviewEvidenceGate.as_str().to_string());
+    let reason_code = if invalid_output_exhausted {
+        HumanRequiredReason::ReviewOutputInvalidExhausted
+    } else {
+        HumanRequiredReason::ReviewEvidenceGate
+    };
+    ledger.human_required_reason_code = Some(reason_code.as_str().to_string());
     ledger.error_summary = Some(message.clone());
     notify_event(
         cfg,
         profile,
         NotifyEvent::HumanRequired {
-            reason: "review escalation exhausted",
+            reason: if invalid_output_exhausted {
+                "review output validation exhausted"
+            } else {
+                "review escalation exhausted"
+            },
             reference: target.mr_url.as_deref(),
-            reason_code: Some(HumanRequiredReason::ReviewEvidenceGate.as_str()),
+            reason_code: Some(reason_code.as_str()),
             failure_class: ledger.failure_class.as_deref().unwrap_or("human_blocked"),
             failure_stage: ledger.failure_stage.as_deref(),
             error_summary: ledger.error_summary.as_deref(),
@@ -923,6 +1079,48 @@ fn stop_for_exhausted_review_escalation(
         )?;
     }
     bail!("{message}")
+}
+
+fn invalid_review_attempt_chain(
+    cfg: &GahConfig,
+    profile: &Profile,
+    ledger: &LedgerEntry,
+    branch: &str,
+) -> String {
+    let mut attempts = crate::ledger::read_entries(cfg)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| {
+            entry.profile == ledger.profile
+                && entry.repo_id == profile.repo_id
+                && entry.mode == "review"
+                && entry.branch.as_deref() == Some(branch)
+                && entry.validation_result.as_deref() == Some("review_output_invalid")
+        })
+        .map(|entry| {
+            let route = route_label(&entry.effective_backend, entry.effective_model.as_deref());
+            let reason = entry
+                .review_gate_reason
+                .as_deref()
+                .or(entry.error_summary.as_deref())
+                .unwrap_or("unknown invalid-output reason");
+            format!("{route} ({})", utf8_safe_prefix(reason, 120))
+        })
+        .collect::<Vec<_>>();
+    if ledger.validation_result.as_deref() == Some("review_output_invalid") {
+        let route = route_label(&ledger.effective_backend, ledger.effective_model.as_deref());
+        let reason = ledger
+            .review_gate_reason
+            .as_deref()
+            .or(ledger.error_summary.as_deref())
+            .unwrap_or("unknown invalid-output reason");
+        attempts.push(format!("{route} ({})", utf8_safe_prefix(reason, 120)));
+    }
+    if attempts.is_empty() {
+        "none recorded".to_string()
+    } else {
+        attempts.join(" -> ")
+    }
 }
 
 #[cfg(test)]

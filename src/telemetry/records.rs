@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 /// Version 5 adds explicit unknown-attribution reasons for model and provider.
 /// Version 6 adds distinct reasoning-token counters plus explicit unknown
 /// reasons for token and quota observations.
-pub const SCHEMA_VERSION: u32 = 6;
+/// Version 7 adds machine-validated actionable review findings.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -239,6 +240,9 @@ pub struct TaskOutcomeRecord {
     /// non-mergeable by GAH's evidence gate.
     #[serde(default)]
     pub review_gate_reason: Option<String>,
+    /// Confirmed repair-driving findings after control-plane validation.
+    #[serde(default)]
+    pub review_actionable_findings: Vec<crate::models::ActionableReviewFinding>,
 
     /// Commit attempted
     pub commit_attempted: bool,
@@ -316,6 +320,9 @@ pub struct ReviewOutcomeRecord {
     pub reviewer_backend: String,
     /// Reviewer model
     pub reviewer_model: Option<String>,
+    /// Confirmed repair-driving findings after control-plane validation.
+    #[serde(default)]
+    pub actionable_findings: Vec<crate::models::ActionableReviewFinding>,
 
     /// Duration of review in seconds
     pub duration_seconds: Option<f64>,
