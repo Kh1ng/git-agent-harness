@@ -138,3 +138,41 @@ fn each_distinct_escalatory_reviewer_gets_one_bounded_attempt() {
         "Claude history must not consume GLM's one distinct escalation attempt"
     );
 }
+
+#[test]
+fn cancelled_escalatory_review_does_not_consume_its_reserved_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            max_review_cycles_per_ticket: Some(1),
+            ..RoutingPolicy::default()
+        },
+    );
+    let prof = profile_with_escalatory_reviewers(
+        &tmp,
+        vec![CandidateConfig {
+            backend: "claude".into(),
+            model: Some("sonnet".into()),
+            ..CandidateConfig::default()
+        }],
+    );
+    append_routine_reviews(&cfg, &prof, 1, "#42");
+    let mut cancelled = review_ledger_entry("test", &prof, "gah/42", "cancelled_shutdown", "low");
+    cancelled.work_id = Some("#42".into());
+    cancelled.effective_backend = "claude".into();
+    cancelled.effective_model = Some("sonnet".into());
+    cancelled.reviewer_class = Some("escalatory:claude/sonnet".into());
+    crate::ledger::append(&cfg, &cancelled).unwrap();
+
+    let block = check_review_budget(
+        &cfg,
+        &prof,
+        "test",
+        Some("#42"),
+        &route_decision("claude", Some("sonnet"), false),
+    )
+    .unwrap();
+
+    assert!(block.is_none(), "shutdown must leave Claude retryable");
+}

@@ -46,7 +46,8 @@ pub(in crate::dispatch) struct ReviewBudgetBlock {
 /// reviewer call; it includes failed and timed-out reviews because those can
 /// still consume quota, but excludes both a prior budget refusal and a
 /// duplicate-review short-circuit (same source SHA/tier already reviewed),
-/// since neither launched a reviewer. Paid usage is counted only from an
+/// plus an operator-requested shutdown, since none is a completed opinion.
+/// Paid usage is counted only from an
 /// explicit recorded `api_key_backed` classification, never inferred from a
 /// provider name or silently from unknown data. The paid cap applies only
 /// when routing has explicitly selected a candidate configured as paid;
@@ -96,6 +97,7 @@ pub(in crate::dispatch) fn check_review_budget(
                     Some("review_budget_exhausted")
                         | Some("skipped_duplicate_review")
                         | Some("deferred_capacity")
+                        | Some("cancelled_shutdown")
                 )
         })
         .collect();
