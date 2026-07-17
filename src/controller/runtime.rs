@@ -2,13 +2,14 @@ use super::decision::decide_next_action;
 use super::human_required_reason::HumanRequiredReason;
 use super::recovery::{
     defer_if_branch_attached, detect_stuck_loop, latest_clear_attempts_timestamp,
-    reconcile_abandoned_dispatches, record_action_events,
+    recently_capacity_deferred_work_ids, reconcile_abandoned_dispatches, record_action_events,
 };
 use super::NextAction;
 use anyhow::Result;
 use fs2::FileExt;
 use serde::Serialize;
 use std::fs::OpenOptions;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::time::{Duration, Instant};
@@ -17,6 +18,57 @@ fn is_validation_gate_failure(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.is::<crate::dispatch::ValidationGateError>())
+}
+
+fn suppress_recent_capacity_deferrals(
+    cfg: &crate::config::GahConfig,
+    snapshot: &mut crate::status::StatusSnapshot,
+    events: &[crate::events::ControllerEvent],
+    entries: &[crate::ledger::LedgerEntry],
+    profile_name: &str,
+    repo_id: &str,
+) {
+    let now = time::OffsetDateTime::now_utc();
+    let route_state = route_state_fingerprint(cfg, profile_name, now).ok();
+    let deferred = recently_capacity_deferred_work_ids(
+        events,
+        entries,
+        profile_name,
+        repo_id,
+        now,
+        route_state.as_deref(),
+    );
+    snapshot.merge_requests.retain(|mr| {
+        mr.work_id
+            .as_deref()
+            .is_none_or(|work_id| !deferred.contains(work_id))
+    });
+    snapshot.available_tickets.retain(|ticket| {
+        ticket
+            .work_id
+            .as_deref()
+            .is_none_or(|work_id| !deferred.contains(work_id))
+    });
+}
+
+/// Hash only non-secret effective configuration plus durable availability.
+/// `list_scopes` evaluates expiry against `now`, so a cooldown becoming
+/// eligible changes this fingerprint even when the state file is untouched.
+fn route_state_fingerprint(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    now: time::OffsetDateTime,
+) -> Result<String> {
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(profile)?.hash(&mut hasher);
+    serde_json::to_string(&profile.effective_routing(&cfg.defaults))?.hash(&mut hasher);
+    format!(
+        "{:?}",
+        crate::availability::list_scopes(&crate::availability::resolve_state_path(), now)?
+    )
+    .hash(&mut hasher);
+    Ok(format!("{:016x}", hasher.finish()))
 }
 
 /// Persist a stuck-loop transition only when this work item has no active
@@ -279,12 +331,10 @@ pub fn run_once(
     crate::prune::run_automatic(cfg, profile_name)?;
     let mut ledger_entries = crate::ledger::read_entries(cfg)?;
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
-    let claim_scope = {
-        let profile = crate::config::get_profile(cfg, profile_name)?;
-        crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id)
-    };
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    let claim_scope = crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id);
     let now = time::OffsetDateTime::now_utc();
-    let snapshot =
+    let mut snapshot =
         crate::status::build_snapshot_from_entries(cfg, profile_name, now, &ledger_entries)?;
     crate::events::record(
         cfg,
@@ -293,6 +343,15 @@ pub fn run_once(
         None,
         format!("profile={profile_name}"),
     )?;
+    let history = crate::events::read_events(cfg)?;
+    suppress_recent_capacity_deferrals(
+        cfg,
+        &mut snapshot,
+        &history,
+        &ledger_entries,
+        profile_name,
+        &profile.repo_id,
+    );
 
     // For parallel > 1, we need to decide multiple actions
     if parallel > 1 {
@@ -308,7 +367,6 @@ pub fn run_once(
     } else {
         // Original single action behavior
         let original_action = decide_next_action(&snapshot);
-        let history = crate::events::read_events(cfg)?;
         let mut action = original_action.clone();
         let reset_after = original_action.work_id().and_then(|work_id| {
             latest_clear_attempts_timestamp(
@@ -507,6 +565,16 @@ fn run_parallel_once(
                         .unwrap_or(true)
                 });
 
+                let history = crate::events::read_events(cfg)?;
+                suppress_recent_capacity_deferrals(
+                    cfg,
+                    &mut fresh_snapshot,
+                    &history,
+                    &ledger_entries,
+                    profile_name,
+                    &crate::config::get_profile(cfg, profile_name)?.repo_id,
+                );
+
                 let original_action = decide_next_action(&fresh_snapshot);
                 let mut action = original_action.clone();
 
@@ -518,7 +586,6 @@ fn run_parallel_once(
                         work_id,
                     )
                 });
-                let history = crate::events::read_events(cfg)?;
                 if let Some(reason) =
                     detect_stuck_loop(&history, profile_name, &original_action, reset_after)
                 {
@@ -948,13 +1015,18 @@ pub(crate) fn run_dispatch_and_record(
             Ok(None)
         }
         Err(e) if crate::dispatch::capacity_deferred_error(&e) => {
+            let route_state =
+                route_state_fingerprint(cfg, &args.profile, time::OffsetDateTime::now_utc())
+                    .ok()
+                    .map(|fingerprint| format!(" route_state={fingerprint}"))
+                    .unwrap_or_default();
             crate::events::record_with_run_id(
                 cfg,
                 crate::events::EventType::DispatchFinished,
                 Some(args.profile.as_str()),
                 work_id,
                 args.run_id.as_deref(),
-                format!("{label}: deferred_capacity: {e:#}"),
+                format!("{label}: deferred_capacity: {e:#}{route_state}"),
             )?;
             Ok(Some(format!(
                 "Deferred {label} because configured route capacity is busy; no backend launched"
@@ -984,6 +1056,10 @@ pub(crate) fn run_dispatch_and_record(
 #[cfg(test)]
 #[path = "ledger_read_tests.rs"]
 mod ledger_read_tests;
+
+#[cfg(test)]
+#[path = "runtime/capacity_tests.rs"]
+mod capacity_tests;
 
 #[cfg(test)]
 mod tests {
