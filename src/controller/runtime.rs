@@ -507,6 +507,7 @@ fn run_parallel_once(
         let mut saw_real_work = false;
         let mut pending_terminal: Option<(NextAction, NextAction)> = None;
         let mut fill_attempts_remaining = effective_parallel_limit;
+        let mut refill_suppressed = false;
         let (done_tx, done_rx) = sync_channel::<(usize, LoopOnceResult)>(effective_parallel_limit);
 
         loop {
@@ -737,8 +738,13 @@ fn run_parallel_once(
                 .recv()
                 .map_err(|_| anyhow::anyhow!("parallel GAH worker channel closed unexpectedly"))?;
             active -= 1;
+            update_parallel_refill_budget(
+                &result.outcome,
+                effective_parallel_limit,
+                &mut fill_attempts_remaining,
+                &mut refill_suppressed,
+            );
             results.push((sequence, result));
-            fill_attempts_remaining = effective_parallel_limit;
         }
         Ok(())
     })?;
@@ -768,8 +774,17 @@ fn run_parallel_once(
 
     // Clean up any stale claims if we encountered errors
     // (This is a safety net - normally individual claims should be released)
-    if results.iter().any(|r| r.outcome.starts_with("Error:")) {
+    let failed_results: Vec<&LoopOnceResult> = results
+        .iter()
+        .filter(|result| parallel_outcome_is_failure(&result.outcome))
+        .collect();
+    if !failed_results.is_empty() {
         crate::work_claim::release_all_for_profile(&claim_scope)?;
+        anyhow::bail!(
+            "{} parallel action(s) failed; first failure: {}",
+            failed_results.len(),
+            failed_results[0].outcome
+        );
     }
 
     Ok(())
@@ -784,6 +799,28 @@ fn action_waits_for_route(action: &NextAction) -> bool {
             | NextAction::FixMr { .. }
             | NextAction::ReviewMr { .. }
     )
+}
+
+fn update_parallel_refill_budget(
+    outcome: &str,
+    parallel_limit: usize,
+    fill_attempts_remaining: &mut usize,
+    refill_suppressed: &mut bool,
+) -> bool {
+    let error = outcome.starts_with("Error:");
+    let failed = parallel_outcome_is_failure(outcome);
+    let capacity_deferred = outcome.starts_with("Deferred ");
+    if error || capacity_deferred {
+        *refill_suppressed = true;
+        *fill_attempts_remaining = 0;
+    } else if !*refill_suppressed {
+        *fill_attempts_remaining = parallel_limit;
+    }
+    failed
+}
+
+fn parallel_outcome_is_failure(outcome: &str) -> bool {
+    outcome.starts_with("Error:") && !outcome.contains("shutdown requested")
 }
 
 /// Executes at most one action. `FixMr` dispatches a fix operation

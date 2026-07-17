@@ -363,9 +363,7 @@ pub fn refresh_existing_branch_from_target(worktree: &Path, target_branch: &str)
     // Never leave a conflicted worktree behind for baseline validation or an
     // agent to misinterpret. Preserve the original branch and surface a
     // deterministic preflight error instead.
-    let merge_error = crate::redact::redact(&String::from_utf8_lossy(&merge.stderr))
-        .trim()
-        .to_string();
+    let merge_error = bounded_git_failure_details(&merge.stdout, &merge.stderr);
     let abort = git_raw(&["merge", "--abort"], worktree)?;
     if !abort.status.success() {
         anyhow::bail!(
@@ -374,6 +372,27 @@ pub fn refresh_existing_branch_from_target(worktree: &Path, target_branch: &str)
         );
     }
     anyhow::bail!("refreshing repair branch from {target_ref} failed: {merge_error}")
+}
+
+fn bounded_git_failure_details(stdout: &[u8], stderr: &[u8]) -> String {
+    const MAX_BYTES: usize = 4_000;
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let combined = match (stderr.trim(), stdout.trim()) {
+        ("", "") => "git exited non-zero without diagnostic output".to_string(),
+        ("", stdout) => stdout.to_string(),
+        (stderr, "") => stderr.to_string(),
+        (stderr, stdout) => format!("{stderr}\n{stdout}"),
+    };
+    let redacted = crate::redact::redact(&combined);
+    if redacted.len() <= MAX_BYTES {
+        return redacted;
+    }
+    let mut end = MAX_BYTES;
+    while end > 0 && !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[git diagnostic truncated]", &redacted[..end])
 }
 
 /// Describes a worktree currently attached to a branch, as reported by
@@ -1188,7 +1207,10 @@ mod tests {
         let head_before = git(&["rev-parse", "HEAD"], &wt).unwrap();
         let err = refresh_existing_branch_from_target(&wt, "main").unwrap_err();
 
-        assert!(format!("{err:#}").contains("refreshing repair branch"));
+        let message = format!("{err:#}");
+        assert!(message.contains("refreshing repair branch"));
+        assert!(message.contains("CONFLICT (content)"));
+        assert!(message.contains("f.txt"));
         assert_eq!(git(&["rev-parse", "HEAD"], &wt).unwrap(), head_before);
         assert_eq!(
             fs::read_to_string(wt.join("f.txt")).unwrap(),

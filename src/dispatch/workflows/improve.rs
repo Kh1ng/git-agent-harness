@@ -40,6 +40,8 @@ mod bounded_validation;
 pub(crate) use bounded_validation::bounded_validation_failure;
 mod shutdown;
 use shutdown::record_cancelled_attempt;
+mod stall;
+use stall::record_exact_route_unavailability;
 mod work_identity;
 use work_identity::apply_authoritative_work_identity;
 
@@ -585,12 +587,16 @@ pub(crate) fn improve(
                 anyhow::bail!("backend descendant cleanup failed; refusing to retry");
             }
             if stalled_before_changes {
+                let availability_result =
+                    record_exact_route_unavailability(&route, &log_text, failure_log_path);
                 worktree::preserve_wip(
                     &wt,
                     &profile.default_target_branch,
                     &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
                 )?;
                 worktree::cleanup(&wt, repo);
+                availability_result
+                    .context("recording idle-stalled backend cooldown before ending the attempt")?;
                 anyhow::bail!(
                     "{} made no repository progress (stalled before any changes) on attempt {}; not retrying blindly",
                     route.effective_backend,
