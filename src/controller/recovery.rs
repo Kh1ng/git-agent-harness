@@ -14,6 +14,22 @@ use std::path::Path;
 /// a profile or make the parallel refill loop create sessions indefinitely.
 const CAPACITY_DEFERRAL_BACKOFF: time::Duration = time::Duration::minutes(5);
 
+fn capacity_deferral_retry_at(
+    details: &str,
+    deferred_at: time::OffsetDateTime,
+) -> time::OffsetDateTime {
+    details
+        .split_once("earliest reset: ")
+        .and_then(|(_, suffix)| suffix.split_whitespace().next())
+        .map(|timestamp| timestamp.trim_end_matches([';', ',', ')']))
+        .and_then(|timestamp| {
+            time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .filter(|reset| *reset > deferred_at)
+        .unwrap_or(deferred_at + CAPACITY_DEFERRAL_BACKOFF)
+}
+
 pub(super) fn recently_capacity_deferred_work_ids(
     events: &[crate::events::ControllerEvent],
     entries: &[crate::ledger::LedgerEntry],
@@ -88,8 +104,7 @@ pub(super) fn recently_capacity_deferred_work_ids(
         {
             continue;
         }
-        let age = now - timestamp;
-        if age <= CAPACITY_DEFERRAL_BACKOFF {
+        if now < capacity_deferral_retry_at(&event.details, timestamp) {
             deferred.insert(work_id.to_string());
         }
     }
@@ -711,6 +726,37 @@ mod tests {
             "gah",
             now,
             Some("after"),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn known_reset_suppresses_until_reset_instead_of_fixed_polling() {
+        let parse = |timestamp| {
+            time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let mut deferred = capacity_finished("gah", "#683", "2026-07-17T08:00:00Z");
+        deferred
+            .details
+            .push_str("; earliest reset: 2026-07-17T12:00:00Z route_state=unchanged");
+
+        assert!(recently_capacity_deferred_work_ids(
+            std::slice::from_ref(&deferred),
+            &[],
+            "gah",
+            "gah",
+            parse("2026-07-17T11:59:59Z"),
+            Some("unchanged"),
+        )
+        .contains("#683"));
+        assert!(recently_capacity_deferred_work_ids(
+            &[deferred],
+            &[],
+            "gah",
+            "gah",
+            parse("2026-07-17T12:00:00Z"),
+            Some("unchanged"),
         )
         .is_empty());
     }
