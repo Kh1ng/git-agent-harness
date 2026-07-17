@@ -1,5 +1,6 @@
 use super::*;
 use crate::dispatch::test_util::{init_repo, profile};
+use std::collections::HashSet;
 use std::fs;
 
 #[test]
@@ -88,6 +89,177 @@ fn apply_pm_plan_skips_duplicates() {
     let written = apply_pm_plan(repo, &ctx, &plan).unwrap();
     assert_eq!(written.len(), 1);
     assert!(written[0].display().to_string().contains("fix-auth"));
+}
+
+fn empty_ctx() -> super::PmPreflight {
+    super::PmPreflight {
+        rendered: String::new(),
+        existing_tickets: vec![],
+        open_mrs: String::new(),
+        merged_mrs: String::new(),
+    }
+}
+
+fn packet_json(key: &str, title: &str, depends_on: &str) -> String {
+    format!(
+        r#"{{"key":"{key}","title":"{title}","objective":"o","task_class":"fix","difficulty":"easy","risk":"low","execution_disposition":"autonomous","recommended_routing":{{"capability":"edit","min_tier":"standard"}},"affected_files":["a"],"acceptance_criteria":["b"],"verification_commands":["pytest"],"depends_on":[{depends_on}],"uncovered_reason":"x"}}"#
+    )
+}
+
+#[test]
+fn apply_pm_plan_translates_fan_out_dependencies_to_assigned_identities() {
+    // One prerequisite unlocks two dependents. Both dependents must resolve
+    // the plan-local "base" key to base's actual assigned TICKET-NNN id, not
+    // the opaque key.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    let ctx = empty_ctx();
+    let tickets = [
+        packet_json("base", "Base work", ""),
+        packet_json("dep-a", "Dependent A", "\"base\""),
+        packet_json("dep-b", "Dependent B", "\"base\""),
+    ]
+    .join(",");
+    let plan: PmPlan = serde_json::from_str(&bounded_plan(&tickets)).expect("plan parses");
+
+    let written = apply_pm_plan(repo, &ctx, &plan).unwrap();
+    assert_eq!(written.len(), 3);
+
+    let base_path = written
+        .iter()
+        .find(|p| p.display().to_string().contains("base-work"))
+        .unwrap();
+    let base_id = fs::read_to_string(base_path)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_string();
+    let base_ticket = base_id
+        .trim_start_matches("# ")
+        .split(':')
+        .next()
+        .unwrap()
+        .to_string();
+
+    for name in ["dependent-a", "dependent-b"] {
+        let path = written
+            .iter()
+            .find(|p| p.display().to_string().contains(name))
+            .unwrap();
+        let body = fs::read_to_string(path).unwrap();
+        assert!(
+            body.contains(&format!("Blocked by: {base_ticket}")),
+            "{name} body missing translated Blocked by line: {body}"
+        );
+        assert!(
+            !body.contains("Blocked by: base"),
+            "{name} leaked plan-local key"
+        );
+    }
+}
+
+#[test]
+fn apply_pm_plan_translates_fan_in_dependencies_to_assigned_identities() {
+    // One dependent requires two prerequisites; both must appear translated
+    // in a single canonical "Blocked by" line.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    let ctx = empty_ctx();
+    let tickets = [
+        packet_json("a", "Prereq A", ""),
+        packet_json("b", "Prereq B", ""),
+        packet_json("combined", "Combined dependent", "\"a\",\"b\""),
+    ]
+    .join(",");
+    let plan: PmPlan = serde_json::from_str(&bounded_plan(&tickets)).expect("plan parses");
+
+    let written = apply_pm_plan(repo, &ctx, &plan).unwrap();
+    assert_eq!(written.len(), 3);
+
+    let combined_path = written
+        .iter()
+        .find(|p| p.display().to_string().contains("combined-dependent"))
+        .unwrap();
+    let body = fs::read_to_string(combined_path).unwrap();
+    let blocked_by_line = body
+        .lines()
+        .find(|line| line.starts_with("Blocked by:"))
+        .expect("combined dependent must have a Blocked by line");
+    assert!(blocked_by_line.contains("TICKET-001"));
+    assert!(blocked_by_line.contains("TICKET-002"));
+}
+
+#[test]
+fn apply_pm_plan_retains_duplicate_skipped_dependency_instead_of_dropping_it() {
+    // "prereq" is judged a duplicate of existing work and is skipped, but
+    // "dependent" still depends on it. The dependency must not silently
+    // vanish -- it must surface as an auditable, unresolved note.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    let mut ctx = empty_ctx();
+    ctx.existing_tickets = vec!["- TICKET-001-prereq.md: Prereq work".into()];
+    let tickets = [
+        packet_json("prereq", "Prereq work", ""),
+        packet_json("dependent", "Dependent work", "\"prereq\""),
+    ]
+    .join(",");
+    let plan: PmPlan = serde_json::from_str(&bounded_plan(&tickets)).expect("plan parses");
+
+    let written = apply_pm_plan(repo, &ctx, &plan).unwrap();
+    assert_eq!(
+        written.len(),
+        1,
+        "prereq is a duplicate and must be skipped"
+    );
+    assert!(written[0].display().to_string().contains("dependent-work"));
+
+    let body = fs::read_to_string(&written[0]).unwrap();
+    assert!(
+        !body.contains("Blocked by:"),
+        "no assigned identity exists for a duplicate-skipped prerequisite: {body}"
+    );
+    assert!(
+        body.contains("Unresolved Dependencies") && body.contains("prereq"),
+        "duplicate-skipped dependency must not be silently dropped: {body}"
+    );
+}
+
+#[test]
+fn apply_pm_plan_assigns_unique_sequential_identities_without_collisions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let tickets_dir = repo.join("docs/tickets");
+    fs::create_dir_all(&tickets_dir).unwrap();
+    fs::write(tickets_dir.join("TICKET-005-old.md"), "old").unwrap();
+    let ctx = empty_ctx();
+    let tickets = [
+        packet_json("k1", "First", ""),
+        packet_json("k2", "Second", ""),
+        packet_json("k3", "Third", ""),
+    ]
+    .join(",");
+    let plan: PmPlan = serde_json::from_str(&bounded_plan(&tickets)).expect("plan parses");
+
+    let written = apply_pm_plan(repo, &ctx, &plan).unwrap();
+    let mut ids: Vec<String> = written
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .split('-')
+                .nth(1)
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["006", "007", "008"]);
+    assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 3, "no collisions");
 }
 
 #[test]
