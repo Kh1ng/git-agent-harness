@@ -80,6 +80,63 @@ pub struct AggregatedTelemetryData {
     pub average_cost_per_attempt: f64,
     pub success_rate: f64,
     pub failure_details: BTreeMap<String, usize>,
+    /// Issue #119: provenance-aware per-attempt behavior metrics, aggregated by
+    /// dimension. Unknown attempts are never summed as zero; `unknown_attempts`
+    /// records how many attempts lacked a known count.
+    pub tool_calls: AggregatedBehaviorMetric,
+    pub shell_calls: AggregatedBehaviorMetric,
+    pub file_edits: AggregatedBehaviorMetric,
+    pub test_runs: AggregatedBehaviorMetric,
+}
+
+/// Aggregated, provenance-aware behavior metric for a single dimension bucket.
+///
+/// Sums only known counts (never coercing unknown to zero) and records how many
+/// attempts contributed a known count vs. remained unknown, plus the dominant
+/// quality observed so dashboards can expose provenance.
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct AggregatedBehaviorMetric {
+    /// Sum of known (`Some(n)`) counts. Unknown attempts do not contribute.
+    pub total: u64,
+    /// Number of attempts that reported a known count.
+    pub known_attempts: u64,
+    /// Number of attempts where this metric was unknown/unavailable.
+    pub unknown_attempts: u64,
+    /// Representative provenance label, e.g. `provider_reported`,
+    /// `structured_event_derived`, `estimated`, `unavailable`, or `mixed`
+    /// when multiple qualities are present in the bucket.
+    pub quality: String,
+}
+
+impl AggregatedBehaviorMetric {
+    fn add(&mut self, metric: &Option<crate::ledger::BehaviorMetric>) {
+        use crate::ledger::BehaviorMetricQuality;
+        match metric {
+            Some(m) => match m.count {
+                Some(n) => {
+                    self.total += n;
+                    self.known_attempts += 1;
+                    let label = match m.quality {
+                        BehaviorMetricQuality::ProviderReported => "provider_reported",
+                        BehaviorMetricQuality::StructuredEventDerived => "structured_event_derived",
+                        BehaviorMetricQuality::Estimated => "estimated",
+                        BehaviorMetricQuality::Unavailable => "unavailable",
+                    };
+                    if self.quality.is_empty() {
+                        self.quality = label.to_string();
+                    } else if self.quality != label {
+                        self.quality = "mixed".to_string();
+                    }
+                }
+                None => {
+                    self.unknown_attempts += 1;
+                }
+            },
+            None => {
+                self.unknown_attempts += 1;
+            }
+        }
+    }
 }
 
 /// Telemetry aggregation parameters
@@ -204,6 +261,36 @@ fn matches_filter_value(filter: &Option<String>, value: &str) -> bool {
     match filter {
         Some(f) => f.to_lowercase() == value.to_lowercase(),
         None => true,
+    }
+}
+
+/// Build a zeroed `AggregatedTelemetryData` for a given dimension value.
+fn new_aggregated_data(
+    dimension: AggregationDimension,
+    dimension_value: &str,
+) -> AggregatedTelemetryData {
+    AggregatedTelemetryData {
+        dimension_key: dimension_key(dimension),
+        dimension_value: dimension_value.to_string(),
+        entries: 0,
+        attempts: 0,
+        successful_attempts: 0,
+        failed_attempts: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        requests_count: 0,
+        estimated_cost_usd: 0.0,
+        actual_cost_usd: 0.0,
+        quota_backed_cost_usd: 0.0,
+        api_cost_usd: 0.0,
+        average_cost_per_attempt: 0.0,
+        success_rate: 0.0,
+        failure_details: BTreeMap::new(),
+        tool_calls: AggregatedBehaviorMetric::default(),
+        shell_calls: AggregatedBehaviorMetric::default(),
+        file_edits: AggregatedBehaviorMetric::default(),
+        test_runs: AggregatedBehaviorMetric::default(),
     }
 }
 
@@ -410,25 +497,7 @@ fn aggregate_by_dimension(
                 let builder = aggregated_map
                     .entry(dimension_value.clone())
                     .or_insert_with(|| AggregationBuilder {
-                        data: AggregatedTelemetryData {
-                            dimension_key: dimension_key(dimension),
-                            dimension_value: dimension_value.clone(),
-                            entries: 0,
-                            attempts: 0,
-                            successful_attempts: 0,
-                            failed_attempts: 0,
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            total_tokens: 0,
-                            requests_count: 0,
-                            estimated_cost_usd: 0.0,
-                            actual_cost_usd: 0.0,
-                            quota_backed_cost_usd: 0.0,
-                            api_cost_usd: 0.0,
-                            average_cost_per_attempt: 0.0,
-                            success_rate: 0.0,
-                            failure_details: BTreeMap::new(),
-                        },
+                        data: new_aggregated_data(dimension, &dimension_value),
                         seen_entries: std::collections::HashSet::new(),
                     });
 
@@ -466,6 +535,15 @@ fn aggregate_by_dimension(
                 } else {
                     builder.data.api_cost_usd += entry_usage.actual_cost_usd.unwrap_or(0.0);
                 }
+
+                // Issue #119: aggregate provenance-aware behavior metrics.
+                // Unknown attempts never contribute a zero.
+                if let Some(metrics) = &entry_usage.behavior_metrics {
+                    builder.data.tool_calls.add(&metrics.tool_calls);
+                    builder.data.shell_calls.add(&metrics.shell_calls);
+                    builder.data.file_edits.add(&metrics.file_edits);
+                    builder.data.test_runs.add(&metrics.test_runs);
+                }
             }
         } else {
             for (i, attempt) in entry.attempts.iter().enumerate() {
@@ -488,25 +566,7 @@ fn aggregate_by_dimension(
                     let builder = aggregated_map
                         .entry(dimension_value.clone())
                         .or_insert_with(|| AggregationBuilder {
-                            data: AggregatedTelemetryData {
-                                dimension_key: dimension_key(dimension),
-                                dimension_value: dimension_value.clone(),
-                                entries: 0,
-                                attempts: 0,
-                                successful_attempts: 0,
-                                failed_attempts: 0,
-                                input_tokens: 0,
-                                output_tokens: 0,
-                                total_tokens: 0,
-                                requests_count: 0,
-                                estimated_cost_usd: 0.0,
-                                actual_cost_usd: 0.0,
-                                quota_backed_cost_usd: 0.0,
-                                api_cost_usd: 0.0,
-                                average_cost_per_attempt: 0.0,
-                                success_rate: 0.0,
-                                failure_details: BTreeMap::new(),
-                            },
+                            data: new_aggregated_data(dimension, &dimension_value),
                             seen_entries: std::collections::HashSet::new(),
                         });
 
@@ -556,6 +616,17 @@ fn aggregate_by_dimension(
                             attempt_usage.actual_cost_usd.unwrap_or(0.0);
                     } else {
                         builder.data.api_cost_usd += attempt_usage.actual_cost_usd.unwrap_or(0.0);
+                    }
+
+                    // Issue #119: aggregate provenance-aware behavior metrics.
+                    // Unknown attempts never contribute a zero. Failed, retried,
+                    // timed-out, cancelled, and fallback attempts are each
+                    // visited independently above, so they remain distinct here.
+                    if let Some(metrics) = &attempt_usage.behavior_metrics {
+                        builder.data.tool_calls.add(&metrics.tool_calls);
+                        builder.data.shell_calls.add(&metrics.shell_calls);
+                        builder.data.file_edits.add(&metrics.file_edits);
+                        builder.data.test_runs.add(&metrics.test_runs);
                     }
                 }
             }
@@ -974,7 +1045,11 @@ fn determine_telemetry_repo_path(telemetry_repo_path: Option<&str>) -> std::path
 
 /// Tests for telemetry functionality
 #[cfg(test)]
-pub mod tests;
+pub(crate) mod tests;
+
+/// Issue #119: provenance-aware per-attempt behavior metrics tests
+#[cfg(test)]
+pub mod behavior_metrics_tests;
 
 /// CLI interface for telemetry commands
 pub mod cli {

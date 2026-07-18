@@ -2,6 +2,7 @@
 //!
 //! Contains all the data structures for telemetry export.
 
+use crate::ledger::BehaviorMetric;
 use serde::{Deserialize, Serialize};
 
 /// Current schema version for exported telemetry records.
@@ -15,7 +16,11 @@ use serde::{Deserialize, Serialize};
 /// Version 6 adds distinct reasoning-token counters plus explicit unknown
 /// reasons for token and quota observations.
 /// Version 7 adds machine-validated actionable review findings.
-pub const SCHEMA_VERSION: u32 = 7;
+/// Version 8 adds provenance-aware per-attempt behavior metrics (tool calls,
+/// shell calls, file edits, test runs) to the attempt usage record. Existing
+/// v1-v7 history remains readable because the new fields are optional with
+/// serde defaults; absence is treated as unknown, never as zero.
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -147,6 +152,21 @@ pub struct AttemptUsageRecord {
     pub token_usage_unknown_reason: Option<String>,
     #[serde(default)]
     pub quota_unknown_reason: Option<String>,
+
+    /// Issue #119: provenance-aware per-attempt behavior metrics. `None` means
+    /// the metric was not present in the source telemetry (unknown), never a
+    /// real zero. Each carries its own source/quality so consumers can tell
+    /// provider-reported, structured-event-derived, estimated, and unavailable
+    /// counts apart. No command contents, file contents, secrets, or
+    /// credentials are persisted as labels.
+    #[serde(default)]
+    pub tool_calls: Option<BehaviorMetric>,
+    #[serde(default)]
+    pub shell_calls: Option<BehaviorMetric>,
+    #[serde(default)]
+    pub file_edits: Option<BehaviorMetric>,
+    #[serde(default)]
+    pub test_runs: Option<BehaviorMetric>,
 }
 
 /// Quota observation telemetry record

@@ -362,6 +362,7 @@ pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
             .token_usage_unknown_reason
             .or(other.token_usage_unknown_reason),
         quota_unknown_reason: base.quota_unknown_reason.or(other.quota_unknown_reason),
+        behavior_metrics: base.behavior_metrics.or(other.behavior_metrics),
         usage_source: match (base.usage_source, other.usage_source) {
             (Some(a), Some(b)) => Some(format!("{a}+{b}")),
             (Some(a), None) => Some(a),

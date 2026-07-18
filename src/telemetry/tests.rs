@@ -9,7 +9,7 @@ use crate::ledger::LedgerEntry;
 use tempfile::tempdir;
 
 #[cfg(test)]
-mod telemetry_tests {
+pub(crate) mod telemetry_tests {
     use super::*;
 
     #[test]
@@ -75,8 +75,8 @@ mod telemetry_tests {
     #[test]
     fn test_schema_version_in_record() {
         assert_eq!(
-            SCHEMA_VERSION, 7,
-            "machine-validated actionable findings require telemetry export schema version 7"
+            SCHEMA_VERSION, 8,
+            "provenance-aware per-attempt behavior metrics require telemetry export schema version 8"
         );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
@@ -134,6 +134,10 @@ mod telemetry_tests {
             quota_reset_at: None,
             token_usage_unknown_reason: None,
             quota_unknown_reason: None,
+            tool_calls: None,
+            shell_calls: None,
+            file_edits: None,
+            test_runs: None,
         };
 
         let exported = ExportedTelemetryRecord::AttemptUsage(Box::new(record));
@@ -370,6 +374,7 @@ mod telemetry_tests {
             cli_version: None,
             usage: LedgerUsage {
                 usage_source: Some("attempt".to_string()),
+                behavior_metrics: None,
                 usage_classification: None,
                 backend_instance: None,
                 provider: None,
@@ -414,6 +419,7 @@ mod telemetry_tests {
             cli_version: None,
             usage: LedgerUsage {
                 usage_source: Some("attempt".to_string()),
+                behavior_metrics: None,
                 usage_classification: None,
                 backend_instance: None,
                 provider: None,
@@ -446,6 +452,7 @@ mod telemetry_tests {
         // Update entry-level usage to be different from attempt
         entry.usage = LedgerUsage {
             usage_source: Some("entry".to_string()),
+            behavior_metrics: None,
             usage_classification: None,
             backend_instance: None,
             provider: None,
@@ -657,7 +664,7 @@ mod telemetry_tests {
     }
 
     // Helper function to create a test ledger entry
-    fn create_test_ledger_entry() -> LedgerEntry {
+    pub(crate) fn create_test_ledger_entry() -> LedgerEntry {
         LedgerEntry {
             timestamp: "2026-07-10T12:00:00Z".to_string(),
             schema_version: crate::ledger::LEDGER_SCHEMA_VERSION,
@@ -780,6 +787,7 @@ default_target_branch = "main"
             // subscription-backed executions. It must never enter the API
             // spend total merely because a quota window is unavailable.
             usage_classification: Some("quota_backed".to_string()),
+            behavior_metrics: None,
             backend_instance: Some("instance-1".to_string()),
             provider: Some("openai".to_string()),
             actual_model: Some("gpt-4".to_string()),
