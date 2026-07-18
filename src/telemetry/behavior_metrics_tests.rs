@@ -46,6 +46,27 @@ mod behavior_metrics_tests {
         }
     }
 
+    fn attempt_with_no_behavior(attempt_number: u32, backend: &str) -> AttemptRecord {
+        AttemptRecord {
+            attempt_number,
+            backend: backend.to_string(),
+            effective_model: Some("model-x".to_string()),
+            exit_code: Some(0),
+            validation_result: Some("pass".to_string()),
+            failure_class: None,
+            failure_stage: None,
+            duration_seconds: Some(1.0),
+            diff_path: None,
+            cli_version: None,
+            usage: LedgerUsage {
+                // No behavior_metrics field at all (the production state
+                // before issue #119 wiring, and the state of most ledger
+                // attempts today).
+                ..LedgerUsage::default()
+            },
+        }
+    }
+
     fn structured_metrics(
         tool_calls: u64,
         shell_calls: u64,
@@ -320,6 +341,62 @@ the agent ran some commands and edited a bunch of files
         assert!(legacy.attempts[0].usage.behavior_metrics.is_none());
         let records = extract_attempt_usage_records(&legacy, "2026-07-10T00:00:00Z");
         assert!(records[0].tool_calls.is_none());
+    }
+
+    #[test]
+    fn missing_behavior_metrics_is_tallied_as_unknown_not_silently_dropped() {
+        // Regression for the blocking finding: an attempt whose
+        // `behavior_metrics` field is entirely absent (`None`) must still be
+        // counted as an unknown attempt rather than excluded from both the
+        // known and unknown counters.
+        let mut entry = create_test_ledger_entry();
+        entry.attempts = vec![
+            attempt_with_behavior(1, "codex", structured_metrics(5, 2, 3, 1)),
+            attempt_with_no_behavior(2, "legacy"),
+        ];
+
+        let params = AggregationParams {
+            dimensions: vec![AggregationDimension::Backend],
+            since: None,
+            until: None,
+            profile: None,
+            include_failed_attempts: true,
+            include_retried_attempts: true,
+            project: None,
+            ticket: None,
+            execution_type: None,
+            backend_instance: None,
+            provider: None,
+            model: None,
+            account: None,
+        };
+
+        let aggregated = aggregate_by_dimension(&[entry], AggregationDimension::Backend, &params);
+        let report = TelemetryReport {
+            report_type: String::new(),
+            generated_at: String::new(),
+            time_range: None,
+            profile: None,
+            total_entries: 0,
+            total_attempts: 0,
+            successful_attempts: 0,
+            failed_attempts: 0,
+            total_cost_usd: 0.0,
+            quota_backed_cost_usd: 0.0,
+            api_cost_usd: 0.0,
+            aggregated_data: aggregated,
+        };
+
+        let legacy = report
+            .aggregated_data
+            .iter()
+            .find(|d| d.dimension_value == "legacy")
+            .expect("legacy bucket");
+        // The attempt occurred; it must be in the unknown counter, not dropped.
+        assert_eq!(legacy.attempts, 1);
+        assert_eq!(legacy.tool_calls.total, 0);
+        assert_eq!(legacy.tool_calls.known_attempts, 0);
+        assert_eq!(legacy.tool_calls.unknown_attempts, 1);
     }
 
     #[test]

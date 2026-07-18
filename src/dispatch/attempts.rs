@@ -402,6 +402,20 @@ pub(super) fn attempt_usage(
         usage = usage::merge_usage(usage, agy);
     }
 
+    // Issue #119: capture documented structured backend events
+    // (`gah.behavior_summary`) that report per-attempt behavior metrics
+    // (tool calls, shell calls, file edits, test runs). Only the documented
+    // event shape is honored; unrecognized output is never inferred from.
+    // The result becomes the attempt's `behavior_metrics`, keeping unknown
+    // distinct from zero. A None result means the backend never emitted the
+    // event, so we deliberately leave any existing field as-is rather than
+    // coercing it to an empty/zero record.
+    if let Some(behavior_metrics) =
+        crate::telemetry::extractor::parse_structured_behavior_events(&text)
+    {
+        usage.behavior_metrics = Some(behavior_metrics);
+    }
+
     if usage.usage_source.is_some() {
         usage.observed_at = Some(
             time::OffsetDateTime::now_utc()

@@ -137,6 +137,14 @@ impl AggregatedBehaviorMetric {
             }
         }
     }
+
+    /// Record an attempt whose `behavior_metrics` field was entirely absent
+    /// (`None`). The attempt still occurred, so it must be tallied as unknown
+    /// for every dimension rather than silently dropped from both the known
+    /// and unknown counters.
+    fn add_missing(&mut self) {
+        self.unknown_attempts += 1;
+    }
 }
 
 /// Telemetry aggregation parameters
@@ -537,12 +545,21 @@ fn aggregate_by_dimension(
                 }
 
                 // Issue #119: aggregate provenance-aware behavior metrics.
-                // Unknown attempts never contribute a zero.
-                if let Some(metrics) = &entry_usage.behavior_metrics {
-                    builder.data.tool_calls.add(&metrics.tool_calls);
-                    builder.data.shell_calls.add(&metrics.shell_calls);
-                    builder.data.file_edits.add(&metrics.file_edits);
-                    builder.data.test_runs.add(&metrics.test_runs);
+                // Unknown attempts never contribute a zero, but they must still
+                // be tallied as unknown so the attempt is not silently dropped.
+                match &entry_usage.behavior_metrics {
+                    Some(metrics) => {
+                        builder.data.tool_calls.add(&metrics.tool_calls);
+                        builder.data.shell_calls.add(&metrics.shell_calls);
+                        builder.data.file_edits.add(&metrics.file_edits);
+                        builder.data.test_runs.add(&metrics.test_runs);
+                    }
+                    None => {
+                        builder.data.tool_calls.add_missing();
+                        builder.data.shell_calls.add_missing();
+                        builder.data.file_edits.add_missing();
+                        builder.data.test_runs.add_missing();
+                    }
                 }
             }
         } else {
@@ -619,14 +636,24 @@ fn aggregate_by_dimension(
                     }
 
                     // Issue #119: aggregate provenance-aware behavior metrics.
-                    // Unknown attempts never contribute a zero. Failed, retried,
-                    // timed-out, cancelled, and fallback attempts are each
-                    // visited independently above, so they remain distinct here.
-                    if let Some(metrics) = &attempt_usage.behavior_metrics {
-                        builder.data.tool_calls.add(&metrics.tool_calls);
-                        builder.data.shell_calls.add(&metrics.shell_calls);
-                        builder.data.file_edits.add(&metrics.file_edits);
-                        builder.data.test_runs.add(&metrics.test_runs);
+                    // Unknown attempts never contribute a zero, but they must
+                    // still be tallied as unknown so the attempt is not silently
+                    // dropped. Failed, retried, timed-out, cancelled, and
+                    // fallback attempts are each visited independently above, so
+                    // they remain distinct here.
+                    match &attempt_usage.behavior_metrics {
+                        Some(metrics) => {
+                            builder.data.tool_calls.add(&metrics.tool_calls);
+                            builder.data.shell_calls.add(&metrics.shell_calls);
+                            builder.data.file_edits.add(&metrics.file_edits);
+                            builder.data.test_runs.add(&metrics.test_runs);
+                        }
+                        None => {
+                            builder.data.tool_calls.add_missing();
+                            builder.data.shell_calls.add_missing();
+                            builder.data.file_edits.add_missing();
+                            builder.data.test_runs.add_missing();
+                        }
                     }
                 }
             }

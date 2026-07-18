@@ -11,7 +11,6 @@ use crate::ledger::{AttemptBehaviorMetrics, BehaviorMetric, BehaviorMetricQualit
 /// Backends that emit this documented event (one JSON object per line) expose
 /// exact counts with provenance. GAH must NOT infer counts from arbitrary
 /// prose, logs, or other substrings — only this documented shape is parsed.
-#[allow(dead_code)]
 pub const BEHAVIOR_SUMMARY_EVENT_TYPE: &str = "gah.behavior_summary";
 
 /// Issue #119: parse documented structured backend events into normalized
@@ -25,7 +24,6 @@ pub const BEHAVIOR_SUMMARY_EVENT_TYPE: &str = "gah.behavior_summary";
 ///
 /// Returns `None` when no recognized event was found, so callers distinguish
 /// "backend emitted the event with zeros" from "backend never reported."
-#[allow(dead_code)]
 pub fn parse_structured_behavior_events(events: &str) -> Option<AttemptBehaviorMetrics> {
     use serde_json::Value;
 
