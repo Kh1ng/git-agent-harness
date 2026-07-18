@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 #[path = "runtime/route_state.rs"]
 mod route_state;
 use route_state::route_state_fingerprint;
+#[path = "runtime/intake.rs"]
+mod intake;
+use intake::{action_creates_managed_mr, action_intake_key, apply_parallel_projection};
 
 fn is_validation_gate_failure(error: &anyhow::Error) -> bool {
     error
@@ -475,10 +478,13 @@ fn run_parallel_once(
     use std::collections::HashSet;
 
     let mut executed_work_ids = HashSet::new();
-    let claim_scope = {
-        let profile = crate::config::get_profile(cfg, profile_name)?;
-        crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id)
-    };
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    let claim_scope = crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id);
+    let effective_open_mr_limit = profile
+        .max_open_managed_mrs
+        .unwrap_or(max_parallel as u32)
+        .max(1);
+    let mut active_intake_keys: HashSet<String> = HashSet::new();
 
     // Profile routing decides which eligible backend handles each action. Do
     // not use the number of persisted availability rows as a worker limit:
@@ -519,6 +525,11 @@ fn run_parallel_once(
                 let claimed_work_ids = crate::work_claim::get_claimed_work_ids(&claim_scope)?;
                 let ledger_entries = crate::ledger::read_entries(cfg)?;
                 let mut fresh_snapshot = observe_snapshot(cfg, profile_name, &ledger_entries)?;
+                apply_parallel_projection(
+                    &mut fresh_snapshot,
+                    &active_intake_keys,
+                    effective_open_mr_limit,
+                );
 
                 // Do not let the next slot re-select work already claimed by
                 // another process or spawned earlier in this refill cycle.
@@ -604,8 +615,8 @@ fn run_parallel_once(
                     action = redispatch;
                 }
 
-                let action_work_id = action.work_id();
-                if let Some(work_id) = action_work_id {
+                let action_work_id = action.work_id().map(str::to_string);
+                if let Some(work_id) = action_work_id.as_deref() {
                     if claimed_work_ids.iter().any(|claimed| claimed == work_id)
                         || executed_work_ids.contains(work_id)
                     {
@@ -630,18 +641,21 @@ fn run_parallel_once(
                     _ => {
                         record_action_events(cfg, profile_name, &original_action, &action)?;
 
-                        if let Some(work_id) = action_work_id {
+                        if let Some(work_id) = action_work_id.as_deref() {
                             if !crate::work_claim::try_claim_work(&claim_scope, work_id)? {
                                 continue;
                             }
                             executed_work_ids.insert(work_id.to_string());
+                        }
+                        if let Some(key) = action_intake_key(&action) {
+                            active_intake_keys.insert(key);
                         }
                         pending_terminal = None;
 
                         let action_for_thread = action.clone();
                         let profile_for_thread = profile_name.to_string();
                         let claim_scope_for_thread = claim_scope.clone();
-                        let work_id_for_thread = action_work_id.map(str::to_string);
+                        let work_id_for_thread = action_work_id;
                         let sequence = next_sequence;
                         next_sequence += 1;
                         saw_real_work = true;
@@ -738,6 +752,11 @@ fn run_parallel_once(
                 .recv()
                 .map_err(|_| anyhow::anyhow!("parallel GAH worker channel closed unexpectedly"))?;
             active -= 1;
+            if action_creates_managed_mr(&result.action) {
+                if let Some(key) = action_intake_key(&result.action) {
+                    active_intake_keys.remove(&key);
+                }
+            }
             update_parallel_refill_budget(
                 &result.outcome,
                 effective_parallel_limit,
@@ -1311,7 +1330,7 @@ default_target_branch = "main"
         ObservationStatus, Observations, ProfileIdentity, ScopeStatusJson, StatusSnapshot,
     };
 
-    fn empty_snapshot() -> StatusSnapshot {
+    pub(super) fn empty_snapshot() -> StatusSnapshot {
         StatusSnapshot {
             schema_version: 1,
             generated_at: "2026-07-05T00:00:00Z".into(),
@@ -1325,6 +1344,7 @@ default_target_branch = "main"
                 merge_policy: crate::config::MergePolicy::default(),
                 max_fix_attempts_per_mr: 2,
                 max_implementation_failures_per_ticket: 2,
+                max_open_managed_mrs: 1,
                 issue_intake_policy: crate::models::IssueIntakePolicy {
                     mode: "canonical_autonomous_only".into(),
                     canonical_autonomous_label: "exec:autonomous".into(),
@@ -1355,6 +1375,9 @@ default_target_branch = "main"
             publishing_allow_pr: true,
             generated_artifact_deny_patterns: vec![],
             max_parallel_workers: 1,
+            open_managed_mr_count: 0,
+            inflight_implementation_count: 0,
+            implementation_intake_paused: false,
             backend_configured: std::collections::HashMap::new(),
         }
     }

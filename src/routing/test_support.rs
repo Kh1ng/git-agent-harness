@@ -92,6 +92,7 @@ pub(super) fn profile() -> Profile {
         codex_idle_timeout_seconds: None,
         claude_idle_timeout_seconds: None,
         max_parallel_workers: None,
+        max_open_managed_mrs: None,
         policy_path: None,
         env_file: None,
         env_file_prod: None,

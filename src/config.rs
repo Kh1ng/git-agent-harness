@@ -230,28 +230,13 @@ pub struct Profile {
     /// as `agy_print_timeout_seconds` below.
     #[serde(default)]
     pub opencode_idle_timeout_seconds_by_model: HashMap<String, u64>,
-    /// Live incident (2026-07-11): `opencode/hy3-free` is a shared free-tier
-    /// quota that silently rate-limits (zero output, hangs until the idle
-    /// timeout kills it) when more than one dispatch lands on it at the same
-    /// time -- confirmed via raw session logs (a 4-line build banner, then
-    /// nothing). `max_parallel_workers` has no awareness of what other slots
-    /// in the same batch already picked, so concurrent dispatches can double
-    /// up on the same backend+model. Caps how many dispatches this profile
-    /// may run concurrently against a given backend+model pair, keyed by
-    /// `"{backend}/{model}"` (e.g. `"opencode/opencode/hy3-free"`). No entry
-    /// means unlimited -- opt-in only, so backends without a configured cap
-    /// are unaffected. Enforced by an in-process counter (see
-    /// `routing::ConcurrencyGuard`), not persisted and not cross-process:
-    /// `acquire_profile_lock` already guarantees only one `gah` process
-    /// dispatches for a given profile at a time.
+    /// Per-backend/model concurrency caps keyed by `"{backend}/{model}"`.
+    /// Missing keys are unlimited. Enforcement is process-local; the profile
+    /// lock guarantees one dispatching GAH process per profile.
     #[serde(default)]
     pub max_concurrent_per_model: HashMap<String, u32>,
-    /// How long OpenHands' own log output can go quiet before GAH considers
-    /// it stalled and kills it, in seconds. Same rationale and mechanism as
-    /// `opencode_idle_timeout_seconds` -- added after a live dispatch (issue
-    /// #87) ran for 2h20m+ with openhands as the backend and `run_openhands`
-    /// had zero supervision of any kind (a plain blocking `cmd.status()`).
-    /// Defaults to 300s when unset.
+    /// OpenHands idle-output timeout in seconds. Defaults to 300s; active
+    /// worktree progress keeps a quiet process alive.
     #[serde(default)]
     pub openhands_idle_timeout_seconds: Option<u64>,
     /// How long Vibe's own log output can go quiet before GAH considers it
@@ -277,6 +262,10 @@ pub struct Profile {
     /// is only a compatibility launcher. Defaults to 1 when unset.
     #[serde(default)]
     pub max_parallel_workers: Option<u32>,
+    /// Open managed PRs/MRs plus pre-publication dispatches allowed before
+    /// implementation intake pauses. Defaults to `max_parallel_workers`.
+    #[serde(default)]
+    pub max_open_managed_mrs: Option<u32>,
     /// HOME override for the `agy-second` backend name only -- a distinct
     /// authenticated Antigravity account/quota pool from the default `agy`
     /// backend, which otherwise runs under the process's real $HOME. Same
@@ -800,6 +789,12 @@ impl Profile {
         self.max_parallel_workers.unwrap_or(1).max(1)
     }
 
+    pub fn max_open_managed_mrs(&self) -> u32 {
+        self.max_open_managed_mrs
+            .unwrap_or_else(|| self.max_parallel_workers())
+            .max(1)
+    }
+
     pub fn pat(&self) -> String {
         match self.provider.as_str() {
             "gitlab" => std::env::var("GITLAB_PAT2")
@@ -1257,6 +1252,7 @@ pub mod tests {
             codex_idle_timeout_seconds: None,
             claude_idle_timeout_seconds: None,
             max_parallel_workers: None,
+            max_open_managed_mrs: None,
             notify_command: None,
             policy_path: None,
             env_file: None,
@@ -1312,6 +1308,7 @@ pub mod tests {
             codex_idle_timeout_seconds: None,
             claude_idle_timeout_seconds: None,
             max_parallel_workers: None,
+            max_open_managed_mrs: None,
             notify_command: None,
             policy_path: None,
             env_file: None,

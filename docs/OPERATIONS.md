@@ -123,6 +123,11 @@ The template reads the profile's configured `max_parallel_workers`; do not
 add another supervisor or a second worker count at the service layer. Inspect
 the entire process tree with `systemd-cgls --user` when validating a run.
 
+Set `max_open_managed_mrs` per profile to bound implementation intake. It
+defaults to `max_parallel_workers`; at the limit GAH keeps reviewing, fixing,
+and merging existing work but does not start another PR-producing dispatch.
+Use `gah profile set <name> --max-open-managed-mrs <count>` to change it.
+
 Unlike the old dashboard-spawned loop, this unit does not inherit
 `gah-server`'s process environment, so provider tokens (`GITHUB_TOKEN`/
 `GH_TOKEN`, `GITLAB_PAT`) and LLM proxy config (`LLM_API_KEY`, `LLM_BASE_URL`,
