@@ -376,6 +376,15 @@ fn gitlab_mr_reference_rejects_wrong_host_url() {
     )
     .unwrap_err();
     assert!(matches!(err, MrReferenceError::CrossProject { .. }));
+
+    let mut profile_no_base = gitlab_profile();
+    profile_no_base.provider_api_base = None;
+    let err_no_base = parse_gitlab_mr_reference(
+        &profile_no_base,
+        "https://attacker.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(err_no_base, MrReferenceError::CrossProject { .. }));
 }
 
 #[test]
@@ -406,6 +415,8 @@ fn gitlab_dispatch_accepts_bare_iid_and_canonical_url() {
     .unwrap();
     assert_eq!(target2.id, "284");
     assert_eq!(target2.source_branch, "gah/284");
+
+    assert_eq!(target1, target2);
 
     let args = fs::read_to_string(args_path).unwrap();
     assert!(args.contains("projects/42/merge_requests/284"));

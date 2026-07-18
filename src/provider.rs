@@ -182,7 +182,7 @@ pub struct MrResult {
     pub id: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewTarget {
     pub id: String,
     pub url: String,
@@ -926,16 +926,19 @@ fn parse_gitlab_mr_reference(profile: &Profile, raw: &str) -> Result<String, MrR
         return Err(MrReferenceError::MalformedUrl(raw.to_string()));
     }
 
-    let expected_host = profile
-        .provider_api_base
-        .as_deref()
-        .and_then(|base| gitlab_hostname(base).ok());
-    let host_matches = match expected_host {
-        Some(expected) => expected.eq_ignore_ascii_case(host),
-        // If provider_api_base is absent or unparseable, skip host check;
-        // project_path below still ensures cross-project isolation.
-        None => true,
+    let expected_host = match profile.provider_api_base.as_deref() {
+        Some(base) => match gitlab_hostname(base) {
+            Ok(h) => h,
+            Err(_) => {
+                return Err(MrReferenceError::CrossProject {
+                    expected: profile.repo.clone(),
+                    found: format!("{host}/{project_path}"),
+                });
+            }
+        },
+        None => "gitlab.com",
     };
+    let host_matches = expected_host.eq_ignore_ascii_case(host);
     let project_matches = project_path == profile.repo;
     if !host_matches || !project_matches {
         return Err(MrReferenceError::CrossProject {
