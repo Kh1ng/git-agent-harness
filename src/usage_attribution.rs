@@ -96,6 +96,7 @@ pub(crate) fn normalize_attempt_usage(
     usage.backend_instance = attribution
         .backend
         .map(|backend| match attribution.quota_pool {
+            Some(pool) if pool.starts_with(&format!("{backend}:")) => pool.to_string(),
             Some(pool) => format!("{backend}:{pool}"),
             None => backend.to_string(),
         });
@@ -547,5 +548,16 @@ mod tests {
         assert_eq!(usage.actual_cost_usd, Some(0.0));
         assert_eq!(usage.pricing_source.as_deref(), Some("local_unmetered"));
         assert!(usage.cost_unknown_reason.is_none());
+    }
+
+    #[test]
+    fn normalize_attempt_usage_does_not_duplicate_backend_prefix() {
+        let usage = normalize_attempt_usage(
+            LedgerUsage::default(),
+            UsageAttribution::routed("agy", "Gemini 3.5", "agy:google-native", "quota_backed"),
+            true,
+        );
+
+        assert_eq!(usage.backend_instance.as_deref(), Some("agy:google-native"));
     }
 }

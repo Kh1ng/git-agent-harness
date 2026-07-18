@@ -503,17 +503,24 @@ fn task_rule_dimension_matches(values: &[String], value: Option<&str>) -> bool {
 fn route_candidates(raw: &[crate::config::CandidateConfig]) -> Vec<RouteCandidate> {
     raw.iter()
         .enumerate()
-        .map(|(idx, c)| RouteCandidate {
-            backend: c.backend.clone(),
-            model: c.model.clone(),
-            quota_pool: c.quota_pool.clone(),
-            priority: c.priority,
-            included_in_quota: c.included_in_quota,
-            marginal_cost_usd: c.marginal_cost_usd,
-            quota_usage_percent: c.quota_usage_percent,
-            quota_days_remaining: c.quota_days_remaining,
-            requires_approval: c.requires_approval,
-            original_order: idx,
+        .map(|(idx, c)| {
+            let quota_pool = crate::availability::resolve_candidate_quota_pool(
+                &c.backend,
+                c.model.as_deref(),
+                c.quota_pool.as_deref(),
+            );
+            RouteCandidate {
+                backend: c.backend.clone(),
+                model: c.model.clone(),
+                quota_pool,
+                priority: c.priority,
+                included_in_quota: c.included_in_quota,
+                marginal_cost_usd: c.marginal_cost_usd,
+                quota_usage_percent: c.quota_usage_percent,
+                quota_days_remaining: c.quota_days_remaining,
+                requires_approval: c.requires_approval,
+                original_order: idx,
+            }
         })
         .collect()
 }

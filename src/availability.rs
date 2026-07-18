@@ -124,20 +124,29 @@ impl Default for AvailabilityState {
     }
 }
 
-/// Issue #180: derive a per-account, per-pool quota-pool tag for AGY. AGY has
-/// two independent quota pools per account -- Google-native models (`Gemini*`)
-/// and externally-served models (everything else, e.g. `Claude Sonnet*`) --
-/// and GAH tracks account identity via the backend instance name (`agy`/
-/// `agy-main` = first account, `agy-second` = second). Combining them yields
-/// `agy:google-native`, `agy:external`, `agy-second:google-native`,
-/// `agy-second:external`, so `availability_for`'s pool scoping keeps a live
-/// Gemini-native rate-limit from blocking the external-model candidates on the
-/// same account (and vice versa). Returns `None` for non-AGY backends and for
-/// AGY when the model is unknown/blank (which would otherwise cross-block pools).
+/// Resolve or derive the quota pool for a candidate given its backend, model,
+/// and optional configured pool tag.
+pub fn resolve_candidate_quota_pool(
+    backend: &str,
+    model: Option<&str>,
+    configured_pool: Option<&str>,
+) -> Option<String> {
+    if let Some(pool) = configured_pool {
+        if (pool == "agy" || pool == "agy-main" || pool.starts_with("agy-")) && model.is_some() {
+            if let Some(derived) = derive_quota_pool(backend, model) {
+                return Some(derived);
+            }
+        }
+        return Some(pool.to_string());
+    }
+    derive_quota_pool(backend, model)
+}
+
+/// Derive a per-account, per-pool quota-pool tag for AGY (`agy:google-native`, etc.).
 pub fn derive_quota_pool(backend: &str, model: Option<&str>) -> Option<String> {
     let account = match backend {
         "agy" | "agy-main" => "agy",
-        "agy-second" => "agy-second",
+        b if b.starts_with("agy-") => b,
         _ => return None,
     };
     let model = model?.trim();
@@ -718,44 +727,34 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn record_unavailable(
         state_path: &Path,
-        backend: &str,
-        model: Option<&str>,
-        reason: Reason,
-        source: Source,
-        unavailable_until: Option<OffsetDateTime>,
-        last_error_summary: Option<String>,
+        b: &str,
+        m: Option<&str>,
+        r: Reason,
+        s: Source,
+        u: Option<OffsetDateTime>,
+        e: Option<String>,
         now: OffsetDateTime,
     ) -> Result<()> {
-        super::record_unavailable(
-            state_path,
-            backend,
-            model,
-            None,
-            reason,
-            source,
-            unavailable_until,
-            last_error_summary,
-            now,
-        )
+        super::record_unavailable(state_path, b, m, None, r, s, u, e, now)
     }
 
     fn record_available(
         state_path: &Path,
-        backend: &str,
-        model: Option<&str>,
-        source: Source,
+        b: &str,
+        m: Option<&str>,
+        s: Source,
         now: OffsetDateTime,
     ) -> Result<()> {
-        super::record_available(state_path, backend, model, None, source, now)
+        super::record_available(state_path, b, m, None, s, now)
     }
 
     fn availability_for(
         state_path: &Path,
-        backend: &str,
-        model: Option<&str>,
+        b: &str,
+        m: Option<&str>,
         now: OffsetDateTime,
     ) -> Result<AvailabilityDecision> {
-        super::availability_for(state_path, backend, model, None, now)
+        super::availability_for(state_path, b, m, None, now)
     }
 
     #[test]
@@ -1368,29 +1367,31 @@ mod tests {
 
     #[test]
     fn derive_quota_pool_separates_pools_per_account_and_ignores_non_agy() {
-        // 4 scopes (2 accounts x 2 pools). Gemini* -> google-native; else
-        // external. `agy-main` aliases `agy`; non-AGY/blank -> None.
         let d = |b, m| super::derive_quota_pool(b, Some(m)).unwrap();
         assert_eq!(d("agy", "Gemini 3.5 Flash (Medium)"), "agy:google-native");
         assert_eq!(d("agy-main", "Gemini 3.5 Flash"), "agy:google-native");
-        assert_eq!(d("agy", "gemini-2.0-flash"), "agy:google-native"); // case-insensitive
+        assert_eq!(d("agy", "gemini-2.0-flash"), "agy:google-native");
         assert_eq!(d("agy", "Claude Sonnet 4.6 (Thinking)"), "agy:external");
         assert_eq!(
             d("agy-second", "Gemini 3.1 Pro (High)"),
             "agy-second:google-native"
         );
         assert_eq!(d("agy-second", "Claude Sonnet 4.6"), "agy-second:external");
+        assert_eq!(d("agy-third", "Gemini 3.5"), "agy-third:google-native");
         assert_eq!(super::derive_quota_pool("claude", Some("Gemini 3.5")), None);
         assert_eq!(super::derive_quota_pool("agy", None), None);
         assert_eq!(super::derive_quota_pool("agy", Some("   ")), None);
+
+        let r = |b, m, p| super::resolve_candidate_quota_pool(b, m, p).unwrap();
+        let g = "agy:google-native";
+        assert_eq!(r("agy", Some("Gemini 3.5"), Some("agy")), g);
+        assert_eq!(r("agy", Some("Gemini 3.5"), None), g);
+        assert_eq!(r("agy", Some("Gemini 3.5"), Some(g)), g);
     }
 
     #[test]
     fn agy_pool_isolation_blocks_only_same_pool_on_same_account() {
-        // Issue #180 acceptance: a live Gemini-native rate-limit must not spill
-        // onto the external pool of the SAME account (and vice versa). The four
-        // distinct scopes (2 accounts x 2 pools) are proven by
-        // derive_quota_pool_separates_pools_per_account_and_ignores_non_agy.
+        // Issue #180: live rate-limit must not spill onto external pool of same account.
         let tmp = TempDir::new().unwrap();
         let p = path(&tmp);
         let now = OffsetDateTime::now_utc();

@@ -1188,3 +1188,42 @@ fn cost_aware_ordering_respects_explicit_priority_override() {
     assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
     assert!(!decision.routing_reason.contains("cost-aware reorder"));
 }
+
+#[test]
+fn policy_candidates_attaches_derived_quota_pool_for_agy() {
+    let policy = crate::config::RoutingPolicy {
+        pm_candidates: Some(vec![
+            crate::config::CandidateConfig {
+                backend: "agy".into(),
+                model: Some("Gemini 3.5 Flash (Medium)".into()),
+                quota_pool: None,
+                ..Default::default()
+            },
+            crate::config::CandidateConfig {
+                backend: "agy".into(),
+                model: Some("Claude Sonnet 4.6 (Thinking)".into()),
+                quota_pool: None,
+                ..Default::default()
+            },
+            crate::config::CandidateConfig {
+                backend: "agy-second".into(),
+                model: Some("Gemini 3.5 Flash".into()),
+                quota_pool: Some("agy-second".into()),
+                ..Default::default()
+            },
+        ]),
+        ..Default::default()
+    };
+
+    let candidates = super::policy_candidates(&policy, "pm").unwrap();
+    assert_eq!(candidates.len(), 3);
+    assert_eq!(
+        candidates[0].quota_pool.as_deref(),
+        Some("agy:google-native")
+    );
+    assert_eq!(candidates[1].quota_pool.as_deref(), Some("agy:external"));
+    assert_eq!(
+        candidates[2].quota_pool.as_deref(),
+        Some("agy-second:google-native")
+    );
+}
