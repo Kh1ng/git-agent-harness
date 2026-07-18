@@ -333,6 +333,13 @@ fn gitlab_mr_reference_normalizes_canonical_url_to_iid() {
     )
     .unwrap();
     assert_eq!(iid, "284");
+
+    let iid_with_diffs = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284/diffs?nav=1#note_42",
+    )
+    .unwrap();
+    assert_eq!(iid_with_diffs, "284");
 }
 
 #[test]
@@ -341,6 +348,13 @@ fn gitlab_mr_reference_rejects_malformed_url() {
         .unwrap_err();
     assert!(matches!(err, MrReferenceError::MalformedUrl(_)));
     assert!(format!("{err}").contains("malformed --mr value"));
+
+    let err_suffix = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284invalid",
+    )
+    .unwrap_err();
+    assert!(matches!(err_suffix, MrReferenceError::MalformedUrl(_)));
 }
 
 #[test]
@@ -365,7 +379,7 @@ fn gitlab_mr_reference_rejects_wrong_host_url() {
 }
 
 #[test]
-fn gitlab_dispatch_by_mr_url_reaches_the_iid_scoped_endpoint() {
+fn gitlab_dispatch_accepts_bare_iid_and_canonical_url() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
@@ -375,18 +389,23 @@ fn gitlab_dispatch_by_mr_url_reaches_the_iid_scoped_endpoint() {
         &bin_dir,
         "glab",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho '{{\"message\":\"404 Project Not Found\"}}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nprintf '%s\\n' '{{\"iid\":284,\"web_url\":\"https://gitlab.example.com/owner/repo/-/merge_requests/284\",\"source_branch\":\"gah/284\",\"target_branch\":\"main\"}}'\nexit 0\n",
             args_path.display()
         ),
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
-    let err = find_review_target_by_mr(
+    let target1 = find_review_target_by_mr(&gitlab_profile(), "284").unwrap();
+    assert_eq!(target1.id, "284");
+    assert_eq!(target1.source_branch, "gah/284");
+
+    let target2 = find_review_target_by_mr(
         &gitlab_profile(),
         "https://gitlab.example.com/owner/repo/-/merge_requests/284",
     )
-    .unwrap_err();
-    assert!(format!("{:#}", err).contains("did not return a merge request"));
+    .unwrap();
+    assert_eq!(target2.id, "284");
+    assert_eq!(target2.source_branch, "gah/284");
 
     let args = fs::read_to_string(args_path).unwrap();
     assert!(args.contains("projects/42/merge_requests/284"));

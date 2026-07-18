@@ -865,7 +865,7 @@ impl fmt::Display for MrReferenceError {
         match self {
             MrReferenceError::MalformedUrl(raw) => write!(
                 f,
-                "malformed --mr value '{raw}': expected a numeric IID or a canonical GitLab MR URL (https://<host>/<namespace>/<project>/-/merge_requests/<iid>)"
+                "malformed --mr value '{raw}': expected a numeric IID or a canonical GitLab MR URL (http:// or https://<host>/<namespace>/<project>/-/merge_requests/<iid>)"
             ),
             MrReferenceError::CrossProject { expected, found } => write!(
                 f,
@@ -884,7 +884,8 @@ fn is_ascii_digits(s: &str) -> bool {
 /// Normalize an explicit `--mr` value to a GitLab IID. Accepts a bare
 /// numeric IID unchanged (existing behavior), or a canonical MR URL whose
 /// host and project path must match this profile -- anything else is a
-/// typed, non-network validation failure.
+/// typed, non-network validation failure. Trailing subpaths (such as `/diffs`),
+/// query parameters (`?`), and URL fragments (`#`) following the IID are ignored.
 fn parse_gitlab_mr_reference(profile: &Profile, raw: &str) -> Result<String, MrReferenceError> {
     let trimmed = raw.trim();
     if is_ascii_digits(trimmed) {
@@ -915,12 +916,24 @@ fn parse_gitlab_mr_reference(profile: &Profile, raw: &str) -> Result<String, MrR
         return Err(MrReferenceError::MalformedUrl(raw.to_string()));
     }
 
+    // Ensure trailing characters after IID are valid URL separators (/diffs, ?query, #fragment)
+    let rest_after_iid = &after_marker[iid.len()..];
+    if !rest_after_iid.is_empty()
+        && !rest_after_iid.starts_with('/')
+        && !rest_after_iid.starts_with('?')
+        && !rest_after_iid.starts_with('#')
+    {
+        return Err(MrReferenceError::MalformedUrl(raw.to_string()));
+    }
+
     let expected_host = profile
         .provider_api_base
         .as_deref()
         .and_then(|base| gitlab_hostname(base).ok());
     let host_matches = match expected_host {
         Some(expected) => expected.eq_ignore_ascii_case(host),
+        // If provider_api_base is absent or unparseable, skip host check;
+        // project_path below still ensures cross-project isolation.
         None => true,
     };
     let project_matches = project_path == profile.repo;
