@@ -124,6 +124,34 @@ impl Default for AvailabilityState {
     }
 }
 
+/// Issue #180: derive a per-account, per-pool quota-pool tag for AGY. AGY has
+/// two independent quota pools per account -- Google-native models (`Gemini*`)
+/// and externally-served models (everything else, e.g. `Claude Sonnet*`) --
+/// and GAH tracks account identity via the backend instance name (`agy`/
+/// `agy-main` = first account, `agy-second` = second). Combining them yields
+/// `agy:google-native`, `agy:external`, `agy-second:google-native`,
+/// `agy-second:external`, so `availability_for`'s pool scoping keeps a live
+/// Gemini-native rate-limit from blocking the external-model candidates on the
+/// same account (and vice versa). Returns `None` for non-AGY backends and for
+/// AGY when the model is unknown/blank (which would otherwise cross-block pools).
+pub fn derive_quota_pool(backend: &str, model: Option<&str>) -> Option<String> {
+    let account = match backend {
+        "agy" | "agy-main" => "agy",
+        "agy-second" => "agy-second",
+        _ => return None,
+    };
+    let model = model?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let pool = if model.to_ascii_lowercase().contains("gemini") {
+        "google-native"
+    } else {
+        "external"
+    };
+    Some(format!("{account}:{pool}"))
+}
+
 /// Which scope a blocking record matched, for callers that want to explain
 /// *why* something was routed around (e.g. TICKET-067's routing log).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1335,6 +1363,78 @@ mod tests {
             availability_for(&p, "agy", Some("Claude Sonnet 4.6 (Thinking)"), now)
                 .unwrap()
                 .eligible
+        );
+    }
+
+    #[test]
+    fn derive_quota_pool_separates_pools_per_account_and_ignores_non_agy() {
+        // 4 scopes (2 accounts x 2 pools). Gemini* -> google-native; else
+        // external. `agy-main` aliases `agy`; non-AGY/blank -> None.
+        let d = |b, m| super::derive_quota_pool(b, Some(m)).unwrap();
+        assert_eq!(d("agy", "Gemini 3.5 Flash (Medium)"), "agy:google-native");
+        assert_eq!(d("agy-main", "Gemini 3.5 Flash"), "agy:google-native");
+        assert_eq!(d("agy", "gemini-2.0-flash"), "agy:google-native"); // case-insensitive
+        assert_eq!(d("agy", "Claude Sonnet 4.6 (Thinking)"), "agy:external");
+        assert_eq!(
+            d("agy-second", "Gemini 3.1 Pro (High)"),
+            "agy-second:google-native"
+        );
+        assert_eq!(d("agy-second", "Claude Sonnet 4.6"), "agy-second:external");
+        assert_eq!(super::derive_quota_pool("claude", Some("Gemini 3.5")), None);
+        assert_eq!(super::derive_quota_pool("agy", None), None);
+        assert_eq!(super::derive_quota_pool("agy", Some("   ")), None);
+    }
+
+    #[test]
+    fn agy_pool_isolation_blocks_only_same_pool_on_same_account() {
+        // Issue #180 acceptance: a live Gemini-native rate-limit must not spill
+        // onto the external pool of the SAME account (and vice versa). The four
+        // distinct scopes (2 accounts x 2 pools) are proven by
+        // derive_quota_pool_separates_pools_per_account_and_ignores_non_agy.
+        let tmp = TempDir::new().unwrap();
+        let p = path(&tmp);
+        let now = OffsetDateTime::now_utc();
+        let ag = super::derive_quota_pool("agy", Some("Gemini 3.5 Flash (Medium)")).unwrap();
+        let ae = super::derive_quota_pool("agy", Some("Claude Sonnet 4.6 (Thinking)")).unwrap();
+        super::record_unavailable(
+            &p,
+            "agy",
+            Some("Gemini 3.5 Flash (Medium)"),
+            Some(&ag),
+            Reason::RateLimited,
+            Source::BackendError,
+            Some(now + time::Duration::hours(1)),
+            None,
+            now,
+        )
+        .unwrap();
+        super::record_available(
+            &p,
+            "agy",
+            Some("Claude Sonnet 4.6 (Thinking)"),
+            Some(&ae),
+            Source::Manual,
+            now,
+        )
+        .unwrap();
+
+        // Gemini on `agy` is blocked; Claude on `agy` is not.
+        let gemini =
+            super::availability_for(&p, "agy", Some("Gemini 3.5 Flash (Medium)"), Some(&ag), now)
+                .unwrap();
+        assert!(!gemini.eligible);
+        assert_eq!(gemini.scope, Some(BlockScope::QuotaPool));
+        let claude = super::availability_for(
+            &p,
+            "agy",
+            Some("Claude Sonnet 4.6 (Thinking)"),
+            Some(&ae),
+            now,
+        )
+        .unwrap();
+        assert!(
+            claude.eligible,
+            "a google-native block must not spill onto the external pool of the same account"
         );
     }
 

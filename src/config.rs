@@ -703,14 +703,14 @@ impl RoutingPolicy {
             "improve" | "fix" | "experiment" => self.improve_candidates.as_ref(),
             _ => None,
         };
-        if let Some(list) = candidates {
-            for c in list {
-                if c.backend == backend && c.model.as_deref() == model {
-                    return c.quota_pool.clone();
-                }
-            }
-        }
-        None
+        // Explicit config pool wins; else derive an AGY pool (Issue #180).
+        candidates
+            .and_then(|list| {
+                list.iter()
+                    .find(|c| c.backend == backend && c.model.as_deref() == model)
+                    .and_then(|c| c.quota_pool.clone())
+            })
+            .or_else(|| crate::availability::derive_quota_pool(backend, model))
     }
 }
 
