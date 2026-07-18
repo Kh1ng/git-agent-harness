@@ -8,7 +8,6 @@
 use clap::Parser;
 use git_agent_harness::cli::args::Cli;
 use predicates::prelude::*;
-use std::ffi::OsStr;
 
 /// The top-level help text advertises the tool's identity unchanged.
 #[test]
@@ -119,6 +118,3 @@ fn subcommand_help_resolves() {
         );
     }
 }
-
-#[allow(dead_code)]
-fn _assert_command_is_osstr(_: &OsStr) {}
