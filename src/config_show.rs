@@ -3,6 +3,9 @@ use crate::{
     context::{ContextConfig, ContextOverride},
 };
 use anyhow::Result;
+use std::{collections::BTreeMap, path::Path};
+
+pub const CONFIG_SHOW_SCHEMA_VERSION: u32 = 1;
 
 #[derive(serde::Serialize)]
 pub struct RoutingCandidateSummary {
@@ -64,6 +67,24 @@ pub struct ConfigProfileContextSummary {
 }
 
 #[derive(serde::Serialize)]
+pub struct TaskRoutingRuleSummary {
+    pub modes: Vec<String>,
+    pub task_classes: Vec<String>,
+    pub difficulties: Vec<String>,
+    pub risks: Vec<String>,
+    pub candidates: Vec<RoutingCandidateSummary>,
+}
+
+#[derive(serde::Serialize)]
+pub struct NotificationSummary {
+    pub configured: bool,
+    pub transport: Option<String>,
+    pub manager_wake_autonomy: String,
+    pub env_file: Option<String>,
+    pub env_file_prod: Option<String>,
+}
+
+#[derive(serde::Serialize)]
 pub struct ConfigProfileSummary {
     pub profile: String,
     pub merge_policy: String,
@@ -74,15 +95,24 @@ pub struct ConfigProfileSummary {
     pub pm_candidates: Vec<RoutingCandidateSummary>,
     pub improve_candidates: Vec<RoutingCandidateSummary>,
     pub review_candidates: Vec<RoutingCandidateSummary>,
+    pub task_routing_rules: Vec<TaskRoutingRuleSummary>,
     pub routine_reviewer: Option<RoutingCandidateSummary>,
     pub escalatory_reviewers: Vec<RoutingCandidateSummary>,
     pub context: ConfigProfileContextSummary,
+    pub notifications: NotificationSummary,
 }
 
 #[derive(serde::Serialize)]
-pub struct ConfigShow {
+pub struct ConfigShowSummary {
     pub current_manager: Option<String>,
-    pub profile: Option<ConfigProfileSummary>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ConfigShowFull {
+    pub schema_version: u32,
+    pub config_path: String,
+    pub current_manager: Option<String>,
+    pub profiles: BTreeMap<String, ConfigProfileSummary>,
 }
 
 fn to_summary(candidate: &config::CandidateConfig) -> RoutingCandidateSummary {
@@ -128,6 +158,26 @@ fn to_context_override(override_cfg: &ContextOverride) -> ContextOverrideBudgetS
     }
 }
 
+fn notification_transport(command: Option<&str>) -> Option<String> {
+    command.map(|command| {
+        let command = command.to_ascii_lowercase();
+        if command.contains("telegram") {
+            "telegram".to_string()
+        } else {
+            "custom_command".to_string()
+        }
+    })
+}
+
+fn wake_autonomy(value: config::WakeAutonomy) -> String {
+    match value {
+        config::WakeAutonomy::Off => "off",
+        config::WakeAutonomy::ReviewOnly => "review_only",
+        config::WakeAutonomy::Full => "full",
+    }
+    .to_string()
+}
+
 fn build_profile_summary(
     cfg: &config::GahConfig,
     profile_name: &str,
@@ -152,6 +202,17 @@ fn build_profile_summary(
         .as_ref()
         .map(|candidates| candidates.iter().map(to_summary).collect())
         .unwrap_or_default();
+    let task_routing_rules = routing
+        .task_routing_rules
+        .iter()
+        .map(|rule| TaskRoutingRuleSummary {
+            modes: rule.modes.clone(),
+            task_classes: rule.task_classes.clone(),
+            difficulties: rule.difficulties.clone(),
+            risks: rule.risks.clone(),
+            candidates: rule.candidates.iter().map(to_summary).collect(),
+        })
+        .collect();
 
     let mut routed_backends: Vec<&str> = routing
         .pm_candidates
@@ -159,6 +220,12 @@ fn build_profile_summary(
         .flatten()
         .chain(routing.improve_candidates.iter().flatten())
         .chain(routing.review_candidates.iter().flatten())
+        .chain(
+            routing
+                .task_routing_rules
+                .iter()
+                .flat_map(|rule| rule.candidates.iter()),
+        )
         .map(|candidate| candidate.backend.as_str())
         .chain(routine_reviewer.iter().map(|c| c.backend.as_str()))
         .chain(escalatory_reviewers.iter().map(|c| c.backend.as_str()))
@@ -188,6 +255,7 @@ fn build_profile_summary(
         pm_candidates,
         improve_candidates,
         review_candidates,
+        task_routing_rules,
         routine_reviewer: routine_reviewer.as_ref().map(to_summary),
         escalatory_reviewers: escalatory_reviewers
             .iter()
@@ -202,30 +270,71 @@ fn build_profile_summary(
                 .map(to_context_override),
             effective_by_backend,
         },
+        notifications: NotificationSummary {
+            configured: profile.notify_command.is_some(),
+            transport: notification_transport(profile.notify_command.as_deref()),
+            manager_wake_autonomy: wake_autonomy(profile.manager_wake_autonomy),
+            env_file: profile.env_file.clone(),
+            env_file_prod: profile.env_file_prod.clone(),
+        },
     })
 }
 
-pub fn config_show(cfg: &config::GahConfig, profile: Option<&str>) -> Result<ConfigShow> {
-    let profile = profile
-        .map(|profile_name| build_profile_summary(cfg, profile_name))
-        .transpose()?;
-
-    Ok(ConfigShow {
+pub fn config_show(cfg: &config::GahConfig) -> ConfigShowSummary {
+    ConfigShowSummary {
         current_manager: cfg.defaults.current_manager.clone(),
-        profile,
+    }
+}
+
+pub fn config_show_json(cfg: &config::GahConfig) -> Result<String> {
+    let show = config_show(cfg);
+    Ok(serde_json::to_string(&show)?)
+}
+
+pub fn config_show_full(
+    cfg: &config::GahConfig,
+    config_path: &Path,
+    profile: Option<&str>,
+) -> Result<ConfigShowFull> {
+    let mut profiles = BTreeMap::new();
+    if let Some(profile_name) = profile {
+        profiles.insert(
+            profile_name.to_string(),
+            build_profile_summary(cfg, profile_name)?,
+        );
+    } else {
+        for profile_name in cfg.profiles.keys() {
+            profiles.insert(
+                profile_name.clone(),
+                build_profile_summary(cfg, profile_name)?,
+            );
+        }
+    }
+
+    Ok(ConfigShowFull {
+        schema_version: CONFIG_SHOW_SCHEMA_VERSION,
+        config_path: config_path.to_string_lossy().into_owned(),
+        current_manager: cfg.defaults.current_manager.clone(),
+        profiles,
     })
 }
 
-pub fn config_show_json(cfg: &config::GahConfig, profile: Option<&str>) -> Result<String> {
-    let show = config_show(cfg, profile)?;
-    Ok(serde_json::to_string(&show)?)
+pub fn config_show_full_json(
+    cfg: &config::GahConfig,
+    config_path: &Path,
+    profile: Option<&str>,
+) -> Result<String> {
+    let mut value = serde_json::to_value(config_show_full(cfg, config_path, profile)?)?;
+    crate::redact::redact_json_value(&mut value);
+    Ok(serde_json::to_string(&value)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{
-        self, tests::test_profile_for_notifications, CandidateConfig, MergePolicy,
+        self, tests::test_profile_for_notifications, CandidateConfig, MergePolicy, TaskRoutingRule,
+        WakeAutonomy,
     };
     use crate::context::{ContextConfig, ContextOverride};
     use serde_json::Value;
@@ -288,7 +397,20 @@ mod tests {
             quota_days_remaining: None,
             requires_approval: false,
         }];
+        profile.routing.task_routing_rules = vec![TaskRoutingRule {
+            difficulties: vec!["easy".into()],
+            candidates: vec![CandidateConfig {
+                backend: "opencode".into(),
+                model: Some("hy3".into()),
+                priority: 1,
+                ..CandidateConfig::default()
+            }],
+            ..TaskRoutingRule::default()
+        }];
         profile.routing.merge_policy = Some(MergePolicy::StopForHuman);
+        profile.notify_command = Some("send-telegram-notification".into());
+        profile.manager_wake_autonomy = WakeAutonomy::ReviewOnly;
+        profile.env_file = Some("/config/dev.env".into());
         profile
     }
 
@@ -434,6 +556,11 @@ mod tests {
 
         assert_eq!(summary.review_candidates.len(), 1);
         assert_eq!(summary.review_candidates[0].backend, "openhands");
+        assert_eq!(summary.task_routing_rules.len(), 1);
+        assert_eq!(
+            summary.task_routing_rules[0].candidates[0].backend,
+            "opencode"
+        );
 
         assert!(summary.routine_reviewer.is_some());
         assert_eq!(summary.routine_reviewer.as_ref().unwrap().backend, "codex");
@@ -455,7 +582,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.backend.as_str())
                 .collect::<Vec<_>>(),
-            vec!["claude", "codex", "ogy", "openhands", "vibe"]
+            vec!["claude", "codex", "ogy", "opencode", "openhands", "vibe"]
         );
         let claude = summary
             .context
@@ -478,6 +605,13 @@ mod tests {
             .unwrap();
         assert!(vibe.backend_override.is_none());
         assert_eq!(vibe.effective.soft_limit_tokens, 90_000);
+        assert!(summary.notifications.configured);
+        assert_eq!(summary.notifications.transport.as_deref(), Some("telegram"));
+        assert_eq!(summary.notifications.manager_wake_autonomy, "review_only");
+        assert_eq!(
+            summary.notifications.env_file.as_deref(),
+            Some("/config/dev.env")
+        );
     }
 
     #[test]
@@ -491,21 +625,45 @@ mod tests {
     }
 
     #[test]
-    fn config_show_json_includes_expected_shape_when_profile_set() {
+    fn bare_config_show_json_retains_legacy_shape() {
         let cfg = sample_config();
-        let raw = config_show_json(&cfg, Some("repo")).expect("json encoding should work");
+        let raw = config_show_json(&cfg).expect("json encoding should work");
         let payload: Value = serde_json::from_str(&raw).expect("json should parse");
 
+        assert_eq!(raw, r#"{"current_manager":"manager"}"#);
         assert_eq!(payload["current_manager"], "manager");
-        assert_eq!(payload["profile"]["profile"], "repo");
     }
 
     #[test]
-    fn config_show_json_omits_profile_with_missing_argument() {
-        let cfg = sample_config();
-        let raw = config_show_json(&cfg, None).expect("json encoding should work");
+    fn full_config_show_is_versioned_keyed_and_redacted() {
+        let mut cfg = sample_config();
+        cfg.defaults.current_manager = Some("sk-abcdefghijklmnopqrstuvwxyz123456".into());
+        cfg.profiles.get_mut("repo").unwrap().notify_command =
+            Some("curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz' telegram".into());
+
+        let raw = config_show_full_json(&cfg, Path::new("/tmp/config.toml"), Some("repo"))
+            .expect("full JSON encoding should work");
         let payload: Value = serde_json::from_str(&raw).expect("json should parse");
 
-        assert_eq!(payload["profile"], Value::Null);
+        assert_eq!(payload["schema_version"], CONFIG_SHOW_SCHEMA_VERSION);
+        assert_eq!(payload["config_path"], "/tmp/config.toml");
+        assert_eq!(payload["current_manager"], "[REDACTED:API_KEY]");
+        assert_eq!(payload["profiles"]["repo"]["profile"], "repo");
+        assert_eq!(
+            payload["profiles"]["repo"]["notifications"]["transport"],
+            "telegram"
+        );
+        assert!(!raw.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(!raw.contains("Authorization"));
+    }
+
+    #[test]
+    fn full_config_show_without_filter_contains_all_profiles() {
+        let cfg = sample_config();
+        let summary = config_show_full(&cfg, Path::new("/tmp/config.toml"), None)
+            .expect("full projection should build");
+
+        assert_eq!(summary.profiles.len(), 1);
+        assert!(summary.profiles.contains_key("repo"));
     }
 }

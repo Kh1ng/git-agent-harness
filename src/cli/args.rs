@@ -336,12 +336,20 @@ pub enum ConfigCommands {
     Show {
         #[arg(long, default_value_t = false)]
         json: bool,
-        #[arg(long, name = "config")]
+        /// Emit the redacted, versioned effective configuration projection.
+        /// Bare `--json` intentionally retains its legacy one-field shape.
+        #[arg(long, default_value_t = false, requires = "json")]
+        full: bool,
+        /// Restrict `--full` output to one profile while retaining the
+        /// provider-neutral profiles map response shape.
+        #[arg(long, requires = "full")]
+        profile: Option<String>,
+        #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
     },
     /// Set one or more global default values.
     Set {
-        #[arg(long, name = "config")]
+        #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
         /// Which agent CLI is currently acting as the operator's manager
         /// across all profiles/projects (the manager-wake "who's on call").

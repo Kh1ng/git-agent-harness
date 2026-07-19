@@ -435,6 +435,26 @@ function ProfileConfigViewerSection({ selectedName, profileConfig }: ProfileConf
       </div>
 
       <div className="mt-3 card-padded border border-subtle">
+        <h4 className="text-xs font-semibold text-primary mb-2">Task routing rules</h4>
+        {effective.task_routing_rules.length === 0 ? (
+          <p className="text-xs text-muted">No class-specific routing rules configured.</p>
+        ) : (
+          <ol className="space-y-2 text-xs text-secondary">
+            {effective.task_routing_rules.map((rule, index) => (
+              <li key={`task-rule-${index}`}>
+                <span className="font-semibold">{index + 1}.</span>{' '}
+                modes {formatList(rule.modes)} · classes {formatList(rule.task_classes)} · difficulty{' '}
+                {formatList(rule.difficulties)} · risk {formatList(rule.risks)}
+                <div className="text-muted ml-4">
+                  {rule.candidates.map(formatCandidateLabel).join(' → ') || 'No candidates configured'}
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+
+      <div className="mt-3 card-padded border border-subtle">
         <h4 className="text-xs font-semibold text-primary mb-2">Context budgets</h4>
         <p className="text-xs text-muted">
           Default context: soft limit {effective.context.global.soft_limit_tokens} · hard limit{' '}
@@ -461,6 +481,18 @@ function ProfileConfigViewerSection({ selectedName, profileConfig }: ProfileConf
           </ul>
         )}
       </div>
+
+      <div className="mt-3 card-padded border border-subtle">
+        <h4 className="text-xs font-semibold text-primary mb-2">Notifications</h4>
+        <p className="text-xs text-secondary">
+          Target: {effective.notifications.configured ? effective.notifications.transport ?? 'unknown' : 'not configured'}
+        </p>
+        <p className="text-xs text-muted mt-1">
+          Manager wake: {effective.notifications.manager_wake_autonomy} · dev env:{' '}
+          {effective.notifications.env_file ?? 'unknown'} · prod env: {effective.notifications.env_file_prod ?? 'unknown'}
+        </p>
+        <p className="text-xs text-muted mt-1">Command contents and credentials are intentionally excluded.</p>
+      </div>
     </section>
   );
 }
@@ -484,7 +516,7 @@ function CandidateTable({ title, candidates }: { title: string; candidates: Rout
             <span className="text-secondary">{formatCandidateLabel(candidate)}</span>
             <span className="text-muted"> · priority {candidate.priority}</span>
             {candidate.requires_approval ? <span className="text-warning"> · requires approval</span> : null}
-            {candidate.quota_pool ? <span className="text-muted"> · pool {candidate.quota_pool}</span> : null}
+            <span className="text-muted"> · pool {candidate.quota_pool ?? 'unknown'}</span>
           </div>
         ))}
       </div>
@@ -493,7 +525,11 @@ function CandidateTable({ title, candidates }: { title: string; candidates: Rout
 }
 
 function formatCandidateLabel(candidate: RoutingCandidateSummary): string {
-  return candidate.model ? `${candidate.backend}/${candidate.model}` : candidate.backend;
+  return `${candidate.backend}/${candidate.model ?? 'unknown'}`;
+}
+
+function formatList(values: string[]): string {
+  return values.length > 0 ? values.join(', ') : 'any';
 }
 
 function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {

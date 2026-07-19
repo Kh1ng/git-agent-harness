@@ -425,19 +425,29 @@ pub fn run() -> Result<()> {
         }
 
         Commands::Config { command } => match command {
-            ConfigCommands::Show { json, config_path } => {
+            ConfigCommands::Show {
+                json,
+                full,
+                profile,
+                config_path,
+            } => {
+                let resolved_config_path = config::resolve_config_path(config_path.as_deref());
                 let cfg = config::load(config_path.as_deref())?;
                 if json {
-                    #[derive(serde::Serialize)]
-                    struct ConfigShow {
-                        current_manager: Option<String>,
+                    if full {
+                        println!(
+                            "{}",
+                            config_show::config_show_full_json(
+                                &cfg,
+                                &resolved_config_path,
+                                profile.as_deref(),
+                            )?
+                        );
+                    } else {
+                        // Compatibility contract: bare `config show --json`
+                        // remains byte-for-byte the original one-field shape.
+                        println!("{}", config_show::config_show_json(&cfg)?);
                     }
-                    println!(
-                        "{}",
-                        serde_json::to_string(&ConfigShow {
-                            current_manager: cfg.defaults.current_manager.clone()
-                        })?
-                    );
                 } else {
                     println!(
                         "current_manager: {}",

@@ -16,6 +16,7 @@ function profilePayload(profile: string): ConfigProfileSummary {
     pm_candidates: [],
     improve_candidates: [],
     review_candidates: [],
+    task_routing_rules: [],
     routine_reviewer: null,
     escalatory_reviewers: [],
     context: {
@@ -32,6 +33,13 @@ function profilePayload(profile: string): ConfigProfileSummary {
       },
       profile_override: null,
       effective_by_backend: []
+    },
+    notifications: {
+      configured: false,
+      transport: null,
+      manager_wake_autonomy: 'off',
+      env_file: null,
+      env_file_prod: null
     }
   };
 }

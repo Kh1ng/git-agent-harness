@@ -494,6 +494,24 @@ export interface ConfigProfileContextSummary {
   effective_by_backend: ConfigBackendContextSummary[];
 }
 
+export interface TaskRoutingRuleSummary {
+  modes: string[];
+  task_classes: string[];
+  difficulties: string[];
+  risks: string[];
+  candidates: RoutingCandidateSummary[];
+}
+
+export interface NotificationSummary {
+  configured: boolean;
+  /** Secret-safe transport classification; the command itself is never sent. */
+  transport: 'telegram' | 'custom_command' | null;
+  manager_wake_autonomy: 'off' | 'review_only' | 'full';
+  /** Paths are configuration metadata only; file contents are never sent. */
+  env_file: string | null;
+  env_file_prod: string | null;
+}
+
 /** Effective read-only profile configuration for Settings’ "effective config"
  * view. Values reflect inheritance through defaults + canonical + repo config
  * for the requested profile. */
@@ -507,9 +525,19 @@ export interface ConfigProfileSummary {
   pm_candidates: RoutingCandidateSummary[];
   improve_candidates: RoutingCandidateSummary[];
   review_candidates: RoutingCandidateSummary[];
+  task_routing_rules: TaskRoutingRuleSummary[];
   routine_reviewer: RoutingCandidateSummary | null;
   escalatory_reviewers: RoutingCandidateSummary[];
   context: ConfigProfileContextSummary;
+  notifications: NotificationSummary;
+}
+
+/** Versioned allowlisted response from `gah config show --json --full`. */
+export interface ConfigShowFull {
+  schema_version: number;
+  config_path: string;
+  current_manager: string | null;
+  profiles: Record<string, ConfigProfileSummary>;
 }
 
 /** Payload for `gah config set` (POST /api/config). `current_manager: null`

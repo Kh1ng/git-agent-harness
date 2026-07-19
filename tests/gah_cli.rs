@@ -2,6 +2,8 @@
 mod already_satisfied;
 #[path = "gah_cli/args.rs"]
 mod args;
+#[path = "gah_cli/config_show.rs"]
+mod config_show;
 #[path = "gah_cli/conflict_resolution.rs"]
 mod conflict_resolution;
 #[path = "gah_cli/gitlab_review.rs"]

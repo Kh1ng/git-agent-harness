@@ -9,6 +9,7 @@ pub mod capability;
 pub mod claude_monitor;
 pub mod cli;
 pub mod config;
+pub mod config_show;
 pub mod context;
 pub mod controller;
 pub mod dispatch;
