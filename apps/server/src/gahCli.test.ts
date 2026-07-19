@@ -10,7 +10,7 @@ import {
   loopStateDir,
 } from './gahCli.js';
 
-test('config set args deduplicate clear values and use the canonical config flag', () => {
+test('config set args deduplicate clear values and use the CLI config flag', () => {
   assert.deepEqual(
     buildConfigSetArgs({
       current_manager: null,
@@ -24,7 +24,7 @@ test('config set args deduplicate clear values and use the canonical config flag
       'current_manager',
       '--clear',
       'other',
-      '--config',
+      '--config-path',
       '/tmp/gah-config.toml',
     ],
   );
@@ -70,7 +70,7 @@ test('profile add args map required and optional fields without spawning gah', (
       '2',
       '--manager-wake-autonomy',
       'review_only',
-      '--config',
+      '--config-path',
       '/tmp/gah-config.toml',
     ],
   );
@@ -103,7 +103,7 @@ test('profile set args map fields and emit each clear key once', () => {
       'manager_wake_autonomy',
       '--clear',
       'other',
-      '--config',
+      '--config-path',
       '/tmp/gah-config.toml',
     ],
   );

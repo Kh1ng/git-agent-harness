@@ -579,7 +579,7 @@ export function buildProfileAddArgs(options: ProfileAddOptions): string[] {
   }
   
   if (options.config) {
-    args.push('--config', options.config);
+    args.push('--config-path', options.config);
   }
 
   return args;
@@ -742,7 +742,7 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   );
   
   if (options.config) {
-    args.push('--config', options.config);
+    args.push('--config-path', options.config);
   }
 
   return args;
@@ -838,7 +838,7 @@ export function buildConfigSetArgs(options: ConfigSetOptions): string[] {
   appendClearArgs(args, options.clear, new Set(['current_manager']));
 
   if (options.config) {
-    args.push('--config', options.config);
+    args.push('--config-path', options.config);
   }
 
   return args;
