@@ -7,6 +7,7 @@ use crate::ledger::LedgerEntry;
 mod acceptance;
 mod actionable;
 mod budget_reservation;
+mod format_retry;
 mod reset;
 
 fn review_ledger_entry(

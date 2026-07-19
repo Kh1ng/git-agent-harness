@@ -1,5 +1,7 @@
 #[path = "gah_cli/conflict_resolution.rs"]
 mod conflict_resolution;
+#[path = "gah_cli/review_format_retry.rs"]
+mod review_format_retry;
 #[path = "gah_cli/stall_retry.rs"]
 mod stall_retry;
 mod support;
@@ -1806,64 +1808,6 @@ llm_model_cloud = ""
         .assert()
         .success()
         .stdout(predicate::str::contains("No ledger entries found"));
-}
-
-#[test]
-fn review_writes_structured_verdict_and_posts_comment() {
-    let tmp = test_tempdir();
-    let repo = tmp.path().join("repo");
-    let prompt_log = tmp.path().join("review-prompt.txt");
-    fs::create_dir_all(&repo).unwrap();
-    init_git_repo(&repo);
-    add_origin_and_feature_commit(&repo);
-    checkout_branch(&repo, "main");
-    let cfg = write_real_repo_config_with_extra(
-        &tmp,
-        &repo,
-        "github",
-        "[profiles.real.routing]\nreview_backend = \"claude\"\n",
-        "",
-    );
-
-    let fake_bin = tmp.path().join("bin");
-    fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin_with_body(
-        &fake_bin,
-        "claude",
-        &format!(
-            "#!/bin/sh\nprintf '%s' \"$2\" > \"{}\"\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[\"Looks fine\"],\"risk_notes\":[\"low risk\"],\"evidence\":[\"file:src.txt\"]}}\nEOF\n",
-            prompt_log.display()
-        ),
-    );
-    make_fake_github_review_api(&fake_bin);
-
-    bin()
-        .args([
-            "dispatch",
-            "--profile",
-            "real",
-            "--mode",
-            "review",
-            "--branch",
-            "feature/review",
-            "--config-path",
-            cfg.to_str().unwrap(),
-        ])
-        .env("PATH", prepend_path(&fake_bin))
-        .assert()
-        .success();
-
-    let sessions = tmp.path().join("artifacts/real/sessions");
-    let session = latest_child_dir(&sessions);
-    let report = fs::read_to_string(session.join("review-report.md")).unwrap();
-    let verdict = fs::read_to_string(session.join("review-verdict.json")).unwrap();
-    let prompt = fs::read_to_string(prompt_log).unwrap();
-    assert!(report.contains("Review notes"));
-    assert!(verdict.contains("\"verdict\": \"APPROVE\""));
-    assert!(verdict.contains("\"reviewer_backend\": \"claude\""));
-    assert!(prompt.contains("Source: feature/review"));
-    assert!(prompt.contains("Target: main"));
-    assert!(prompt.contains("Changed files:\nsrc.txt"));
 }
 
 #[test]

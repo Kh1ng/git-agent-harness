@@ -972,6 +972,18 @@ fn finding_text_disclaims_actionability(text: &str) -> bool {
     .any(|marker| normalized.contains(marker))
 }
 
+pub(in crate::dispatch) const REVIEW_FORMAT_ONLY_VIOLATION_REASON: &str =
+    "APPROVE included substantive prose; every finding must be represented in the review JSON";
+
+pub(in crate::dispatch) fn is_retryable_format_only_violation(
+    verdict: &crate::models::ReviewVerdict,
+    has_retried_format_only_once: bool,
+) -> bool {
+    !has_retried_format_only_once
+        && verdict.safety_gate_reason.as_deref() == Some(REVIEW_FORMAT_ONLY_VIOLATION_REASON)
+        && verdict.verdict == "HUMAN_REVIEW"
+}
+
 /// A reviewer is advisory; merge safety is deterministic. In particular, an
 /// LLM must not be able to write an apparent APPROVE while its own structured
 /// findings describe a blocking or unversioned contract change (the exact
@@ -1000,10 +1012,7 @@ fn enforce_review_evidence_gate(
     let reason = if !verdict.blocking_findings.is_empty() {
         Some("APPROVE contradicted non-empty blocking_findings".to_string())
     } else if review_text_has_substantive_prose(review_text, reviewer_backend) {
-        Some(
-            "APPROVE included substantive prose; every finding must be represented in the review JSON"
-                .to_string(),
-        )
+        Some(REVIEW_FORMAT_ONLY_VIOLATION_REASON.to_string())
     } else if verdict.evidence.is_empty() {
         Some("APPROVE omitted required concrete review evidence".to_string())
     } else if gate_context.enforce_grounding
