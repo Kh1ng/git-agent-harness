@@ -8,8 +8,9 @@
 //! no_op decisions.
 
 mod support;
+use std::fs;
 use support::fake_ledger::{ledger_entry_full, TestLedger};
-use support::scenario::{GithubPrParams, ScenarioHarness};
+use support::scenario::{read_jsonl_lines, GithubPrParams, ScenarioHarness};
 use support::{FakeBackend, Scenario};
 use tempfile::TempDir;
 
@@ -357,4 +358,160 @@ fn regression_quota_exhausted_reviewer_failover_is_bounded() {
 
     let results = harness.run_loops(3).unwrap();
     assert_bounded_progress_or_terminal(&results, 3, "quota exhausted failover");
+}
+
+/// A generic non-zero review exit has no availability signal, so policy
+/// retries the same route within the fixed three-attempt budget and emits one
+/// terminal dispatch result.
+#[test]
+fn regression_generic_nonzero_review_retry_is_bounded_and_terminal() {
+    let mut harness = ScenarioHarness::new("github")
+        .with_config_append("[profiles.test.routing]\nreview_backend = \"claude\"\n")
+        .github_scenario("one_pr_needs_review")
+        .worker_scenario("failure");
+    harness.create_remote_branch("gah/feature-1");
+
+    let dispatch_result = harness
+        .run_dispatch(&["--mode", "review", "--branch", "gah/feature-1"])
+        .unwrap();
+    let events = read_jsonl_lines(&harness.events_path).unwrap_or_default();
+    let ledger_entries = fs::read_to_string(&harness.ledger_path)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect::<Vec<_>>();
+    let attempts = ledger_entries
+        .last()
+        .and_then(|entry| entry["attempts"].as_array())
+        .expect("terminal ledger entry has attempts");
+
+    assert_eq!(attempts.len(), 3);
+    assert!(attempts
+        .iter()
+        .all(|attempt| attempt["backend"] == "claude"));
+    let models = attempts
+        .iter()
+        .map(|attempt| attempt["effective_model"].clone())
+        .collect::<Vec<_>>();
+    assert!(models.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"].as_str() == Some("dispatch_started"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"].as_str() == Some("dispatch_finished"))
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|event| event["details"]
+        .as_str()
+        .is_some_and(|details| details.contains("review failed after 3 attempt(s)"))));
+    assert_ne!(dispatch_result.exit_code, Some(0));
+}
+
+/// An idle timeout is an availability signal even when the backend emitted
+/// partial output before stalling. The attempted route is recorded, its slot
+/// is released, and the next configured candidate can complete the dispatch.
+#[test]
+fn regression_idle_timeout_with_partial_output_reroutes_and_succeeds() {
+    let tmp = TempDir::new().unwrap();
+    let vibe = FakeBackend::new(tmp.path(), "vibe");
+    vibe.install(
+        Scenario::success()
+            .with_stdout("Initializing review context...\n")
+            .with_delay_ms(30_000),
+    );
+    let claude = FakeBackend::new(tmp.path(), "claude");
+    claude.install(Scenario::success().with_stdout(
+        r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["file:gah-feature-1.md"]}"#,
+    ));
+
+    let mut harness = ScenarioHarness::new("github")
+        .with_config_append(
+            "review_timeout_seconds = 1\n[profiles.test.routing]\nreview_backend = \"vibe\"\nweak_review_backend = \"claude\"\nallow_review_fallback = true\n",
+        )
+        .github_scenario("one_pr_needs_review");
+    harness.install_custom_worker("vibe", &vibe);
+    harness.install_custom_worker("claude", &claude);
+    harness.create_remote_branch("gah/feature-1");
+
+    let dispatch_result = harness
+        .run_dispatch(&["--mode", "review", "--branch", "gah/feature-1"])
+        .unwrap();
+    assert_eq!(
+        dispatch_result.exit_code,
+        Some(0),
+        "{}",
+        dispatch_result.stderr
+    );
+
+    let entry = fs::read_to_string(&harness.ledger_path)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .next_back()
+        .expect("ledger entry");
+    let attempts = entry["attempts"].as_array().expect("attempts");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["backend"], "vibe");
+    assert_eq!(attempts[0]["validation_result"], "not_run_idle_timeout");
+    assert_eq!(attempts[1]["backend"], "claude");
+    assert_eq!(attempts[1]["validation_result"], "APPROVE");
+
+    let events = read_jsonl_lines(&harness.events_path).unwrap_or_default();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"].as_str() == Some("dispatch_finished"))
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|event| event["details"]
+        .as_str()
+        .is_some_and(|details| details.contains("dispatch failed"))));
+}
+
+/// The hard safety ceiling is operator policy, not backend unavailability. It
+/// remains terminal and must not consume a fallback reviewer.
+#[test]
+fn regression_hard_review_timeout_does_not_fallback() {
+    let tmp = TempDir::new().unwrap();
+    let vibe = FakeBackend::new(tmp.path(), "vibe");
+    vibe.install(Scenario::success().with_delay_ms(30_000));
+    let claude = FakeBackend::new(tmp.path(), "claude");
+    claude.install(Scenario::success().with_stdout(
+        r#"{"verdict":"APPROVE","confidence":"high","human_required":false,"blocking_findings":[],"non_blocking_findings":[],"risk_notes":[],"evidence":["file:gah-feature-1.md"]}"#,
+    ));
+
+    let mut harness = ScenarioHarness::new("github")
+        .with_config_append(
+            "review_timeout_seconds = 30\nreview_hard_timeout_seconds = 1\n[profiles.test.routing]\nreview_backend = \"vibe\"\nweak_review_backend = \"claude\"\nallow_review_fallback = true\n",
+        )
+        .github_scenario("one_pr_needs_review");
+    harness.install_custom_worker("vibe", &vibe);
+    harness.install_custom_worker("claude", &claude);
+    harness.create_remote_branch("gah/feature-1");
+
+    let dispatch_result = harness
+        .run_dispatch(&["--mode", "review", "--branch", "gah/feature-1"])
+        .unwrap();
+    assert_ne!(dispatch_result.exit_code, Some(0));
+    assert_eq!(vibe.call_count(), 1);
+    assert_eq!(claude.call_count(), 0);
+
+    let entry = fs::read_to_string(&harness.ledger_path)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .next_back()
+        .expect("ledger entry");
+    let attempts = entry["attempts"].as_array().expect("attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["backend"], "vibe");
+    assert_eq!(attempts[0]["validation_result"], "not_run_hard_timeout");
 }

@@ -26,6 +26,7 @@ use crate::usage_attribution::{
 };
 use crate::{provider, runner};
 use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -39,7 +40,66 @@ use source_issue_context::{
 };
 
 fn review_outcome_allows_reroute(outcome: &runner::ReviewProcessOutcome) -> bool {
-    matches!(outcome, runner::ReviewProcessOutcome::NonZeroExit(_))
+    matches!(
+        outcome,
+        runner::ReviewProcessOutcome::NonZeroExit(_) | runner::ReviewProcessOutcome::IdleTimeout
+    )
+}
+
+fn review_failure_output(
+    outcome: &runner::ReviewProcessOutcome,
+    stdout: &str,
+    stderr: &str,
+    idle_timeout_seconds: u64,
+) -> String {
+    let mut output = if stdout.trim().is_empty() {
+        stderr.to_string()
+    } else if stderr.trim().is_empty() {
+        stdout.to_string()
+    } else {
+        format!("{stdout}\n{stderr}")
+    };
+    if matches!(outcome, runner::ReviewProcessOutcome::IdleTimeout) {
+        let stall_marker = format!(
+            "GAH: killed after {idle_timeout_seconds}s with no new worktree progress (stalled before changes, not just slow)."
+        );
+        if output.trim().is_empty() {
+            output = stall_marker;
+        } else {
+            output.push('\n');
+            output.push_str(&stall_marker);
+        }
+    }
+    output
+}
+
+fn review_failure_log_path(attempt_session: &Path, stdout: &str) -> String {
+    let stream = if stdout.trim().is_empty() {
+        "review-stderr.log"
+    } else {
+        "review-stdout.log"
+    };
+    attempt_session.join(stream).display().to_string()
+}
+
+fn review_terminal_failure_summary(ledger: &LedgerEntry, final_failure: &str) -> String {
+    let mut routes = Vec::new();
+    let mut seen = HashSet::new();
+    for attempt in &ledger.attempts {
+        let route = route_label(&attempt.backend, attempt.effective_model.as_deref());
+        if seen.insert(route.clone()) {
+            routes.push(route);
+        }
+    }
+    let attempts = ledger.attempts_started.unwrap_or_default();
+    if routes.is_empty() {
+        format!("review failed after {attempts} attempt(s): {final_failure}")
+    } else {
+        format!(
+            "review failed after {attempts} attempt(s): {final_failure}; attempted routes: {}",
+            routes.join(" -> ")
+        )
+    }
 }
 
 pub(in crate::dispatch) fn review(
@@ -534,63 +594,65 @@ pub(in crate::dispatch) fn review(
             }
             let is_last_attempt = attempt_number + 1 == MAX_REVIEW_ATTEMPTS;
             if !is_last_attempt && review_outcome_allows_reroute(&attempt.outcome) {
-                if let runner::ReviewProcessOutcome::NonZeroExit(_) = attempt.outcome {
-                    // Provider CLIs commonly put quota/auth diagnostics on stderr
-                    // while keeping stdout empty.  Routing availability must see
-                    // both streams or a failed reviewer remains eligible and is
-                    // selected again on the next loop cycle.
-                    let failure_output = if attempt.stderr.trim().is_empty() {
-                        attempt.stdout.clone()
-                    } else if attempt.stdout.trim().is_empty() {
-                        attempt.stderr.clone()
-                    } else {
-                        format!("{}\n{}", attempt.stdout, attempt.stderr)
-                    };
-                    let failure_log = if attempt.stdout.trim().is_empty() {
-                        attempt_session.join("review-stderr.log")
-                    } else {
-                        attempt_session.join("review-stdout.log")
-                    };
-                    if let Some((parsed, rerouted)) = route_after_backend_unavailable(
-                        cfg,
-                        profile,
-                        &route_request,
-                        None,
-                        ledger,
-                        &route,
-                        (&failure_output, &failure_log.display().to_string()),
-                    )? {
-                        let current_identity = route_identity(
-                            &route.effective_backend,
-                            route.effective_model.as_deref(),
+                // The invocation slot was released immediately after the
+                // backend exited. Availability parsing and route selection
+                // therefore happen without holding stale capacity.
+                debug_assert!(review_slot.is_none());
+                let failure_output = review_failure_output(
+                    &attempt.outcome,
+                    &attempt.stdout,
+                    &attempt.stderr,
+                    attempt.idle_timeout_seconds,
+                );
+                let failure_log = review_failure_log_path(&attempt_session, &attempt.stdout);
+                if let Some((parsed, rerouted)) = route_after_backend_unavailable(
+                    cfg,
+                    profile,
+                    &route_request,
+                    None,
+                    ledger,
+                    &route,
+                    (&failure_output, &failure_log),
+                )? {
+                    let current_identity =
+                        route_identity(&route.effective_backend, route.effective_model.as_deref());
+                    let rerouted_identity = route_identity(
+                        &rerouted.effective_backend,
+                        rerouted.effective_model.as_deref(),
+                    );
+                    if rerouted_identity != current_identity {
+                        println!(
+                            "Backend unavailable; retrying review with {} instead of {} ({:?})",
+                            route_label(
+                                &rerouted.effective_backend,
+                                rerouted.effective_model.as_deref(),
+                            ),
+                            route_label(&route.effective_backend, route.effective_model.as_deref()),
+                            parsed.kind
                         );
-                        let rerouted_identity = route_identity(
-                            &rerouted.effective_backend,
-                            rerouted.effective_model.as_deref(),
+                        route = rerouted;
+                        // A newly selected reviewer gets its own bounded
+                        // format-repair opportunity.
+                        format_only_repair_count = 0;
+                    } else {
+                        println!(
+                            "Review backend {} was unavailable ({:?}) but no alternate route was selected; retrying the same route (attempt {}/{})",
+                            route_label(&route.effective_backend, route.effective_model.as_deref()),
+                            parsed.kind,
+                            attempt_number + 1,
+                            MAX_REVIEW_ATTEMPTS
                         );
-                        if rerouted_identity != current_identity {
-                            println!(
-                                "Backend unavailable; retrying review with {} instead of {} ({:?})",
-                                route_label(
-                                    &rerouted.effective_backend,
-                                    rerouted.effective_model.as_deref(),
-                                ),
-                                route_label(
-                                    &route.effective_backend,
-                                    route.effective_model.as_deref(),
-                                ),
-                                parsed.kind
-                            );
-                            route = rerouted;
-                            // The one format-repair retry is scoped to a
-                            // reviewer identity. A newly selected reviewer
-                            // gets its own bounded repair opportunity.
-                            format_only_repair_count = 0;
-                            review_slot = Some(reserve_review_route(profile, &route)?);
-                            continue 'attempts;
-                        }
                     }
+                } else {
+                    println!(
+                        "Review backend {} failed without an availability signal; retrying the same route (attempt {}/{})",
+                        route_label(&route.effective_backend, route.effective_model.as_deref()),
+                        attempt_number + 1,
+                        MAX_REVIEW_ATTEMPTS
+                    );
                 }
+                review_slot = Some(reserve_review_route(profile, &route)?);
+                continue 'attempts;
             }
             if matches!(attempt.outcome, runner::ReviewProcessOutcome::Success) {
                 let review_usage = ledger
@@ -620,6 +682,11 @@ pub(in crate::dispatch) fn review(
                                 attempt_record.validation_result =
                                     Some(REVIEW_FORMAT_ONLY_VIOLATION_REASON.to_string());
                             }
+                            // The just-finished invocation released its slot.
+                            // Reacquire before the same reviewer performs the
+                            // bounded format-only repair attempt.
+                            debug_assert!(review_slot.is_none());
+                            review_slot = Some(reserve_review_route(profile, &route)?);
                             // Bounded retry to the same reviewer/route: this
                             // `continue` targets the inner loop only, so it
                             // does not advance `attempt_number` or consume a
@@ -817,6 +884,8 @@ pub(in crate::dispatch) fn review(
             }
         }
         runner::ReviewProcessOutcome::ExecutableUnavailable => {
+            let summary = review_terminal_failure_summary(ledger, "review backend unavailable");
+            ledger.error_summary = Some(summary.clone());
             ledger.set_failure(
                 crate::ledger::FailureClass::EnvironmentError,
                 crate::ledger::FailureStage::Review,
@@ -824,9 +893,14 @@ pub(in crate::dispatch) fn review(
             ledger.validation_result = Some("not_run".into());
             println!("Review backend is unavailable.");
             println!("Review bundle written to: {}", bundle.display());
-            anyhow::bail!("review backend is unavailable")
+            anyhow::bail!("{summary}")
         }
         runner::ReviewProcessOutcome::SpawnFailure => {
+            let summary = review_terminal_failure_summary(
+                ledger,
+                &format!("review backend launch failed: {}", result.stderr.trim()),
+            );
+            ledger.error_summary = Some(summary.clone());
             ledger.set_failure(
                 crate::ledger::FailureClass::HarnessError,
                 crate::ledger::FailureStage::BackendLaunch,
@@ -834,9 +908,14 @@ pub(in crate::dispatch) fn review(
             ledger.validation_result = Some("not_run".into());
             println!("Review backend failed to launch.");
             println!("Review bundle written to: {}", bundle.display());
-            anyhow::bail!("review backend failed to launch: {}", result.stderr.trim())
+            anyhow::bail!("{summary}")
         }
         runner::ReviewProcessOutcome::NonZeroExit(code) => {
+            let summary = review_terminal_failure_summary(
+                ledger,
+                &format!("review backend exited with status {code}"),
+            );
+            ledger.error_summary = Some(summary.clone());
             ledger.set_failure(
                 crate::ledger::FailureClass::BackendError,
                 crate::ledger::FailureStage::Review,
@@ -845,21 +924,30 @@ pub(in crate::dispatch) fn review(
             ledger.validation_result = Some("not_run".into());
             println!("Review backend exited with status {}.", code);
             println!("Review bundle written to: {}", bundle.display());
-            anyhow::bail!("review backend exited with status {code}")
+            anyhow::bail!("{summary}")
         }
         runner::ReviewProcessOutcome::SignalTermination(signal) => {
+            let summary = review_terminal_failure_summary(
+                ledger,
+                &format!(
+                    "shutdown requested while {} was running (signal {signal})",
+                    route.effective_backend
+                ),
+            );
+            ledger.error_summary = Some(summary.clone());
             mark_review_shutdown_cancelled(ledger, signal);
             println!(
                 "Review shutdown requested; terminated backend process group (signal {}).",
                 signal
             );
             println!("Review bundle written to: {}", bundle.display());
-            anyhow::bail!(
-                "shutdown requested while {} was running",
-                route.effective_backend
-            )
+            anyhow::bail!("{summary}")
         }
         runner::ReviewProcessOutcome::CleanupFailure(error) => {
+            let summary = review_terminal_failure_summary(
+                ledger,
+                &format!("review backend descendant cleanup failed: {error}"),
+            );
             ledger.set_failure(
                 crate::ledger::FailureClass::HarnessError,
                 crate::ledger::FailureStage::Review,
@@ -867,12 +955,20 @@ pub(in crate::dispatch) fn review(
             ledger.backend_exit_code =
                 Some(crate::runner::process::PROCESS_CLEANUP_FAILED_EXIT_CODE);
             ledger.validation_result = Some("not_run_process_cleanup_failed".into());
-            ledger.error_summary = Some(error.clone());
+            ledger.error_summary = Some(summary.clone());
             println!("Review backend descendant cleanup failed: {error}");
             println!("Review bundle written to: {}", bundle.display());
-            anyhow::bail!("review backend descendant cleanup failed: {error}")
+            anyhow::bail!("{summary}")
         }
         runner::ReviewProcessOutcome::IdleTimeout => {
+            let summary = review_terminal_failure_summary(
+                ledger,
+                &format!(
+                    "review backend stalled (no progress) after {}s idle budget",
+                    result.idle_timeout_seconds
+                ),
+            );
+            ledger.error_summary = Some(summary.clone());
             ledger.set_failure(
                 crate::ledger::FailureClass::AgentNoProgress,
                 crate::ledger::FailureStage::Review,
@@ -884,15 +980,22 @@ pub(in crate::dispatch) fn review(
                 result.idle_timeout_seconds
             );
             println!("Review bundle written to: {}", bundle.display());
-            anyhow::bail!(
-                "review backend stalled (no progress) after {}s idle budget",
-                result.idle_timeout_seconds
-            )
+            anyhow::bail!("{summary}")
         }
         runner::ReviewProcessOutcome::HardTimeout => {
             // A healthy reviewer exceeded the explicit hard safety ceiling. This
             // is NOT a backend failure and must not trigger retry/escalation to
             // a paid reviewer (issue #540).
+            let summary = review_terminal_failure_summary(
+                ledger,
+                &format!(
+                    "review backend exceeded the {}s hard safety ceiling",
+                    result
+                        .hard_timeout_seconds
+                        .unwrap_or(result.idle_timeout_seconds)
+                ),
+            );
+            ledger.error_summary = Some(summary.clone());
             ledger.set_failure(
                 crate::ledger::FailureClass::HumanBlocked,
                 crate::ledger::FailureStage::Review,
@@ -912,12 +1015,7 @@ pub(in crate::dispatch) fn review(
                 );
             }
             println!("Review bundle written to: {}", bundle.display());
-            anyhow::bail!(
-                "review backend exceeded the {}s hard safety ceiling",
-                result
-                    .hard_timeout_seconds
-                    .unwrap_or(result.idle_timeout_seconds)
-            )
+            anyhow::bail!("{summary}")
         }
     }
     Ok(())
@@ -1219,144 +1317,5 @@ fn invalid_review_attempt_chain(
 }
 
 #[cfg(test)]
-mod reservation_tests {
-    use super::{
-        mark_review_budget_exhausted, mark_review_shutdown_cancelled, reserve_review_route,
-        review_attempt_environment, review_outcome_allows_reroute,
-    };
-    use crate::config::tests::test_profile_for_notifications;
-    use crate::ledger::LedgerEntry;
-    use crate::routing::{current_concurrent, RouteDecision};
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Arc, Barrier};
-
-    #[test]
-    fn healthy_hard_ceiling_does_not_retry_or_escalate() {
-        assert!(!review_outcome_allows_reroute(
-            &crate::runner::ReviewProcessOutcome::HardTimeout
-        ));
-        assert!(!review_outcome_allows_reroute(
-            &crate::runner::ReviewProcessOutcome::IdleTimeout
-        ));
-        assert!(review_outcome_allows_reroute(
-            &crate::runner::ReviewProcessOutcome::NonZeroExit(1)
-        ));
-    }
-
-    #[test]
-    fn review_attempt_environment_isolates_only_agy_second() {
-        let mut profile = test_profile_for_notifications();
-        profile.agy_second_home = Some("/tmp/agy-account-2".into());
-        let base = vec![("HOME".to_string(), "/home/operator".to_string())];
-
-        let primary = review_attempt_environment(&profile, "agy", &base);
-        assert_eq!(primary, base);
-
-        let secondary = review_attempt_environment(&profile, "agy-second", &base);
-        assert_eq!(
-            secondary,
-            vec![("HOME".to_string(), "/tmp/agy-account-2".to_string())]
-        );
-    }
-
-    #[test]
-    fn shutdown_clears_provisional_fallback_confidence_and_human_hold() {
-        let profile = test_profile_for_notifications();
-        let mut ledger = LedgerEntry::new("gah", &profile, "claude", "review", "test", None, None);
-        ledger.confidence_impact = Some("low".into());
-        ledger.human_required = true;
-
-        mark_review_shutdown_cancelled(&mut ledger, 15);
-
-        assert_eq!(
-            ledger.validation_result.as_deref(),
-            Some("cancelled_shutdown")
-        );
-        assert_eq!(ledger.failure_class.as_deref(), Some("harness_error"));
-        assert_eq!(ledger.failure_stage.as_deref(), Some("review"));
-        assert_eq!(ledger.backend_exit_code, Some(-15));
-        assert_eq!(ledger.confidence_impact, None);
-        assert!(!ledger.human_required);
-    }
-
-    #[test]
-    fn route_attribution_does_not_clear_a_review_budget_hold() {
-        let profile = test_profile_for_notifications();
-        let mut ledger = LedgerEntry::new("gah", &profile, "vibe", "review", "test", None, None);
-        let route = RouteDecision {
-            requested_backend: "vibe".into(),
-            effective_backend: "vibe".into(),
-            requested_model: Some("reviewer".into()),
-            effective_model: Some("reviewer".into()),
-            effective_quota_pool: None,
-            routing_reason: "test".into(),
-            fallback_used: false,
-            confidence_impact: None,
-            human_required: false,
-            routing_diagnostics: None,
-        };
-
-        mark_review_budget_exhausted(&mut ledger, &route, "budget exhausted");
-
-        assert!(ledger.human_required);
-        assert_eq!(
-            ledger.human_required_reason_code.as_deref(),
-            Some("retry_budget_exhausted")
-        );
-        assert_eq!(ledger.failure_class.as_deref(), Some("human_blocked"));
-        assert_eq!(ledger.failure_stage.as_deref(), Some("review"));
-    }
-
-    #[test]
-    fn three_reviews_never_overlap_on_a_backend_model_capped_at_one() {
-        let backend = format!("review-reservation-test-{}", std::process::id());
-        let model = "sonnet-test";
-        let mut profile = test_profile_for_notifications();
-        profile
-            .max_concurrent_per_model
-            .insert(format!("{backend}/{model}"), 1);
-        let route = RouteDecision {
-            requested_backend: backend.clone(),
-            effective_backend: backend.clone(),
-            requested_model: Some(model.into()),
-            effective_model: Some(model.into()),
-            effective_quota_pool: None,
-            routing_reason: "test".into(),
-            fallback_used: false,
-            confidence_impact: None,
-            human_required: false,
-            routing_diagnostics: None,
-        };
-
-        let profile = Arc::new(profile);
-        let route = Arc::new(route);
-        let start = Arc::new(Barrier::new(3));
-        let max_seen = Arc::new(AtomicU32::new(0));
-        let workers: Vec<_> = (0..3)
-            .map(|_| {
-                let profile = Arc::clone(&profile);
-                let route = Arc::clone(&route);
-                let start = Arc::clone(&start);
-                let max_seen = Arc::clone(&max_seen);
-                std::thread::spawn(move || {
-                    start.wait();
-                    let _slot = reserve_review_route(&profile, &route).unwrap();
-                    max_seen.fetch_max(
-                        current_concurrent(
-                            &route.effective_backend,
-                            route.effective_model.as_deref(),
-                        ),
-                        Ordering::SeqCst,
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                })
-            })
-            .collect();
-        for worker in workers {
-            worker.join().unwrap();
-        }
-
-        assert_eq!(max_seen.load(Ordering::SeqCst), 1);
-        assert_eq!(current_concurrent(&backend, Some(model)), 0);
-    }
-}
+#[path = "review/reservation_tests.rs"]
+mod reservation_tests;
