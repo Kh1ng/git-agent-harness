@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::{Defaults, GahConfig, IssueIntakeMode, Profile, RoutingPolicy};
-use crate::dispatch::{scan_available_tickets, scan_available_tickets_with_dependencies};
+use crate::dispatch::claims::scan_available_tickets;
+use crate::dispatch::scan_available_tickets_with_dependencies;
 use crate::ledger;
 use crate::test_support::{ExecGuard, PathGuard};
 use std::collections::HashMap;

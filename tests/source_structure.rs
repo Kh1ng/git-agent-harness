@@ -38,7 +38,6 @@ fn dispatch_facade_preserves_public_call_paths_and_final_layout() {
     public(git_agent_harness::dispatch::review_budget_exhausted_error);
     public(git_agent_harness::dispatch::review_preflight);
     public(git_agent_harness::dispatch::merge_branch);
-    public(git_agent_harness::dispatch::scan_available_tickets);
     public(git_agent_harness::dispatch::self_check_validation_gate);
     let _ = std::mem::size_of::<git_agent_harness::dispatch::DispatchArgs>();
     let _ = std::mem::size_of::<git_agent_harness::dispatch::ValidationGateError>();

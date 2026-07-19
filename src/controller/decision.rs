@@ -270,6 +270,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             work_id: mr.work_id.clone(),
             branch: mr.branch.clone(),
             mr_url: mr.url.clone(),
+            review_generation: mr.review_generation.clone(),
             reason: match merge_policy {
                 crate::config::MergePolicy::GitlabMwps => format!(
                     "MR on branch '{}' approved by a strong reviewer with CI passing; setting GitLab merge-when-pipeline-succeeds",
@@ -295,6 +296,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             work_id: mr.work_id.clone(),
             branch: mr.branch.clone(),
             mr_url: mr.url.clone(),
+            review_generation: mr.review_generation.clone(),
             reason: format!(
                 "MR on branch '{}' classified {} - reusing existing branch",
                 mr.branch, mr.classification

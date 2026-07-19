@@ -56,6 +56,10 @@ mod tests {
             effective_model: None,
             review_verdict: None,
             review_gate_reason: None,
+            source_sha: None,
+            review_contract_version: crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
+            review_generation: None,
+            review_generation_status: None,
             classification: classification.into(),
             recommended_action: crate::sync::RecommendedAction::RunReview,
         }

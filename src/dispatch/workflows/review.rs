@@ -84,6 +84,13 @@ pub(in crate::dispatch) fn review(
             target.draft,
         ));
     }
+    ledger.review_source_sha = target.source_sha.clone();
+    ledger.review_metadata_fingerprint = target.metadata_fingerprint.clone();
+    ledger.review_contract_version = Some(crate::ledger::REVIEW_CONTRACT_VERSION);
+    ledger.review_generation = crate::ledger::review_generation(
+        ledger.review_source_sha.as_deref(),
+        ledger.review_metadata_fingerprint.as_deref(),
+    );
     let bundle = session_dir.join("review-bundle");
     fs::create_dir_all(&bundle)?;
     fs::write(bundle.join("diff.patch"), &diff_bundle.diff)?;
@@ -189,13 +196,32 @@ pub(in crate::dispatch) fn review(
     // ESCALATORY_REVIEW list. A routine reviewer may legitimately request
     // human help or fail the deterministic evidence gate; that is an input to
     // this bounded second-opinion chain, not an immediate terminal handoff.
-    let escalation_reason =
-        review_escalation_reason(cfg, profile, &args.profile, &target.source_branch);
+    let escalation_reason = review_escalation_reason(
+        cfg,
+        profile,
+        &args.profile,
+        &target.source_branch,
+        ledger.review_generation.as_deref(),
+    );
     let next_reviewer = escalation_reason.and_then(|reason| {
         if reason == "review_output_invalid" {
-            next_review_candidate(cfg, profile, &args.profile, &target.source_branch, None)
+            next_review_candidate(
+                cfg,
+                profile,
+                &args.profile,
+                &target.source_branch,
+                None,
+                ledger.review_generation.as_deref(),
+            )
         } else {
-            next_escalatory_reviewer(cfg, profile, &args.profile, &target.source_branch, None)
+            next_escalatory_reviewer(
+                cfg,
+                profile,
+                &args.profile,
+                &target.source_branch,
+                None,
+                ledger.review_generation.as_deref(),
+            )
         }
     });
     let (requested_backend, requested_model) = match (escalation_reason, next_reviewer.as_ref()) {
@@ -261,13 +287,16 @@ pub(in crate::dispatch) fn review(
             return Ok(());
         }
     }
-    ledger.review_source_sha = target.source_sha.clone();
-    ledger.review_metadata_fingerprint = target.metadata_fingerprint.clone();
     ledger.reviewer_class = Some(reviewer_class.to_string());
 
-    if let Some(block) =
-        check_review_budget(cfg, profile, &args.profile, args.work_id.as_deref(), &route)?
-    {
+    if let Some(block) = check_review_budget(
+        cfg,
+        profile,
+        &args.profile,
+        args.work_id.as_deref(),
+        &route,
+        ledger.review_generation.as_deref(),
+    )? {
         mark_review_budget_exhausted(ledger, &route, &block.reason);
         notify_event(
             cfg,
@@ -686,6 +715,7 @@ pub(in crate::dispatch) fn review(
                     &args.profile,
                     &target.source_branch,
                     Some((&route.effective_backend, route.effective_model.as_deref())),
+                    ledger.review_generation.as_deref(),
                 )
                 .is_some()
             {
@@ -733,6 +763,8 @@ pub(in crate::dispatch) fn review(
                     review_gate_reason: verdict.safety_gate_reason.as_deref(),
                     review_source_sha: ledger.review_source_sha.as_deref(),
                     review_metadata_fingerprint: ledger.review_metadata_fingerprint.as_deref(),
+                    review_contract_version: ledger.review_contract_version,
+                    review_generation: ledger.review_generation.as_deref(),
                     blocking_findings: &verdict.blocking_findings,
                     actionable_findings: &verdict.actionable_findings,
                     non_blocking_findings: &verdict.non_blocking_findings,
@@ -1042,6 +1074,8 @@ fn record_review_output_invalid(
             review_gate_reason: Some(&reason),
             review_source_sha: ledger.review_source_sha.as_deref(),
             review_metadata_fingerprint: ledger.review_metadata_fingerprint.as_deref(),
+            review_contract_version: ledger.review_contract_version,
+            review_generation: ledger.review_generation.as_deref(),
             blocking_findings: &[],
             actionable_findings: &[],
             non_blocking_findings: &[],

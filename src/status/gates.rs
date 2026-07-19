@@ -51,6 +51,7 @@ pub(super) fn policy_approval_still_required(
                 work_id,
                 backend,
                 model,
+                gate.review_generation.as_deref(),
             )
         {
             return false;
@@ -76,6 +77,7 @@ pub(super) fn policy_approval_still_required(
                         work_id,
                         &decision.effective_backend,
                         decision.effective_model.as_deref(),
+                        gate.review_generation.as_deref(),
                     )
             })
     };
@@ -112,6 +114,7 @@ fn review_route_was_already_used(
     work_id: &str,
     backend: &str,
     model: Option<&str>,
+    review_generation: Option<&str>,
 ) -> bool {
     let aliases = ledger::work_id_aliases(work_id);
     let reset_index = entries.iter().rposition(|entry| {
@@ -128,8 +131,8 @@ fn review_route_was_already_used(
         entry.profile == profile_name
             && entry.repo_id == repo_id
             && entry.mode == "review"
-            && entry.review_contract_version.unwrap_or(0)
-                >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
+            && entry.review_contract_version == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
+            && entry.review_generation.as_deref() == review_generation
             && entry
                 .work_id
                 .as_deref()
@@ -181,6 +184,15 @@ pub(super) fn project_effective_mr_gates(
         ) else {
             continue;
         };
+        let review_derived = gate.mode == "review"
+            || (gate.reason_code.as_deref() == Some("stuck_loop_gate")
+                && gate.review_generation.is_some());
+        if review_derived
+            && (gate.review_contract_version != Some(ledger::REVIEW_CONTRACT_VERSION)
+                || gate.review_generation.as_deref() != mr.review_generation.as_deref())
+        {
+            continue;
+        }
         if !policy_approval_still_required(cfg, profile_name, profile, entries, work_id, &gate) {
             continue;
         }
@@ -267,6 +279,10 @@ default_target_branch = "main"
             effective_model: None,
             review_verdict: None,
             review_gate_reason: None,
+            source_sha: None,
+            review_contract_version: ledger::REVIEW_CONTRACT_VERSION,
+            review_generation: None,
+            review_generation_status: None,
             ci_pending: false,
             classification: "NEEDS_REVIEW".into(),
             recommended_action: sync::RecommendedAction::RunReview,
@@ -389,6 +405,7 @@ requires_approval = true
             timestamp: "2026-07-16T00:00:00Z".into(),
             routing_diagnostics: None,
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
+            review_generation: None,
         };
         let availability_path = tmp.path().join("availability.json");
         let _availability_guard =
@@ -409,6 +426,7 @@ requires_approval = true
         used_claude.effective_backend = "claude".into();
         used_claude.effective_model = Some("sonnet".into());
         used_claude.review_verdict = Some("HUMAN_REVIEW".into());
+        used_claude.review_contract_version = Some(ledger::REVIEW_CONTRACT_VERSION);
         let unavailable = AvailabilityState {
             version: 1,
             records: vec![AvailabilityRecord {
@@ -486,6 +504,7 @@ requires_approval = true
         policy_entry.work_id = Some("#650".into());
         policy_entry.human_required = true;
         policy_entry.human_required_reason_code = Some("policy_approval".into());
+        policy_entry.review_contract_version = Some(ledger::REVIEW_CONTRACT_VERSION);
         policy_entry.set_failure(
             crate::ledger::FailureClass::HumanBlocked,
             crate::ledger::FailureStage::Route,
@@ -512,6 +531,7 @@ requires_approval = true
         duplicate.validation_result = Some("skipped_duplicate_review".into());
         duplicate.review_source_sha = Some("same-sha".into());
         duplicate.reviewer_class = Some("escalatory:claude/sonnet".into());
+        duplicate.review_contract_version = Some(ledger::REVIEW_CONTRACT_VERSION);
         let entries = vec![used_claude, policy_entry, duplicate];
         let mut blockers = Vec::new();
         project_effective_mr_gates(
@@ -579,7 +599,6 @@ included_in_quota = true
             message: None,
             mode: "fix".into(),
             timestamp: "2026-07-16T00:00:00Z".into(),
-            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             routing_diagnostics: Some(crate::ledger::RoutingDiagnostics {
                 candidates: vec![crate::ledger::RoutingCandidateDiagnostic {
                     backend: "claude".into(),
@@ -589,6 +608,8 @@ included_in_quota = true
                 }],
                 ..Default::default()
             }),
+            review_contract_version: None,
+            review_generation: None,
         };
 
         assert!(!policy_approval_still_required(
@@ -625,6 +646,7 @@ included_in_quota = true
             mode: "review".into(),
             timestamp: "2026-07-16T00:00:00Z".into(),
             review_contract_version: None, // Pre-bump
+            review_generation: None,
             routing_diagnostics: None,
         };
 
@@ -654,6 +676,7 @@ included_in_quota = true
             mode: "fix".into(),
             timestamp: "2026-07-16T00:00:00Z".into(),
             review_contract_version: None, // Pre-bump
+            review_generation: None,
             routing_diagnostics: None,
         };
 

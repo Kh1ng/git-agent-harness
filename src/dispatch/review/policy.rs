@@ -97,6 +97,7 @@ pub(in crate::dispatch) fn check_review_budget(
     profile_name: &str,
     work_id: Option<&str>,
     route: &RouteDecision,
+    review_generation: Option<&str>,
 ) -> Result<Option<ReviewBudgetBlock>> {
     // Direct branch/MR reviews without a controller-provided ticket identity
     // cannot be attributed safely to a per-ticket budget. Fail open rather
@@ -126,8 +127,8 @@ pub(in crate::dispatch) fn check_review_budget(
             entry.profile == profile_name
                 && entry.repo_id == profile.repo_id
                 && entry.mode == "review"
-                && entry.review_contract_version.unwrap_or(0)
-                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
+                && entry.review_contract_version == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
+                && entry.review_generation.as_deref() == review_generation
                 && !matches!(
                     entry.validation_result.as_deref(),
                     Some("review_budget_exhausted")
@@ -201,6 +202,7 @@ pub(in crate::dispatch) fn review_escalation_reason(
     profile: &Profile,
     profile_name: &str,
     branch: &str,
+    review_generation: Option<&str>,
 ) -> Option<&'static str> {
     let repeated_failure_threshold = profile
         .effective_routing(&cfg.defaults)
@@ -215,8 +217,8 @@ pub(in crate::dispatch) fn review_escalation_reason(
             e.profile == profile_name
                 && e.mode == "review"
                 && e.branch.as_deref() == Some(branch)
-                && e.review_contract_version.unwrap_or(0)
-                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
+                && e.review_contract_version == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
+                && e.review_generation.as_deref() == review_generation
                 // Legacy reviews written before reviewed-SHA persistence
                 // cannot support a safe repair and must be re-runnable. Do
                 // not let them trigger escalation before that migration
@@ -283,6 +285,7 @@ pub(in crate::dispatch) fn next_review_candidate(
     profile_name: &str,
     branch: &str,
     current: Option<(&str, Option<&str>)>,
+    review_generation: Option<&str>,
 ) -> Option<CandidateConfig> {
     let entries = ledger::read_entries(cfg).ok()?;
     let active_entries = active_branch_review_entries(&entries, profile, profile_name, branch);
@@ -292,9 +295,9 @@ pub(in crate::dispatch) fn next_review_candidate(
             entry.profile == profile_name
                 && entry.mode == "review"
                 && entry.branch.as_deref() == Some(branch)
+                && entry.review_contract_version == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
+                && entry.review_generation.as_deref() == review_generation
                 && entry.review_source_sha.is_some()
-                && entry.review_contract_version.unwrap_or(0)
-                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
                 && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
                 && entry.validation_result.as_deref() != Some("cancelled_shutdown")
         })
@@ -334,6 +337,7 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
     profile_name: &str,
     branch: &str,
     current: Option<(&str, Option<&str>)>,
+    review_generation: Option<&str>,
 ) -> Option<CandidateConfig> {
     let entries = ledger::read_entries(cfg).ok()?;
     let active_entries = active_branch_review_entries(&entries, profile, profile_name, branch);
@@ -343,12 +347,13 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
             entry.profile == profile_name
                 && entry.mode == "review"
                 && entry.branch.as_deref() == Some(branch)
+                && entry.review_contract_version
+                    == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
+                && entry.review_generation.as_deref() == review_generation
                 // A SHA-less legacy opinion is not reusable repair context.
                 // Treating its backend as spent would skip directly to the
                 // next (possibly paid) reviewer instead of migrating it.
                 && entry.review_source_sha.is_some()
-                && entry.review_contract_version.unwrap_or(0)
-                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
                 && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
                 // An operator-requested shutdown is not a reviewer opinion
                 // and must remain retryable after the daemon restarts.

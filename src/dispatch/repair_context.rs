@@ -17,11 +17,23 @@ pub(super) struct RepairContext {
     pub reviewer_model: Option<String>,
     pub reviewer_tier: Option<String>,
     pub source_sha: String,
+    pub metadata_fingerprint: String,
+    pub review_contract_version: u32,
+    pub review_generation: String,
     pub blocking_findings: Vec<String>,
     pub non_blocking_findings: Vec<String>,
     pub risk_notes: Vec<String>,
     pub evidence: Vec<String>,
     pub compatibility_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RepairIdentity<'a> {
+    pub profile_name: &'a str,
+    pub repo_id: &'a str,
+    pub branch: &'a str,
+    pub work_id: Option<&'a str>,
+    pub expected_review_generation: Option<&'a str>,
 }
 
 /// Load the latest applicable structured review for this exact repair
@@ -31,18 +43,48 @@ pub(super) struct RepairContext {
 /// backfilled implementation entry, so both are considered.
 pub(super) fn load(
     cfg: &GahConfig,
-    profile_name: &str,
-    repo_id: &str,
-    branch: &str,
-    work_id: Option<&str>,
+    profile: &crate::config::Profile,
+    identity: RepairIdentity<'_>,
     worktree: &Path,
 ) -> Result<RepairContext> {
+    if let Some(expected) = identity.expected_review_generation {
+        let live = current_provider_generation(profile, identity.branch)?;
+        if live.as_deref() != Some(expected) {
+            anyhow::bail!(
+                "repair branch '{}' changed after controller observation: expected review generation '{expected}', live provider generation is '{}'; re-run review before repair",
+                identity.branch,
+                live.as_deref().unwrap_or("unknown")
+            );
+        }
+    }
     let entries = ledger::read_entries(cfg).context("reading repair review context from ledger")?;
-    let context = latest_from_entries(&entries, profile_name, repo_id, branch, work_id)?;
+    let context = latest_from_entries_for_generation(&entries, identity)?;
     ensure_source_is_ancestor(worktree, &context.source_sha)?;
     Ok(context)
 }
 
+fn current_provider_generation(
+    profile: &crate::config::Profile,
+    branch: &str,
+) -> Result<Option<String>> {
+    if !matches!(profile.provider.as_str(), "github" | "gitlab") {
+        return Ok(None);
+    }
+    let target = crate::provider::find_review_target_by_branch(profile, branch)
+        .with_context(|| format!("refreshing live review identity for repair branch '{branch}'"))?;
+    let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+        target.source_sha.as_deref(),
+        target.title.as_deref(),
+        target.body.as_deref(),
+        target.draft,
+    );
+    Ok(crate::ledger::review_generation(
+        target.source_sha.as_deref(),
+        Some(&metadata_fingerprint),
+    ))
+}
+
+#[cfg(test)]
 fn latest_from_entries(
     entries: &[LedgerEntry],
     profile_name: &str,
@@ -50,14 +92,35 @@ fn latest_from_entries(
     branch: &str,
     work_id: Option<&str>,
 ) -> Result<RepairContext> {
-    let aliases = work_id.map(ledger::work_id_aliases);
+    latest_from_entries_for_generation(
+        entries,
+        RepairIdentity {
+            profile_name,
+            repo_id,
+            branch,
+            work_id,
+            expected_review_generation: None,
+        },
+    )
+}
+
+fn latest_from_entries_for_generation(
+    entries: &[LedgerEntry],
+    identity: RepairIdentity<'_>,
+) -> Result<RepairContext> {
+    let aliases = identity.work_id.map(ledger::work_id_aliases);
     let latest = entries
         .iter()
         .filter(|entry| {
-            entry.profile == profile_name
-                && entry.repo_id == repo_id
+            entry.profile == identity.profile_name
+                && entry.repo_id == identity.repo_id
                 && matches!(entry.mode.as_str(), "review" | "fix" | "improve")
-                && entry.branch.as_deref() == Some(branch)
+                && entry.review_contract_version == Some(ledger::REVIEW_CONTRACT_VERSION)
+                && entry.review_generation.is_some()
+                && identity
+                    .expected_review_generation
+                    .is_none_or(|expected| entry.review_generation.as_deref() == Some(expected))
+                && entry.branch.as_deref() == Some(identity.branch)
                 && aliases.as_ref().is_none_or(|aliases| {
                     entry
                         .work_id
@@ -75,10 +138,16 @@ fn latest_from_entries(
         .max_by_key(|entry| entry.timestamp.as_str())
         .with_context(|| {
             format!(
-                "no structured completed review exists for repair branch '{branch}'{}",
-                work_id
+                "no structured completed review exists for repair branch '{}'{}{}",
+                identity.branch,
+                identity
+                    .work_id
                     .map(|id| format!(" and work item '{id}'"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                identity
+                    .expected_review_generation
+                    .map(|generation| format!(" at expected generation '{generation}'"))
+                    .unwrap_or_default(),
             )
         })?;
 
@@ -89,20 +158,36 @@ fn latest_from_entries(
         .unwrap_or_default();
     if !matches!(verdict, "NEEDS_FIX" | "REJECT") {
         anyhow::bail!(
-            "latest review for repair branch '{branch}' has verdict '{verdict}', not NEEDS_FIX/REJECT"
+            "latest review for repair branch '{}' has verdict '{verdict}', not NEEDS_FIX/REJECT",
+            identity.branch
         );
     }
     if latest.review_blocking_findings.is_empty() {
         anyhow::bail!(
-            "latest {verdict} review for repair branch '{branch}' has no structured blocking findings; re-run review before repair"
+            "latest {verdict} review for repair branch '{}' has no structured blocking findings; re-run review before repair",
+            identity.branch
         );
     }
-    let source_sha = latest
-        .review_source_sha
+    let source_sha = latest.review_source_sha.clone().with_context(|| {
+        format!(
+            "latest review for repair branch '{}' has no source SHA",
+            identity.branch
+        )
+    })?;
+    let metadata_fingerprint = latest
+        .review_metadata_fingerprint
         .clone()
-        .with_context(|| format!("latest review for repair branch '{branch}' has no source SHA"))?;
+        .with_context(|| {
+            format!(
+                "latest review for repair branch '{}' has no metadata fingerprint",
+                identity.branch
+            )
+        })?;
     let recorded_work_id = latest.work_id.clone().with_context(|| {
-        format!("latest review for repair branch '{branch}' has no work-item identity")
+        format!(
+            "latest review for repair branch '{}' has no work-item identity",
+            identity.branch
+        )
     })?;
 
     Ok(RepairContext {
@@ -118,6 +203,9 @@ fn latest_from_entries(
             .or_else(|| latest.effective_model.clone()),
         reviewer_tier: latest.reviewer_tier.clone(),
         source_sha,
+        metadata_fingerprint,
+        review_contract_version: latest.review_contract_version.unwrap_or_default(),
+        review_generation: latest.review_generation.clone().unwrap_or_default(),
         blocking_findings: latest.review_blocking_findings.clone(),
         non_blocking_findings: latest.review_non_blocking_findings.clone(),
         risk_notes: latest.review_risk_notes.clone(),
@@ -153,13 +241,14 @@ pub(super) fn append_to_prompt(prompt: &mut String, context: &RepairContext) {
          Address every blocking finding; do not infer a different task from branch history.\n\n",
     );
     prompt.push_str(&format!(
-        "Work item: {}\nVerdict: {}\nReviewer: {} / {} ({})\nReviewed source SHA: {}\n",
+        "Work item: {}\nVerdict: {}\nReviewer: {} / {} ({})\nReviewed source SHA: {}\nReview generation: {}\n",
         indent_untrusted_text(&context.work_id),
         indent_untrusted_text(&context.verdict),
         indent_untrusted_text(&context.reviewer_backend),
         indent_untrusted_text(context.reviewer_model.as_deref().unwrap_or("unknown")),
         indent_untrusted_text(context.reviewer_tier.as_deref().unwrap_or("unknown tier")),
         indent_untrusted_text(&context.source_sha),
+        indent_untrusted_text(&context.review_generation),
     ));
     append_list(prompt, "Blocking findings", &context.blocking_findings);
     append_list(
@@ -210,6 +299,12 @@ mod tests {
         entry.work_id = Some(work_id.to_string());
         entry.review_verdict = Some("NEEDS_FIX".to_string());
         entry.review_source_sha = Some("abc123".to_string());
+        entry.review_metadata_fingerprint = Some("sha256:test".to_string());
+        entry.review_contract_version = Some(crate::ledger::REVIEW_CONTRACT_VERSION);
+        entry.review_generation = crate::ledger::review_generation(
+            entry.review_source_sha.as_deref(),
+            entry.review_metadata_fingerprint.as_deref(),
+        );
         entry.reviewer_backend = Some("agy".to_string());
         entry.reviewer_model = Some("sonnet".to_string());
         entry.review_blocking_findings = vec!["src/lib.rs: fix retry".to_string()];
@@ -231,6 +326,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected.blocking_findings, ["latest blocker"]);
+    }
+
+    #[test]
+    fn controller_expected_generation_cannot_reuse_newer_or_older_review_findings() {
+        let expected = review_entry("gah/fix", "#493", "2026-01-01T00:00:00Z");
+        let expected_generation = expected.review_generation.clone().unwrap();
+        let mut different = review_entry("gah/fix", "#493", "2026-01-02T00:00:00Z");
+        different.review_source_sha = Some("different-sha".into());
+        different.review_metadata_fingerprint = Some("sha256:different".into());
+        different.review_generation = crate::ledger::review_generation(
+            different.review_source_sha.as_deref(),
+            different.review_metadata_fingerprint.as_deref(),
+        );
+        different.review_blocking_findings = vec!["stale blocker".into()];
+
+        let selected = latest_from_entries_for_generation(
+            &[expected, different],
+            RepairIdentity {
+                profile_name: "gah",
+                repo_id: "repo",
+                branch: "gah/fix",
+                work_id: Some("#493"),
+                expected_review_generation: Some(&expected_generation),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selected.review_generation, expected_generation);
+        assert_eq!(selected.blocking_findings, ["src/lib.rs: fix retry"]);
+    }
+
+    #[test]
+    fn missing_controller_generation_fails_closed() {
+        let entry = review_entry("gah/fix", "#493", "2026-01-01T00:00:00Z");
+        let error = latest_from_entries_for_generation(
+            &[entry],
+            RepairIdentity {
+                profile_name: "gah",
+                repo_id: "repo",
+                branch: "gah/fix",
+                work_id: Some("#493"),
+                expected_review_generation: Some("review-v1:missing:sha256:missing"),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("at expected generation"));
     }
 
     #[test]
@@ -310,6 +452,12 @@ mod tests {
         entry.reviewer_model = Some("claude-sonnet-4".to_string());
         entry.reviewer_tier = Some("strong".to_string());
         entry.review_source_sha = Some(source_sha.clone());
+        entry.review_metadata_fingerprint = Some("sha256:test".to_string());
+        entry.review_contract_version = Some(crate::ledger::REVIEW_CONTRACT_VERSION);
+        entry.review_generation = crate::ledger::review_generation(
+            entry.review_source_sha.as_deref(),
+            entry.review_metadata_fingerprint.as_deref(),
+        );
         entry.review_blocking_findings = vec!["src/lib.rs: fix retry".to_string()];
         entry.review_non_blocking_findings = vec!["consider a smaller helper".to_string()];
         entry.review_risk_notes = vec!["retry state can be lost".to_string()];
@@ -318,10 +466,14 @@ mod tests {
 
         let context = load(
             &cfg,
-            "test",
-            &profile.repo_id,
-            "gah/fix",
-            Some("#493"),
+            &profile,
+            RepairIdentity {
+                profile_name: "test",
+                repo_id: &profile.repo_id,
+                branch: "gah/fix",
+                work_id: Some("#493"),
+                expected_review_generation: None,
+            },
             &repo_path,
         )
         .unwrap();

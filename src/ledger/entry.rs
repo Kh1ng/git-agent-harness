@@ -260,10 +260,29 @@ pub struct RoutingCandidateDiagnostic {
 // v5 adds typed, machine-validated actionable review findings. The field also
 // defaults empty so historical review records remain readable but cannot
 // silently become repair instructions.
-pub const LEDGER_SCHEMA_VERSION: u32 = 5;
-/// Review contract version tracked independently from raw ledger schema.
-/// Bumping this invalidates historical review-derived gates/budgets/counters.
+// v6 adds an independently-versioned review contract and source/metadata
+// generation. Ledger schema and review policy deliberately advance separately.
+pub const LEDGER_SCHEMA_VERSION: u32 = 6;
+
+/// Version of the machine-enforced review output and lifecycle policy. Bump
+/// this when an older review opinion, retry budget, or derived human gate must
+/// not remain authoritative under the new contract. This is intentionally not
+/// the ledger wire-schema version.
 pub const CURRENT_REVIEW_CONTRACT_VERSION: u32 = 1;
+/// Short compatibility name used by the generation-aware lifecycle modules.
+/// Both names identify the same independently-versioned review contract.
+pub const REVIEW_CONTRACT_VERSION: u32 = CURRENT_REVIEW_CONTRACT_VERSION;
+
+pub fn review_generation(
+    source_sha: Option<&str>,
+    metadata_fingerprint: Option<&str>,
+) -> Option<String> {
+    let source_sha = source_sha.filter(|value| !value.trim().is_empty())?;
+    let metadata_fingerprint = metadata_fingerprint.filter(|value| !value.trim().is_empty())?;
+    Some(format!(
+        "review-v{CURRENT_REVIEW_CONTRACT_VERSION}:{source_sha}:{metadata_fingerprint}"
+    ))
+}
 
 fn default_ledger_schema_version() -> u32 {
     1
@@ -273,11 +292,6 @@ fn default_ledger_schema_version() -> u32 {
 pub struct LedgerEntry {
     #[serde(default = "default_ledger_schema_version")]
     pub schema_version: u32,
-    /// TICKET-711: contract version for review verdicts, cycle accounting,
-    /// stuck-loop fingerprints, policy holds, and repair-budget decisions.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub review_contract_version: Option<u32>,
     pub timestamp: String,
     pub session_id: Option<String>,
     pub profile: String,
@@ -354,6 +368,15 @@ pub struct LedgerEntry {
     /// intentionally re-reviewed before their verdict can drive a repair.
     #[serde(default)]
     pub review_metadata_fingerprint: Option<String>,
+    /// Independent review-policy/output contract version. `None` means the
+    /// record predates versioned review authority and is telemetry only.
+    #[serde(default)]
+    pub review_contract_version: Option<u32>,
+    /// Exact review lifecycle generation: contract + source SHA + provider
+    /// metadata fingerprint. Review-derived gates and budgets are authoritative
+    /// only while this matches the active MR generation.
+    #[serde(default)]
+    pub review_generation: Option<String>,
     /// Authority class (strong/standard/weak/escalatory) of the reviewer.
     #[serde(default)]
     pub reviewer_class: Option<String>,
@@ -467,7 +490,6 @@ impl LedgerEntry {
                 .format(&Rfc3339)
                 .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
             schema_version: LEDGER_SCHEMA_VERSION,
-            review_contract_version: Some(CURRENT_REVIEW_CONTRACT_VERSION),
             session_id,
             profile: profile_name.to_string(),
             display_name: profile.display_name.clone(),
@@ -505,6 +527,8 @@ impl LedgerEntry {
             reviewer_tier: None,
             review_source_sha: None,
             review_metadata_fingerprint: None,
+            review_contract_version: None,
+            review_generation: None,
             reviewer_class: None,
             review_gate_reason: None,
             review_blocking_findings: Vec::new(),
@@ -563,7 +587,6 @@ impl LedgerEntry {
                 .format(&Rfc3339)
                 .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
             schema_version: LEDGER_SCHEMA_VERSION,
-            review_contract_version: Some(CURRENT_REVIEW_CONTRACT_VERSION),
             session_id: None,
             profile: profile_name.to_string(),
             display_name: profile.display_name.clone(),
@@ -601,6 +624,8 @@ impl LedgerEntry {
             reviewer_tier: None,
             review_source_sha: None,
             review_metadata_fingerprint: None,
+            review_contract_version: None,
+            review_generation: None,
             reviewer_class: None,
             review_gate_reason: None,
             review_blocking_findings: Vec::new(),

@@ -38,9 +38,9 @@ pub(crate) use self::attempts::routing_runtime_state_from_entries;
 
 use self::claims::check_duplicate_work;
 pub(crate) use self::claims::duplicate_work_error;
-pub(crate) use self::claims::scan_available_tickets_with_dependencies;
 #[allow(unused_imports)]
-pub use self::claims::{merge_branch, scan_available_tickets};
+pub use self::claims::merge_branch;
+pub(crate) use self::claims::scan_available_tickets_with_dependencies;
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
 
 /// A parallel sibling reached routing after another worker reserved the only
@@ -89,13 +89,7 @@ pub struct DispatchArgs {
     pub branch: Option<String>,
     pub mr: Option<String>,
     pub current_branch: bool,
-    /// Reserved for future per-run cost/turn budget enforcement; not yet read.
-    #[allow(dead_code)]
-    pub budget: u32,
     pub dry_run: bool,
-    /// Already consumed by the caller to load `cfg`; kept on the struct for CLI plumbing symmetry.
-    #[allow(dead_code)]
-    pub config_path: Option<String>,
     pub oh_profile: Option<String>,
     pub model: Option<String>,
     pub retries: u32,
@@ -114,8 +108,11 @@ pub struct DispatchArgs {
     /// doesn't need a second escalation mechanism.
     pub escalate: bool,
     /// TICKET-118: for FixMr action, reuse an existing branch instead of creating a new one.
-    #[allow(dead_code)]
     pub existing_branch: Option<String>,
+    /// Exact review generation selected by the controller for an existing-
+    /// branch repair. Direct CLI dispatches leave this unset; controller
+    /// FixMr actions require an exact match during repair-context preflight.
+    pub expected_review_generation: Option<String>,
     /// TICKET-073: deliberately bypass the fresh-worktree self-verification of
     /// a profile's `validation_commands`. Intended only for recovering from a
     /// known-broken config after the operator has acknowledged the failure.
@@ -123,7 +120,6 @@ pub struct DispatchArgs {
     /// Distinguishes dispatch purpose for ledger persistence: `initial`,
     /// `post_review_repair`, `review`, or `stuck_loop_gate`.  The retry cap
     /// counts only `post_review_repair` entries.
-    #[allow(dead_code)]
     pub dispatch_reason: Option<String>,
     /// Controller-provided work identity, especially important for reviews
     /// that do not resolve a ticket file during dispatch.

@@ -294,9 +294,6 @@ fn build_snapshot_inner(
 
     let mut errors = Vec::new();
 
-    // TICKET-118: Count fix attempts per branch from ledger entries
-    let fix_attempt_counts =
-        sync::count_fix_attempts_per_branch_for_scope(entries, profile_name, &profile.repo_id);
     // TICKET-127: Count merge attempts per branch for the auto-merge retry cap
     let merge_attempt_counts =
         sync::count_merge_attempts_per_branch_for_scope(entries, profile_name, &profile.repo_id);
@@ -330,6 +327,15 @@ fn build_snapshot_inner(
             });
         }
     }
+    // Review-derived repair budgets are scoped to the exact active contract,
+    // source SHA, and metadata generation. Historical attempts remain in the
+    // ledger for telemetry but cannot exhaust a fresh generation's budget.
+    let fix_attempt_counts = sync::count_current_fix_attempts_for_mrs(
+        entries,
+        profile_name,
+        &profile.repo_id,
+        &merge_requests,
+    );
 
     // 2. Availability State
     let state_path = availability::resolve_state_path();
@@ -1157,6 +1163,7 @@ default_target_branch = "main"
             None,
         );
         entry.work_id = Some("TICKET-300".into());
+        entry.mode = "fix".into();
         entry.human_required = true;
         entry.human_required_reason_code = Some("stuck_loop_gate".into());
         crate::ledger::append(&cfg, &entry).unwrap();

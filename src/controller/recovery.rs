@@ -183,9 +183,12 @@ pub(super) fn detect_stuck_loop(
     profile_name: &str,
     action: &NextAction,
     reset_after: Option<&str>,
+    review_generation: Option<&str>,
 ) -> Option<String> {
     let work_id = action.work_id()?;
     let fingerprint_prefix = format!("{}:", action.kind());
+    let generation_token =
+        review_generation.map(|generation| format!("review_generation={generation}"));
     let mut consecutive = 0;
     for event in events.iter().rev() {
         if event.profile.as_deref() != Some(profile_name) {
@@ -211,6 +214,14 @@ pub(super) fn detect_stuck_loop(
             break;
         }
         if event.event_type != "action_decided" {
+            continue;
+        }
+        if generation_token.as_deref().is_some_and(|generation| {
+            !event
+                .details
+                .split_whitespace()
+                .any(|part| part == generation)
+        }) {
             continue;
         }
         if event.details.starts_with(&fingerprint_prefix) {
@@ -269,16 +280,25 @@ pub(super) fn record_action_events(
     profile_name: &str,
     original_action: &NextAction,
     effective_action: &NextAction,
+    review_generation: Option<&str>,
 ) -> Result<()> {
     let original_reason_code = original_action.human_required_reason_code();
     let effective_reason_code = effective_action.human_required_reason_code();
 
+    let generation_suffix = review_generation
+        .map(|generation| format!(" review_generation={generation}"))
+        .unwrap_or_default();
     crate::events::record_with_reason_code(
         cfg,
         crate::events::EventType::ActionDecided,
         Some(profile_name),
         original_action.work_id(),
-        format!("{}: {}", original_action.kind(), original_action.reason()),
+        format!(
+            "{}: {}{}",
+            original_action.kind(),
+            original_action.reason(),
+            generation_suffix
+        ),
         original_reason_code,
     )?;
     if original_action != effective_action {
@@ -288,10 +308,11 @@ pub(super) fn record_action_events(
             Some(profile_name),
             original_action.work_id(),
             format!(
-                "{} -> {}: {}",
+                "{} -> {}: {}{}",
                 original_action.kind(),
                 effective_action.kind(),
-                effective_action.reason()
+                effective_action.reason(),
+                generation_suffix
             ),
             effective_reason_code,
         )?;
@@ -408,11 +429,29 @@ pub(super) fn defer_if_branch_attached(
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_stuck_loop, latest_clear_attempts_timestamp, recently_capacity_deferred_work_ids,
-        record_action_events, resolve_attached_branch_conflicts, NextAction, STUCK_LOOP_THRESHOLD,
+        latest_clear_attempts_timestamp, recently_capacity_deferred_work_ids,
+        resolve_attached_branch_conflicts, NextAction, STUCK_LOOP_THRESHOLD,
     };
     use crate::config::{Defaults, GahConfig, RoutingPolicy};
     use crate::events::ControllerEvent;
+
+    fn detect_stuck_loop(
+        events: &[ControllerEvent],
+        profile_name: &str,
+        action: &NextAction,
+        reset_after: Option<&str>,
+    ) -> Option<String> {
+        super::detect_stuck_loop(events, profile_name, action, reset_after, None)
+    }
+
+    fn record_action_events(
+        cfg: &GahConfig,
+        profile_name: &str,
+        original_action: &NextAction,
+        effective_action: &NextAction,
+    ) -> anyhow::Result<()> {
+        super::record_action_events(cfg, profile_name, original_action, effective_action, None)
+    }
     use crate::worktree::BranchWorktreeAttachment;
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -423,6 +462,7 @@ mod tests {
             work_id: Some(work_id.to_string()),
             branch: branch.to_string(),
             mr_url: None,
+            review_generation: None,
             reason: "test repair".to_string(),
         }
     }
@@ -515,6 +555,7 @@ mod tests {
             work_id: Some("TICKET-500".into()),
             branch: "gah/real-1".into(),
             mr_url: None,
+            review_generation: None,
             reason: "test".into(),
         }
     }

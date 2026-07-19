@@ -164,6 +164,10 @@ export interface MergeRequest {
   review_verdict?: string | null;
   /** Deterministic reason GAH made a reviewer result non-mergeable. */
   review_gate_reason?: string | null;
+  source_sha?: string | null;
+  review_contract_version: number;
+  review_generation?: string | null;
+  review_generation_status?: string | null;
   classification: string;
   recommended_action: RecommendedAction;
 }
@@ -561,6 +565,8 @@ export interface LedgerEntry {
   reviewer_backend?: string | null;
   reviewer_model?: string | null;
   review_gate_reason?: string | null;
+  review_contract_version?: number | null;
+  review_generation?: string | null;
   review_timeout_class?: string | null;
   review_idle_timeout_seconds?: number | null;
   review_hard_timeout_seconds?: number | null;
