@@ -674,6 +674,36 @@ fn build_snapshot_inner(
         }
     }
 
+    // Same projection as above, for the merge side: an approved, non-draft,
+    // CI-passing MR whose merge_attempt_counts reach AUTO_RETRY_CAP is
+    // returned as HumanRequired(MergeRetryCapExceeded) by decide_next_action
+    // (decision.rs), but under a non-StopForHuman merge policy that decision
+    // never reaches the surfaced HumanRequired branch -- it silently no-ops
+    // every tick instead. Without this projection an already-approved,
+    // green-CI MR sits permanently unmerged and invisible in `gah status`.
+    for mr in &merge_requests {
+        if mr.classification == "READY_FOR_HUMAN" && !mr.draft && mr.ci_passed {
+            let attempts = merge_attempt_counts.get(&mr.branch).copied().unwrap_or(0);
+            if attempts >= crate::controller::AUTO_RETRY_CAP {
+                blocked_work_items.push(Blocker {
+                    kind: "human_required".into(),
+                    reason: Some("merge_retry_cap_exceeded".into()),
+                    message: Some(format!(
+                        "MR on branch '{}' classified {} but merge retry cap ({}) exceeded",
+                        mr.branch,
+                        mr.classification,
+                        crate::controller::AUTO_RETRY_CAP
+                    )),
+                    backend: None,
+                    model: None,
+                    until: None,
+                    source_reference: Some(mr.branch.clone()),
+                    reason_code: Some(HumanRequiredReason::MergeRetryCapExceeded.as_str().into()),
+                });
+            }
+        }
+    }
+
     // TICKET-157: build the per-backend "configured for this profile" signal.
     // Only backends with a real Rust implementation are listed. `configured`
     // is true when the profile sets up this backend (an explicit executable
