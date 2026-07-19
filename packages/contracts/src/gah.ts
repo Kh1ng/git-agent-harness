@@ -228,6 +228,16 @@ export interface ActiveClaim {
   age_seconds: number;
 }
 
+export interface PmParentStatus {
+  work_id: string;
+  source_issue_number: string;
+  plan_fingerprint: string;
+  child_issue_numbers: string[];
+  open_child_count: number;
+  completed: boolean;
+  reconciled: boolean;
+}
+
 export interface StatusSnapshot {
   schema_version: number;
   review_contract_version: number;
@@ -255,6 +265,13 @@ export interface StatusSnapshot {
   errors: StatusError[];
   available_tickets: AvailableTicket[];
   active_claims: ActiveClaim[];
+  /** Published PM parents and the current provider-native state of their
+   * exact child issue identities. */
+  pm_parent_states: PmParentStatus[];
+  /** Failed PM planning/publication attempts, keyed by native work ID. */
+  pm_decomposition_attempt_counts: Record<string, number>;
+  /** Effective bounded retry ceiling for PM decomposition. */
+  pm_max_attempts: number;
   fix_attempt_counts: Record<string, number>;
   merge_attempt_counts: Record<string, number>;
   /** Work IDs currently under an out-of-band manager review hold. These
