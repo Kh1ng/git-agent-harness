@@ -583,6 +583,44 @@ exit 0
 }
 
 #[test]
+fn gitlab_source_issue_comment_is_idempotent() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        r#"#!/bin/sh
+case "$*" in
+  *"--method GET"*)
+    if [ -f "$0.accepted" ]; then
+      printf '[{"body":"already satisfied"}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  *"--method POST"*)
+    : > "$0.accepted"
+    echo post >> "$0.posts"
+    printf '{}\n'
+    ;;
+  *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    super::post_issue_comment(&gitlab_profile(), "42", "already satisfied").unwrap();
+    super::post_issue_comment(&gitlab_profile(), "42", "already satisfied").unwrap();
+
+    assert_eq!(
+        fs::read_to_string(bin_dir.join("glab.posts")).unwrap(),
+        "post\n"
+    );
+}
+
+#[test]
 fn github_repaired_state_removes_needs_fix_and_preserves_unrelated_labels() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = TempDir::new().unwrap();
