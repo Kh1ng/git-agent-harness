@@ -34,6 +34,26 @@ pub enum AvailabilityAction {
     },
 }
 
+/// Explicit product-manager publication operations. Planning and provider
+/// mutation are deliberately separate commands so a model response can never
+/// create issues merely by completing a `dispatch --mode pm` run.
+#[derive(Subcommand)]
+pub enum PmCommands {
+    /// Publish a validated PM plan artifact as native provider issues.
+    Publish {
+        #[arg(long)]
+        profile: String,
+        /// Path to the `pm-plan-v1.json` artifact produced by PM dispatch.
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        /// Resolve and validate the publication without provider writes.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Inspect or set global GAH config defaults (cross-profile facts such as
@@ -268,6 +288,11 @@ pub enum Commands {
         /// genuine `VALIDATION GATE FAILED` error.
         #[arg(long, default_value_t = false)]
         skip_validation_gate: bool,
+    },
+    /// Validate or explicitly publish product-manager decomposition plans.
+    Pm {
+        #[command(subcommand)]
+        command: PmCommands,
     },
     /// Interactive terminal UI: observe state, confirm and run the one
     /// already-decided next action. Does not let you pick an arbitrary

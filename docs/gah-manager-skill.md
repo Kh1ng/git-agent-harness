@@ -48,12 +48,16 @@ maintenance.
 
 ## GAH CLI Toolchain
 
-### PM mode — ticket decomposition
+### PM mode — provider-native work decomposition
 ```bash
-gah dispatch --profile <name> --mode pm --target "<high level issue>"
+gah dispatch --profile <name> --mode pm --target "#<provider issue number>"
+gah pm publish --profile <name> --plan <session>/pm-plan-v1.json --dry-run
+gah pm publish --profile <name> --plan <session>/pm-plan-v1.json
 ```
-Requires `docs/MANAGER_MEMORY.md` to exist in the target repo (hard failure
-otherwise). Writes validated, deduped tickets to `docs/tickets/TICKET-NNN-<slug>.md`.
+Planning writes only a validated JSON artifact; it never mutates the provider.
+Publication is a separate explicit command. It creates idempotent native
+GitHub/GitLab child issues, retains dependency metadata, applies only configured
+labels that already exist, and never invents `TICKET-NNN` aliases.
 
 ### Fix / improve mode — implementation
 

@@ -416,6 +416,20 @@ pub fn run() -> Result<()> {
             controller::run_dispatch_and_record(&cfg, "dispatch", None, &args)?;
         }
 
+        Commands::Pm { command } => match command {
+            PmCommands::Publish {
+                profile,
+                plan,
+                config_path,
+                dry_run,
+            } => {
+                let cfg = config::load(config_path.as_deref())?;
+                let resolved_config_path = config::resolve_config_path(config_path.as_deref());
+                let _lock = controller::acquire_profile_lock(&profile, &resolved_config_path)?;
+                dispatch::publish_pm_plan(&cfg, &profile, &plan, dry_run)?;
+            }
+        },
+
         Commands::Tui {
             profile,
             config_path,

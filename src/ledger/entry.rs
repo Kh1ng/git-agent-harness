@@ -353,7 +353,7 @@ pub struct RoutingCandidateDiagnostic {
 // silently become repair instructions.
 // v6 adds an independently-versioned review contract and source/metadata
 // generation. Ledger schema and review policy deliberately advance separately.
-pub const LEDGER_SCHEMA_VERSION: u32 = 6;
+pub const LEDGER_SCHEMA_VERSION: u32 = 7;
 
 /// Version of the machine-enforced review output and lifecycle policy. Bump
 /// this when an older review opinion, retry budget, or derived human gate must
@@ -515,6 +515,15 @@ pub struct LedgerEntry {
     pub mr_attempted: bool,
     pub mr_created: bool,
     pub mr_url: Option<String>,
+    /// Generic provider-write telemetry used by operations that are not merge
+    /// requests (for example PM child issue publication). Values are
+    /// secret-safe enums/URLs and remain optional for historical entries.
+    #[serde(default)]
+    pub provider_mutation_kind: Option<String>,
+    #[serde(default)]
+    pub provider_mutation_status: Option<String>,
+    #[serde(default)]
+    pub provider_mutation_url: Option<String>,
     pub files_changed: Option<u32>,
     pub insertions: Option<u32>,
     pub deletions: Option<u32>,
@@ -639,6 +648,9 @@ impl LedgerEntry {
             mr_attempted: false,
             mr_created: false,
             mr_url: None,
+            provider_mutation_kind: None,
+            provider_mutation_status: None,
+            provider_mutation_url: None,
             files_changed: None,
             insertions: None,
             deletions: None,
@@ -736,6 +748,9 @@ impl LedgerEntry {
             mr_attempted: false,
             mr_created: false,
             mr_url: None,
+            provider_mutation_kind: None,
+            provider_mutation_status: None,
+            provider_mutation_url: None,
             files_changed: None,
             insertions: None,
             deletions: None,

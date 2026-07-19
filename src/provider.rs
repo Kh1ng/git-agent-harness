@@ -6,6 +6,9 @@ use std::thread;
 use std::time::Duration;
 use url::Url;
 
+mod relations;
+pub(crate) use relations::{link_provider_child, link_provider_dependency};
+
 const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
     "gah-needs-fix",
     "gah-ready-for-human",
@@ -181,6 +184,249 @@ pub fn provider_command(name: &str) -> Command {
 pub struct MrResult {
     pub url: String,
     pub id: String,
+}
+
+/// Secret-safe provider issue identity used by PM publication. `id` is the
+/// provider's opaque database/node identifier; `number` is the project-local
+/// issue number operators see in URLs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderIssue {
+    pub(crate) id: String,
+    pub(crate) number: String,
+    pub(crate) url: String,
+    pub(crate) state: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) labels: Vec<String>,
+}
+
+fn provider_issue_from_value(provider: &str, value: &serde_json::Value) -> Result<ProviderIssue> {
+    let (number, url, body) = match provider {
+        "github" => (
+            value["number"].as_u64().map(|v| v.to_string()),
+            value["html_url"].as_str(),
+            value["body"].as_str().unwrap_or_default(),
+        ),
+        "gitlab" => (
+            value["iid"].as_u64().map(|v| v.to_string()),
+            value["web_url"].as_str(),
+            value["description"].as_str().unwrap_or_default(),
+        ),
+        other => anyhow::bail!("unsupported provider: {other}"),
+    };
+    let id = value["id"]
+        .as_u64()
+        .map(|v| v.to_string())
+        .or_else(|| value["id"].as_str().map(ToOwned::to_owned))
+        .ok_or_else(|| anyhow::anyhow!("provider issue response missing id"))?;
+    let labels = value["labels"]
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| {
+                    label
+                        .as_str()
+                        .or_else(|| label["name"].as_str())
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ProviderIssue {
+        id,
+        number: number.ok_or_else(|| anyhow::anyhow!("provider issue response missing number"))?,
+        url: url
+            .ok_or_else(|| anyhow::anyhow!("provider issue response missing URL"))?
+            .to_string(),
+        state: value["state"].as_str().unwrap_or("unknown").to_string(),
+        title: value["title"].as_str().unwrap_or_default().to_string(),
+        body: body.to_string(),
+        labels,
+    })
+}
+
+fn github_json_api(
+    _profile: &Profile,
+    method: &str,
+    endpoint: &str,
+    fields: &[(&str, &str)],
+) -> Result<serde_json::Value> {
+    let mut command = provider_command("gh");
+    command.args(["api", "--method", method, endpoint]);
+    for (name, value) in fields {
+        command.args(["-f", &format!("{name}={value}")]);
+    }
+    let out = command.output().context("gh api issue operation")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh api issue operation failed for {endpoint}: {}",
+            redacted_provider_output(&out)
+        );
+    }
+    serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("parsing GitHub API response for {endpoint}"))
+}
+
+pub(crate) fn get_provider_issue(profile: &Profile, number: &str) -> Result<ProviderIssue> {
+    let value = match profile.provider.as_str() {
+        "github" => github_json_api(
+            profile,
+            "GET",
+            &format!("repos/{}/issues/{number}", profile.repo),
+            &[],
+        )?,
+        "gitlab" => {
+            let project_id = profile
+                .provider_project_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            gitlab_api(
+                profile,
+                &format!("projects/{project_id}/issues/{number}"),
+                "GET",
+                &[],
+            )?
+        }
+        other => anyhow::bail!("unsupported provider: {other}"),
+    };
+    provider_issue_from_value(&profile.provider, &value)
+}
+
+pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssue>> {
+    const PAGE_SIZE: usize = 100;
+    const MAX_PAGES: usize = 100;
+    let mut issues = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let value = match profile.provider.as_str() {
+            "github" => github_json_api(
+                profile,
+                "GET",
+                &format!(
+                    "repos/{}/issues?state=all&per_page={PAGE_SIZE}&page={page}",
+                    profile.repo
+                ),
+                &[],
+            )?,
+            "gitlab" => {
+                let project_id = profile.provider_project_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("profile missing provider_project_id for gitlab")
+                })?;
+                gitlab_api(
+                    profile,
+                    &format!(
+                        "projects/{project_id}/issues?scope=all&state=all&per_page={PAGE_SIZE}&page={page}"
+                    ),
+                    "GET",
+                    &[],
+                )?
+            }
+            other => anyhow::bail!("unsupported provider: {other}"),
+        };
+        let page_values = value
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("provider issue listing was not an array"))?;
+        for value in page_values {
+            if profile.provider == "github" && value.get("pull_request").is_some() {
+                continue;
+            }
+            issues.push(provider_issue_from_value(&profile.provider, value)?);
+        }
+        if page_values.len() < PAGE_SIZE {
+            return Ok(issues);
+        }
+    }
+    anyhow::bail!(
+        "provider issue listing reached {} pages; refusing an incomplete idempotency snapshot",
+        MAX_PAGES
+    )
+}
+
+pub(crate) fn list_provider_label_names(profile: &Profile) -> Result<Vec<String>> {
+    const PAGE_SIZE: usize = 100;
+    const MAX_PAGES: usize = 100;
+    let mut labels = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let value = match profile.provider.as_str() {
+            "github" => github_json_api(
+                profile,
+                "GET",
+                &format!(
+                    "repos/{}/labels?per_page={PAGE_SIZE}&page={page}",
+                    profile.repo
+                ),
+                &[],
+            )?,
+            "gitlab" => {
+                let project_id = profile.provider_project_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("profile missing provider_project_id for gitlab")
+                })?;
+                gitlab_api(
+                    profile,
+                    &format!("projects/{project_id}/labels?per_page={PAGE_SIZE}&page={page}"),
+                    "GET",
+                    &[],
+                )?
+            }
+            other => anyhow::bail!("unsupported provider: {other}"),
+        };
+        let page_values = value
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("provider label listing was not an array"))?;
+        labels.extend(
+            page_values
+                .iter()
+                .filter_map(|value| value["name"].as_str().map(ToOwned::to_owned)),
+        );
+        if page_values.len() < PAGE_SIZE {
+            return Ok(labels);
+        }
+    }
+    anyhow::bail!(
+        "provider label listing reached {} pages; refusing an incomplete taxonomy snapshot",
+        MAX_PAGES
+    )
+}
+
+pub(crate) fn create_provider_issue(
+    profile: &Profile,
+    title: &str,
+    body: &str,
+    labels: &[String],
+) -> Result<ProviderIssue> {
+    let title = crate::redact::redact(title);
+    let body = crate::redact::redact(body);
+    let value = match profile.provider.as_str() {
+        "github" => {
+            let mut fields = vec![("title", title.as_str()), ("body", body.as_str())];
+            fields.extend(labels.iter().map(|label| ("labels[]", label.as_str())));
+            github_json_api(
+                profile,
+                "POST",
+                &format!("repos/{}/issues", profile.repo),
+                &fields,
+            )?
+        }
+        "gitlab" => {
+            let project_id = profile
+                .provider_project_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            let labels = labels.join(",");
+            let mut fields = vec![("title", title.as_str()), ("description", body.as_str())];
+            if !labels.is_empty() {
+                fields.push(("labels", labels.as_str()));
+            }
+            gitlab_api(
+                profile,
+                &format!("projects/{project_id}/issues"),
+                "POST",
+                &fields,
+            )?
+        }
+        other => anyhow::bail!("unsupported provider: {other}"),
+    };
+    provider_issue_from_value(&profile.provider, &value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
