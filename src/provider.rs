@@ -195,6 +195,9 @@ pub struct ReviewTarget {
     pub body: Option<String>,
     pub draft: bool,
     pub ci_status: Option<String>,
+    /// GitLab mergeability state (for the same target), kept separate from
+    /// CI/pipeline status so draft/mergeability isn't misread as `ci:passed`.
+    pub merge_status: Option<String>,
     /// Immutable source commit that the reviewer inspected. Optional so
     /// older provider responses and local/fallback targets remain valid.
     pub source_sha: Option<String>,
@@ -847,7 +850,13 @@ fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<Rev
         .as_array()
         .and_then(|items| items.first())
         .ok_or_else(|| anyhow::anyhow!("no open GitLab MR found for branch '{}'", branch))?;
-    gitlab_target_from_value(first)
+    let mut target = gitlab_target_from_value(first)?;
+    // Extract the raw iid string directly from the response value; this
+    // ensures the pipelines lookup always uses the raw MR iid even if the
+    // representation inside `ReviewTarget::id` is changed in the future.
+    let iid = first["iid"].to_string().trim_matches('"').to_string();
+    target.ci_status = gitlab_ci_status_for_merge_request(profile, project_id, &iid, first)?;
+    Ok(target)
 }
 
 /// Explicit `--mr` dispatch typed failure: the operator-supplied MR
@@ -971,7 +980,67 @@ fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarg
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
     let endpoint = format!("projects/{project_id}/merge_requests/{iid}");
     let resp = gitlab_api(profile, &endpoint, "GET", &[])?;
-    gitlab_target_from_value(&resp)
+    let mut target = gitlab_target_from_value(&resp)?;
+    // The operator may have supplied a full URL; all provider endpoints must
+    // use the normalized IID resolved above.
+    target.ci_status = gitlab_ci_status_for_merge_request(profile, project_id, &iid, &resp)?;
+    Ok(target)
+}
+
+fn gitlab_ci_status_for_merge_request(
+    profile: &Profile,
+    project_id: &str,
+    iid: &str,
+    value: &serde_json::Value,
+) -> Result<Option<String>> {
+    let source_sha = value["sha"].as_str().unwrap_or("");
+    if source_sha.is_empty() {
+        return Ok(Some("missing".to_string()));
+    }
+
+    let head_pipeline = &value["head_pipeline"];
+    if head_pipeline["sha"].as_str() == Some(source_sha) {
+        if let Some(status) = head_pipeline["status"].as_str() {
+            return Ok(Some(normalize_gitlab_ci_status(status)));
+        }
+    }
+
+    gitlab_pipeline_status_for_sha(profile, project_id, iid, source_sha)?
+        .map_or(Ok(Some("missing".to_string())), |status| {
+            Ok(Some(normalize_gitlab_ci_status(&status)))
+        })
+}
+
+fn gitlab_pipeline_status_for_sha(
+    profile: &Profile,
+    project_id: &str,
+    iid: &str,
+    source_sha: &str,
+) -> Result<Option<String>> {
+    let endpoint = format!("projects/{project_id}/merge_requests/{iid}/pipelines");
+    let response = gitlab_api(profile, &endpoint, "GET", &[("per_page", "100")])?;
+    let pipelines = response.as_array().ok_or_else(|| {
+        anyhow::anyhow!(
+            "GitLab pipeline lookup returned a non-list response for MR !{}: {}",
+            iid,
+            crate::redact::redact(&response.to_string())
+        )
+    })?;
+    Ok(pipelines
+        .iter()
+        .find(|pipeline| pipeline["sha"].as_str() == Some(source_sha))
+        .and_then(|pipeline| pipeline.get("status").and_then(serde_json::Value::as_str))
+        .map(str::to_string))
+}
+
+fn normalize_gitlab_ci_status(status: &str) -> String {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "running" | "created" | "pending" | "manual" => "pending".into(),
+        "canceled" | "cancelled" => "canceled".into(),
+        "success" => "passed".into(),
+        "skipped" => "skipped".into(),
+        status => status.into(),
+    }
 }
 
 fn github_find_pr_number_by_branch(profile: &Profile, branch: &str) -> Result<String> {
@@ -1057,6 +1126,7 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
         body: resp["body"].as_str().map(str::to_string),
         draft: resp["isDraft"].as_bool().unwrap_or(false),
         ci_status,
+        merge_status: None,
         source_sha: resp["headRefOid"].as_str().map(str::to_string),
         // `gh pr view` does not expose baseRefOid. The dispatch review path
         // resolves this from the fetched target ref used to build the diff.
@@ -1088,7 +1158,7 @@ fn gitlab_target_from_value(value: &serde_json::Value) -> Result<ReviewTarget> {
                 crate::redact::redact(&value.to_string())
             )
         })?;
-    let ci_status = value["detailed_merge_status"]
+    let merge_status = value["detailed_merge_status"]
         .as_str()
         .or_else(|| value["merge_status"].as_str())
         .map(str::to_string);
@@ -1102,7 +1172,8 @@ fn gitlab_target_from_value(value: &serde_json::Value) -> Result<ReviewTarget> {
         title: value["title"].as_str().map(str::to_string),
         body: value["description"].as_str().map(str::to_string),
         draft: value["draft"].as_bool().unwrap_or(false),
-        ci_status,
+        ci_status: None,
+        merge_status,
         source_sha: value["sha"].as_str().map(str::to_string),
         target_sha: value["diff_refs"]["base_sha"].as_str().map(str::to_string),
     })
