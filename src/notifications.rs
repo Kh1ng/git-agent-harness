@@ -851,6 +851,7 @@ fn event_name(event: &NotifyEvent<'_>) -> &'static str {
         NotifyEvent::HumanRequired { .. } => "human_required",
         NotifyEvent::MrCreated { .. } => "mr_created",
         NotifyEvent::ReviewVerdict { .. } => "review_verdict",
+        NotifyEvent::ReviewOutputInvalid { .. } => "review_output_invalid",
         NotifyEvent::MrMerged { .. } => "mr_merged",
         NotifyEvent::DispatchFailed { .. } => "dispatch_failed",
         NotifyEvent::DispatchFailureResolved { .. } => "dispatch_failure_resolved",

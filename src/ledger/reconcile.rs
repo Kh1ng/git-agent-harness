@@ -238,14 +238,14 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
             new_entries.push(entry);
         }
 
-        if new_state.as_str() == "MERGED" {
+        let dispatch_entries = entries_by_work_id
+            .get(work_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if matches!(new_state.as_str(), "MERGED" | "CLOSED_UNMERGED") {
             // A terminal reconciliation state means prior terminal dispatch
             // failures for this work_id are no longer actionable; resolve the
             // outstanding operator notification once.
-            let dispatch_entries = entries_by_work_id
-                .get(work_id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
             let resolved_by_run_id = dispatch_entries
                 .iter()
                 .rev()
@@ -265,10 +265,11 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
                     notify_terminal_failure_resolved(cfg, profile, profile_name, work_id);
                 }
             }
-            let dispatch_entries = entries_by_work_id
-                .get(work_id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+        }
+        // Closing an MR without merging ends that execution, but it does not
+        // complete the source issue. Only a real merge may reconcile source
+        // issue closure.
+        if new_state.as_str() == "MERGED" {
             let decision = reconcile_source_issue_closure(
                 cfg,
                 profile,
@@ -765,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_run_does_not_resolve_terminal_failure_for_closed_unmerged_mr() {
+    fn reconcile_run_resolves_failure_but_not_source_issue_for_closed_unmerged_mr() {
         let (_tmp, mut cfg) = test_config();
         let profile = crate::ledger::test_util::profile();
         cfg.profiles.insert("test".to_string(), profile.clone());
@@ -777,7 +778,7 @@ mod tests {
         let _provider_guard = ProviderPathGuard;
 
         let gh_path = bin_dir.join("gh");
-        let response = r#"[{"title":"Fix #12","headRefName":"gah/reconcile-work","url":"https://github.com/owner/repo/pull/7","labels":[],"number":7,"state":"CLOSED_UNMERGED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":null,"updatedAt":"2026-07-16T12:00:00-05:00","statusCheckRollup":[] }]"#;
+        let response = r#"[{"title":"Fix #12","headRefName":"gah/reconcile-work","url":"https://github.com/owner/repo/pull/7","labels":[],"number":7,"state":"CLOSED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":null,"updatedAt":"2026-07-16T12:00:00-05:00","statusCheckRollup":[] }]"#;
         std::fs::write(
             &gh_path,
             format!(
@@ -816,6 +817,20 @@ mod tests {
             },
         );
 
+        let mut dispatch_entry = crate::ledger::LedgerEntry::new(
+            "repo",
+            &profile,
+            "codex",
+            "fix",
+            "gah/reconcile-work",
+            Some("run-failure".to_string()),
+            None,
+        );
+        dispatch_entry.work_id = Some("WORK-RECONCILE-CLOSED".into());
+        dispatch_entry.mr_url = Some("https://github.com/owner/repo/pull/7".into());
+        dispatch_entry.branch = Some("gah/reconcile-work".into());
+        crate::ledger::append(&cfg, &dispatch_entry).unwrap();
+
         run(&cfg, "test", false, false).unwrap();
 
         let events = crate::events::read_events(&cfg).unwrap();
@@ -830,6 +845,13 @@ mod tests {
                 event.event_type == crate::events::EventType::TerminalFailureResolved.as_str()
             })
             .count();
-        assert_eq!(resolved_count, 0);
+        assert_eq!(resolved_count, 1);
+        let reconciliation = read_reconciliation_entries(&cfg).unwrap();
+        assert!(
+            reconciliation
+                .iter()
+                .all(|entry| entry.record_type != "issue_closure"),
+            "closed-unmerged must resolve terminal alerts without closing the source issue"
+        );
     }
 }

@@ -29,11 +29,11 @@ fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
 fn setup_fake_gh_merge(bin_dir: &Path) {
     let gh_path = bin_dir.join("gh");
     let content = r#"#!/bin/sh
-case "$1 $2" in
-  "pr list") printf '[{"number":7}]' ;;
-  "pr view") printf '{"number":7,"url":"https://github.com/owner/repo/pull/7","headRefName":"gah/merge-work","baseRefName":"main"}' ;;
-  "pr ready") exit 0 ;;
-  "pr merge") exit 0 ;;
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":7}]' ;;
+  "pr view 7 --repo") printf '{"number":7,"url":"https://github.com/owner/repo/pull/7","title":"Fix","body":"body","isDraft":false,"headRefName":"gah/merge-work","baseRefName":"main","headRefOid":"source-sha"}' ;;
+  "pr ready 7 --repo") exit 0 ;;
+  "pr merge 7 --squash") exit 0 ;;
   *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
 esac
 "#;
@@ -1180,11 +1180,14 @@ fn merge_branch_resolves_terminal_failure_with_merge_run_id() {
     merge_branch(
         &cfg,
         &prof,
-        "test-profile",
         branch,
         &Some("WORK-MERGE-1".to_string()),
         &Some("https://github.com/owner/repo/pull/7".to_string()),
-        Some("run-merge"),
+        None,
+        MergeExecution {
+            profile_name: "test-profile",
+            run_id: Some("run-merge"),
+        },
     )
     .unwrap();
 

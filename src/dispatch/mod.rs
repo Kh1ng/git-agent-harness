@@ -38,9 +38,8 @@ pub(crate) use self::attempts::routing_runtime_state_from_entries;
 
 use self::claims::check_duplicate_work;
 pub(crate) use self::claims::duplicate_work_error;
-#[allow(unused_imports)]
-pub use self::claims::merge_branch;
 pub(crate) use self::claims::scan_available_tickets_with_dependencies;
+pub use self::claims::{merge_branch, MergeExecution};
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
 
 /// A parallel sibling reached routing after another worker reserved the only
