@@ -400,10 +400,15 @@ fn add_candidate(
     mode: &str,
     candidate: CandidateConfig,
 ) {
+    let effective_quota_pool = availability::resolve_candidate_quota_pool(
+        &candidate.backend,
+        candidate.model.as_deref(),
+        candidate.quota_pool.as_deref(),
+    );
     let key = CandidateKey {
         backend: config::canonical_backend_name(&candidate.backend).to_string(),
         model: candidate.model.clone(),
-        quota_pool: candidate.quota_pool.clone(),
+        quota_pool: effective_quota_pool,
     };
     if let Some(idx) = index.get(&key).copied() {
         let modes = &mut aggregates[idx].1.modes;
@@ -985,5 +990,59 @@ mod tests {
             .map(|o| o.quota_window.clone().unwrap())
             .collect();
         assert_eq!(windows, vec!["5h".to_string(), "weekly".to_string()]);
+    }
+
+    #[test]
+    fn build_candidates_creates_four_distinct_agy_scopes() {
+        let routing = RoutingPolicy {
+            pm_candidates: Some(vec![
+                CandidateConfig {
+                    backend: "agy".to_string(),
+                    model: Some("Gemini 3.5 Flash (Medium)".to_string()),
+                    quota_pool: None,
+                    ..Default::default()
+                },
+                CandidateConfig {
+                    backend: "agy".to_string(),
+                    model: Some("Claude Sonnet 4.6 (Thinking)".to_string()),
+                    quota_pool: None,
+                    ..Default::default()
+                },
+                CandidateConfig {
+                    backend: "agy-second".to_string(),
+                    model: Some("Gemini 3.5 Flash".to_string()),
+                    quota_pool: Some("agy-second".to_string()),
+                    ..Default::default()
+                },
+                CandidateConfig {
+                    backend: "agy-second".to_string(),
+                    model: Some("Claude Sonnet 4.6".to_string()),
+                    quota_pool: None,
+                    ..Default::default()
+                },
+            ]),
+            ..RoutingPolicy::default()
+        };
+        let profile = test_profile_for_notifications();
+        let candidates = build_candidates(
+            &routing,
+            &profile,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+        );
+
+        assert_eq!(candidates.len(), 4);
+        let pools: Vec<Option<String>> = candidates.iter().map(|c| c.quota_pool.clone()).collect();
+        assert_eq!(
+            pools,
+            vec![
+                Some("agy:google-native".to_string()),
+                Some("agy:external".to_string()),
+                Some("agy-second:google-native".to_string()),
+                Some("agy-second:external".to_string()),
+            ]
+        );
     }
 }

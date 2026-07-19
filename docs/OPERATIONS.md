@@ -200,9 +200,9 @@ Each backend authenticates through its own CLI, not through GAH:
   not API-metered.
 - **claude** — `claude` CLI login; configured executable path allowed via
   profile `claude_path`.
-- **agy / agy-main / agy-second** — separate AGY instances isolated by distinct
-  `HOME`/state roots (and `agy_second_home`), each a distinct authenticated
-  account / quota pool.
+- **agy / agy-main / agy-second** — `agy` and the `agy-main` wrapper share the
+  default `HOME` and therefore one authenticated account/quota pool;
+  `agy-second` is isolated by `agy_second_home` as a distinct account.
 - **vibe**, **opencode**, **openhands** — their own respective CLI auth.
 
 Validate that a profile's declared backends and tokens are actually present

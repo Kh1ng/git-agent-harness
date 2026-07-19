@@ -93,12 +93,27 @@ pub(crate) fn normalize_attempt_usage(
     attribution: UsageAttribution<'_>,
     launched: bool,
 ) -> LedgerUsage {
-    usage.backend_instance = attribution
-        .backend
-        .map(|backend| match attribution.quota_pool {
+    usage.backend_instance = attribution.backend.map(|backend| {
+        match attribution.quota_pool {
+            // Preserve the raw executable/backend identity even when an AGY
+            // alias shares a canonical quota account (`agy-main` -> `agy`).
+            Some(pool)
+                if crate::availability::agy_account(backend).is_some_and(|account| {
+                    pool.split_once(':')
+                        .is_some_and(|(owner, _)| owner == account || owner == backend)
+                }) =>
+            {
+                let (_, family) = pool.split_once(':').expect("qualified AGY pool");
+                format!("{backend}:{family}")
+            }
+            // Already fully-qualified to this backend; respect it verbatim to
+            // avoid a latent double-prefix if a caller passes a qualified pool.
+            Some(pool) if pool.split(':').next() == Some(backend) => pool.to_string(),
+            // Bare pool tag: prefix with the backend to form a qualified tag.
             Some(pool) => format!("{backend}:{pool}"),
             None => backend.to_string(),
-        });
+        }
+    });
     usage.account_label = attribution.quota_pool.map(str::to_string);
     usage.usage_classification = match attribution.cost_class {
         Some("included_quota") => Some("quota_backed".to_string()),
@@ -547,5 +562,32 @@ mod tests {
         assert_eq!(usage.actual_cost_usd, Some(0.0));
         assert_eq!(usage.pricing_source.as_deref(), Some("local_unmetered"));
         assert!(usage.cost_unknown_reason.is_none());
+    }
+
+    #[test]
+    fn normalize_attempt_usage_does_not_duplicate_backend_prefix() {
+        let usage = normalize_attempt_usage(
+            LedgerUsage::default(),
+            UsageAttribution::routed("agy", "Gemini 3.5", "agy:google-native", "quota_backed"),
+            true,
+        );
+
+        assert_eq!(usage.backend_instance.as_deref(), Some("agy:google-native"));
+
+        let alias = normalize_attempt_usage(
+            LedgerUsage::default(),
+            UsageAttribution::routed(
+                "agy-main",
+                "Gemini 3.5",
+                "agy:google-native",
+                "quota_backed",
+            ),
+            true,
+        );
+        assert_eq!(
+            alias.backend_instance.as_deref(),
+            Some("agy-main:google-native")
+        );
+        assert_eq!(alias.account_label.as_deref(), Some("agy:google-native"));
     }
 }

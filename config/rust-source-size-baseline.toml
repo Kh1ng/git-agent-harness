@@ -1,5 +1,5 @@
 threshold = 1500
 
 [files]
-"src/config.rs" = 2025
+"src/config.rs" = 2023
 "tests/gah_cli.rs" = 6200

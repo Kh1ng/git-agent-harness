@@ -1188,3 +1188,95 @@ fn cost_aware_ordering_respects_explicit_priority_override() {
     assert_eq!(decision.effective_model.as_deref(), Some("gpt-5.4"));
     assert!(!decision.routing_reason.contains("cost-aware reorder"));
 }
+
+#[test]
+fn policy_candidates_attaches_derived_quota_pool_for_agy() {
+    let policy = crate::config::RoutingPolicy {
+        pm_candidates: Some(vec![
+            crate::config::CandidateConfig {
+                backend: "agy".into(),
+                model: Some("Gemini 3.5 Flash (Medium)".into()),
+                quota_pool: None,
+                ..Default::default()
+            },
+            crate::config::CandidateConfig {
+                backend: "agy".into(),
+                model: Some("Claude Sonnet 4.6 (Thinking)".into()),
+                quota_pool: None,
+                ..Default::default()
+            },
+            crate::config::CandidateConfig {
+                backend: "agy-second".into(),
+                model: Some("Gemini 3.5 Flash".into()),
+                quota_pool: Some("agy-second".into()),
+                ..Default::default()
+            },
+        ]),
+        ..Default::default()
+    };
+
+    let candidates = super::policy_candidates(&policy, "pm").unwrap();
+    assert_eq!(candidates.len(), 3);
+    assert_eq!(
+        candidates[0].quota_pool.as_deref(),
+        Some("agy:google-native")
+    );
+    assert_eq!(candidates[1].quota_pool.as_deref(), Some("agy:external"));
+    assert_eq!(
+        candidates[2].quota_pool.as_deref(),
+        Some("agy-second:google-native")
+    );
+}
+
+#[test]
+fn live_agy_gemini_pool_block_routes_to_same_accounts_external_pool() {
+    let tmp = TempDir::new().unwrap();
+    let now = OffsetDateTime::now_utc();
+    let mut profile = profile();
+    profile.routing.pm_candidates = Some(vec![
+        candidate_config("agy", Some("Gemini 3.5 Flash (Medium)"), Some("agy")),
+        candidate_config("agy", Some("Claude Sonnet 4.6 (Thinking)"), Some("agy")),
+    ]);
+    crate::availability::record_unavailable(
+        &path(&tmp),
+        "agy",
+        Some("Gemini 3.5 Flash (Medium)"),
+        Some("agy:google-native"),
+        Reason::QuotaExhausted,
+        Source::BackendError,
+        Some(now + time::Duration::hours(1)),
+        None,
+        now,
+    )
+    .unwrap();
+
+    let decision = decide_with(
+        &defaults(),
+        &profile,
+        RouteRequest {
+            mode: "pm",
+            requested_backend: "auto",
+            requested_model: None,
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: None,
+            usage_summary: None,
+            last_failure_class: None,
+        },
+        &path(&tmp),
+        now,
+        backend_available,
+    )
+    .unwrap();
+
+    assert_eq!(decision.effective_backend, "agy");
+    assert_eq!(
+        decision.effective_model.as_deref(),
+        Some("Claude Sonnet 4.6 (Thinking)")
+    );
+    assert_eq!(
+        decision.effective_quota_pool.as_deref(),
+        Some("agy:external")
+    );
+    assert!(decision.fallback_used);
+}

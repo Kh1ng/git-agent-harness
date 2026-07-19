@@ -703,14 +703,12 @@ impl RoutingPolicy {
             "improve" | "fix" | "experiment" => self.improve_candidates.as_ref(),
             _ => None,
         };
-        if let Some(list) = candidates {
-            for c in list {
-                if c.backend == backend && c.model.as_deref() == model {
-                    return c.quota_pool.clone();
-                }
-            }
-        }
-        None
+        let configured = candidates.and_then(|list| {
+            list.iter()
+                .find(|c| c.backend == backend && c.model.as_deref() == model)
+                .and_then(|c| c.quota_pool.as_deref())
+        });
+        crate::availability::resolve_candidate_quota_pool(backend, model, configured)
     }
 }
 
