@@ -257,6 +257,8 @@ export interface StatusSnapshot {
   active_claims: ActiveClaim[];
   fix_attempt_counts: Record<string, number>;
   merge_attempt_counts: Record<string, number>;
+  /** Work IDs currently under an out-of-band manager review hold. These
+   * remain blocked from automatic review/merge until explicitly released. */
   review_held_work_ids: string[];
   publishing_allow_pr: boolean;
   /** Effective profile policy used to reject newly tracked generated files
