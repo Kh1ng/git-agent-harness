@@ -100,7 +100,7 @@ struct IssueClosureDecision {
 /// This makes reconciliation idempotent across provider/GitLab/GitHub regardless of the
 /// closure *mode* (e.g. `gah_reconciliation_write` vs `provider_already_closed`)
 /// while preventing false cross-profile dedup and ensuring reopened issues can be re-closed.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IssueClosureKey {
     pub profile: String,
     pub work_id: String,
@@ -905,5 +905,18 @@ mod tests {
                 .all(|entry| entry.record_type != "issue_closure"),
             "closed-unmerged must resolve terminal alerts without closing the source issue"
         );
+    }
+
+    #[test]
+    fn legacy_reconciliation_entry_without_profile_field_remains_readable() {
+        let (_tmp, cfg) = test_config();
+        let path = cfg.defaults.reconciliation_path();
+        let legacy_json = r#"{"timestamp":"2026-07-05T00:00:00Z","record_type":"mr_state","work_id":"TICKET-072","new_state":"NEEDS_REVIEW","source":"sync"}"#;
+        fs::write(&path, format!("{legacy_json}\n")).unwrap();
+
+        let entries = read_reconciliation_entries(&cfg).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].profile, None);
+        assert_eq!(entries[0].work_id, "TICKET-072");
     }
 }
