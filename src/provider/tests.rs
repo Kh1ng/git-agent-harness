@@ -1225,23 +1225,23 @@ esac
 }
 
 #[test]
-fn handoff_mode_short_circuits_all_remote_provider_calls() {
+fn handoff_mode_rejects_all_remote_provider_calls() {
     let mut profile = github_profile();
     profile.delivery_mode = crate::config::DeliveryMode::Handoff;
 
-    let res = create_draft_mr(&profile, "branch", "title", "body").unwrap();
-    assert_eq!(res.url, "");
-    assert_eq!(res.id, "");
+    create_draft_mr(&profile, "branch", "title", "body").unwrap_err();
+    super::post_review_comment(&profile, "branch", "body", &[]).unwrap_err();
+    super::post_issue_comment(&profile, "123", "body").unwrap_err();
+    super::set_review_state_labels(&profile, "branch", &["gah-needs-fix"]).unwrap_err();
+    mark_ready_for_review(&profile, "branch").unwrap_err();
+    merge_mr(&profile, "branch", None).unwrap_err();
+    super::gitlab_set_mwps(&profile, "branch", "gen").unwrap_err();
+    super::github_close_issue(&profile, "123").unwrap_err();
+    super::gitlab_close_issue(&profile, "123").unwrap_err();
 
-    super::post_review_comment(&profile, "branch", "body", &[]).unwrap();
-    super::post_issue_comment(&profile, "123", "body").unwrap();
-    super::set_review_state_labels(&profile, "branch", &["gah-needs-fix"]).unwrap();
-    mark_ready_for_review(&profile, "branch").unwrap();
-    merge_mr(&profile, "branch", None).unwrap();
-    super::gitlab_set_mwps(&profile, "branch", "gen").unwrap();
-    super::github_close_issue(&profile, "123").unwrap();
-    super::gitlab_close_issue(&profile, "123").unwrap();
-
+    // Provider relationship links remain best-effort no-ops in handoff mode:
+    // they are not part of the mr_url/mr_created ledger contract and skipping
+    // them is safe rather than a correctness landmine.
     let child = ProviderIssue {
         id: "c1".into(),
         number: "1".into(),
