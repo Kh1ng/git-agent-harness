@@ -1,8 +1,8 @@
 //! Publishing policy, source freshness checks, and deterministic handoff/MR rendering.
 
 use super::already_satisfied::{
-    classify_backend_disposition, reconcile_already_satisfied, AlreadySatisfiedEvidence,
-    Disposition,
+    classify_backend_disposition, evidence_is_grounded_in_worktree, reconcile_already_satisfied,
+    AlreadySatisfiedEvidence, Disposition,
 };
 use super::issues::{fetch_issue_details, IssueDetails, TicketMetadata};
 use crate::config::Profile;
@@ -114,9 +114,14 @@ pub(super) fn reconcile_before_publish(
     profile: &Profile,
     backend_summary: &str,
     diff: &super::already_satisfied::DiffSummary,
+    worktree: &Path,
+    validation_clean: bool,
 ) -> AlreadySatisfiedPublishOutcome {
     match classify_backend_disposition(backend_summary, diff) {
         Disposition::AlreadySatisfied(evidence) => {
+            if !validation_clean || !evidence_is_grounded_in_worktree(worktree, &evidence) {
+                return AlreadySatisfiedPublishOutcome::Proceed;
+            }
             match reconcile_already_satisfied(profile, &evidence) {
                 super::already_satisfied::ReconciliationDecision::PostEvidenceAndClose {
                     ..

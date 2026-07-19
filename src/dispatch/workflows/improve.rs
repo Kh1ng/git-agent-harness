@@ -24,7 +24,7 @@ use super::super::validation::{
     validation_env, validation_failure_no_progress_reason,
 };
 use super::super::DispatchArgs;
-use super::already_satisfied_reconcile::reconcile_already_satisfied_publish as reconcile_already_satisfied;
+use super::already_satisfied_reconcile::AlreadySatisfiedRun;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};
@@ -218,6 +218,14 @@ pub(crate) fn improve(
         session_dir,
         &profile.default_target_branch,
     )?;
+    let already_satisfied = AlreadySatisfiedRun::new(
+        profile,
+        &wt,
+        repo,
+        &branch,
+        &args.mode,
+        issue_details.as_ref().map(|issue| issue.number.as_str()),
+    );
     let repair_context = repair::load_context(
         repair::LoadContext::new(args, cfg, profile, &branch, &wt, repo),
         ledger,
@@ -874,6 +882,17 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
+            if already_satisfied.reconcile(
+                ledger,
+                &backend_summary,
+                &wip_checkpoints,
+                matches!(
+                    baseline_disposition,
+                    crate::baseline::BaselineDisposition::Clean
+                ),
+            )? {
+                return Ok(());
+            }
             if attempt + 1 < max_attempts {
                 // No progress is recoverable: a fresh attempt can get a
                 // clearer instruction or a transient backend condition may
@@ -1272,61 +1291,35 @@ pub(crate) fn improve(
         ledger.validation_result = Some("not_run".into());
     }
 
-    // ── Architecture note ──────────────────────────────────────────────────
-    // The retry loop above cold-restarts the backend on each attempt. It does
-    // NOT maintain a persistent agent session across retries. Each attempt
-    // launches a fresh backend process with accumulated failure context in the
-    // task prompt. This is intentional — the current design prioritizes
-    // simplicity and observability over session persistence. A future version
-    // could keep the backend running (e.g., via a socket or API) and push
-    // validation feedback into the existing conversation, but that would
-    // require each backend to expose a continuation API. For now, the retry
-    // loop is stateless: fail → append context → re-launch.
-    //
-    // The validation_commands list runs sequentially in the worktree directory.
-    // All commands must exit 0 for the attempt to count as passing. The full
-    // stdout+stderr of any failing command is fed back into the next attempt's
-    // prompt, truncated to 8 000 chars to stay within context windows.
-    // Because the backend is re-launched from scratch each attempt, the agent
-    // must re-read the repo state — it cannot carry working memory between
-    // attempts. This is acceptable for bounded code-generation tasks where
-    // each attempt is self-contained.
-    // ────────────────────────────────────────────────────────────────────────
+    // Retries cold-start a backend with bounded failure context; validation
+    // commands run sequentially and feed bounded output into the next attempt.
 
     let has_changes = classify_git_operation_result(
         ledger,
         crate::ledger::FailureStage::PostValidation,
         worktree::has_changes(&wt, &profile.default_target_branch),
     )?;
-    if !has_changes {
-        // Defensive backstop: a later transform must not turn this into a no-op.
-        ledger.validation_result = Some("passed_no_changes".into());
-        ledger.set_failure(
-            crate::ledger::FailureClass::AgentNoProgress,
-            crate::ledger::FailureStage::AgentRun,
-        );
-        if let Some(last_attempt) = ledger.attempts.last_mut() {
-            last_attempt.validation_result = Some("passed_no_changes".into());
-            last_attempt.failure_class =
-                Some(crate::ledger::FailureClass::AgentNoProgress.as_str().into());
-            last_attempt.failure_stage =
-                Some(crate::ledger::FailureStage::AgentRun.as_str().into());
-        }
-        worktree::cleanup(&wt, repo);
-        anyhow::bail!("all worktree changes disappeared before publish");
+    // Reconcile a structured, grounded no-diff completion before the generic
+    // no-progress backstop. This is the primary already-satisfied path.
+    if !has_changes
+        && already_satisfied.reconcile(
+            ledger,
+            &backend_summary,
+            &wip_checkpoints,
+            !validation_failed,
+        )?
+    {
+        return Ok(());
     }
+    already_satisfied.enforce_post_validation_changes(ledger, has_changes)?;
 
-    // Issue #584: reconcile an already-satisfied disposition (rejects test-only
-    // coverage regressions) before publishing; `Ok(true)` short-circuits publish.
-    if reconcile_already_satisfied(
-        profile,
+    // Reject an explicitly claimed already-satisfied completion that consists
+    // only of a coverage-weakening test diff before publishing.
+    if already_satisfied.reconcile(
         ledger,
-        &wt,
-        repo,
-        &branch,
-        args,
         &backend_summary,
         &wip_checkpoints,
+        !validation_failed,
     )? {
         return Ok(());
     }

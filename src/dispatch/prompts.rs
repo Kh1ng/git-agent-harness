@@ -193,6 +193,9 @@ fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &Issue
         "\n## Focus\n\n{}\n",
         format_issue_focus_reference(issue)
     ));
+    task.push_str(
+        "\nIf the target branch already satisfies every acceptance criterion and no repository change is needed, do not manufacture a diff. Run the configured verification, then make the final summary contain the exact line `GAH_DISPOSITION: already_satisfied` followed by one or more `file:<repository-relative path>` evidence lines and any `test:<exact test or command>` evidence lines. Use this disposition only for a genuinely complete, unchanged target branch.\n",
+    );
     task
 }
 

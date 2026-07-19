@@ -226,6 +226,33 @@ pub fn post_review_comment(
     }
 }
 
+/// Post an idempotent comment to a source issue using the configured provider.
+/// The body is redacted before it crosses the provider boundary.
+pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> Result<()> {
+    let body = crate::redact::redact(body);
+    match profile.provider.as_str() {
+        "github" => github_post_issue_comment(profile, issue_number, &body),
+        "gitlab" => {
+            let project_id = profile
+                .provider_project_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            let endpoint = format!("projects/{project_id}/issues/{issue_number}/notes");
+            let existing = gitlab_api(profile, &endpoint, "GET", &[])?;
+            if existing.as_array().is_some_and(|notes| {
+                notes
+                    .iter()
+                    .any(|note| note["body"].as_str() == Some(body.as_str()))
+            }) {
+                return Ok(());
+            }
+            gitlab_api(profile, &endpoint, "POST", &[("body", &body)])?;
+            Ok(())
+        }
+        other => anyhow::bail!("unsupported provider: {other}"),
+    }
+}
+
 /// Replace the mutually-exclusive GAH review/controller labels while
 /// preserving every unrelated provider label. Review state is a state
 /// machine, not an append-only set: leaving `gah-needs-fix` attached after a

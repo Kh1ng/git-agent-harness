@@ -19,6 +19,9 @@
 //! closure.
 
 use crate::config::Profile;
+use std::path::{Component, Path};
+
+pub const ALREADY_SATISFIED_MARKER: &str = "GAH_DISPOSITION: already_satisfied";
 
 /// Grounded evidence that an issue's requirements are already satisfied in the
 /// target branch. Every entry must point at a concrete artifact so a reviewer
@@ -137,8 +140,18 @@ pub enum Disposition {
 /// * Otherwise, with no grounded satisfaction evidence and no acceptable diff,
 ///   this is `AgentNoProgress`.
 pub fn classify_backend_disposition(backend_summary: &str, diff: &DiffSummary) -> Disposition {
+    if !backend_summary
+        .lines()
+        .any(|line| line.trim() == ALREADY_SATISFIED_MARKER)
+    {
+        return Disposition::AgentNoProgress;
+    }
     if diff.is_test_only_coverage_regression() {
         return Disposition::RegressiveCompletion(diff.clone());
+    }
+
+    if !diff.changed_files.is_empty() {
+        return Disposition::AgentNoProgress;
     }
 
     let evidence = extract_evidence(backend_summary);
@@ -147,6 +160,38 @@ pub fn classify_backend_disposition(backend_summary: &str, diff: &DiffSummary) -
     }
 
     Disposition::AgentNoProgress
+}
+
+/// Verify the backend's file evidence against the actual checkout. Free-form
+/// test names remain supporting context; at least one repository-relative,
+/// in-worktree path must exist so prose alone can never authorize closure.
+pub fn evidence_is_grounded_in_worktree(
+    worktree: &Path,
+    evidence: &AlreadySatisfiedEvidence,
+) -> bool {
+    if evidence.grounded_files.is_empty() || evidence.repository_diff.is_some() {
+        return false;
+    }
+    let Ok(root) = worktree.canonicalize() else {
+        return false;
+    };
+    evidence.grounded_files.iter().all(|raw| {
+        let relative = Path::new(raw);
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return false;
+        }
+        worktree
+            .join(relative)
+            .canonicalize()
+            .is_ok_and(|candidate| candidate.starts_with(&root))
+    })
 }
 
 /// Extract grounded satisfaction evidence from a backend's structured summary.
@@ -338,7 +383,7 @@ mod tests {
 
     #[test]
     fn classify_prefers_already_satisfied_over_no_progress() {
-        let summary = "Work is done.\nfile:src/foo.rs\ntest:tests::foo_works";
+        let summary = "GAH_DISPOSITION: already_satisfied\nfile:src/foo.rs\ntest:tests::foo_works";
         let diff = DiffSummary::default();
         let d = classify_backend_disposition(summary, &diff);
         assert_eq!(
@@ -363,7 +408,7 @@ mod tests {
 
     #[test]
     fn classify_distinguishes_already_satisfied_from_no_progress() {
-        let with_evidence = "Done.\nfile:src/foo.rs";
+        let with_evidence = "GAH_DISPOSITION: already_satisfied\nfile:src/foo.rs";
         let without = "Done.";
         assert!(matches!(
             classify_backend_disposition(with_evidence, &DiffSummary::default()),
@@ -377,7 +422,7 @@ mod tests {
 
     #[test]
     fn classify_rejects_test_only_coverage_regression() {
-        let summary = "Removed dead tests.\nfile:tests/legacy.rs";
+        let summary = "GAH_DISPOSITION: already_satisfied\nfile:tests/legacy.rs";
         let diff = DiffSummary {
             changed_files: vec!["tests/legacy.rs".into()],
             test_files: vec!["tests/legacy.rs".into()],
@@ -393,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_only_regression_is_rejected_even_with_evidence_claim() {
-        let summary = "Already satisfied.\nfile:src/foo.rs";
+        let summary = "GAH_DISPOSITION: already_satisfied\nfile:src/foo.rs";
         let diff = DiffSummary {
             changed_files: vec!["tests/legacy.rs".into()],
             test_files: vec!["tests/legacy.rs".into()],
@@ -405,6 +450,35 @@ mod tests {
             classify_backend_disposition(summary, &diff),
             Disposition::RegressiveCompletion(_)
         ));
+    }
+
+    #[test]
+    fn file_shaped_prose_without_exact_disposition_marker_is_no_progress() {
+        let summary = "Changed file:src/foo.rs and test:tests::foo_works";
+        assert_eq!(
+            classify_backend_disposition(summary, &DiffSummary::default()),
+            Disposition::AgentNoProgress
+        );
+    }
+
+    #[test]
+    fn evidence_paths_must_resolve_inside_the_real_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/foo.rs"), "fn done() {}\n").unwrap();
+        let grounded = AlreadySatisfiedEvidence {
+            grounded_files: vec!["src/foo.rs".into()],
+            grounded_tests: vec![],
+            repository_diff: None,
+        };
+        assert!(evidence_is_grounded_in_worktree(tmp.path(), &grounded));
+
+        let escaped = AlreadySatisfiedEvidence {
+            grounded_files: vec!["../outside".into()],
+            grounded_tests: vec![],
+            repository_diff: None,
+        };
+        assert!(!evidence_is_grounded_in_worktree(tmp.path(), &escaped));
     }
 
     #[test]
