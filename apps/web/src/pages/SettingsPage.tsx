@@ -7,7 +7,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
-import type { WakeAutonomyValue } from '@git-agent-harness/contracts';
+import type { WakeAutonomyValue, ConfigProfileSummary, RoutingCandidateSummary } from '@git-agent-harness/contracts';
 
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
 const WAKE_AUTONOMY_OPTIONS: { value: WakeAutonomyValue; label: string }[] = [
@@ -22,18 +22,25 @@ export function SettingsPage() {
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
   const config = useGahStore((s) => s.config);
+  const profileConfig = useGahStore((s) => s.profileConfig);
   const fetchConfig = useGahStore((s) => s.fetchConfig);
+  const fetchProfileConfig = useGahStore((s) => s.fetchProfileConfig);
   const setConfig = useGahStore((s) => s.setConfig);
   const clearConfigErrors = useGahStore((s) => s.clearConfigErrors);
+  const configuredProfiles = profiles.data ?? [];
+  const selectedName = profileOverride ?? profile ?? '';
+  const selected = configuredProfiles.find((p) => p.name === selectedName);
 
   useEffect(() => {
     fetchProfiles();
     fetchConfig();
   }, [fetchProfiles, fetchConfig]);
 
-  const configuredProfiles = profiles.data ?? [];
-  const selectedName = profileOverride ?? profile ?? '';
-  const selected = configuredProfiles.find((p) => p.name === selectedName);
+  useEffect(() => {
+    if (selectedName) {
+      fetchProfileConfig(selectedName);
+    }
+  }, [selectedName, fetchProfileConfig]);
 
   const agentBackends = providers.filter((p) => !SCM_PROVIDER_KINDS.has(p.providerKind));
   const activeScmProvider = selected?.provider
@@ -127,6 +134,11 @@ export function SettingsPage() {
         config={config}
         setConfig={setConfig}
         clearConfigErrors={clearConfigErrors}
+      />
+
+      <ProfileConfigViewerSection
+        selectedName={selectedName}
+        profileConfig={profileConfig}
       />
 
       <section>
@@ -325,6 +337,199 @@ interface GlobalManagerSectionProps {
   config: { data: { current_manager: string | null } | null; loading: boolean; error: string | null };
   setConfig: (data: { current_manager?: string | null; clear?: string[] }) => Promise<void>;
   clearConfigErrors: () => void;
+}
+
+interface ProfileConfigViewerSectionProps {
+  selectedName: string;
+  profileConfig: {
+    data: ConfigProfileSummary | null;
+    loading: boolean;
+    error: string | null;
+  };
+}
+
+function ProfileConfigViewerSection({ selectedName, profileConfig }: ProfileConfigViewerSectionProps) {
+  if (!selectedName) {
+    return (
+      <section className="card-padded max-w-3xl">
+        <h3 className="text-sm font-semibold text-primary mb-1">Effective profile configuration</h3>
+        <p className="text-xs text-muted">Select a profile to view effective routing, review chain, and context budget configuration.</p>
+      </section>
+    );
+  }
+
+  if (profileConfig.loading && !profileConfig.data) {
+    return (
+      <section className="card-padded max-w-3xl">
+        <h3 className="text-sm font-semibold text-primary mb-3">Effective profile configuration</h3>
+        <p className="text-xs text-muted">Loading profile configuration…</p>
+      </section>
+    );
+  }
+
+  if (profileConfig.error && !profileConfig.data) {
+    return (
+      <section className="card-padded max-w-3xl">
+        <h3 className="text-sm font-semibold text-primary mb-3">Effective profile configuration</h3>
+        <p className="text-xs text-critical">Failed to load effective config: {profileConfig.error}</p>
+      </section>
+    );
+  }
+
+  const effective = profileConfig.data;
+  if (!effective) {
+    return null;
+  }
+
+  return (
+    <section className="card-padded max-w-3xl">
+      <h3 className="text-sm font-semibold text-primary mb-1">Effective profile configuration</h3>
+      <p className="text-xs text-muted mb-3">
+        Read-only effective routing and policy for <span className="font-mono text-secondary">{selectedName}</span>.
+      </p>
+
+      {profileConfig.error && (
+        <p className="text-xs text-critical mb-2">Last refresh error: {profileConfig.error}</p>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="card-padded border border-subtle">
+          <h4 className="text-xs font-semibold text-primary mb-2">Policy</h4>
+          <p className="text-xs">
+            Merge policy: <span className="font-mono text-secondary">{effective.merge_policy}</span>
+          </p>
+          <p className="text-xs text-muted mt-1">Profile: {effective.profile}</p>
+          <div className="mt-2 text-xs text-muted">
+            <p>Max repair cycles per ticket: {effective.max_fix_attempts_per_mr}</p>
+            <p>Max implementation failures per ticket: {effective.max_implementation_failures_per_ticket}</p>
+            <p>Max review cycles per ticket: {effective.max_review_cycles_per_ticket}</p>
+            <p>Max paid reviews per ticket: {effective.max_paid_reviews_per_ticket}</p>
+          </div>
+        </div>
+
+        <div className="card-padded border border-subtle">
+          <h4 className="text-xs font-semibold text-primary mb-2">Review escalation</h4>
+          <p className="text-xs">
+            Routine reviewer:{' '}
+            {effective.routine_reviewer ? formatCandidateLabel(effective.routine_reviewer) : 'None configured'}
+          </p>
+          <p className="text-xs text-muted mt-1">Escalation chain:</p>
+          {effective.escalatory_reviewers.length === 0 ? (
+            <p className="text-xs text-muted">No configured escalation chain.</p>
+          ) : (
+            <ul className="text-xs text-secondary">
+              {effective.escalatory_reviewers.map((candidate, index) => (
+                <li key={`${candidate.backend}-${index}`} className="mt-1">
+                  {index + 1}. {formatCandidateLabel(candidate)}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+        <CandidateTable title="PM candidates" candidates={effective.pm_candidates} />
+        <CandidateTable title="Improve candidates" candidates={effective.improve_candidates} />
+        <CandidateTable title="Review candidates" candidates={effective.review_candidates} />
+      </div>
+
+      <div className="mt-3 card-padded border border-subtle">
+        <h4 className="text-xs font-semibold text-primary mb-2">Task routing rules</h4>
+        {effective.task_routing_rules.length === 0 ? (
+          <p className="text-xs text-muted">No class-specific routing rules configured.</p>
+        ) : (
+          <ol className="space-y-2 text-xs text-secondary">
+            {effective.task_routing_rules.map((rule, index) => (
+              <li key={`task-rule-${index}`}>
+                <span className="font-semibold">{index + 1}.</span>{' '}
+                modes {formatList(rule.modes)} · classes {formatList(rule.task_classes)} · difficulty{' '}
+                {formatList(rule.difficulties)} · risk {formatList(rule.risks)}
+                <div className="text-muted ml-4">
+                  {rule.candidates.map(formatCandidateLabel).join(' → ') || 'No candidates configured'}
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+
+      <div className="mt-3 card-padded border border-subtle">
+        <h4 className="text-xs font-semibold text-primary mb-2">Context budgets</h4>
+        <p className="text-xs text-muted">
+          Default context: soft limit {effective.context.global.soft_limit_tokens} · hard limit{' '}
+          {effective.context.global.hard_limit_tokens}
+        </p>
+        {effective.context.profile_override && (
+          <p className="text-xs text-muted mt-1">Profile context override is present.</p>
+        )}
+        <p className="text-xs text-muted mt-2">
+          Effective budgets differ per routed backend when a `context.backends.&lt;name&gt;` override applies:
+        </p>
+        {effective.context.effective_by_backend.length === 0 ? (
+          <p className="text-xs text-muted mt-1">No backends are routed for this profile.</p>
+        ) : (
+          <ul className="text-xs text-secondary mt-1">
+            {effective.context.effective_by_backend.map((entry) => (
+              <li key={entry.backend} className="mt-1">
+                <span className="font-mono">{entry.backend}</span>: soft limit {entry.effective.soft_limit_tokens} · hard
+                limit {entry.effective.hard_limit_tokens} · fresh on review/fix:{' '}
+                {entry.effective.fresh_context_on_review ? 'yes' : 'no'}/{entry.effective.fresh_context_on_fix ? 'yes' : 'no'}
+                {entry.backend_override && <span className="text-muted"> (backend override applied)</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="mt-3 card-padded border border-subtle">
+        <h4 className="text-xs font-semibold text-primary mb-2">Notifications</h4>
+        <p className="text-xs text-secondary">
+          Target: {effective.notifications.configured ? effective.notifications.transport ?? 'unknown' : 'not configured'}
+        </p>
+        <p className="text-xs text-muted mt-1">
+          Manager wake: {effective.notifications.manager_wake_autonomy} · dev env:{' '}
+          {effective.notifications.env_file ?? 'unknown'} · prod env: {effective.notifications.env_file_prod ?? 'unknown'}
+        </p>
+        <p className="text-xs text-muted mt-1">Command contents and credentials are intentionally excluded.</p>
+      </div>
+    </section>
+  );
+}
+
+function CandidateTable({ title, candidates }: { title: string; candidates: RoutingCandidateSummary[] }) {
+  if (candidates.length === 0) {
+    return (
+      <div className="card-padded border border-subtle">
+        <h4 className="text-xs font-semibold text-primary mb-2">{title}</h4>
+        <p className="text-xs text-muted">No candidates configured.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card-padded border border-subtle">
+      <h4 className="text-xs font-semibold text-primary mb-2">{title}</h4>
+      <div className="space-y-1.5">
+        {candidates.map((candidate, index) => (
+          <div key={`${candidate.backend}-${candidate.model ?? 'none'}-${index}`} className="text-xs">
+            <span className="text-secondary">{formatCandidateLabel(candidate)}</span>
+            <span className="text-muted"> · priority {candidate.priority}</span>
+            {candidate.requires_approval ? <span className="text-warning"> · requires approval</span> : null}
+            <span className="text-muted"> · pool {candidate.quota_pool ?? 'unknown'}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatCandidateLabel(candidate: RoutingCandidateSummary): string {
+  return `${candidate.backend}/${candidate.model ?? 'unknown'}`;
+}
+
+function formatList(values: string[]): string {
+  return values.length > 0 ? values.join(', ') : 'any';
 }
 
 function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {

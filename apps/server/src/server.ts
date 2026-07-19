@@ -1,17 +1,57 @@
 import express from 'express';
 import cors from 'cors';
 import { getServerReadiness } from './serverReadiness.js';
-import { runStatus, runQuota, runReport, runReportSeries, runLedgerWork, runEvents, runProfileList, runProfileAdd, runProfileSet, runProfileRemove, runConfigSet, runConfigShow, getLoopStatus, startLoop, stopLoop, type ProfileAddOptions, type ProfileSetOptions, type ProfileRemoveOptions, type ConfigSetOptions } from './gahCli.js';
-import type { ReportGroupBy, ReportSeriesData } from '@git-agent-harness/contracts';
+import {
+  runStatus,
+  runQuota,
+  runReport,
+  runReportSeries,
+  runLedgerWork,
+  runEvents,
+  runProfileList,
+  runProfileAdd,
+  runProfileSet,
+  runProfileRemove,
+  runConfigSet,
+  runConfigShow,
+  runConfigShowProfile,
+  getLoopStatus,
+  startLoop,
+  stopLoop,
+  type ProfileAddOptions,
+  type ProfileSetOptions,
+  type ProfileRemoveOptions,
+  type ConfigSetOptions
+} from './gahCli.js';
+import type {
+  ReportGroupBy,
+  ReportSeriesData,
+  ConfigProfileSummary
+} from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
 
 const SERVER_VERSION = '0.1.0';
+
+type ConfigEffectiveDeps = {
+  runConfigShowProfile: (profile: string) => Promise<ConfigProfileSummary>;
+};
+
+const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
+  runConfigShowProfile
+};
 
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
 const DEFAULT_PROFILE = 'gah';
 
-export function createServer() {
+export function createServer(
+  configDeps: Partial<ConfigEffectiveDeps> = {}
+): express.Express {
+  const configEffectiveDeps: ConfigEffectiveDeps = {
+    ...DEFAULT_CONFIG_EFFECTIVE_DEPS,
+    ...configDeps
+  };
+
   const app = express();
 
   // Middleware
@@ -48,6 +88,7 @@ export function createServer() {
         controllerActivity: '/api/controller-activity',
         profiles: '/api/profiles',
         config: '/api/config',
+        configEffective: '/api/config/effective',
         loopStatus: '/api/loop/status',
         loopStart: '/api/loop/start',
         loopStop: '/api/loop/stop',
@@ -236,6 +277,19 @@ export function createServer() {
     } catch (error) {
       res.status(502).json({
         error: 'Failed to update global config',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/config/effective', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      const config = await configEffectiveDeps.runConfigShowProfile(profile);
+      res.json(config);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load effective config',
         message: error instanceof Error ? error.message : String(error)
       });
     }
