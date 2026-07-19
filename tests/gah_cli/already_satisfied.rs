@@ -73,7 +73,7 @@ exit 0
         "gh",
         r###"#!/bin/sh
 case "$1 $2 $3 $4" in
-  "issue view 42 --repo") printf '{"title":"Already complete","body":"Acceptance criteria already met","labels":[],"author":{"login":"owner","type":"User","is_bot":false},"state":"OPEN"}\n' ;;
+  "api --method GET repos/owner/real/issues/42") printf '{"number":42,"title":"Already complete","body":"Acceptance criteria already met","labels":[],"user":{"login":"owner","type":"User"},"state":"open"}\n' ;;
   "api --method GET repos/owner/real/issues/42/comments") printf '[]\n' ;;
   "api --method POST repos/owner/real/issues/42/comments") echo comment >> "$0.calls" ;;
   "api repos/owner/real/issues/42 --jq .state") printf 'open\n' ;;

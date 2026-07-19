@@ -31,6 +31,61 @@ fn recurring_status_fetches_only_bounded_open_pull_requests() {
 }
 
 #[test]
+fn recurring_status_resolves_github_dependencies_through_rest_only() {
+    let issues = serde_json::json!([{
+        "number": 2,
+        "title": "Dependent work",
+        "body": "Blocked by: #1",
+        "labels": [],
+        "user": {"login": "owner", "type": "User"},
+        "state": "open"
+    }]);
+    let dependency = serde_json::json!({
+        "number": 1,
+        "title": "Prerequisite",
+        "body": "",
+        "labels": [],
+        "user": {"login": "owner", "type": "User"},
+        "state": "closed"
+    });
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install_sequence(vec![
+        Scenario::success().with_stdout("[]"),
+        Scenario::success().with_stdout(issues.to_string()),
+        Scenario::success().with_stdout(dependency.to_string()),
+    ]);
+    let mut harness = ScenarioHarness::new("github").github_scenario("empty");
+    harness.install_custom_gh(&gh);
+
+    harness.run_status_json().expect("status should succeed");
+
+    assert_eq!(gh.call_count(), 3);
+    let calls = (1..=gh.call_count())
+        .map(|call| gh.argv_for_call(call))
+        .collect::<Vec<_>>();
+    assert!(
+        calls
+            .iter()
+            .all(|args| args.first().is_some_and(|arg| arg == "api")),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg == "repos/owner/repo/issues/1")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .flatten()
+            .any(|arg| arg == "issue" || arg == "view"),
+        "{calls:?}"
+    );
+}
+
+#[test]
 fn explicit_sync_retains_full_history_for_reconciliation() {
     let mut harness = ScenarioHarness::new("github").github_scenario("empty");
     harness.run_sync_json().expect("sync should succeed");
