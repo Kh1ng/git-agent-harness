@@ -68,15 +68,31 @@ pub(crate) fn improve(
     enforce_policy(profile, "open-draft-pr")?;
     enforce_policy(profile, push_action)?;
 
+    let manual_fix = resolve_manual_fix_context(
+        cfg,
+        &args.profile,
+        profile,
+        &args.mode,
+        args.existing_branch.clone(),
+        args.mr.as_deref(),
+    )?;
+
     let target = if args.target.is_empty() {
-        let default = PathBuf::from(&profile.artifact_root)
-            .join("candidates")
-            .join("latest.json");
-        if default.exists() {
-            println!("Auto-target: {}", default.display());
-            default.to_string_lossy().into_owned()
+        if args.mode == "fix" && args.mr.is_some() {
+            manual_fix
+                .work_id
+                .clone()
+                .context("manual FixMr resolved no work identity to use as the repair target")?
         } else {
-            args.target.clone()
+            let default = PathBuf::from(&profile.artifact_root)
+                .join("candidates")
+                .join("latest.json");
+            if default.exists() {
+                println!("Auto-target: {}", default.display());
+                default.to_string_lossy().into_owned()
+            } else {
+                args.target.clone()
+            }
         }
     } else {
         args.target.clone()
@@ -93,14 +109,6 @@ pub(crate) fn improve(
         println!("Issue intake override enabled for explicit issue dispatch");
     }
 
-    let manual_fix = resolve_manual_fix_context(
-        cfg,
-        &args.profile,
-        profile,
-        &args.mode,
-        args.existing_branch.clone(),
-        args.mr.as_deref(),
-    )?;
     let ticket_meta = if let Some(ref issue) = issue_details {
         Some(parse_ticket_metadata_from_issue(issue))
     } else {

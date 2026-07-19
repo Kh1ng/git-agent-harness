@@ -15,7 +15,7 @@ pub(super) struct ManualFixContext {
 
 /// Apply an authoritative external identity, retain a controller-supplied
 /// FixMr identity, or fall back to the unique dispatch branch.
-pub(crate) fn apply_authoritative_work_identity(
+pub(super) fn apply_authoritative_work_identity(
     ledger: &mut LedgerEntry,
     ticket: Option<&TicketMetadata>,
     fallback_work_id: &str,
@@ -124,7 +124,7 @@ pub(super) fn resolve_manual_fix_context(
     let mut manual_fix_source_issue: Option<String> = None;
     let mut manual_fix_mr_url: Option<String> = None;
 
-    if mode == "fix" && existing_branch.is_none() {
+    if mode == "fix" {
         if let Some(mr) = mr {
             let review_target = crate::provider::find_review_target_by_mr(profile, mr)
                 .with_context(|| format!("resolve source branch for MR {mr}"))?;
@@ -135,6 +135,14 @@ pub(super) fn resolve_manual_fix_context(
             }
             ensure_manual_fix_review_target_is_open(mr, &review_target)
                 .with_context(|| format!("validate source branch for MR {mr}"))?;
+            if let Some(explicit_branch) = existing_branch.as_deref() {
+                if explicit_branch != review_target.source_branch {
+                    anyhow::bail!(
+                        "--existing-branch '{explicit_branch}' does not match MR {mr} source branch '{}'; remove --existing-branch or pass the exact MR source branch",
+                        review_target.source_branch
+                    );
+                }
+            }
             println!(
                 "Resolved MR {} to branch {}",
                 review_target.id.as_str(),
@@ -175,6 +183,9 @@ pub(super) fn apply_manual_fix_context_to_ledger(
         .map(ToString::to_string)
         .unwrap_or_else(|| branch.to_string());
     apply_authoritative_work_identity(ledger, ticket_meta, &fallback_work_id);
+    if let Some(work_id) = manual_fix_context.work_id.as_deref() {
+        ledger.work_id = Some(work_id.to_string());
+    }
     if let Some(source_issue_number) = manual_fix_context.source_issue_number.as_deref() {
         ledger.source_issue_number = Some(source_issue_number.to_string());
     }
@@ -248,9 +259,16 @@ fn ensure_manual_fix_review_target_is_open(
         );
     }
 
-    let Some(state) = review_target.state.as_deref() else {
-        return Ok(());
-    };
+    let state = review_target
+        .state
+        .as_deref()
+        .map(str::trim)
+        .filter(|state| !state.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "MR {mr} provider response omitted its state; refusing to reuse an unverified repair branch"
+            )
+        })?;
     let state = state.to_ascii_lowercase();
     if !matches!(state.as_str(), "open" | "opened") {
         anyhow::bail!(
@@ -304,6 +322,70 @@ mod tests {
         entries.push(later);
 
         entries
+    }
+
+    fn review_target_with_state(state: Option<&str>) -> crate::provider::ReviewTarget {
+        crate::provider::ReviewTarget {
+            id: "269".into(),
+            url: "https://example.test/merge_requests/269".into(),
+            source_branch: "gah/manual-fix-1".into(),
+            target_branch: "main".into(),
+            state: state.map(str::to_string),
+            merged_at: None,
+            title: None,
+            body: None,
+            draft: false,
+            ci_status: None,
+            source_sha: None,
+            target_sha: None,
+        }
+    }
+
+    #[test]
+    fn manual_fix_rejects_provider_target_without_state() {
+        let error = ensure_manual_fix_review_target_is_open("269", &review_target_with_state(None))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("provider response omitted its state"));
+    }
+
+    #[test]
+    fn manual_fix_identity_overrides_unrelated_candidate_metadata() {
+        let profile = ledger_test_util::profile();
+        let mut entry = crate::ledger::LedgerEntry::new(
+            "test",
+            &profile,
+            "openhands",
+            "fix",
+            "gah/manual-fix-1",
+            None,
+            None,
+        );
+        let candidate = TicketMetadata {
+            work_id: Some("TICKET-999".into()),
+            ticket_id: Some("TICKET-999".into()),
+            title: Some("unrelated stale candidate".into()),
+            is_authoritative: true,
+            ..TicketMetadata::default()
+        };
+        let context = ManualFixContext {
+            existing_branch: Some("gah/manual-fix-1".into()),
+            work_id: Some("TICKET-269".into()),
+            source_issue_number: Some("269".into()),
+            mr_url: Some("https://example.test/merge_requests/269".into()),
+        };
+
+        apply_manual_fix_context_to_ledger(
+            &mut entry,
+            Some(&candidate),
+            "gah/manual-fix-1",
+            &context,
+        );
+
+        assert_eq!(entry.work_id.as_deref(), Some("TICKET-269"));
+        assert_eq!(entry.source_issue_number.as_deref(), Some("269"));
     }
 
     #[test]

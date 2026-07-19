@@ -27,6 +27,22 @@ fn manual_fix_review_ledger_entry(
             "review_source_sha".into(),
             serde_json::json!("HEAD".to_string()),
         );
+        let metadata_fingerprint = "sha256:manual-fix-fixture";
+        obj.insert(
+            "review_metadata_fingerprint".into(),
+            serde_json::json!(metadata_fingerprint),
+        );
+        obj.insert(
+            "review_contract_version".into(),
+            serde_json::json!(git_agent_harness::ledger::REVIEW_CONTRACT_VERSION),
+        );
+        obj.insert(
+            "review_generation".into(),
+            serde_json::json!(git_agent_harness::ledger::review_generation(
+                Some("HEAD"),
+                Some(metadata_fingerprint),
+            )),
+        );
         obj.insert(
             "review_blocking_findings".into(),
             serde_json::json!(vec!["stability regression".to_string()]),
@@ -80,6 +96,13 @@ fn github_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
             )),
         );
     harness.create_remote_branch(branch);
+    let candidates_dir = harness.artifacts_dir.join("candidates");
+    std::fs::create_dir_all(&candidates_dir).unwrap();
+    std::fs::write(
+        candidates_dir.join("latest.json"),
+        r#"{"work_id":"TICKET-999","title":"unrelated stale candidate"}"#,
+    )
+    .unwrap();
     let _openhands_fake = install_change_making_worker(&mut harness, "openhands");
     let _vibe_fake = install_change_making_worker(&mut harness, "vibe");
     let _opencode_fake = install_change_making_worker(&mut harness, "opencode");
@@ -102,6 +125,7 @@ fn github_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
     assert!(result
         .stdout
         .contains("Resolved MR 269 to branch gah/fix-needs-fix"));
+    assert!(!result.stdout.contains("Auto-target:"));
     assert!(!result.stdout.contains("Creating worktree from main"));
 
     let ledger = TestLedger::read_from(&harness.ledger_path).unwrap();
@@ -137,7 +161,7 @@ fn gitlab_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
     let _agy_fake = install_change_making_worker(&mut harness, "agy");
 
     let result = harness
-        .run_dispatch(&["--mode", "fix", "--mr", "269"])
+        .run_dispatch(&["--mode", "fix", "--mr", "269", "--existing-branch", branch])
         .unwrap();
     assert_eq!(result.exit_code, Some(0), "stderr was {}", result.stderr);
 
@@ -158,6 +182,40 @@ fn gitlab_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
     assert_eq!(entry["branch"], serde_json::json!(branch));
     assert_eq!(entry["work_id"], serde_json::json!("TICKET-269"));
     assert_eq!(entry["source_issue_number"], serde_json::json!("269"));
+}
+
+#[test]
+fn manual_fix_dispatch_rejects_branch_that_disagrees_with_mr() {
+    let branch = "gah/fix-needs-fix";
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("manual_fix_needs_fix")
+        .with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+            branch,
+            "#269",
+            None,
+            "2026-07-01T00:00:00Z",
+        )));
+
+    let result = harness
+        .run_dispatch(&[
+            "--mode",
+            "fix",
+            "--mr",
+            "269",
+            "--existing-branch",
+            "gah/not-the-mr-branch",
+        ])
+        .unwrap();
+
+    assert_ne!(result.exit_code, Some(0));
+    assert!(
+        result.stderr.contains(
+            "--existing-branch 'gah/not-the-mr-branch' does not match MR 269 source branch 'gah/fix-needs-fix'"
+        ),
+        "{}",
+        result.stderr
+    );
+    assert!(!result.stdout.contains("Creating worktree"));
 }
 
 #[test]
