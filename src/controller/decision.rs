@@ -13,7 +13,7 @@ use std::time::Duration;
 /// Deliberately small and inline (not configurable) -- this is a safety
 /// floor, not a policy knob; see TICKET-081 for the broader stuck-loop
 /// detector this complements.
-const AUTO_RETRY_CAP: usize = 2;
+pub(crate) const AUTO_RETRY_CAP: usize = 2;
 
 pub(crate) fn is_genuine_agent_failure(failure_class: &str) -> bool {
     matches!(
