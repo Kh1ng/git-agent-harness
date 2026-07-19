@@ -486,7 +486,7 @@ fn execution_identity_golden_legacy_unknown() {
     assert_eq!(entry.schema_version, 1);
     // usage was never omittable (it predates optionality changes), but its
     // internal identity/classification fields must all be unknown.
-    let usage = LedgerUsage::default();
+    let usage = entry.usage;
     assert_eq!(usage.usage_classification, None);
     assert_eq!(usage.backend_instance, None);
     assert_eq!(usage.provider, None);
