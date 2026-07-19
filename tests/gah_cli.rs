@@ -2180,7 +2180,7 @@ fn loop_reports_nonzero_review_backend_as_failure_not_success() {
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"headRefName\":\"gah/real-review\",\"url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"OPEN\",\"isDraft\":true,\"mergeStateStatus\":\"BLOCKED\",\"mergedAt\":null,\"updatedAt\":\"2026-07-18T17:22:35-05:00\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"headRefName\":\"gah/real-review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nexit 0\n",
+        "#!/bin/sh\ncase \"$4\" in */pulls?*) echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"head\":{\"ref\":\"gah/real-review\",\"sha\":\"source-sha\"},\"html_url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"open\",\"draft\":true,\"updated_at\":\"2026-07-18T17:22:35-05:00\"}]'; exit 0;; */check-runs?*) echo '{\"total_count\":1,\"check_runs\":[{\"status\":\"completed\",\"conclusion\":\"success\"}]}'; exit 0;; esac\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"headRefName\":\"gah/real-review\",\"baseRefName\":\"main\",\"headRefOid\":\"source-sha\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nexit 0\n",
     );
 
     let events_path = tmp.path().join("events.jsonl");
@@ -5004,7 +5004,7 @@ fn loop_once_reports_noop_when_nothing_actionable() {
 }
 
 #[test]
-fn loop_once_prunes_clean_closed_worktree_before_observing() {
+fn loop_once_prune_skips_full_provider_history_and_retains_fresh_worktree() {
     let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -5032,7 +5032,7 @@ fn loop_once_prunes_clean_closed_worktree_before_observing() {
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"TICKET-1\",\"headRefName\":\"gah/real-no-progress\",\"state\":\"CLOSED\",\"mergedAt\":null}]'; exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo 'automatic loop must not query full PR history' >&2; exit 97; fi\nif [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\nexit 0\n",
     );
 
     bin()
@@ -5048,9 +5048,9 @@ fn loop_once_prunes_clean_closed_worktree_before_observing() {
         .env("GITHUB_TOKEN", "token")
         .assert()
         .success()
-        .stdout(predicate::str::contains("MERGED/CLOSED"));
+        .stdout(predicate::str::contains("no_op"));
 
-    assert!(!worktree.exists());
+    assert!(worktree.exists(), "fresh worktree was automatically pruned");
 }
 
 /// TICKET-079: an eligible never-dispatched ticket actually gets dispatched
@@ -5393,7 +5393,7 @@ fn loop_once_stops_on_stuck_loop_instead_of_repeating_forever() {
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"headRefName\":\"gah/real-1\",\"url\":\"https://github.com/owner/real/pull/1\",\"labels\":[],\"number\":1,\"state\":\"OPEN\",\"isDraft\":false,\"mergeStateStatus\":\"CLEAN\",\"mergedAt\":null,\"updatedAt\":\"2026-07-18T17:22:35-05:00\",\"statusCheckRollup\":[]}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":1,\"url\":\"https://github.com/owner/real/pull/1\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"headRefName\":\"gah/real-1\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 0\n",
+        "#!/bin/sh\ncase \"$4\" in */pulls?*) echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"head\":{\"ref\":\"gah/real-1\",\"sha\":null},\"html_url\":\"https://github.com/owner/real/pull/1\",\"labels\":[],\"number\":1,\"state\":\"open\",\"draft\":false,\"updated_at\":\"2026-07-18T17:22:35-05:00\"}]'; exit 0;; */check-runs?*) echo '{\"total_count\":0,\"check_runs\":[]}'; exit 0;; esac\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":1,\"url\":\"https://github.com/owner/real/pull/1\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"headRefName\":\"gah/real-1\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 0\n",
     );
 
     let events_path = tmp.path().join("events.jsonl");

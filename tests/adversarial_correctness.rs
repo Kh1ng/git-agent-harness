@@ -36,7 +36,7 @@ fn status_fix_counts(ledger: TestLedger) -> serde_json::Map<String, serde_json::
         .collect::<Vec<_>>();
     let tmp = TempDir::new().unwrap();
     let gh = FakeBackend::new(tmp.path(), "gh");
-    gh.install(Scenario::success().with_stdout(serde_json::to_string(&prs).unwrap()));
+    install_active_prs(&gh, &prs);
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("empty")
         .with_ledger(ledger);
@@ -46,6 +46,14 @@ fn status_fix_counts(ledger: TestLedger) -> serde_json::Map<String, serde_json::
         .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default()
+}
+
+fn install_active_prs(gh: &FakeBackend, prs: &[serde_json::Value]) {
+    gh.install_github_api(
+        Scenario::success().with_stdout("[]"),
+        Scenario::success().with_stdout(serde_json::to_string(prs).unwrap()),
+        Scenario::success().with_stdout(r#"{"total_count":0,"check_runs":[]}"#),
+    );
 }
 
 fn count_for_branch(counts: &serde_json::Map<String, serde_json::Value>, branch: &str) -> u64 {
@@ -77,7 +85,7 @@ fn fixture_metadata_fingerprint(branch: &str, work_id: &str) -> String {
 }
 
 fn current_pr(branch: &str, work_id: &str, number: i64) -> serde_json::Value {
-    let mut pr = support::scenario::github_pr_json(GithubPrParams {
+    let mut pr = support::scenario::github_rest_pr_json(GithubPrParams {
         title: fixture_title(work_id),
         branch: branch.into(),
         labels: vec!["gah-needs-fix".into()],
@@ -89,7 +97,7 @@ fn current_pr(branch: &str, work_id: &str, number: i64) -> serde_json::Value {
         merged_at: None,
         updated_at: None,
     });
-    pr["headRefOid"] = serde_json::json!(fixture_source_sha(branch));
+    pr["head"]["sha"] = serde_json::json!(fixture_source_sha(branch));
     pr
 }
 
@@ -240,7 +248,7 @@ fn two_tickets_independent_progress() {
     let pr_b = current_pr("gah/fix-b", "TICKET-002", 2);
     let tmp = TempDir::new().unwrap();
     let gh = FakeBackend::new(tmp.path(), "gh");
-    gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr_a, pr_b]).unwrap()));
+    install_active_prs(&gh, &[pr_a, pr_b]);
 
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("empty")
@@ -304,21 +312,9 @@ fn two_tickets_independent_progress() {
 
 #[test]
 fn recurring_status_excludes_terminal_merges() {
-    let pr = support::scenario::github_pr_json(GithubPrParams {
-        title: "Draft: TICKET-001 Merged".into(),
-        branch: "gah/merged-1".into(),
-        labels: vec![],
-        ci_conclusion: Some("SUCCESS".into()),
-        state: None,
-        url: None,
-        number: Some(1),
-        draft: None,
-        merged_at: Some("2026-07-01T00:00:00Z".into()),
-        updated_at: None,
-    });
     let tmp = TempDir::new().unwrap();
     let gh = FakeBackend::new(tmp.path(), "gh");
-    gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr]).unwrap()));
+    install_active_prs(&gh, &[]);
 
     let mut harness = ScenarioHarness::new("github").github_scenario("empty");
     harness.install_custom_gh(&gh);
@@ -430,9 +426,7 @@ fn restart_two_process_continuity_shared_ledger() {
     );
     let tmp = TempDir::new().unwrap();
     let gh = FakeBackend::new(tmp.path(), "gh");
-    gh.install(Scenario::success().with_stdout(
-        serde_json::to_string(&vec![current_pr("gah/fix-1", "TICKET-001", 1)]).unwrap(),
-    ));
+    install_active_prs(&gh, &[current_pr("gah/fix-1", "TICKET-001", 1)]);
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("empty")
         .with_ledger(TestLedger::new().with_entry(repair));
@@ -472,7 +466,7 @@ fn exhausted_ticket_does_not_starve_eligible_ticket() {
     let pr_b = current_pr("gah/fix-b", "TICKET-002", 2);
     let tmp = TempDir::new().unwrap();
     let gh = FakeBackend::new(tmp.path(), "gh");
-    gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr_a, pr_b]).unwrap()));
+    install_active_prs(&gh, &[pr_a, pr_b]);
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("empty")
         .with_ledger(TestLedger::new().with_entry(a1).with_entry(a2));
@@ -668,7 +662,7 @@ fn stale_human_required_ledger_entry_does_not_block_unrelated_status() {
     );
     entry["human_required"] = serde_json::json!(true);
 
-    let pr = support::scenario::github_pr_json(GithubPrParams {
+    let pr = support::scenario::github_rest_pr_json(GithubPrParams {
         title: "Draft: TICKET-UNRELATED healthy work".into(),
         branch: "gah/unrelated-healthy-work".into(),
         labels: vec![],
@@ -682,7 +676,7 @@ fn stale_human_required_ledger_entry_does_not_block_unrelated_status() {
     });
     let tmp = TempDir::new().unwrap();
     let gh = FakeBackend::new(tmp.path(), "gh");
-    gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr]).unwrap()));
+    install_active_prs(&gh, &[pr]);
 
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("empty")

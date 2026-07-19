@@ -108,7 +108,7 @@ fn sync_provider_fails_then_recovers() {
     let gh = FakeBackend::new(tmp.path(), "gh");
 
     // Sequence: fail, fail, succeed (one PR needing review)
-    let pr_json = support::scenario::github_pr_json(GithubPrParams {
+    let pr_json = support::scenario::github_rest_pr_json(GithubPrParams {
         title: "Draft: TICKET-001 Feature".into(),
         branch: "gah/feature-1".into(),
         labels: vec![],
@@ -125,6 +125,9 @@ fn sync_provider_fails_then_recovers() {
         Scenario::failure(1).with_stderr("gh: network error"),
         Scenario::failure(1).with_stderr("gh: network error"),
         Scenario::success().with_stdout(serde_json::to_string(&vec![pr_json]).unwrap()),
+        Scenario::success().with_stdout(
+            r#"{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}"#,
+        ),
     ]);
 
     // Copy the fake gh script into the harness bin_dir for subprocess resolution

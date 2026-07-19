@@ -49,7 +49,7 @@ fn prune_profile(
     }
     prune_sessions(profile, cutoff, dry_run)?;
     crate::build_cache::prune_inactive(&profile.artifact_root, dry_run)?;
-    prune_worktrees(cfg, profile, cutoff, dry_run)?;
+    prune_worktrees(cfg, profile, cutoff, dry_run, announce)?;
     Ok(())
 }
 
@@ -131,6 +131,7 @@ fn prune_worktrees(
     profile: &Profile,
     cutoff: SystemTime,
     dry_run: bool,
+    include_terminal_provider_state: bool,
 ) -> Result<()> {
     if cfg.defaults.worktree_base.trim().is_empty() {
         println!("  worktrees: skipped (no defaults.worktree_base)");
@@ -145,7 +146,15 @@ fn prune_worktrees(
         format!("gah-{}-", profile.repo_id),
         format!("gah-exp-{}-", profile.repo_id),
     ];
-    let done = done_worktree_names(profile);
+    // Full GitHub history is GraphQL-backed in the compatibility sync path.
+    // It is acceptable for an explicit operator prune, but never for the
+    // recurring controller's automatic maintenance. Age + cleanliness still
+    // bounds unattended disk use without consuming shared GraphQL quota.
+    let done = if include_terminal_provider_state {
+        done_worktree_names(profile)
+    } else {
+        HashSet::new()
+    };
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();

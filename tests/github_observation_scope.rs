@@ -3,7 +3,7 @@
 
 mod support;
 
-use support::scenario::{github_pr_json, GithubPrParams, ScenarioHarness};
+use support::scenario::ScenarioHarness;
 use support::{FakeBackend, Scenario};
 use tempfile::TempDir;
 
@@ -20,9 +20,14 @@ fn recurring_status_fetches_only_bounded_open_pull_requests() {
     harness.run_status_json().expect("status should succeed");
 
     let args = harness.github_argv_for_call(1);
-    assert_scope(&args, "open", "100");
-    assert!(!args.iter().any(|arg| arg == "all"), "{args:?}");
-    assert!(!args.iter().any(|arg| arg == "1000"), "{args:?}");
+    assert_eq!(args.first().map(String::as_str), Some("api"));
+    assert!(
+        args.iter().any(|arg| arg
+            == "repos/owner/repo/pulls?state=open&per_page=100&sort=updated&direction=desc"),
+        "{args:?}"
+    );
+    assert!(!args.iter().any(|arg| arg == "pr"), "{args:?}");
+    assert!(!args.iter().any(|arg| arg == "list"), "{args:?}");
 }
 
 #[test]
@@ -38,17 +43,19 @@ fn explicit_sync_retains_full_history_for_reconciliation() {
 fn active_observation_fails_closed_at_the_query_cap() {
     let prs: Vec<_> = (1..=100)
         .map(|number| {
-            github_pr_json(GithubPrParams {
-                title: format!("[GAH] Fix: #{number} bounded observation"),
-                branch: format!("gah/bounded-{number}"),
-                labels: vec![],
-                ci_conclusion: None,
-                state: None,
-                url: None,
-                number: Some(number),
-                draft: Some(true),
-                merged_at: None,
-                updated_at: None,
+            serde_json::json!({
+                "number": number,
+                "title": format!("[GAH] Fix: #{number} bounded observation"),
+                "body": null,
+                "html_url": format!("https://github.com/owner/repo/pull/{number}"),
+                "state": "open",
+                "draft": true,
+                "head": {
+                    "ref": format!("gah/bounded-{number}"),
+                    "sha": format!("sha-{number}")
+                },
+                "labels": [],
+                "updated_at": "2026-07-01T00:00:00Z"
             })
         })
         .collect();
@@ -64,8 +71,8 @@ fn active_observation_fails_closed_at_the_query_cap() {
     assert_eq!(status["observations"]["sync"]["status"], "error");
     assert!(status["merge_requests"].as_array().unwrap().is_empty());
     assert!(status["errors"].as_array().unwrap().iter().any(|error| {
-        error["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("active observation cap"))
+        error["message"].as_str().is_some_and(|message| {
+            message.contains("active observation open-PR snapshot reached its cap")
+        })
     }));
 }
