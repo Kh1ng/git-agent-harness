@@ -115,6 +115,16 @@ struct IssueClosureKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct MrStateKey {
+    profile: String,
+    repo_id: String,
+    work_id: String,
+    branch: Option<String>,
+    mr_url: Option<String>,
+    record_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ReconciliationIdentity {
     profile: String,
     repo_id: String,
@@ -171,7 +181,7 @@ fn last_known_states(
     current_profile: &str,
     current_repo_id: &str,
     ledger_entries: &[LedgerEntry],
-) -> BTreeMap<String, String> {
+) -> BTreeMap<MrStateKey, String> {
     let mut map = BTreeMap::new();
     for entry in entries {
         if entry.record_type != "mr_state" {
@@ -183,7 +193,17 @@ fn last_known_states(
         if identity.profile != current_profile || identity.repo_id != current_repo_id {
             continue;
         }
-        map.insert(entry.work_id.clone(), entry.new_state.clone());
+        map.insert(
+            MrStateKey {
+                profile: identity.profile,
+                repo_id: identity.repo_id,
+                work_id: entry.work_id.clone(),
+                branch: identity.branch,
+                mr_url: identity.mr_url,
+                record_type: entry.record_type.clone(),
+            },
+            entry.new_state.clone(),
+        );
     }
     map
 }
@@ -339,7 +359,15 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
         });
         let Some(mr) = matching_mr else { continue };
         let new_state = sync::classify(mr).to_string();
-        let previous = last_known.get(work_id).cloned();
+        let state_key = MrStateKey {
+            profile: profile_name.to_string(),
+            repo_id: profile.repo_id.clone(),
+            work_id: work_id.clone(),
+            branch: branch.clone(),
+            mr_url: mr.url.clone(),
+            record_type: "mr_state".to_string(),
+        };
+        let previous = last_known.get(&state_key).cloned();
         if previous.as_deref() != Some(new_state.as_str()) {
             let entry = ReconciliationEntry {
                 timestamp: OffsetDateTime::now_utc()
@@ -365,7 +393,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
             if !dry_run {
                 append_reconciliation_entry(cfg, &entry)?;
             }
-            last_known.insert(work_id.clone(), new_state.clone());
+            last_known.insert(state_key, new_state.clone());
             new_entries.push(entry);
         }
 
@@ -868,6 +896,32 @@ mod tests {
             ],
         );
         assert_eq!(ambiguous, None);
+    }
+
+    #[test]
+    fn mr_state_deduplication_is_scoped_to_exact_branch_and_repo() {
+        let recorded: ReconciliationEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-07-05T00:00:00Z","record_type":"mr_state","work_id":"TICKET-072","branch":"gah/first","mr_url":"https://example.test/merge_requests/72","new_state":"MERGED","source":"sync","profile":"sportsball","repo_id":"sportsball"}"#,
+        )
+        .unwrap();
+        let states = last_known_states(&[recorded], "sportsball", "sportsball", &[]);
+
+        assert!(states.contains_key(&MrStateKey {
+            profile: "sportsball".into(),
+            repo_id: "sportsball".into(),
+            work_id: "TICKET-072".into(),
+            branch: Some("gah/first".into()),
+            mr_url: Some("https://example.test/merge_requests/72".into()),
+            record_type: "mr_state".into(),
+        }));
+        assert!(!states.contains_key(&MrStateKey {
+            profile: "sportsball".into(),
+            repo_id: "sportsball".into(),
+            work_id: "TICKET-072".into(),
+            branch: Some("gah/replacement".into()),
+            mr_url: Some("https://example.test/merge_requests/73".into()),
+            record_type: "mr_state".into(),
+        }));
     }
 
     #[test]
