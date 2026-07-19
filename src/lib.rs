@@ -21,6 +21,7 @@ pub mod models;
 pub mod notifications;
 pub mod policy;
 pub mod price_guard;
+pub mod profile_output;
 pub mod provider;
 pub mod prune;
 pub mod quota;

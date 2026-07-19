@@ -75,6 +75,72 @@ fn dispatch_parses_mode_and_profile() {
     assert!(parsed.is_ok(), "valid dispatch args must parse");
 }
 
+#[test]
+fn profile_add_set_and_clear_preserve_max_open_managed_mrs() {
+    let tmp = super::test_tempdir();
+    let config_path = tmp.path().join("config.toml");
+    let repo_path = tmp.path().join("repo");
+    let artifact_root = tmp.path().join("artifacts");
+    std::fs::write(&config_path, "").unwrap();
+
+    super::bin()
+        .args([
+            "profile",
+            "add",
+            "test",
+            "--display-name",
+            "Test",
+            "--repo-id",
+            "owner/repo",
+            "--provider",
+            "github",
+            "--repo",
+            "owner/repo",
+            "--local-path",
+            repo_path.to_str().unwrap(),
+            "--artifact-root",
+            artifact_root.to_str().unwrap(),
+            "--max-open-managed-mrs",
+            "7",
+            "--config-path",
+            config_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let cfg = git_agent_harness::config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(cfg.profiles["test"].max_open_managed_mrs, Some(7));
+
+    super::bin()
+        .args([
+            "profile",
+            "set",
+            "test",
+            "--max-open-managed-mrs",
+            "3",
+            "--config-path",
+            config_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let cfg = git_agent_harness::config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(cfg.profiles["test"].max_open_managed_mrs, Some(3));
+
+    super::bin()
+        .args([
+            "profile",
+            "set",
+            "test",
+            "--clear",
+            "max_open_managed_mrs",
+            "--config-path",
+            config_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let cfg = git_agent_harness::config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(cfg.profiles["test"].max_open_managed_mrs, None);
+}
+
 /// `--help` on a subcommand resolves without touching any handler logic.
 #[test]
 fn subcommand_help_resolves() {

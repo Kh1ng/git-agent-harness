@@ -369,7 +369,7 @@ pub fn run() -> Result<()> {
             branch,
             mr,
             current_branch,
-            budget,
+            budget: _budget,
             dry_run,
             config_path,
             model,
@@ -396,9 +396,7 @@ pub fn run() -> Result<()> {
                 branch,
                 mr,
                 current_branch,
-                budget,
                 dry_run,
-                config_path,
                 model,
                 oh_profile,
                 retries,
@@ -408,6 +406,7 @@ pub fn run() -> Result<()> {
                 allow_unknown_red_baseline,
                 escalate,
                 existing_branch,
+                expected_review_generation: None,
                 skip_validation_gate,
                 dispatch_reason: None,
                 work_id: None,
@@ -468,38 +467,7 @@ pub fn run() -> Result<()> {
                 let mut names: Vec<&str> = cfg.profiles.keys().map(String::as_str).collect();
                 names.sort_unstable();
                 if json {
-                    #[derive(serde::Serialize)]
-                    struct ProfileSummary<'a> {
-                        name: &'a str,
-                        display_name: &'a str,
-                        provider: &'a str,
-                        repo: &'a str,
-                        local_path: &'a str,
-                        web_url: Option<String>,
-                        max_parallel_workers: Option<u32>,
-                        manager_wake_autonomy: &'a str,
-                    }
-                    let summaries: Vec<ProfileSummary> = names
-                        .iter()
-                        .map(|name| {
-                            let p = &cfg.profiles[*name];
-                            ProfileSummary {
-                                name,
-                                display_name: &p.display_name,
-                                provider: &p.provider,
-                                repo: &p.repo,
-                                local_path: &p.local_path,
-                                web_url: p.web_url(),
-                                max_parallel_workers: p.max_parallel_workers,
-                                manager_wake_autonomy: match p.manager_wake_autonomy {
-                                    config::WakeAutonomy::Off => "off",
-                                    config::WakeAutonomy::ReviewOnly => "review_only",
-                                    config::WakeAutonomy::Full => "full",
-                                },
-                            }
-                        })
-                        .collect();
-                    println!("{}", serde_json::to_string(&summaries)?);
+                    println!("{}", profile_output::list_json(&cfg)?);
                 } else {
                     for name in names {
                         let p = &cfg.profiles[name];
@@ -570,6 +538,7 @@ pub fn run() -> Result<()> {
                 validation_commands,
                 auto_fix_commands,
                 max_parallel_workers,
+                max_open_managed_mrs,
                 manager_wake_autonomy,
             } => {
                 let mut cfg = config::load(config_path.as_deref())?;
@@ -605,6 +574,7 @@ pub fn run() -> Result<()> {
                     codex_idle_timeout_seconds: None,
                     claude_idle_timeout_seconds: None,
                     max_parallel_workers,
+                    max_open_managed_mrs,
                     notify_command,
                     manager_wake_autonomy: match &manager_wake_autonomy {
                         Some(v) => parse_wake_autonomy(v)?,
@@ -662,6 +632,7 @@ pub fn run() -> Result<()> {
                 validation_commands,
                 auto_fix_commands,
                 max_parallel_workers,
+                max_open_managed_mrs,
                 manager_wake_autonomy,
                 clear,
             } => {
@@ -834,6 +805,12 @@ pub fn run() -> Result<()> {
                     existing.max_parallel_workers = Some(v);
                 } else if should_clear("max_parallel_workers", &clear) {
                     existing.max_parallel_workers = None;
+                }
+
+                if let Some(v) = max_open_managed_mrs {
+                    existing.max_open_managed_mrs = Some(v);
+                } else if should_clear("max_open_managed_mrs", &clear) {
+                    existing.max_open_managed_mrs = None;
                 }
 
                 if let Some(v) = &manager_wake_autonomy {

@@ -447,6 +447,10 @@ pub enum ProfileCommands {
         /// profile (defaults to 1). Exposed in the dashboard Settings UI.
         #[arg(long)]
         max_parallel_workers: Option<u32>,
+        /// Maximum open/in-flight managed PRs or MRs before implementation
+        /// intake pauses and lifecycle work drains.
+        #[arg(long)]
+        max_open_managed_mrs: Option<u32>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
@@ -513,6 +517,10 @@ pub enum ProfileCommands {
         /// profile (defaults to 1). Exposed in the dashboard Settings UI.
         #[arg(long)]
         max_parallel_workers: Option<u32>,
+        /// Maximum open/in-flight managed PRs or MRs before implementation
+        /// intake pauses and lifecycle work drains.
+        #[arg(long)]
+        max_open_managed_mrs: Option<u32>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
