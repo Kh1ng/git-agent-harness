@@ -851,7 +851,11 @@ fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<Rev
         .and_then(|items| items.first())
         .ok_or_else(|| anyhow::anyhow!("no open GitLab MR found for branch '{}'", branch))?;
     let mut target = gitlab_target_from_value(first)?;
-    target.ci_status = gitlab_ci_status_for_merge_request(profile, project_id, &target.id, first)?;
+    // Extract the raw iid string directly from the response value; this
+    // ensures the pipelines lookup always uses the raw MR iid even if the
+    // representation inside `ReviewTarget::id` is changed in the future.
+    let iid = first["iid"].to_string().trim_matches('"').to_string();
+    target.ci_status = gitlab_ci_status_for_merge_request(profile, project_id, &iid, first)?;
     Ok(target)
 }
 

@@ -604,7 +604,7 @@ fn find_review_target_by_mr_ignores_stale_pipeline_status_not_matching_source_sh
     make_fake_bin(
         &bin_dir,
         "glab",
-        "#!/bin/sh\nendpoint=\"${2%%\\?*}\"\ncase \"$1 $endpoint\" in\n  \"api projects/42/merge_requests/235\") printf '{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"current-sha\",\"detailed_merge_status\":\"can_be_merged\",\"head_pipeline\":{\"sha\":\"old-sha\",\"status\":\"success\"}}\\n' ;;\n  \"api projects/42/merge_requests/235/pipelines\") printf '[{\"sha\":\"old-sha\",\"status\":\"success\"}]\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
+        "#!/bin/sh\nendpoint=\"${2%%\\?*}\"\ncase \"$1 $endpoint\" in\n  \"api projects/42/merge_requests/235\") printf '{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"current-sha\",\"detailed_merge_status\":\"can_be_merged\",\"head_pipeline\":{\"sha\":\"old-sha\",\"status\":\"success\"}}\\n' ;;\n  \"api projects/42/merge_requests/235/pipelines\") case \"$*\" in *\"per_page=100\"*) ;; *) echo \"missing per_page=100: $*\" >&2; exit 1 ;; esac; printf '[{\"sha\":\"old-sha\",\"status\":\"success\"}]\\n' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
