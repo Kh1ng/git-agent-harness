@@ -1,3 +1,5 @@
+#[path = "gah_cli/args.rs"]
+mod args;
 #[path = "gah_cli/conflict_resolution.rs"]
 mod conflict_resolution;
 #[path = "gah_cli/review_format_retry.rs"]
@@ -283,15 +285,6 @@ default_target_branch = "main"
     )
     .unwrap();
     cfg
-}
-
-#[test]
-fn help_works() {
-    bin()
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("git agent harness"));
 }
 
 /// TICKET-069: CLI-level smoke test for `gah availability`. The module's

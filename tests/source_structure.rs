@@ -80,6 +80,28 @@ fn routing_facade_preserves_public_call_paths_and_final_layout() {
     assert!(repo_root.join("src/routing/test_support.rs").is_file());
 }
 
+#[test]
+fn main_rs_is_thin_wrapper_below_50_lines_and_has_no_module_list() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let main_rs = repo_root.join("src/main.rs");
+    assert!(main_rs.is_file(), "src/main.rs must exist");
+
+    let line_count = count_lines(&main_rs);
+    assert!(
+        line_count < 50,
+        "src/main.rs must be below 50 lines (observed: {} lines)",
+        line_count
+    );
+
+    let content = fs::read_to_string(&main_rs).expect("failed to read src/main.rs");
+    let mod_decls = parse_mod_decls(&content);
+    assert!(
+        mod_decls.is_empty(),
+        "src/main.rs must have no module list; modules belong in src/lib.rs (found module declarations: {:?})",
+        mod_decls.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
+}
+
 #[derive(Debug, Deserialize)]
 struct RustSourceBaseline {
     #[serde(default = "default_max_lines")]
