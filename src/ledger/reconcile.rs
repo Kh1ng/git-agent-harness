@@ -49,6 +49,10 @@ pub struct ReconciliationEntry {
     pub issue_closure_classification: Option<String>,
     #[serde(default)]
     pub issue_closure_reason: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub repo_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -61,6 +65,8 @@ struct ReconciliationIssueClosureReport {
     leave_open: Vec<String>,
     observation_failed: Vec<String>,
     policy_blocked: Vec<String>,
+    #[serde(default)]
+    skipped: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,8 +97,40 @@ struct IssueClosureDecision {
     resulting_issue_state: Option<String>,
 }
 
-type IssueClosureKey = (String, String);
-type IssueClosureSnapshot = (Option<String>, Option<String>, Option<String>);
+/// Durable deduplication key for an issue closure record: includes profile/repo,
+/// work identity, branch/MR identity, record type, issue number, and resulting state.
+/// This makes reconciliation idempotent across provider/GitLab/GitHub regardless of the
+/// closure *mode* (e.g. `gah_reconciliation_write` vs `provider_already_closed`)
+/// while preventing false cross-profile dedup and ensuring reopened issues can be re-closed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct IssueClosureKey {
+    profile: String,
+    repo_id: String,
+    work_id: String,
+    branch: Option<String>,
+    mr_url: Option<String>,
+    record_type: String,
+    issue_number: String,
+    resulting_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct MrStateKey {
+    profile: String,
+    repo_id: String,
+    work_id: String,
+    branch: Option<String>,
+    mr_url: Option<String>,
+    record_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ReconciliationIdentity {
+    profile: String,
+    repo_id: String,
+    branch: Option<String>,
+    mr_url: Option<String>,
+}
 
 pub fn read_reconciliation_entries(cfg: &GahConfig) -> Result<Vec<ReconciliationEntry>> {
     let path = cfg.defaults.reconciliation_path();
@@ -136,23 +174,51 @@ fn append_reconciliation_entry(cfg: &GahConfig, entry: &ReconciliationEntry) -> 
     Ok(())
 }
 
-/// Most recent recorded state per work_id (reconciliation log is
+/// Most recent recorded state per work_id for the given profile (reconciliation log is
 /// chronological, so the last entry for a given work_id wins).
-fn last_known_states(entries: &[ReconciliationEntry]) -> BTreeMap<String, String> {
+fn last_known_states(
+    entries: &[ReconciliationEntry],
+    current_profile: &str,
+    current_repo_id: &str,
+    ledger_entries: &[LedgerEntry],
+) -> BTreeMap<MrStateKey, String> {
     let mut map = BTreeMap::new();
     for entry in entries {
         if entry.record_type != "mr_state" {
             continue;
         }
-        map.insert(entry.work_id.clone(), entry.new_state.clone());
+        let Some(identity) = reconciliation_identity(entry, ledger_entries) else {
+            continue;
+        };
+        if identity.profile != current_profile || identity.repo_id != current_repo_id {
+            continue;
+        }
+        map.insert(
+            MrStateKey {
+                profile: identity.profile,
+                repo_id: identity.repo_id,
+                work_id: entry.work_id.clone(),
+                branch: identity.branch,
+                mr_url: identity.mr_url,
+                record_type: entry.record_type.clone(),
+            },
+            entry.new_state.clone(),
+        );
     }
     map
 }
 
-fn last_known_issue_closure(
+/// Set of durable issue-closure facts already recorded in the reconciliation
+/// log for the given profile. Keyed by `IssueClosureKey` (profile/repo, work_id, branch,
+/// mr_url, record_type, issue_number, resulting_state) so that observing an already-closed
+/// issue collapses to the same durable fact while preserving profile isolation.
+fn recorded_issue_closures(
     entries: &[ReconciliationEntry],
-) -> BTreeMap<IssueClosureKey, IssueClosureSnapshot> {
-    let mut map = BTreeMap::new();
+    current_profile: &str,
+    current_repo_id: &str,
+    ledger_entries: &[LedgerEntry],
+) -> BTreeSet<IssueClosureKey> {
+    let mut set = BTreeSet::new();
     for entry in entries {
         if entry.record_type != "issue_closure" {
             continue;
@@ -160,16 +226,92 @@ fn last_known_issue_closure(
         let Some(issue_number) = entry.source_issue_number.clone() else {
             continue;
         };
-        map.insert(
-            (entry.work_id.clone(), issue_number),
-            (
-                entry.issue_closure_mode.clone(),
-                entry.resulting_issue_state.clone(),
-                entry.issue_closure_classification.clone(),
-            ),
-        );
+        let Some(resulting_state) = entry.resulting_issue_state.clone() else {
+            continue;
+        };
+        let Some(identity) = reconciliation_identity(entry, ledger_entries) else {
+            continue;
+        };
+        if identity.profile != current_profile || identity.repo_id != current_repo_id {
+            continue;
+        }
+
+        set.insert(IssueClosureKey {
+            profile: identity.profile,
+            repo_id: identity.repo_id,
+            work_id: entry.work_id.clone(),
+            branch: identity.branch,
+            mr_url: identity.mr_url,
+            record_type: entry.record_type.clone(),
+            issue_number,
+            resulting_state,
+        });
     }
-    map
+    set
+}
+
+/// Resolve old reconciliation rows that predate profile/repo attribution only
+/// when the dispatch ledger identifies one unambiguous owning scope. Ambiguous
+/// legacy rows remain readable but cannot suppress a canonical scoped record.
+fn reconciliation_identity(
+    entry: &ReconciliationEntry,
+    ledger_entries: &[LedgerEntry],
+) -> Option<ReconciliationIdentity> {
+    let mut scopes = BTreeMap::<(String, String), (BTreeSet<String>, BTreeSet<String>)>::new();
+    for ledger in ledger_entries
+        .iter()
+        .filter(|ledger| ledger.work_id.as_deref() == Some(entry.work_id.as_str()))
+        .filter(|ledger| {
+            entry
+                .profile
+                .as_deref()
+                .is_none_or(|profile| ledger.profile == profile)
+                && entry
+                    .repo_id
+                    .as_deref()
+                    .is_none_or(|repo_id| ledger.repo_id == repo_id)
+                && entry
+                    .branch
+                    .as_deref()
+                    .is_none_or(|branch| ledger.branch.as_deref() == Some(branch))
+                && entry
+                    .mr_url
+                    .as_deref()
+                    .is_none_or(|url| ledger.mr_url.as_deref() == Some(url))
+        })
+    {
+        let (branches, mr_urls) = scopes
+            .entry((ledger.profile.clone(), ledger.repo_id.clone()))
+            .or_default();
+        if let Some(branch) = ledger.branch.as_deref() {
+            branches.insert(branch.to_string());
+        }
+        if let Some(mr_url) = ledger.mr_url.as_deref() {
+            mr_urls.insert(mr_url.to_string());
+        }
+    }
+
+    if scopes.len() == 1 {
+        let ((profile, repo_id), (mut branches, mut mr_urls)) = scopes.pop_first()?;
+        if branches.len() <= 1 && mr_urls.len() <= 1 {
+            return Some(ReconciliationIdentity {
+                profile,
+                repo_id,
+                branch: entry.branch.clone().or_else(|| branches.pop_first()),
+                mr_url: entry.mr_url.clone().or_else(|| mr_urls.pop_first()),
+            });
+        }
+    }
+
+    match (entry.profile.as_ref(), entry.repo_id.as_ref()) {
+        (Some(profile), Some(repo_id)) => Some(ReconciliationIdentity {
+            profile: profile.clone(),
+            repo_id: repo_id.clone(),
+            branch: entry.branch.clone(),
+            mr_url: entry.mr_url.clone(),
+        }),
+        _ => None,
+    }
 }
 
 /// Most recent branch/mr_url per work_id from dispatch history (ledger
@@ -193,11 +335,18 @@ fn latest_dispatch_identity(
 pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Result<()> {
     let profile = config::get_profile(cfg, profile_name)?;
     let ledger_entries = read_entries(cfg)?;
+    let scoped_ledger_entries = ledger_entries
+        .iter()
+        .filter(|entry| entry.profile == profile_name && entry.repo_id == profile.repo_id)
+        .cloned()
+        .collect::<Vec<_>>();
     let history = read_reconciliation_entries(cfg)?;
-    let mut last_known = last_known_states(&history);
-    let mut last_issue_closure = last_known_issue_closure(&history);
-    let dispatch_identity = latest_dispatch_identity(&ledger_entries);
-    let entries_by_work_id = crate::ledger::index_entries_by_work_id(&ledger_entries);
+    let mut last_known =
+        last_known_states(&history, profile_name, &profile.repo_id, &ledger_entries);
+    let mut recorded_closures =
+        recorded_issue_closures(&history, profile_name, &profile.repo_id, &ledger_entries);
+    let dispatch_identity = latest_dispatch_identity(&scoped_ledger_entries);
+    let entries_by_work_id = crate::ledger::index_entries_by_work_id(&scoped_ledger_entries);
 
     let mrs = sync::fetch_mrs(profile)?;
 
@@ -210,7 +359,15 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
         });
         let Some(mr) = matching_mr else { continue };
         let new_state = sync::classify(mr).to_string();
-        let previous = last_known.get(work_id).cloned();
+        let state_key = MrStateKey {
+            profile: profile_name.to_string(),
+            repo_id: profile.repo_id.clone(),
+            work_id: work_id.clone(),
+            branch: branch.clone(),
+            mr_url: mr.url.clone(),
+            record_type: "mr_state".to_string(),
+        };
+        let previous = last_known.get(&state_key).cloned();
         if previous.as_deref() != Some(new_state.as_str()) {
             let entry = ReconciliationEntry {
                 timestamp: OffsetDateTime::now_utc()
@@ -230,11 +387,13 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
                 issue_closure_mode: None,
                 issue_closure_classification: None,
                 issue_closure_reason: None,
+                profile: Some(profile_name.to_string()),
+                repo_id: Some(profile.repo_id.clone()),
             };
             if !dry_run {
                 append_reconciliation_entry(cfg, &entry)?;
             }
-            last_known.insert(work_id.clone(), new_state.clone());
+            last_known.insert(state_key, new_state.clone());
             new_entries.push(entry);
         }
 
@@ -281,20 +440,35 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
             )?;
             record_issue_closure_report(&mut issue_closure, &decision);
             if let Some(issue_number) = decision.issue_number.clone() {
-                let prior = last_issue_closure
-                    .get(&(work_id.clone(), issue_number.clone()))
-                    .cloned();
-                let current = (
-                    Some(decision.mode.to_string()),
-                    decision.resulting_issue_state.clone(),
-                    Some(decision.classification.to_string()),
+                let is_written_mode = matches!(
+                    decision.mode,
+                    "provider_already_closed" | "gah_reconciliation_write"
                 );
-                if prior != Some(current.clone())
-                    && matches!(
-                        decision.mode,
-                        "provider_already_closed" | "gah_reconciliation_write"
+                if !is_written_mode {
+                    continue;
+                }
+                let durable_state = decision.resulting_issue_state.clone().with_context(|| {
+                    format!(
+                        "issue closure decision '{}' for work item '{}' omitted its durable resulting state",
+                        decision.mode, work_id
                     )
-                {
+                })?;
+                let key = IssueClosureKey {
+                    profile: profile_name.to_string(),
+                    repo_id: profile.repo_id.clone(),
+                    work_id: work_id.clone(),
+                    branch: branch.clone(),
+                    mr_url: mr.url.clone(),
+                    record_type: "issue_closure".to_string(),
+                    issue_number: issue_number.clone(),
+                    resulting_state: durable_state.clone(),
+                };
+                let already_recorded =
+                    decision.mode == "provider_already_closed" && recorded_closures.contains(&key);
+                if already_recorded {
+                    issue_closure.skipped.push(issue_number.clone());
+                }
+                if is_written_mode && !already_recorded {
                     let entry = ReconciliationEntry {
                         timestamp: OffsetDateTime::now_utc()
                             .format(&Rfc3339)
@@ -313,12 +487,14 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
                         issue_closure_mode: Some(decision.mode.to_string()),
                         issue_closure_classification: Some(decision.classification.to_string()),
                         issue_closure_reason: decision.reason.clone(),
+                        profile: Some(profile_name.to_string()),
+                        repo_id: Some(profile.repo_id.clone()),
                     };
                     if !dry_run {
                         append_reconciliation_entry(cfg, &entry)?;
                     }
                     new_entries.push(entry);
-                    last_issue_closure.insert((work_id.clone(), issue_number), current);
+                    recorded_closures.insert(key);
                 }
             }
         }
@@ -348,7 +524,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
             );
         }
         println!(
-            "Issue closure: already_closed={} would_close={} closed={} ambiguous={} unmapped={} leave_open={} observation_failed={} policy_blocked={}",
+            "Issue closure: already_closed={} would_close={} closed={} ambiguous={} unmapped={} leave_open={} observation_failed={} policy_blocked={} skipped={}",
             issue_closure.already_closed.len(),
             issue_closure.would_close.len(),
             issue_closure.closed.len(),
@@ -357,6 +533,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, dry_run: bool) -> Re
             issue_closure.leave_open.len(),
             issue_closure.observation_failed.len(),
             issue_closure.policy_blocked.len(),
+            issue_closure.skipped.len(),
         );
     }
     Ok(())
@@ -662,6 +839,8 @@ mod tests {
             issue_closure_mode: None,
             issue_closure_classification: None,
             issue_closure_reason: None,
+            profile: Some("test".into()),
+            repo_id: Some("repo".into()),
         };
         fs::write(
             &path,
@@ -672,6 +851,77 @@ mod tests {
         let entries = read_reconciliation_entries(&cfg).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], entry);
+    }
+
+    fn reconciliation_identity_ledger_entry(profile_name: &str, repo_id: &str) -> LedgerEntry {
+        let mut profile = crate::ledger::test_util::profile();
+        profile.repo_id = repo_id.to_string();
+        let mut entry = LedgerEntry::new(
+            profile_name,
+            &profile,
+            "codex",
+            "review",
+            "gah/legacy-identity",
+            None,
+            None,
+        );
+        entry.work_id = Some("TICKET-072".into());
+        entry.branch = Some("gah/legacy-identity".into());
+        entry.mr_url = Some("https://example.test/merge_requests/72".into());
+        entry
+    }
+
+    #[test]
+    fn legacy_reconciliation_identity_is_inferred_only_from_one_scope() {
+        let legacy: ReconciliationEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-07-05T00:00:00Z","record_type":"issue_closure","work_id":"TICKET-072","branch":"gah/legacy-identity","mr_url":"https://example.test/merge_requests/72","new_state":"MERGED","source":"issue_closure","source_issue_number":"72","resulting_issue_state":"closed"}"#,
+        )
+        .unwrap();
+        let owner = reconciliation_identity(
+            &legacy,
+            &[reconciliation_identity_ledger_entry(
+                "sportsball",
+                "sportsball",
+            )],
+        )
+        .unwrap();
+        assert_eq!(owner.profile, "sportsball");
+        assert_eq!(owner.repo_id, "sportsball");
+
+        let ambiguous = reconciliation_identity(
+            &legacy,
+            &[
+                reconciliation_identity_ledger_entry("sportsball", "sportsball"),
+                reconciliation_identity_ledger_entry("gah", "gah"),
+            ],
+        );
+        assert_eq!(ambiguous, None);
+    }
+
+    #[test]
+    fn mr_state_deduplication_is_scoped_to_exact_branch_and_repo() {
+        let recorded: ReconciliationEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-07-05T00:00:00Z","record_type":"mr_state","work_id":"TICKET-072","branch":"gah/first","mr_url":"https://example.test/merge_requests/72","new_state":"MERGED","source":"sync","profile":"sportsball","repo_id":"sportsball"}"#,
+        )
+        .unwrap();
+        let states = last_known_states(&[recorded], "sportsball", "sportsball", &[]);
+
+        assert!(states.contains_key(&MrStateKey {
+            profile: "sportsball".into(),
+            repo_id: "sportsball".into(),
+            work_id: "TICKET-072".into(),
+            branch: Some("gah/first".into()),
+            mr_url: Some("https://example.test/merge_requests/72".into()),
+            record_type: "mr_state".into(),
+        }));
+        assert!(!states.contains_key(&MrStateKey {
+            profile: "sportsball".into(),
+            repo_id: "sportsball".into(),
+            work_id: "TICKET-072".into(),
+            branch: Some("gah/replacement".into()),
+            mr_url: Some("https://example.test/merge_requests/73".into()),
+            record_type: "mr_state".into(),
+        }));
     }
 
     #[test]
@@ -733,7 +983,7 @@ mod tests {
         );
 
         let mut merge_entry = crate::ledger::LedgerEntry::new(
-            "repo",
+            "test",
             &profile,
             "codex",
             "merge",
@@ -818,7 +1068,7 @@ mod tests {
         );
 
         let mut dispatch_entry = crate::ledger::LedgerEntry::new(
-            "repo",
+            "test",
             &profile,
             "codex",
             "fix",
@@ -853,5 +1103,18 @@ mod tests {
                 .all(|entry| entry.record_type != "issue_closure"),
             "closed-unmerged must resolve terminal alerts without closing the source issue"
         );
+    }
+
+    #[test]
+    fn legacy_reconciliation_entry_without_profile_field_remains_readable() {
+        let (_tmp, cfg) = test_config();
+        let path = cfg.defaults.reconciliation_path();
+        let legacy_json = r#"{"timestamp":"2026-07-05T00:00:00Z","record_type":"mr_state","work_id":"TICKET-072","new_state":"NEEDS_REVIEW","source":"sync"}"#;
+        fs::write(&path, format!("{legacy_json}\n")).unwrap();
+
+        let entries = read_reconciliation_entries(&cfg).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].profile, None);
+        assert_eq!(entries[0].work_id, "TICKET-072");
     }
 }
