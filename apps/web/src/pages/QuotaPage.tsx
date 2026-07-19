@@ -7,7 +7,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { StatTile } from '../components/ui/StatTile.js';
-import { formatPercent, formatRemaining, formatAge, isStale, formatTokens, formatCount, formatCost } from '../lib/format.js';
+import { formatPercent, formatRemaining, formatAge, isStale, formatTokens, formatCount, formatCost, formatLocalTime } from '../lib/format.js';
 
 /** A quota/availability scope's identity string -- backend + instance
  * (model) + pool must never be collapsed, per the spec: "agy" and
@@ -18,6 +18,29 @@ function scopeIdentity(backend: string, model: string | null, pool?: string | nu
   if (pool) parts.push(pool);
   if (model) parts.push(model);
   return parts.join(' / ');
+}
+
+function formatQuotaUsage(q: {
+  quota_used_percent?: number | null;
+  quota_remaining_percent?: number | null;
+  quota_window?: string | null;
+  quota_reset_at?: string | null;
+  usage_source?: string | null;
+}): string {
+  const limit = q.quota_remaining_percent !== null && q.quota_remaining_percent !== undefined
+    ? `${formatPercent(q.quota_remaining_percent / 100)} remaining`
+    : q.quota_used_percent !== null && q.quota_used_percent !== undefined
+      ? `${formatPercent(q.quota_used_percent / 100)} used`
+      : 'No usage percentage available';
+
+  const reset = q.quota_reset_at
+    ? q.quota_reset_at.startsWith('in ')
+      ? q.quota_reset_at
+      : formatRemaining(q.quota_reset_at) ?? formatLocalTime(q.quota_reset_at) ?? q.quota_reset_at
+    : null;
+
+  const source = q.usage_source ? ` · source: ${q.usage_source}` : '';
+  return `${limit}${reset ? ` · resets ${reset}` : ''}${source}`;
 }
 
 export function QuotaPage() {
@@ -162,11 +185,7 @@ export function QuotaPage() {
                       {observations.map((q, j) => (
                         <div key={j} className="flex items-start justify-between gap-2 text-xs text-secondary">
                           <span>{q.quota_window ?? 'unknown'}{q.model ? ` · ${q.model}` : ''}</span>
-                          <span className="text-right">
-                            {q.quota_remaining_percent !== null && q.quota_remaining_percent !== undefined
-                              ? `${formatPercent(q.quota_remaining_percent / 100)} remaining`
-                              : 'No percentage reported'}
-                          </span>
+                          <span className="text-right">{formatQuotaUsage(q)}</span>
                         </div>
                       ))}
                     </div>
