@@ -2425,7 +2425,7 @@ fn loop_reports_nonzero_review_backend_as_failure_not_success() {
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"headRefName\":\"gah/real-review\",\"url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"OPEN\",\"isDraft\":true,\"mergeStateStatus\":\"BLOCKED\",\"mergedAt\":null,\"updatedAt\":\"2026-07-04T17:22:35-05:00\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"headRefName\":\"gah/real-review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"headRefName\":\"gah/real-review\",\"url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"OPEN\",\"isDraft\":true,\"mergeStateStatus\":\"BLOCKED\",\"mergedAt\":null,\"updatedAt\":\"2026-07-18T17:22:35-05:00\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"headRefName\":\"gah/real-review\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nexit 0\n",
     );
 
     let events_path = tmp.path().join("events.jsonl");
@@ -5747,7 +5747,7 @@ fn loop_once_stops_on_stuck_loop_instead_of_repeating_forever() {
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"headRefName\":\"gah/real-1\",\"url\":\"https://github.com/owner/real/pull/1\",\"labels\":[],\"number\":1,\"state\":\"OPEN\",\"isDraft\":false,\"mergeStateStatus\":\"CLEAN\",\"mergedAt\":null,\"updatedAt\":\"2026-07-04T17:22:35-05:00\",\"statusCheckRollup\":[]}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":1,\"url\":\"https://github.com/owner/real/pull/1\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"headRefName\":\"gah/real-1\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"headRefName\":\"gah/real-1\",\"url\":\"https://github.com/owner/real/pull/1\",\"labels\":[],\"number\":1,\"state\":\"OPEN\",\"isDraft\":false,\"mergeStateStatus\":\"CLEAN\",\"mergedAt\":null,\"updatedAt\":\"2026-07-18T17:22:35-05:00\",\"statusCheckRollup\":[]}]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":1,\"url\":\"https://github.com/owner/real/pull/1\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"headRefName\":\"gah/real-1\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 0\n",
     );
 
     let events_path = tmp.path().join("events.jsonl");
@@ -5762,7 +5762,8 @@ fn loop_once_stops_on_stuck_loop_instead_of_repeating_forever() {
                 "event_type": "action_decided",
                 "profile": "real",
                 "work_id": "TICKET-500",
-                "details": "review_mr: MR needs review"
+                "details": "review_mr: MR needs review",
+                "review_contract_version": 1
             }))
             .unwrap(),
         );

@@ -28,6 +28,7 @@ pub fn ledger_entry_full(
     ts: &str,
 ) -> LedgerEntry {
     let mut m = serde_json::Map::new();
+    m.insert("review_contract_version".into(), serde_json::Value::Number(1.into()));
     m.insert("timestamp".into(), serde_json::Value::String(ts.into()));
     m.insert("session_id".into(), serde_json::Value::Null);
     m.insert("profile".into(), serde_json::Value::String("test".into()));
