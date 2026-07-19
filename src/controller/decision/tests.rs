@@ -13,6 +13,7 @@ mod lifecycle_priority;
 fn empty_snapshot() -> StatusSnapshot {
     StatusSnapshot {
         schema_version: 1,
+        review_contract_version: crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
         generated_at: "2026-07-05T00:00:00Z".into(),
         profile: ProfileIdentity {
             profile: "real".into(),
@@ -1447,7 +1448,6 @@ fn every_human_required_constructor_has_a_reason_code() {
     review_mr.work_id = Some("TICKET-EVIDENCE".into());
     review_evidence.merge_requests.push(review_mr);
     cases.push((HumanRequiredReason::ReviewEvidenceGate, review_evidence));
-
     let mut fix_retry_exhausted = empty_snapshot();
     fix_retry_exhausted.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
     fix_retry_exhausted.fix_attempt_counts.insert(
@@ -1461,7 +1461,6 @@ fn every_human_required_constructor_has_a_reason_code() {
         HumanRequiredReason::FixRetryCapExceeded,
         fix_retry_exhausted,
     ));
-
     let mut merge_retry_exhausted = empty_snapshot();
     merge_retry_exhausted.profile.merge_policy = crate::config::MergePolicy::StopForHuman;
     merge_retry_exhausted
@@ -1474,7 +1473,6 @@ fn every_human_required_constructor_has_a_reason_code() {
         HumanRequiredReason::MergeRetryCapExceeded,
         merge_retry_exhausted,
     ));
-
     let mut retry_budget = empty_snapshot();
     retry_budget.available_tickets.push(ticket(
         "docs/tickets/TICKET-RETRY.md",
@@ -1494,7 +1492,7 @@ fn every_human_required_constructor_has_a_reason_code() {
         assert_eq!(
             reason_code,
             Some(expected.as_str().to_string()),
-            "snapshot expected {expected:?} but got {reason_code:?}",
+            "snapshot expected {expected:?} but got {reason_code:?}"
         );
     }
 }

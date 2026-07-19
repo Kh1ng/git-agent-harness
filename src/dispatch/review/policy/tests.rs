@@ -1460,3 +1460,29 @@ which lacks a leading boundary check.
         vec!["regex lacks leading boundary assertion".to_string()]
     );
 }
+
+#[test]
+fn historical_review_records_created_before_contract_bump_do_not_exhaust_new_contract_review_budget(
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let prof = profile(tmp.path());
+    let route = route_decision("vibe", Some("vibe-model"), false);
+
+    // Write a historical review entry created before contract bump (version None)
+    let mut old_review = review_ledger_entry("test", &prof, "gah/test-branch", "NEEDS_FIX", "high");
+    old_review.work_id = Some("#711".to_string());
+    old_review.review_contract_version = None; // Pre-bump
+
+    let routing = RoutingPolicy {
+        max_review_cycles_per_ticket: Some(1),
+        ..Default::default()
+    };
+    let cfg = gah_config_with_ledger(tmp.path(), routing);
+    crate::ledger::append(&cfg, &old_review).unwrap();
+
+    let block = check_review_budget(&cfg, &prof, "test", Some("#711"), &route).unwrap();
+    assert_eq!(
+        block, None,
+        "Pre-bump review entry must not block fresh review attempt under new contract"
+    );
+}

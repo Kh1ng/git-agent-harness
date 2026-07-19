@@ -197,6 +197,11 @@ pub(super) fn detect_stuck_loop(
         if reset_after.is_some_and(|reset| timestamp_at_or_before(&event.timestamp, reset)) {
             break;
         }
+        if event.review_contract_version.unwrap_or(0)
+            < crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
+        {
+            break;
+        }
         // A prior selection that reached only local route contention made no
         // agent call and explicitly deferred itself. It is an expected wait
         // boundary, not evidence that the controller is spinning without a
@@ -500,6 +505,7 @@ mod tests {
             work_id: Some(work_id.into()),
             run_id: None,
             reason_code: None,
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: format!("{kind}: test"),
         }
     }
@@ -623,6 +629,7 @@ mod tests {
             work_id: Some("TICKET-500".into()),
             run_id: Some("deferred-run".into()),
             reason_code: None,
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: "fix_existing: deferred_capacity: claude/sonnet busy".into(),
         });
 
@@ -638,9 +645,10 @@ mod tests {
             event_type: "dispatch_finished".into(),
             profile: Some(profile.into()),
             work_id: Some(work_id.into()),
-            run_id: Some(format!("run-{profile}-{work_id}")),
+            run_id: Some("deferred-run".into()),
             reason_code: None,
-            details: "fix_existing: deferred_capacity: no eligible backend".into(),
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
+            details: "fix_existing: deferred_capacity: claude/sonnet busy".into(),
         }
     }
 
@@ -905,5 +913,33 @@ default_target_branch = "main"
         assert!(events[0].details.starts_with("review_mr:"));
         assert_eq!(events[1].event_type, "action_overridden");
         assert!(events[1].details.contains("review_mr -> human_required"));
+    }
+
+    #[test]
+    fn stuck_loop_events_before_contract_bump_do_not_count() {
+        let action = NextAction::ReviewMr {
+            work_id: Some("TICKET-500".into()),
+            branch: "gah/real-1".into(),
+            mr_url: Some("https://example/review".into()),
+            reason: "MR on branch 'gah/real-1' classified NEEDS_REVIEW".into(),
+        };
+
+        let old_event = crate::events::ControllerEvent {
+            timestamp: "2026-07-16T00:00:00Z".into(),
+            event_type: "action_decided".into(),
+            profile: Some("real".into()),
+            work_id: Some("TICKET-500".into()),
+            run_id: None,
+            details: "review_mr: MR needs review".into(),
+            reason_code: None,
+            review_contract_version: None, // Pre-bump event
+        };
+
+        let events = vec![old_event.clone(), old_event.clone(), old_event.clone()];
+        let detected = detect_stuck_loop(&events, "real", &action, None);
+        assert_eq!(
+            detected, None,
+            "Pre-bump events must not trigger stuck loop under new contract"
+        );
     }
 }

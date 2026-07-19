@@ -126,6 +126,8 @@ pub(in crate::dispatch) fn check_review_budget(
             entry.profile == profile_name
                 && entry.repo_id == profile.repo_id
                 && entry.mode == "review"
+                && entry.review_contract_version.unwrap_or(0)
+                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
                 && !matches!(
                     entry.validation_result.as_deref(),
                     Some("review_budget_exhausted")
@@ -213,6 +215,8 @@ pub(in crate::dispatch) fn review_escalation_reason(
             e.profile == profile_name
                 && e.mode == "review"
                 && e.branch.as_deref() == Some(branch)
+                && e.review_contract_version.unwrap_or(0)
+                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
                 // Legacy reviews written before reviewed-SHA persistence
                 // cannot support a safe repair and must be re-runnable. Do
                 // not let them trigger escalation before that migration
@@ -289,6 +293,8 @@ pub(in crate::dispatch) fn next_review_candidate(
                 && entry.mode == "review"
                 && entry.branch.as_deref() == Some(branch)
                 && entry.review_source_sha.is_some()
+                && entry.review_contract_version.unwrap_or(0)
+                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
                 && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
                 && entry.validation_result.as_deref() != Some("cancelled_shutdown")
         })
@@ -341,6 +347,8 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
                 // Treating its backend as spent would skip directly to the
                 // next (possibly paid) reviewer instead of migrating it.
                 && entry.review_source_sha.is_some()
+                && entry.review_contract_version.unwrap_or(0)
+                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
                 && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
                 // An operator-requested shutdown is not a reviewer opinion
                 // and must remain retryable after the daemon restarts.

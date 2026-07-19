@@ -85,6 +85,8 @@ pub struct ControllerEvent {
     pub details: String,
     #[serde(default)]
     pub reason_code: Option<String>,
+    #[serde(default)]
+    pub review_contract_version: Option<u32>,
 }
 
 pub fn append(cfg: &GahConfig, event: &ControllerEvent) -> Result<()> {
@@ -179,6 +181,7 @@ pub fn record_with_run_id_and_reason_code(
             run_id: run_id.map(str::to_string),
             details: details.into(),
             reason_code: reason_code.map(str::to_string),
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
         },
     )
 }
@@ -401,6 +404,7 @@ mod tests {
             work_id: None,
             run_id: None,
             reason_code: None,
+            review_contract_version: None,
             details: String::new(),
         };
         append(&cfg, &event).unwrap();

@@ -262,13 +262,24 @@ pub fn sync_mr_to_json(
         ledger_info_for_mr(ledger, mr);
     if !matches!(class, "MERGED" | "CLOSED_UNMERGED" | "CI_FAILED") {
         if let Some(latest) = latest_review_for_mr(ledger, mr) {
-            if !review_metadata_matches(latest, mr) {
+            let contract_stale = latest.review_contract_version.unwrap_or(0)
+                < crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION;
+            let metadata_stale = !review_metadata_matches(latest, mr);
+            if contract_stale || metadata_stale {
                 // The provider label reflects an opinion about older
-                // metadata. Metadata-only corrections require review, not a
+                // metadata or a superseded contract version. Corrections require review, not a
                 // worktree repair or terminal human gate.
                 class = "NEEDS_REVIEW";
                 review_verdict = None;
-                review_gate_reason = None;
+                review_gate_reason = Some(if contract_stale {
+                    format!(
+                        "superseded: active review contract generation is v{}, prior review was under v{}",
+                        crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
+                        latest.review_contract_version.unwrap_or(0)
+                    )
+                } else {
+                    "superseded: review metadata/source invalidated".to_string()
+                });
             } else {
                 // Provider label mutations can fail or lag after a completed
                 // review. Reconcile from the exact-branch, exact-metadata
@@ -631,7 +642,9 @@ pub fn count_fix_attempts_per_branch_from_entries(
                 && entry
                     .dispatch_reason
                     .as_deref()
-                    .is_some_and(|reason| reason == "post_review_repair"),
+                    .is_some_and(|reason| reason == "post_review_repair")
+                && entry.review_contract_version.unwrap_or(0)
+                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
         )
     })
 }
@@ -647,7 +660,9 @@ pub fn count_fix_attempts_per_branch_for_scope(
                 && entry
                     .dispatch_reason
                     .as_deref()
-                    .is_some_and(|reason| reason == "post_review_repair"),
+                    .is_some_and(|reason| reason == "post_review_repair")
+                && entry.review_contract_version.unwrap_or(0)
+                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
         )
     })
 }
@@ -1450,6 +1465,18 @@ mod tests {
             counts.get("branch-A").copied().unwrap_or(0),
             0,
             "legacy entries without dispatch_reason must not count (unprovable)"
+        );
+    }
+
+    #[test]
+    fn pre_bump_post_review_repair_entries_do_not_count_toward_fix_retry_cap() {
+        let mut old_entry = ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(1));
+        old_entry.review_contract_version = None; // Pre-bump
+        let counts = super::count_fix_attempts_per_branch_from_entries(&[old_entry]);
+        assert_eq!(
+            counts.get("branch-A").copied().unwrap_or(0),
+            0,
+            "pre-bump post_review_repair entries must not count under new contract"
         );
     }
 }

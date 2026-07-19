@@ -59,6 +59,8 @@ pub struct StatusSnapshot {
     /// they do not recognize. Increment this only for an incompatible removal,
     /// rename, or semantic/type change.
     pub schema_version: u32,
+    #[serde(default = "default_review_contract_version")]
+    pub review_contract_version: u32,
     pub generated_at: String,
     pub profile: ProfileIdentity,
     pub observations: Observations,
@@ -649,6 +651,7 @@ fn build_snapshot_inner(
 
     let snapshot = StatusSnapshot {
         schema_version: 1,
+        review_contract_version: crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
         generated_at,
         profile: profile_identity,
         observations: Observations {

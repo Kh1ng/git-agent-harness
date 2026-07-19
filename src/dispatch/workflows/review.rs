@@ -1095,6 +1095,8 @@ fn invalid_review_attempt_chain(
                 && entry.repo_id == profile.repo_id
                 && entry.mode == "review"
                 && entry.branch.as_deref() == Some(branch)
+                && entry.review_contract_version.unwrap_or(0)
+                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
                 && entry.validation_result.as_deref() == Some("review_output_invalid")
         })
         .map(|entry| {

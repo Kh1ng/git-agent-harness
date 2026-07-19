@@ -502,6 +502,8 @@ pub fn review_already_exists(
         entry.profile == profile_name
             && entry.repo_id == repo_id
             && entry.mode == "review"
+            && entry.review_contract_version.unwrap_or(0)
+                >= super::entry::CURRENT_REVIEW_CONTRACT_VERSION
             && entry
                 .work_id
                 .as_deref()
@@ -544,6 +546,52 @@ pub struct EffectiveHumanGate {
     pub mode: String,
     pub timestamp: String,
     pub routing_diagnostics: Option<super::entry::RoutingDiagnostics>,
+    pub review_contract_version: Option<u32>,
+}
+
+/// Helper to identify review-derived human gates (stuck-loop gates, review-evidence gates,
+/// review budget exhaustion, post-review policy approvals, etc.) distinct from explicit operator holds
+/// and non-review implementation failure caps.
+pub fn is_review_derived_gate(entry: &LedgerEntry) -> bool {
+    let reason_code = entry.human_required_reason_code.as_deref();
+    let dispatch_reason = entry.dispatch_reason.as_deref();
+    let mode = entry.mode.as_str();
+
+    if mode == "review" {
+        return true;
+    }
+
+    if matches!(
+        reason_code,
+        Some(
+            "stuck_loop_gate"
+                | "review_evidence_gate"
+                | "review_output_invalid_exhausted"
+                | "review_ceiling_exhausted"
+                | "fix_retry_cap_exceeded"
+        )
+    ) {
+        return true;
+    }
+
+    if dispatch_reason == Some("stuck_loop_gate") {
+        return true;
+    }
+
+    if entry.validation_result.as_deref() == Some("review_budget_exhausted")
+        || (reason_code == Some("retry_budget_exhausted")
+            && dispatch_reason == Some("post_review_repair"))
+    {
+        return true;
+    }
+
+    if reason_code == Some("policy_approval")
+        && (mode == "review" || dispatch_reason == Some("post_review_repair"))
+    {
+        return true;
+    }
+
+    false
 }
 
 const LEDGER_ENTRY_STALE_AFTER_DAYS: i64 = 14;
@@ -632,6 +680,16 @@ fn effective_human_gate_for_scope(
             _ => {}
         }
 
+        // TICKET-711: Review-derived gates created under a superseded review contract version
+        // (review_contract_version < CURRENT_REVIEW_CONTRACT_VERSION) are superseded and cannot
+        // block a fresh attempt.
+        if is_review_derived_gate(entry)
+            && entry.review_contract_version.unwrap_or(0)
+                < super::entry::CURRENT_REVIEW_CONTRACT_VERSION
+        {
+            continue;
+        }
+
         gate = Some(EffectiveHumanGate {
             reason_code: entry.human_required_reason_code.clone(),
             dispatch_reason: entry.dispatch_reason.clone(),
@@ -639,6 +697,7 @@ fn effective_human_gate_for_scope(
             mode: entry.mode.clone(),
             timestamp: entry.timestamp.clone(),
             routing_diagnostics: entry.routing_diagnostics.clone(),
+            review_contract_version: entry.review_contract_version,
         });
     }
     gate
@@ -1332,5 +1391,49 @@ mod tests {
         assert!(active_paid_route_approvals(&cfg, "test", "ISSUE-42")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn stale_contract_version_review_derived_gate_is_superseded() {
+        let (_tmp, _cfg) = ledger_tests::test_config();
+        let prof = ledger_tests::profile();
+
+        // Historical gate entry written under older review contract (version None)
+        let mut entry =
+            super::super::LedgerEntry::new("test", &prof, "codex", "review", "target", None, None);
+        entry.work_id = Some("#711".into());
+        entry.human_required = true;
+        entry.human_required_reason_code = Some("stuck_loop_gate".into());
+        entry.dispatch_reason = Some("stuck_loop_gate".into());
+        entry.review_contract_version = None; // Historical/pre-bump
+
+        let entries = vec![entry];
+        let gate = effective_human_gate_from_entries(&entries, "test", &prof.repo_id, "#711");
+        assert_eq!(
+            gate, None,
+            "Pre-bump review-derived gate must be superseded"
+        );
+    }
+
+    #[test]
+    fn true_operator_human_hold_remains_active_across_contract_version_bump() {
+        let (_tmp, cfg) = ledger_tests::test_config();
+        let prof = ledger_tests::profile();
+
+        // Explicit operator review_hold (not review-derived)
+        let mut hold_entry = super::super::LedgerEntry::new_review_hold(
+            "test",
+            &prof,
+            "#711",
+            Some("operator pause".into()),
+        );
+        hold_entry.review_contract_version = None;
+
+        append(&cfg, &hold_entry).unwrap();
+        let held = active_review_hold_work_ids(&cfg, "test");
+        assert!(
+            held.contains("#711"),
+            "Explicit operator hold must remain active"
+        );
     }
 }
