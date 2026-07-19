@@ -15,7 +15,17 @@ pub(super) fn policy_approval_still_required(
     if gate.reason_code.as_deref() != Some(HumanRequiredReason::PolicyApproval.as_str()) {
         return true;
     }
-    if gate.review_contract_version.unwrap_or(0) < crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION {
+    // TICKET-711: only a review-derived policy_approval gate (raised during
+    // review escalation or its post-review repair) is superseded by a stale
+    // contract version. A genuine non-review paid-route hold (a regular
+    // fix/improve dispatch still awaiting `gah route-approval grant`) must
+    // not be silently released just because it predates the contract bump.
+    let review_derived =
+        gate.mode == "review" || gate.dispatch_reason.as_deref() == Some("post_review_repair");
+    if review_derived
+        && gate.review_contract_version.unwrap_or(0)
+            < crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
+    {
         return false;
     }
     let mode = match gate.mode.as_str() {
@@ -606,7 +616,58 @@ included_in_quota = true
     }
 
     #[test]
-    fn pre_bump_policy_approval_gate_is_superseded() {
+    fn pre_bump_review_derived_policy_approval_gate_is_superseded() {
+        let (cfg, profile) = policy_approval_test_cfg();
+        let gate = ledger::EffectiveHumanGate {
+            reason_code: Some("policy_approval".into()),
+            dispatch_reason: Some("post_review_repair".into()),
+            message: None,
+            mode: "review".into(),
+            timestamp: "2026-07-16T00:00:00Z".into(),
+            review_contract_version: None, // Pre-bump
+            routing_diagnostics: None,
+        };
+
+        assert!(!policy_approval_still_required(
+            &cfg,
+            "test",
+            &profile,
+            &[],
+            "#640",
+            &gate,
+        ));
+    }
+
+    #[test]
+    fn pre_bump_non_review_policy_approval_gate_still_required() {
+        // TICKET-711 regression: a genuine implementation-task paid-route
+        // hold (mode "fix", not raised during review or post-review repair)
+        // predates the contract bump too, but it is not review-derived and
+        // must remain blocked until an actual `gah route-approval grant` is
+        // recorded -- not silently released just because it has no stamped
+        // review_contract_version.
+        let (cfg, profile) = policy_approval_test_cfg();
+        let gate = ledger::EffectiveHumanGate {
+            reason_code: Some("policy_approval".into()),
+            dispatch_reason: Some("initial".into()),
+            message: None,
+            mode: "fix".into(),
+            timestamp: "2026-07-16T00:00:00Z".into(),
+            review_contract_version: None, // Pre-bump
+            routing_diagnostics: None,
+        };
+
+        assert!(policy_approval_still_required(
+            &cfg,
+            "test",
+            &profile,
+            &[],
+            "#640",
+            &gate,
+        ));
+    }
+
+    fn policy_approval_test_cfg() -> (crate::config::GahConfig, crate::config::Profile) {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("cfg.toml");
         fs::write(
@@ -631,24 +692,7 @@ default_target_branch = "main"
         )
         .unwrap();
         let cfg = crate::config::load(Some(path.to_str().unwrap())).unwrap();
-        let profile = &cfg.profiles["test"];
-        let gate = ledger::EffectiveHumanGate {
-            reason_code: Some("policy_approval".into()),
-            dispatch_reason: Some("initial".into()),
-            message: None,
-            mode: "fix".into(),
-            timestamp: "2026-07-16T00:00:00Z".into(),
-            review_contract_version: None, // Pre-bump
-            routing_diagnostics: None,
-        };
-
-        assert!(!policy_approval_still_required(
-            &cfg,
-            "test",
-            profile,
-            &[],
-            "#640",
-            &gate,
-        ));
+        let profile = cfg.profiles["test"].clone();
+        (cfg, profile)
     }
 }
