@@ -9,7 +9,10 @@ use crate::config::{GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
 use crate::models::{AvailableTicket, DependencyBlocker, IssueIntakeRejection};
-use crate::notifications::{notify_event, NotifyEvent};
+use crate::notifications::{
+    notify_event, notify_terminal_failure_resolved, notify_terminal_failure_resolved_with_run_id,
+    NotifyEvent,
+};
 use crate::provider;
 use anyhow::{Context, Result};
 use std::fmt;
@@ -635,6 +638,12 @@ pub(crate) fn scan_available_tickets_with_dependencies(
 /// (so `count_merge_attempts_per_branch` can cap retries), and a
 /// notification. Merge failures are returned as `Err` for the caller to
 /// report as a soft outcome, not a hard loop error.
+#[derive(Clone, Copy)]
+pub struct MergeExecution<'a> {
+    pub profile_name: &'a str,
+    pub run_id: Option<&'a str>,
+}
+
 pub fn merge_branch(
     cfg: &GahConfig,
     profile: &Profile,
@@ -642,7 +651,7 @@ pub fn merge_branch(
     work_id: &Option<String>,
     mr_url: &Option<String>,
     expected_review_generation: Option<&str>,
-    run_id: Option<&str>,
+    execution: MergeExecution<'_>,
 ) -> Result<()> {
     let mut entry = LedgerEntry::new(
         &profile.repo_id,
@@ -650,7 +659,7 @@ pub fn merge_branch(
         "none",
         "merge",
         branch,
-        run_id.map(str::to_string),
+        execution.run_id.map(str::to_string),
         None,
     );
     entry.branch = Some(branch.to_string());
@@ -670,6 +679,27 @@ pub fn merge_branch(
                     work_id: work_id.as_deref().unwrap_or("unknown"),
                 },
             );
+            if let Some(work_id) = work_id.as_deref() {
+                match execution.run_id {
+                    Some(run_id) => {
+                        notify_terminal_failure_resolved_with_run_id(
+                            cfg,
+                            profile,
+                            execution.profile_name,
+                            work_id,
+                            Some(run_id),
+                        );
+                    }
+                    None => {
+                        notify_terminal_failure_resolved(
+                            cfg,
+                            profile,
+                            execution.profile_name,
+                            work_id,
+                        );
+                    }
+                }
+            }
         }
         Err(e) => {
             entry.failure_class = Some("merge_failed".to_string());

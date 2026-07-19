@@ -50,7 +50,10 @@ pub(super) fn execute(
             work_id,
             mr_url,
             Some(expected_generation),
-            Some(&run_id),
+            crate::dispatch::MergeExecution {
+                profile_name,
+                run_id: Some(&run_id),
+            },
         )
     };
     let outcome = match &result {
