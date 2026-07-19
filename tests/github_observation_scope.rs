@@ -43,6 +43,7 @@ fn active_observation_fails_closed_at_the_query_cap() {
                 branch: format!("gah/bounded-{number}"),
                 labels: vec![],
                 ci_conclusion: None,
+                state: None,
                 url: None,
                 number: Some(number),
                 draft: Some(true),

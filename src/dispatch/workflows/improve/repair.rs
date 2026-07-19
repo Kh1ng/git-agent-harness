@@ -20,6 +20,7 @@ pub(super) struct LoadContext<'a> {
 
 impl<'a> LoadContext<'a> {
     pub fn new(
+        enabled: bool,
         args: &'a DispatchArgs,
         cfg: &'a GahConfig,
         profile: &'a crate::config::Profile,
@@ -28,7 +29,7 @@ impl<'a> LoadContext<'a> {
         repo: &'a Path,
     ) -> Self {
         Self {
-            enabled: args.existing_branch.is_some(),
+            enabled,
             cfg,
             profile,
             profile_name: &args.profile,

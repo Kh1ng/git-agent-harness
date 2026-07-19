@@ -1,3 +1,4 @@
+use super::work_identity::apply_authoritative_work_identity;
 use super::*;
 use crate::dispatch::issues::TicketMetadata;
 use crate::dispatch::test_util::profile;
