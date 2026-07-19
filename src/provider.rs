@@ -4,6 +4,7 @@ use std::fmt;
 use std::process::{Command, Output};
 use std::thread;
 use std::time::Duration;
+use url::Url;
 
 const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
     "gah-needs-fix",
@@ -858,6 +859,7 @@ fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<Rev
 pub enum MrReferenceError {
     MalformedUrl(String),
     CrossProject { expected: String, found: String },
+    InvalidProfile(String),
 }
 
 impl fmt::Display for MrReferenceError {
@@ -865,12 +867,15 @@ impl fmt::Display for MrReferenceError {
         match self {
             MrReferenceError::MalformedUrl(raw) => write!(
                 f,
-                "malformed --mr value '{raw}': expected a numeric IID or a canonical GitLab MR URL (http:// or https://<host>/<namespace>/<project>/-/merge_requests/<iid>)"
+                "malformed --mr value '{raw}': expected a numeric IID or a canonical GitLab MR URL (http(s)://<host>/<namespace>/<project>/-/merge_requests/<iid>)"
             ),
             MrReferenceError::CrossProject { expected, found } => write!(
                 f,
                 "--mr URL does not match this profile's project: expected '{expected}', found '{found}'"
             ),
+            MrReferenceError::InvalidProfile(reason) => {
+                write!(f, "cannot validate --mr URL for this GitLab profile: {reason}")
+            }
         }
     }
 }
@@ -892,62 +897,70 @@ fn parse_gitlab_mr_reference(profile: &Profile, raw: &str) -> Result<String, MrR
         return Ok(trimmed.to_string());
     }
 
-    let without_scheme = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))
-        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?;
-    let (host, rest) = without_scheme
-        .split_once('/')
-        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?;
-
-    let (project_path, after_marker) = rest
-        .find("/-/merge_requests/")
-        .map(|idx| (&rest[..idx], &rest[idx + "/-/merge_requests/".len()..]))
-        .or_else(|| {
-            rest.find("/merge_requests/")
-                .map(|idx| (&rest[..idx], &rest[idx + "/merge_requests/".len()..]))
-        })
-        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?;
-    let iid: String = after_marker
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if iid.is_empty() || project_path.is_empty() {
-        return Err(MrReferenceError::MalformedUrl(raw.to_string()));
-    }
-
-    // Ensure trailing characters after IID are valid URL separators (/diffs, ?query, #fragment)
-    let rest_after_iid = &after_marker[iid.len()..];
-    if !rest_after_iid.is_empty()
-        && !rest_after_iid.starts_with('/')
-        && !rest_after_iid.starts_with('?')
-        && !rest_after_iid.starts_with('#')
+    let parsed =
+        Url::parse(trimmed).map_err(|_| MrReferenceError::MalformedUrl(raw.to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
     {
         return Err(MrReferenceError::MalformedUrl(raw.to_string()));
     }
 
-    let expected_host = match profile.provider_api_base.as_deref() {
-        Some(base) => match gitlab_hostname(base) {
-            Ok(h) => h,
-            Err(_) => {
-                return Err(MrReferenceError::CrossProject {
-                    expected: profile.repo.clone(),
-                    found: format!("{host}/{project_path}"),
-                });
-            }
-        },
-        None => "gitlab.com",
-    };
-    let host_matches = expected_host.eq_ignore_ascii_case(host);
+    let segments: Vec<_> = parsed
+        .path_segments()
+        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let marker = segments
+        .windows(2)
+        .position(|pair| pair == ["-", "merge_requests"])
+        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?;
+    let project_path = segments[..marker].join("/");
+    let iid = segments
+        .get(marker + 2)
+        .copied()
+        .filter(|value| is_ascii_digits(value))
+        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?;
+
+    let api_base = profile
+        .provider_api_base
+        .as_deref()
+        .ok_or_else(|| MrReferenceError::InvalidProfile("missing provider_api_base".to_string()))?;
+    let expected = Url::parse(api_base).map_err(|_| {
+        MrReferenceError::InvalidProfile("provider_api_base is not a valid URL".to_string())
+    })?;
+    if !matches!(expected.scheme(), "http" | "https") || expected.host_str().is_none() {
+        return Err(MrReferenceError::InvalidProfile(
+            "provider_api_base must be an http(s) URL with a hostname".to_string(),
+        ));
+    }
+
+    let expected_host = expected.host_str().expect("checked above");
+    let found_host = parsed
+        .host_str()
+        .ok_or_else(|| MrReferenceError::MalformedUrl(raw.to_string()))?;
+    // The operator-facing web URL may use a different http(s) scheme from
+    // the configured API base behind a reverse proxy. The host and any
+    // explicitly configured port identify the instance; scheme alone does not.
+    let host_matches =
+        expected_host.eq_ignore_ascii_case(found_host) && expected.port() == parsed.port();
     let project_matches = project_path == profile.repo;
     if !host_matches || !project_matches {
+        let expected_authority = expected.port().map_or_else(
+            || expected_host.to_string(),
+            |port| format!("{expected_host}:{port}"),
+        );
+        let found_authority = parsed.port().map_or_else(
+            || found_host.to_string(),
+            |port| format!("{found_host}:{port}"),
+        );
         return Err(MrReferenceError::CrossProject {
-            expected: profile.repo.clone(),
-            found: format!("{host}/{project_path}"),
+            expected: format!("{expected_authority}/{}", profile.repo),
+            found: format!("{found_authority}/{project_path}"),
         });
     }
 
-    Ok(iid)
+    Ok(iid.to_string())
 }
 
 fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarget> {

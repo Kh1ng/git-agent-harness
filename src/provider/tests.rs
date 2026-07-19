@@ -340,6 +340,15 @@ fn gitlab_mr_reference_normalizes_canonical_url_to_iid() {
     )
     .unwrap();
     assert_eq!(iid_with_diffs, "284");
+
+    let mut local_http = gitlab_profile();
+    local_http.provider_api_base = Some("http://gitlab.example.com/api/v4".into());
+    let local_iid = parse_gitlab_mr_reference(
+        &local_http,
+        "http://gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap();
+    assert_eq!(local_iid, "284");
 }
 
 #[test]
@@ -355,6 +364,23 @@ fn gitlab_mr_reference_rejects_malformed_url() {
     )
     .unwrap_err();
     assert!(matches!(err_suffix, MrReferenceError::MalformedUrl(_)));
+
+    let err_noncanonical = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://gitlab.example.com/owner/repo/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err_noncanonical,
+        MrReferenceError::MalformedUrl(_)
+    ));
+
+    let err_credentials = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://user@gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(err_credentials, MrReferenceError::MalformedUrl(_)));
 }
 
 #[test]
@@ -384,7 +410,28 @@ fn gitlab_mr_reference_rejects_wrong_host_url() {
         "https://attacker.example.com/owner/repo/-/merge_requests/284",
     )
     .unwrap_err();
-    assert!(matches!(err_no_base, MrReferenceError::CrossProject { .. }));
+    assert!(matches!(err_no_base, MrReferenceError::InvalidProfile(_)));
+}
+
+#[test]
+fn gitlab_mr_reference_rejects_invalid_profile_configuration() {
+    let mut missing_base = gitlab_profile();
+    missing_base.provider_api_base = None;
+    let missing = parse_gitlab_mr_reference(
+        &missing_base,
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(missing, MrReferenceError::InvalidProfile(_)));
+
+    let mut malformed_base = gitlab_profile();
+    malformed_base.provider_api_base = Some("not-a-url".into());
+    let malformed = parse_gitlab_mr_reference(
+        &malformed_base,
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(malformed, MrReferenceError::InvalidProfile(_)));
 }
 
 #[test]
@@ -435,6 +482,13 @@ fn gitlab_dispatch_by_malformed_mr_url_fails_before_any_provider_launch() {
     let err = find_review_target_by_mr(&gitlab_profile(), "not-a-valid-mr-reference").unwrap_err();
 
     assert!(format!("{:#}", err).contains("malformed --mr value"));
+
+    let cross_project = find_review_target_by_mr(
+        &gitlab_profile(),
+        "https://gitlab.example.com/other/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(format!("{cross_project:#}").contains("does not match this profile's project"));
 }
 
 #[test]
