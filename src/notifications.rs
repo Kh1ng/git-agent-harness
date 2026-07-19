@@ -241,7 +241,13 @@ pub fn format_message(event: &NotifyEvent) -> String {
             ticket,
             path,
             summary,
-        } => format!("[gah] handoff ready for {ticket} at {path}: {summary}"),
+        } => {
+            if let Some(short_summary) = summarize_error_summary(Some(summary)) {
+                format!("[gah] handoff ready for {ticket} at {path}: {short_summary}")
+            } else {
+                format!("[gah] handoff ready for {ticket} at {path}")
+            }
+        }
     }
 }
 

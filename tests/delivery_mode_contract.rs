@@ -27,6 +27,11 @@ fn profile_cli_supports_delivery_mode_add_set_show() {
     let cfg_path = home.path().join("gah.toml");
     fs::write(&cfg_path, "[profiles]\n").unwrap();
 
+    let local_path = home.path().join("local");
+    let artifact_root = home.path().join("artifacts");
+    fs::create_dir_all(&local_path).unwrap();
+    fs::create_dir_all(&artifact_root).unwrap();
+
     bin()
         .args([
             "profile",
@@ -41,9 +46,9 @@ fn profile_cli_supports_delivery_mode_add_set_show() {
             "--repo",
             "owner/repo",
             "--local-path",
-            "/tmp/local",
+            local_path.to_str().unwrap(),
             "--artifact-root",
-            "/tmp/artifacts",
+            artifact_root.to_str().unwrap(),
             "--delivery-mode",
             "handoff",
             "--config",

@@ -458,11 +458,7 @@ pub fn create_draft_mr(
     body: &str,
 ) -> Result<MrResult> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        eprintln!("delivery_mode=handoff: skipping create_draft_mr for branch {branch}");
-        return Ok(MrResult {
-            url: String::new(),
-            id: String::new(),
-        });
+        anyhow::bail!("delivery_mode=handoff: create_draft_mr is disallowed in handoff mode");
     }
     let body = crate::redact::redact(body);
     match profile.provider.as_str() {
@@ -479,8 +475,7 @@ pub fn post_review_comment(
     labels: &[&str],
 ) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        eprintln!("delivery_mode=handoff: skipping post_review_comment for branch {branch}");
-        return Ok(());
+        anyhow::bail!("delivery_mode=handoff: post_review_comment is disallowed in handoff mode");
     }
     let body = crate::redact::redact(body);
     match profile.provider.as_str() {
@@ -494,8 +489,7 @@ pub fn post_review_comment(
 /// The body is redacted before it crosses the provider boundary.
 pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        eprintln!("delivery_mode=handoff: skipping post_issue_comment for issue {issue_number}");
-        return Ok(());
+        anyhow::bail!("delivery_mode=handoff: post_issue_comment is disallowed in handoff mode");
     }
     let body = crate::redact::redact(body);
     match profile.provider.as_str() {
@@ -528,8 +522,9 @@ pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> 
 /// fix cap without reviewing the new source commit.
 pub fn set_review_state_labels(profile: &Profile, branch: &str, labels: &[&str]) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        eprintln!("delivery_mode=handoff: skipping set_review_state_labels for branch {branch}");
-        return Ok(());
+        anyhow::bail!(
+            "delivery_mode=handoff: set_review_state_labels is disallowed in handoff mode"
+        );
     }
     match profile.provider.as_str() {
         "gitlab" => {
@@ -847,8 +842,7 @@ fn github_set_review_state_labels(
 /// REST.
 pub fn mark_ready_for_review(profile: &Profile, branch: &str) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        eprintln!("delivery_mode=handoff: skipping mark_ready_for_review for branch {branch}");
-        return Ok(());
+        anyhow::bail!("delivery_mode=handoff: mark_ready_for_review is disallowed in handoff mode");
     }
     let target = find_review_target_by_branch(profile, branch)?;
     match profile.provider.as_str() {
@@ -885,8 +879,7 @@ pub fn merge_mr(
     expected_review_generation: Option<&str>,
 ) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        eprintln!("delivery_mode=handoff: skipping merge_mr for branch {branch}");
-        return Ok(());
+        anyhow::bail!("delivery_mode=handoff: merge_mr is disallowed in handoff mode");
     }
     let target = find_review_target_by_branch(profile, branch)?;
     ensure_review_generation(&target, expected_review_generation)?;
@@ -946,8 +939,7 @@ pub fn gitlab_set_mwps(
     expected_review_generation: &str,
 ) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        eprintln!("delivery_mode=handoff: skipping gitlab_set_mwps for branch {branch}");
-        return Ok(());
+        anyhow::bail!("delivery_mode=handoff: gitlab_set_mwps is disallowed in handoff mode");
     }
     let target = find_review_target_by_branch(profile, branch)?;
     ensure_review_generation(&target, Some(expected_review_generation))?;
@@ -990,8 +982,7 @@ pub fn gitlab_set_mwps(
 /// Close a GitHub issue by number.
 pub fn github_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        eprintln!("delivery_mode=handoff: skipping github_close_issue for issue {issue_number}");
-        return Ok(());
+        anyhow::bail!("delivery_mode=handoff: github_close_issue is disallowed in handoff mode");
     }
     let out = provider_command("gh")
         .args(["issue", "close", issue_number, "--repo", &profile.repo])
@@ -1007,8 +998,7 @@ pub fn github_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
 /// Close a GitLab issue by number.
 pub fn gitlab_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        eprintln!("delivery_mode=handoff: skipping gitlab_close_issue for issue {issue_number}");
-        return Ok(());
+        anyhow::bail!("delivery_mode=handoff: gitlab_close_issue is disallowed in handoff mode");
     }
     let project_id = profile
         .provider_project_id

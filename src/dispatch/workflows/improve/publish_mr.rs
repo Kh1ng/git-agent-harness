@@ -16,6 +16,9 @@ pub(super) fn publish_or_update_mr(
     effective_backend: &str,
     effective_model: Option<&str>,
 ) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("cannot publish or update MR when profile delivery_mode is handoff");
+    }
     if is_manual_fix {
         let existing = provider::find_review_target_by_branch(profile, branch)
             .with_context(|| format!("resolving existing PR/MR for repaired branch '{branch}'"))?;

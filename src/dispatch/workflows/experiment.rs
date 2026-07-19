@@ -8,7 +8,7 @@ use super::super::metrics::apply_diff_stats;
 use super::super::prompts::build_task;
 use super::super::publish::{
     build_experiment_mr_body, emit_human_handoff, enforce_generated_artifact_policy,
-    perform_handoff_delivery, publishing_allows_publish, ExperimentMrRenderContext,
+    handle_handoff_delivery, publishing_allows_publish, ExperimentMrRenderContext,
 };
 use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
@@ -197,27 +197,18 @@ pub(crate) fn experiment(
     });
     enforce_generated_artifact_policy(profile, ledger, &wt)?;
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
-        if worktree::has_uncommitted_changes(&wt)? {
-            ledger.commit_attempted = true;
-            worktree::stage_all(&wt)?;
-            worktree::ensure_staged(&wt)?;
-            let commit_msg = format!("gah: experiment for {}", profile.repo_id);
-            worktree::commit_msg(&wt, &commit_msg)?;
-            ledger.commit_created = true;
-        } else {
-            ledger.commit_created = true;
-        }
         let ticket_id = ledger
             .work_id
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
-        apply_diff_stats(ledger, &wt, &profile.default_target_branch);
-        perform_handoff_delivery(
+        let commit_msg = format!("gah: experiment for {}", profile.repo_id);
+        handle_handoff_delivery(
             cfg,
             profile,
             ledger,
             &wt,
             &branch,
+            &commit_msg,
             &ticket_id,
             &backend_summary,
         )?;

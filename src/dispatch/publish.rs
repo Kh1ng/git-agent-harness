@@ -97,7 +97,6 @@ pub(super) fn perform_handoff_delivery(
     std::fs::create_dir_all(&handoff_dir)?;
 
     let patch = crate::worktree::diff_patch(wt, &profile.default_target_branch).unwrap_or_default();
-    std::fs::write(handoff_dir.join("patch.diff"), &patch)?;
     std::fs::write(handoff_dir.join("diff.patch"), &patch)?;
 
     let summary_report = format!(
@@ -120,7 +119,6 @@ pub(super) fn perform_handoff_delivery(
         ledger.deletions.unwrap_or(0),
     );
     std::fs::write(handoff_dir.join("report.md"), &summary_report)?;
-    std::fs::write(handoff_dir.join("summary.md"), &summary_report)?;
 
     let handoff_dir_str = handoff_dir.display().to_string();
     crate::notifications::notify_event(
@@ -1128,5 +1126,70 @@ mod tests {
             !body.contains("Closes #"),
             "MR body should not contain Closes directive without issue number"
         );
+    }
+
+    #[test]
+    fn perform_handoff_delivery_creates_single_canonical_patch_and_report() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::worktree::git(&["init", "-q"], temp.path()).unwrap();
+        crate::worktree::git(
+            &["config", "user.email", "gah@example.invalid"],
+            temp.path(),
+        )
+        .unwrap();
+        crate::worktree::git(&["config", "user.name", "GAH Test"], temp.path()).unwrap();
+        std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+        crate::worktree::git(&["add", "."], temp.path()).unwrap();
+        crate::worktree::git(&["commit", "-q", "-m", "base"], temp.path()).unwrap();
+        crate::worktree::git(&["branch", "-M", "main"], temp.path()).unwrap();
+        crate::worktree::git(&["remote", "add", "origin", "."], temp.path()).unwrap();
+        crate::worktree::git(
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+            temp.path(),
+        )
+        .unwrap();
+
+        std::fs::write(temp.path().join("README.md"), "base\nmodified\n").unwrap();
+
+        let artifact_dir = temp.path().join("artifacts");
+        let mut profile = profile(temp.path());
+        profile.artifact_root = artifact_dir.to_string_lossy().to_string();
+        profile.delivery_mode = crate::config::DeliveryMode::Handoff;
+
+        let cfg = crate::dispatch::test_util::gah_config(Default::default());
+        let mut ledger = LedgerEntry::new(
+            "real",
+            &profile,
+            "codex",
+            "fix",
+            "target",
+            Some("handoff-test".into()),
+            None,
+        );
+
+        perform_handoff_delivery(
+            &cfg,
+            &profile,
+            &mut ledger,
+            temp.path(),
+            "gah/handoff-test",
+            "TICKET-125",
+            "Fixed something substantive.",
+        )
+        .unwrap();
+
+        let handoff_dir = artifact_dir.join("handoffs").join("TICKET-125");
+        assert!(handoff_dir.join("diff.patch").exists());
+        assert!(handoff_dir.join("report.md").exists());
+        assert!(!handoff_dir.join("patch.diff").exists());
+        assert!(!handoff_dir.join("summary.md").exists());
+
+        let report = std::fs::read_to_string(handoff_dir.join("report.md")).unwrap();
+        assert!(report.contains("# Handoff Report: TICKET-125"));
+        assert!(report.contains("Fixed something substantive."));
+
+        assert_eq!(ledger.mode, "handoff");
+        assert_eq!(ledger.mr_url, None);
+        assert!(!ledger.mr_created);
     }
 }
