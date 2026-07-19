@@ -93,13 +93,16 @@ pub(crate) fn normalize_attempt_usage(
     attribution: UsageAttribution<'_>,
     launched: bool,
 ) -> LedgerUsage {
-    usage.backend_instance = attribution
-        .backend
-        .map(|backend| match attribution.quota_pool {
-            Some(pool) if pool.starts_with(&format!("{backend}:")) => pool.to_string(),
+    usage.backend_instance = attribution.backend.map(|backend| {
+        match attribution.quota_pool {
+            // Already fully-qualified to this backend; respect it verbatim to
+            // avoid a latent double-prefix if a caller passes a qualified pool.
+            Some(pool) if pool.split(':').next() == Some(backend) => pool.to_string(),
+            // Bare pool tag: prefix with the backend to form a qualified tag.
             Some(pool) => format!("{backend}:{pool}"),
             None => backend.to_string(),
-        });
+        }
+    });
     usage.account_label = attribution.quota_pool.map(str::to_string);
     usage.usage_classification = match attribution.cost_class {
         Some("included_quota") => Some("quota_backed".to_string()),

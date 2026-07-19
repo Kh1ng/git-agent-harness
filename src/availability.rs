@@ -132,7 +132,8 @@ pub fn resolve_candidate_quota_pool(
     configured_pool: Option<&str>,
 ) -> Option<String> {
     if let Some(pool) = configured_pool {
-        if (pool == "agy" || pool == "agy-main" || pool.starts_with("agy-")) && model.is_some() {
+        let is_agy_account = pool == "agy" || pool == "agy-main" || pool.starts_with("agy-");
+        if !pool.contains(':') && is_agy_account && model.is_some() {
             if let Some(derived) = derive_quota_pool(backend, model) {
                 return Some(derived);
             }
@@ -1381,12 +1382,15 @@ mod tests {
         assert_eq!(super::derive_quota_pool("claude", Some("Gemini 3.5")), None);
         assert_eq!(super::derive_quota_pool("agy", None), None);
         assert_eq!(super::derive_quota_pool("agy", Some("   ")), None);
-
         let r = |b, m, p| super::resolve_candidate_quota_pool(b, m, p).unwrap();
         let g = "agy:google-native";
         assert_eq!(r("agy", Some("Gemini 3.5"), Some("agy")), g);
         assert_eq!(r("agy", Some("Gemini 3.5"), None), g);
-        assert_eq!(r("agy", Some("Gemini 3.5"), Some(g)), g);
+        // A fully-qualified pool is operator intent and is respected verbatim.
+        assert_eq!(
+            r("agy", Some("Gemini 3.5"), Some("agy:external")),
+            "agy:external"
+        );
     }
 
     #[test]
