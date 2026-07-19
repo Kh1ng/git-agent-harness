@@ -19,9 +19,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 mod publish;
-pub(crate) use publish::publish_plan;
+pub(crate) use publish::{publish_plan, validate_source_depth, PmPublicationSummary};
 
 const PM_PLAN_JSON_SCHEMA_VERSION: u32 = 1;
 const PM_PLAN_JSON_MAX_BYTES: usize = 200_000;
@@ -134,7 +135,13 @@ pub(crate) fn pm(
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
 
     let mut attempted_routes = HashSet::new();
+    let backend_budget = Duration::from_secs(profile.publishing.pm_timeout_seconds());
+    let backend_started = Instant::now();
     let log_text = loop {
+        let remaining = backend_budget
+            .checked_sub(backend_started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .context("PM backend attempts exhausted the configured wall-clock budget")?;
         let attempt_index = attempted_routes.len() + 1;
         let attempt_dir = session_dir.join(format!("pm-run-{attempt_index}"));
         fs::create_dir_all(&attempt_dir)?;
@@ -150,6 +157,7 @@ pub(crate) fn pm(
             &llm,
             plan_route.effective_model.as_deref(),
             None,
+            Some(remaining.as_secs().max(1)),
         )?;
         println!(
             "PM backend finished: exit={} duration={:.0}s log={}",
@@ -166,6 +174,14 @@ pub(crate) fn pm(
             crate::ledger::FailureClass::BackendError,
             crate::ledger::FailureStage::AgentRun,
         );
+        if log_text.contains("hard wall-clock timeout") {
+            ledger.validation_result = Some("not_run_hard_timeout".into());
+            anyhow::bail!(
+                "PM backend {} exceeded the configured {}s total wall-clock budget",
+                plan_route.effective_backend,
+                profile.publishing.pm_timeout_seconds()
+            );
+        }
         let route_key = route_identity(
             &plan_route.effective_backend,
             plan_route.effective_model.as_deref(),

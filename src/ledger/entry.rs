@@ -353,7 +353,10 @@ pub struct RoutingCandidateDiagnostic {
 // silently become repair instructions.
 // v6 adds an independently-versioned review contract and source/metadata
 // generation. Ledger schema and review policy deliberately advance separately.
-pub const LEDGER_SCHEMA_VERSION: u32 = 7;
+// v7 adds resumable provider-native PM publication mutation records.
+// v8 adds durable parent publication identity and exact child issue numbers for
+// controller reconciliation. Every added field defaults for historical rows.
+pub const LEDGER_SCHEMA_VERSION: u32 = 8;
 
 /// Version of the machine-enforced review output and lifecycle policy. Bump
 /// this when an older review opinion, retry budget, or derived human gate must
@@ -524,6 +527,19 @@ pub struct LedgerEntry {
     pub provider_mutation_status: Option<String>,
     #[serde(default)]
     pub provider_mutation_url: Option<String>,
+    /// Durable parent-level PM publication identity. Child mutation records
+    /// remain separate; this record lets the controller avoid replanning and
+    /// reconcile the parent from exact provider issue identities.
+    #[serde(default)]
+    pub pm_plan_fingerprint: Option<String>,
+    #[serde(default)]
+    pub pm_publication_status: Option<String>,
+    #[serde(default)]
+    pub pm_child_issue_numbers: Vec<String>,
+    #[serde(default)]
+    pub pm_decomposition_depth: Option<u32>,
+    #[serde(default)]
+    pub pm_publication_state_path: Option<String>,
     pub files_changed: Option<u32>,
     pub insertions: Option<u32>,
     pub deletions: Option<u32>,
@@ -651,6 +667,11 @@ impl LedgerEntry {
             provider_mutation_kind: None,
             provider_mutation_status: None,
             provider_mutation_url: None,
+            pm_plan_fingerprint: None,
+            pm_publication_status: None,
+            pm_child_issue_numbers: Vec::new(),
+            pm_decomposition_depth: None,
+            pm_publication_state_path: None,
             files_changed: None,
             insertions: None,
             deletions: None,
@@ -751,6 +772,11 @@ impl LedgerEntry {
             provider_mutation_kind: None,
             provider_mutation_status: None,
             provider_mutation_url: None,
+            pm_plan_fingerprint: None,
+            pm_publication_status: None,
+            pm_child_issue_numbers: Vec::new(),
+            pm_decomposition_depth: None,
+            pm_publication_state_path: None,
             files_changed: None,
             insertions: None,
             deletions: None,

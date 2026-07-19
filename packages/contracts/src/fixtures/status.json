@@ -81,6 +81,9 @@
     }
   },
   "open_managed_mr_count": 1,
+  "pm_decomposition_attempt_counts": {},
+  "pm_max_attempts": 2,
+  "pm_parent_states": [],
   "profile": {
     "default_target_branch": "main",
     "display_name": "Test Repo",

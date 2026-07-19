@@ -402,6 +402,7 @@ pub(crate) fn improve(
             route.effective_model.as_deref(),
             env_path,
             reserved_route_slot.is_some(),
+            None,
         );
         let result = match result {
             Ok(r) => r,

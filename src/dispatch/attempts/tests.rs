@@ -422,6 +422,7 @@ fn agy_second_backend_runs_with_agy_second_home_override() {
         &llm,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -473,6 +474,7 @@ fn agy_backend_without_second_home_uses_real_home() {
         "do the thing",
         &session_dir,
         &llm,
+        None,
         None,
         None,
     )
@@ -531,6 +533,7 @@ fn run_backend_looks_up_agy_print_timeout_by_exact_model_name() {
         &llm,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -583,6 +586,7 @@ fn run_backend_omits_print_timeout_for_unmapped_model() {
         "do the thing",
         &session_dir,
         &llm,
+        None,
         None,
         None,
     )
@@ -644,6 +648,7 @@ fn run_backend_looks_up_opencode_idle_timeout_by_exact_model_name() {
         &llm,
         Some("litellm-lan/qwen3.6:35b-a3b"),
         None,
+        None,
     )
     .unwrap();
 
@@ -701,6 +706,7 @@ fn run_backend_falls_back_to_flat_opencode_idle_timeout_for_unmapped_model() {
         &session_dir,
         &llm,
         Some("litellm-lan/qwen3.6:35b-a3b"), // not in the map
+        None,
         None,
     )
     .unwrap();
@@ -766,6 +772,7 @@ fn run_backend_routes_vibe_to_run_vibe_not_the_openhands_fallthrough() {
         "do the thing",
         &session_dir,
         &llm,
+        None,
         None,
         None,
     )

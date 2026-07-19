@@ -47,6 +47,30 @@ pub(super) fn apply_parallel_projection(
         >= limit;
 }
 
+pub(super) fn retain_unclaimed_work(
+    snapshot: &mut StatusSnapshot,
+    claimed_work_ids: &[String],
+    executed_work_ids: &HashSet<String>,
+) {
+    let eligible = |work_id: Option<&str>| {
+        work_id
+            .map(|id| {
+                !claimed_work_ids.iter().any(|claimed| claimed == id)
+                    && !executed_work_ids.contains(id)
+            })
+            .unwrap_or(true)
+    };
+    snapshot
+        .available_tickets
+        .retain(|ticket| eligible(ticket.work_id.as_deref()));
+    snapshot
+        .issue_intake_rejections
+        .retain(|issue| eligible(issue.work_id.as_deref()));
+    snapshot
+        .merge_requests
+        .retain(|mr| eligible(mr.work_id.as_deref()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
