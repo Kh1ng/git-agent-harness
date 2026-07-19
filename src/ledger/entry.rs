@@ -261,6 +261,9 @@ pub struct RoutingCandidateDiagnostic {
 // defaults empty so historical review records remain readable but cannot
 // silently become repair instructions.
 pub const LEDGER_SCHEMA_VERSION: u32 = 5;
+/// Review contract version tracked independently from raw ledger schema.
+/// Bumping this invalidates historical review-derived gates/budgets/counters.
+pub const CURRENT_REVIEW_CONTRACT_VERSION: u32 = 1;
 
 fn default_ledger_schema_version() -> u32 {
     1
@@ -270,6 +273,11 @@ fn default_ledger_schema_version() -> u32 {
 pub struct LedgerEntry {
     #[serde(default = "default_ledger_schema_version")]
     pub schema_version: u32,
+    /// TICKET-711: contract version for review verdicts, cycle accounting,
+    /// stuck-loop fingerprints, policy holds, and repair-budget decisions.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_contract_version: Option<u32>,
     pub timestamp: String,
     pub session_id: Option<String>,
     pub profile: String,
@@ -459,6 +467,7 @@ impl LedgerEntry {
                 .format(&Rfc3339)
                 .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
             schema_version: LEDGER_SCHEMA_VERSION,
+            review_contract_version: Some(CURRENT_REVIEW_CONTRACT_VERSION),
             session_id,
             profile: profile_name.to_string(),
             display_name: profile.display_name.clone(),
@@ -554,6 +563,7 @@ impl LedgerEntry {
                 .format(&Rfc3339)
                 .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string()),
             schema_version: LEDGER_SCHEMA_VERSION,
+            review_contract_version: Some(CURRENT_REVIEW_CONTRACT_VERSION),
             session_id: None,
             profile: profile_name.to_string(),
             display_name: profile.display_name.clone(),

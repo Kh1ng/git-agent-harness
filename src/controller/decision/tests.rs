@@ -13,6 +13,7 @@ mod lifecycle_priority;
 fn empty_snapshot() -> StatusSnapshot {
     StatusSnapshot {
         schema_version: 1,
+        review_contract_version: crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
         generated_at: "2026-07-05T00:00:00Z".into(),
         profile: ProfileIdentity {
             profile: "real".into(),

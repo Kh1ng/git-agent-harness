@@ -24,6 +24,7 @@ default_target_branch = "main"
 fn empty_snapshot() -> crate::status::StatusSnapshot {
     crate::status::StatusSnapshot {
         schema_version: 1,
+        review_contract_version: crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
         generated_at: "2026-07-17T00:00:00Z".into(),
         profile: crate::status::ProfileIdentity {
             profile: "real".into(),
@@ -132,6 +133,7 @@ fn capacity_event(work_id: &str, details: &str) -> crate::events::ControllerEven
         work_id: Some(work_id.into()),
         run_id: Some(format!("capacity-{work_id}")),
         reason_code: None,
+        review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
         details: details.into(),
     }
 }

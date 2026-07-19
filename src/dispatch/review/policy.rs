@@ -126,6 +126,8 @@ pub(in crate::dispatch) fn check_review_budget(
             entry.profile == profile_name
                 && entry.repo_id == profile.repo_id
                 && entry.mode == "review"
+                && entry.review_contract_version.unwrap_or(0)
+                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
                 && !matches!(
                     entry.validation_result.as_deref(),
                     Some("review_budget_exhausted")

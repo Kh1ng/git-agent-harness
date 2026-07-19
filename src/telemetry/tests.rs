@@ -661,6 +661,7 @@ mod telemetry_tests {
         LedgerEntry {
             timestamp: "2026-07-10T12:00:00Z".to_string(),
             schema_version: crate::ledger::LEDGER_SCHEMA_VERSION,
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             session_id: None,
             profile: "test-profile".to_string(),
             display_name: "Test Profile".to_string(),

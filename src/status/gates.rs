@@ -15,6 +15,9 @@ pub(super) fn policy_approval_still_required(
     if gate.reason_code.as_deref() != Some(HumanRequiredReason::PolicyApproval.as_str()) {
         return true;
     }
+    if gate.review_contract_version.unwrap_or(0) < crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION {
+        return false;
+    }
     let mode = match gate.mode.as_str() {
         "review" => "review",
         "pm" => "pm",
@@ -373,6 +376,7 @@ requires_approval = true
             mode: "review".into(),
             timestamp: "2026-07-16T00:00:00Z".into(),
             routing_diagnostics: None,
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
         };
         let availability_path = tmp.path().join("availability.json");
         let _availability_guard =
@@ -563,6 +567,7 @@ included_in_quota = true
             message: None,
             mode: "fix".into(),
             timestamp: "2026-07-16T00:00:00Z".into(),
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             routing_diagnostics: Some(crate::ledger::RoutingDiagnostics {
                 candidates: vec![crate::ledger::RoutingCandidateDiagnostic {
                     backend: "claude".into(),
