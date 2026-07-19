@@ -614,6 +614,10 @@ fn find_review_target_by_mr_ignores_stale_pipeline_status_not_matching_source_sh
     assert_eq!(target.merge_status.as_deref(), Some("can_be_merged"));
 }
 
+// Source Acceptance Criterion 1: GitLab review targets expose pipeline status for the exact source SHA.
+// Grounded evidence:
+// ac:1:snapshot:src/provider/tests.rs:cargo test find_review_target_by_mr_resolves_pipeline_status_from_pipelines_fallback_when_head_pipeline_sha_mismatches
+// ac:1:provider:gitlab:projects/42/merge_requests/235/pipelines
 #[test]
 fn find_review_target_by_branch_prefers_pipeline_status_for_ci_status_on_draft_mr() {
     let _exec_guard = crate::test_support::ExecGuard::new();
