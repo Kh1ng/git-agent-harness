@@ -233,7 +233,7 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
     );
     make_fake_bin_with_body(
         &fake_bin,
@@ -364,7 +364,7 @@ fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
     );
     make_fake_bin_with_body(
         &fake_bin,
@@ -423,7 +423,7 @@ fn parallel_loop_does_not_refill_after_shutdown() {
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; fi\nif [ \"$1\" = \"api\" ]; then echo '[]'; fi\nexit 0\n",
     );
     make_fake_bin_with_body(
         &fake_bin,

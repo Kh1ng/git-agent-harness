@@ -174,7 +174,7 @@ fn issue_author_kind_to_str(kind: IssueAuthorKind) -> &'static str {
 }
 
 fn parse_github_author(response: &serde_json::Value) -> Option<IssueAuthorIdentity> {
-    let author = response.get("author")?;
+    let author = response.get("author").or_else(|| response.get("user"))?;
     let login = author.get("login")?.as_str()?.trim();
     if login.is_empty() {
         return None;
@@ -669,29 +669,39 @@ fn issue_rejection_snapshot(
 }
 
 fn discover_open_github_issues(profile: &Profile) -> Result<IssueIntakeDiscovery> {
-    let out = provider_command("gh")
-        .arg("issue")
-        .arg("list")
-        .arg("--repo")
-        .arg(&profile.repo)
-        .arg("--state")
-        .arg("open")
-        .arg("--json")
-        .arg("number,title,body,labels,author,state")
-        .arg("--limit")
-        .arg("1000")
-        .output()
-        .context("gh issue list")?;
-
-    if !out.status.success() {
-        anyhow::bail!(
-            "gh issue list failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+    const PAGE_SIZE: usize = 100;
+    const MAX_PAGES: usize = 2;
+    let mut items = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let endpoint = format!(
+            "repos/{}/issues?state=open&per_page={PAGE_SIZE}&page={page}",
+            profile.repo
         );
+        let out = provider_command("gh")
+            .args(["api", "--method", "GET", &endpoint])
+            .output()
+            .context("GitHub REST open-issue snapshot")?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "GitHub REST open-issue snapshot failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let mut page_items: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout)
+            .context("parsing GitHub REST open-issue snapshot")?;
+        let page_was_full = page_items.len() >= PAGE_SIZE;
+        page_items.retain(|item| item.get("pull_request").is_none());
+        items.extend(page_items);
+        if !page_was_full {
+            break;
+        }
+        if page == MAX_PAGES {
+            anyhow::bail!(
+                "GitHub REST open-issue snapshot reached its cap ({}); refusing incomplete intake",
+                PAGE_SIZE * MAX_PAGES
+            );
+        }
     }
-
-    let items: Vec<serde_json::Value> =
-        serde_json::from_slice(&out.stdout).context("parsing GitHub issue list response")?;
     let mut allowed = Vec::new();
     let mut rejected = Vec::new();
     for resp in items {

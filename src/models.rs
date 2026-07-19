@@ -288,11 +288,15 @@ pub struct RepoPolicy {
 /// dispatcher stays free to map the request onto whatever backend instance
 /// currently satisfies the capability.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PlannerWorkPacket {
     /// Plan-local stable key, unique within the plan. Used to express
     /// dependencies between packets via `depends_on`.
     pub key: String,
     pub title: String,
+    /// Concise provider-facing summary, distinct from the full objective.
+    #[serde(default)]
+    pub summary: String,
     /// The objective the packet should achieve (the "why"), distinct from the
     /// machine summary used for de-duplication.
     pub objective: String,
@@ -330,6 +334,7 @@ pub struct PlannerWorkPacket {
 /// TICKET-544: recommended routing expressed as a capability requirement and
 /// a difficulty tier, intentionally provider/model-neutral.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RecommendedRouting {
     /// Capability the backend must provide: edit | plan | review | research.
     pub capability: String,
@@ -343,6 +348,7 @@ fn default_routing_tier() -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct PmPlan {
     pub title: String,
     pub summary: String,

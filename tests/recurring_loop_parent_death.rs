@@ -76,7 +76,7 @@ fn recurring_loop_exits_and_releases_ownership_when_launcher_dies() {
     let gh = bin_dir.join("gh");
     fs::write(
         &gh,
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"pr list\"|\"issue list\") echo '[]' ;;\n  *) exit 0 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"pr list\"|\"api --method\") echo '[]' ;;\n  *) exit 0 ;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();

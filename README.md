@@ -399,13 +399,27 @@ gah dispatch --profile my-repo --mode pm --backend claude --target "Break this w
 
 PM mode with a target now injects preflight context before the manager runs:
 
-- `docs/MANAGER_MEMORY.md`
-- open GitLab MRs
-- recently merged GitLab MRs
+- open trusted GitHub or GitLab issues
+- open native PRs/MRs, including non-GAH branches
+- recently merged native PRs/MRs
 - existing `docs/tickets/*.md`
 - current branch, dirty state, recent commits
+- optional bounded project guidance
 
-Missing `docs/MANAGER_MEMORY.md` is a hard failure for PM decomposition.
+Project guidance is optional. By default GAH uses the first existing file from
+`docs/PM_GUIDANCE.md`, `docs/project-guidance.md`,
+`docs/pm-guidance.md`, or `PM_GUIDANCE.md`. Override that ordered search per
+profile (or in routing defaults) when a repository uses another convention:
+
+```toml
+[profiles.my-repo.routing]
+pm_guidance_paths = ["docs/PROJECT_BRIEF.md", "AGENTS.md"]
+```
+
+If issue or PR/MR discovery fails or reaches a provider query cap, PM
+decomposition stops instead of treating the missing duplicate context as an
+empty backlog. The generated plan is validated and written as
+`pm-plan-v1.json` in the dispatch session before local ticket application.
 
 Implementation, fix, and experiment workers instead receive the bounded
 `docs/PROJECT_BRIEF.md` and a task-specific live task pack. This deliberately
@@ -413,7 +427,10 @@ keeps mutable manager state and unrelated backlog out of worker prompts; the
 written `context-built.json` artifact records every prompt section and its
 estimated token size.
 
-With a target, PM mode now asks the manager for structured JSON, validates it, dedupes it against existing tickets/open MRs/recent merged MRs, assigns ticket IDs, and then writes the ticket markdown files itself.
+With a target, PM mode asks the manager for provider-neutral structured JSON,
+validates field/count/byte/dependency/overlap bounds, dedupes it against native
+issues, existing tickets, open PRs/MRs, and recently merged PRs/MRs, assigns
+ticket IDs, and then writes the transitional ticket markdown files itself.
 
 When `improve` or `fix` targets a ticket markdown file, GAH also reads ticket metadata such as difficulty, risk, recommended backend/model, affected files, and verification commands before routing the worker.
 
