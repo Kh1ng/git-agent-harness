@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 #[path = "runtime/route_state.rs"]
 mod route_state;
 use route_state::route_state_fingerprint;
+#[path = "runtime/dispatch_policy.rs"]
+mod dispatch_policy;
 #[path = "runtime/intake.rs"]
 mod intake;
 use intake::{action_creates_managed_mr, action_intake_key, apply_parallel_projection};
@@ -868,7 +870,7 @@ pub(crate) fn execute_action(
         allow_draft_fail: false,
         prod: false,
         issue_intake_override: false,
-        allow_unknown_red_baseline: false,
+        allow_unknown_red_baseline: dispatch_policy::allow_unknown_red_baseline(action),
         escalate: false,
         existing_branch: None,
         skip_validation_gate,
