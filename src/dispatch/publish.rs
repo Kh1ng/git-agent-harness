@@ -53,11 +53,106 @@ pub(super) fn emit_human_handoff(
     println!("=== end GAH human handoff ===");
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_handoff_delivery(
+    cfg: &crate::config::GahConfig,
+    profile: &Profile,
+    ledger: &mut LedgerEntry,
+    wt: &Path,
+    branch: &str,
+    commit_msg: &str,
+    ticket_id: &str,
+    backend_summary: &str,
+) -> anyhow::Result<()> {
+    if crate::worktree::has_uncommitted_changes(wt)? {
+        ledger.commit_attempted = true;
+        crate::worktree::stage_all(wt)?;
+        crate::worktree::ensure_staged(wt)?;
+        crate::worktree::commit_msg(wt, commit_msg)?;
+        ledger.commit_created = true;
+    } else {
+        ledger.commit_created = true;
+    }
+    crate::dispatch::metrics::apply_diff_stats(ledger, wt, &profile.default_target_branch);
+    perform_handoff_delivery(cfg, profile, ledger, wt, branch, ticket_id, backend_summary)?;
+    Ok(())
+}
+
+pub(super) fn perform_handoff_delivery(
+    cfg: &crate::config::GahConfig,
+    profile: &Profile,
+    ledger: &mut LedgerEntry,
+    wt: &Path,
+    branch: &str,
+    work_id_or_ticket: &str,
+    backend_summary: &str,
+) -> anyhow::Result<()> {
+    let artifact_root = if profile.artifact_root.trim().is_empty() {
+        crate::config::default_config_dir()
+    } else {
+        std::path::PathBuf::from(profile.artifact_root.trim())
+    };
+    let ticket_name = work_id_or_ticket.trim();
+    let handoff_dir = artifact_root.join("handoffs").join(ticket_name);
+    std::fs::create_dir_all(&handoff_dir)?;
+
+    let patch = crate::worktree::diff_patch(wt, &profile.default_target_branch).unwrap_or_default();
+    std::fs::write(handoff_dir.join("patch.diff"), &patch)?;
+    std::fs::write(handoff_dir.join("diff.patch"), &patch)?;
+
+    let summary_report = format!(
+        "# Handoff Report: {ticket_name}\n\
+         - Profile: {}\n\
+         - Branch: {branch}\n\
+         - Target Branch: {}\n\
+         - Delivery Mode: handoff\n\
+         - Validation Status: {}\n\
+         - Changed Files: {}\n\
+         - Insertions: {}\n\
+         - Deletions: {}\n\n\
+         ## Summary\n\
+         {backend_summary}\n",
+        profile.display_name,
+        profile.default_target_branch,
+        ledger.validation_result.as_deref().unwrap_or("unknown"),
+        ledger.files_changed.unwrap_or(0),
+        ledger.insertions.unwrap_or(0),
+        ledger.deletions.unwrap_or(0),
+    );
+    std::fs::write(handoff_dir.join("report.md"), &summary_report)?;
+    std::fs::write(handoff_dir.join("summary.md"), &summary_report)?;
+
+    let handoff_dir_str = handoff_dir.display().to_string();
+    crate::notifications::notify_event(
+        cfg,
+        profile,
+        crate::notifications::NotifyEvent::HandoffCreated {
+            ticket: ticket_name,
+            path: &handoff_dir_str,
+            summary: &summary_report,
+        },
+    );
+
+    ledger.mode = "handoff".to_string();
+    ledger.mr_url = None;
+    ledger.mr_created = false;
+    ledger.push_attempted = false;
+    ledger.push_succeeded = false;
+
+    println!("=== GAH operator handoff (delivery_mode = handoff) ===");
+    println!("ticket: {ticket_name}");
+    println!("path: {}", handoff_dir.display());
+    println!("=== end GAH operator handoff ===");
+
+    Ok(())
+}
+
 /// TICKET-128: whether the profile may publish the work autonomously. A
 /// restricted profile can still run the full backend and validation pipeline
 /// and write local artifacts; they just must not be published as an agent-authored MR.
 pub(super) fn publishing_allows_publish(profile: &Profile) -> bool {
-    profile.publishing.allow_pull_request_creation
+    profile.delivery_mode != crate::config::DeliveryMode::Handoff
+        && profile.publishing.allow_pull_request_creation
         && profile.publishing.allow_commit_message_generation
 }
 

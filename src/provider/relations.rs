@@ -10,6 +10,9 @@ pub(crate) fn link_provider_child(
     parent_number: &str,
     child: &ProviderIssue,
 ) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        return Ok(());
+    }
     if profile.provider != "github" {
         return Ok(());
     }
@@ -68,6 +71,9 @@ pub(crate) fn link_provider_dependency(
     dependency: &ProviderIssue,
     child: &ProviderIssue,
 ) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        return Ok(());
+    }
     if profile.provider != "gitlab" {
         return Ok(());
     }

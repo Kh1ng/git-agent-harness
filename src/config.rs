@@ -7,6 +7,10 @@ mod issue_intake;
 pub use issue_intake::IssueIntakeMode;
 mod publishing;
 pub use publishing::PublishingPolicy;
+mod delivery;
+pub use delivery::DeliveryMode;
+mod autonomy;
+pub use autonomy::WakeAutonomy;
 
 /// TICKET-127/Issue #124: per-repo merge policy controlling what the
 /// controller does once an MR is `READY_FOR_HUMAN` (strong reviewer approved)
@@ -37,29 +41,6 @@ impl MergePolicy {
             MergePolicy::GitlabMwps => "gitlab_mwps",
         }
     }
-}
-
-/// How much a woken manager agent (see `Defaults::current_manager`) is
-/// allowed to do on its own when a notify-worthy event fires (MR ready,
-/// human required, review verdict, terminal dispatch failure).
-/// Deliberately per-profile, not global -- an operator sprinting on one
-/// project may want full autonomy while another project's operator wants
-/// to decide every merge themselves.
-///
-/// * `Off` (default): no wake, `notify_command` behavior is unchanged.
-/// * `ReviewOnly`: the woken agent reviews and posts findings, but must not
-///   merge or take any other write action.
-/// * `Full`: the woken agent may act on its own judgment (review and merge
-///   if CI is green and review passed, investigate and fix a failure,
-///   etc.) under the same standing authorization a human operator would
-///   otherwise apply manually.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum WakeAutonomy {
-    #[default]
-    Off,
-    ReviewOnly,
-    Full,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -304,6 +285,9 @@ pub struct Profile {
     /// specific profile into this.
     #[serde(default)]
     pub manager_wake_autonomy: WakeAutonomy,
+    /// Delivery mode for work results: `pr` (default) | `handoff`.
+    #[serde(default)]
+    pub delivery_mode: DeliveryMode,
     /// Path to a policy TOML file (see gah policy-check). When set, dispatch
     /// enforces permissions before provisioning any worktree.
     #[serde(default)]
@@ -1110,6 +1094,7 @@ pub mod tests {
     pub fn test_profile_for_notifications() -> Profile {
         Profile {
             manager_wake_autonomy: crate::config::WakeAutonomy::default(),
+            delivery_mode: crate::config::DeliveryMode::default(),
             prune_older_than_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),
@@ -1166,6 +1151,7 @@ pub mod tests {
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
             manager_wake_autonomy: crate::config::WakeAutonomy::default(),
+            delivery_mode: crate::config::DeliveryMode::default(),
             prune_older_than_days: None,
             display_name: "Test".into(),
             repo_id: "test".into(),

@@ -42,6 +42,7 @@ fn make_fake_bin(dir: &Path, name: &str, body: &str) {
 
 fn github_profile() -> Profile {
     Profile {
+        delivery_mode: crate::config::DeliveryMode::default(),
         manager_wake_autonomy: crate::config::WakeAutonomy::default(),
         prune_older_than_days: None,
         display_name: "Repo".into(),
@@ -1221,4 +1222,35 @@ esac
     assert!(fs::read_to_string(bin_dir.join("add_call"))
         .unwrap()
         .contains("labels[]=gah-review-escalating"));
+}
+
+#[test]
+fn handoff_mode_short_circuits_all_remote_provider_calls() {
+    let mut profile = github_profile();
+    profile.delivery_mode = crate::config::DeliveryMode::Handoff;
+
+    let res = create_draft_mr(&profile, "branch", "title", "body").unwrap();
+    assert_eq!(res.url, "");
+    assert_eq!(res.id, "");
+
+    super::post_review_comment(&profile, "branch", "body", &[]).unwrap();
+    super::post_issue_comment(&profile, "123", "body").unwrap();
+    super::set_review_state_labels(&profile, "branch", &["gah-needs-fix"]).unwrap();
+    mark_ready_for_review(&profile, "branch").unwrap();
+    merge_mr(&profile, "branch", None).unwrap();
+    super::gitlab_set_mwps(&profile, "branch", "gen").unwrap();
+    super::github_close_issue(&profile, "123").unwrap();
+    super::gitlab_close_issue(&profile, "123").unwrap();
+
+    let child = ProviderIssue {
+        id: "c1".into(),
+        number: "1".into(),
+        title: "child".into(),
+        body: String::new(),
+        labels: vec![],
+        state: "open".into(),
+        url: "http".into(),
+    };
+    link_provider_child(&profile, "parent", &child).unwrap();
+    link_provider_dependency(&profile, &child, &child).unwrap();
 }

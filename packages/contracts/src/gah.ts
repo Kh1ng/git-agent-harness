@@ -442,6 +442,8 @@ export interface ProfileSummary {
   max_open_managed_mrs: number;
   /** Manager-wake autonomy for this profile (null = unset -> off). */
   manager_wake_autonomy: WakeAutonomyValue | null;
+  /** Delivery mode for work results ('pr' | 'handoff'). */
+  delivery_mode: 'pr' | 'handoff';
   /** Effective validation command timeout in seconds for this profile (defaults
    * to 300). If unset in TOML, this is computed and returned as the effective
    * timeout. */

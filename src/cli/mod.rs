@@ -569,6 +569,7 @@ pub fn run() -> Result<()> {
                 max_open_managed_mrs,
                 validation_timeout_seconds,
                 manager_wake_autonomy,
+                delivery_mode,
             } => {
                 let mut cfg = config::load(config_path.as_deref())?;
                 let profile = Profile {
@@ -608,6 +609,10 @@ pub fn run() -> Result<()> {
                     manager_wake_autonomy: match &manager_wake_autonomy {
                         Some(v) => parse_wake_autonomy(v)?,
                         None => config::WakeAutonomy::default(),
+                    },
+                    delivery_mode: match &delivery_mode {
+                        Some(v) => parse_delivery_mode(v)?,
+                        None => config::DeliveryMode::default(),
                     },
                     policy_path,
                     env_file,
@@ -664,6 +669,7 @@ pub fn run() -> Result<()> {
                 max_open_managed_mrs,
                 validation_timeout_seconds,
                 manager_wake_autonomy,
+                delivery_mode,
                 clear,
             } => {
                 let mut cfg = config::load(config_path.as_deref())?;
@@ -853,6 +859,12 @@ pub fn run() -> Result<()> {
                     existing.manager_wake_autonomy = parse_wake_autonomy(v)?;
                 } else if should_clear("manager_wake_autonomy", &clear) {
                     existing.manager_wake_autonomy = config::WakeAutonomy::default();
+                }
+
+                if let Some(v) = &delivery_mode {
+                    existing.delivery_mode = parse_delivery_mode(v)?;
+                } else if should_clear("delivery_mode", &clear) {
+                    existing.delivery_mode = config::DeliveryMode::default();
                 }
 
                 config::save(&cfg, config_path.as_deref())?;

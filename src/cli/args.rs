@@ -491,6 +491,9 @@ pub enum ProfileCommands {
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
+        /// Delivery mode for work results: pr (default) | handoff.
+        #[arg(long)]
+        delivery_mode: Option<String>,
     },
     /// Set/Update fields of an existing profile
     Set {
@@ -564,6 +567,9 @@ pub enum ProfileCommands {
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
+        /// Delivery mode for work results: pr | handoff.
+        #[arg(long)]
+        delivery_mode: Option<String>,
         /// Clear the specified field(s) - for fields that support it
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,
@@ -576,6 +582,30 @@ pub enum ProfileCommands {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+}
+
+/// Parse a `manager_wake_autonomy` value from CLI text (snake_case, matching
+/// the TOML/serde spelling) into the typed enum. Kept as a manual mapping so
+/// the CLI error message can name the accepted values precisely.
+pub fn parse_wake_autonomy(value: &str) -> anyhow::Result<crate::config::WakeAutonomy> {
+    match value.to_ascii_lowercase().as_str() {
+        "off" | "none" => Ok(crate::config::WakeAutonomy::Off),
+        "review_only" | "reviewonly" | "review" => Ok(crate::config::WakeAutonomy::ReviewOnly),
+        "full" => Ok(crate::config::WakeAutonomy::Full),
+        other => anyhow::bail!(
+            "invalid manager_wake_autonomy '{}' (expected off | review_only | full)",
+            other
+        ),
+    }
+}
+
+/// Parse a `delivery_mode` value from CLI text into the typed enum.
+pub fn parse_delivery_mode(value: &str) -> anyhow::Result<crate::config::DeliveryMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "pr" => Ok(crate::config::DeliveryMode::Pr),
+        "handoff" => Ok(crate::config::DeliveryMode::Handoff),
+        other => anyhow::bail!("invalid delivery_mode '{}' (expected pr | handoff)", other),
+    }
 }
 
 #[derive(Subcommand)]
@@ -828,19 +858,4 @@ pub enum ClaimsCommands {
         #[arg(long, default_value = "3600")]
         max_age_secs: u64,
     },
-}
-
-/// Parse a `manager_wake_autonomy` value from CLI text (snake_case, matching
-/// the TOML/serde spelling) into the typed enum. Kept as a manual mapping so
-/// the CLI error message can name the accepted values precisely.
-pub fn parse_wake_autonomy(value: &str) -> anyhow::Result<crate::config::WakeAutonomy> {
-    match value.to_ascii_lowercase().as_str() {
-        "off" | "none" => Ok(crate::config::WakeAutonomy::Off),
-        "review_only" | "reviewonly" | "review" => Ok(crate::config::WakeAutonomy::ReviewOnly),
-        "full" => Ok(crate::config::WakeAutonomy::Full),
-        other => anyhow::bail!(
-            "invalid manager_wake_autonomy '{}' (expected off | review_only | full)",
-            other
-        ),
-    }
 }

@@ -10,6 +10,7 @@ use std::path::Path;
 
 fn profile(local_path: &Path) -> Profile {
     Profile {
+        delivery_mode: crate::config::DeliveryMode::default(),
         manager_wake_autonomy: crate::config::WakeAutonomy::default(),
         display_name: "Repo".into(),
         repo_id: "repo".into(),
