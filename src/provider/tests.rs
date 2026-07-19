@@ -1,6 +1,7 @@
 use super::{
     create_draft_mr, draft_mr_title, find_review_target_by_mr, github_review_target_by_number,
-    gitlab_target_from_value, mark_ready_for_review, merge_mr, TEST_PATH_OVERRIDE,
+    gitlab_target_from_value, mark_ready_for_review, merge_mr, parse_gitlab_mr_reference,
+    MrReferenceError, TEST_PATH_OVERRIDE,
 };
 use crate::config::{Profile, RoutingPolicy};
 use std::fs;
@@ -316,6 +317,203 @@ fn gitlab_review_target_uses_authenticated_glab_session_and_surfaces_api_failure
     let args = fs::read_to_string(args_path).unwrap();
     assert!(args.contains("--hostname\ngitlab.example.com"));
     assert!(!args.contains("PRIVATE-TOKEN"));
+}
+
+#[test]
+fn gitlab_mr_reference_accepts_bare_iid() {
+    let iid = parse_gitlab_mr_reference(&gitlab_profile(), "284").unwrap();
+    assert_eq!(iid, "284");
+}
+
+#[test]
+fn gitlab_mr_reference_normalizes_canonical_url_to_iid() {
+    let iid = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap();
+    assert_eq!(iid, "284");
+
+    let iid_with_diffs = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284/diffs?nav=1#note_42",
+    )
+    .unwrap();
+    assert_eq!(iid_with_diffs, "284");
+
+    let mut local_http = gitlab_profile();
+    local_http.provider_api_base = Some("http://gitlab.example.com/api/v4".into());
+    let local_iid = parse_gitlab_mr_reference(
+        &local_http,
+        "http://gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap();
+    assert_eq!(local_iid, "284");
+}
+
+#[test]
+fn gitlab_mr_reference_rejects_malformed_url() {
+    let err = parse_gitlab_mr_reference(&gitlab_profile(), "http://gitlab.example.com/owner/repo")
+        .unwrap_err();
+    assert!(matches!(err, MrReferenceError::MalformedUrl(_)));
+    assert!(format!("{err}").contains("malformed --mr value"));
+
+    let err_suffix = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284invalid",
+    )
+    .unwrap_err();
+    assert!(matches!(err_suffix, MrReferenceError::MalformedUrl(_)));
+
+    let err_noncanonical = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://gitlab.example.com/owner/repo/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err_noncanonical,
+        MrReferenceError::MalformedUrl(_)
+    ));
+
+    let err_credentials = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://user@gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(err_credentials, MrReferenceError::MalformedUrl(_)));
+}
+
+#[test]
+fn gitlab_mr_reference_rejects_wrong_project_url() {
+    let err = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://gitlab.example.com/other/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(err, MrReferenceError::CrossProject { .. }));
+    assert!(format!("{err}").contains("does not match this profile's project"));
+}
+
+#[test]
+fn gitlab_mr_reference_rejects_wrong_host_url() {
+    let err = parse_gitlab_mr_reference(
+        &gitlab_profile(),
+        "https://attacker.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(err, MrReferenceError::CrossProject { .. }));
+
+    let mut profile_no_base = gitlab_profile();
+    profile_no_base.provider_api_base = None;
+    let err_no_base = parse_gitlab_mr_reference(
+        &profile_no_base,
+        "https://attacker.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(err_no_base, MrReferenceError::InvalidProfile(_)));
+}
+
+#[test]
+fn gitlab_mr_reference_rejects_invalid_profile_configuration() {
+    let mut missing_base = gitlab_profile();
+    missing_base.provider_api_base = None;
+    let missing = parse_gitlab_mr_reference(
+        &missing_base,
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(missing, MrReferenceError::InvalidProfile(_)));
+
+    let mut malformed_base = gitlab_profile();
+    malformed_base.provider_api_base = Some("not-a-url".into());
+    let malformed = parse_gitlab_mr_reference(
+        &malformed_base,
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(matches!(malformed, MrReferenceError::InvalidProfile(_)));
+}
+
+#[test]
+fn gitlab_dispatch_accepts_bare_iid_and_canonical_url() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let args_path = bin_dir.join("glab-args.txt");
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nprintf '%s\\n' '{{\"iid\":284,\"web_url\":\"https://gitlab.example.com/owner/repo/-/merge_requests/284\",\"source_branch\":\"gah/284\",\"target_branch\":\"main\"}}'\nexit 0\n",
+            args_path.display()
+        ),
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let target1 = find_review_target_by_mr(&gitlab_profile(), "284").unwrap();
+    assert_eq!(target1.id, "284");
+    assert_eq!(target1.source_branch, "gah/284");
+
+    let target2 = find_review_target_by_mr(
+        &gitlab_profile(),
+        "https://gitlab.example.com/owner/repo/-/merge_requests/284",
+    )
+    .unwrap();
+    assert_eq!(target2.id, "284");
+    assert_eq!(target2.source_branch, "gah/284");
+
+    assert_eq!(target1, target2);
+
+    let args = fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("projects/42/merge_requests/284"));
+}
+
+#[test]
+fn gitlab_dispatch_by_malformed_mr_url_fails_before_any_provider_launch() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    // Deliberately no `glab` binary in PATH: a malformed/cross-project `--mr`
+    // must fail at preflight validation without ever launching the provider CLI.
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let err = find_review_target_by_mr(&gitlab_profile(), "not-a-valid-mr-reference").unwrap_err();
+
+    assert!(format!("{:#}", err).contains("malformed --mr value"));
+
+    let cross_project = find_review_target_by_mr(
+        &gitlab_profile(),
+        "https://gitlab.example.com/other/repo/-/merge_requests/284",
+    )
+    .unwrap_err();
+    assert!(format!("{cross_project:#}").contains("does not match this profile's project"));
+}
+
+#[test]
+fn github_dispatch_accepts_bare_number_and_canonical_url() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let args_path = bin_dir.join("gh-args.txt");
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nprintf '%s\\n' '{{\"number\":7,\"url\":\"https://github.test/owner/repo/pull/7\",\"headRefName\":\"gah/7\",\"baseRefName\":\"main\"}}'\n",
+            args_path.display()
+        ),
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    find_review_target_by_mr(&github_profile(), "7").unwrap();
+    find_review_target_by_mr(&github_profile(), "https://github.com/owner/repo/pull/7").unwrap();
+
+    let args = fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("pr\nview\n7\n"));
+    assert!(args.contains("pr\nview\nhttps://github.com/owner/repo/pull/7\n"));
 }
 
 #[test]
