@@ -709,7 +709,7 @@ fn explicit_issue_fetch_requires_visible_override_for_unlabelled_discovery() {
     fs::write(
             &gh_path,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/42\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
                 issue_json.replace('\'', "'\\''")
             ),
         )
@@ -851,7 +851,7 @@ fn github_dependency_query_fixture_releases_653_when_652_closes() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  cat '{}'\nelse\n  exit 2\nfi\n",
+            "#!/bin/sh\nif [ \"$4\" = \"repos/owner/repo/issues?state=open&per_page=100&page=1\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$4\" = \"repos/owner/repo/issues/652\" ]; then\n  cat '{}'\nelse\n  exit 2\nfi\n",
             issues.to_string().replace('\'', "'\\''"),
             dependency_path.display()
         ),
