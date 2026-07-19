@@ -1,7 +1,8 @@
 use super::{
     create_draft_mr, draft_mr_title, find_review_target_by_branch, find_review_target_by_mr,
-    github_review_target_by_number, gitlab_target_from_value, mark_ready_for_review, merge_mr,
-    parse_gitlab_mr_reference, MrReferenceError, TEST_PATH_OVERRIDE,
+    github_review_target_by_number, gitlab_target_from_value, link_provider_child,
+    link_provider_dependency, mark_ready_for_review, merge_mr, parse_gitlab_mr_reference,
+    MrReferenceError, ProviderIssue, TEST_PATH_OVERRIDE,
 };
 use crate::config::{Profile, RoutingPolicy};
 use std::fs;
@@ -103,6 +104,75 @@ fn gitlab_profile() -> Profile {
         provider_project_id: Some("42".into()),
         ..github_profile()
     }
+}
+
+fn provider_issue(id: &str, number: &str) -> ProviderIssue {
+    ProviderIssue {
+        id: id.to_string(),
+        number: number.to_string(),
+        url: format!("https://provider.example/issues/{number}"),
+        state: "open".to_string(),
+        title: "child".to_string(),
+        body: String::new(),
+        labels: Vec::new(),
+    }
+}
+
+#[test]
+fn github_child_relation_uses_numeric_typed_field() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let args_log = tmp.path().join("args.log");
+    make_fake_bin(
+        &bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncase \"$*\" in *\"--method GET\"*) printf '[]\\n' ;; *) printf '{{}}\\n' ;; esac\n",
+            args_log.display()
+        ),
+    );
+    let _guard = PathOverride::set(bin.to_string_lossy().to_string());
+
+    link_provider_child(&github_profile(), "42", &provider_issue("9001", "101")).unwrap();
+
+    let args = fs::read_to_string(args_log).unwrap();
+    assert!(args.contains("sub_issue_id=9001"));
+    assert!(
+        args.lines()
+            .zip(args.lines().skip(1))
+            .any(|(left, right)| left == "-F" && right == "sub_issue_id=9001"),
+        "GitHub sub_issue_id must use gh's typed -F field: {args}"
+    );
+}
+
+#[test]
+fn gitlab_dependency_relation_uses_native_blocks_link() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let args_log = tmp.path().join("args.log");
+    make_fake_bin(
+        &bin,
+        "glab",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '{{}}\\n'\n",
+            args_log.display()
+        ),
+    );
+    let _guard = PathOverride::set(bin.to_string_lossy().to_string());
+
+    link_provider_dependency(
+        &gitlab_profile(),
+        &provider_issue("1", "10"),
+        &provider_issue("2", "11"),
+    )
+    .unwrap();
+
+    let args = fs::read_to_string(args_log).unwrap();
+    assert!(args.contains("projects/42/issues/10/links"));
+    assert!(args.contains("target_issue_iid=11"));
+    assert!(args.contains("link_type=blocks"));
 }
 
 #[test]

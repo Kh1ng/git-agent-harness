@@ -392,7 +392,9 @@ gah dispatch --profile my-repo --mode pm
 PM ticket decomposition:
 
 ```bash
-gah dispatch --profile my-repo --mode pm --backend claude --target "Break this work into atomic tickets"
+gah dispatch --profile my-repo --mode pm --backend claude --target "#123"
+gah pm publish --profile my-repo --plan artifacts/sessions/<run>/pm-plan-v1.json --dry-run
+gah pm publish --profile my-repo --plan artifacts/sessions/<run>/pm-plan-v1.json
 ```
 
 ## PM Mode
@@ -419,7 +421,8 @@ pm_guidance_paths = ["docs/PROJECT_BRIEF.md", "AGENTS.md"]
 If issue or PR/MR discovery fails or reaches a provider query cap, PM
 decomposition stops instead of treating the missing duplicate context as an
 empty backlog. The generated plan is validated and written as
-`pm-plan-v1.json` in the dispatch session before local ticket application.
+`pm-plan-v1.json` in the dispatch session. Planning never creates provider
+issues or local ticket files.
 
 Implementation, fix, and experiment workers instead receive the bounded
 `docs/PROJECT_BRIEF.md` and a task-specific live task pack. This deliberately
@@ -428,9 +431,31 @@ written `context-built.json` artifact records every prompt section and its
 estimated token size.
 
 With a target, PM mode asks the manager for provider-neutral structured JSON,
-validates field/count/byte/dependency/overlap bounds, dedupes it against native
-issues, existing tickets, open PRs/MRs, and recently merged PRs/MRs, assigns
-ticket IDs, and then writes the transitional ticket markdown files itself.
+validates field/count/byte/dependency/overlap bounds and dedupes it against
+native issues, existing tickets, open PRs/MRs, and recently merged PRs/MRs.
+The separate `gah pm publish` operation rechecks the source issue before every
+provider write, uses a stable plan fingerprint to resume partial publication
+without duplicates, and uses provider issue numbers as the only work identity.
+
+PM publication applies only labels explicitly mapped in the profile and only
+when those labels already exist at the provider. Autonomous work also uses the
+profile's existing `canonical_autonomous_label`:
+
+```toml
+[profiles.my-repo.publishing.pm_difficulty_labels]
+easy = "difficulty:easy"
+medium = "difficulty:medium"
+hard = "difficulty:hard"
+
+[profiles.my-repo.publishing.pm_risk_labels]
+low = "risk:low"
+medium = "risk:medium"
+high = "risk:high"
+
+[profiles.my-repo.publishing.pm_execution_labels]
+human_required = "exec:owner-decision"
+supervised = "exec:supervised"
+```
 
 When `improve` or `fix` targets a ticket markdown file, GAH also reads ticket metadata such as difficulty, risk, recommended backend/model, affected files, and verification commands before routing the worker.
 

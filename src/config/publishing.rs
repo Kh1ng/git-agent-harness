@@ -1,5 +1,6 @@
 use super::{issue_intake, IssueIntakeMode};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Per-profile policy for human-facing repository messaging and safe
 /// publication boundaries. This remains independent from reviewer routing
@@ -24,6 +25,15 @@ pub struct PublishingPolicy {
     pub issue_intake_mode: IssueIntakeMode,
     #[serde(default = "issue_intake::default_canonical_autonomous_label")]
     pub canonical_autonomous_label: String,
+    /// Existing provider labels to apply to PM-published children. Values are
+    /// label names, keyed by the planner's normalized value (for example
+    /// `easy = "difficulty:easy"`). GAH never creates missing labels.
+    #[serde(default)]
+    pub pm_difficulty_labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub pm_risk_labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub pm_execution_labels: BTreeMap<String, String>,
     /// Gitignore-style path patterns that newly tracked files must not match
     /// before GAH creates a commit or pushes a backend-authored commit.
     /// Explicit `[]` disables the guard for a profile.
@@ -43,6 +53,9 @@ impl Default for PublishingPolicy {
             trusted_issue_bot_authors: None,
             issue_intake_mode: issue_intake::default_issue_intake_mode(),
             canonical_autonomous_label: issue_intake::default_canonical_autonomous_label(),
+            pm_difficulty_labels: BTreeMap::new(),
+            pm_risk_labels: BTreeMap::new(),
+            pm_execution_labels: BTreeMap::new(),
             generated_artifact_deny_patterns: crate::generated_artifacts::default_deny_patterns(),
         }
     }
