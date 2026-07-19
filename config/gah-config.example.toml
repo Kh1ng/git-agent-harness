@@ -58,3 +58,5 @@ validation_commands = []
 [profiles.my-repo.routing]
 pm_backend = "claude"
 improve_backend = "codex"
+# Optional ordered project-guidance candidates for PM decomposition.
+pm_guidance_paths = ["docs/PM_GUIDANCE.md", "PM_GUIDANCE.md"]

@@ -465,6 +465,8 @@ pub struct RoutingPolicy {
     pub pm_candidates: Option<Vec<CandidateConfig>>,
     #[serde(default)]
     pub improve_candidates: Option<Vec<CandidateConfig>>,
+    #[serde(default)]
+    pub pm_guidance_paths: Vec<String>,
     /// Ordered deterministic overrides for implementation work classified by
     /// trusted ticket metadata. Empty means no class-specific override.
     #[serde(default)]
@@ -516,120 +518,7 @@ pub struct RoutingPolicy {
 
 impl RoutingPolicy {
     pub fn merged_with_defaults(&self, defaults: &RoutingPolicy) -> RoutingPolicy {
-        RoutingPolicy {
-            default_backend: self
-                .default_backend
-                .clone()
-                .or_else(|| defaults.default_backend.clone()),
-            default_model: self
-                .default_model
-                .clone()
-                .or_else(|| defaults.default_model.clone()),
-            pm_backend: self
-                .pm_backend
-                .clone()
-                .or_else(|| defaults.pm_backend.clone()),
-            pm_model: self.pm_model.clone().or_else(|| defaults.pm_model.clone()),
-            improve_backend: self
-                .improve_backend
-                .clone()
-                .or_else(|| defaults.improve_backend.clone()),
-            improve_model: self
-                .improve_model
-                .clone()
-                .or_else(|| defaults.improve_model.clone()),
-            review_backend: self
-                .review_backend
-                .clone()
-                .or_else(|| defaults.review_backend.clone()),
-            review_model: self
-                .review_model
-                .clone()
-                .or_else(|| defaults.review_model.clone()),
-            strong_review_backend: self
-                .strong_review_backend
-                .clone()
-                .or_else(|| defaults.strong_review_backend.clone()),
-            strong_review_model: self
-                .strong_review_model
-                .clone()
-                .or_else(|| defaults.strong_review_model.clone()),
-            weak_review_backend: self
-                .weak_review_backend
-                .clone()
-                .or_else(|| defaults.weak_review_backend.clone()),
-            weak_review_model: self
-                .weak_review_model
-                .clone()
-                .or_else(|| defaults.weak_review_model.clone()),
-            routine_reviewer: self
-                .routine_reviewer
-                .clone()
-                .or_else(|| defaults.routine_reviewer.clone()),
-            escalatory_reviewers: if !self.escalatory_reviewers.is_empty() {
-                self.escalatory_reviewers.clone()
-            } else {
-                defaults.escalatory_reviewers.clone()
-            },
-            pm_candidates: self
-                .pm_candidates
-                .clone()
-                .or_else(|| defaults.pm_candidates.clone()),
-            improve_candidates: self
-                .improve_candidates
-                .clone()
-                .or_else(|| defaults.improve_candidates.clone()),
-            task_routing_rules: if !self.task_routing_rules.is_empty() {
-                self.task_routing_rules.clone()
-            } else {
-                defaults.task_routing_rules.clone()
-            },
-            review_candidates: self
-                .review_candidates
-                .clone()
-                .or_else(|| defaults.review_candidates.clone()),
-            review_required_capabilities: {
-                // Same merge-by-key semantics as merge_routing_policy (TICKET-106):
-                // repo's own entries win for a given key, defaults fill the rest.
-                let mut merged = defaults.review_required_capabilities.clone();
-                merged.extend(self.review_required_capabilities.clone());
-                merged
-            },
-            allow_review_fallback: self.allow_review_fallback || defaults.allow_review_fallback,
-            allow_implementation_fallback: self.allow_implementation_fallback
-                || defaults.allow_implementation_fallback,
-            max_runs_per_backend_per_week: self
-                .max_runs_per_backend_per_week
-                .or(defaults.max_runs_per_backend_per_week),
-            max_runs_per_backend_per_session: self
-                .max_runs_per_backend_per_session
-                .or(defaults.max_runs_per_backend_per_session),
-            max_total_strong_model_runs_per_week: self
-                .max_total_strong_model_runs_per_week
-                .or(defaults.max_total_strong_model_runs_per_week),
-            max_total_strong_model_runs_per_session: self
-                .max_total_strong_model_runs_per_session
-                .or(defaults.max_total_strong_model_runs_per_session),
-            max_known_estimated_cost_per_week: self
-                .max_known_estimated_cost_per_week
-                .or(defaults.max_known_estimated_cost_per_week),
-            max_known_actual_cost_per_week: self
-                .max_known_actual_cost_per_week
-                .or(defaults.max_known_actual_cost_per_week),
-            max_review_cycles_per_ticket: self
-                .max_review_cycles_per_ticket
-                .or(defaults.max_review_cycles_per_ticket),
-            max_fix_attempts_per_mr: self
-                .max_fix_attempts_per_mr
-                .or(defaults.max_fix_attempts_per_mr),
-            max_paid_reviews_per_ticket: self
-                .max_paid_reviews_per_ticket
-                .or(defaults.max_paid_reviews_per_ticket),
-            max_implementation_failures_per_ticket: self
-                .max_implementation_failures_per_ticket
-                .or(defaults.max_implementation_failures_per_ticket),
-            merge_policy: self.merge_policy.or(defaults.merge_policy),
-        }
+        merge_routing_policy(defaults.clone(), self.clone())
     }
 
     /// Issue #123: resolve the effective ROUTINE_REVIEWER (STRONG tier).
@@ -1009,6 +898,9 @@ fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> Ro
     }
     repo.pm_candidates = repo.pm_candidates.or(canonical.pm_candidates);
     repo.improve_candidates = repo.improve_candidates.or(canonical.improve_candidates);
+    if repo.pm_guidance_paths.is_empty() {
+        repo.pm_guidance_paths = canonical.pm_guidance_paths;
+    }
     if repo.task_routing_rules.is_empty() {
         repo.task_routing_rules = canonical.task_routing_rules.clone();
     }

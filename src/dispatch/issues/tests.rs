@@ -485,6 +485,61 @@ fn github_issue_intake_author_allowlist_is_fail_closed() {
 }
 
 #[test]
+fn github_rest_user_identity_is_classified_without_graphql_author_shape() {
+    let response = serde_json::json!({
+        "user": {"login": "owner", "type": "User"}
+    });
+    let author = parse_github_author(&response).unwrap();
+    assert_eq!(author.login, "owner");
+    assert_eq!(author.kind, IssueAuthorKind::Human);
+}
+
+#[test]
+fn github_rest_issue_discovery_fails_closed_at_two_full_pages() {
+    let _exec_guard = ExecGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let page = serde_json::Value::Array(
+        (0..100)
+            .map(|number| {
+                serde_json::json!({
+                    "number": number,
+                    "title": format!("Issue {number}"),
+                    "body": "",
+                    "labels": [],
+                    "user": {"login": "owner", "type": "User"},
+                    "state": "open"
+                })
+            })
+            .collect(),
+    );
+    let gh_path = bin_dir.join("gh");
+    fs::write(
+        &gh_path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'",
+            page.to_string().replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_path, perms).unwrap();
+    }
+    let _guard = PathGuard::set(&bin_dir);
+    let mut prof = profile(tmp.path());
+    prof.provider = "github".into();
+    prof.repo = "owner/repo".into();
+
+    let err = try_discover_open_issues(&prof).unwrap_err();
+    assert!(format!("{err:#}").contains("reached its cap (200)"));
+}
+
+#[test]
 fn canonical_autonomous_mode_rejects_unlabelled_github_issues() {
     let _exec_guard = ExecGuard::new();
     let tmp = tempfile::tempdir().unwrap();
@@ -493,13 +548,13 @@ fn canonical_autonomous_mode_rejects_unlabelled_github_issues() {
     let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\nRecommended model: Gemini 3.5 Flash (Medium)\n","labels":[],"author":{"login":"owner","type":"User","is_bot":false},"state":"OPEN"}]"#;
     let gh_path = bin_dir.join("gh");
     fs::write(
-            &gh_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
+        &gh_path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            issue_json.replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -674,13 +729,13 @@ fn scan_available_tickets_includes_open_github_issues() {
     let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\nRecommended model: Gemini 3.5 Flash (Medium)\n","labels":[],"author":{"login":"owner","type":"User","is_bot":false},"state":"OPEN"}]"#;
     let gh_path = bin_dir.join("gh");
     fs::write(
-            &gh_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
+        &gh_path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            issue_json.replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -723,7 +778,7 @@ fn github_dependency_chain_excludes_653_while_652_is_open() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
             issues.to_string().replace('\'', "'\\''")
         ),
     )
@@ -782,7 +837,7 @@ fn github_dependency_query_fixture_releases_653_when_652_closes() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  cat '{}'\nelse\n  exit 2\nfi\n",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  cat '{}'\nelse\n  exit 2\nfi\n",
             issues.to_string().replace('\'', "'\\''"),
             dependency_path.display()
         ),
@@ -979,13 +1034,13 @@ fn scan_available_tickets_excludes_owner_decision_github_issues() {
     let issue_json = r#"[{"number":92,"title":"MS-5: Fleet ledger","body":"","labels":[{"name":"EXEC:OWNER-DECISION"}],"author":{"login":"owner"}}]"#;
     let gh_path = bin_dir.join("gh");
     fs::write(
-            &gh_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
+        &gh_path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            issue_json.replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1019,13 +1074,13 @@ fn scan_available_tickets_excludes_issue_already_archived_locally() {
     let issue_json = r#"[{"number":118,"title":"TICKET-101-fail-closed-version-drift: TICKET-101 — Fail closed","body":"Recommended backend: agy\n","labels":[],"author":{"login":"owner"}}]"#;
     let gh_path = bin_dir.join("gh");
     fs::write(
-            &gh_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
+        &gh_path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            issue_json.replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

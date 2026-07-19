@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
+mod repository;
 mod review_state;
+pub use repository::fetch_repository_mrs;
 pub(crate) use review_state::review_metadata_fingerprint;
 pub(crate) use review_state::{
     current_review_generation, review_contract_matches, review_generation_matches_mr,
@@ -189,20 +191,24 @@ pub(crate) fn extract_work_id_from_title(title: &str) -> Option<String> {
 }
 
 pub fn fetch_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
-    fetch_mrs_for_scope(profile, MrFetchScope::FullHistory)
+    fetch_mrs_for_scope(profile, MrFetchScope::FullHistory, true)
 }
 
 /// Fetch only merge requests that can drive a controller action. Recurring
 /// status/controller observations must use this bounded path; full history is
 /// reserved for explicit synchronization, reconciliation, and pruning.
 pub fn fetch_active_mrs(profile: &config::Profile) -> Result<Vec<SyncMr>> {
-    fetch_mrs_for_scope(profile, MrFetchScope::Active)
+    fetch_mrs_for_scope(profile, MrFetchScope::Active, true)
 }
 
-fn fetch_mrs_for_scope(profile: &config::Profile, scope: MrFetchScope) -> Result<Vec<SyncMr>> {
+fn fetch_mrs_for_scope(
+    profile: &config::Profile,
+    scope: MrFetchScope,
+    filter_gah_branches: bool,
+) -> Result<Vec<SyncMr>> {
     let mut mrs = match profile.provider.as_str() {
-        "github" => github_prs(profile, scope),
-        "gitlab" => gitlab_mrs(profile, scope),
+        "github" => github_prs(profile, scope, filter_gah_branches),
+        "gitlab" => gitlab_mrs(profile, scope, filter_gah_branches),
         other => anyhow::bail!("unsupported provider: {}", other),
     }?;
     if scope == MrFetchScope::Active {
@@ -433,7 +439,11 @@ fn github_pr_list_args(profile: &crate::config::Profile, scope: MrFetchScope) ->
     .collect()
 }
 
-fn github_prs(profile: &crate::config::Profile, scope: MrFetchScope) -> Result<Vec<SyncMr>> {
+fn github_prs(
+    profile: &crate::config::Profile,
+    scope: MrFetchScope,
+    filter_gah_branches: bool,
+) -> Result<Vec<SyncMr>> {
     let out = crate::provider::provider_command("gh")
         .args(github_pr_list_args(profile, scope))
         .output()
@@ -452,7 +462,7 @@ fn github_prs(profile: &crate::config::Profile, scope: MrFetchScope) -> Result<V
     }
     Ok(prs
         .into_iter()
-        .filter(|pr| pr.head_ref_name.starts_with("gah/"))
+        .filter(|pr| !filter_gah_branches || pr.head_ref_name.starts_with("gah/"))
         .map(|pr| SyncMr {
             work_id: extract_work_id_from_title(&pr.title),
             title: pr.title,
@@ -547,7 +557,11 @@ fn gitlab_mr_list_args(profile: &crate::config::Profile, scope: MrFetchScope) ->
     args
 }
 
-fn gitlab_mrs(profile: &crate::config::Profile, scope: MrFetchScope) -> Result<Vec<SyncMr>> {
+fn gitlab_mrs(
+    profile: &crate::config::Profile,
+    scope: MrFetchScope,
+    filter_gah_branches: bool,
+) -> Result<Vec<SyncMr>> {
     let out = crate::provider::provider_command("glab")
         .args(gitlab_mr_list_args(profile, scope))
         .output()
@@ -562,7 +576,7 @@ fn gitlab_mrs(profile: &crate::config::Profile, scope: MrFetchScope) -> Result<V
     let mut synced = Vec::new();
     for mr in mrs
         .into_iter()
-        .filter(|mr| mr.source_branch.starts_with("gah/"))
+        .filter(|mr| !filter_gah_branches || mr.source_branch.starts_with("gah/"))
     {
         let iid = mr
             .iid
