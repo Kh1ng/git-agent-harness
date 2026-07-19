@@ -6,7 +6,7 @@
 
 import { spawn, spawnSync, SpawnOptions } from 'node:child_process';
 import { userInfo } from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accessSync, constants, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { AsyncTtlCache } from './asyncTtlCache.js';
@@ -34,7 +34,18 @@ export type { StatusSnapshot, ControllerEvent };
  * Find the GAH binary path
  * Reuses the same lookup logic from rustBackend.ts
  */
-function findGahBinary(): string {
+type ExecutableProbe = (path: string) => boolean;
+
+function executableOnDisk(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function findGahBinary(isExecutable: ExecutableProbe = executableOnDisk): string {
   const possiblePaths = [
     resolve(__dirname, '../../../target/release/gah'),
     resolve(__dirname, '../../../target/debug/gah'),
@@ -44,15 +55,7 @@ function findGahBinary(): string {
   ];
 
   for (const path of possiblePaths) {
-    try {
-      // Check if the path exists and is executable
-      // Note: We use a simple sync check here for startup
-      // In a real implementation, this could be async
-      accessSync(path, constants.X_OK);
-      return path;
-    } catch {
-      // Try next path
-    }
+    if (isExecutable(path)) return path;
   }
 
   // Default to 'gah' which will use system PATH
@@ -498,7 +501,7 @@ export interface ProfileAddOptions {
   config?: string;
 }
 
-export async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
+export function buildProfileAddArgs(options: ProfileAddOptions): string[] {
   const args = ['profile', 'add', options.name];
   
   args.push('--display-name', options.display_name);
@@ -579,6 +582,11 @@ export async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
     args.push('--config-path', options.config);
   }
 
+  return args;
+}
+
+export async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
+  const args = buildProfileAddArgs(options);
   return new Promise((resolve, reject) => {
     const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
     
@@ -636,7 +644,7 @@ export interface ProfileSetOptions {
   config?: string;
 }
 
-export async function runProfileSet(options: ProfileSetOptions): Promise<void> {
+export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   const args = ['profile', 'set', options.name];
   
   if (options.display_name) {
@@ -727,19 +735,21 @@ export async function runProfileSet(options: ProfileSetOptions): Promise<void> {
   } else if (options.clear?.includes('manager_wake_autonomy')) {
     args.push('--clear', 'manager_wake_autonomy');
   }
-  if (options.clear?.length) {
-    // Only forward generic clear entries that aren't already handled above.
-    const already = new Set(['max_parallel_workers', 'manager_wake_autonomy']);
-    const remaining = options.clear.filter((c) => !already.has(c));
-    if (remaining.length) {
-      args.push('--clear', remaining.join(','));
-    }
-  }
+  appendClearArgs(
+    args,
+    options.clear,
+    new Set(['max_parallel_workers', 'manager_wake_autonomy'])
+  );
   
   if (options.config) {
     args.push('--config-path', options.config);
   }
 
+  return args;
+}
+
+export async function runProfileSet(options: ProfileSetOptions): Promise<void> {
+  const args = buildProfileSetArgs(options);
   return new Promise((resolve, reject) => {
     const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
     
@@ -816,7 +826,7 @@ export interface ConfigSetOptions {
   config?: string;
 }
 
-export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
+export function buildConfigSetArgs(options: ConfigSetOptions): string[] {
   const args = ['config', 'set'];
 
   if (options.current_manager !== undefined && options.current_manager !== null) {
@@ -825,18 +835,17 @@ export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
     args.push('--clear', 'current_manager');
   }
 
-  if (options.clear?.length) {
-    const already = new Set(['current_manager']);
-    const remaining = options.clear.filter((c) => !already.has(c));
-    if (remaining.length) {
-      args.push('--clear', remaining.join(','));
-    }
-  }
+  appendClearArgs(args, options.clear, new Set(['current_manager']));
 
   if (options.config) {
     args.push('--config-path', options.config);
   }
 
+  return args;
+}
+
+export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
+  const args = buildConfigSetArgs(options);
   return new Promise((resolve, reject) => {
     const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
 
@@ -863,7 +872,7 @@ export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
 export async function runConfigShow(config?: string): Promise<{ current_manager: string | null }> {
   const args = ['config', 'show', '--json'];
   if (config) {
-    args.push('--config-path', config);
+    args.push('--config', config);
   }
   return runJsonCommand<{ current_manager: string | null }>(args, config);
 }
@@ -878,12 +887,35 @@ export async function runConfigShow(config?: string): Promise<{ current_manager:
 // ---------------------------------------------------------------------------
 
 /** Same state-dir fallback chain as `loop_lock_path` in src/controller.rs,
- * so the PID file lives next to gah's own lock file. */
-function loopStateDir(): string {
-  const base =
-    process.env.XDG_STATE_HOME ||
-    (process.env.HOME ? resolve(process.env.HOME, '.local/state') : '/tmp');
-  return resolve(base, 'gah');
+ * so the PID file lives next to gah's own lock file.
+ * When config is unavailable, retain previous fallback behavior for parity
+ * with older environments where discovery fails. */
+export function loopStateDir(
+  configPath: string | null = getConfigPath() ?? null,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  if (!configPath) {
+    const base =
+      env.XDG_STATE_HOME ||
+      (env.HOME ? resolve(env.HOME, '.local/state') : '/tmp');
+    return resolve(base, 'gah');
+  }
+  return resolve(dirname(configPath), '.gah-locks');
+}
+
+function appendClearArgs(
+  args: string[],
+  clearValues: string[] | undefined,
+  excluded: Set<string>
+): void {
+  if (!clearValues?.length) return;
+
+  const seen = new Set<string>();
+  for (const key of clearValues) {
+    if (excluded.has(key) || seen.has(key)) continue;
+    args.push('--clear', key);
+    seen.add(key);
+  }
 }
 
 /** A durable acknowledgement that the operator intentionally stopped this
