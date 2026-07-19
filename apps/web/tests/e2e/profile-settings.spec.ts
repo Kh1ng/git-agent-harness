@@ -73,6 +73,11 @@ test('Settings exposes validation timeout and sends it to profile update API', a
   await expect(page.getByText(/validation command timeout/i)).toBeVisible();
   await expect(page.getByText(/backend idle timeouts/i)).toBeVisible();
 
+  await validationTimeoutInput.fill('0');
+  await expect(page.getByRole('alert')).toContainText(/whole number of seconds greater than zero/i);
+  await expect(page.getByRole('button', { name: 'Save dispatch settings' })).toBeDisabled();
+  expect(updatePayload).toBeNull();
+
   await validationTimeoutInput.fill('900');
   await page.getByRole('button', { name: 'Save dispatch settings' }).click();
 

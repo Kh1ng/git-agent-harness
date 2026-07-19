@@ -584,7 +584,7 @@ export function buildProfileAddArgs(options: ProfileAddOptions): string[] {
   }
   
   if (options.config) {
-    args.push('--config-path', options.config);
+    args.push('--config', options.config);
   }
 
   return args;
@@ -758,7 +758,7 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   );
   
   if (options.config) {
-    args.push('--config-path', options.config);
+    args.push('--config', options.config);
   }
 
   return args;

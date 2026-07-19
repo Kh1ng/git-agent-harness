@@ -390,7 +390,7 @@ pub enum ProfileCommands {
         provider_api_base: Option<String>,
         #[arg(long)]
         provider_project_id: Option<String>,
-        #[arg(long, name = "config")]
+        #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
         /// Extra CLI args for openhands
         #[arg(long, value_delimiter = ',')]
@@ -451,6 +451,9 @@ pub enum ProfileCommands {
         /// intake pauses and lifecycle work drains.
         #[arg(long)]
         max_open_managed_mrs: Option<u32>,
+        /// Timeout in seconds for each validation command (defaults to 300).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        validation_timeout_seconds: Option<u64>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
@@ -477,7 +480,7 @@ pub enum ProfileCommands {
         provider_api_base: Option<String>,
         #[arg(long)]
         provider_project_id: Option<String>,
-        #[arg(long, name = "config")]
+        #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
         #[arg(long, value_delimiter = ',')]
         openhands_args: Vec<String>,
@@ -521,6 +524,9 @@ pub enum ProfileCommands {
         /// intake pauses and lifecycle work drains.
         #[arg(long)]
         max_open_managed_mrs: Option<u32>,
+        /// Timeout in seconds for each validation command (defaults to 300).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        validation_timeout_seconds: Option<u64>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
@@ -532,7 +538,7 @@ pub enum ProfileCommands {
     /// Remove a profile
     Remove {
         name: String,
-        #[arg(long, name = "config")]
+        #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
         #[arg(long, default_value_t = false)]
         force: bool,
