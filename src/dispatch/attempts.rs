@@ -289,6 +289,19 @@ pub(super) fn attempt_usage(
             );
         }
     };
+    let behavior_metrics = crate::telemetry::extractor::parse_structured_behavior_events(&text);
+    let finalize = |mut usage: crate::ledger::LedgerUsage| {
+        if let Some(metrics) = &behavior_metrics {
+            usage = usage::merge_usage(
+                usage,
+                crate::ledger::LedgerUsage {
+                    behavior_metrics: Some(metrics.clone()),
+                    ..crate::ledger::LedgerUsage::default()
+                },
+            );
+        }
+        normalize_attempt_usage(usage, attribution, true)
+    };
 
     // Claude Code: prefer the structured session transcript for real
     // per-attempt token/cost usage (issue #153). Never scrape stdout text.
@@ -323,7 +336,7 @@ pub(super) fn attempt_usage(
                                 .unwrap_or_default(),
                         );
                     }
-                    return normalize_attempt_usage(merged, attribution, true);
+                    return finalize(merged);
                 }
             }
         }
@@ -337,7 +350,7 @@ pub(super) fn attempt_usage(
                     .unwrap_or_default(),
             );
         }
-        return normalize_attempt_usage(usage, attribution, true);
+        return finalize(usage);
     }
 
     // Vibe's structured session metadata is passed through the same artifact
@@ -347,7 +360,7 @@ pub(super) fn attempt_usage(
             if let Ok(metadata_json) = fs::read_to_string(metadata) {
                 let session_usage = usage::parse_vibe_session_metadata(&metadata_json);
                 if session_usage.usage_source.is_some() {
-                    return normalize_attempt_usage(session_usage, attribution, true);
+                    return finalize(session_usage);
                 }
             }
         }
@@ -361,7 +374,7 @@ pub(super) fn attempt_usage(
             if let Ok(metadata_json) = fs::read_to_string(metadata) {
                 let session_usage = usage::parse_opencode_session_metadata(&metadata_json);
                 if session_usage.usage_source.is_some() {
-                    return normalize_attempt_usage(session_usage, attribution, true);
+                    return finalize(session_usage);
                 }
             }
         }
@@ -402,20 +415,6 @@ pub(super) fn attempt_usage(
         usage = usage::merge_usage(usage, agy);
     }
 
-    // Issue #119: capture documented structured backend events
-    // (`gah.behavior_summary`) that report per-attempt behavior metrics
-    // (tool calls, shell calls, file edits, test runs). Only the documented
-    // event shape is honored; unrecognized output is never inferred from.
-    // The result becomes the attempt's `behavior_metrics`, keeping unknown
-    // distinct from zero. A None result means the backend never emitted the
-    // event, so we deliberately leave any existing field as-is rather than
-    // coercing it to an empty/zero record.
-    if let Some(behavior_metrics) =
-        crate::telemetry::extractor::parse_structured_behavior_events(&text)
-    {
-        usage.behavior_metrics = Some(behavior_metrics);
-    }
-
     if usage.usage_source.is_some() {
         usage.observed_at = Some(
             time::OffsetDateTime::now_utc()
@@ -423,7 +422,7 @@ pub(super) fn attempt_usage(
                 .unwrap_or_default(),
         );
     }
-    normalize_attempt_usage(usage, attribution, true)
+    finalize(usage)
 }
 
 /// Attribute a review invocation even when the reviewer does not expose token
