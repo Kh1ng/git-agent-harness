@@ -497,6 +497,8 @@ export interface ProfileAddOptions {
   validation_commands?: string[];
   auto_fix_commands?: string[];
   max_parallel_workers?: number;
+  /** Validation command timeout in seconds. */
+  validation_timeout_seconds?: number;
   manager_wake_autonomy?: string;
   config?: string;
 }
@@ -574,12 +576,15 @@ export function buildProfileAddArgs(options: ProfileAddOptions): string[] {
   if (options.max_parallel_workers !== undefined && options.max_parallel_workers !== null) {
     args.push('--max-parallel-workers', String(options.max_parallel_workers));
   }
+  if (options.validation_timeout_seconds !== undefined && options.validation_timeout_seconds !== null) {
+    args.push('--validation-timeout-seconds', String(options.validation_timeout_seconds));
+  }
   if (options.manager_wake_autonomy) {
     args.push('--manager-wake-autonomy', options.manager_wake_autonomy);
   }
   
   if (options.config) {
-    args.push('--config-path', options.config);
+    args.push('--config', options.config);
   }
 
   return args;
@@ -640,6 +645,8 @@ export interface ProfileSetOptions {
   auto_fix_commands?: string[];
   max_parallel_workers?: number | null;
   manager_wake_autonomy?: string | null;
+  /** Validation command timeout in seconds. */
+  validation_timeout_seconds?: number | null;
   clear?: string[];
   config?: string;
 }
@@ -730,6 +737,11 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   } else if (options.clear?.includes('max_parallel_workers')) {
     args.push('--clear', 'max_parallel_workers');
   }
+  if (options.validation_timeout_seconds !== undefined && options.validation_timeout_seconds !== null) {
+    args.push('--validation-timeout-seconds', String(options.validation_timeout_seconds));
+  } else if (options.clear?.includes('validation_timeout_seconds')) {
+    args.push('--clear', 'validation_timeout_seconds');
+  }
   if (options.manager_wake_autonomy !== undefined && options.manager_wake_autonomy !== null) {
     args.push('--manager-wake-autonomy', options.manager_wake_autonomy);
   } else if (options.clear?.includes('manager_wake_autonomy')) {
@@ -738,11 +750,15 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   appendClearArgs(
     args,
     options.clear,
-    new Set(['max_parallel_workers', 'manager_wake_autonomy'])
+    new Set([
+      'max_parallel_workers',
+      'manager_wake_autonomy',
+      'validation_timeout_seconds',
+    ])
   );
   
   if (options.config) {
-    args.push('--config-path', options.config);
+    args.push('--config', options.config);
   }
 
   return args;

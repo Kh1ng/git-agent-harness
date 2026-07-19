@@ -43,6 +43,7 @@ test('profile add args map required and optional fields without spawning gah', (
       default_target_branch: 'trunk',
       validation_commands: ['cargo test', 'npm test'],
       max_parallel_workers: 2,
+      validation_timeout_seconds: 900,
       manager_wake_autonomy: 'review_only',
       config: '/tmp/gah-config.toml',
     }),
@@ -68,9 +69,11 @@ test('profile add args map required and optional fields without spawning gah', (
       'cargo test,npm test',
       '--max-parallel-workers',
       '2',
+      '--validation-timeout-seconds',
+      '900',
       '--manager-wake-autonomy',
       'review_only',
-      '--config-path',
+      '--config',
       '/tmp/gah-config.toml',
     ],
   );
@@ -82,6 +85,7 @@ test('profile set args map fields and emit each clear key once', () => {
       name: 'api-worker',
       provider: 'github',
       max_parallel_workers: null,
+      validation_timeout_seconds: 900,
       clear: [
         'max_parallel_workers',
         'max_parallel_workers',
@@ -99,12 +103,31 @@ test('profile set args map fields and emit each clear key once', () => {
       'github',
       '--clear',
       'max_parallel_workers',
+      '--validation-timeout-seconds',
+      '900',
       '--clear',
       'manager_wake_autonomy',
       '--clear',
       'other',
-      '--config-path',
+      '--config',
       '/tmp/gah-config.toml',
+    ],
+  );
+});
+
+test('profile set emits validation timeout clear exactly once', () => {
+  assert.deepEqual(
+    buildProfileSetArgs({
+      name: 'api-worker',
+      validation_timeout_seconds: null,
+      clear: ['validation_timeout_seconds', 'validation_timeout_seconds'],
+    }),
+    [
+      'profile',
+      'set',
+      'api-worker',
+      '--clear',
+      'validation_timeout_seconds',
     ],
   );
 });

@@ -157,7 +157,11 @@ export function SettingsPage() {
 
 interface DispatchSettingsSectionProps {
   selectedName: string;
-  selected?: { max_parallel_workers: number | null; manager_wake_autonomy: WakeAutonomyValue | null };
+  selected?: {
+    max_parallel_workers: number | null;
+    validation_timeout_seconds?: number | null;
+    manager_wake_autonomy: WakeAutonomyValue | null;
+  };
   profileLoading: boolean;
   profileError: string | null;
 }
@@ -172,13 +176,22 @@ function DispatchSettingsSection({
   const profileCrud = useGahStore((s) => s.profileCrud);
 
   const [parallel, setParallel] = useState<string>('');
+  const [validationTimeout, setValidationTimeout] = useState<string>('');
   const [autonomy, setAutonomy] = useState<WakeAutonomyValue>('off');
+
+  const validationTimeoutValue = validationTimeout.trim();
+  const parsedValidationTimeout = Number(validationTimeoutValue);
+  const validationTimeoutError = validationTimeoutValue !== ''
+    && (!Number.isInteger(parsedValidationTimeout) || parsedValidationTimeout < 1)
+    ? 'Validation timeout must be a whole number of seconds greater than zero.'
+    : null;
 
   // Re-seed the form whenever the selected profile changes or its values load.
   useEffect(() => {
     setParallel(selected?.max_parallel_workers != null ? String(selected.max_parallel_workers) : '');
+    setValidationTimeout(selected?.validation_timeout_seconds != null ? String(selected.validation_timeout_seconds) : '');
     setAutonomy(selected?.manager_wake_autonomy ?? 'off');
-  }, [selectedName, selected?.max_parallel_workers, selected?.manager_wake_autonomy]);
+  }, [selectedName, selected?.max_parallel_workers, selected?.validation_timeout_seconds, selected?.manager_wake_autonomy]);
 
   if (profileLoading && !selected) {
     return (
@@ -201,10 +214,15 @@ function DispatchSettingsSection({
   }
 
   const handleSave = async () => {
+    if (validationTimeoutError) return;
     const parsed = parallel.trim() === '' ? undefined : Math.max(1, parseInt(parallel, 10) || 1);
+    const hasValidationTimeout = validationTimeoutValue !== '';
     await updateProfile(selectedName, {
       max_parallel_workers: parsed,
       manager_wake_autonomy: autonomy,
+      ...(hasValidationTimeout
+        ? { validation_timeout_seconds: parsedValidationTimeout }
+        : { clear: ['validation_timeout_seconds'] }),
     });
   };
 
@@ -239,6 +257,32 @@ function DispatchSettingsSection({
 
         <div>
           <label className="block text-xs font-medium text-secondary mb-1">
+            Validation command timeout (seconds)
+          </label>
+          <input
+            type="number"
+            min={1}
+            value={validationTimeout}
+            onChange={(e) => setValidationTimeout(e.target.value)}
+            placeholder="300"
+            aria-invalid={validationTimeoutError != null}
+            aria-describedby={validationTimeoutError ? 'validation-timeout-error' : undefined}
+            className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+          />
+          {validationTimeoutError && (
+            <p id="validation-timeout-error" role="alert" className="text-xs text-critical mt-1">
+              {validationTimeoutError}
+            </p>
+          )}
+          <p className="text-xs text-muted mt-1">
+            Per-profile timeout for <code>validation_commands</code>.
+            This is separate from backend idle timeouts such as <code>codex_idle_timeout_seconds</code> and
+            <code>claude_idle_timeout_seconds</code>.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-secondary mb-1">
             Manager wake autonomy
           </label>
           <select
@@ -267,7 +311,7 @@ function DispatchSettingsSection({
 
       <button
         onClick={handleSave}
-        disabled={saving}
+        disabled={saving || validationTimeoutError != null}
         className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {saving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}

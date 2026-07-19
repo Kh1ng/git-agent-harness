@@ -507,6 +507,10 @@ pub fn run() -> Result<()> {
                         println!("  - {}", cmd);
                     }
                 }
+                println!(
+                    "validation_timeout_seconds: {}",
+                    p.validation_timeout_seconds()
+                );
             }
             ProfileCommands::Add {
                 name,
@@ -539,6 +543,7 @@ pub fn run() -> Result<()> {
                 auto_fix_commands,
                 max_parallel_workers,
                 max_open_managed_mrs,
+                validation_timeout_seconds,
                 manager_wake_autonomy,
             } => {
                 let mut cfg = config::load(config_path.as_deref())?;
@@ -592,7 +597,7 @@ pub fn run() -> Result<()> {
                     model_review: None,
                     review_timeout_seconds: None,
                     review_hard_timeout_seconds: None,
-                    validation_timeout_seconds: None,
+                    validation_timeout_seconds,
                     routing: config::RoutingPolicy::default(),
                     publishing: Default::default(),
                     pacing: Default::default(),
@@ -633,6 +638,7 @@ pub fn run() -> Result<()> {
                 auto_fix_commands,
                 max_parallel_workers,
                 max_open_managed_mrs,
+                validation_timeout_seconds,
                 manager_wake_autonomy,
                 clear,
             } => {
@@ -811,6 +817,12 @@ pub fn run() -> Result<()> {
                     existing.max_open_managed_mrs = Some(v);
                 } else if should_clear("max_open_managed_mrs", &clear) {
                     existing.max_open_managed_mrs = None;
+                }
+
+                if let Some(v) = validation_timeout_seconds {
+                    existing.validation_timeout_seconds = Some(v);
+                } else if should_clear("validation_timeout_seconds", &clear) {
+                    existing.validation_timeout_seconds = None;
                 }
 
                 if let Some(v) = &manager_wake_autonomy {
