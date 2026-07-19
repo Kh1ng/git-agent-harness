@@ -158,6 +158,7 @@ fn run_publish(
         fingerprint: &fingerprint,
         order: &order,
         state_path: &state_path,
+        child_depth: 1,
     };
     publish_with_provider(&context, state, fake, dry_run)
 }
@@ -368,4 +369,15 @@ fn dependency_order_is_deterministic_and_rejects_cycles() {
     );
     artifact.plan.tickets[0].depends_on = vec!["dependent".to_string()];
     assert!(topological_order(&artifact.plan.tickets).is_err());
+}
+
+#[test]
+fn decomposition_depth_marker_is_strict_and_defaults_only_when_absent() {
+    assert_eq!(decomposition_depth("ordinary source issue").unwrap(), 0);
+    assert_eq!(
+        decomposition_depth("<!-- gah-pm-depth:v1 depth=3 -->").unwrap(),
+        3
+    );
+    assert!(decomposition_depth("<!-- gah-pm-depth:v1 depth=oops -->").is_err());
+    assert!(decomposition_depth("<!-- gah-pm-depth:v1 depth=2").is_err());
 }

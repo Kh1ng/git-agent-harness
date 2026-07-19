@@ -9,6 +9,9 @@ use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+mod pm;
+pub use self::pm::PmParentStatus;
+
 mod gates;
 mod intake;
 
@@ -92,6 +95,10 @@ pub struct StatusSnapshot {
     pub available_tickets: Vec<crate::models::AvailableTicket>,
     /// Active durable claims keyed by canonical profile+repo scope.
     pub active_claims: Vec<ActiveClaimSnapshot>,
+    /// Bounded PM orchestration history and provider-native child state.
+    pub pm_parent_states: Vec<PmParentStatus>,
+    pub pm_decomposition_attempt_counts: std::collections::HashMap<String, usize>,
+    pub pm_max_attempts: u32,
     /// TICKET-118: fix attempt counts per branch for retry cap.
     pub fix_attempt_counts: std::collections::HashMap<String, usize>,
     /// TICKET-127: merge attempt counts per branch for the auto-merge
@@ -293,6 +300,15 @@ fn build_snapshot_inner(
     };
 
     let mut errors = Vec::new();
+    let (pm_parent_states, pm_decomposition_attempt_counts, pm_error) =
+        pm::project(profile, profile_name, entries);
+    if let Some(message) = pm_error {
+        errors.push(StatusError {
+            subsystem: "pm_reconciliation".into(),
+            message,
+            incomplete_snapshot: false,
+        });
+    }
 
     // TICKET-127: Count merge attempts per branch for the auto-merge retry cap
     let merge_attempt_counts =
@@ -474,6 +490,38 @@ fn build_snapshot_inner(
     let mut available_tickets = ticket_scan.available_tickets;
     let dependency_blockers = ticket_scan.dependency_blockers;
     let issue_intake_rejections = ticket_scan.issue_intake_rejections;
+    let published_pm_work_ids = pm_parent_states
+        .iter()
+        .map(|parent| parent.work_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for issue in issue_intake_rejections
+        .iter()
+        .filter(|issue| issue.reason_code == "planning")
+    {
+        let Some(work_id) = issue.work_id.as_deref() else {
+            continue;
+        };
+        let attempts = pm_decomposition_attempt_counts
+            .get(work_id)
+            .copied()
+            .unwrap_or_default();
+        if attempts >= profile.publishing.pm_max_attempts()
+            && !published_pm_work_ids.contains(work_id)
+        {
+            blocked_work_items.push(Blocker {
+                kind: "human_required".into(),
+                reason: Some("retry_budget_exhausted".into()),
+                message: Some(format!(
+                    "{work_id} exhausted {attempts} bounded PM decomposition attempt(s)"
+                )),
+                backend: None,
+                model: None,
+                until: None,
+                source_reference: Some(work_id.to_string()),
+                reason_code: Some("retry_budget_exhausted".into()),
+            });
+        }
+    }
     if let Some(error) = ticket_scan.provider_error {
         errors.push(StatusError {
             subsystem: "issue_intake".into(),
@@ -676,6 +724,9 @@ fn build_snapshot_inner(
         errors,
         available_tickets,
         active_claims,
+        pm_parent_states,
+        pm_decomposition_attempt_counts,
+        pm_max_attempts: profile.publishing.pm_max_attempts() as u32,
         fix_attempt_counts,
         merge_attempt_counts,
         review_held_work_ids,
@@ -823,9 +874,58 @@ mod tests {
     use super::*;
     use crate::availability::{AvailabilityRecord, AvailabilityState, Reason, Source, Status};
     use crate::ledger::{LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics};
-    use crate::test_support::ClaimStateEnvGuard;
+    use crate::test_support::{ClaimStateEnvGuard, ExecGuard, PathGuard};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn pm_parent_projection_uses_provider_child_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _exec_guard = ExecGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let gh = bin.join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+case "$*" in
+  *"/issues?state=all"*) printf '%s\n' '[{"id":600,"number":600,"html_url":"https://example/issues/600","state":"closed","title":"Done","body":"","labels":[]},{"id":601,"number":601,"html_url":"https://example/issues/601","state":"open","title":"Open","body":"","labels":[]}]' ;;
+  *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&gh).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap();
+        let _path = PathGuard::set(&bin);
+        let profile = crate::ledger::test_util::profile();
+        let mut entry = LedgerEntry::new(
+            "real",
+            &profile,
+            "control-plane",
+            "pm_publish",
+            "#561",
+            None,
+            None,
+        );
+        entry.work_id = Some("#561".into());
+        entry.source_issue_number = Some("561".into());
+        entry.pm_plan_fingerprint = Some("plan-a".into());
+        entry.pm_publication_status = Some("published".into());
+        entry.pm_child_issue_numbers = vec!["600".into(), "601".into()];
+
+        let (states, attempts, error) = pm::project(&profile, "real", &[entry]);
+
+        assert!(error.is_none());
+        assert!(attempts.is_empty());
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].open_child_count, 1);
+        assert!(!states[0].completed);
+        assert!(!states[0].reconciled);
+    }
 
     fn make_test_cfg(tmp: &TempDir) -> GahConfig {
         let path = tmp.path().join("cfg.toml");

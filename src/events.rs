@@ -37,6 +37,12 @@ pub enum EventType {
     /// distinct from a backend failure.
     ReviewBudgetExhausted,
     DuplicateGuardTriggered,
+    PmPlanned,
+    PmPublished,
+    PmDuplicate,
+    PmBlocked,
+    PmFailed,
+    PmReconciled,
     LoopStopped,
     /// TICKET-282: a work item was deliberately NOT dispatched because it would
     /// reuse a branch already attached to another worktree. This is a
@@ -64,6 +70,12 @@ impl EventType {
             Self::HumanRequired => "human_required",
             Self::ReviewBudgetExhausted => "review_budget_exhausted",
             Self::DuplicateGuardTriggered => "duplicate_guard_triggered",
+            Self::PmPlanned => "pm_planned",
+            Self::PmPublished => "pm_published",
+            Self::PmDuplicate => "pm_duplicate",
+            Self::PmBlocked => "pm_blocked",
+            Self::PmFailed => "pm_failed",
+            Self::PmReconciled => "pm_reconciled",
             Self::LoopStopped => "loop_stopped",
             Self::WorkDeferred => "work_deferred",
             Self::TerminalFailure => "terminal_failure",
@@ -356,6 +368,12 @@ mod tests {
             EventType::DuplicateGuardTriggered.as_str(),
             "duplicate_guard_triggered"
         );
+        assert_eq!(EventType::PmPlanned.as_str(), "pm_planned");
+        assert_eq!(EventType::PmPublished.as_str(), "pm_published");
+        assert_eq!(EventType::PmDuplicate.as_str(), "pm_duplicate");
+        assert_eq!(EventType::PmBlocked.as_str(), "pm_blocked");
+        assert_eq!(EventType::PmFailed.as_str(), "pm_failed");
+        assert_eq!(EventType::PmReconciled.as_str(), "pm_reconciled");
         assert_eq!(EventType::LoopStopped.as_str(), "loop_stopped");
         assert_eq!(EventType::TerminalFailure.as_str(), "terminal_failure");
         assert_eq!(

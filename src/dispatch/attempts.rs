@@ -128,6 +128,7 @@ pub(super) fn run_backend(
     llm: &runner::LlmConfig,
     effective_model: Option<&str>,
     env_path: Option<&str>,
+    hard_timeout_seconds: Option<u64>,
 ) -> Result<runner::RunResult> {
     run_backend_with_reserved_route(
         backend,
@@ -139,6 +140,7 @@ pub(super) fn run_backend(
         effective_model,
         env_path,
         false,
+        hard_timeout_seconds,
     )
 }
 
@@ -153,6 +155,7 @@ pub(super) fn run_backend_with_reserved_route(
     effective_model: Option<&str>,
     env_path: Option<&str>,
     route_slot_already_reserved: bool,
+    hard_timeout_seconds: Option<u64>,
 ) -> Result<runner::RunResult> {
     // Live incident (2026-07-11): concurrent dispatches landing on the same
     // shared free-tier backend+model (opencode/hy3-free) silently rate-limit.
@@ -175,6 +178,13 @@ pub(super) fn run_backend_with_reserved_route(
             .into_owned(),
     ));
     apply_backend_instance_env(profile, backend, &mut env_vars);
+    env_vars.retain(|(key, _)| key != crate::runner::process::HARD_TIMEOUT_ENV);
+    if let Some(seconds) = hard_timeout_seconds.filter(|seconds| *seconds > 0) {
+        env_vars.push((
+            crate::runner::process::HARD_TIMEOUT_ENV.to_string(),
+            seconds.to_string(),
+        ));
+    }
     let result = match backend {
         "codex" => runner::run_codex_with_executable(
             &runner::require_backend_executable(profile, backend)?,

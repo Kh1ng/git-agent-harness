@@ -85,6 +85,18 @@ pub struct NotificationSummary {
 }
 
 #[derive(serde::Serialize)]
+pub struct PmOrchestrationSummary {
+    pub decomposition_labels: Vec<String>,
+    pub max_children: u32,
+    pub max_depth: u32,
+    pub max_attempts: u32,
+    pub timeout_seconds: u64,
+    pub difficulty_labels: BTreeMap<String, String>,
+    pub risk_labels: BTreeMap<String, String>,
+    pub execution_labels: BTreeMap<String, String>,
+}
+
+#[derive(serde::Serialize)]
 pub struct ConfigProfileSummary {
     pub profile: String,
     pub merge_policy: String,
@@ -100,6 +112,7 @@ pub struct ConfigProfileSummary {
     pub escalatory_reviewers: Vec<RoutingCandidateSummary>,
     pub context: ConfigProfileContextSummary,
     pub notifications: NotificationSummary,
+    pub pm_orchestration: PmOrchestrationSummary,
 }
 
 #[derive(serde::Serialize)]
@@ -276,6 +289,16 @@ fn build_profile_summary(
             manager_wake_autonomy: wake_autonomy(profile.manager_wake_autonomy),
             env_file: profile.env_file.clone(),
             env_file_prod: profile.env_file_prod.clone(),
+        },
+        pm_orchestration: PmOrchestrationSummary {
+            decomposition_labels: profile.publishing.pm_decomposition_labels(),
+            max_children: profile.publishing.pm_max_children() as u32,
+            max_depth: profile.publishing.pm_max_depth(),
+            max_attempts: profile.publishing.pm_max_attempts() as u32,
+            timeout_seconds: profile.publishing.pm_timeout_seconds(),
+            difficulty_labels: profile.publishing.pm_difficulty_labels.clone(),
+            risk_labels: profile.publishing.pm_risk_labels.clone(),
+            execution_labels: profile.publishing.pm_execution_labels.clone(),
         },
     })
 }
@@ -546,6 +569,14 @@ mod tests {
         assert_eq!(summary.max_implementation_failures_per_ticket, 8);
         assert_eq!(summary.max_review_cycles_per_ticket, 3);
         assert_eq!(summary.max_paid_reviews_per_ticket, 3);
+        assert_eq!(
+            summary.pm_orchestration.decomposition_labels,
+            ["planning", "plan"]
+        );
+        assert_eq!(summary.pm_orchestration.max_children, 12);
+        assert_eq!(summary.pm_orchestration.max_depth, 1);
+        assert_eq!(summary.pm_orchestration.max_attempts, 2);
+        assert_eq!(summary.pm_orchestration.timeout_seconds, 900);
 
         assert_eq!(summary.pm_candidates.len(), 1);
         assert_eq!(summary.pm_candidates[0].backend, "claude");

@@ -671,6 +671,8 @@ fn canonical_autonomous_intake_remains_opt_in_for_legacy_configs() {
 
 #[test]
 fn conflicting_disposition_labels_resolve_to_owner_decision_regardless_of_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile = profile(tmp.path());
     let labels = vec![
         "planning".into(),
         "blocked".into(),
@@ -679,8 +681,20 @@ fn conflicting_disposition_labels_resolve_to_owner_decision_regardless_of_order(
     ];
 
     assert_eq!(
-        issue_disposition_from_labels(&labels),
+        issue_disposition_from_labels(&profile, &labels),
         Some(IssueDisposition::OwnerDecision)
+    );
+}
+
+#[test]
+fn configured_pm_decomposition_label_is_a_planning_disposition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut profile = profile(tmp.path());
+    profile.publishing.pm_decomposition_labels = vec!["epic:decompose".into()];
+
+    assert_eq!(
+        issue_disposition_from_labels(&profile, &["EPIC:DECOMPOSE".into()]),
+        Some(IssueDisposition::Planning)
     );
 }
 

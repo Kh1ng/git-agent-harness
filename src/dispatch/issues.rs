@@ -264,7 +264,7 @@ fn issue_author_is_trusted(profile: &Profile, author: &IssueAuthorIdentity) -> b
     }
 }
 
-fn issue_disposition_from_labels(labels: &[String]) -> Option<IssueDisposition> {
+fn issue_disposition_from_labels(profile: &Profile, labels: &[String]) -> Option<IssueDisposition> {
     let normalized = labels
         .iter()
         .map(|label| label.trim().to_ascii_lowercase())
@@ -283,10 +283,13 @@ fn issue_disposition_from_labels(labels: &[String]) -> Option<IssueDisposition> 
     {
         return Some(IssueDisposition::Blocked);
     }
-    if normalized
-        .iter()
-        .any(|label| matches!(label.as_str(), "planning" | "plan"))
-    {
+    if normalized.iter().any(|label| {
+        profile
+            .publishing
+            .pm_decomposition_labels()
+            .iter()
+            .any(|configured| label.eq_ignore_ascii_case(configured.trim()))
+    }) {
         return Some(IssueDisposition::Planning);
     }
     None
@@ -314,7 +317,7 @@ fn evaluate_issue_intake(
         return Err(IntakeRejection::UntrustedAuthor);
     }
 
-    if let Some(disposition) = issue_disposition_from_labels(labels) {
+    if let Some(disposition) = issue_disposition_from_labels(profile, labels) {
         return Err(IntakeRejection::Disposition(disposition));
     }
 

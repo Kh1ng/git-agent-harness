@@ -122,6 +122,7 @@ pub(crate) fn experiment(
         &llm,
         route.effective_model.as_deref(),
         env_path,
+        None,
     ) {
         Ok(r) => r,
         Err(e) => {

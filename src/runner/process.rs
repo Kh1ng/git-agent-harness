@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 /// write the normal terminal event and ledger record before exiting.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub(crate) const PROCESS_CLEANUP_FAILED_EXIT_CODE: i32 = -3;
+/// Internal-only command environment used to carry a per-attempt wall-clock
+/// ceiling through backend adapters. The watcher removes it before spawning.
+pub(crate) const HARD_TIMEOUT_ENV: &str = "GAH_INTERNAL_HARD_TIMEOUT_SECONDS";
 
 pub fn install_shutdown_handler() -> Result<()> {
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
@@ -458,6 +461,16 @@ fn spawn_with_idle_watch_with_shutdown(
     output_counts_as_progress: bool,
 ) -> Result<(i32, f64)> {
     let start = Instant::now();
+    let hard_timeout = cmd
+        .get_envs()
+        .find_map(|(key, value)| {
+            (key == HARD_TIMEOUT_ENV)
+                .then(|| value.and_then(|value| value.to_str()?.parse::<u64>().ok()))
+                .flatten()
+        })
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs);
+    cmd.env_remove(HARD_TIMEOUT_ENV);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     prepare_process_group(&mut cmd);
 
@@ -492,6 +505,7 @@ fn spawn_with_idle_watch_with_shutdown(
     let mut saw_progress = false;
     let mut had_attempt_progress_at_kill = false;
     let mut killed_for_idle = false;
+    let mut killed_for_hard_timeout = false;
     let mut killed_for_shutdown = false;
     let mut cleanup_error = None;
     let mut exit_code = loop {
@@ -549,6 +563,12 @@ fn spawn_with_idle_watch_with_shutdown(
                 } else {
                     start.elapsed() >= startup_grace
                 };
+                if hard_timeout.is_some_and(|timeout| start.elapsed() >= timeout) {
+                    cleanup_error = kill_process_group(&mut child);
+                    let _ = child.wait();
+                    killed_for_hard_timeout = true;
+                    break -1;
+                }
                 if stalled {
                     // Issue #579: record whether the backend had already
                     // produced a repository diff when it stalled. A backend
@@ -617,6 +637,17 @@ fn spawn_with_idle_watch_with_shutdown(
             );
         }
     }
+    if killed_for_hard_timeout {
+        if let Ok(mut file) = fs::OpenOptions::new().append(true).open(log_path) {
+            let seconds = hard_timeout
+                .map(|timeout| timeout.as_secs())
+                .unwrap_or_default();
+            let _ = writeln!(
+                file,
+                "GAH: killed after reaching the configured {seconds}s hard wall-clock timeout."
+            );
+        }
+    }
     if killed_for_shutdown {
         if let Ok(mut file) = fs::OpenOptions::new().append(true).open(log_path) {
             let _ = writeln!(
@@ -670,6 +701,35 @@ mod tests {
         assert!(log.contains("started"));
         assert!(!log.contains("should not complete"));
         assert!(log.contains("shutdown requested; terminated backend process group"));
+    }
+
+    #[test]
+    fn hard_timeout_terminates_active_process_group() {
+        let _exec_guard = ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "backend-hard-timeout",
+            "#!/bin/sh\nif [ -n \"$GAH_INTERNAL_HARD_TIMEOUT_SECONDS\" ]; then echo leaked; exit 99; fi\nwhile :; do echo active; sleep 0.1; done\n",
+        );
+        let log_path = f.session_dir.join("backend-hard-timeout.log");
+        let mut command = Command::new(f.bin_dir.join("backend-hard-timeout"));
+        command.env(HARD_TIMEOUT_ENV, "1");
+        let started = Instant::now();
+        let result = spawn_with_idle_watch(
+            command,
+            &log_path,
+            &f.worktree,
+            60,
+            "launching hard-timeout test backend",
+        )
+        .unwrap();
+
+        assert_eq!(result.0, -1);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let log = fs::read_to_string(log_path).unwrap();
+        assert!(!log.contains("leaked"));
+        assert!(log.contains("configured 1s hard wall-clock timeout"));
     }
 
     #[cfg(target_os = "linux")]

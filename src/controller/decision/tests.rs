@@ -1,69 +1,19 @@
 use super::{decide_next_action, NextAction, AUTO_RETRY_CAP};
 use crate::models::AvailableTicket;
-use crate::status::{
-    Blocker, ObservationStatus, Observations, ProfileIdentity, ScopeStatusJson, StatusError,
-    StatusSnapshot,
-};
+use crate::status::{Blocker, ScopeStatusJson, StatusError, StatusSnapshot};
 use crate::sync::{RecommendedAction, SyncMrJson};
 
 #[path = "tests/backpressure.rs"]
 mod backpressure;
 #[path = "tests/lifecycle_priority.rs"]
 mod lifecycle_priority;
+#[path = "tests/pm.rs"]
+mod pm;
 #[path = "tests/review_handoff.rs"]
 mod review_handoff;
-fn empty_snapshot() -> StatusSnapshot {
-    StatusSnapshot {
-        schema_version: 1,
-        review_contract_version: crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
-        generated_at: "2026-07-05T00:00:00Z".into(),
-        profile: ProfileIdentity {
-            profile: "real".into(),
-            display_name: "Real".into(),
-            repo_id: "real".into(),
-            provider: "github".into(),
-            local_path: "/tmp/repo".into(),
-            default_target_branch: "main".into(),
-            merge_policy: crate::config::MergePolicy::default(),
-            max_fix_attempts_per_mr: 2,
-            max_implementation_failures_per_ticket: 2,
-            max_open_managed_mrs: 1,
-            issue_intake_policy: crate::models::IssueIntakePolicy {
-                mode: "canonical_autonomous_only".into(),
-                canonical_autonomous_label: "exec:autonomous".into(),
-                trusted_human_authors: vec![],
-                trusted_bot_authors: vec![],
-                github_issue_author_allowlist: vec![],
-            },
-        },
-        observations: Observations {
-            sync: ObservationStatus { status: "ok" },
-            availability: ObservationStatus { status: "ok" },
-            ledger: ObservationStatus { status: "ok" },
-        },
-        merge_requests: vec![],
-        availability: vec![],
-        recent_ledger: None,
-        constraints: vec![],
-        blockers: vec![],
-        blocked_work_items: vec![],
-        issue_intake_rejections: vec![],
-        dependency_blockers: vec![],
-        errors: vec![],
-        available_tickets: vec![],
-        active_claims: vec![],
-        fix_attempt_counts: std::collections::HashMap::new(),
-        merge_attempt_counts: std::collections::HashMap::new(),
-        review_held_work_ids: std::collections::HashSet::new(),
-        publishing_allow_pr: true,
-        generated_artifact_deny_patterns: vec![],
-        max_parallel_workers: 1,
-        open_managed_mr_count: 0,
-        inflight_implementation_count: 0,
-        implementation_intake_paused: false,
-        backend_configured: std::collections::HashMap::new(),
-    }
-}
+#[path = "tests/support.rs"]
+mod support;
+use support::empty_snapshot;
 
 fn mr(branch: &str, classification: &str) -> SyncMrJson {
     mr_with_ci(branch, classification, false)

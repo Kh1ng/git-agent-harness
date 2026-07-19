@@ -93,6 +93,17 @@ struct PublishContext<'a> {
     fingerprint: &'a str,
     order: &'a [usize],
     state_path: &'a Path,
+    child_depth: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PmPublicationSummary {
+    pub(crate) plan_fingerprint: String,
+    pub(crate) state_path: PathBuf,
+    pub(crate) source_issue_number: String,
+    pub(crate) child_issue_numbers: Vec<String>,
+    pub(crate) child_depth: u32,
+    pub(crate) already_published: bool,
 }
 
 struct MutationLedgerContext<'a> {
@@ -108,7 +119,7 @@ pub(crate) fn publish_plan(
     profile: &Profile,
     plan_path: &Path,
     dry_run: bool,
-) -> Result<()> {
+) -> Result<PmPublicationSummary> {
     let bytes = fs::read(plan_path)
         .with_context(|| format!("reading PM plan artifact: {}", plan_path.display()))?;
     if bytes.len() > MAX_ARTIFACT_BYTES {
@@ -118,6 +129,12 @@ pub(crate) fn publish_plan(
         .with_context(|| format!("parsing PM plan artifact: {}", plan_path.display()))?;
     validate_publication_contract(profile, &artifact)?;
     validate_plan(&artifact.plan)?;
+    anyhow::ensure!(
+        artifact.plan.tickets.len() <= profile.publishing.pm_max_children(),
+        "PM plan contains {} children, exceeding configured pm_max_children={}",
+        artifact.plan.tickets.len(),
+        profile.publishing.pm_max_children()
+    );
     if !dry_run {
         crate::dispatch::mutation_policy::enforce_policy(profile, "edit-issue")?;
     }
@@ -133,7 +150,18 @@ pub(crate) fn publish_plan(
         &source_issue_number,
         &fingerprint,
     )?;
+    let already_published = state.status == "complete";
     let mut publisher = CliIssuePublisher { profile };
+    let source_issue = publisher.get_issue(&source_issue_number)?;
+    let source_depth = decomposition_depth(&source_issue.body)?;
+    anyhow::ensure!(
+        source_depth < profile.publishing.pm_max_depth(),
+        "source issue #{} is at PM decomposition depth {}, configured maximum is {}",
+        source_issue_number,
+        source_depth,
+        profile.publishing.pm_max_depth()
+    );
+    let child_depth = source_depth + 1;
     let context = PublishContext {
         cfg,
         profile_name,
@@ -143,8 +171,79 @@ pub(crate) fn publish_plan(
         fingerprint: &fingerprint,
         order: &order,
         state_path: &state_path,
+        child_depth,
     };
-    publish_with_provider(&context, &mut state, &mut publisher, dry_run)
+    publish_with_provider(&context, &mut state, &mut publisher, dry_run)?;
+    let summary = PmPublicationSummary {
+        plan_fingerprint: fingerprint,
+        state_path,
+        source_issue_number,
+        child_issue_numbers: state
+            .children
+            .values()
+            .map(|child| child.issue_number.clone())
+            .collect(),
+        child_depth,
+        already_published,
+    };
+    if !dry_run {
+        append_parent_publication_ledger(cfg, profile_name, profile, &summary)?;
+    }
+    Ok(summary)
+}
+
+pub(crate) fn validate_source_depth(profile: &Profile, target: &str) -> Result<u32> {
+    let source_issue_number = parse_issue_number(target)?;
+    let source = provider::get_provider_issue(profile, &source_issue_number)?;
+    let depth = decomposition_depth(&source.body)?;
+    anyhow::ensure!(
+        depth < profile.publishing.pm_max_depth(),
+        "source issue #{} is at PM decomposition depth {}, configured maximum is {}",
+        source_issue_number,
+        depth,
+        profile.publishing.pm_max_depth()
+    );
+    Ok(depth)
+}
+
+fn append_parent_publication_ledger(
+    cfg: &GahConfig,
+    profile_name: &str,
+    profile: &Profile,
+    summary: &PmPublicationSummary,
+) -> Result<()> {
+    let work_id = format!("#{}", summary.source_issue_number);
+    let already_recorded = ledger::read_entries(cfg)?.into_iter().any(|entry| {
+        entry.profile == profile_name
+            && entry.repo_id == profile.repo_id
+            && entry.work_id.as_deref() == Some(work_id.as_str())
+            && entry.pm_plan_fingerprint.as_deref() == Some(summary.plan_fingerprint.as_str())
+            && entry.pm_publication_status.as_deref() == Some("published")
+    });
+    if already_recorded {
+        return Ok(());
+    }
+    let mut entry = LedgerEntry::new(
+        profile_name,
+        profile,
+        "control-plane",
+        "pm_publish",
+        &work_id,
+        None,
+        summary.state_path.parent(),
+    );
+    entry.work_id = Some(work_id);
+    entry.source_issue_number = Some(summary.source_issue_number.clone());
+    entry.validation_result = Some("passed".to_string());
+    entry.provider_mutation_kind = Some("plan_publish".to_string());
+    entry.provider_mutation_status = Some("succeeded".to_string());
+    entry.pm_plan_fingerprint = Some(summary.plan_fingerprint.clone());
+    entry.pm_publication_status = Some("published".to_string());
+    entry.pm_child_issue_numbers = summary.child_issue_numbers.clone();
+    entry.pm_decomposition_depth = Some(summary.child_depth);
+    entry.pm_publication_state_path = Some(summary.state_path.display().to_string());
+    ledger::append(cfg, &entry)?;
+    Ok(())
 }
 
 fn publish_with_provider(
@@ -243,7 +342,13 @@ fn publish_with_provider(
                     .map(|label| (label.to_ascii_lowercase(), label))
                     .collect::<BTreeMap<_, _>>();
                 configured_labels = labels_for_ticket(profile, ticket, &current_labels)?;
-                let body = render_issue_body(&source_issue.url, fingerprint, ticket, state);
+                let body = render_issue_body(
+                    &source_issue.url,
+                    fingerprint,
+                    ticket,
+                    state,
+                    context.child_depth,
+                );
                 if ticket.title.chars().count() > MAX_PROVIDER_TITLE_CHARS {
                     anyhow::bail!(
                         "PM child '{}' title exceeds provider limit of {} characters",
@@ -508,6 +613,21 @@ fn child_marker(plan_fingerprint: &str, key: &str) -> String {
     )
 }
 
+fn decomposition_depth(body: &str) -> Result<u32> {
+    const PREFIX: &str = "<!-- gah-pm-depth:v1 depth=";
+    let Some(start) = body.find(PREFIX) else {
+        return Ok(0);
+    };
+    let rest = &body[start + PREFIX.len()..];
+    let value = rest
+        .split_once(" -->")
+        .map(|(value, _)| value)
+        .ok_or_else(|| anyhow::anyhow!("malformed GAH PM decomposition depth marker"))?;
+    value
+        .parse::<u32>()
+        .context("parsing GAH PM decomposition depth marker")
+}
+
 fn labels_for_ticket(
     profile: &Profile,
     ticket: &PlannerWorkPacket,
@@ -549,6 +669,7 @@ fn render_issue_body(
     fingerprint: &str,
     ticket: &PlannerWorkPacket,
     state: &PublicationState,
+    child_depth: u32,
 ) -> String {
     let dependencies = ticket
         .depends_on
@@ -562,8 +683,9 @@ fn render_issue_body(
         })
         .collect::<Vec<_>>();
     format!(
-        "{}\n\nParent: {}\nPlan key: {}\nPlan fingerprint: {}\nSummary: {}\nObjective: {}\nTask class: {}\nDifficulty: {}\nRisk: {}\nExecution disposition: {}\nRecommended routing: capability={} min_tier={}\nDependencies: {}\nDuplicate evidence: {}\nUncovered reason: {}\n\n## Affected areas\n{}\n\n## Affected files\n{}\n\n## Acceptance criteria\n{}\n\n## Verification\n{}\n",
+        "{}\n<!-- gah-pm-depth:v1 depth={} -->\n\nParent: {}\nPlan key: {}\nPlan fingerprint: {}\nSummary: {}\nObjective: {}\nTask class: {}\nDifficulty: {}\nRisk: {}\nExecution disposition: {}\nRecommended routing: capability={} min_tier={}\nDependencies: {}\nDuplicate evidence: {}\nUncovered reason: {}\n\n## Affected areas\n{}\n\n## Affected files\n{}\n\n## Acceptance criteria\n{}\n\n## Verification\n{}\n",
         child_marker(fingerprint, &ticket.key),
+        child_depth,
         source_issue_url,
         ticket.key,
         fingerprint,

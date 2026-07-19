@@ -27,9 +27,13 @@ use dispatch_state::{
 };
 #[path = "runtime/intake.rs"]
 mod intake;
-use intake::{action_creates_managed_mr, action_intake_key, apply_parallel_projection};
+use intake::{
+    action_creates_managed_mr, action_intake_key, apply_parallel_projection, retain_unclaimed_work,
+};
 #[path = "runtime/merge.rs"]
 mod merge;
+#[path = "runtime/pm.rs"]
+mod pm;
 
 /// TICKET-079: `gah loop --once` -- exactly one bounded controller
 /// iteration. Build a snapshot, decide one action, execute at most that
@@ -510,25 +514,7 @@ fn run_parallel_once(
 
                 // Do not let the next slot re-select work already claimed by
                 // another process or spawned earlier in this refill cycle.
-                fresh_snapshot.available_tickets.retain(|ticket| {
-                    ticket
-                        .work_id
-                        .as_deref()
-                        .map(|id| {
-                            !claimed_work_ids.iter().any(|claimed| claimed == id)
-                                && !executed_work_ids.contains(id)
-                        })
-                        .unwrap_or(true)
-                });
-                fresh_snapshot.merge_requests.retain(|mr| {
-                    mr.work_id
-                        .as_deref()
-                        .map(|id| {
-                            !claimed_work_ids.iter().any(|claimed| claimed == id)
-                                && !executed_work_ids.contains(id)
-                        })
-                        .unwrap_or(true)
-                });
+                retain_unclaimed_work(&mut fresh_snapshot, &claimed_work_ids, &executed_work_ids);
 
                 let history = crate::events::read_events(cfg)?;
                 let capacity_deferred_work_ids = suppress_recent_capacity_deferrals(
@@ -578,6 +564,9 @@ fn run_parallel_once(
                         fresh_snapshot
                             .available_tickets
                             .retain(|t| t.work_id.as_deref() != Some(stuck_wid));
+                        fresh_snapshot
+                            .issue_intake_rejections
+                            .retain(|issue| issue.work_id.as_deref() != Some(stuck_wid));
                     }
                     let redispatched = decide_next_action(&fresh_snapshot);
                     if redispatched.kind() == "no_op" {
@@ -924,6 +913,34 @@ pub(crate) fn execute_action(
                 run_dispatch_and_record(cfg, "dispatch_ticket", action.work_id(), &args)?;
             Ok(deferred.unwrap_or_else(|| format!("Dispatched ticket '{ticket_path}'")))
         }
+        NextAction::DecomposeIssue {
+            ticket_path,
+            work_id,
+            title,
+            ..
+        } => pm::execute(
+            cfg,
+            profile_name,
+            ticket_path,
+            work_id,
+            title.as_deref(),
+            skip_validation_gate,
+            route_ready.clone(),
+        ),
+        NextAction::ReconcilePmParent {
+            work_id,
+            source_issue_number,
+            plan_fingerprint,
+            child_issue_numbers,
+            ..
+        } => pm::reconcile_parent(
+            cfg,
+            profile_name,
+            work_id,
+            source_issue_number,
+            plan_fingerprint,
+            child_issue_numbers,
+        ),
         NextAction::Retry { ticket_path, .. } => {
             let args = crate::dispatch::DispatchArgs {
                 target: ticket_path.clone(),
@@ -1329,6 +1346,9 @@ default_target_branch = "main"
             errors: vec![],
             available_tickets: vec![],
             active_claims: vec![],
+            pm_parent_states: vec![],
+            pm_decomposition_attempt_counts: std::collections::HashMap::new(),
+            pm_max_attempts: 2,
             fix_attempt_counts: std::collections::HashMap::new(),
             merge_attempt_counts: std::collections::HashMap::new(),
             review_held_work_ids: std::collections::HashSet::new(),
