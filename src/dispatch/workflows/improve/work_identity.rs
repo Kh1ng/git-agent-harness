@@ -4,6 +4,7 @@ use crate::{config, ledger};
 use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Default)]
 pub(super) struct ManualFixContext {
@@ -169,6 +170,32 @@ pub(super) fn resolve_manual_fix_context(
         source_issue_number: manual_fix_source_issue,
         mr_url: manual_fix_mr_url,
     })
+}
+
+pub(super) fn resolve_target(
+    args: &crate::dispatch::DispatchArgs,
+    profile: &config::Profile,
+    manual_fix: &ManualFixContext,
+) -> Result<String> {
+    if !args.target.is_empty() {
+        return Ok(args.target.clone());
+    }
+    if args.mode == "fix" && args.mr.is_some() {
+        return manual_fix
+            .work_id
+            .clone()
+            .context("manual FixMr resolved no work identity to use as the repair target");
+    }
+
+    let default = PathBuf::from(&profile.artifact_root)
+        .join("candidates")
+        .join("latest.json");
+    if default.exists() {
+        println!("Auto-target: {}", default.display());
+        Ok(default.to_string_lossy().into_owned())
+    } else {
+        Ok(args.target.clone())
+    }
 }
 
 pub(super) fn apply_manual_fix_context_to_ledger(

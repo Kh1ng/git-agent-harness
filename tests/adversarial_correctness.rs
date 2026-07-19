@@ -82,6 +82,7 @@ fn current_pr(branch: &str, work_id: &str, number: i64) -> serde_json::Value {
         branch: branch.into(),
         labels: vec!["gah-needs-fix".into()],
         ci_conclusion: None,
+        state: None,
         url: None,
         number: Some(number),
         draft: Some(true),

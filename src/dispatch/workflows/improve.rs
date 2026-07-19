@@ -44,7 +44,9 @@ use shutdown::record_cancelled_attempt;
 mod stall;
 use stall::record_exact_route_unavailability;
 mod work_identity;
-use work_identity::{apply_manual_fix_context_to_ledger, resolve_manual_fix_context};
+use work_identity::{
+    apply_manual_fix_context_to_ledger, resolve_manual_fix_context, resolve_target,
+};
 pub(crate) fn improve(
     cfg: &GahConfig,
     profile: &Profile,
@@ -77,26 +79,7 @@ pub(crate) fn improve(
         args.mr.as_deref(),
     )?;
 
-    let target = if args.target.is_empty() {
-        if args.mode == "fix" && args.mr.is_some() {
-            manual_fix
-                .work_id
-                .clone()
-                .context("manual FixMr resolved no work identity to use as the repair target")?
-        } else {
-            let default = PathBuf::from(&profile.artifact_root)
-                .join("candidates")
-                .join("latest.json");
-            if default.exists() {
-                println!("Auto-target: {}", default.display());
-                default.to_string_lossy().into_owned()
-            } else {
-                args.target.clone()
-            }
-        }
-    } else {
-        args.target.clone()
-    };
+    let target = resolve_target(args, profile, &manual_fix)?;
 
     // Try to resolve target as an issue number. Propagate a real fetch
     // error (bad issue number, auth, rate limit) instead of silently
