@@ -5,7 +5,7 @@
 ## Requirements
 
 - `git`
-- Rust toolchain (`cargo build --release`)
+- Rust toolchain (`cargo` and `rustup`)
 - One backend CLI:
   - `codex`
   - `claude`
@@ -16,11 +16,30 @@
 
 ## Install
 
+Install the CLI and control-plane server through the deterministic host
+installer from a clean checkout of the default branch:
+
 ```bash
-cargo build --release
+scripts/install.sh
 mkdir -p ~/.config/gah
 cp config/gah-config.example.toml ~/.config/gah/config.toml
 ```
+
+For every deployed upgrade, use the installed CLI to update the checkout,
+replace the executable selected by `PATH`, rebuild the server, and restart the
+system service only after all build steps succeed:
+
+```bash
+gah update --repo /path/to/git-agent-harness --restart-server
+```
+
+`cargo build --release` is a development build only. It updates
+`target/release/gah`; it does not replace the Cargo-installed `gah` executable
+or rebuild/restart the control-plane server.
+
+The default product installation covers the Rust CLI and Node control-plane
+server. Web, desktop, mobile, and other clients are separate packages with
+independent build/deployment workflows.
 
 Provider-specific examples:
 
