@@ -783,7 +783,7 @@ mod tests {
             make_fake_bin(
                 &f.bin_dir,
                 "backend",
-                "#!/bin/sh\n# Deterministic, quiet parent with active descendant.\n/bin/yes >/dev/null &\nbackend_descendant=$!\nsleep 2\n/bin/kill -TERM \"$backend_descendant\" >/dev/null 2>&1 || true\nwait \"$backend_descendant\" 2>/dev/null || true\n",
+                "#!/bin/sh\n# Deterministic, quiet parent with active descendant.\n/bin/yes >/dev/null &\nbackend_descendant=$!\nsleep 3\n/bin/kill -TERM \"$backend_descendant\" >/dev/null 2>&1 || true\nwait \"$backend_descendant\" 2>/dev/null || true\n",
             );
             let log_path = f.session_dir.join("backend-output.log");
             let shutdown = AtomicBool::new(false);
@@ -792,7 +792,7 @@ mod tests {
                 Command::new(f.bin_dir.join("backend")),
                 &log_path,
                 &f.worktree,
-                1,
+                2,
                 "launching quiet verification backend",
                 &shutdown,
                 true,
@@ -850,7 +850,7 @@ mod tests {
                  git add -A >/dev/null 2>&1\n\
                  /bin/yes >/dev/null &\n\
                  backend_descendant=$!\n\
-                 sleep 2\n\
+                 sleep 3\n\
                  /bin/kill -TERM \"$backend_descendant\" >/dev/null 2>&1 || true\n\
                  wait \"$backend_descendant\" 2>/dev/null || true\n",
             );
@@ -863,7 +863,7 @@ mod tests {
                 command,
                 &log_path,
                 &f.worktree,
-                1,
+                2,
                 "launching productive validation backend",
                 &shutdown,
                 false, // output does NOT count as progress (OpenCode-style)
