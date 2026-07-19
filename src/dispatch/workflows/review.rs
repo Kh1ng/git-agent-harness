@@ -158,7 +158,7 @@ pub(in crate::dispatch) fn review(
     fs::write(
         bundle.join("mr-description.md"),
         format!(
-            "MR: {}\nURL: {}\nSource: {}\nTarget: {}\nSource SHA: {}\nTarget SHA: {}\nRepo: {}\nTitle: {}\nCI: {}",
+            "MR: {}\nURL: {}\nSource: {}\nTarget: {}\nSource SHA: {}\nTarget SHA: {}\nRepo: {}\nTitle: {}\nDraft: {}\nCI: {}\nMergeability: {}",
             target.mr_id.as_deref().unwrap_or("n/a"),
             target.mr_url.as_deref().unwrap_or("n/a"),
             target.source_branch,
@@ -167,7 +167,9 @@ pub(in crate::dispatch) fn review(
             target.target_sha.as_deref().unwrap_or("unknown"),
             profile.repo,
             target.mr_title.as_deref().unwrap_or("n/a"),
+            target.draft,
             target.ci_status.as_deref().unwrap_or("unknown"),
+            target.merge_status.as_deref().unwrap_or("unknown"),
         ),
     )?;
     println!(
@@ -209,7 +211,7 @@ pub(in crate::dispatch) fn review(
          - NEEDS_FIX: you found a concrete, confirmed problem that should be fixed before merge. Put it in actionable_findings with direct changed-file evidence, even if it isn't an immediate crash -- e.g. silent data loss, a hidden failure mode, or anything that would take real effort to diagnose later if left in. Do not downgrade a confirmed risk into non_blocking_findings/risk_notes just because it wouldn't break the build today.\n\
          - REJECT: the change is fundamentally wrong and should not be merged as-is.\n\
          - HUMAN_REVIEW: you cannot make a confident recommendation at all.\n\
-         Repo: {}. MR: {}. Source: {}. Target: {}. CI status: {}.\n\
+         Repo: {}. MR: {}. Source: {}. Target: {}. Draft: {}. CI status: {}. Mergeability status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
          {}\n\
          ## Prior Run State\n\n{}\n\n## Diff\n\n```\n{}\n```\nChanged files:\n{}",
@@ -217,7 +219,9 @@ pub(in crate::dispatch) fn review(
         target.mr_id.as_deref().unwrap_or("n/a"),
         target.source_branch,
         target.target_branch,
+        target.draft,
         target.ci_status.as_deref().unwrap_or("unknown"),
+        target.merge_status.as_deref().unwrap_or("unknown"),
         render_untrusted_inline_review_text(
             target.mr_title.as_deref().unwrap_or("n/a"),
             REVIEW_MR_TITLE_MAX_BYTES,

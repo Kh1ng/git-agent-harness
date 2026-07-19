@@ -981,17 +981,12 @@ fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarg
     let endpoint = format!("projects/{project_id}/merge_requests/{iid}");
     let resp = gitlab_api(profile, &endpoint, "GET", &[])?;
     let mut target = gitlab_target_from_value(&resp)?;
-    // Keep caller-supplied MR identifier as the pipelines lookup key; this
-    // avoids coupling CI status probing to any potential future fallback
-    // representation changes inside `ReviewTarget::id`.
-    target.ci_status = gitlab_ci_status_for_merge_request(profile, project_id, mr, &resp)?;
+    // The operator may have supplied a full URL; all provider endpoints must
+    // use the normalized IID resolved above.
+    target.ci_status = gitlab_ci_status_for_merge_request(profile, project_id, &iid, &resp)?;
     Ok(target)
 }
 
-// Source Acceptance Criterion 1: GitLab review targets expose pipeline status for the exact source SHA.
-// Grounded evidence:
-// ac:1:snapshot:src/provider.rs:cargo test find_review_target_by_mr_resolves_pipeline_status_from_pipelines_fallback_when_head_pipeline_sha_mismatches
-// ac:1:provider:gitlab:projects/42/merge_requests/235/pipelines
 fn gitlab_ci_status_for_merge_request(
     profile: &Profile,
     project_id: &str,

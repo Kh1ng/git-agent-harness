@@ -596,7 +596,7 @@ fn find_review_target_by_mr_prefers_skipped_pipeline_status_on_draft_mr() {
 }
 
 #[test]
-fn find_review_target_by_mr_ignores_stale_pipeline_status_not_matching_source_sha() {
+fn find_review_target_by_canonical_url_uses_iid_and_ignores_stale_pipeline_status() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
@@ -608,16 +608,16 @@ fn find_review_target_by_mr_ignores_stale_pipeline_status_not_matching_source_sh
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
-    let target = find_review_target_by_mr(&gitlab_profile(), "235").unwrap();
+    let target = find_review_target_by_mr(
+        &gitlab_profile(),
+        "https://gitlab.example.com/owner/repo/-/merge_requests/235",
+    )
+    .unwrap();
 
     assert_eq!(target.ci_status.as_deref(), Some("missing"));
     assert_eq!(target.merge_status.as_deref(), Some("can_be_merged"));
 }
 
-// Source Acceptance Criterion 1: GitLab review targets expose pipeline status for the exact source SHA.
-// Grounded evidence:
-// ac:1:snapshot:src/provider/tests.rs:cargo test find_review_target_by_mr_resolves_pipeline_status_from_pipelines_fallback_when_head_pipeline_sha_mismatches
-// ac:1:provider:gitlab:projects/42/merge_requests/235/pipelines
 #[test]
 fn find_review_target_by_branch_prefers_pipeline_status_for_ci_status_on_draft_mr() {
     let _exec_guard = crate::test_support::ExecGuard::new();
@@ -792,7 +792,7 @@ fn merge_mr_gitlab_un_drafts_then_merges() {
         "glab",
         r#"#!/bin/sh
 case "$1 $2" in
-  "api projects/42/merge_requests") printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"test","description":"body","draft":false,"sha":"source-gitlab-sha"}]\n' ;;
+  "api projects/42/merge_requests") printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"test","description":"body","draft":false,"sha":"source-gitlab-sha","head_pipeline":{"sha":"source-gitlab-sha","status":"success"}}]\n' ;;
   "mr update") exit 0 ;;
   "mr merge") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
   *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;

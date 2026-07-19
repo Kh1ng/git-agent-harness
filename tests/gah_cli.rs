@@ -2420,7 +2420,7 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
         &fake_bin,
         "glab",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$1 $2\" in\n  \"api projects/42/merge_requests\")\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}]'\n    ;;\n  \"api projects/42/merge_requests/7/notes\")\n    printf '%s\\n' '{{\"id\":1}}'\n    ;;\n  \"api projects/42/merge_requests/7\")\n    printf '%s\\n' '{{\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}'\n    ;;\n  *) echo \"unexpected glab invocation: $*\" >&2; exit 1 ;;\n esac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$1 $2\" in\n  \"api projects/42/merge_requests\")\n    printf '%s\\n' '[{{\"web_url\":\"https://gitlab.example.com/owner/real/-/merge_requests/7\",\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\",\"draft\":true,\"sha\":\"review-source-sha\",\"detailed_merge_status\":\"draft\",\"head_pipeline\":{{\"sha\":\"review-source-sha\",\"status\":\"success\"}}}}]'\n    ;;\n  \"api projects/42/merge_requests/7/notes\")\n    printf '%s\\n' '{{\"id\":1}}'\n    ;;\n  \"api projects/42/merge_requests/7\")\n    printf '%s\\n' '{{\"iid\":7,\"source_branch\":\"feature/review\",\"target_branch\":\"main\"}}'\n    ;;\n  *) echo \"unexpected glab invocation: $*\" >&2; exit 1 ;;\n esac\n",
             glab_log.display()
         ),
     );
@@ -2451,6 +2451,13 @@ fn review_gitlab_posts_comment_by_branch_and_adds_ready_label() {
     assert!(glab_log.contains("projects/42/merge_requests/7/notes"));
     assert!(glab_log.contains("add_labels=gah-ready-for-human"));
     assert!(!glab_log.contains("PRIVATE-TOKEN"));
+
+    let session_dir = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    let mr_description =
+        fs::read_to_string(session_dir.join("review-bundle/mr-description.md")).unwrap();
+    assert!(mr_description.contains("Draft: true"));
+    assert!(mr_description.contains("CI: passed"));
+    assert!(mr_description.contains("Mergeability: draft"));
 }
 
 #[test]

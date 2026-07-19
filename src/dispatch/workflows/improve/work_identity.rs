@@ -363,6 +363,7 @@ mod tests {
             body: None,
             draft: false,
             ci_status: None,
+            merge_status: None,
             source_sha: None,
             target_sha: None,
         }
