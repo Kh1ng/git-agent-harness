@@ -65,6 +65,7 @@ pub(super) fn policy_approval_still_required(
             session_id: None,
             usage_summary: None,
             last_failure_class: None,
+            exact_route_required: false,
         };
         crate::routing::decide_with_state(&cfg.defaults, profile, request, &runtime)
             .ok()

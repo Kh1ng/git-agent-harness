@@ -691,6 +691,7 @@ fn session_limit_marks_model_scope_and_reroutes_to_alternate_backend() {
         recommended_model: None,
         session_id: None,
         usage_summary: None,
+        exact_route_required: false,
     };
 
     let first = decide_with(
@@ -767,6 +768,7 @@ fn capacity_downgrade_skips_sibling_codex_model_in_next_attempt() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+            exact_route_required: false,
         },
         &path(&tmp),
         now,

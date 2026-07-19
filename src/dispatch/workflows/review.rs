@@ -306,7 +306,7 @@ pub(in crate::dispatch) fn review(
     // An ordered escalation selects an exact reviewer identity. Generic
     // review fallback must not substitute a previously used reviewer when
     // that exact route needs approval or is unavailable.
-    let exact_route_required = next_escalatory.is_some();
+    let exact_route_required = next_reviewer.is_some();
     let route_request = RouteRequest {
         last_failure_class: None,
         mode: "review",

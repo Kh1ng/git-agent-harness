@@ -1026,11 +1026,56 @@ fn decide_route_classifies_no_eligible_backend_as_backend_error() {
         .routing_diagnostics
         .expect("route failures must preserve structured candidates");
     assert_eq!(diagnostics.candidates.len(), 1);
+    assert_eq!(
+        diagnostics.selected_backend.as_deref(),
+        Some("not-a-real-backend")
+    );
+    assert_eq!(diagnostics.selected_model, None);
     assert_eq!(diagnostics.candidates[0].backend, "not-a-real-backend");
     assert_eq!(
         diagnostics.candidates[0].skip_reason.as_deref(),
         Some("backend CLI not installed")
     );
+    assert!(diagnostics
+        .human_summary
+        .as_deref()
+        .is_some_and(|summary| summary.contains("no eligible backend")));
+}
+
+#[test]
+fn exact_route_deferral_preserves_requested_identity_in_ledger_diagnostics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prof = profile(tmp.path());
+    let cfg = gah_config(RoutingPolicy::default());
+    let mut ledger = LedgerEntry::new("test", &prof, "codex", "review", "target", None, None);
+    let req = RouteRequest {
+        mode: "review",
+        requested_backend: "not-a-real-reviewer",
+        requested_model: Some("exact-model"),
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+        last_failure_class: None,
+        exact_route_required: true,
+    };
+
+    let err = decide_route(&cfg, &prof, req, None, &mut ledger).unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::NoEligibleBackend {
+            preferred_backend,
+            preferred_model,
+            ..
+        }) if preferred_backend == "not-a-real-reviewer"
+            && preferred_model.as_deref() == Some("exact-model")
+    ));
+    let diagnostics = ledger.routing_diagnostics.expect("typed route diagnostics");
+    assert_eq!(
+        diagnostics.selected_backend.as_deref(),
+        Some("not-a-real-reviewer")
+    );
+    assert_eq!(diagnostics.selected_model.as_deref(), Some("exact-model"));
     assert!(diagnostics
         .human_summary
         .as_deref()

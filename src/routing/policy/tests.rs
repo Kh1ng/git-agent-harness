@@ -1434,6 +1434,7 @@ fn live_agy_gemini_pool_block_routes_to_same_accounts_external_pool() {
             session_id: None,
             usage_summary: None,
             last_failure_class: None,
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
