@@ -83,20 +83,37 @@ pub(crate) fn current_review_generation(mr: &SyncMr) -> Option<String> {
     crate::ledger::review_generation(mr.source_sha.as_deref(), Some(&fingerprint))
 }
 
-pub(crate) fn review_generation_matches_mr(generation: &str, mr: &SyncMr) -> bool {
-    current_review_generation(mr).as_deref() == Some(generation)
-        || (!mr.draft
+/// Generation-match check shared by every merge/dispatch caller. A stored
+/// `generation` matches the live MR either exactly, or via GAH's one-way
+/// draft-to-ready transition (`mark_ready_for_review` flips `draft` after the
+/// review that approved it ran) — re-drafting still invalidates the review.
+pub(crate) fn review_generation_matches(
+    generation: &str,
+    source_sha: Option<&str>,
+    title: Option<&str>,
+    body: Option<&str>,
+    draft: bool,
+) -> bool {
+    let live_fingerprint = review_metadata_fingerprint(source_sha, title, body, draft);
+    crate::ledger::review_generation(source_sha, Some(&live_fingerprint)).as_deref()
+        == Some(generation)
+        || (!draft
             && crate::ledger::review_generation(
-                mr.source_sha.as_deref(),
-                Some(&review_metadata_fingerprint(
-                    mr.source_sha.as_deref(),
-                    Some(&mr.title),
-                    mr.body.as_deref(),
-                    true,
-                )),
+                source_sha,
+                Some(&review_metadata_fingerprint(source_sha, title, body, true)),
             )
             .as_deref()
                 == Some(generation))
+}
+
+pub(crate) fn review_generation_matches_mr(generation: &str, mr: &SyncMr) -> bool {
+    review_generation_matches(
+        generation,
+        mr.source_sha.as_deref(),
+        Some(&mr.title),
+        mr.body.as_deref(),
+        mr.draft,
+    )
 }
 
 pub(crate) fn review_contract_matches(latest: &LedgerEntry, mr: &SyncMr) -> bool {
