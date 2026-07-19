@@ -3,9 +3,9 @@ mod jsonl;
 
 #[allow(unused_imports)]
 pub use self::entry::{
-    AttemptRecord, AttemptRoutingRecord, FailureClass, FailureStage, LedgerEntry, LedgerUsage,
-    RoutingCandidateDiagnostic, RoutingDiagnostics, CURRENT_REVIEW_CONTRACT_VERSION,
-    LEDGER_SCHEMA_VERSION,
+    review_generation, AttemptRecord, AttemptRoutingRecord, FailureClass, FailureStage,
+    LedgerEntry, LedgerUsage, RoutingCandidateDiagnostic, RoutingDiagnostics,
+    CURRENT_REVIEW_CONTRACT_VERSION, LEDGER_SCHEMA_VERSION, REVIEW_CONTRACT_VERSION,
 };
 #[allow(unused_imports)]
 pub use self::jsonl::{

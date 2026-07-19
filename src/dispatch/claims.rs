@@ -384,7 +384,33 @@ fn ledger_lookup_for_ticket(
         ledger_entries_by_work_id,
         &profile.repo_id,
         wid,
-    );
+    )
+    .filter(|gate| {
+        let review_derived = gate.mode == "review"
+            || (gate.reason_code.as_deref() == Some("stuck_loop_gate")
+                && gate.review_generation.is_some());
+        if !review_derived {
+            return true;
+        }
+        if gate.review_contract_version != Some(crate::ledger::REVIEW_CONTRACT_VERSION) {
+            return false;
+        }
+        let aliases = crate::ledger::work_id_aliases(wid);
+        let relevant_mrs = all_mrs
+            .iter()
+            .filter(|mr| {
+                mr.work_id
+                    .as_deref()
+                    .is_some_and(|id| aliases.iter().any(|alias| alias == id))
+            })
+            .collect::<Vec<_>>();
+        relevant_mrs.is_empty()
+            || relevant_mrs.iter().any(|mr| {
+                gate.review_generation.as_deref().is_some_and(|generation| {
+                    crate::sync::review_generation_matches_mr(generation, mr)
+                })
+            })
+    });
     let human_required = effective_gate.is_some();
     let human_required_reason_code = effective_gate.and_then(|gate| gate.reason_code);
     Some((
@@ -432,8 +458,8 @@ pub(crate) struct TicketScan {
     pub(crate) provider_error: Option<String>,
 }
 
-#[allow(dead_code)]
-pub fn scan_available_tickets(
+#[cfg(test)]
+pub(crate) fn scan_available_tickets(
     profile: &Profile,
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
@@ -615,6 +641,7 @@ pub fn merge_branch(
     branch: &str,
     work_id: &Option<String>,
     mr_url: &Option<String>,
+    expected_review_generation: Option<&str>,
     run_id: Option<&str>,
 ) -> Result<()> {
     let mut entry = LedgerEntry::new(
@@ -631,7 +658,7 @@ pub fn merge_branch(
     entry.mr_url = mr_url.clone();
     entry.attempts_started = Some(1);
 
-    let result = provider::merge_mr(profile, branch);
+    let result = provider::merge_mr(profile, branch, expected_review_generation);
     match &result {
         Ok(()) => {
             entry.attempts_completed = Some(1);

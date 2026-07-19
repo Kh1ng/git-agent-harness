@@ -24,6 +24,8 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             requested_model TEXT,
             validation_result TEXT,
             review_verdict TEXT,
+            review_contract_version INTEGER,
+            review_generation TEXT,
             human_required INTEGER NOT NULL,
             duration_seconds REAL,
             failure_class TEXT,
@@ -44,6 +46,23 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             ON ledger_entries(work_id);",
     )?;
     ensure_human_required_reason_code_column(conn)?;
+    ensure_review_generation_columns(conn)?;
+    Ok(())
+}
+
+fn ensure_review_generation_columns(conn: &Connection) -> Result<()> {
+    if !has_column(conn, "ledger_entries", "review_contract_version")? {
+        conn.execute(
+            "ALTER TABLE ledger_entries ADD COLUMN review_contract_version INTEGER",
+            [],
+        )?;
+    }
+    if !has_column(conn, "ledger_entries", "review_generation")? {
+        conn.execute(
+            "ALTER TABLE ledger_entries ADD COLUMN review_generation TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -193,9 +212,10 @@ fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
         "INSERT INTO ledger_entries (
             timestamp, profile, work_id, mode, backend, effective_backend,
             effective_model, requested_model, validation_result, review_verdict,
-            human_required, duration_seconds, failure_class, total_tokens,
+            review_contract_version, review_generation, human_required,
+            duration_seconds, failure_class, total_tokens,
             human_required_reason_code, actual_cost_usd, estimated_cost_usd, raw_json
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
         params![
             entry.timestamp,
             entry.profile,
@@ -207,6 +227,8 @@ fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
             entry.requested_model,
             entry.validation_result,
             entry.review_verdict,
+            entry.review_contract_version.map(i64::from),
+            entry.review_generation,
             entry.human_required as i64,
             entry.duration_seconds,
             entry.failure_class,
@@ -240,6 +262,32 @@ mod tests {
     use super::*;
     use crate::ledger::append;
     use crate::ledger::test_util::{profile, test_config};
+
+    #[test]
+    fn schema_upgrade_adds_review_generation_columns_idempotently() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ledger_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                work_id TEXT,
+                mode TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                effective_backend TEXT NOT NULL,
+                human_required INTEGER NOT NULL,
+                raw_json TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        ensure_schema(&conn).unwrap();
+        ensure_schema(&conn).unwrap();
+
+        assert!(has_column(&conn, "ledger_entries", "review_contract_version").unwrap());
+        assert!(has_column(&conn, "ledger_entries", "review_generation").unwrap());
+        assert!(has_column(&conn, "ledger_entries", "human_required_reason_code").unwrap());
+    }
 
     #[test]
     fn sync_mirrors_appended_entries_and_stays_in_lockstep_on_backfill() {
@@ -278,6 +326,8 @@ mod tests {
                 review_gate_reason: None,
                 review_source_sha: None,
                 review_metadata_fingerprint: None,
+                review_contract_version: None,
+                review_generation: None,
                 blocking_findings: &[],
                 actionable_findings: &[],
                 non_blocking_findings: &[],

@@ -110,6 +110,10 @@ fn needs_fix_mr(work_id: &str) -> crate::sync::SyncMrJson {
         effective_model: None,
         review_verdict: Some("NEEDS_FIX".into()),
         review_gate_reason: None,
+        source_sha: None,
+        review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
+        review_generation: None,
+        review_generation_status: None,
         classification: "NEEDS_FIX".into(),
         recommended_action: crate::sync::RecommendedAction::ReuseBranch,
     }

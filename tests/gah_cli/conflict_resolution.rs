@@ -84,6 +84,12 @@ fn setup_conflicted_repair_with_config(
     review.work_id = Some("repair".into());
     review.review_verdict = Some("NEEDS_FIX".into());
     review.review_source_sha = Some(source_sha);
+    review.review_metadata_fingerprint = Some("sha256:conflict-fixture".into());
+    review.review_contract_version = Some(git_agent_harness::ledger::REVIEW_CONTRACT_VERSION);
+    review.review_generation = git_agent_harness::ledger::review_generation(
+        review.review_source_sha.as_deref(),
+        review.review_metadata_fingerprint.as_deref(),
+    );
     review.review_blocking_findings = vec!["README.md: preserve both accepted versions".into()];
     review.reviewer_backend = Some("claude".into());
     review.reviewer_model = Some("sonnet".into());

@@ -19,58 +19,17 @@ mod route_state;
 use route_state::route_state_fingerprint;
 #[path = "runtime/dispatch_policy.rs"]
 mod dispatch_policy;
+#[path = "runtime/dispatch_state.rs"]
+mod dispatch_state;
+use dispatch_state::{
+    action_review_generation, append_stuck_loop_gate_if_transition, is_validation_gate_failure,
+    suppress_recent_capacity_deferrals,
+};
 #[path = "runtime/intake.rs"]
 mod intake;
 use intake::{action_creates_managed_mr, action_intake_key, apply_parallel_projection};
-
-fn is_validation_gate_failure(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.is::<crate::dispatch::ValidationGateError>())
-}
-
-fn suppress_recent_capacity_deferrals(
-    cfg: &crate::config::GahConfig,
-    snapshot: &mut crate::status::StatusSnapshot,
-    events: &[crate::events::ControllerEvent],
-    entries: &[crate::ledger::LedgerEntry],
-    profile_name: &str,
-    repo_id: &str,
-) -> std::collections::HashSet<String> {
-    let now = time::OffsetDateTime::now_utc();
-    let route_state = route_state_fingerprint(cfg, profile_name, now).ok();
-    let deferred = recently_capacity_deferred_work_ids(
-        events,
-        entries,
-        profile_name,
-        repo_id,
-        now,
-        route_state.as_deref(),
-    );
-    retain_snapshot_candidates(snapshot, &deferred, &std::collections::HashSet::new());
-    deferred
-}
-
-/// Persist a stuck-loop transition only when this work item has no active
-/// durable human gate. The profile lock serializes controller writers, while
-/// the fresh ledger read also protects parallel refill slots whose snapshot
-/// predates a sibling's gate append.
-fn append_stuck_loop_gate_if_transition(
-    cfg: &crate::config::GahConfig,
-    profile_name: &str,
-    work_id: &str,
-    reason: &str,
-) -> Result<bool> {
-    let profile = crate::config::get_profile(cfg, profile_name)?;
-    let mut gate =
-        crate::ledger::LedgerEntry::new(profile_name, profile, "auto", "fix", work_id, None, None);
-    gate.work_id = Some(work_id.to_string());
-    gate.human_required = true;
-    gate.dispatch_reason = Some("stuck_loop_gate".to_string());
-    gate.human_required_reason_code = Some("stuck_loop_gate".to_string());
-    gate.error_summary = Some(reason.to_string());
-    crate::ledger::append_human_gate_if_transition(cfg, &gate)
-}
+#[path = "runtime/merge.rs"]
+mod merge;
 
 /// TICKET-079: `gah loop --once` -- exactly one bounded controller
 /// iteration. Build a snapshot, decide one action, execute at most that
@@ -115,8 +74,9 @@ fn loop_lock_path(profile_name: &str, config_path: &std::path::Path) -> PathBuf 
 /// Dropping it releases the underlying flock.
 // The File is never read again -- it exists only so its flock is released on
 // Drop, when the guard goes out of scope at the end of the invocation.
-#[allow(dead_code)]
-pub struct ProfileLock(std::fs::File);
+pub struct ProfileLock {
+    _file: std::fs::File,
+}
 
 /// Acquire the exclusive per-profile execution lock so that only one gah
 /// process at a time can do real execution work for a given profile of a
@@ -149,7 +109,7 @@ pub fn acquire_profile_lock(
             lock_path.display()
         )
     })?;
-    Ok(ProfileLock(lock))
+    Ok(ProfileLock { _file: lock })
 }
 
 /// Reload the config from disk for `run_loop`'s per-iteration hot-reload,
@@ -347,6 +307,7 @@ pub fn run_once(
     } else {
         // Original single action behavior
         let original_action = decide_next_action(&snapshot);
+        let original_review_generation = action_review_generation(&snapshot, &original_action);
         let mut action = original_action.clone();
         let reset_after = original_action.work_id().and_then(|work_id| {
             latest_clear_attempts_timestamp(
@@ -356,18 +317,26 @@ pub fn run_once(
                 work_id,
             )
         });
-        if let Some(reason) =
-            detect_stuck_loop(&history, profile_name, &original_action, reset_after)
-        {
+        if let Some(reason) = detect_stuck_loop(
+            &history,
+            profile_name,
+            &original_action,
+            reset_after,
+            original_review_generation.as_deref(),
+        ) {
             // Persist a work-item-scoped durable human gate so that
             // subsequent loop iterations see human_required=true for this
             // work_id via ledger_lookup_for_ticket and skip it, rather than
             // re-selecting DispatchTicket every cycle (the original
             // trip-without-latch bug).
             if let Some(wid) = original_action.work_id() {
-                if let Err(e) =
-                    append_stuck_loop_gate_if_transition(cfg, profile_name, wid, &reason)
-                {
+                if let Err(e) = append_stuck_loop_gate_if_transition(
+                    cfg,
+                    profile_name,
+                    wid,
+                    &reason,
+                    original_review_generation.as_deref(),
+                ) {
                     eprintln!("warning: failed to persist stuck-loop gate: {e:#}");
                 }
             }
@@ -413,7 +382,13 @@ pub fn run_once(
         {
             action = redispatch;
         }
-        record_action_events(cfg, profile_name, &original_action, &action)?;
+        record_action_events(
+            cfg,
+            profile_name,
+            &original_action,
+            &action,
+            original_review_generation.as_deref(),
+        )?;
 
         let outcome = if let Some(work_id) = action.work_id().filter(|_| {
             !matches!(
@@ -513,7 +488,7 @@ fn run_parallel_once(
         let mut active = 0usize;
         let mut next_sequence = 0usize;
         let mut saw_real_work = false;
-        let mut pending_terminal: Option<(NextAction, NextAction)> = None;
+        let mut pending_terminal: Option<(NextAction, NextAction, Option<String>)> = None;
         let mut fill_attempts_remaining = effective_parallel_limit;
         let mut refill_suppressed = false;
         let (done_tx, done_rx) = sync_channel::<(usize, LoopOnceResult)>(effective_parallel_limit);
@@ -566,6 +541,8 @@ fn run_parallel_once(
                 );
 
                 let original_action = decide_next_action(&fresh_snapshot);
+                let original_review_generation =
+                    action_review_generation(&fresh_snapshot, &original_action);
                 let mut action = original_action.clone();
 
                 let reset_after = original_action.work_id().and_then(|work_id| {
@@ -576,13 +553,21 @@ fn run_parallel_once(
                         work_id,
                     )
                 });
-                if let Some(reason) =
-                    detect_stuck_loop(&history, profile_name, &original_action, reset_after)
-                {
+                if let Some(reason) = detect_stuck_loop(
+                    &history,
+                    profile_name,
+                    &original_action,
+                    reset_after,
+                    original_review_generation.as_deref(),
+                ) {
                     if let Some(wid) = original_action.work_id() {
-                        if let Err(error) =
-                            append_stuck_loop_gate_if_transition(cfg, profile_name, wid, &reason)
-                        {
+                        if let Err(error) = append_stuck_loop_gate_if_transition(
+                            cfg,
+                            profile_name,
+                            wid,
+                            &reason,
+                            original_review_generation.as_deref(),
+                        ) {
                             eprintln!("warning: failed to persist stuck-loop gate: {error:#}");
                         }
                     }
@@ -631,7 +616,8 @@ fn run_parallel_once(
                     | NextAction::HumanRequired { .. }
                     | NextAction::NoOp { .. } => {
                         if !saw_real_work {
-                            pending_terminal = Some((original_action, action));
+                            pending_terminal =
+                                Some((original_action, action, original_review_generation));
                             if active == 0 {
                                 continue;
                             }
@@ -641,7 +627,13 @@ fn run_parallel_once(
                         }
                     }
                     _ => {
-                        record_action_events(cfg, profile_name, &original_action, &action)?;
+                        record_action_events(
+                            cfg,
+                            profile_name,
+                            &original_action,
+                            &action,
+                            original_review_generation.as_deref(),
+                        )?;
 
                         if let Some(work_id) = action_work_id.as_deref() {
                             if !crate::work_claim::try_claim_work(&claim_scope, work_id)? {
@@ -723,8 +715,16 @@ fn run_parallel_once(
 
             if active == 0 {
                 if !saw_real_work {
-                    if let Some((original_action, action)) = pending_terminal.take() {
-                        record_action_events(cfg, profile_name, &original_action, &action)?;
+                    if let Some((original_action, action, review_generation)) =
+                        pending_terminal.take()
+                    {
+                        record_action_events(
+                            cfg,
+                            profile_name,
+                            &original_action,
+                            &action,
+                            review_generation.as_deref(),
+                        )?;
                         let outcome =
                             execute_action(cfg, profile_name, &action, skip_validation_gate, None)?;
 
@@ -861,9 +861,7 @@ pub(crate) fn execute_action(
         branch: None,
         mr: None,
         current_branch: false,
-        budget: 0,
         dry_run: false,
-        config_path: None,
         oh_profile: None,
         model: None,
         retries: 2,
@@ -873,6 +871,7 @@ pub(crate) fn execute_action(
         allow_unknown_red_baseline: dispatch_policy::allow_unknown_red_baseline(action),
         escalate: false,
         existing_branch: None,
+        expected_review_generation: None,
         skip_validation_gate,
         dispatch_reason: None,
         work_id: action.work_id().map(str::to_string),
@@ -896,10 +895,15 @@ pub(crate) fn execute_action(
             crate::provider::mark_ready_for_review(profile, branch)?;
             Ok(format!("Marked MR on branch '{branch}' ready for review"))
         }
-        NextAction::FixMr { branch, .. } => {
+        NextAction::FixMr {
+            branch,
+            review_generation,
+            ..
+        } => {
             let args = crate::dispatch::DispatchArgs {
                 target: branch.clone(),
                 existing_branch: Some(branch.clone()),
+                expected_review_generation: review_generation.clone(),
                 dispatch_reason: Some("post_review_repair".to_string()),
                 ..base_args()
             };
@@ -909,55 +913,7 @@ pub(crate) fn execute_action(
                     .unwrap_or_else(|| format!("Dispatched fix for existing branch '{branch}'")),
             )
         }
-        NextAction::MergeMr {
-            branch,
-            work_id,
-            mr_url,
-            ..
-        } => {
-            let profile = crate::config::get_profile(cfg, profile_name)?;
-            let merge_policy = profile
-                .effective_routing(&cfg.defaults)
-                .merge_policy
-                .unwrap_or_default();
-            let run_id = uuid::Uuid::new_v4().to_string();
-            crate::events::record_with_run_id(
-                cfg,
-                crate::events::EventType::DispatchStarted,
-                Some(profile_name),
-                action.work_id(),
-                Some(&run_id),
-                "merge",
-            )?;
-            let gitlab_mwps = merge_policy == crate::config::MergePolicy::GitlabMwps
-                && profile.provider == "gitlab";
-            let result = if gitlab_mwps {
-                // Issue #124 / TICKET-127: set GitLab's merge-when-pipeline
-                // succeeds flag and return; GitLab enforces the CI gate
-                // natively. We never merge the MR ourselves in this mode.
-                let target = crate::provider::find_review_target_by_branch(profile, branch)
-                    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-                crate::provider::gitlab_set_mwps(profile, &target.id)
-            } else {
-                crate::dispatch::merge_branch(cfg, profile, branch, work_id, mr_url, Some(&run_id))
-            };
-            let outcome = match &result {
-                Ok(()) if gitlab_mwps => {
-                    format!("Set GitLab merge-when-pipeline-succeeds on branch '{branch}'")
-                }
-                Ok(()) => format!("Merged MR on branch '{branch}'"),
-                Err(e) => format!("Merge failed for branch '{branch}': {e:#}"),
-            };
-            crate::events::record_with_run_id(
-                cfg,
-                crate::events::EventType::DispatchFinished,
-                Some(profile_name),
-                action.work_id(),
-                Some(&run_id),
-                format!("merge: {outcome}"),
-            )?;
-            Ok(outcome)
-        }
+        NextAction::MergeMr { .. } => merge::execute(cfg, profile_name, action),
         NextAction::DispatchTicket { ticket_path, .. } => {
             let args = crate::dispatch::DispatchArgs {
                 target: ticket_path.clone(),
@@ -1180,6 +1136,7 @@ default_target_branch = "main"
                             "test",
                             "#639",
                             "same stuck decision",
+                            None,
                         )
                         .unwrap()
                     })

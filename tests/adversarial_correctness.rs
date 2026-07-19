@@ -11,6 +11,8 @@
 #![recursion_limit = "256"]
 
 mod support;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use support::fake_ledger::{ledger_entry_full, TestLedger};
 use support::scenario::{gitlab_mr_json, GithubPrParams, GitlabMrParams, ScenarioHarness};
 use support::{FakeBackend, Scenario};
@@ -21,9 +23,24 @@ use tempfile::TempDir;
 /// Run production `count_fix_attempts_per_branch` by reading
 /// `fix_attempt_counts` from `gah status --json`.
 fn status_fix_counts(ledger: TestLedger) -> serde_json::Map<String, serde_json::Value> {
+    let prs = ledger
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            let branch = entry["branch"].as_str()?;
+            let work_id = entry["work_id"].as_str().unwrap_or("TICKET-001");
+            Some((branch.to_string(), current_pr(branch, work_id, 1)))
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect::<Vec<_>>();
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install(Scenario::success().with_stdout(serde_json::to_string(&prs).unwrap()));
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("empty")
         .with_ledger(ledger);
+    harness.install_custom_gh(&gh);
     let snap = harness.run_status_json().expect("status should succeed");
     snap.get("fix_attempt_counts")
         .and_then(|v| v.as_object())
@@ -35,8 +52,58 @@ fn count_for_branch(counts: &serde_json::Map<String, serde_json::Value>, branch:
     counts.get(branch).and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
-fn ledger_fix(branch: &str, reason: &str, ts: &str) -> serde_json::Value {
-    ledger_entry_full("fix", branch, Some(reason), "TICKET-001", ts)
+fn fixture_title(work_id: &str) -> String {
+    format!("Draft: {work_id} fixture")
+}
+
+fn fixture_source_sha(branch: &str) -> String {
+    format!("source-{branch}")
+}
+
+fn fixture_metadata_fingerprint(branch: &str, work_id: &str) -> String {
+    let source_sha = fixture_source_sha(branch);
+    let title = fixture_title(work_id)
+        .strip_prefix("Draft: ")
+        .unwrap()
+        .to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(b"gah-review-metadata-v1\0");
+    for value in [source_sha.as_str(), title.as_str(), ""] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.update([1]);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn current_pr(branch: &str, work_id: &str, number: i64) -> serde_json::Value {
+    let mut pr = support::scenario::github_pr_json(GithubPrParams {
+        title: fixture_title(work_id),
+        branch: branch.into(),
+        labels: vec!["gah-needs-fix".into()],
+        ci_conclusion: None,
+        url: None,
+        number: Some(number),
+        draft: Some(true),
+        merged_at: None,
+        updated_at: None,
+    });
+    pr["headRefOid"] = serde_json::json!(fixture_source_sha(branch));
+    pr
+}
+
+fn ledger_fix(branch: &str, work_id: &str, reason: &str, ts: &str) -> serde_json::Value {
+    let mut entry = ledger_entry_full("fix", branch, Some(reason), work_id, ts);
+    let source_sha = fixture_source_sha(branch);
+    let metadata = fixture_metadata_fingerprint(branch, work_id);
+    entry["review_source_sha"] = serde_json::json!(source_sha);
+    entry["review_metadata_fingerprint"] = serde_json::json!(metadata);
+    entry["review_generation"] = serde_json::json!(format!(
+        "review-v1:{}:{}",
+        fixture_source_sha(branch),
+        fixture_metadata_fingerprint(branch, work_id)
+    ));
+    entry
 }
 
 // ── mutation targets (must go red on production mutations) ───────────
@@ -46,18 +113,23 @@ fn mutation_target_branch_filter_must_be_isolated() {
     let ledger = TestLedger::new()
         .with_entry(ledger_fix(
             "gah/branch-1",
+            "TICKET-001",
             "post_review_repair",
             "2026-07-01T00:00:00Z",
         ))
         .with_entry(ledger_fix(
             "gah/branch-1",
+            "TICKET-001",
             "post_review_repair",
             "2026-07-01T01:00:00Z",
         ))
         .with_entry({
-            let mut e = ledger_fix("gah/branch-2", "post_review_repair", "2026-07-01T00:00:00Z");
-            e["work_id"] = serde_json::json!("TICKET-002");
-            e
+            ledger_fix(
+                "gah/branch-2",
+                "TICKET-002",
+                "post_review_repair",
+                "2026-07-01T00:00:00Z",
+            )
         });
     let counts = status_fix_counts(ledger);
     assert_eq!(
@@ -86,7 +158,12 @@ fn mutation_target_review_mode_must_not_count_as_fix() {
         "TICKET-001",
         "2026-07-01T00:00:00Z",
     );
-    let fix = ledger_fix("gah/fix-1", "post_review_repair", "2026-07-01T00:00:00Z");
+    let fix = ledger_fix(
+        "gah/fix-1",
+        "TICKET-001",
+        "post_review_repair",
+        "2026-07-01T00:00:00Z",
+    );
     let counts = status_fix_counts(TestLedger::new().with_entry(review).with_entry(fix));
     assert_eq!(
         count_for_branch(&counts, "gah/fix-1"),
@@ -97,8 +174,13 @@ fn mutation_target_review_mode_must_not_count_as_fix() {
 
 #[test]
 fn mutation_target_initial_dispatch_must_not_count_as_repair() {
-    let initial = ledger_fix("gah/fix-1", "initial", "2026-07-01T00:00:00Z");
-    let repair = ledger_fix("gah/fix-1", "post_review_repair", "2026-07-01T01:00:00Z");
+    let initial = ledger_fix("gah/fix-1", "TICKET-001", "initial", "2026-07-01T00:00:00Z");
+    let repair = ledger_fix(
+        "gah/fix-1",
+        "TICKET-001",
+        "post_review_repair",
+        "2026-07-01T01:00:00Z",
+    );
     let counts = status_fix_counts(TestLedger::new().with_entry(initial).with_entry(repair));
     assert_eq!(
         count_for_branch(&counts, "gah/fix-1"),
@@ -134,33 +216,27 @@ fn sync_failure_marks_incomplete_observation() {
 
 #[test]
 fn two_tickets_independent_progress() {
-    let a1 = ledger_fix("gah/fix-a", "post_review_repair", "2026-07-01T00:00:00Z");
-    let a2 = ledger_fix("gah/fix-a", "post_review_repair", "2026-07-01T01:00:00Z");
-    let mut b1 = ledger_fix("gah/fix-b", "post_review_repair", "2026-07-01T00:00:00Z");
-    b1["work_id"] = serde_json::json!("TICKET-002");
+    let a1 = ledger_fix(
+        "gah/fix-a",
+        "TICKET-001",
+        "post_review_repair",
+        "2026-07-01T00:00:00Z",
+    );
+    let a2 = ledger_fix(
+        "gah/fix-a",
+        "TICKET-001",
+        "post_review_repair",
+        "2026-07-01T01:00:00Z",
+    );
+    let b1 = ledger_fix(
+        "gah/fix-b",
+        "TICKET-002",
+        "post_review_repair",
+        "2026-07-01T00:00:00Z",
+    );
 
-    let pr_a = support::scenario::github_pr_json(GithubPrParams {
-        title: "Draft: TICKET-001 Exhausted".into(),
-        branch: "gah/fix-a".into(),
-        labels: vec!["gah-needs-fix".into()],
-        ci_conclusion: None,
-        url: None,
-        number: Some(1),
-        draft: None,
-        merged_at: None,
-        updated_at: None,
-    });
-    let pr_b = support::scenario::github_pr_json(GithubPrParams {
-        title: "Draft: TICKET-002 Eligible".into(),
-        branch: "gah/fix-b".into(),
-        labels: vec!["gah-needs-fix".into()],
-        ci_conclusion: None,
-        url: None,
-        number: Some(2),
-        draft: None,
-        merged_at: None,
-        updated_at: None,
-    });
+    let pr_a = current_pr("gah/fix-a", "TICKET-001", 1);
+    let pr_b = current_pr("gah/fix-b", "TICKET-002", 2);
     let tmp = TempDir::new().unwrap();
     let gh = FakeBackend::new(tmp.path(), "gh");
     gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr_a, pr_b]).unwrap()));
@@ -344,10 +420,21 @@ fn crash_after_attempt_start_reconciles_stale_state() {
 /// Two gah child processes: durable ledger counts stable after process exit.
 #[test]
 fn restart_two_process_continuity_shared_ledger() {
-    let repair = ledger_fix("gah/fix-1", "post_review_repair", "2026-07-01T00:00:00Z");
+    let repair = ledger_fix(
+        "gah/fix-1",
+        "TICKET-001",
+        "post_review_repair",
+        "2026-07-01T00:00:00Z",
+    );
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    gh.install(Scenario::success().with_stdout(
+        serde_json::to_string(&vec![current_pr("gah/fix-1", "TICKET-001", 1)]).unwrap(),
+    ));
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("empty")
         .with_ledger(TestLedger::new().with_entry(repair));
+    harness.install_custom_gh(&gh);
     let a = harness.run_status_json().unwrap();
     let b = harness.run_status_json().unwrap();
     assert_eq!(
@@ -367,30 +454,20 @@ fn restart_two_process_continuity_shared_ledger() {
 
 #[test]
 fn exhausted_ticket_does_not_starve_eligible_ticket() {
-    let a1 = ledger_fix("gah/fix-a", "post_review_repair", "2026-07-01T00:00:00Z");
-    let a2 = ledger_fix("gah/fix-a", "post_review_repair", "2026-07-01T01:00:00Z");
-    let pr_a = support::scenario::github_pr_json(GithubPrParams {
-        title: "Draft: TICKET-001 Exhausted".into(),
-        branch: "gah/fix-a".into(),
-        labels: vec!["gah-needs-fix".into()],
-        ci_conclusion: None,
-        url: None,
-        number: Some(1),
-        draft: None,
-        merged_at: None,
-        updated_at: None,
-    });
-    let pr_b = support::scenario::github_pr_json(GithubPrParams {
-        title: "Draft: TICKET-002 Eligible".into(),
-        branch: "gah/fix-b".into(),
-        labels: vec!["gah-needs-fix".into()],
-        ci_conclusion: None,
-        url: None,
-        number: Some(2),
-        draft: None,
-        merged_at: None,
-        updated_at: None,
-    });
+    let a1 = ledger_fix(
+        "gah/fix-a",
+        "TICKET-001",
+        "post_review_repair",
+        "2026-07-01T00:00:00Z",
+    );
+    let a2 = ledger_fix(
+        "gah/fix-a",
+        "TICKET-001",
+        "post_review_repair",
+        "2026-07-01T01:00:00Z",
+    );
+    let pr_a = current_pr("gah/fix-a", "TICKET-001", 1);
+    let pr_b = current_pr("gah/fix-b", "TICKET-002", 2);
     let tmp = TempDir::new().unwrap();
     let gh = FakeBackend::new(tmp.path(), "gh");
     gh.install(Scenario::success().with_stdout(serde_json::to_string(&vec![pr_a, pr_b]).unwrap()));
@@ -412,9 +489,18 @@ fn exhausted_ticket_does_not_starve_eligible_ticket() {
 
 #[test]
 fn metamorphic_unrelated_ledger_does_not_poison_count() {
-    let current = ledger_fix("gah/fix-1", "post_review_repair", "2026-07-01T00:00:00Z");
-    let mut other = ledger_fix("gah/other", "post_review_repair", "2026-07-01T00:00:00Z");
-    other["work_id"] = serde_json::json!("TICKET-002");
+    let current = ledger_fix(
+        "gah/fix-1",
+        "TICKET-001",
+        "post_review_repair",
+        "2026-07-01T00:00:00Z",
+    );
+    let other = ledger_fix(
+        "gah/other",
+        "TICKET-002",
+        "post_review_repair",
+        "2026-07-01T00:00:00Z",
+    );
     let base = status_fix_counts(TestLedger::new().with_entry(current.clone()));
     let both = status_fix_counts(TestLedger::new().with_entry(other).with_entry(current));
     assert_eq!(count_for_branch(&base, "gah/fix-1"), 1);

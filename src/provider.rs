@@ -193,10 +193,8 @@ pub struct ReviewTarget {
     pub ci_status: Option<String>,
     /// Immutable source commit that the reviewer inspected. Optional so
     /// older provider responses and local/fallback targets remain valid.
-    #[allow(dead_code)] // consumed by SHA review deduplication (#109)
     pub source_sha: Option<String>,
     /// Immutable target/base commit used to construct the reviewed diff.
-    #[allow(dead_code)] // consumed by SHA review deduplication (#109)
     pub target_sha: Option<String>,
 }
 
@@ -552,16 +550,42 @@ pub fn mark_ready_for_review(profile: &Profile, branch: &str) -> Result<()> {
     }
 }
 
-pub fn merge_mr(profile: &Profile, branch: &str) -> Result<()> {
+fn ensure_review_generation(target: &ReviewTarget, expected: Option<&str>) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+        target.source_sha.as_deref(),
+        target.title.as_deref(),
+        target.body.as_deref(),
+        target.draft,
+    );
+    let live =
+        crate::ledger::review_generation(target.source_sha.as_deref(), Some(&metadata_fingerprint));
+    if live.as_deref() != Some(expected) {
+        anyhow::bail!(
+            "MR source or metadata changed after review: expected generation '{expected}', live generation is '{}'; re-run review before merge",
+            live.as_deref().unwrap_or("unknown")
+        );
+    }
+    Ok(())
+}
+
+pub fn merge_mr(
+    profile: &Profile,
+    branch: &str,
+    expected_review_generation: Option<&str>,
+) -> Result<()> {
     let target = find_review_target_by_branch(profile, branch)?;
+    ensure_review_generation(&target, expected_review_generation)?;
     match profile.provider.as_str() {
         "gitlab" => {
             gitlab_mark_ready_for_review(profile, &target.id)?;
-            gitlab_merge_mr(profile, &target.id)
+            gitlab_merge_mr(profile, &target.id, target.source_sha.as_deref())
         }
         "github" => {
             github_mark_ready_for_review(profile, &target.id)?;
-            github_merge_mr(profile, &target.id)
+            github_merge_mr(profile, &target.id, target.source_sha.as_deref())
         }
         other => anyhow::bail!("unsupported provider: {}", other),
     }
@@ -581,18 +605,14 @@ fn gitlab_mark_ready_for_review(profile: &Profile, iid: &str) -> Result<()> {
     Ok(())
 }
 
-fn gitlab_merge_mr(profile: &Profile, iid: &str) -> Result<()> {
+fn gitlab_merge_mr(profile: &Profile, iid: &str, source_sha: Option<&str>) -> Result<()> {
+    let mut args = vec!["mr", "merge", iid, "--squash", "--remove-source-branch"];
+    if let Some(source_sha) = source_sha {
+        args.extend(["--sha", source_sha]);
+    }
+    args.extend(["--yes", "--repo", &profile.repo]);
     let merge = provider_command("glab")
-        .args([
-            "mr",
-            "merge",
-            iid,
-            "--squash",
-            "--remove-source-branch",
-            "--yes",
-            "--repo",
-            &profile.repo,
-        ])
+        .args(args)
         .output()
         .context("glab mr merge")?;
     if !merge.status.success() {
@@ -608,7 +628,14 @@ fn gitlab_merge_mr(profile: &Profile, iid: &str) -> Result<()> {
 /// flag on the MR and return without merging. GitLab then enforces the CI gate
 /// natively: the MR only merges once its pipeline turns green. Used by the
 /// `gitlab_mwps` merge policy so GAH does not merge the MR itself.
-pub fn gitlab_set_mwps(profile: &Profile, iid: &str) -> Result<()> {
+pub fn gitlab_set_mwps(
+    profile: &Profile,
+    branch: &str,
+    expected_review_generation: &str,
+) -> Result<()> {
+    let target = find_review_target_by_branch(profile, branch)?;
+    ensure_review_generation(&target, Some(expected_review_generation))?;
+    let iid = &target.id;
     let ready = provider_command("glab")
         .args(["mr", "update", iid, "--ready", "--repo", &profile.repo])
         .output()
@@ -619,18 +646,20 @@ pub fn gitlab_set_mwps(profile: &Profile, iid: &str) -> Result<()> {
             String::from_utf8_lossy(&ready.stderr).trim()
         );
     }
+    let mut args = vec![
+        "mr",
+        "merge",
+        iid,
+        "--auto-merge",
+        "--squash",
+        "--remove-source-branch",
+    ];
+    if let Some(source_sha) = target.source_sha.as_deref() {
+        args.extend(["--sha", source_sha]);
+    }
+    args.extend(["--yes", "--repo", &profile.repo]);
     let mwps = provider_command("glab")
-        .args([
-            "mr",
-            "merge",
-            iid,
-            "--auto-merge",
-            "--squash",
-            "--remove-source-branch",
-            "--yes",
-            "--repo",
-            &profile.repo,
-        ])
+        .args(args)
         .output()
         .context("glab mr merge --auto-merge")?;
     if !mwps.status.success() {
@@ -699,7 +728,7 @@ pub fn gitlab_get_issue_state(profile: &Profile, issue_number: &str) -> Result<O
     Ok(state)
 }
 
-fn github_merge_mr(profile: &Profile, number: &str) -> Result<()> {
+fn github_merge_mr(profile: &Profile, number: &str, source_sha: Option<&str>) -> Result<()> {
     // --admin: gah's own review step only ever posts a plain issue comment,
     // never a formal GitHub PR review (GitHub disallows self-approval, and
     // gah's PRs are authored by the same identity that would review them) --
@@ -708,17 +737,13 @@ fn github_merge_mr(profile: &Profile, number: &str) -> Result<()> {
     // has already decided this merge is safe by the time we get here; this
     // flag just lets that decision execute instead of failing with "the base
     // branch policy prohibits the merge" (confirmed live on PR #255).
+    let mut args = vec!["pr", "merge", number, "--squash", "--admin"];
+    if let Some(source_sha) = source_sha {
+        args.extend(["--match-head-commit", source_sha]);
+    }
+    args.extend(["--delete-branch", "--repo", &profile.repo]);
     let merge = provider_command("gh")
-        .args([
-            "pr",
-            "merge",
-            number,
-            "--squash",
-            "--admin",
-            "--delete-branch",
-            "--repo",
-            &profile.repo,
-        ])
+        .args(args)
         .output()
         .context("gh pr merge")?;
     if !merge.status.success() {

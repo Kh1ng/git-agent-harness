@@ -78,6 +78,42 @@ pub(super) fn review_metadata_matches(latest: &LedgerEntry, mr: &SyncMr) -> bool
             )
 }
 
+pub(crate) fn current_review_generation(mr: &SyncMr) -> Option<String> {
+    let fingerprint = mr.review_metadata_fingerprint();
+    crate::ledger::review_generation(mr.source_sha.as_deref(), Some(&fingerprint))
+}
+
+pub(crate) fn review_generation_matches_mr(generation: &str, mr: &SyncMr) -> bool {
+    current_review_generation(mr).as_deref() == Some(generation)
+        || (!mr.draft
+            && crate::ledger::review_generation(
+                mr.source_sha.as_deref(),
+                Some(&review_metadata_fingerprint(
+                    mr.source_sha.as_deref(),
+                    Some(&mr.title),
+                    mr.body.as_deref(),
+                    true,
+                )),
+            )
+            .as_deref()
+                == Some(generation))
+}
+
+pub(crate) fn review_contract_matches(latest: &LedgerEntry, mr: &SyncMr) -> bool {
+    latest.review_contract_version == Some(crate::ledger::REVIEW_CONTRACT_VERSION)
+        && latest.review_generation
+            == crate::ledger::review_generation(
+                latest.review_source_sha.as_deref(),
+                latest.review_metadata_fingerprint.as_deref(),
+            )
+        && latest.review_generation.is_some()
+        && review_metadata_matches(latest, mr)
+        && latest
+            .review_generation
+            .as_deref()
+            .is_some_and(|generation| review_generation_matches_mr(generation, mr))
+}
+
 /// Return implementation attribution independently from the latest review.
 /// A metadata-only re-review appends a review without a new implementation.
 pub(super) fn ledger_info_for_mr(

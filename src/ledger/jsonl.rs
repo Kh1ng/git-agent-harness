@@ -211,10 +211,18 @@ pub fn append_human_gate_if_transition(cfg: &GahConfig, entry: &LedgerEntry) -> 
     } else {
         Vec::new()
     };
-    if effective_human_gate_from_entries(&existing, &entry.profile, &entry.repo_id, work_id)
-        .is_some()
+    if let Some(active) =
+        effective_human_gate_from_entries(&existing, &entry.profile, &entry.repo_id, work_id)
     {
-        return Ok(false);
+        let active_is_review_derived =
+            active.mode == "review" || active.reason_code.as_deref() == Some("stuck_loop_gate");
+        let starts_new_review_generation = entry.review_generation.is_some()
+            && active_is_review_derived
+            && (active.review_contract_version != entry.review_contract_version
+                || active.review_generation != entry.review_generation);
+        if !starts_new_review_generation {
+            return Ok(false);
+        }
     }
     append_locked(cfg, &path, entry)?;
     Ok(true)
@@ -387,6 +395,8 @@ pub struct ReviewVerdictBackfill<'a> {
     pub review_gate_reason: Option<&'a str>,
     pub review_source_sha: Option<&'a str>,
     pub review_metadata_fingerprint: Option<&'a str>,
+    pub review_contract_version: Option<u32>,
+    pub review_generation: Option<&'a str>,
     pub blocking_findings: &'a [String],
     pub actionable_findings: &'a [crate::models::ActionableReviewFinding],
     pub non_blocking_findings: &'a [String],
@@ -435,6 +445,8 @@ pub fn backfill_review_verdict(
     entries[idx].review_source_sha = backfill.review_source_sha.map(str::to_string);
     entries[idx].review_metadata_fingerprint =
         backfill.review_metadata_fingerprint.map(str::to_string);
+    entries[idx].review_contract_version = backfill.review_contract_version;
+    entries[idx].review_generation = backfill.review_generation.map(str::to_string);
     entries[idx].review_blocking_findings = backfill.blocking_findings.to_vec();
     entries[idx].review_actionable_findings = backfill.actionable_findings.to_vec();
     entries[idx].review_non_blocking_findings = backfill.non_blocking_findings.to_vec();
@@ -487,6 +499,7 @@ pub fn review_already_exists(
     reviewer_class: &str,
 ) -> Result<bool> {
     let aliases = work_id_aliases(work_id);
+    let generation = super::review_generation(Some(source_sha), Some(metadata_fingerprint));
     let entries = read_entries(cfg)?;
     let reset_index = entries.iter().rposition(|entry| {
         entry.profile == profile_name
@@ -510,6 +523,8 @@ pub fn review_already_exists(
                 .is_some_and(|id| aliases.iter().any(|alias| alias == id))
             && entry.review_source_sha.as_deref() == Some(source_sha)
             && entry.review_metadata_fingerprint.as_deref() == Some(metadata_fingerprint)
+            && entry.review_contract_version == Some(super::REVIEW_CONTRACT_VERSION)
+            && entry.review_generation == generation
             && entry.reviewer_class.as_deref() == Some(reviewer_class)
             && review_is_dedup_eligible(entry)
     }))
@@ -547,6 +562,7 @@ pub struct EffectiveHumanGate {
     pub timestamp: String,
     pub routing_diagnostics: Option<super::entry::RoutingDiagnostics>,
     pub review_contract_version: Option<u32>,
+    pub review_generation: Option<String>,
 }
 
 /// Helper to identify review-derived human gates (stuck-loop gates, review-evidence gates,
@@ -564,8 +580,7 @@ pub fn is_review_derived_gate(entry: &LedgerEntry) -> bool {
     if matches!(
         reason_code,
         Some(
-            "stuck_loop_gate"
-                | "review_evidence_gate"
+            "review_evidence_gate"
                 | "review_output_invalid_exhausted"
                 | "review_ceiling_exhausted"
                 | "fix_retry_cap_exceeded"
@@ -574,7 +589,15 @@ pub fn is_review_derived_gate(entry: &LedgerEntry) -> bool {
         return true;
     }
 
-    if dispatch_reason == Some("stuck_loop_gate") {
+    // Stuck-loop detection applies to every controller action, including an
+    // initial implementation dispatch. It is review-derived only when the
+    // controller attached the exact review generation of an MR lifecycle
+    // action. Treating every legacy/non-MR stuck gate as review-derived would
+    // make a contract bump erase unrelated durable safety holds and would
+    // defeat append_human_gate_if_transition's idempotency.
+    if (reason_code == Some("stuck_loop_gate") || dispatch_reason == Some("stuck_loop_gate"))
+        && entry.review_generation.is_some()
+    {
         return true;
     }
 
@@ -698,6 +721,7 @@ fn effective_human_gate_for_scope(
             timestamp: entry.timestamp.clone(),
             routing_diagnostics: entry.routing_diagnostics.clone(),
             review_contract_version: entry.review_contract_version,
+            review_generation: entry.review_generation.clone(),
         });
     }
     gate
@@ -779,6 +803,14 @@ mod tests {
             reviewer_class,
         )
         .unwrap()
+    }
+
+    fn stamp_current_review(entry: &mut crate::ledger::LedgerEntry) {
+        entry.review_contract_version = Some(crate::ledger::REVIEW_CONTRACT_VERSION);
+        entry.review_generation = crate::ledger::review_generation(
+            entry.review_source_sha.as_deref(),
+            entry.review_metadata_fingerprint.as_deref(),
+        );
     }
 
     #[test]
@@ -881,6 +913,7 @@ mod tests {
         gate.work_id = Some("#650".into());
         gate.human_required = true;
         gate.human_required_reason_code = Some("policy_approval".into());
+        gate.review_contract_version = Some(crate::ledger::REVIEW_CONTRACT_VERSION);
         let grant = super::super::LedgerEntry::new_paid_route_approval(
             "test",
             &profile,
@@ -915,6 +948,7 @@ mod tests {
         gate.work_id = Some("#650".into());
         gate.human_required = true;
         gate.human_required_reason_code = Some("policy_approval".into());
+        gate.review_contract_version = Some(crate::ledger::REVIEW_CONTRACT_VERSION);
 
         let mut duplicate =
             super::super::LedgerEntry::new("test", &profile, "auto", "review", "#650", None, None);
@@ -936,6 +970,7 @@ mod tests {
         entry.work_id = Some("#109".into());
         entry.review_source_sha = Some("abc123".into());
         entry.review_metadata_fingerprint = Some("metadata-for-abc123".into());
+        stamp_current_review(&mut entry);
         entry.reviewer_class = Some("strong".into());
         entry.review_verdict = Some("APPROVE".into());
         append(&cfg, &entry).unwrap();
@@ -1009,6 +1044,7 @@ mod tests {
         review.work_id = Some("#109".into());
         review.review_source_sha = Some("abc123".into());
         review.review_metadata_fingerprint = Some("metadata-for-abc123".into());
+        stamp_current_review(&mut review);
         review.reviewer_class = Some("strong".into());
         review.review_verdict = Some("APPROVE".into());
         append(&cfg, &review).unwrap();
@@ -1217,6 +1253,8 @@ mod tests {
                 review_gate_reason: Some("test review evidence gate"),
                 review_source_sha: Some("abc123"),
                 review_metadata_fingerprint: Some("sha256:test"),
+                review_contract_version: Some(super::super::REVIEW_CONTRACT_VERSION),
+                review_generation: Some("review-v1:abc123:sha256:test"),
                 blocking_findings: &["src/lib.rs: broken retry".to_string()],
                 actionable_findings: &[],
                 non_blocking_findings: &["consider a smaller helper".to_string()],
@@ -1279,6 +1317,8 @@ mod tests {
                 review_gate_reason: None,
                 review_source_sha: None,
                 review_metadata_fingerprint: None,
+                review_contract_version: None,
+                review_generation: None,
                 blocking_findings: &[],
                 actionable_findings: &[],
                 non_blocking_findings: &[],

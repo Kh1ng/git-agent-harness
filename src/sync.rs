@@ -6,7 +6,10 @@ use time::{Duration, OffsetDateTime};
 
 mod review_state;
 pub(crate) use review_state::review_metadata_fingerprint;
-use review_state::{latest_review_for_mr, ledger_info_for_mr, review_metadata_matches};
+pub(crate) use review_state::{
+    current_review_generation, review_contract_matches, review_generation_matches_mr,
+};
+use review_state::{latest_review_for_mr, ledger_info_for_mr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MrFetchScope {
@@ -109,6 +112,15 @@ pub struct SyncMrJson {
     pub review_verdict: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_gate_reason: Option<String>,
+    /// Immutable source and independently-versioned lifecycle generation used
+    /// to decide whether historical review-derived gates remain authoritative.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sha: Option<String>,
+    pub review_contract_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_generation_status: Option<String>,
     /// Non-terminal / unknown CI (running/pending/missing) for which there
     /// is no defined next controller action yet. GitHub is never `ci_pending`
     /// (see `SyncMr::ci_pending`); this mirrors the typed field on `SyncMr`.
@@ -260,26 +272,42 @@ pub fn sync_mr_to_json(
     let mut class = classify(mr);
     let (effective_backend, effective_model, mut review_verdict, mut review_gate_reason) =
         ledger_info_for_mr(ledger, mr);
+    let latest_review = latest_review_for_mr(ledger, mr);
+    let latest_review_is_current =
+        latest_review.is_some_and(|latest| review_contract_matches(latest, mr));
+    let review_generation = if latest_review_is_current {
+        latest_review.and_then(|entry| entry.review_generation.clone())
+    } else {
+        current_review_generation(mr)
+    };
+    let review_generation_status = latest_review.and_then(|latest| {
+        (!latest_review_is_current).then(|| {
+            if latest.review_contract_version
+                != Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION)
+            {
+                format!(
+                    "superseded review contract {} -> {}",
+                    latest
+                        .review_contract_version
+                        .map_or_else(|| "legacy".to_string(), |version| version.to_string()),
+                    crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
+                )
+            } else if latest.review_generation.is_none() {
+                "superseded review missing generation identity".to_string()
+            } else {
+                "superseded review because source or provider metadata changed".to_string()
+            }
+        })
+    });
     if !matches!(class, "MERGED" | "CLOSED_UNMERGED" | "CI_FAILED") {
-        if let Some(latest) = latest_review_for_mr(ledger, mr) {
-            let contract_stale = latest.review_contract_version.unwrap_or(0)
-                < crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION;
-            let metadata_stale = !review_metadata_matches(latest, mr);
-            if contract_stale || metadata_stale {
+        if let Some(latest) = latest_review {
+            if !latest_review_is_current {
                 // The provider label reflects an opinion about older
-                // metadata or a superseded contract version. Corrections require review, not a
-                // worktree repair or terminal human gate.
+                // metadata or a superseded review contract. Both require a
+                // fresh bounded review, not repair or a terminal human gate.
                 class = "NEEDS_REVIEW";
                 review_verdict = None;
-                review_gate_reason = Some(if contract_stale {
-                    format!(
-                        "superseded: active review contract generation is v{}, prior review was under v{}",
-                        crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
-                        latest.review_contract_version.unwrap_or(0)
-                    )
-                } else {
-                    "superseded: review metadata/source invalidated".to_string()
-                });
+                review_gate_reason = review_generation_status.clone();
             } else {
                 // Provider label mutations can fail or lag after a completed
                 // review. Reconcile from the exact-branch, exact-metadata
@@ -314,6 +342,10 @@ pub fn sync_mr_to_json(
         effective_model,
         review_verdict,
         review_gate_reason,
+        source_sha: mr.source_sha.clone(),
+        review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
+        review_generation,
+        review_generation_status,
         classification: class.to_string(),
         recommended_action: RecommendedAction::from_class(class),
     }
@@ -615,88 +647,42 @@ fn gitlab_ci_pending(pipeline_status: Option<&str>) -> bool {
     )
 }
 
-/// Used to implement the retry cap for FixMr actions on existing branches.
-/// Counts ONLY ledger entries with `dispatch_reason == "post_review_repair"`
-/// — internal OpenHands retries within a single dispatch (attempts_started)
-/// do NOT consume retry budget.  This prevents a ticket that needed 2
-/// internal attempts to pass validation from being blocked from its first
-/// post-review fix before the review even happens.
-#[allow(dead_code)]
-pub fn count_fix_attempts_per_branch(cfg: &GahConfig) -> std::collections::HashMap<String, usize> {
-    use std::collections::HashMap;
-
-    let entries = match crate::ledger::read_entries(cfg) {
-        Ok(entries) => entries,
-        Err(_) => return HashMap::new(),
-    };
-    count_fix_attempts_per_branch_from_entries(&entries)
-}
-
-#[allow(dead_code)]
-pub fn count_fix_attempts_per_branch_from_entries(
-    entries: &[crate::ledger::LedgerEntry],
-) -> std::collections::HashMap<String, usize> {
-    count_branch_attempts(entries, None, |entry| {
-        usize::from(
-            entry.mode == "fix"
-                && entry
-                    .dispatch_reason
-                    .as_deref()
-                    .is_some_and(|reason| reason == "post_review_repair")
-                && entry.review_contract_version.unwrap_or(0)
-                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
-        )
-    })
-}
-
-pub fn count_fix_attempts_per_branch_for_scope(
+/// Count only post-review repairs from the active source/metadata generation.
+/// Internal backend retries within one dispatch still count as one repair
+/// cycle, and `clear_attempts` tombstones reset the append-only history.
+pub fn count_current_fix_attempts_for_mrs(
     entries: &[crate::ledger::LedgerEntry],
     profile: &str,
     repo_id: &str,
+    merge_requests: &[SyncMrJson],
 ) -> std::collections::HashMap<String, usize> {
+    let generations: std::collections::HashMap<&str, &str> = merge_requests
+        .iter()
+        .filter_map(|mr| Some((mr.branch.as_str(), mr.review_generation.as_deref()?)))
+        .collect();
     count_branch_attempts(entries, Some((profile, repo_id)), |entry| {
         usize::from(
             entry.mode == "fix"
+                && entry.dispatch_reason.as_deref() == Some("post_review_repair")
+                && entry.review_contract_version
+                    == Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION)
                 && entry
-                    .dispatch_reason
+                    .review_generation
                     .as_deref()
-                    .is_some_and(|reason| reason == "post_review_repair")
-                && entry.review_contract_version.unwrap_or(0)
-                    >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
+                    .is_some_and(|generation| {
+                        entry
+                            .branch
+                            .as_deref()
+                            .and_then(|branch| generations.get(branch).copied())
+                            == Some(generation)
+                    }),
         )
     })
 }
 
 /// Used to cap auto-merge retries (TICKET-127): a merge that fails
 /// (conflicts, unresolved discussions, external checks) would otherwise be
-/// re-attempted every loop iteration forever. Mirrors
-/// `count_fix_attempts_per_branch` exactly, filtered to `mode == "merge"`.
-#[allow(dead_code)]
-pub fn count_merge_attempts_per_branch(
-    cfg: &GahConfig,
-) -> std::collections::HashMap<String, usize> {
-    use std::collections::HashMap;
-
-    let entries = match crate::ledger::read_entries(cfg) {
-        Ok(entries) => entries,
-        Err(_) => return HashMap::new(),
-    };
-    count_merge_attempts_per_branch_from_entries(&entries)
-}
-
-#[allow(dead_code)]
-pub fn count_merge_attempts_per_branch_from_entries(
-    entries: &[crate::ledger::LedgerEntry],
-) -> std::collections::HashMap<String, usize> {
-    count_branch_attempts(entries, None, |entry| {
-        if entry.mode == "merge" {
-            entry.attempts_started.unwrap_or(0) as usize
-        } else {
-            0
-        }
-    })
-}
-
+/// re-attempted every loop iteration forever.
 pub fn count_merge_attempts_per_branch_for_scope(
     entries: &[crate::ledger::LedgerEntry],
     profile: &str,
@@ -923,6 +909,20 @@ mod tests {
         }
     }
 
+    fn set_review_identity(
+        entry: &mut crate::ledger::LedgerEntry,
+        mr: &SyncMr,
+        fingerprint: Option<String>,
+    ) {
+        entry.review_source_sha = mr.source_sha.clone();
+        entry.review_metadata_fingerprint = fingerprint;
+        entry.review_contract_version = Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION);
+        entry.review_generation = crate::ledger::review_generation(
+            entry.review_source_sha.as_deref(),
+            entry.review_metadata_fingerprint.as_deref(),
+        );
+    }
+
     #[test]
     fn work_id_extracted_from_authoritative_title() {
         assert_eq!(
@@ -961,13 +961,14 @@ mod tests {
     #[test]
     fn sync_row_exposes_gate_reason_even_when_it_comes_from_review_entry() {
         let mut mr = base_mr();
+        mr.source_sha = Some("source-sha".into());
         mr.work_id = Some("TICKET-295".into());
         let mut review = ledger_entry("review", "gah/test", Some("review"), Some(1));
         review.work_id = Some("TICKET-295".into());
         review.effective_backend = "claude".into();
         review.review_verdict = Some("HUMAN_REVIEW".into());
         review.review_gate_reason = Some("APPROVE omitted grounded evidence".into());
-        review.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+        set_review_identity(&mut review, &mr, Some(mr.review_metadata_fingerprint()));
         let mut ledger = crate::ledger::LedgerEntriesByWorkId::new();
         ledger.insert("TICKET-295".into(), vec![review]);
 
@@ -993,8 +994,7 @@ mod tests {
         review.work_id = Some("#701".into());
         review.review_verdict = Some("NEEDS_FIX".into());
         review.validation_result = Some("NEEDS_FIX".into());
-        review.review_source_sha = Some("source-sha".into());
-        review.review_metadata_fingerprint = fingerprint;
+        set_review_identity(&mut review, &mr, fingerprint);
         review.review_blocking_findings = vec!["MR description omitted the finding".into()];
 
         let mut ledger = crate::ledger::LedgerEntriesByWorkId::new();
@@ -1018,8 +1018,11 @@ mod tests {
     #[test]
     fn unchanged_review_metadata_preserves_needs_fix() {
         let (mr, mut ledger) = reviewed_needs_fix_row(None);
-        ledger.get_mut("#701").unwrap()[0].review_metadata_fingerprint =
-            Some(mr.review_metadata_fingerprint());
+        set_review_identity(
+            &mut ledger.get_mut("#701").unwrap()[0],
+            &mr,
+            Some(mr.review_metadata_fingerprint()),
+        );
 
         let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
 
@@ -1033,7 +1036,7 @@ mod tests {
         let (mr, mut ledger) = reviewed_needs_fix_row(None);
         let entry = &mut ledger.get_mut("#701").unwrap()[0];
         entry.mode = "fix".into();
-        entry.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+        set_review_identity(entry, &mr, Some(mr.review_metadata_fingerprint()));
 
         let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
 
@@ -1048,7 +1051,7 @@ mod tests {
         review.review_verdict = Some("HUMAN_REVIEW".into());
         review.validation_result = Some("HUMAN_REVIEW".into());
         review.human_required = false;
-        review.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+        set_review_identity(review, &mr, Some(mr.review_metadata_fingerprint()));
 
         let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
 
@@ -1065,7 +1068,7 @@ mod tests {
         review.validation_result = Some("review_output_invalid".into());
         review.review_gate_reason = Some("finding explicitly withdrew itself".into());
         review.review_blocking_findings.clear();
-        review.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+        set_review_identity(review, &mr, Some(mr.review_metadata_fingerprint()));
 
         let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
 
@@ -1085,7 +1088,7 @@ mod tests {
         review.review_verdict = Some("HUMAN_REVIEW".into());
         review.validation_result = Some("HUMAN_REVIEW".into());
         review.human_required = true;
-        review.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+        set_review_identity(review, &mr, Some(mr.review_metadata_fingerprint()));
 
         let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
 
@@ -1114,7 +1117,7 @@ mod tests {
         rereview.mr_url = mr.url.clone();
         rereview.review_verdict = Some("APPROVE".into());
         rereview.validation_result = Some("APPROVE".into());
-        rereview.review_metadata_fingerprint = Some(mr.review_metadata_fingerprint());
+        set_review_identity(&mut rereview, &mr, Some(mr.review_metadata_fingerprint()));
         ledger.get_mut("#701").unwrap().push(rereview);
 
         let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
@@ -1173,12 +1176,16 @@ mod tests {
         let review = &mut ledger.get_mut("#701").unwrap()[0];
         review.review_verdict = Some("APPROVE".into());
         review.validation_result = Some("APPROVE".into());
-        review.review_metadata_fingerprint = Some(review_metadata_fingerprint(
-            mr.source_sha.as_deref(),
-            Some("Draft: approved title"),
-            mr.body.as_deref(),
-            true,
-        ));
+        set_review_identity(
+            review,
+            &mr,
+            Some(review_metadata_fingerprint(
+                mr.source_sha.as_deref(),
+                Some("Draft: approved title"),
+                mr.body.as_deref(),
+                true,
+            )),
+        );
 
         let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
 
@@ -1193,12 +1200,16 @@ mod tests {
         let review = &mut ledger.get_mut("#701").unwrap()[0];
         review.review_verdict = Some("APPROVE".into());
         review.validation_result = Some("APPROVE".into());
-        review.review_metadata_fingerprint = Some(review_metadata_fingerprint(
-            mr.source_sha.as_deref(),
-            Some(&mr.title),
-            mr.body.as_deref(),
-            false,
-        ));
+        set_review_identity(
+            review,
+            &mr,
+            Some(review_metadata_fingerprint(
+                mr.source_sha.as_deref(),
+                Some(&mr.title),
+                mr.body.as_deref(),
+                false,
+            )),
+        );
 
         let row = sync_mr_to_json(&mr, Some("test".into()), &ledger);
 
@@ -1232,28 +1243,7 @@ mod tests {
     // These tests prove the retry cap counts ONLY actual post-review repair
     // dispatches, not internal OpenHands retries or initial dispatches.
 
-    fn test_cfg_with_ledger(
-        entries: &[crate::ledger::LedgerEntry],
-    ) -> (crate::config::GahConfig, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = crate::config::GahConfig {
-            context: Default::default(),
-            defaults: crate::config::Defaults {
-                current_manager: None,
-                artifact_root: tmp.path().to_string_lossy().into_owned(),
-                worktree_base: tmp.path().to_string_lossy().into_owned(),
-                llm_base_url: String::new(),
-                llm_model_local: String::new(),
-                llm_model_cloud: String::new(),
-                routing: crate::config::RoutingPolicy::default(),
-            },
-            profiles: std::collections::HashMap::new(),
-        };
-        for entry in entries {
-            crate::ledger::append(&cfg, entry).unwrap();
-        }
-        (cfg, tmp)
-    }
+    const TEST_REVIEW_GENERATION: &str = "review-v1:source-sha:metadata-fingerprint";
 
     fn ledger_entry(
         mode: &str,
@@ -1320,7 +1310,22 @@ mod tests {
         entry.branch = Some(branch.into());
         entry.attempts_started = attempts_started;
         entry.dispatch_reason = dispatch_reason.map(|s| s.into());
+        entry.review_contract_version = Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION);
+        entry.review_generation = Some(TEST_REVIEW_GENERATION.into());
         entry
+    }
+
+    fn count_current_fixes(
+        entries: &[crate::ledger::LedgerEntry],
+    ) -> std::collections::HashMap<String, usize> {
+        let mut mr = super::sync_mr_to_json(
+            &base_mr(),
+            Some("test".into()),
+            &crate::ledger::LedgerEntriesByWorkId::new(),
+        );
+        mr.branch = "branch-A".into();
+        mr.review_generation = Some(TEST_REVIEW_GENERATION.into());
+        super::count_current_fix_attempts_for_mrs(entries, "test", "test", &[mr])
     }
 
     fn clear_entry(work_id: &str) -> crate::ledger::LedgerEntry {
@@ -1334,9 +1339,8 @@ mod tests {
     /// zero post-review repair retries.
     #[test]
     fn internal_retries_in_initial_dispatch_count_zero() {
-        let (cfg, _tmp) =
-            test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", Some("initial"), Some(2))]);
-        let counts = super::count_fix_attempts_per_branch(&cfg);
+        let counts =
+            count_current_fixes(&[ledger_entry("fix", "branch-A", Some("initial"), Some(2))]);
         assert_eq!(
             counts.get("branch-A").copied().unwrap_or(0),
             0,
@@ -1348,11 +1352,10 @@ mod tests {
     /// regardless of how many internal attempts it used.
     #[test]
     fn one_repair_dispatch_counts_one() {
-        let (cfg, _tmp) = test_cfg_with_ledger(&[
+        let counts = count_current_fixes(&[
             ledger_entry("fix", "branch-A", Some("initial"), Some(2)),
             ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(3)),
         ]);
-        let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
             counts.get("branch-A").copied().unwrap_or(0),
             1,
@@ -1364,13 +1367,12 @@ mod tests {
     /// inflate the repair-cycle count — it increments exactly once per entry.
     #[test]
     fn internal_retries_in_repair_dispatch_do_not_inflate() {
-        let (cfg, _tmp) = test_cfg_with_ledger(&[ledger_entry(
+        let counts = count_current_fixes(&[ledger_entry(
             "fix",
             "branch-A",
             Some("post_review_repair"),
             Some(5),
         )]);
-        let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
             counts.get("branch-A").copied().unwrap_or(0),
             1,
@@ -1382,12 +1384,11 @@ mod tests {
     /// post-review repair cycles (AUTO_RETRY_CAP=2).
     #[test]
     fn two_repair_dispatches_hit_cap() {
-        let (cfg, _tmp) = test_cfg_with_ledger(&[
+        let counts = count_current_fixes(&[
             ledger_entry("fix", "branch-A", Some("initial"), Some(2)),
             ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(1)),
             ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(1)),
         ]);
-        let counts = super::count_fix_attempts_per_branch(&cfg);
         assert_eq!(
             counts.get("branch-A").copied().unwrap_or(0),
             2,
@@ -1410,13 +1411,8 @@ mod tests {
         after.work_id = Some("#437".into());
         after.timestamp = "2026-01-04T00:00:00Z".into();
 
-        let counts = super::count_fix_attempts_per_branch_from_entries(&[
-            before_one,
-            before_two,
-            attributed_review,
-            clear,
-            after,
-        ]);
+        let counts =
+            count_current_fixes(&[before_one, before_two, attributed_review, clear, after]);
         assert_eq!(counts.get("branch-A"), Some(&1));
     }
 
@@ -1444,11 +1440,10 @@ mod tests {
     /// Entries with mode != "fix" (review, merge) never count.
     #[test]
     fn review_and_merge_entries_never_count() {
-        let (cfg, _tmp) = test_cfg_with_ledger(&[
+        let counts = count_current_fixes(&[
             ledger_entry("review", "branch-A", Some("review"), Some(1)),
             ledger_entry("merge", "branch-A", None, Some(1)),
         ]);
-        let counts = super::count_fix_attempts_per_branch(&cfg);
         assert!(
             counts.is_empty(),
             "review/merge entries must not count toward fix retry cap"
@@ -1459,8 +1454,7 @@ mod tests {
     /// count — they cannot be proven to be post-review repairs.
     #[test]
     fn legacy_entries_without_dispatch_reason_do_not_count() {
-        let (cfg, _tmp) = test_cfg_with_ledger(&[ledger_entry("fix", "branch-A", None, Some(2))]);
-        let counts = super::count_fix_attempts_per_branch(&cfg);
+        let counts = count_current_fixes(&[ledger_entry("fix", "branch-A", None, Some(2))]);
         assert_eq!(
             counts.get("branch-A").copied().unwrap_or(0),
             0,
@@ -1472,11 +1466,21 @@ mod tests {
     fn pre_bump_post_review_repair_entries_do_not_count_toward_fix_retry_cap() {
         let mut old_entry = ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(1));
         old_entry.review_contract_version = None; // Pre-bump
-        let counts = super::count_fix_attempts_per_branch_from_entries(&[old_entry]);
+        let counts = count_current_fixes(&[old_entry]);
         assert_eq!(
             counts.get("branch-A").copied().unwrap_or(0),
             0,
             "pre-bump post_review_repair entries must not count under new contract"
         );
+    }
+
+    #[test]
+    fn stale_review_generation_does_not_consume_current_fix_budget() {
+        let mut stale = ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(1));
+        stale.review_generation = Some("review-v1:old-source:old-metadata".into());
+        let current = ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(4));
+
+        let counts = count_current_fixes(&[stale, current]);
+        assert_eq!(counts.get("branch-A"), Some(&1));
     }
 }

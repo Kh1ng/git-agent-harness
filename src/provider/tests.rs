@@ -373,7 +373,7 @@ fn merge_mr_github_un_drafts_then_merges() {
         r#"#!/bin/sh
 case "$1 $2 $3 $4" in
   "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
-  "pr view 42 --repo") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefName":"gah/test","baseRefName":"main"}\n' ;;
+  "pr view 42 --repo") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","title":"test","body":"body","isDraft":false,"headRefName":"gah/test","baseRefName":"main","headRefOid":"source-github-sha"}\n' ;;
   "pr ready 42 --repo") exit 0 ;;
   "pr merge 42 --squash") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
   *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
@@ -382,7 +382,7 @@ esac
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
-    merge_mr(&github_profile(), "gah/test").unwrap();
+    merge_mr(&github_profile(), "gah/test", None).unwrap();
 
     let call = fs::read_to_string(bin_dir.join("merge_call.txt")).unwrap();
     assert!(call.contains("42"));
@@ -392,6 +392,39 @@ esac
     // rejected by branch protection's required-approving-review count,
     // which gah's own issue-comment review verdict can never satisfy.
     assert!(call.contains("--admin"));
+    assert!(call.contains("--match-head-commit source-github-sha"));
+}
+
+#[test]
+fn merge_mr_rejects_a_generation_changed_after_review() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        r#"#!/bin/sh
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  "pr view 42 --repo") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","title":"changed","body":"body","isDraft":false,"headRefName":"gah/test","baseRefName":"main","headRefOid":"new-source-sha"}\n' ;;
+  "pr ready 42 --repo") echo "unexpected ready" > "${0%/*}/mutated.txt"; exit 0 ;;
+  "pr merge 42 --squash") echo "unexpected merge" > "${0%/*}/mutated.txt"; exit 0 ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let error = merge_mr(
+        &github_profile(),
+        "gah/test",
+        Some("review-v1:old-source:sha256:old-metadata"),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("changed after review"));
+    assert!(!bin_dir.join("mutated.txt").exists());
 }
 
 #[test]
@@ -442,7 +475,7 @@ esac
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
-    let err = merge_mr(&github_profile(), "gah/test").unwrap_err();
+    let err = merge_mr(&github_profile(), "gah/test", None).unwrap_err();
 
     assert!(format!("{:#}", err).contains("not mergeable"));
 }
@@ -458,7 +491,7 @@ fn merge_mr_gitlab_un_drafts_then_merges() {
         "glab",
         r#"#!/bin/sh
 case "$1 $2" in
-  "api projects/42/merge_requests") printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main"}]\n' ;;
+  "api projects/42/merge_requests") printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"test","description":"body","draft":false,"sha":"source-gitlab-sha"}]\n' ;;
   "mr update") exit 0 ;;
   "mr merge") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
   *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;
@@ -467,12 +500,13 @@ esac
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
-    merge_mr(&gitlab_profile(), "gah/test").unwrap();
+    merge_mr(&gitlab_profile(), "gah/test", None).unwrap();
 
     let call = fs::read_to_string(bin_dir.join("merge_call.txt")).unwrap();
     assert!(call.contains(" 7 "));
     assert!(call.contains("--squash"));
     assert!(call.contains("--remove-source-branch"));
+    assert!(call.contains("--sha source-gitlab-sha"));
 }
 
 #[test]

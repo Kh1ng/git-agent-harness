@@ -10,6 +10,8 @@ use crate::sync::{RecommendedAction, SyncMrJson};
 mod backpressure;
 #[path = "tests/lifecycle_priority.rs"]
 mod lifecycle_priority;
+#[path = "tests/review_handoff.rs"]
+mod review_handoff;
 fn empty_snapshot() -> StatusSnapshot {
     StatusSnapshot {
         schema_version: 1,
@@ -86,6 +88,10 @@ fn mr_with_ci(branch: &str, classification: &str, ci_passed: bool) -> SyncMrJson
         effective_model: None,
         review_verdict: None,
         review_gate_reason: None,
+        source_sha: None,
+        review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
+        review_generation: None,
+        review_generation_status: None,
         classification: classification.into(),
         recommended_action: RecommendedAction::from_class(classification),
     }
@@ -114,6 +120,10 @@ fn mr_ci_pending(branch: &str, classification: &str) -> SyncMrJson {
         effective_model: None,
         review_verdict: None,
         review_gate_reason: None,
+        source_sha: None,
+        review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
+        review_generation: None,
+        review_generation_status: None,
         classification: classification.into(),
         recommended_action: RecommendedAction::from_class(classification),
     }
@@ -850,24 +860,6 @@ fn exhausted_mr_alone_is_human_required() {
 }
 
 #[test]
-fn final_review_handoff_is_not_re_reviewed_each_loop_tick() {
-    let mut snapshot = empty_snapshot();
-    snapshot.merge_requests.push(mr("gah/42", "NEEDS_REVIEW"));
-    snapshot.blocked_work_items.push(Blocker {
-        kind: "human_required".into(),
-        reason: Some("review_escalation_exhausted".into()),
-        message: Some("all configured reviewers were tried".into()),
-        backend: None,
-        model: None,
-        until: None,
-        source_reference: Some("TICKET-gah/42".into()),
-        reason_code: None,
-    });
-
-    assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
-}
-
-#[test]
 fn never_dispatched_ticket_is_eligible() {
     let mut snapshot = empty_snapshot();
     snapshot.available_tickets.push(ticket(
@@ -1105,6 +1097,10 @@ fn needs_fix_mr(branch: &str, work_id: &str) -> crate::sync::SyncMrJson {
         effective_model: None,
         review_verdict: None,
         review_gate_reason: None,
+        source_sha: None,
+        review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
+        review_generation: None,
+        review_generation_status: None,
         classification: "NEEDS_FIX".into(),
         recommended_action: crate::sync::RecommendedAction::ReuseBranch,
     }

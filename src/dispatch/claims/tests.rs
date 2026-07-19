@@ -149,6 +149,7 @@ fn human_required_is_not_cleared_by_a_later_non_review_entry() {
     exhausted.work_id = Some("TICKET-300".into());
     exhausted.human_required = true;
     exhausted.human_required_reason_code = Some("review_evidence_gate".into());
+    exhausted.review_contract_version = Some(crate::ledger::REVIEW_CONTRACT_VERSION);
     crate::ledger::append(&cfg, &exhausted).unwrap();
 
     // A racing worker's unrelated fix dispatch completes afterward with a
@@ -833,9 +834,7 @@ fn test_check_duplicate_work_cases() {
         branch: None,
         mr: None,
         current_branch: false,
-        budget: 0,
         dry_run: false,
-        config_path: None,
         oh_profile: None,
         model: None,
         retries: 0,
@@ -845,6 +844,7 @@ fn test_check_duplicate_work_cases() {
         allow_unknown_red_baseline: false,
         escalate: false,
         existing_branch: None,
+        expected_review_generation: None,
         skip_validation_gate: false,
         dispatch_reason: None,
         work_id: None,
@@ -992,9 +992,7 @@ fn check_duplicate_work_blocks_on_active_claim() {
         branch: None,
         mr: None,
         current_branch: false,
-        budget: 0,
         dry_run: false,
-        config_path: None,
         oh_profile: None,
         model: None,
         retries: 0,
@@ -1004,6 +1002,7 @@ fn check_duplicate_work_blocks_on_active_claim() {
         allow_unknown_red_baseline: false,
         escalate: false,
         existing_branch: None,
+        expected_review_generation: None,
         skip_validation_gate: false,
         dispatch_reason: None,
         work_id: None,

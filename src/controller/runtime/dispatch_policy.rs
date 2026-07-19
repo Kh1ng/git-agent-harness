@@ -22,6 +22,7 @@ mod tests {
             work_id: Some("#624".into()),
             branch: "gah/repair".into(),
             mr_url: Some("https://example.test/pull/624".into()),
+            review_generation: Some("review-v1:source:sha256:metadata".into()),
             reason: "review requested changes".into(),
         }));
         assert!(!allow_unknown_red_baseline(&NextAction::DispatchTicket {

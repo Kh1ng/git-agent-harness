@@ -23,13 +23,23 @@ fn approved_green_mr_merges_before_starting_another_review() {
     snapshot
         .merge_requests
         .push(mr("gah/review", "NEEDS_REVIEW"));
-    snapshot
-        .merge_requests
-        .push(mr_with_ci("gah/approved", "READY_FOR_HUMAN", true));
+    let mut approved = mr_with_ci("gah/approved", "READY_FOR_HUMAN", true);
+    approved.review_generation = Some("review-v1:source:sha256:metadata".into());
+    snapshot.merge_requests.push(approved);
 
     let action = decide_next_action(&snapshot);
     match action {
-        NextAction::MergeMr { branch, .. } => assert_eq!(branch, "gah/approved"),
+        NextAction::MergeMr {
+            branch,
+            review_generation,
+            ..
+        } => {
+            assert_eq!(branch, "gah/approved");
+            assert_eq!(
+                review_generation.as_deref(),
+                Some("review-v1:source:sha256:metadata")
+            );
+        }
         other => panic!("expected MergeMr, got {other:?}"),
     }
 }

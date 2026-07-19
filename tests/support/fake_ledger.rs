@@ -136,6 +136,10 @@ impl TestLedger {
         self
     }
 
+    pub fn entries(&self) -> &[LedgerEntry] {
+        &self.entries
+    }
+
     /// Convenience: add an entry for a dispatch attempt.
     pub fn add_entry(
         mut self,

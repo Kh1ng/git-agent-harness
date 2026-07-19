@@ -28,6 +28,11 @@ pub enum NextAction {
         work_id: Option<String>,
         branch: String,
         mr_url: Option<String>,
+        /// Exact source/metadata generation whose findings authorize this
+        /// repair. `None` is retained for backwards-compatible event reads;
+        /// newly-decided autonomous repairs always populate it.
+        #[serde(default)]
+        review_generation: Option<String>,
         reason: String,
     },
     /// TICKET-127: auto-merge -- a strong-tier reviewer's APPROVE (high
@@ -37,6 +42,10 @@ pub enum NextAction {
         work_id: Option<String>,
         branch: String,
         mr_url: Option<String>,
+        /// Exact source/metadata generation approved for merge. Old persisted
+        /// actions deserialize as `None` and fail closed during execution.
+        #[serde(default)]
+        review_generation: Option<String>,
         reason: String,
     },
     DispatchTicket {

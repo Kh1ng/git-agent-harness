@@ -219,13 +219,7 @@ pub(crate) fn improve(
         &profile.default_target_branch,
     )?;
     let repair_context = repair::load_context(
-        args.existing_branch.is_some(),
-        cfg,
-        &args.profile,
-        &profile.repo_id,
-        &branch,
-        &wt,
-        repo,
+        repair::LoadContext::new(args, cfg, profile, &branch, &wt, repo),
         ledger,
     )?;
     let _cargo_target =
