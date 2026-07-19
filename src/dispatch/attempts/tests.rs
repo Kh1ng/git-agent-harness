@@ -12,6 +12,8 @@ use time::OffsetDateTime;
 
 const CODEX_FULL_RESET: &str =
     include_str!("../../../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
+const CODEX_SELECTED_MODEL_CAPACITY: &str =
+    include_str!("../../../tests/fixtures/quota-logs/codex_selected_model_at_capacity.jsonl");
 const OPENCODE_HY3_RATE_LIMIT: &str =
     include_str!("../../../tests/fixtures/quota-logs/opencode_hy3_rate_limit.log");
 const VIBE_INVALID_API_KEY: &str =
@@ -1122,6 +1124,41 @@ fn claude_session_limit_marks_exact_claude_model_unavailable_without_blocking_ba
     let model_available =
         availability_for(&state_path, "claude", Some("sonnet"), None, before_reset).unwrap();
     assert!(!model_available.eligible, "model should be unavailable");
+}
+
+#[test]
+fn backend_selected_model_capacity_marks_model_unavailable_with_conservative_cooldown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("availability.json");
+    let parsed = mark_backend_unavailable_from_output_at(
+        &state,
+        "codex",
+        Some("gpt-5.4-mini"),
+        None,
+        CODEX_SELECTED_MODEL_CAPACITY,
+        "/tmp/backend-output.log",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(parsed.kind, crate::quota_parser::FailureKind::RateLimited);
+    assert!(parsed.retryable);
+    assert_eq!(parsed.reset_at, None);
+    assert!(parsed.retry_after_seconds.is_some());
+    assert!(parsed
+        .matched_evidence
+        .contains("\"message\":\"Selected model is at capacity. Please try a different model.\""),);
+
+    let decision = availability_for(
+        &state,
+        "codex",
+        Some("gpt-5.4-mini"),
+        None,
+        OffsetDateTime::now_utc(),
+    )
+    .unwrap();
+    assert!(!decision.eligible);
+    assert_eq!(decision.reason, Some(Reason::RateLimited));
 }
 
 #[test]

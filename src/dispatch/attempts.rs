@@ -877,6 +877,31 @@ pub(super) fn mark_backend_unavailable_from_output(
     )
 }
 
+pub(super) fn route_after_backend_unavailable<'a>(
+    cfg: &crate::config::GahConfig,
+    profile: &Profile,
+    route_req: &RouteRequest<'a>,
+    ticket_meta: Option<&WorkMetadata>,
+    ledger: &mut LedgerEntry,
+    route: &RouteDecision,
+    failure_output: (&str, &str),
+) -> Result<Option<(crate::quota_parser::ParsedFailure, RouteDecision)>> {
+    let Some(parsed) = mark_backend_unavailable_from_output(
+        &route.effective_backend,
+        route.effective_model.as_deref(),
+        route.effective_quota_pool.as_deref(),
+        failure_output.0,
+        failure_output.1,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let rerouted = decide_route(cfg, profile, route_req.clone(), ticket_meta, ledger)?;
+
+    Ok(Some((parsed, rerouted)))
+}
+
 /// Combine CLI output with the run-scoped diagnostic tail captured from a
 /// backend-owned internal log. Missing internal logs intentionally preserve
 /// existing output-only behavior.

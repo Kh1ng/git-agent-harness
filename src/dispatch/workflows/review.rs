@@ -1,7 +1,7 @@
 use super::super::attempts::{
-    apply_backend_instance_env, apply_route_to_ledger, decide_route,
-    mark_backend_unavailable_from_output, mark_shutdown_cancelled, record_route_attempt,
-    reserve_backend_slot, review_preflight, review_usage, route_identity, route_label,
+    apply_backend_instance_env, apply_route_to_ledger, decide_route, mark_shutdown_cancelled,
+    record_route_attempt, reserve_backend_slot, review_preflight, review_usage,
+    route_after_backend_unavailable, route_identity, route_label,
 };
 use super::super::prompts::enforce_context_budget;
 use super::super::publish::{render_review_comment, review_labels};
@@ -243,22 +243,17 @@ pub(in crate::dispatch) fn review(
         ),
     };
 
-    let mut route = decide_route(
-        cfg,
-        profile,
-        RouteRequest {
-            last_failure_class: None,
-            mode: "review",
-            requested_backend,
-            requested_model,
-            recommended_backend: None,
-            recommended_model: None,
-            session_id: session_dir.file_name().and_then(|s| s.to_str()),
-            usage_summary: None,
-        },
-        None,
-        ledger,
-    )?;
+    let route_request = RouteRequest {
+        last_failure_class: None,
+        mode: "review",
+        requested_backend,
+        requested_model,
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: session_dir.file_name().and_then(|s| s.to_str()),
+        usage_summary: None,
+    };
+    let mut route = decide_route(cfg, profile, route_request.clone(), None, ledger)?;
 
     // Duplicate-review short-circuit runs before the budget check: if nothing
     // has changed since the last completed review of the same tier, that is
@@ -556,29 +551,15 @@ pub(in crate::dispatch) fn review(
                     } else {
                         attempt_session.join("review-stdout.log")
                     };
-                    if let Some(parsed) = mark_backend_unavailable_from_output(
-                        &route.effective_backend,
-                        route.effective_model.as_deref(),
+                    if let Some((parsed, rerouted)) = route_after_backend_unavailable(
+                        cfg,
+                        profile,
+                        &route_request,
                         None,
-                        &failure_output,
-                        &failure_log.display().to_string(),
+                        ledger,
+                        &route,
+                        (&failure_output, &failure_log.display().to_string()),
                     )? {
-                        let rerouted = decide_route(
-                            cfg,
-                            profile,
-                            RouteRequest {
-                                last_failure_class: None,
-                                mode: "review",
-                                requested_backend: config::canonical_backend_name(&args.backend),
-                                requested_model: args.model.as_deref(),
-                                recommended_backend: None,
-                                recommended_model: None,
-                                session_id: session_dir.file_name().and_then(|s| s.to_str()),
-                                usage_summary: None,
-                            },
-                            None,
-                            ledger,
-                        )?;
                         let current_identity = route_identity(
                             &route.effective_backend,
                             route.effective_model.as_deref(),
