@@ -914,4 +914,32 @@ default_target_branch = "main"
         assert_eq!(events[1].event_type, "action_overridden");
         assert!(events[1].details.contains("review_mr -> human_required"));
     }
+
+    #[test]
+    fn stuck_loop_events_before_contract_bump_do_not_count() {
+        let action = NextAction::ReviewMr {
+            work_id: Some("TICKET-500".into()),
+            branch: "gah/real-1".into(),
+            mr_url: Some("https://example/review".into()),
+            reason: "MR on branch 'gah/real-1' classified NEEDS_REVIEW".into(),
+        };
+
+        let old_event = crate::events::ControllerEvent {
+            timestamp: "2026-07-16T00:00:00Z".into(),
+            event_type: "action_decided".into(),
+            profile: Some("real".into()),
+            work_id: Some("TICKET-500".into()),
+            run_id: None,
+            details: "review_mr: MR needs review".into(),
+            reason_code: None,
+            review_contract_version: None, // Pre-bump event
+        };
+
+        let events = vec![old_event.clone(), old_event.clone(), old_event.clone()];
+        let detected = detect_stuck_loop(&events, "real", &action, None);
+        assert_eq!(
+            detected, None,
+            "Pre-bump events must not trigger stuck loop under new contract"
+        );
+    }
 }

@@ -118,6 +118,8 @@ fn review_route_was_already_used(
         entry.profile == profile_name
             && entry.repo_id == repo_id
             && entry.mode == "review"
+            && entry.review_contract_version.unwrap_or(0)
+                >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
             && entry
                 .work_id
                 .as_deref()
@@ -599,6 +601,53 @@ included_in_quota = true
             profile,
             &[failed],
             "#650",
+            &gate,
+        ));
+    }
+
+    #[test]
+    fn pre_bump_policy_approval_gate_is_superseded() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("cfg.toml");
+        fs::write(
+            &path,
+            format!(
+                r#"
+[defaults]
+artifact_root = "{}"
+
+[profiles.test]
+display_name = "Test"
+repo_id = "test/test"
+provider = "github"
+repo = "test/test"
+local_path = "/tmp"
+artifact_root = "{}"
+default_target_branch = "main"
+"#,
+                tmp.path().display(),
+                tmp.path().display()
+            ),
+        )
+        .unwrap();
+        let cfg = crate::config::load(Some(path.to_str().unwrap())).unwrap();
+        let profile = &cfg.profiles["test"];
+        let gate = ledger::EffectiveHumanGate {
+            reason_code: Some("policy_approval".into()),
+            dispatch_reason: Some("initial".into()),
+            message: None,
+            mode: "fix".into(),
+            timestamp: "2026-07-16T00:00:00Z".into(),
+            review_contract_version: None, // Pre-bump
+            routing_diagnostics: None,
+        };
+
+        assert!(!policy_approval_still_required(
+            &cfg,
+            "test",
+            profile,
+            &[],
+            "#640",
             &gate,
         ));
     }

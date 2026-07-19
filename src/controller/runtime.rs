@@ -1470,15 +1470,13 @@ default_target_branch = "main"
     #[test]
     fn no_backend_availability_zero_parallelism() {
         let mut snapshot = empty_snapshot();
-
-        // Add only unavailable backends
         for i in 0..3 {
             snapshot.availability.push(ScopeStatusJson {
-                backend: format!("backend_{}", i),
+                backend: format!("backend_{i}"),
                 model: None,
                 quota_pool: None,
                 eligible_now: false,
-                reason: Some("rate limited".to_string()),
+                reason: Some("rate limited".into()),
                 unavailable_until: Some(time::OffsetDateTime::now_utc().to_string()),
                 source: None,
                 last_error_summary: None,
@@ -1486,8 +1484,6 @@ default_target_branch = "main"
                 scope: None,
             });
         }
-
-        // With 0 eligible backends, max_parallel=5 should be limited to 0
         let effective_parallel_limit = std::cmp::min(
             5,
             snapshot

@@ -502,6 +502,8 @@ pub fn review_already_exists(
         entry.profile == profile_name
             && entry.repo_id == repo_id
             && entry.mode == "review"
+            && entry.review_contract_version.unwrap_or(0)
+                >= super::entry::CURRENT_REVIEW_CONTRACT_VERSION
             && entry
                 .work_id
                 .as_deref()

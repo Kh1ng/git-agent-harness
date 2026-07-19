@@ -5758,8 +5758,7 @@ fn loop_once_stops_on_stuck_loop_instead_of_repeating_forever() {
     for _ in 0..3 {
         seeded.push_str(
             &serde_json::to_string(&serde_json::json!({
-                "timestamp": "2026-07-05T00:00:00Z",
-                "event_type": "action_decided",
+                "timestamp": "2026-07-05T00:00:00Z", "event_type": "action_decided",
                 "profile": "real",
                 "work_id": "TICKET-500",
                 "details": "review_mr: MR needs review",

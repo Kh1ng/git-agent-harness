@@ -1467,4 +1467,16 @@ mod tests {
             "legacy entries without dispatch_reason must not count (unprovable)"
         );
     }
+
+    #[test]
+    fn pre_bump_post_review_repair_entries_do_not_count_toward_fix_retry_cap() {
+        let mut old_entry = ledger_entry("fix", "branch-A", Some("post_review_repair"), Some(1));
+        old_entry.review_contract_version = None; // Pre-bump
+        let counts = super::count_fix_attempts_per_branch_from_entries(&[old_entry]);
+        assert_eq!(
+            counts.get("branch-A").copied().unwrap_or(0),
+            0,
+            "pre-bump post_review_repair entries must not count under new contract"
+        );
+    }
 }
