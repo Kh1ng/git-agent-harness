@@ -88,6 +88,55 @@ fn attempt_usage_is_empty_when_log_has_no_usage_info() {
 }
 
 #[test]
+fn structured_behavior_survives_every_structured_usage_early_return() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("attempt.log");
+    fs::write(
+        &log,
+        "{\"type\":\"gah.behavior_summary\",\"tool_calls\":4,\"shell_calls\":1,\"file_edits\":2,\"test_runs\":3}\n",
+    )
+    .unwrap();
+
+    let cases = [
+        (
+            "claude",
+            r#"{"type":"assistant","message":{"id":"msg-1","model":"claude-sonnet","usage":{"input_tokens":10,"output_tokens":2}}}"#,
+            "claude_transcript_json",
+        ),
+        (
+            "vibe",
+            r#"{"start_time":"2026-07-10T10:00:00Z","end_time":"2026-07-10T10:02:00Z","config":{"active_model":"mistral-medium-3.5"},"stats":{"steps":4,"session_prompt_tokens":1200,"session_completion_tokens":300,"session_total_llm_tokens":1500}}"#,
+            "vibe_session_metadata",
+        ),
+        (
+            "opencode",
+            r#"{"model":{"id":"hy3-free","providerID":"opencode"},"tokens_input":775,"tokens_output":140,"time_updated":1783824274016}"#,
+            "opencode_session_database",
+        ),
+    ];
+
+    for (backend, metadata, expected_source) in cases {
+        let metadata_path = tmp.path().join(format!("{backend}.jsonl"));
+        fs::write(&metadata_path, metadata).unwrap();
+        let usage = attempt_usage(
+            log.to_str().unwrap(),
+            None,
+            UsageAttribution::backend(Some(backend), None),
+            Some(metadata_path.to_str().unwrap()),
+            None,
+        );
+        assert_eq!(usage.usage_source.as_deref(), Some(expected_source));
+        let metrics = usage
+            .behavior_metrics
+            .unwrap_or_else(|| panic!("{backend} dropped structured behavior metrics"));
+        assert_eq!(metrics.tool_calls.as_ref().unwrap().count, Some(4));
+        assert_eq!(metrics.shell_calls.as_ref().unwrap().count, Some(1));
+        assert_eq!(metrics.file_edits.as_ref().unwrap().count, Some(2));
+        assert_eq!(metrics.test_runs.as_ref().unwrap().count, Some(3));
+    }
+}
+
+#[test]
 fn attempt_usage_records_the_bound_agy_model_when_cli_logs_only_quota_state() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("backend-output.log");

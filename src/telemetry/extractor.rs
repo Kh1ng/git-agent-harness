@@ -3,7 +3,87 @@
 //! Extracts telemetry records from ledger entries.
 
 use super::records::*;
-use crate::ledger::LedgerEntry;
+use crate::ledger::{AttemptBehaviorMetrics, BehaviorMetric, BehaviorMetricQuality, LedgerEntry};
+
+/// Issue #119: the only structured backend event GAH is allowed to parse for
+/// per-attempt behavior metrics.
+///
+/// Backends that emit this documented event (one JSON object per line) expose
+/// exact counts with provenance. GAH must NOT infer counts from arbitrary
+/// prose, logs, or other substrings — only this documented shape is parsed.
+pub const BEHAVIOR_SUMMARY_EVENT_TYPE: &str = "gah.behavior_summary";
+
+/// Issue #119: parse documented structured backend events into normalized
+/// per-attempt behavior metrics.
+///
+/// `events` is expected to be newline-delimited JSON. Only the documented
+/// `gah.behavior_summary` event type is honored; every other line is ignored.
+/// When a recognized event is present, each count it carries becomes a
+/// `StructuredEventDerived` metric. Counts it omits stay `None` (unknown),
+/// never zero. Lines that fail to parse are skipped, not inferred from.
+///
+/// Returns `None` when no recognized event was found, so callers distinguish
+/// "backend emitted the event with zeros" from "backend never reported."
+pub fn parse_structured_behavior_events(events: &str) -> Option<AttemptBehaviorMetrics> {
+    use serde_json::Value;
+
+    let mut metrics = AttemptBehaviorMetrics::default();
+    let mut found = false;
+
+    for line in events.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            // Malformed line: skip, never infer counts from it.
+            continue;
+        };
+        let Value::Object(map) = &value else {
+            continue;
+        };
+        let event_type = map.get("type").and_then(|v| v.as_str());
+        if event_type != Some(BEHAVIOR_SUMMARY_EVENT_TYPE) {
+            // Documented only; arbitrary events are ignored.
+            continue;
+        }
+        found = true;
+
+        let as_metric = |v: &Value| -> Option<BehaviorMetric> {
+            match v {
+                Value::Number(n) => n.as_u64().map(|c| BehaviorMetric {
+                    count: Some(c),
+                    quality: BehaviorMetricQuality::StructuredEventDerived,
+                    unknown_reason: None,
+                }),
+                _ => None,
+            }
+        };
+
+        if let Some(v) = map.get("tool_calls") {
+            if let Some(m) = as_metric(v) {
+                metrics.tool_calls = Some(m);
+            }
+        }
+        if let Some(v) = map.get("shell_calls") {
+            if let Some(m) = as_metric(v) {
+                metrics.shell_calls = Some(m);
+            }
+        }
+        if let Some(v) = map.get("file_edits") {
+            if let Some(m) = as_metric(v) {
+                metrics.file_edits = Some(m);
+            }
+        }
+        if let Some(v) = map.get("test_runs") {
+            if let Some(m) = as_metric(v) {
+                metrics.test_runs = Some(m);
+            }
+        }
+    }
+
+    found.then_some(metrics)
+}
 
 /// Extract attempt usage records from a ledger entry
 pub fn extract_attempt_usage_records(
@@ -114,6 +194,26 @@ pub fn extract_attempt_usage_records(
             quota_reset_at: attempt.usage.quota_reset_at.clone(),
             token_usage_unknown_reason: attempt.usage.token_usage_unknown_reason.clone(),
             quota_unknown_reason: attempt.usage.quota_unknown_reason.clone(),
+            tool_calls: attempt
+                .usage
+                .behavior_metrics
+                .as_ref()
+                .and_then(|m| m.tool_calls.clone()),
+            shell_calls: attempt
+                .usage
+                .behavior_metrics
+                .as_ref()
+                .and_then(|m| m.shell_calls.clone()),
+            file_edits: attempt
+                .usage
+                .behavior_metrics
+                .as_ref()
+                .and_then(|m| m.file_edits.clone()),
+            test_runs: attempt
+                .usage
+                .behavior_metrics
+                .as_ref()
+                .and_then(|m| m.test_runs.clone()),
         };
 
         records.push(record);

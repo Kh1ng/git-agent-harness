@@ -133,6 +133,84 @@ pub struct AttemptRecord {
 /// Route selected for one launched attempt inside a dispatch. Unlike the
 /// top-level routing fields, this list preserves earlier route decisions and
 /// their skip diagnostics when a later retry changes backend.
+/// Issue #119: provenance/quality of a normalized per-attempt behavior metric.
+///
+/// Distinguishes how a behavior count (tool calls, shell calls, file edits,
+/// test runs) was obtained so that "unavailable" is never silently treated as
+/// a real zero.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BehaviorMetricQuality {
+    /// Backend/session reported the count directly (provider API/usage).
+    ProviderReported,
+    /// Count derived from documented structured backend events (e.g. the
+    /// `gah.behavior_summary` event), never from arbitrary prose or logs.
+    StructuredEventDerived,
+    /// Count is a coarse estimate (e.g. bounded from a known command budget).
+    Estimated,
+    /// Backend does not expose this metric at all.
+    Unavailable,
+}
+
+/// Issue #119: a per-attempt behavior metric captured with explicit provenance.
+///
+/// `count` is `None` when the backend did not report it (unknown). Unknown is
+/// distinct from zero and must never be coerced to `0`.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct BehaviorMetric {
+    /// Known count (`None` = unknown / not reported).
+    #[serde(default)]
+    pub count: Option<u64>,
+    /// How this count was obtained.
+    pub quality: BehaviorMetricQuality,
+    /// Why the count is unknown when `count` is `None` and quality is
+    /// `Unavailable`. Kept separate so consumers never conflate missing
+    /// telemetry with a real zero.
+    #[serde(default)]
+    pub unknown_reason: Option<String>,
+}
+
+impl BehaviorMetric {
+    /// Unknown metric with the given reason; never serialized as zero.
+    pub fn unavailable(reason: &str) -> Self {
+        BehaviorMetric {
+            count: None,
+            quality: BehaviorMetricQuality::Unavailable,
+            unknown_reason: Some(reason.to_string()),
+        }
+    }
+}
+
+/// Issue #119: normalized per-attempt behavior metrics with provenance.
+///
+/// Optional at the usage level so pre-tracking ledger lines (written before
+/// this field existed) deserialize as `None` (unknown) rather than zeros.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
+pub struct AttemptBehaviorMetrics {
+    #[serde(default)]
+    pub tool_calls: Option<BehaviorMetric>,
+    #[serde(default)]
+    pub shell_calls: Option<BehaviorMetric>,
+    #[serde(default)]
+    pub file_edits: Option<BehaviorMetric>,
+    #[serde(default)]
+    pub test_runs: Option<BehaviorMetric>,
+}
+
+impl AttemptBehaviorMetrics {
+    /// Whether every metric is unknown (no known count anywhere). Used to keep
+    /// failed/retried/timeout/cancelled/fallback attempts preserved
+    /// independently even when no behavior data is available.
+    pub fn is_fully_unknown(&self) -> bool {
+        let known =
+            |m: &Option<BehaviorMetric>| m.as_ref().map(|b| b.count.is_some()).unwrap_or(false);
+        !known(&self.tool_calls)
+            && !known(&self.shell_calls)
+            && !known(&self.file_edits)
+            && !known(&self.test_runs)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct AttemptRoutingRecord {
     pub attempt_number: u32,
@@ -197,6 +275,11 @@ pub struct LedgerUsage {
     /// Quota state was unavailable for a quota-backed execution.
     #[serde(default)]
     pub quota_unknown_reason: Option<String>,
+    /// Issue #119: provenance-aware per-attempt behavior metrics (tool calls,
+    /// shell calls, file edits, test runs). Optional so historical ledger
+    /// lines without this key deserialize as `None` (unknown), never zero.
+    #[serde(default)]
+    pub behavior_metrics: Option<AttemptBehaviorMetrics>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]

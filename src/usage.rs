@@ -1,5 +1,5 @@
 use crate::ledger::summary::GroupQuotaObservation;
-use crate::ledger::LedgerUsage;
+use crate::ledger::{AttemptBehaviorMetrics, LedgerUsage};
 use regex::Regex;
 use serde_json::Value;
 use std::process::Command;
@@ -362,6 +362,7 @@ pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
             .token_usage_unknown_reason
             .or(other.token_usage_unknown_reason),
         quota_unknown_reason: base.quota_unknown_reason.or(other.quota_unknown_reason),
+        behavior_metrics: merge_behavior_metrics(base.behavior_metrics, other.behavior_metrics),
         usage_source: match (base.usage_source, other.usage_source) {
             (Some(a), Some(b)) => Some(format!("{a}+{b}")),
             (Some(a), None) => Some(a),
@@ -369,6 +370,41 @@ pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
             (None, None) => None,
         },
         observed_at: base.observed_at.or(other.observed_at),
+    }
+}
+
+/// Per-field merge of `AttemptBehaviorMetrics` (Issue #119). Unlike the
+/// neighboring whole-struct `Option::or` merges, this keeps a known count from
+/// `base` even when `other` also reports a different field — e.g. a base attempt
+/// with only `tool_calls` known does not discard `other`'s known `shell_calls`.
+/// Every field that remains unknown on both sides collapses to `None` rather
+/// than an empty (zero) metric.
+fn merge_behavior_metrics(
+    base: Option<AttemptBehaviorMetrics>,
+    other: Option<AttemptBehaviorMetrics>,
+) -> Option<AttemptBehaviorMetrics> {
+    let merged = AttemptBehaviorMetrics {
+        tool_calls: base
+            .as_ref()
+            .and_then(|b| b.tool_calls.clone())
+            .or_else(|| other.as_ref().and_then(|o| o.tool_calls.clone())),
+        shell_calls: base
+            .as_ref()
+            .and_then(|b| b.shell_calls.clone())
+            .or_else(|| other.as_ref().and_then(|o| o.shell_calls.clone())),
+        file_edits: base
+            .as_ref()
+            .and_then(|b| b.file_edits.clone())
+            .or_else(|| other.as_ref().and_then(|o| o.file_edits.clone())),
+        test_runs: base
+            .as_ref()
+            .and_then(|b| b.test_runs.clone())
+            .or_else(|| other.as_ref().and_then(|o| o.test_runs.clone())),
+    };
+    if merged.is_fully_unknown() {
+        None
+    } else {
+        Some(merged)
     }
 }
 
@@ -684,6 +720,8 @@ mod tests {
     use super::parse_opencode_session_metadata;
     use super::parse_openhands_usage;
     use super::parse_vibe_session_metadata;
+    use super::{merge_usage, LedgerUsage};
+    use crate::ledger::{AttemptBehaviorMetrics, BehaviorMetric, BehaviorMetricQuality};
 
     // ── codex exec --json (Issue #152) ───────────────────────────────────
 
@@ -967,5 +1005,52 @@ mod tests {
         assert_eq!(usage.quota_window, None);
         assert_eq!(usage.quota_used_percent, None);
         assert_eq!(usage.quota_remaining_percent, None);
+    }
+
+    // ── Issue #119: behavior_metrics merge (non-blocking finding) ──────────
+
+    #[test]
+    fn merge_usage_keeps_known_behavior_fields_from_both_sides() {
+        let known = |n: u64, q: BehaviorMetricQuality| BehaviorMetric {
+            count: Some(n),
+            quality: q,
+            unknown_reason: None,
+        };
+        let base = LedgerUsage {
+            behavior_metrics: Some(AttemptBehaviorMetrics {
+                tool_calls: Some(known(3, BehaviorMetricQuality::ProviderReported)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let other = LedgerUsage {
+            behavior_metrics: Some(AttemptBehaviorMetrics {
+                shell_calls: Some(known(2, BehaviorMetricQuality::StructuredEventDerived)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let merged = merge_usage(base, other);
+        let m = merged.behavior_metrics.expect("merged keeps known fields");
+        assert_eq!(m.tool_calls.as_ref().unwrap().count, Some(3));
+        assert_eq!(m.shell_calls.as_ref().unwrap().count, Some(2));
+        assert!(m.file_edits.is_none());
+    }
+
+    #[test]
+    fn merge_usage_collapses_fully_unknown_behavior_to_none() {
+        let base = LedgerUsage {
+            behavior_metrics: Some(AttemptBehaviorMetrics {
+                tool_calls: Some(BehaviorMetric::unavailable("n/a")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let other = LedgerUsage::default();
+        let merged = merge_usage(base, other);
+        assert!(
+            merged.behavior_metrics.is_none(),
+            "fully-unknown behavior_metrics merge to None, never a zero record"
+        );
     }
 }

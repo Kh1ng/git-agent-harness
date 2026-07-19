@@ -513,6 +513,37 @@ export interface LedgerUsage {
   quota_reset_at: string | null;
   token_usage_unknown_reason?: string | null;
   quota_unknown_reason?: string | null;
+  /**
+   * Issue #119: provenance-aware per-attempt behavior metrics (tool calls,
+   * shell calls, file edits, test runs). `null`/`undefined` means the backend
+   * did not report it (unknown) — never a real zero.
+   */
+  behavior_metrics?: AttemptBehaviorMetrics | null;
+}
+
+/** Issue #119: how a behavior metric count was obtained. */
+export type BehaviorMetricQuality =
+  | 'provider_reported'
+  | 'structured_event_derived'
+  | 'estimated'
+  | 'unavailable';
+
+/** Issue #119: a single per-attempt behavior metric with explicit provenance. */
+export interface BehaviorMetric {
+  /** Known count (`null` = unknown / not reported). */
+  count: number | null;
+  /** How this count was obtained. */
+  quality: BehaviorMetricQuality;
+  /** Why the count is unknown when `count` is `null` and quality is `unavailable`. */
+  unknown_reason?: string | null;
+}
+
+/** Issue #119: normalized per-attempt behavior metrics with provenance. */
+export interface AttemptBehaviorMetrics {
+  tool_calls?: BehaviorMetric | null;
+  shell_calls?: BehaviorMetric | null;
+  file_edits?: BehaviorMetric | null;
+  test_runs?: BehaviorMetric | null;
 }
 
 /** TICKET-101: usage for exactly this attempt (not the whole dispatch). An
