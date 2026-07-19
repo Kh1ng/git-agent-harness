@@ -11,9 +11,11 @@ fn setup_fake_gh(bin_dir: &Path, response_json: &str) {
     let gh_path = bin_dir.join("gh");
     let content = format!(
         "#!/bin/sh\n\
-             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
-                 echo '{}'\n\
-             fi\n",
+             case \"$4\" in\n\
+               */check-runs?*) echo '{{\"total_count\":0,\"check_runs\":[]}}' ;;\n\
+               */pulls?*) echo '{}' ;;\n\
+               *) echo \"unexpected gh invocation: $*\" >&2; exit 1 ;;\n\
+             esac\n",
         response_json.replace('\'', "'\\''")
     );
     fs::write(&gh_path, content).unwrap();
@@ -875,7 +877,7 @@ fn test_check_duplicate_work_cases() {
     assert!(res.is_ok());
 
     // 4. Case B: Active open PR exists -> Should block
-    let pr_json = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"OPEN","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":null,"updatedAt":"2026-07-17T17:22:35-05:00","statusCheckRollup":[]}]"#;
+    let pr_json = r#"[{"title":"Fix login","body":null,"head":{"ref":"gah/repo-active","sha":"source-sha"},"html_url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"open","draft":false,"updated_at":"2026-07-17T17:22:35-05:00"}]"#;
     setup_fake_gh(&bin_dir, pr_json);
     let _guard = PathGuard::set(&bin_dir);
 
@@ -912,15 +914,13 @@ fn test_check_duplicate_work_cases() {
     );
 
     // 5. Case C: PR is merged -> Should pass
-    let pr_json_merged = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"MERGED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":"2026-07-17T17:22:35-05:00","updatedAt":"2026-07-17T17:22:35-05:00","statusCheckRollup":[]}]"#;
-    setup_fake_gh(&bin_dir, pr_json_merged);
+    setup_fake_gh(&bin_dir, "[]");
 
     let res = super::check_duplicate_work(&cfg, &prof, &args);
     assert!(res.is_ok());
 
     // 6. Case D: PR is closed unmerged -> Should pass
-    let pr_json_closed = r#"[{"title":"Fix login","headRefName":"gah/repo-active","url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"CLOSED","isDraft":false,"mergeStateStatus":"CLEAN","mergedAt":null,"updatedAt":"2026-07-17T17:22:35-05:00","statusCheckRollup":[]}]"#;
-    setup_fake_gh(&bin_dir, pr_json_closed);
+    setup_fake_gh(&bin_dir, "[]");
 
     let res = super::check_duplicate_work(&cfg, &prof, &args);
     assert!(res.is_ok());

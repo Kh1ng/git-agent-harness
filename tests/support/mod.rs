@@ -354,6 +354,38 @@ impl FakeBackend {
         }
     }
 
+    /// Install a GitHub CLI fixture that distinguishes recurring REST
+    /// observation from compatibility commands such as `gh pr view/list`.
+    pub fn install_github_api(
+        &self,
+        default: Scenario,
+        open_pulls: Scenario,
+        check_runs: Scenario,
+    ) {
+        let counter_path = self.record_dir.join("call-count");
+        let _ = fs::remove_file(&counter_path);
+        let mut script = format!(
+            "#!/bin/sh\nn=$( [ -f '{c}' ] && cat '{c}' || echo 0 )\nn=$((n+1))\necho \"$n\" > '{c}'\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{r}/argv-call-'\"$n\"'.txt'\n",
+            c = counter_path.display(),
+            r = self.record_dir.display(),
+        );
+        script.push_str("if [ \"$1\" = \"api\" ]; then\n  case \"$4\" in\n    */pulls?*)\n");
+        script.push_str(&Self::render_case_body(&open_pulls));
+        script.push_str("    ;;\n    */check-runs?*)\n");
+        script.push_str(&Self::render_case_body(&check_runs));
+        script.push_str("    ;;\n  esac\nfi\n");
+        script.push_str(&Self::render_case_body(&default));
+
+        let path = self.bin_dir.join(&self.name);
+        fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).unwrap();
+        }
+    }
+
     fn render_case_body(s: &Scenario) -> String {
         let mut body = String::new();
         if s.delay_ms > 0 {
