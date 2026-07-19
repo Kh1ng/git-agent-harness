@@ -1,0 +1,110 @@
+{
+  "active_claims": [],
+  "availability": [],
+  "available_tickets": [],
+  "backend_configured": {
+    "agy": false,
+    "agy-main": false,
+    "agy-second": false,
+    "claude": false,
+    "codex": false,
+    "opencode": false,
+    "openhands": false,
+    "vibe": false
+  },
+  "blocked_work_items": [],
+  "blockers": [],
+  "constraints": [],
+  "dependency_blockers": [],
+  "errors": [],
+  "fix_attempt_counts": {},
+  "generated_artifact_deny_patterns": [
+    "**/node_modules/**",
+    "**/.vite/**",
+    "**/.vitest/**",
+    "**/coverage/**",
+    "**/.nyc_output/**",
+    "**/.cache/**",
+    "**/.next/**",
+    "**/test-results/**",
+    "**/playwright-report/**",
+    "**/target/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/*.tsbuildinfo"
+  ],
+  "generated_at": "2026-07-19T10:13:21.833180438Z",
+  "implementation_intake_paused": true,
+  "inflight_implementation_count": 0,
+  "issue_intake_rejections": [
+    {
+      "author_kind": null,
+      "author_login": null,
+      "labels": [],
+      "provider": "github",
+      "reason": "author identity missing or unreadable",
+      "reason_code": "missing_author",
+      "ticket_path": "1",
+      "title": "Draft: TICKET-001 Add feature",
+      "work_id": "#1"
+    }
+  ],
+  "max_parallel_workers": 1,
+  "merge_attempt_counts": {},
+  "merge_requests": [
+    {
+      "branch": "gah/feature-1",
+      "ci_passed": true,
+      "ci_pending": false,
+      "classification": "STALE",
+      "draft": true,
+      "id": "1",
+      "merge_status": "CLEAN",
+      "merged": false,
+      "recommended_action": "INSPECT_BRANCH",
+      "review_contract_version": 1,
+      "state": "OPEN",
+      "title": "Draft: TICKET-001 Add feature",
+      "url": "https://github.com/owner/repo/pull/1",
+      "work_id": "TICKET-001"
+    }
+  ],
+  "observations": {
+    "availability": {
+      "status": "ok"
+    },
+    "ledger": {
+      "status": "ok"
+    },
+    "sync": {
+      "status": "ok"
+    }
+  },
+  "open_managed_mr_count": 1,
+  "profile": {
+    "default_target_branch": "main",
+    "display_name": "Test Repo",
+    "issue_intake_policy": {
+      "canonical_autonomous_label": "exec:autonomous",
+      "github_issue_author_allowlist": [],
+      "mode": "legacy",
+      "trusted_bot_authors": [],
+      "trusted_human_authors": [
+        "owner"
+      ]
+    },
+    "local_path": "/tmp/.tmpdMnloO/repo",
+    "max_fix_attempts_per_mr": 2,
+    "max_implementation_failures_per_ticket": 8,
+    "max_open_managed_mrs": 1,
+    "merge_policy": "auto",
+    "profile": "test",
+    "provider": "github",
+    "repo_id": "test"
+  },
+  "publishing_allow_pr": true,
+  "recent_ledger": null,
+  "review_contract_version": 1,
+  "review_held_work_ids": [],
+  "schema_version": 1
+}

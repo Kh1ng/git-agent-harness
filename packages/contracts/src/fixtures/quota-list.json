@@ -1,0 +1,12 @@
+[
+  {
+    "backend": "codex",
+    "model": "gpt-5.4-mini",
+    "observed_at": "2026-07-19T00:00:00Z",
+    "quota_remaining_percent": 75.0,
+    "quota_reset_at": "2026-07-20T00:00:00Z",
+    "quota_used_percent": 25.0,
+    "quota_window": "weekly",
+    "usage_source": "codex_status"
+  }
+]

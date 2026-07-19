@@ -457,6 +457,60 @@ impl ScenarioHarness {
         serde_json::from_str(&stdout[start..]).map_err(|e| format!("parse status json: {e}"))
     }
 
+    pub fn run_quota_list_json(&mut self) -> Result<serde_json::Value, String> {
+        self.setup_env();
+        self.install_fakes();
+        let store_path = self.artifacts_dir.join("quota-observations.jsonl");
+        fs::write(
+            &store_path,
+            concat!(
+                r#"{"backend":"codex","model":"gpt-5.4-mini","quota_window":"weekly","quota_used_percent":25.0,"quota_remaining_percent":75.0,"quota_reset_at":"2026-07-20T00:00:00Z","observed_at":"2026-07-19T00:00:00Z","usage_source":"codex_status"}"#,
+                "\n"
+            ),
+        )
+        .map_err(|e| format!("write quota fixture store: {e}"))?;
+        let out = Command::new(&self.gah_bin)
+            .args([
+                "quota",
+                "list",
+                "--json",
+                "--store-path",
+                store_path.to_str().unwrap(),
+            ])
+            .env(
+                "XDG_STATE_HOME",
+                self._temp.path().join("xdg-state").to_str().unwrap(),
+            )
+            .env("GAH_CONFIG", self.config_path.to_str().unwrap())
+            .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
+            .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin_dir.display(),
+                    env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .map_err(|e| format!("quota list spawn failed: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "quota list exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let start = stdout.find('[').ok_or_else(|| {
+            format!(
+                "no JSON array in quota list stdout: {}",
+                &stdout[..stdout.len().min(200)]
+            )
+        })?;
+        serde_json::from_str(&stdout[start..]).map_err(|e| format!("parse quota list json: {e}"))
+    }
+
     pub fn run_dispatch(&mut self, args: &[&str]) -> Result<CommandResult, String> {
         self.setup_env();
         self.install_fakes();

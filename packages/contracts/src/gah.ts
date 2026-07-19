@@ -27,6 +27,9 @@ export interface ProfileIdentity {
   provider: string;
   local_path: string;
   default_target_branch: string;
+  max_fix_attempts_per_mr: number;
+  max_implementation_failures_per_ticket: number;
+  max_open_managed_mrs: number;
   /** Resolved per-repo merge policy (inherits canonical/defaults policy
    * when the profile doesn't set its own). */
   merge_policy: string;
@@ -157,6 +160,7 @@ export interface MergeRequest {
   /** RFC3339 merge timestamp for merged MRs (TICKET-198). */
   merged_at?: string | null;
   ci_passed: boolean;
+  ci_pending: boolean;
   /** Backend/model that produced the merge, joined from the ledger (TICKET-198). */
   effective_backend?: string | null;
   effective_model?: string | null;
@@ -226,6 +230,7 @@ export interface ActiveClaim {
 
 export interface StatusSnapshot {
   schema_version: number;
+  review_contract_version: number;
   generated_at: string;
   profile: ProfileIdentity;
   observations: Observations;
@@ -252,10 +257,15 @@ export interface StatusSnapshot {
   active_claims: ActiveClaim[];
   fix_attempt_counts: Record<string, number>;
   merge_attempt_counts: Record<string, number>;
+  review_held_work_ids: string[];
   publishing_allow_pr: boolean;
   /** Effective profile policy used to reject newly tracked generated files
    * before commit/push. */
   generated_artifact_deny_patterns: string[];
+  max_parallel_workers: number;
+  open_managed_mr_count: number;
+  inflight_implementation_count: number;
+  implementation_intake_paused: boolean;
   /** TICKET-157: per-backend "configured for this profile" signal, keyed by
    * logical backend name. Only backends with a real Rust implementation are
    * present. A `true` value means the backend is set up for the active
@@ -339,6 +349,8 @@ export interface BackendModelComparison {
   cache_write_tokens: number | null;
   total_tokens: number | null;
   requests_count: number | null;
+  tokens_per_success: number | null;
+  requests_per_success: number | null;
   quota_observations: QuotaObservation[];
   /** [verdict, count] pairs, e.g. ["APPROVE_STRONG", 3]. */
   review_verdict_distribution: [string, number][];
