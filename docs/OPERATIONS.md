@@ -81,11 +81,12 @@ The updater never starts or restarts a recurring `gah loop`; with
   or start a detached `gah loop` by hand.
 
 Direct `gah loop --once` remains useful for a bounded operator smoke test. On
-Linux, graceful SIGINT/SIGTERM cleanup walks the backend's PPID tree before
-killing it, so tool commands that created a new session with `setsid` cannot
-survive as PID-1 orphans. A recurring unattended loop must still use the
-systemd unit: its control-group boundary also covers abrupt parent death or
-SIGKILL, when no in-process cleanup handler can run.
+Linux, a recurring foreground loop arms a kernel parent-death signal and exits
+through normal SIGTERM cleanup when its launcher disappears; it refuses to
+start if already orphaned to PID 1. Graceful cleanup walks the backend's PPID
+tree, including tools that used `setsid`. Unattended operation must still use
+the systemd unit: its control-group boundary additionally covers SIGKILL, when
+no in-process cleanup handler can run.
 
 The checked-in server template is
 `packaging/systemd/gah-server.service`. Before installing it, edit its `User`,

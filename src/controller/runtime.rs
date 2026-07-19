@@ -155,11 +155,11 @@ pub fn run_loop(
     skip_validation_gate: bool,
     config_path: &std::path::Path,
 ) -> Result<()> {
+    super::ownership::arm_parent_death_signal()?;
     let _lock = acquire_profile_lock(profile_name, config_path)?;
 
-    // The dashboard Settings UI can change max_parallel_workers,
-    // manager_wake_autonomy (per-profile) and current_manager (global) at
-    // runtime. Reload the config from disk on every iteration so those
+    // Dashboard Settings can change max_parallel_workers, manager_wake_autonomy
+    // and current_manager at runtime. Reload from disk on every iteration so those
     // changes take effect on the next loop iteration without restarting the
     // daemon. We keep the last successfully-loaded config as a fallback so a
     // transient read failure (e.g. the config file is mid-write) can't kill
