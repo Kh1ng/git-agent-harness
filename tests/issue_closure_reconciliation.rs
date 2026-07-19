@@ -474,11 +474,18 @@ fn different_profiles_with_same_work_and_issue_do_not_dedupe_each_other() {
         Scenario::success().with_stdout(r#"{"state":"closed"}"#),
     ]);
 
+    let mut gitlab_ledger_entry = ledger_entry(None);
+    gitlab_ledger_entry["profile"] = serde_json::json!("gitlab");
+    gitlab_ledger_entry["repo_id"] = serde_json::json!("gitlab");
+    let ledger = support::fake_ledger::TestLedger::new()
+        .with_entry(ledger_entry(None))
+        .with_entry(gitlab_ledger_entry);
+
     let mut harness = ScenarioHarness::new("github")
         .with_config_append(
             "[profiles.test.publishing]\nallow_source_issue_closure = true\n\n[profiles.gitlab]\ndisplay_name = \"GitLab Test\"\nrepo_id = \"gitlab\"\nrepo = \"group/repo\"\nlocal_path = \".\"\nartifact_root = \".\"\ndefault_target_branch = \"main\"\nprovider = \"gitlab\"\nprovider_api_base = \"https://gitlab.example.com/api/v4\"\nprovider_project_id = \"123\"\n[profiles.gitlab.publishing]\nallow_source_issue_closure = true\n",
         )
-        .with_ledger(support::fake_ledger::TestLedger::new().with_entry(ledger_entry(None)));
+        .with_ledger(ledger);
     harness.install_custom_gh(&gh);
     harness.install_custom_glab(&glab);
 
