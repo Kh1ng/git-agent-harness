@@ -839,15 +839,26 @@ fn ensure_review_generation(target: &ReviewTarget, expected: Option<&str>) -> Re
     let Some(expected) = expected else {
         return Ok(());
     };
-    let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+    // Tolerates GAH's own one-way draft-to-ready transition (mark_ready_for_review
+    // runs before merge_mr and flips `draft`, which would otherwise invalidate
+    // every review's generation right before merge — see review_state.rs).
+    if !crate::sync::review_generation_matches(
+        expected,
         target.source_sha.as_deref(),
         target.title.as_deref(),
         target.body.as_deref(),
         target.draft,
-    );
-    let live =
-        crate::ledger::review_generation(target.source_sha.as_deref(), Some(&metadata_fingerprint));
-    if live.as_deref() != Some(expected) {
+    ) {
+        let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+            target.source_sha.as_deref(),
+            target.title.as_deref(),
+            target.body.as_deref(),
+            target.draft,
+        );
+        let live = crate::ledger::review_generation(
+            target.source_sha.as_deref(),
+            Some(&metadata_fingerprint),
+        );
         anyhow::bail!(
             "MR source or metadata changed after review: expected generation '{expected}', live generation is '{}'; re-run review before merge",
             live.as_deref().unwrap_or("unknown")
