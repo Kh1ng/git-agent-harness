@@ -29,6 +29,8 @@ fn codex_fallback_model_extracted_from_profile_codex_args() {
             session_id: None,
             usage_summary: None,
             last_failure_class: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -59,6 +61,8 @@ fn codex_stale_args_do_not_override_resolved_model() {
             session_id: None,
             usage_summary: None,
             last_failure_class: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -91,6 +95,8 @@ fn explicit_cross_mode_route_preserves_configured_usage_class() {
             session_id: None,
             usage_summary: None,
             last_failure_class: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -127,6 +133,8 @@ fn auto_backend_honors_cli_model_override_in_effective_identity() {
             session_id: None,
             usage_summary: None,
             last_failure_class: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -169,6 +177,8 @@ fn profile_scalar_override_preserves_inherited_default_model() {
             session_id: None,
             usage_summary: None,
             last_failure_class: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -209,6 +219,8 @@ fn preferred_backend_unavailable_falls_back() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -236,6 +248,8 @@ fn preferred_backend_available_keeps_normal_selection() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -275,6 +289,8 @@ fn expired_temporary_record_restores_eligibility() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -313,6 +329,8 @@ fn backend_wide_block_blocks_all_models() {
             recommended_model: Some("gpt-5"),
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -362,6 +380,8 @@ fn model_specific_block_only_blocks_that_model() {
             recommended_model: Some("gpt-5"),
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -382,6 +402,8 @@ fn model_specific_block_only_blocks_that_model() {
             recommended_model: Some("gpt-5-mini"),
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -419,6 +441,8 @@ fn manual_disable_blocks_indefinitely() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now + time::Duration::days(30),
@@ -459,6 +483,8 @@ fn all_candidates_unavailable_returns_earliest_reset() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -506,6 +532,8 @@ fn fallback_route_records_availability_reason() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -535,6 +563,8 @@ fn malformed_availability_state_surfaces_error() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -566,6 +596,8 @@ fn candidate_list_honored_when_available() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -614,6 +646,8 @@ fn candidate_list_skips_unavailable_candidates() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -657,6 +691,7 @@ fn session_limit_marks_model_scope_and_reroutes_to_alternate_backend() {
         recommended_model: None,
         session_id: None,
         usage_summary: None,
+        exact_route_required: false,
     };
 
     let first = decide_with(
@@ -733,6 +768,7 @@ fn capacity_downgrade_skips_sibling_codex_model_in_next_attempt() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -783,6 +819,8 @@ fn candidate_list_expired_availability_re_enters() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -832,6 +870,8 @@ fn candidate_list_exhausted_errors() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -884,6 +924,8 @@ fn routing_honors_shared_quota_pool() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -922,6 +964,8 @@ fn routing_honors_shared_quota_pool() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,
@@ -960,6 +1004,8 @@ fn validation_retry_skips_every_route_already_tried_in_the_same_dispatch() {
         recommended_model: None,
         session_id: None,
         usage_summary: None,
+
+        exact_route_required: false,
     };
 
     let second = decide_with_runtime(
@@ -1021,6 +1067,8 @@ fn validation_retry_returns_structured_no_route_when_all_candidates_were_tried()
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &runtime,
         &path(&tmp),
@@ -1064,6 +1112,8 @@ fn explicit_retry_preserves_configured_backend_model_pairs() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &runtime,
         &path(&tmp),
@@ -1110,6 +1160,8 @@ fn auto_fallback_does_not_transplant_requested_model_to_another_runner() {
             recommended_model: Some("gpt-5.4-mini"),
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         now,

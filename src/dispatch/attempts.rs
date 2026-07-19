@@ -620,7 +620,16 @@ pub(super) fn decide_route(
                         model,
                         skipped,
                     } => (Some(backend.clone()), model.clone(), skipped),
-                    RouteError::NoEligibleBackend { skipped, .. } => (None, None, skipped),
+                    RouteError::NoEligibleBackend {
+                        preferred_backend,
+                        preferred_model,
+                        skipped,
+                        ..
+                    } => (
+                        Some(preferred_backend.clone()),
+                        preferred_model.clone(),
+                        skipped,
+                    ),
                 };
                 ledger.routing_diagnostics = Some(crate::ledger::RoutingDiagnostics {
                     selected_backend,

@@ -586,6 +586,13 @@ where
 {
     let allow_impl_fallback = effective_routing.allow_implementation_fallback;
     let allow_review_fallback = effective_routing.allow_review_fallback;
+    // Issue #607: an exact, pre-selected route (e.g. an ordered review
+    // escalation identity) is the only eligible route for this step. Disable
+    // generic fallback so a paid/unavailable exact route reports a typed
+    // pause/deferral rather than silently substituting a prior reviewer.
+    let exact_route = req.exact_route_required;
+    let allow_impl_fallback = allow_impl_fallback && !exact_route;
+    let allow_review_fallback = allow_review_fallback && !exact_route;
     let exclude_attempted = is_genuine_agent_failure(req.last_failure_class)
         || !runtime.attempted.is_empty()
         || !runtime.dispatch_attempted.is_empty();

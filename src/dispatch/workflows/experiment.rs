@@ -41,6 +41,7 @@ pub(crate) fn experiment(
             recommended_model: None,
             session_id: session_dir.file_name().and_then(|s| s.to_str()),
             usage_summary: None,
+            exact_route_required: false,
         },
         None,
         ledger,

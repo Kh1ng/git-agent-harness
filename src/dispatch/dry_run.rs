@@ -182,6 +182,7 @@ fn dry_run_route(
                 .and_then(|m| m.recommended_model.as_deref()),
             session_id: None,
             usage_summary: None,
+            exact_route_required: false,
         },
         TaskRoutingContext {
             task_class: ticket_meta

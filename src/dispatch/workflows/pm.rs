@@ -69,6 +69,7 @@ pub(crate) fn pm(
         session_id: session_dir.file_name().and_then(|s| s.to_str()),
         usage_summary: None,
         last_failure_class: None,
+        exact_route_required: false,
     };
     let mut plan_route = decide_route(cfg, profile, route_req.clone(), None, ledger)?;
     apply_route_to_ledger(ledger, &plan_route);

@@ -127,6 +127,7 @@ pub(crate) fn improve(
         } else {
             None
         },
+        exact_route_required: false,
     };
     let mut route = decide_route(
         cfg,

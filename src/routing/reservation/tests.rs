@@ -69,6 +69,8 @@ fn preferred_backend_at_max_concurrent_falls_back() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &path(&tmp),
         OffsetDateTime::now_utc(),
@@ -124,6 +126,8 @@ fn concurrent_dispatch_holding_slot_forces_other_thread_to_fall_back() {
                 recommended_model: None,
                 session_id: None,
                 usage_summary: None,
+
+                exact_route_required: false,
             },
             &state_path_for_decider,
             OffsetDateTime::now_utc(),
@@ -152,6 +156,8 @@ fn concurrent_dispatch_holding_slot_forces_other_thread_to_fall_back() {
             recommended_model: None,
             session_id: None,
             usage_summary: None,
+
+            exact_route_required: false,
         },
         &state_path,
         OffsetDateTime::now_utc(),
