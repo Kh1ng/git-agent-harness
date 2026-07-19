@@ -1,140 +1,163 @@
 mod support;
 
 use serde_json::Value;
-use std::collections::{BTreeSet, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
+use support::fake_ledger::{ledger_entry_full, TestLedger};
 use support::scenario::ScenarioHarness;
 
-const CONTRACTS_GAH_TS: &str = include_str!("../packages/contracts/src/gah.ts");
+const UPDATE_FIXTURES_ENV: &str = "GAH_UPDATE_CONTRACT_FIXTURES";
 
 #[test]
-fn status_json_matches_contract_snapshot_fields() {
-    let mut harness = ScenarioHarness::new("github").github_scenario("empty");
+fn status_json_matches_checked_fixture_recursively() {
+    let mut harness = ScenarioHarness::new("github").github_scenario("one_pr_needs_review");
     let payload = harness.run_status_json().expect("status --json must run");
-    assert_interface_fields_match(&payload, "StatusSnapshot", "gah status --json");
+    assert_or_update_fixture("status.json", &payload);
 }
 
 #[test]
-fn quota_snapshot_json_matches_contract_fields() {
+fn quota_list_json_matches_checked_fixture_recursively() {
     let mut harness = ScenarioHarness::new("github").github_scenario("empty");
     let payload = harness
-        .run_quota_snapshot_json("7d")
-        .expect("quota snapshot --json must run");
-    assert_interface_fields_match(&payload, "QuotaSnapshot", "gah quota snapshot --json");
+        .run_quota_list_json()
+        .expect("quota list --json must run");
+    assert_or_update_fixture("quota-list.json", &payload);
 }
 
 #[test]
-fn report_json_matches_contract_fields() {
-    let mut harness = ScenarioHarness::new("github").github_scenario("empty");
+fn report_json_matches_checked_fixture_recursively() {
+    let mut entry = ledger_entry_full(
+        "implementation",
+        "gah/contracts-fixture",
+        Some("agent-ready"),
+        "#637",
+        "2026-07-19T00:00:00Z",
+    );
+    let object = entry
+        .as_object_mut()
+        .expect("ledger entry must be an object");
+    object.insert(
+        "effective_model".into(),
+        Value::String("gpt-5.4-mini".into()),
+    );
+    object.insert("duration_seconds".into(), serde_json::json!(12.5));
+    object.insert("validation_result".into(), Value::String("passed".into()));
+    object.insert("review_verdict".into(), Value::String("APPROVE".into()));
+    object.insert(
+        "usage".into(),
+        serde_json::json!({
+            "usage_source": "codex_session",
+            "usage_classification": "quota_backed",
+            "backend_instance": "codex",
+            "provider": "openai",
+            "actual_model": "gpt-5.4-mini",
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "reasoning_tokens": 10,
+            "cache_read_tokens": 20,
+            "cache_write_tokens": 5,
+            "total_tokens": 175,
+            "requests_count": 1,
+            "estimated_cost_usd": null,
+            "actual_cost_usd": null,
+            "quota_window": "weekly",
+            "quota_used_percent": 25.0,
+            "quota_remaining_percent": 75.0,
+            "quota_reset_at": "2026-07-20T00:00:00Z"
+        }),
+    );
+    let ledger = TestLedger::new().with_entry(entry);
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .with_ledger(ledger);
     let payload = harness
         .run_report_json("backend")
-        .expect("gah report --json must run");
-    assert_interface_fields_match(&payload, "ReportData", "gah report --json");
+        .expect("report --json must run");
+    assert_or_update_fixture("report.json", &payload);
 }
 
-fn assert_interface_fields_match(payload: &Value, interface_name: &str, label: &str) {
-    let rust_fields = json_top_level_fields(payload);
-    let ts_fields = contract_interface_fields(interface_name);
+fn assert_or_update_fixture(name: &str, actual: &Value) {
+    let path = fixture_path(name);
+    if std::env::var_os(UPDATE_FIXTURES_ENV).is_some() {
+        fs::create_dir_all(path.parent().expect("fixture path has parent"))
+            .expect("create contract fixture directory");
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(actual).expect("serialize fixture")
+            ),
+        )
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+        return;
+    }
 
-    let missing_in_contract: BTreeSet<_> = rust_fields
-        .difference(&ts_fields)
-        .map(String::from)
-        .collect();
-    let extra_in_contract: BTreeSet<_> = ts_fields
-        .difference(&rust_fields)
-        .map(String::from)
-        .collect();
-
-    assert!(
-        missing_in_contract.is_empty() && extra_in_contract.is_empty(),
-        "{} field drift\n  fields in Rust JSON missing from `{}`: {:?}\n  fields in contracts not present in Rust JSON: {:?}",
-        label,
-        interface_name,
-        missing_in_contract,
-        extra_in_contract
-    );
+    let expected: Value = serde_json::from_slice(&fs::read(&path).unwrap_or_else(|e| {
+        panic!(
+            "read {}: {e}; regenerate with `{}`",
+            path.display(),
+            regeneration_command()
+        )
+    }))
+    .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    assert_same_json_shape("$", actual, &expected);
 }
 
-fn json_top_level_fields(value: &Value) -> HashSet<String> {
-    value
-        .as_object()
-        .map(|obj| obj.keys().map(|key| key.to_string()).collect())
-        .unwrap_or_default()
-}
-
-fn contract_interface_fields(interface_name: &str) -> HashSet<String> {
-    let marker = format!("export interface {}", interface_name);
-    let start = CONTRACTS_GAH_TS
-        .find(&marker)
-        .unwrap_or_else(|| panic!("cannot find interface `{interface_name}` in contracts"));
-    let after_marker = &CONTRACTS_GAH_TS[start..];
-    let body_start = after_marker
-        .find('{')
-        .unwrap_or_else(|| panic!("interface `{interface_name}` has no opening brace"));
-    let mut depth = 0;
-    let mut body_end = 0;
-    for (offset, ch) in after_marker[body_start + 1..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                if depth == 0 {
-                    body_end = offset + body_start;
-                    break;
-                }
-                depth -= 1;
+fn assert_same_json_shape(path: &str, actual: &Value, expected: &Value) {
+    match (actual, expected) {
+        (Value::Object(actual), Value::Object(expected)) => {
+            let actual_keys = actual.keys().collect::<std::collections::BTreeSet<_>>();
+            let expected_keys = expected.keys().collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                actual_keys,
+                expected_keys,
+                "object field drift at {path}; regenerate with `{}`",
+                regeneration_command()
+            );
+            for (key, actual_value) in actual {
+                assert_same_json_shape(&format!("{path}.{key}"), actual_value, &expected[key]);
             }
-            _ => {}
         }
+        (Value::Array(actual), Value::Array(expected)) => {
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "array shape drift at {path}; regenerate with `{}`",
+                regeneration_command()
+            );
+            for (index, (actual_value, expected_value)) in
+                actual.iter().zip(expected.iter()).enumerate()
+            {
+                assert_same_json_shape(&format!("{path}[{index}]"), actual_value, expected_value);
+            }
+        }
+        _ => assert_eq!(
+            json_kind(actual),
+            json_kind(expected),
+            "JSON type drift at {path}; regenerate with `{}`",
+            regeneration_command()
+        ),
     }
-    if body_end == 0 {
-        panic!("interface `{interface_name}` has no closing brace");
-    }
-
-    let body = &after_marker[body_start + 1..body_end];
-    body.lines()
-        .filter_map(parse_interface_key)
-        .collect::<HashSet<_>>()
 }
 
-fn parse_interface_key(line: &str) -> Option<String> {
-    let mut text = line.trim();
-    if text.is_empty() {
-        return None;
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
-    if text.starts_with("//") || text.starts_with("/*") || text.starts_with("* ") || text == "*/" {
-        return None;
-    }
-
-    if let Some(comment_start) = text.find("//") {
-        text = text[..comment_start].trim();
-        if text.is_empty() {
-            return None;
-        }
-    }
-
-    let part = match text.find(':') {
-        Some(idx) => text[..idx].trim(),
-        None => return None,
-    };
-    let part = part.trim_end_matches('?').trim();
-    if part.is_empty() || part.starts_with('[') || part.starts_with('*') || part.contains(' ') {
-        return None;
-    }
-    if !is_identifier(part) {
-        return None;
-    }
-
-    Some(part.to_string())
 }
 
-fn is_identifier(token: &str) -> bool {
-    let mut chars = token.chars();
-    let first = match chars.next() {
-        Some(ch) => ch,
-        None => return false,
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+fn fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("packages/contracts/src/fixtures")
+        .join(name)
+}
+
+fn regeneration_command() -> &'static str {
+    "GAH_UPDATE_CONTRACT_FIXTURES=1 cargo test --test contracts_drift"
 }

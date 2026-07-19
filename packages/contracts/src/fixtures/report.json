@@ -1,0 +1,58 @@
+{
+  "comparisons": [
+    {
+      "actual_cost_usd": null,
+      "attempts": 1,
+      "average_cost_usd": null,
+      "average_duration_seconds": 12.5,
+      "backend_or_model": "openhands",
+      "cache_read_tokens": 20,
+      "cache_write_tokens": 5,
+      "entries": 1,
+      "estimated_cost_usd": null,
+      "input_tokens": 100,
+      "is_model": false,
+      "output_tokens": 40,
+      "quota_observations": [
+        {
+          "backend": "openhands",
+          "model": "gpt-5.4-mini",
+          "quota_remaining_percent": 75.0,
+          "quota_reset_at": "2026-07-20T00:00:00Z",
+          "quota_used_percent": 25.0,
+          "quota_window": "weekly",
+          "usage_source": "codex_session"
+        }
+      ],
+      "reasoning_tokens": 10,
+      "requests_count": 1,
+      "requests_per_success": 1.0,
+      "review_verdict_distribution": [
+        [
+          "APPROVE",
+          1
+        ]
+      ],
+      "success_rate": 1.0,
+      "tokens_per_success": 175.0,
+      "total_cost_usd": null,
+      "total_tokens": 175,
+      "validation_pass": 1
+    }
+  ],
+  "group_by": "Backend",
+  "ledger_path": "/tmp/.tmpui3GO0/artifacts/ledger.jsonl",
+  "profile": null,
+  "since": "365d",
+  "total_entries": 1,
+  "trend": [
+    {
+      "actual_cost_usd": null,
+      "date": "2026-07-19",
+      "entries": 1,
+      "estimated_cost_usd": null,
+      "total_tokens": 175,
+      "validation_pass": 1
+    }
+  ]
+}

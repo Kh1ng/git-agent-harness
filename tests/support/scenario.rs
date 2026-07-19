@@ -457,18 +457,25 @@ impl ScenarioHarness {
         serde_json::from_str(&stdout[start..]).map_err(|e| format!("parse status json: {e}"))
     }
 
-    pub fn run_quota_snapshot_json(&mut self, since: &str) -> Result<serde_json::Value, String> {
+    pub fn run_quota_list_json(&mut self) -> Result<serde_json::Value, String> {
         self.setup_env();
         self.install_fakes();
+        let store_path = self.artifacts_dir.join("quota-observations.jsonl");
+        fs::write(
+            &store_path,
+            concat!(
+                r#"{"backend":"codex","model":"gpt-5.4-mini","quota_window":"weekly","quota_used_percent":25.0,"quota_remaining_percent":75.0,"quota_reset_at":"2026-07-20T00:00:00Z","observed_at":"2026-07-19T00:00:00Z","usage_source":"codex_status"}"#,
+                "\n"
+            ),
+        )
+        .map_err(|e| format!("write quota fixture store: {e}"))?;
         let out = Command::new(&self.gah_bin)
             .args([
                 "quota",
-                "snapshot",
+                "list",
                 "--json",
-                "--profile",
-                &self.profile_name,
-                "--since",
-                since,
+                "--store-path",
+                store_path.to_str().unwrap(),
             ])
             .env(
                 "XDG_STATE_HOME",
@@ -486,23 +493,22 @@ impl ScenarioHarness {
                 ),
             )
             .output()
-            .map_err(|e| format!("quota snapshot spawn failed: {e}"))?;
+            .map_err(|e| format!("quota list spawn failed: {e}"))?;
         if !out.status.success() {
             return Err(format!(
-                "quota snapshot exit {:?}: {}",
+                "quota list exit {:?}: {}",
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr)
             ));
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let start = stdout.find('{').ok_or_else(|| {
+        let start = stdout.find('[').ok_or_else(|| {
             format!(
-                "no JSON object in quota snapshot stdout: {}",
+                "no JSON array in quota list stdout: {}",
                 &stdout[..stdout.len().min(200)]
             )
         })?;
-        serde_json::from_str(&stdout[start..])
-            .map_err(|e| format!("parse quota snapshot json: {e}"))
+        serde_json::from_str(&stdout[start..]).map_err(|e| format!("parse quota list json: {e}"))
     }
 
     pub fn run_dispatch(&mut self, args: &[&str]) -> Result<CommandResult, String> {
