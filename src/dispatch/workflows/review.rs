@@ -16,6 +16,7 @@ use super::super::review::policy::{
 };
 use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
+use crate::availability;
 use crate::config::{self, GahConfig, Profile};
 use crate::controller::HumanRequiredReason;
 use crate::ledger::LedgerEntry;
@@ -267,6 +268,7 @@ pub(in crate::dispatch) fn review(
         &target.source_branch,
         ledger.review_generation.as_deref(),
     );
+    let availability_state_path = availability::resolve_state_path();
     let next_reviewer = escalation_reason.and_then(|reason| {
         if reason == "review_output_invalid" {
             next_review_candidate(
@@ -276,6 +278,7 @@ pub(in crate::dispatch) fn review(
                 &target.source_branch,
                 None,
                 ledger.review_generation.as_deref(),
+                &availability_state_path,
             )
         } else {
             next_escalatory_reviewer(
@@ -285,6 +288,7 @@ pub(in crate::dispatch) fn review(
                 &target.source_branch,
                 None,
                 ledger.review_generation.as_deref(),
+                &availability_state_path,
             )
         }
     });
@@ -773,6 +777,7 @@ pub(in crate::dispatch) fn review(
                     &target.source_branch,
                     Some((&route.effective_backend, route.effective_model.as_deref())),
                     ledger.review_generation.as_deref(),
+                    &availability::resolve_state_path(),
                 )
                 .is_some()
             {
