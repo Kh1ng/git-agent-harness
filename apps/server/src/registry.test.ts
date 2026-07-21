@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 
 import { createServer } from './server.js';
 import { RegistryService, containsSecretWords, isSchemaCompatible } from './registryService.js';
-import { getCoordinatorIdentity, resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
+import { COORDINATOR_SCHEMA_DIGEST, getCoordinatorIdentity, resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import { authMiddleware } from './authMiddleware.js';
 import type { RegisteredNode, NodeSummary, NodeHealthCheckResult } from '@git-agent-harness/contracts';
 
@@ -91,10 +91,9 @@ test('containsSecretWords detects secret strings', () => {
 });
 
 test('isSchemaCompatible validates digests', () => {
-  const validSha = crypto.createHash('sha256').update('test').digest('hex');
-  assert.equal(isSchemaCompatible(validSha), true);
-  assert.equal(isSchemaCompatible('gah-node-v1-digest'), true);
-  assert.equal(isSchemaCompatible('gah-compat-v2'), true);
+  assert.equal(isSchemaCompatible(COORDINATOR_SCHEMA_DIGEST), true);
+  assert.equal(isSchemaCompatible(crypto.createHash('sha256').update('test').digest('hex')), false);
+  assert.equal(isSchemaCompatible('gah-node-v1-digest'), false);
   assert.equal(isSchemaCompatible('invalid_digest'), false);
 });
 
@@ -107,12 +106,13 @@ test('getCoordinatorIdentity returns stable identity', () => {
   
   try {
     resetCachedCoordinatorIdentity();
-    const id1 = getCoordinatorIdentity(tempPath);
+    const id1 = getCoordinatorIdentity(tempPath, 9123);
     resetCachedCoordinatorIdentity();
-    const id2 = getCoordinatorIdentity(tempPath);
+    const id2 = getCoordinatorIdentity(tempPath, 9123);
 
     assert.equal(id1.node_id, id2.node_id);
     assert.equal(id1.display_name, 'GAH Coordinator');
+    assert.equal(id1.advertised_url, 'http://localhost:9123');
     assert.equal(id1.version, '0.1.0');
     assert.ok(id1.schema_digest);
   } finally {
@@ -136,7 +136,7 @@ test('RegistryService rejects duplicate IDs and malformed inputs', () => {
       display_name: 'Safe Display Name',
       advertised_url: 'http://localhost:8080',
       version: '0.1.0',
-      schema_digest: crypto.createHash('sha256').update('schema').digest('hex'),
+      schema_digest: COORDINATOR_SCHEMA_DIGEST,
       transport_mode: 'loopback',
       secret_ref: 'env:NODE_1_SECRET'
     };
@@ -195,7 +195,7 @@ test('RegistryService rejects duplicate IDs and malformed inputs', () => {
         ...validNode,
         node_id: 'node-3',
         advertised_url: 'http://localhost:8082',
-        schema_digest: 'not-a-digest'
+        schema_digest: crypto.createHash('sha256').update('not-the-current-schema').digest('hex')
       });
     }, /Incompatible schema/);
 
@@ -215,7 +215,7 @@ test('RegistryService validates non-loopback endpoints and TLS modes', () => {
       node_id: 'node-remote',
       display_name: 'Remote Node',
       version: '0.1.0',
-      schema_digest: crypto.createHash('sha256').update('schema').digest('hex'),
+      schema_digest: COORDINATOR_SCHEMA_DIGEST,
       secret_ref: 'env:NODE_SECRET'
     };
 
@@ -246,15 +246,15 @@ test('RegistryService validates non-loopback endpoints and TLS modes', () => {
     });
     assert.equal(resRemoteTls.warnings.length, 0);
 
-    // Non-loopback URL + trusted_lan + no TLS -> Warn, but Success
-    const resLan = registry.registerNode({
-      ...baseNode,
-      node_id: 'node-lan',
-      advertised_url: 'http://node.lan.com',
-      transport_mode: 'trusted_lan'
-    });
-    assert.ok(resLan.warnings.length > 0);
-    assert.ok(resLan.warnings[0].includes('Trusted-LAN endpoints on non-loopback addresses without TLS'));
+    // Non-loopback URL + trusted_lan -> Reject
+    assert.throws(() => {
+      registry.registerNode({
+        ...baseNode,
+        node_id: 'node-lan',
+        advertised_url: 'http://node.lan.com',
+        transport_mode: 'trusted_lan'
+      });
+    }, /cannot use trusted_lan transport mode/);
 
   } finally {
     if (existsSync(tempPath)) {
@@ -278,7 +278,7 @@ test('checkNodeHealth distinguishes different failure kinds', async () => {
     display_name: 'Mock Node',
     advertised_url: `http://127.0.0.1:${mockPort}`,
     version: '0.1.0',
-    schema_digest: crypto.createHash('sha256').update('schema-data').digest('hex'),
+    schema_digest: COORDINATOR_SCHEMA_DIGEST,
     transport_mode: 'authenticated_remote',
     secret_ref: 'env:MOCK_NODE_TOKEN'
   };
@@ -491,7 +491,7 @@ test('Server endpoints handle Node CRUD, Secret Rotation and Revocation', async 
       display_name: 'Test API Node',
       advertised_url: 'http://localhost:9000',
       version: '0.1.0',
-      schema_digest: crypto.createHash('sha256').update('schema-data').digest('hex'),
+      schema_digest: COORDINATOR_SCHEMA_DIGEST,
       transport_mode: 'loopback',
       secret_ref: 'env:TEST_SECRET'
     };
@@ -668,4 +668,3 @@ test('authMiddleware timing-safe comparison rejects invalid tokens', () => {
   
   delete process.env.COORDINATOR_TOKEN;
 });
-

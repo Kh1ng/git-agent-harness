@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import crypto from 'node:crypto';
 import type { RegisteredNode, NodeSummary, NodeHealthCheckResult } from '@git-agent-harness/contracts';
+import { COORDINATOR_SCHEMA_DIGEST } from './coordinatorIdentity.js';
 
 export function isLoopback(urlStr: string): boolean {
   try {
@@ -35,7 +36,7 @@ export function containsSecretWords(text: string): boolean {
 }
 
 export function isSchemaCompatible(schemaDigest: string): boolean {
-  return /^[a-fA-F0-9]{64}$/.test(schemaDigest) || schemaDigest === 'gah-node-v1-digest' || schemaDigest.startsWith('gah-compat-');
+  return schemaDigest === COORDINATOR_SCHEMA_DIGEST;
 }
 
 export function resolveSecret(secretRef: string): string {
@@ -180,10 +181,7 @@ export class RegistryService {
           throw new Error('Non-loopback authenticated remote endpoints must use TLS (https:// or wss://)');
         }
       } else if (node.transport_mode === 'trusted_lan') {
-        const url = node.advertised_url.toLowerCase();
-        if (!url.startsWith('https://') && !url.startsWith('wss://')) {
-          warnings.push('Trusted-LAN endpoints on non-loopback addresses without TLS are susceptible to eavesdropping');
-        }
+        throw new Error('Non-loopback advertised URL cannot use trusted_lan transport mode; use authenticated_remote with TLS');
       }
     } else {
       if (node.transport_mode === 'authenticated_remote') {

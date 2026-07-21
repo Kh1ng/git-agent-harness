@@ -15,7 +15,7 @@ async function main() {
   console.log('Starting Git Agent Harness server...');
   
   // Create Express app
-  const app = createExpressServer();
+  const app = createExpressServer({ coordinatorPort: PORT });
   
   // Create HTTP server from Express app
   const server = createHttpServer(app);

@@ -42,6 +42,11 @@ type ConfigEffectiveDeps = {
   runDoctor: (profile: string) => Promise<DoctorSnapshot>;
 };
 
+type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
+  registryService?: RegistryService;
+  coordinatorPort?: number;
+};
+
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
   runConfigShowProfile,
   runDoctor
@@ -52,12 +57,13 @@ const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
 const DEFAULT_PROFILE = 'gah';
 
 export function createServer(
-  configDeps: Partial<ConfigEffectiveDeps> & { registryService?: RegistryService } = {}
+  configDeps: CreateServerOptions = {}
 ): express.Express {
   const configEffectiveDeps: ConfigEffectiveDeps = {
     ...DEFAULT_CONFIG_EFFECTIVE_DEPS,
     ...configDeps
   };
+  const coordinatorPort = configDeps.coordinatorPort ?? 3773;
 
   const registryService = configDeps.registryService || new RegistryService();
 
@@ -72,7 +78,7 @@ export function createServer(
   app.get('/health', (req, res) => {
     const readiness = getServerReadiness();
     const status = readiness.isReady ? 'healthy' : 'starting';
-    const identity = getCoordinatorIdentity();
+    const identity = getCoordinatorIdentity(undefined, coordinatorPort);
 
     res.json({
       status,
@@ -88,7 +94,7 @@ export function createServer(
 
   // API info endpoint
   app.get('/api/info', (req, res) => {
-    const identity = getCoordinatorIdentity();
+    const identity = getCoordinatorIdentity(undefined, coordinatorPort);
     res.json({
       name: 'Git Agent Harness',
       version: SERVER_VERSION,

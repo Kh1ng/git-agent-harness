@@ -10,21 +10,26 @@ export interface CoordinatorIdentity {
   schema_digest: string;
 }
 
-let cachedIdentity: CoordinatorIdentity | null = null;
+export const COORDINATOR_SCHEMA_DIGEST = crypto
+  .createHash('sha256')
+  .update('gah-coordinator-v1')
+  .digest('hex');
+
+let cachedIdentity: { cacheKey: string; identity: CoordinatorIdentity } | null = null;
 
 export function getCoordinatorIdentity(
   configPath?: string,
   port: number = 3773
 ): CoordinatorIdentity {
-  if (cachedIdentity) return cachedIdentity;
-
   const identityPath = configPath || process.env.GAH_COORDINATOR_IDENTITY_PATH || resolve(process.cwd(), 'config/coordinator-identity.json');
+  const cacheKey = `${identityPath}::${port}`;
+  if (cachedIdentity?.cacheKey === cacheKey) return cachedIdentity.identity;
   
   let node_id: string;
   let display_name = 'GAH Coordinator';
   let advertised_url = `http://localhost:${port}`;
   const version = '0.1.0';
-  const schema_digest = crypto.createHash('sha256').update('gah-coordinator-v1').digest('hex');
+  const schema_digest = COORDINATOR_SCHEMA_DIGEST;
 
   if (existsSync(identityPath)) {
     try {
@@ -48,14 +53,15 @@ export function getCoordinatorIdentity(
     }
   }
 
-  cachedIdentity = {
+  const identity = {
     node_id,
     display_name,
     advertised_url,
     version,
     schema_digest
   };
-  return cachedIdentity;
+  cachedIdentity = { cacheKey, identity };
+  return identity;
 }
 
 export function resetCachedCoordinatorIdentity() {
