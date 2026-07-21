@@ -355,21 +355,40 @@ fn build_candidates(
 
     if let Some(list) = &routing.pm_candidates {
         for candidate in list {
-            add_candidate(&mut aggregates, &mut index, "pm", candidate.clone());
+            add_candidate(
+                routing,
+                &mut aggregates,
+                &mut index,
+                "pm",
+                candidate.clone(),
+            );
         }
     }
     if let Some(list) = &routing.improve_candidates {
         for candidate in list {
-            add_candidate(&mut aggregates, &mut index, "improve", candidate.clone());
+            add_candidate(
+                routing,
+                &mut aggregates,
+                &mut index,
+                "improve",
+                candidate.clone(),
+            );
         }
     }
     if let Some(list) = &routing.review_candidates {
         for candidate in list {
-            add_candidate(&mut aggregates, &mut index, "review", candidate.clone());
+            add_candidate(
+                routing,
+                &mut aggregates,
+                &mut index,
+                "review",
+                candidate.clone(),
+            );
         }
     }
     if let Some(candidate) = &routing.routine_reviewer {
         add_candidate(
+            routing,
             &mut aggregates,
             &mut index,
             "routine_review",
@@ -378,6 +397,7 @@ fn build_candidates(
     }
     for candidate in &routing.escalatory_reviewers {
         add_candidate(
+            routing,
             &mut aggregates,
             &mut index,
             "escalatory_review",
@@ -388,6 +408,7 @@ fn build_candidates(
     if aggregates.is_empty() {
         if let Some(backend) = routing.default_backend.clone() {
             add_candidate(
+                routing,
                 &mut aggregates,
                 &mut index,
                 "default",
@@ -404,12 +425,7 @@ fn build_candidates(
     aggregates
         .into_iter()
         .map(|(key, aggregate)| {
-            let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
-                &key.backend,
-                key.model.as_deref(),
-                key.quota_pool.as_deref(),
-            );
-            identity.backend_instance = key.backend_instance.clone();
+            let identity = routing.execution_identity_for_candidate(&aggregate.candidate);
             let scope = find_scope_status(scope_lookup, &key);
             let candidate_group = key.model.as_deref().and_then(|model| {
                 candidate_map.get(&candidate_usage_key(&key.backend, Some(model)))
@@ -434,7 +450,14 @@ fn build_candidates(
                 backend_instance: Some(key.backend_instance),
                 model: key.model,
                 quota_pool: key.quota_pool,
-                configured: profile.is_backend_configured(&aggregate.candidate.backend),
+                configured: aggregate
+                    .candidate
+                    .instance
+                    .as_ref()
+                    .and_then(|name| routing.backend_instances.get(name))
+                    .is_some()
+                    || (aggregate.candidate.instance.is_none()
+                        && profile.is_backend_configured(&aggregate.candidate.backend)),
                 eligible_now: scope.as_ref().map(|s| s.eligible).unwrap_or(true),
                 reason: scope
                     .as_ref()
@@ -484,24 +507,18 @@ fn find_scope_status(
 }
 
 fn add_candidate(
+    routing: &RoutingPolicy,
     aggregates: &mut Vec<(CandidateKey, CandidateAggregate)>,
     index: &mut HashMap<CandidateKey, usize>,
     mode: &str,
     candidate: CandidateConfig,
 ) {
-    let effective_quota_pool = availability::resolve_candidate_quota_pool(
-        &candidate.backend,
-        candidate.model.as_deref(),
-        candidate.quota_pool.as_deref(),
-    );
+    let identity = routing.execution_identity_for_candidate(&candidate);
     let key = CandidateKey {
-        backend: config::canonical_backend_name(&candidate.backend).to_string(),
-        backend_instance: crate::execution_identity::legacy_backend_instance(
-            config::canonical_backend_name(&candidate.backend),
-            effective_quota_pool.as_deref(),
-        ),
-        model: candidate.model.clone(),
-        quota_pool: effective_quota_pool,
+        backend: identity.logical_backend,
+        backend_instance: identity.backend_instance,
+        model: identity.effective_model,
+        quota_pool: identity.quota_pool,
     };
     if let Some(idx) = index.get(&key).copied() {
         let modes = &mut aggregates[idx].1.modes;
@@ -1078,6 +1095,7 @@ mod tests {
 
     #[test]
     fn add_candidate_merges_modes_for_the_same_key_without_duplicating() {
+        let routing = RoutingPolicy::default();
         let mut aggregates = Vec::new();
         let mut index = HashMap::new();
         let candidate = CandidateConfig {
@@ -1085,9 +1103,21 @@ mod tests {
             model: Some("gpt-5".to_string()),
             ..Default::default()
         };
-        add_candidate(&mut aggregates, &mut index, "pm", candidate.clone());
-        add_candidate(&mut aggregates, &mut index, "improve", candidate.clone());
-        add_candidate(&mut aggregates, &mut index, "pm", candidate);
+        add_candidate(
+            &routing,
+            &mut aggregates,
+            &mut index,
+            "pm",
+            candidate.clone(),
+        );
+        add_candidate(
+            &routing,
+            &mut aggregates,
+            &mut index,
+            "improve",
+            candidate.clone(),
+        );
+        add_candidate(&routing, &mut aggregates, &mut index, "pm", candidate);
 
         assert_eq!(aggregates.len(), 1);
         assert_eq!(aggregates[0].1.modes, vec!["pm", "improve"]);
@@ -1098,6 +1128,7 @@ mod tests {
         // Candidate scoping: "agy" and "agy-second" are different instances
         // and must never collapse into a single row (see QuotaPage.tsx's own
         // `scopeIdentity` doc comment for the same invariant on the UI side).
+        let routing = RoutingPolicy::default();
         let mut aggregates = Vec::new();
         let mut index = HashMap::new();
         let a = CandidateConfig {
@@ -1110,10 +1141,41 @@ mod tests {
             quota_pool: Some("agy-second".to_string()),
             ..Default::default()
         };
-        add_candidate(&mut aggregates, &mut index, "review", a);
-        add_candidate(&mut aggregates, &mut index, "review", b);
+        add_candidate(&routing, &mut aggregates, &mut index, "review", a);
+        add_candidate(&routing, &mut aggregates, &mut index, "review", b);
 
         assert_eq!(aggregates.len(), 2);
+    }
+
+    #[test]
+    fn add_candidate_uses_declared_instance_identity_and_quota_pool() {
+        let mut routing = RoutingPolicy::default();
+        routing.backend_instances.insert(
+            "opencode-subscription".into(),
+            crate::config::BackendInstanceConfig {
+                runner_kind: "opencode".into(),
+                logical_backend: Some("opencode".into()),
+                quota_pool: Some("opencode-plan".into()),
+                ..Default::default()
+            },
+        );
+        let mut aggregates = Vec::new();
+        let mut index = HashMap::new();
+        add_candidate(
+            &routing,
+            &mut aggregates,
+            &mut index,
+            "improve",
+            CandidateConfig {
+                backend: "opencode".into(),
+                instance: Some("opencode-subscription".into()),
+                model: Some("gpt-5".into()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(aggregates[0].0.backend_instance, "opencode-subscription");
+        assert_eq!(aggregates[0].0.quota_pool.as_deref(), Some("opencode-plan"));
     }
 
     // -- build_candidates -----------------------------------------------------

@@ -200,6 +200,10 @@ instance (`agy` and `agy-second`, for example), even when the provider and
 model are identical; this keeps quota, availability, and usage records
 separate.
 
+For a shared, provider-neutral registry of CLI wrappers, account labels,
+isolated state roots, and quota pools—with per-project overrides—see
+[`docs/BACKEND_INSTANCE_CONFIG_MIGRATION.md`](docs/BACKEND_INSTANCE_CONFIG_MIGRATION.md).
+
 Routing is currently configured in TOML. Verify the selected config and its
 prerequisites from the CLI before starting a loop:
 

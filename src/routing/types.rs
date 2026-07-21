@@ -61,12 +61,16 @@ impl CandidateIdentity {
         }
     }
 
-    /// Compatibility key used during execution-identity carrier migration.
-    /// The approved destination key is backend-instance/model, but changing
-    /// equality here before the availability migration would reorder routes.
+    /// Canonical destination key activated by execution-identity config.
+    /// Instances remain independently routable even when they share a runner,
+    /// model, account label, or quota pool.
     pub fn from_execution_identity(identity: &ExecutionIdentity) -> Self {
         Self {
-            backend: identity.logical_backend.clone(),
+            backend: if identity.explicit_instance {
+                identity.backend_instance.clone()
+            } else {
+                identity.logical_backend.clone()
+            },
             model: identity.effective_model.clone(),
         }
     }
@@ -162,6 +166,7 @@ pub enum RouteError {
     },
     ApprovalRequired {
         backend: String,
+        backend_instance: Option<String>,
         model: Option<String>,
         skipped: Vec<SkippedBackend>,
     },
@@ -211,6 +216,7 @@ impl fmt::Display for RouteError {
             }
             RouteError::ApprovalRequired {
                 backend,
+                backend_instance,
                 model,
                 skipped,
             } => {
@@ -219,6 +225,12 @@ impl fmt::Display for RouteError {
                     "operator approval required before using paid route {}",
                     candidate_label(backend, model.as_deref())
                 )?;
+                if let Some(instance) = backend_instance
+                    .as_deref()
+                    .filter(|instance| *instance != backend)
+                {
+                    write!(f, " (instance {instance})")?;
+                }
                 if !skipped.is_empty() {
                     write!(f, "; skipped: {}", render_skips(skipped))?;
                 }
@@ -286,6 +298,7 @@ mod tests {
     fn approval_error_preserves_exact_paid_route_identity() {
         let error = RouteError::ApprovalRequired {
             backend: "opencode-nous".into(),
+            backend_instance: None,
             model: Some("glm-5.2".into()),
             skipped: Vec::new(),
         };
@@ -339,6 +352,7 @@ mod tests {
 
         let approval = RouteError::ApprovalRequired {
             backend: "opencode".into(),
+            backend_instance: None,
             model: Some("glm-5.2".into()),
             skipped: Vec::new(),
         };

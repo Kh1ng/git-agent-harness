@@ -161,8 +161,29 @@ fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
     }
     failed |= !check_manager_memory(profile);
     failed |= !check_candidate_model_consistency(defaults, profile);
+    failed |= !check_backend_instance_config(defaults, profile);
     failed |= !check_generated_artifact_policy(profile);
     !failed
+}
+
+fn check_backend_instance_config(defaults: &Defaults, profile: &Profile) -> bool {
+    match config::check_profile_backend_instances(defaults, profile) {
+        Ok(()) => {
+            let count = profile.effective_routing(defaults).backend_instances.len();
+            print_check(
+                CheckStatus::Pass,
+                "backend instances",
+                &format!("{count} normalized instance declaration(s) valid"),
+            );
+            true
+        }
+        Err(errors) => {
+            for error in &errors {
+                print_check(CheckStatus::Fail, "backend instances", error);
+            }
+            false
+        }
+    }
 }
 
 fn check_generated_artifact_policy(profile: &Profile) -> bool {

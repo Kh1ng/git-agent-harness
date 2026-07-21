@@ -84,13 +84,49 @@ fn review_attempt_environment_isolates_only_agy_second() {
     profile.agy_second_home = Some("/tmp/agy-account-2".into());
     let base = vec![("HOME".to_string(), "/home/operator".to_string())];
 
-    let primary = review_attempt_environment(&profile, "agy", &base);
+    let primary_identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        "agy",
+        None::<String>,
+        None::<String>,
+    );
+    let primary = review_attempt_environment(&profile, &primary_identity, &base);
     assert_eq!(primary, base);
 
-    let secondary = review_attempt_environment(&profile, "agy-second", &base);
+    let secondary_identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        "agy-second",
+        None::<String>,
+        None::<String>,
+    );
+    let secondary = review_attempt_environment(&profile, &secondary_identity, &base);
     assert_eq!(
         secondary,
         vec![("HOME".to_string(), "/tmp/agy-account-2".to_string())]
+    );
+}
+
+#[test]
+fn review_attempt_environment_uses_declared_instance_state_root() {
+    let profile = test_profile_for_notifications();
+    let base = vec![
+        ("HOME".to_string(), "/home/operator".to_string()),
+        ("PATH".to_string(), "/bin".to_string()),
+    ];
+    let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        "opencode",
+        Some("openai/gpt-5"),
+        None::<String>,
+    );
+    identity.backend_instance = "opencode-api".into();
+    identity.set_state_root(Some("/var/lib/gah/opencode-api".into()));
+
+    let environment = review_attempt_environment(&profile, &identity, &base);
+
+    assert_eq!(
+        environment,
+        vec![
+            ("PATH".to_string(), "/bin".to_string()),
+            ("HOME".to_string(), "/var/lib/gah/opencode-api".to_string()),
+        ]
     );
 }
 

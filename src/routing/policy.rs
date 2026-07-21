@@ -138,10 +138,10 @@ pub(super) fn explicit_candidates(
         // different runner: that was the source of codex aliases reaching
         // OpenHands/Claude and being reported as exit-0 no-progress.
         if let Some(configured) = policy_candidates(routing, mode) {
-            if let Some(position) = configured.iter().position(|candidate| {
-                candidate.identity.logical_backend == primary.identity.logical_backend
-                    && candidate.identity.effective_model == primary.identity.effective_model
-            }) {
+            if let Some(position) = configured
+                .iter()
+                .position(|candidate| same_destination(candidate, primary))
+            {
                 candidates.extend(configured.into_iter().skip(position + 1));
             } else {
                 candidates.extend(configured);
@@ -197,10 +197,11 @@ fn dedupe_candidates(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for candidate in candidates {
+        let identity = CandidateIdentity::from_execution_identity(&candidate.identity);
         let key = format!(
             "{}\u{0}{}",
-            candidate.identity.logical_backend,
-            candidate.identity.effective_model.as_deref().unwrap_or("")
+            identity.backend,
+            identity.model.as_deref().unwrap_or("")
         );
         if seen.insert(key) {
             out.push(candidate);
@@ -243,10 +244,7 @@ pub(super) fn order_candidates(
     };
     let selected_over = original
         .iter()
-        .take_while(|candidate| {
-            candidate.identity.logical_backend != selected.identity.logical_backend
-                || candidate.identity.effective_model != selected.identity.effective_model
-        })
+        .take_while(|candidate| !same_destination(candidate, selected))
         .filter(|candidate| {
             compare_candidates(
                 selected,
@@ -323,9 +321,8 @@ fn compare_candidates(
 fn candidate_run_count(candidate: &RouteCandidate, runtime: &RoutingRuntimeState) -> u64 {
     runtime
         .recent_runs
-        .get(&CandidateIdentity::new(
-            candidate.identity.logical_backend.as_str(),
-            candidate.identity.effective_model.as_deref(),
+        .get(&CandidateIdentity::from_execution_identity(
+            &candidate.identity,
         ))
         .copied()
         .unwrap_or(0)
@@ -420,7 +417,7 @@ pub(super) fn policy_candidates(policy: &RoutingPolicy, mode: &str) -> Option<Ve
         "improve" | "fix" | "experiment" => policy.improve_candidates.as_ref(),
         _ => None,
     };
-    raw.map(|list| route_candidates(list))
+    raw.map(|list| route_candidates(policy, list))
 }
 
 /// Return true when this exact backend/model is configured as an
@@ -485,7 +482,7 @@ pub(super) fn task_rule_candidates(
         .iter()
         .enumerate()
         .find(|(_, rule)| task_rule_matches(rule, mode, task))
-        .map(|(idx, rule)| (idx, route_candidates(&rule.candidates)))
+        .map(|(idx, rule)| (idx, route_candidates(routing, &rule.candidates)))
 }
 
 fn task_rule_matches(rule: &TaskRoutingRule, mode: &str, task: TaskRoutingContext<'_>) -> bool {
@@ -500,29 +497,21 @@ fn task_rule_dimension_matches(values: &[String], value: Option<&str>) -> bool {
         || value.is_some_and(|value| values.iter().any(|item| item.eq_ignore_ascii_case(value)))
 }
 
-fn route_candidates(raw: &[crate::config::CandidateConfig]) -> Vec<RouteCandidate> {
+fn route_candidates(
+    routing: &RoutingPolicy,
+    raw: &[crate::config::CandidateConfig],
+) -> Vec<RouteCandidate> {
     raw.iter()
         .enumerate()
-        .map(|(idx, c)| {
-            let quota_pool = crate::availability::resolve_candidate_quota_pool(
-                &c.backend,
-                c.model.as_deref(),
-                c.quota_pool.as_deref(),
-            );
-            RouteCandidate {
-                identity: ExecutionIdentity::legacy_candidate(
-                    c.backend.clone(),
-                    c.model.clone(),
-                    quota_pool,
-                ),
-                priority: c.priority,
-                included_in_quota: c.included_in_quota,
-                marginal_cost_usd: c.marginal_cost_usd,
-                quota_usage_percent: c.quota_usage_percent,
-                quota_days_remaining: c.quota_days_remaining,
-                requires_approval: c.requires_approval,
-                original_order: idx,
-            }
+        .map(|(idx, c)| RouteCandidate {
+            identity: routing.execution_identity_for_candidate(c),
+            priority: c.priority,
+            included_in_quota: c.included_in_quota,
+            marginal_cost_usd: c.marginal_cost_usd,
+            quota_usage_percent: c.quota_usage_percent,
+            quota_days_remaining: c.quota_days_remaining,
+            requires_approval: c.requires_approval,
+            original_order: idx,
         })
         .collect()
 }
@@ -573,7 +562,7 @@ pub(super) fn configured_route_candidate(
                 .find(matches)
         })?;
 
-    route_candidates(std::slice::from_ref(configured)).pop()
+    route_candidates(routing, std::slice::from_ref(configured)).pop()
 }
 
 impl RouteCandidate {
@@ -592,6 +581,11 @@ impl RouteCandidate {
             || self.quota_usage_percent.is_some()
             || self.quota_days_remaining.is_some()
     }
+}
+
+pub(super) fn same_destination(left: &RouteCandidate, right: &RouteCandidate) -> bool {
+    CandidateIdentity::from_execution_identity(&left.identity)
+        == CandidateIdentity::from_execution_identity(&right.identity)
 }
 
 fn review_fallback_backend_name(routing: &RoutingPolicy) -> Option<&str> {

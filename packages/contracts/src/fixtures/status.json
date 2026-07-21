@@ -12,6 +12,7 @@
     "openhands": false,
     "vibe": false
   },
+  "backend_instances": [],
   "blocked_work_items": [],
   "blockers": [],
   "constraints": [],

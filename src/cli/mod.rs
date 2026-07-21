@@ -261,38 +261,84 @@ pub fn run() -> Result<()> {
         },
 
         Commands::RouteApproval { command } => {
-            let (profile, work_id, backend, model, config_path, granted) = match command {
+            let (profile, work_id, backend, instance, model, config_path, granted) = match command {
                 RouteApprovalCommands::Grant {
                     profile,
                     work_id,
                     backend,
+                    instance,
                     model,
                     config_path,
-                } => (profile, work_id, backend, model, config_path, true),
+                } => (
+                    profile,
+                    work_id,
+                    backend,
+                    instance,
+                    model,
+                    config_path,
+                    true,
+                ),
                 RouteApprovalCommands::Revoke {
                     profile,
                     work_id,
                     backend,
+                    instance,
                     model,
                     config_path,
-                } => (profile, work_id, backend, model, config_path, false),
+                } => (
+                    profile,
+                    work_id,
+                    backend,
+                    instance,
+                    model,
+                    config_path,
+                    false,
+                ),
             };
             let cfg = config::load(config_path.as_deref())?;
             let prof = config::get_profile(&cfg, &profile)?;
-            let entry = ledger::LedgerEntry::new_paid_route_approval(
+            if let Some(instance_name) = instance.as_deref() {
+                let routing = prof.effective_routing(&cfg.defaults);
+                let declared = routing
+                    .backend_instances
+                    .get(instance_name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "unknown backend instance '{instance_name}' for profile '{profile}'"
+                        )
+                    })?;
+                let logical_backend = declared
+                    .logical_backend
+                    .as_deref()
+                    .unwrap_or(declared.runner_kind.as_str());
+                if logical_backend != backend {
+                    anyhow::bail!(
+                        "backend instance '{}' belongs to logical backend '{}', not '{}'",
+                        instance_name,
+                        logical_backend,
+                        backend
+                    );
+                }
+            }
+            let entry = ledger::LedgerEntry::new_paid_route_approval_for_instance(
                 &profile,
                 prof,
                 &work_id,
                 &backend,
+                instance.as_deref(),
                 model.as_deref(),
                 granted,
             );
             let path = ledger::append(&cfg, &entry)?;
             println!(
-                "Paid route approval {} for work_id '{}' on {}/{} ({})",
+                "Paid route approval {} for work_id '{}' on {}{}/{} ({})",
                 if granted { "granted" } else { "revoked" },
                 work_id,
                 backend,
+                instance
+                    .as_deref()
+                    .map(|instance| format!(" [{instance}]"))
+                    .unwrap_or_default(),
                 model.as_deref().unwrap_or("default"),
                 path.display()
             );

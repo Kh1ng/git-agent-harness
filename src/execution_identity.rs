@@ -2,6 +2,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Canonical identity selected for one execution attempt.
 ///
 /// This is the typed carrier approved by
@@ -19,6 +23,14 @@ pub struct ExecutionIdentity {
     /// with the same resolver dispatch uses.
     #[serde(skip, default)]
     pub executable: Option<PathBuf>,
+    /// Optional isolated HOME/state directory used only to launch this
+    /// instance. Like the executable, it must never enter durable identity.
+    #[serde(skip, default)]
+    pub state_root: Option<PathBuf>,
+    /// Whether `backend_instance` came from an explicit instance declaration
+    /// rather than the legacy backend/quota compatibility projection.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub explicit_instance: bool,
     /// Backend requested before routing/fallback.
     pub requested_backend: String,
     /// Effective logical backend selected by routing.
@@ -77,6 +89,8 @@ impl ExecutionIdentity {
         Self {
             runner_kind: runner_kind_for_backend(&logical_backend).to_string(),
             executable: None,
+            state_root: None,
+            explicit_instance: false,
             requested_backend,
             logical_backend,
             backend_instance,
@@ -117,6 +131,10 @@ impl ExecutionIdentity {
 
     pub fn set_executable(&mut self, executable: Option<PathBuf>) {
         self.executable = executable;
+    }
+
+    pub fn set_state_root(&mut self, state_root: Option<PathBuf>) {
+        self.state_root = state_root;
     }
 
     /// Enforce the durable-label contract at the last boundary before an

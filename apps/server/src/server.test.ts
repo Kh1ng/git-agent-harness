@@ -14,6 +14,7 @@ function profilePayload(profile: string): ConfigProfileSummary {
     max_implementation_failures_per_ticket: 8,
     max_review_cycles_per_ticket: 3,
     max_paid_reviews_per_ticket: 3,
+    backend_instances: [],
     pm_candidates: [],
     improve_candidates: [],
     review_candidates: [],

@@ -1,6 +1,7 @@
 use super::super::attempts::{
     apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output_for_identity,
-    preflight, record_route_attempt, resolve_llm, route_identity, route_label, run_backend,
+    preflight_identity, record_route_attempt, resolve_llm, route_identity, route_label,
+    run_backend_for_identity,
 };
 use super::super::issues::try_discover_open_issues;
 use super::super::prompts::indent_untrusted_text;
@@ -110,7 +111,7 @@ pub(crate) fn pm(
     };
     let mut plan_route = decide_route(cfg, profile, route_req.clone(), None, ledger)?;
     apply_route_to_ledger(ledger, &plan_route);
-    preflight(profile, &plan_route.effective_backend)?;
+    preflight_identity(profile, &plan_route.identity)?;
     let mut llm = resolve_llm(
         cfg,
         args,
@@ -148,14 +149,13 @@ pub(crate) fn pm(
         fs::write(attempt_dir.join("task.md"), crate::redact::redact(&task))?;
 
         record_route_attempt(ledger, &plan_route)?;
-        let result = run_backend(
-            &plan_route.effective_backend,
+        let result = run_backend_for_identity(
+            &plan_route.identity,
             profile,
             repo,
             &task,
             &attempt_dir,
             &llm,
-            plan_route.effective_model.as_deref(),
             None,
             Some(remaining.as_secs().max(1)),
         )?;
@@ -226,7 +226,7 @@ pub(crate) fn pm(
         );
         plan_route = rerouted;
         apply_route_to_ledger(ledger, &plan_route);
-        preflight(profile, &plan_route.effective_backend)?;
+        preflight_identity(profile, &plan_route.identity)?;
         llm = resolve_llm(
             cfg,
             args,

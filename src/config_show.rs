@@ -5,11 +5,12 @@ use crate::{
 use anyhow::Result;
 use std::{collections::BTreeMap, path::Path};
 
-pub const CONFIG_SHOW_SCHEMA_VERSION: u32 = 2;
+pub const CONFIG_SHOW_SCHEMA_VERSION: u32 = 3;
 
 #[derive(serde::Serialize)]
 pub struct RoutingCandidateSummary {
     pub backend: String,
+    pub instance: Option<String>,
     pub model: Option<String>,
     pub quota_pool: Option<String>,
     pub priority: i32,
@@ -18,6 +19,44 @@ pub struct RoutingCandidateSummary {
     pub quota_usage_percent: Option<f64>,
     pub quota_days_remaining: Option<f64>,
     pub requires_approval: bool,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct BackendInstanceSummary {
+    pub backend_instance: String,
+    pub runner_kind: String,
+    pub logical_backend: String,
+    pub account_label: Option<String>,
+    pub auth_source_label: Option<String>,
+    pub quota_pool: Option<String>,
+    pub supported_models: Vec<String>,
+    pub executable_configured: bool,
+    pub isolated_state_configured: bool,
+}
+
+pub(crate) fn backend_instance_summaries(
+    routing: &config::RoutingPolicy,
+) -> Vec<BackendInstanceSummary> {
+    let mut summaries = routing
+        .backend_instances
+        .iter()
+        .map(|(name, instance)| BackendInstanceSummary {
+            backend_instance: name.clone(),
+            runner_kind: instance.runner_kind.clone(),
+            logical_backend: instance
+                .logical_backend
+                .clone()
+                .unwrap_or_else(|| instance.runner_kind.clone()),
+            account_label: instance.account_label.clone(),
+            auth_source_label: instance.auth_source_label.clone(),
+            quota_pool: instance.quota_pool.clone(),
+            supported_models: instance.supported_models.clone(),
+            executable_configured: instance.executable.is_some(),
+            isolated_state_configured: instance.state_root.is_some(),
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| left.backend_instance.cmp(&right.backend_instance));
+    summaries
 }
 
 #[derive(serde::Serialize)]
@@ -105,6 +144,7 @@ pub struct ConfigProfileSummary {
     pub max_implementation_failures_per_ticket: u32,
     pub max_review_cycles_per_ticket: u32,
     pub max_paid_reviews_per_ticket: u32,
+    pub backend_instances: Vec<BackendInstanceSummary>,
     pub pm_candidates: Vec<RoutingCandidateSummary>,
     pub improve_candidates: Vec<RoutingCandidateSummary>,
     pub review_candidates: Vec<RoutingCandidateSummary>,
@@ -132,6 +172,7 @@ pub struct ConfigShowFull {
 fn to_summary(candidate: &config::CandidateConfig) -> RoutingCandidateSummary {
     RoutingCandidateSummary {
         backend: candidate.backend.clone(),
+        instance: candidate.instance.clone(),
         model: candidate.model.clone(),
         quota_pool: candidate.quota_pool.clone(),
         priority: candidate.priority,
@@ -198,6 +239,7 @@ fn build_profile_summary(
 ) -> Result<ConfigProfileSummary> {
     let profile = config::get_profile(cfg, profile_name)?;
     let routing = profile.effective_routing(&cfg.defaults);
+    let backend_instances = backend_instance_summaries(&routing);
     let routine_reviewer = routing.effective_routine_reviewer();
     let escalatory_reviewers = routing.effective_escalatory_reviewers();
 
@@ -267,6 +309,7 @@ fn build_profile_summary(
         max_implementation_failures_per_ticket: routing.max_implementation_failures_per_ticket(),
         max_review_cycles_per_ticket: routing.max_review_cycles_per_ticket(),
         max_paid_reviews_per_ticket: routing.max_paid_reviews_per_ticket(),
+        backend_instances,
         pm_candidates,
         improve_candidates,
         review_candidates,
@@ -369,6 +412,7 @@ mod tests {
         let mut profile = test_profile_for_notifications();
         profile.routing.pm_candidates = Some(vec![CandidateConfig {
             backend: "claude".into(),
+            instance: None,
             model: Some("sonnet".into()),
             quota_pool: Some("default".into()),
             priority: 10,
@@ -380,6 +424,7 @@ mod tests {
         }]);
         profile.routing.improve_candidates = Some(vec![CandidateConfig {
             backend: "vibe".into(),
+            instance: None,
             model: None,
             quota_pool: None,
             priority: 20,
@@ -391,6 +436,7 @@ mod tests {
         }]);
         profile.routing.review_candidates = Some(vec![CandidateConfig {
             backend: "openhands".into(),
+            instance: None,
             model: Some("opus".into()),
             quota_pool: Some("review".into()),
             priority: 30,
@@ -402,6 +448,7 @@ mod tests {
         }]);
         profile.routing.routine_reviewer = Some(CandidateConfig {
             backend: "codex".into(),
+            instance: None,
             model: Some("gpt-4.1".into()),
             quota_pool: None,
             priority: 5,
@@ -413,6 +460,7 @@ mod tests {
         });
         profile.routing.escalatory_reviewers = vec![CandidateConfig {
             backend: "ogy".into(),
+            instance: None,
             model: None,
             quota_pool: None,
             priority: 15,
@@ -477,6 +525,7 @@ mod tests {
     fn to_summary_copies_all_candidate_fields() {
         let candidate = CandidateConfig {
             backend: "claude".into(),
+            instance: None,
             model: Some("opus".into()),
             quota_pool: Some("main".into()),
             priority: 12,

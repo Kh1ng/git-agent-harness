@@ -135,6 +135,7 @@ pub(super) fn candidate_config(
 ) -> crate::config::CandidateConfig {
     crate::config::CandidateConfig {
         backend: backend.into(),
+        instance: None,
         model: model.map(str::to_string),
         quota_pool: quota_pool.map(str::to_string),
         priority: 0,

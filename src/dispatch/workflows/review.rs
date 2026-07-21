@@ -1,6 +1,6 @@
 use super::super::attempts::{
-    apply_backend_instance_env, apply_route_to_ledger, decide_route, mark_shutdown_cancelled,
-    record_route_attempt, reserve_backend_slot, review_preflight, review_usage,
+    apply_execution_identity_env, apply_route_to_ledger, decide_route, mark_shutdown_cancelled,
+    record_route_attempt, reserve_backend_slot, review_preflight_for_identity, review_usage,
     route_after_backend_unavailable, route_identity, route_label,
 };
 use super::super::prompts::enforce_context_budget;
@@ -411,7 +411,7 @@ pub(in crate::dispatch) fn review(
     let mut parsed_verdict: Option<Result<crate::models::ReviewVerdict>> = None;
     let mut attempt_index = 0usize;
     'attempts: for attempt_number in 0..MAX_REVIEW_ATTEMPTS {
-        let required_capabilities = review_preflight(cfg, profile, &route.effective_backend)?;
+        let required_capabilities = review_preflight_for_identity(cfg, profile, &route.identity)?;
         let mut capability_prefix = String::new();
         applied_capabilities.clear();
         for capability in &required_capabilities {
@@ -469,15 +469,13 @@ pub(in crate::dispatch) fn review(
             let attempt_session = session_dir.join(format!("review-attempt-{attempt_index}"));
             fs::create_dir_all(&attempt_session)?;
             record_route_attempt(ledger, &route)?;
-            let attempt_env_vars =
-                review_attempt_environment(profile, &route.effective_backend, &env_vars);
-            let attempt = runner::run_review_backend(
+            let attempt_env_vars = review_attempt_environment(profile, &route.identity, &env_vars);
+            let attempt = runner::run_review_backend_for_identity(
                 profile,
-                &route.effective_backend,
+                &route.identity,
                 repo,
                 &prompt,
                 &attempt_session,
-                route.effective_model.as_deref(),
                 &attempt_env_vars,
             );
             // The slot covers the backend invocation itself. Release it before
@@ -1076,11 +1074,11 @@ fn reserve_review_route(profile: &Profile, route: &RouteDecision) -> Result<Conc
 
 fn review_attempt_environment(
     profile: &Profile,
-    backend: &str,
+    identity: &crate::execution_identity::ExecutionIdentity,
     base: &[(String, String)],
 ) -> Vec<(String, String)> {
     let mut env_vars = base.to_vec();
-    apply_backend_instance_env(profile, backend, &mut env_vars);
+    apply_execution_identity_env(profile, identity, &mut env_vars);
     env_vars
 }
 

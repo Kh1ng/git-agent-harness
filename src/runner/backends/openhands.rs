@@ -63,10 +63,33 @@ pub fn run_openhands(
     env_vars: &[(String, String)],
     idle_timeout_seconds: u64,
 ) -> Result<RunResult> {
+    run_openhands_with_executable(
+        Path::new("openhands"),
+        worktree,
+        task,
+        session_dir,
+        llm,
+        extra_args,
+        env_vars,
+        idle_timeout_seconds,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_openhands_with_executable(
+    executable: &Path,
+    worktree: &Path,
+    task: &str,
+    session_dir: &Path,
+    llm: &LlmConfig,
+    extra_args: &[String],
+    env_vars: &[(String, String)],
+    idle_timeout_seconds: u64,
+) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     write_redacted_task(session_dir, task)?;
 
-    let mut cmd = Command::new("openhands");
+    let mut cmd = Command::new(executable);
     cmd.args([
         "--headless",
         "--json",
