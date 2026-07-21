@@ -1203,6 +1203,7 @@ mod tests {
     ) -> crate::ledger::LedgerEntry {
         let tmp = tempfile::tempdir().unwrap();
         let prof = crate::config::Profile {
+            delivery_mode: crate::config::DeliveryMode::default(),
             manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "test".into(),

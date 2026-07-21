@@ -110,6 +110,12 @@ pub enum NotifyEvent<'a> {
         model: &'a str,
         duration_seconds: f64,
     },
+    /// A local operator handoff artifact was created (delivery_mode = handoff).
+    HandoffCreated {
+        ticket: &'a str,
+        path: &'a str,
+        summary: &'a str,
+    },
 }
 
 /// Render a `backend`/`model` pair for a human-facing message. Some
@@ -231,6 +237,17 @@ pub fn format_message(event: &NotifyEvent) -> String {
             "[gah] backend stalled work_id={work_id} route={} duration={duration_seconds:.0}s; rerouting",
             route_label(backend, model)
         ),
+        NotifyEvent::HandoffCreated {
+            ticket,
+            path,
+            summary,
+        } => {
+            if let Some(short_summary) = summarize_error_summary(Some(summary)) {
+                format!("[gah] handoff ready for {ticket} at {path}: {short_summary}")
+            } else {
+                format!("[gah] handoff ready for {ticket} at {path}")
+            }
+        }
     }
 }
 
@@ -360,6 +377,7 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
         ),
         // Already resolved -- nothing for a woken agent to act on.
         NotifyEvent::MrMerged { .. } => return None,
+        NotifyEvent::HandoffCreated { .. } => return None,
     };
 
     Some(format!("[gah manager wake] {context} {action}"))
@@ -856,6 +874,7 @@ fn event_name(event: &NotifyEvent<'_>) -> &'static str {
         NotifyEvent::DispatchFailed { .. } => "dispatch_failed",
         NotifyEvent::DispatchFailureResolved { .. } => "dispatch_failure_resolved",
         NotifyEvent::BackendStalled { .. } => "backend_stalled",
+        NotifyEvent::HandoffCreated { .. } => "handoff_created",
     }
 }
 
@@ -864,6 +883,7 @@ fn event_work_id<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
         NotifyEvent::MrMerged { work_id, .. } => Some(work_id),
         NotifyEvent::DispatchFailed { work_id, .. } => Some(work_id),
         NotifyEvent::DispatchFailureResolved { work_id, .. } => Some(work_id),
+        NotifyEvent::HandoffCreated { ticket, .. } => Some(ticket),
         _ => None,
     }
 }

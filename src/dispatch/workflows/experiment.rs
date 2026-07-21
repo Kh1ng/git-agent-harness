@@ -8,7 +8,7 @@ use super::super::metrics::apply_diff_stats;
 use super::super::prompts::build_task;
 use super::super::publish::{
     build_experiment_mr_body, emit_human_handoff, enforce_generated_artifact_policy,
-    publishing_allows_publish, ExperimentMrRenderContext,
+    handle_handoff_delivery, publishing_allows_publish, ExperimentMrRenderContext,
 };
 use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
@@ -196,6 +196,25 @@ pub(crate) fn experiment(
         "partial".into()
     });
     enforce_generated_artifact_policy(profile, ledger, &wt)?;
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        let ticket_id = ledger
+            .work_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let commit_msg = format!("gah: experiment for {}", profile.repo_id);
+        handle_handoff_delivery(
+            cfg,
+            profile,
+            ledger,
+            &wt,
+            &branch,
+            &commit_msg,
+            &ticket_id,
+            &backend_summary,
+        )?;
+        worktree::cleanup(&wt, repo);
+        return Ok(());
+    }
     // TICKET-128: honor the per-profile publishing policy (see fix/improve
     // mode for the full rationale). Experiments may still generate code and
     // artifacts; they just must not be published as an agent-authored MR.

@@ -898,6 +898,7 @@ mod tests {
 
     fn profile() -> Profile {
         Profile {
+            delivery_mode: crate::config::DeliveryMode::default(),
             manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "Repo".into(),

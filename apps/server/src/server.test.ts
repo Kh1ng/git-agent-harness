@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net';
 function profilePayload(profile: string): ConfigProfileSummary {
   return {
     profile,
+    delivery_mode: 'pr',
     merge_policy: 'auto',
     max_fix_attempts_per_mr: 2,
     max_implementation_failures_per_ticket: 8,

@@ -5,7 +5,7 @@ use crate::{
 use anyhow::Result;
 use std::{collections::BTreeMap, path::Path};
 
-pub const CONFIG_SHOW_SCHEMA_VERSION: u32 = 1;
+pub const CONFIG_SHOW_SCHEMA_VERSION: u32 = 2;
 
 #[derive(serde::Serialize)]
 pub struct RoutingCandidateSummary {
@@ -99,6 +99,7 @@ pub struct PmOrchestrationSummary {
 #[derive(serde::Serialize)]
 pub struct ConfigProfileSummary {
     pub profile: String,
+    pub delivery_mode: String,
     pub merge_policy: String,
     pub max_fix_attempts_per_mr: u32,
     pub max_implementation_failures_per_ticket: u32,
@@ -256,6 +257,7 @@ fn build_profile_summary(
 
     Ok(ConfigProfileSummary {
         profile: profile_name.to_string(),
+        delivery_mode: profile.delivery_mode.as_str().to_string(),
         merge_policy: routing
             .merge_policy
             .unwrap_or_default()

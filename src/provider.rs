@@ -457,6 +457,9 @@ pub fn create_draft_mr(
     title: &str,
     body: &str,
 ) -> Result<MrResult> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: create_draft_mr is disallowed in handoff mode");
+    }
     let body = crate::redact::redact(body);
     match profile.provider.as_str() {
         "gitlab" => gitlab_mr(profile, branch, title, &body),
@@ -471,6 +474,9 @@ pub fn post_review_comment(
     body: &str,
     labels: &[&str],
 ) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: post_review_comment is disallowed in handoff mode");
+    }
     let body = crate::redact::redact(body);
     match profile.provider.as_str() {
         "gitlab" => gitlab_post_review_comment(profile, branch, &body, labels),
@@ -482,6 +488,9 @@ pub fn post_review_comment(
 /// Post an idempotent comment to a source issue using the configured provider.
 /// The body is redacted before it crosses the provider boundary.
 pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: post_issue_comment is disallowed in handoff mode");
+    }
     let body = crate::redact::redact(body);
     match profile.provider.as_str() {
         "github" => github_post_issue_comment(profile, issue_number, &body),
@@ -512,6 +521,11 @@ pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> 
 /// repair makes it outrank `gah-review-escalating` forever and exhausts the
 /// fix cap without reviewing the new source commit.
 pub fn set_review_state_labels(profile: &Profile, branch: &str, labels: &[&str]) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!(
+            "delivery_mode=handoff: set_review_state_labels is disallowed in handoff mode"
+        );
+    }
     match profile.provider.as_str() {
         "gitlab" => {
             let mr = gitlab_find_mr_by_branch(profile, branch)?;
@@ -827,6 +841,9 @@ fn github_set_review_state_labels(
 /// rather than reimplementing GitLab's title-based draft toggle over raw
 /// REST.
 pub fn mark_ready_for_review(profile: &Profile, branch: &str) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: mark_ready_for_review is disallowed in handoff mode");
+    }
     let target = find_review_target_by_branch(profile, branch)?;
     match profile.provider.as_str() {
         "gitlab" => gitlab_mark_ready_for_review(profile, &target.id),
@@ -872,6 +889,9 @@ pub fn merge_mr(
     branch: &str,
     expected_review_generation: Option<&str>,
 ) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: merge_mr is disallowed in handoff mode");
+    }
     let target = find_review_target_by_branch(profile, branch)?;
     ensure_review_generation(&target, expected_review_generation)?;
     match profile.provider.as_str() {
@@ -929,6 +949,9 @@ pub fn gitlab_set_mwps(
     branch: &str,
     expected_review_generation: &str,
 ) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: gitlab_set_mwps is disallowed in handoff mode");
+    }
     let target = find_review_target_by_branch(profile, branch)?;
     ensure_review_generation(&target, Some(expected_review_generation))?;
     let iid = &target.id;
@@ -969,6 +992,9 @@ pub fn gitlab_set_mwps(
 
 /// Close a GitHub issue by number.
 pub fn github_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: github_close_issue is disallowed in handoff mode");
+    }
     let out = provider_command("gh")
         .args(["issue", "close", issue_number, "--repo", &profile.repo])
         .output()
@@ -982,6 +1008,9 @@ pub fn github_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
 
 /// Close a GitLab issue by number.
 pub fn gitlab_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: gitlab_close_issue is disallowed in handoff mode");
+    }
     let project_id = profile
         .provider_project_id
         .as_deref()

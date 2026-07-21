@@ -442,6 +442,8 @@ export interface ProfileSummary {
   max_open_managed_mrs: number;
   /** Manager-wake autonomy for this profile (null = unset -> off). */
   manager_wake_autonomy: WakeAutonomyValue | null;
+  /** Delivery mode for work results ('pr' | 'handoff'). Defaults to 'pr' if omitted. */
+  delivery_mode?: 'pr' | 'handoff';
   /** Effective validation command timeout in seconds for this profile (defaults
    * to 300). If unset in TOML, this is computed and returned as the effective
    * timeout. */
@@ -534,6 +536,8 @@ export interface NotificationSummary {
  * for the requested profile. */
 export interface ConfigProfileSummary {
   profile: string;
+  /** Effective delivery behavior for completed work. */
+  delivery_mode: 'pr' | 'handoff';
   merge_policy: string;
   max_fix_attempts_per_mr: number;
   max_implementation_failures_per_ticket: number;

@@ -42,6 +42,7 @@ fn make_fake_bin(dir: &Path, name: &str, body: &str) {
 
 fn github_profile() -> Profile {
     Profile {
+        delivery_mode: crate::config::DeliveryMode::default(),
         manager_wake_autonomy: crate::config::WakeAutonomy::default(),
         prune_older_than_days: None,
         display_name: "Repo".into(),
@@ -1265,4 +1266,35 @@ esac
     assert!(fs::read_to_string(bin_dir.join("add_call"))
         .unwrap()
         .contains("labels[]=gah-review-escalating"));
+}
+
+#[test]
+fn handoff_mode_rejects_all_remote_provider_calls() {
+    let mut profile = github_profile();
+    profile.delivery_mode = crate::config::DeliveryMode::Handoff;
+
+    create_draft_mr(&profile, "branch", "title", "body").unwrap_err();
+    super::post_review_comment(&profile, "branch", "body", &[]).unwrap_err();
+    super::post_issue_comment(&profile, "123", "body").unwrap_err();
+    super::set_review_state_labels(&profile, "branch", &["gah-needs-fix"]).unwrap_err();
+    mark_ready_for_review(&profile, "branch").unwrap_err();
+    merge_mr(&profile, "branch", None).unwrap_err();
+    super::gitlab_set_mwps(&profile, "branch", "gen").unwrap_err();
+    super::github_close_issue(&profile, "123").unwrap_err();
+    super::gitlab_close_issue(&profile, "123").unwrap_err();
+
+    // Provider relationship links remain best-effort no-ops in handoff mode:
+    // they are not part of the mr_url/mr_created ledger contract and skipping
+    // them is safe rather than a correctness landmine.
+    let child = ProviderIssue {
+        id: "c1".into(),
+        number: "1".into(),
+        title: "child".into(),
+        body: String::new(),
+        labels: vec![],
+        state: "open".into(),
+        url: "http".into(),
+    };
+    link_provider_child(&profile, "parent", &child).unwrap();
+    link_provider_dependency(&profile, &child, &child).unwrap();
 }
