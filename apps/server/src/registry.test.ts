@@ -410,17 +410,7 @@ test('Server endpoints enforce loopback check and authentication', async () => {
     assert.equal(localRes.status, 200);
     assert.ok(Array.isArray(localRes.body));
 
-    // To simulate a remote non-loopback request, we can mock the request IP / headers or test middleware logic.
-    // However, since express detects loopback by parsing req.ip (which fetch to 127.0.0.1 will produce as local),
-    // let's test the middleware behavior by overriding clientIp detection.
-    // In our authMiddleware, we check req.ip / req.socket.remoteAddress.
-    // If we test with headers, can we override? No, express sets req.ip from socket.
-    // Wait, let's spin up the server listening on a mock public-like interface if possible? Or we can configure
-    // express 'trust proxy' and set 'X-Forwarded-For' to a non-loopback IP like '8.8.8.8'!
-    // Let's check: in Express, if we enable `app.set('trust proxy', true)`, we can pass `X-Forwarded-For: 8.8.8.8`.
-    // Let's modify the app in the test or mock the IP.
-    // Let's check: does createServer enable proxy trust? It doesn't, but we can call it on the app instance!
-    app.set('trust proxy', true);
+    assert.equal(app.get('trust proxy'), true);
 
     // 2. Non-loopback request: no TLS -> returns 403 Forbidden
     const headersNoTls = {

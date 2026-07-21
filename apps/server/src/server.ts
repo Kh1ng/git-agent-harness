@@ -68,6 +68,9 @@ export function createServer(
   const registryService = configDeps.registryService || new RegistryService();
 
   const app = express();
+  // Trust proxy headers so TLS-terminated deployments can satisfy req.secure
+  // for authenticated_remote registry traffic.
+  app.set('trust proxy', true);
 
   // Middleware
   app.use(cors());
