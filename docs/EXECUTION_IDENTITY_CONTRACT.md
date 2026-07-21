@@ -1,10 +1,12 @@
 # Execution Identity: Canonical Contract (1/5)
 
-Status: **proposed — pending owner sign-off** (see [Sign-off](#sign-off)).
-Scope: documentation and executable golden fixtures/tests only. This ticket
-does not introduce a new production type and does not change routing,
-ledger, or telemetry behavior. Parts 2/5–5/5 thread the canonical type
-through production against this contract.
+Status: **approved** (see [Sign-off](#sign-off)).
+Scope: documentation, executable golden fixtures/tests, and a
+behavior-preserving extraction of the existing provider and usage-class
+mappings so those fixtures call production code directly. This ticket does
+not introduce a new production type and does not change routing, ledger, or
+telemetry behavior. Parts 2/5–5/5 thread the canonical type through
+production against this contract.
 
 ## Problem
 
@@ -244,8 +246,9 @@ must produce from it.
 3. **Proxies/aliases** — `cloud-coder` folds to the `openhands` runner via
    `config::canonical_backend_name` (a real call into production code, not
    a re-implementation); OpenCode's `"nous-portal/z-ai/glm-5.2"` model
-   string is a proxy path whose inferred `provider` (`z-ai`) differs from
-   its `logical_backend` (`opencode`). Test:
+   string is a proxy path whose inferred `provider` (`z-ai`, via the real
+   `usage_attribution::provider_for_model`) differs from its
+   `logical_backend` (`opencode`). Test:
    `execution_identity_golden_proxy_alias`.
 4. **Fallback substitution** — `requested_backend != effective_backend`,
    `fallback_used = true`, with distinct requested vs. effective identity
@@ -263,12 +266,20 @@ must produce from it.
 Because this ticket does not thread a new type into production,
 `tests/execution_identity.rs` defines a small, test-local
 `ExecutionIdentity` struct and an `adapt_legacy_usage()` function that maps
-each golden fixture above onto it, mirroring exactly the rules in §§1–9 (the
-mapping is transcribed from, not a stand-in for, the production logic in
-`usage_attribution::normalize_attempt_usage`/`provider_for_model` and
-`config::canonical_backend_name`, the latter called directly since it is a
-public function). This is the adapter parts 2/5–5/5 must reproduce when the
-canonical type is threaded through production.
+each golden fixture above onto it, mirroring exactly the rules in §§1–9.
+Every mapping that has a real production function is called directly, not
+reimplemented: `config::canonical_backend_name` (already public),
+`usage_attribution::classify_usage` (contract §7's cost-class mapping,
+extracted out of `normalize_attempt_usage` and made `pub` specifically so
+this test can call it), and `usage_attribution::provider_for_model`
+(contract §3, made `pub` for the same reason). This closes the drift risk
+an earlier draft of this document had: reimplemented copies of these two
+mappings could have silently gone stale against production while these
+fixtures kept passing. Only the `ExecutionIdentity` struct shape itself and
+the field-composition glue in `adapt_legacy_usage()` remain test-local,
+since those don't exist as a single production type yet — that is exactly
+what parts 2/5–5/5 build. This is the adapter parts 2/5–5/5 must reproduce
+when the canonical type is threaded through production.
 
 Separately, `execution_identity_route_decision_alias_fold_is_byte_for_byte` runs one
 real end-to-end dispatch through `ScenarioHarness` (the same harness used by
@@ -283,23 +294,23 @@ byte-for-byte equivalent under the migration.
 
 ## 12. Sign-off
 
-Owner: **pending** — recorded via the review verdict/approval on issue #504
-(this document + `tests/execution_identity.rs`), per the project's evidence
-gate (missing evidence is a human-review outcome, not an autonomous
-approval). The reviewer confirms, before 2/5 begins:
+Owner: **approved** (Khing, 2026-07-21) — reviewed via manager-agent session.
+The owner read §§1–11 in full, approved the field boundaries and keying
+transition, identified the fixture-drift gap, and requested that it be fixed
+and merged. Confirmed:
 
-- [ ] Every field in §1 has an unambiguous owner and no two owners can write
+- [x] Every field in §1 has an unambiguous owner and no two owners can write
       conflicting values for the same field.
-- [ ] The auth/cost class taxonomy in §7 covers every `logical_backend`
+- [x] The auth/cost class taxonomy in §7 covers every `logical_backend`
       GAH currently dispatches to (`claude`, `codex`, `openhands`, `vibe`,
       `opencode`, `agy`/`agy-main`/`agy-second`) without a credential ever
       appearing in a canonical field.
-- [ ] The equality/keying transition in §6 preserves current routing during
+- [x] The equality/keying transition in §6 preserves current routing during
       the carrier migration, then makes explicit backend instances independently
       routable without treating a shared quota pool as one instance.
-- [ ] Profile, repository, run, work, and attempt identity are all present in
+- [x] Profile, repository, run, work, and attempt identity are all present in
       the cross-system join key; issue numbers alone can never merge projects.
-- [ ] The legacy compatibility table in §9 has no system GAH persists
+- [x] The legacy compatibility table in §9 has no system GAH persists
       identity/usage to that is left undocumented.
 - [ ] `cargo test execution_identity`, `cargo test --test
       usage_telemetry_regression`, and `cargo test` all pass on this

@@ -57,7 +57,11 @@ impl<'a> UsageAttribution<'a> {
     }
 }
 
-fn provider_for_model(backend: Option<&str>, model: Option<&str>) -> Option<String> {
+/// Contract: `docs/EXECUTION_IDENTITY_CONTRACT.md` §3. `pub`, not
+/// `pub(crate)`, specifically so `tests/execution_identity.rs`'s golden
+/// fixtures call this real mapping directly instead of a reimplementation
+/// that could silently drift from it.
+pub fn provider_for_model(backend: Option<&str>, model: Option<&str>) -> Option<String> {
     let model = model.unwrap_or_default().to_ascii_lowercase();
     let inferred =
         if model.contains("claude") || model.contains("sonnet") || model.contains("haiku") {
@@ -88,6 +92,35 @@ fn provider_for_model(backend: Option<&str>, model: Option<&str>) -> Option<Stri
     })
 }
 
+/// Contract: `docs/EXECUTION_IDENTITY_CONTRACT.md` §7 (auth/cost class
+/// taxonomy). `pub`, not `pub(crate)`, for the same reason as
+/// `provider_for_model` above -- extracted out of `normalize_attempt_usage`
+/// so the golden fixtures in `tests/execution_identity.rs` exercise this
+/// exact mapping instead of a reimplementation that could silently drift.
+pub fn classify_usage(
+    backend: Option<&str>,
+    effective_model: Option<&str>,
+    cost_class: Option<&str>,
+) -> Option<String> {
+    match cost_class {
+        Some("included_quota") => Some("quota_backed".to_string()),
+        Some("paid") => Some("api_key_backed".to_string()),
+        _ if backend == Some("opencode")
+            && effective_model
+                .is_some_and(|model| model.contains("ollama") || model.contains("local/")) =>
+        {
+            Some("local_unmetered".to_string())
+        }
+        _ => match backend {
+            Some("claude" | "codex" | "vibe" | "agy" | "agy-main" | "agy-second") => {
+                Some("quota_backed".to_string())
+            }
+            Some(_) => Some("unknown".to_string()),
+            None => None,
+        },
+    }
+}
+
 pub(crate) fn normalize_attempt_usage(
     mut usage: LedgerUsage,
     attribution: UsageAttribution<'_>,
@@ -115,24 +148,11 @@ pub(crate) fn normalize_attempt_usage(
         }
     });
     usage.account_label = attribution.quota_pool.map(str::to_string);
-    usage.usage_classification = match attribution.cost_class {
-        Some("included_quota") => Some("quota_backed".to_string()),
-        Some("paid") => Some("api_key_backed".to_string()),
-        _ if attribution.backend == Some("opencode")
-            && attribution
-                .effective_model
-                .is_some_and(|model| model.contains("ollama") || model.contains("local/")) =>
-        {
-            Some("local_unmetered".to_string())
-        }
-        _ => match attribution.backend {
-            Some("claude" | "codex" | "vibe" | "agy" | "agy-main" | "agy-second") => {
-                Some("quota_backed".to_string())
-            }
-            Some(_) => Some("unknown".to_string()),
-            None => None,
-        },
-    };
+    usage.usage_classification = classify_usage(
+        attribution.backend,
+        attribution.effective_model,
+        attribution.cost_class,
+    );
     if usage.provider.is_none() {
         usage.provider = provider_for_model(attribution.backend, attribution.effective_model);
     }

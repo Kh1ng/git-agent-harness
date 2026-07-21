@@ -6,15 +6,18 @@
 //! canonical type through production. `ExecutionIdentity`/`adapt_legacy_usage`
 //! below are a test-local transcription of the contract (§11), used to pin
 //! today's field-mapping rules as fixtures for parts 2/5-5/5 to reproduce.
-//! Wherever a real public production function exists (`config::
-//! canonical_backend_name`, the `ledger::LedgerEntry`/`AttemptRecord`/
-//! `LedgerUsage` types, or a full `ScenarioHarness` dispatch), the tests call
-//! it directly instead of reimplementing it.
+//! Every mapping with a real production function -- `config::
+//! canonical_backend_name`, `usage_attribution::classify_usage`,
+//! `usage_attribution::provider_for_model`, the `ledger::LedgerEntry`/
+//! `AttemptRecord`/`LedgerUsage` types, or a full `ScenarioHarness` dispatch
+//! -- is called directly instead of reimplemented, so these fixtures cannot
+//! silently drift from what production actually does.
 
 mod support;
 
 use git_agent_harness::config;
 use git_agent_harness::ledger::{AttemptRecord, LedgerEntry, LedgerUsage};
+use git_agent_harness::usage_attribution::{classify_usage, provider_for_model};
 use support::fake_ledger::TestLedger;
 use support::scenario::ScenarioHarness;
 
@@ -38,63 +41,6 @@ struct ExecutionIdentity {
     cost_known: bool,
 }
 
-/// Mirrors `usage_attribution::normalize_attempt_usage`'s cost-class ->
-/// `usage_classification` mapping (contract §7). Reimplemented here (that
-/// function is `pub(crate)`, unreachable from an integration test) so the
-/// mapping is pinned as an explicit, reviewable fixture rather than an
-/// opaque assumption.
-fn classify(
-    logical_backend: &str,
-    cost_class: Option<&str>,
-    effective_model: Option<&str>,
-) -> &'static str {
-    match cost_class {
-        Some("included_quota") => "quota_backed",
-        Some("paid") => "api_key_backed",
-        _ if logical_backend == "opencode"
-            && effective_model.is_some_and(|m| m.contains("ollama") || m.contains("local/")) =>
-        {
-            "local_unmetered"
-        }
-        _ => match logical_backend {
-            "claude" | "codex" | "vibe" | "agy" | "agy-main" | "agy-second" => "quota_backed",
-            _ => "unknown",
-        },
-    }
-}
-
-/// Mirrors `usage_attribution::provider_for_model` (contract §3).
-fn infer_provider(logical_backend: &str, model: Option<&str>) -> Option<&'static str> {
-    let model = model.unwrap_or_default().to_ascii_lowercase();
-    let inferred =
-        if model.contains("claude") || model.contains("sonnet") || model.contains("haiku") {
-            Some("anthropic")
-        } else if model.contains("gemini") {
-            Some("google")
-        } else if model.contains("mistral") || model.contains("devstral") {
-            Some("mistral")
-        } else if model.contains("deepseek") {
-            Some("deepseek")
-        } else if model.contains("glm") || model.contains("z-ai") {
-            Some("z-ai")
-        } else if model.contains("hy3") || model.contains("tencent") {
-            Some("tencent")
-        } else if model.contains("gpt-") || model.contains("openai") {
-            Some("openai")
-        } else if model.contains("ollama") || model.contains("local/") {
-            Some("local")
-        } else {
-            None
-        };
-    inferred.or(match logical_backend {
-        "claude" => Some("anthropic"),
-        "codex" => Some("openai"),
-        "vibe" => Some("mistral"),
-        "agy" | "agy-main" | "agy-second" => Some("google"),
-        _ => None,
-    })
-}
-
 /// The documented compatibility adapter (contract §11): legacy
 /// backend/model/quota_pool/cost_class facts -> canonical `ExecutionIdentity`.
 fn adapt_legacy_usage(
@@ -111,9 +57,10 @@ fn adapt_legacy_usage(
         Some(pool) => format!("{logical_backend}:{pool}"),
         None => logical_backend.clone(),
     };
-    let auth_class = classify(&logical_backend, cost_class, effective_model).to_string();
-    let provider =
-        infer_provider(&logical_backend, effective_model.or(actual_model)).map(str::to_string);
+    // Real production mappings (contract §7, §3) -- not reimplementations.
+    let auth_class = classify_usage(Some(&logical_backend), effective_model, cost_class)
+        .expect("a Some(backend) input always yields a classified auth_class");
+    let provider = provider_for_model(Some(&logical_backend), effective_model.or(actual_model));
     let provider_attribution_source = if provider.is_some() {
         "inferred"
     } else {
