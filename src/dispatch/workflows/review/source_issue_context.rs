@@ -75,7 +75,7 @@ pub(super) fn resolve_source_issue_context(
 
     match fetch_issue_details(profile, &identity.issue_number, false) {
         Ok(issue) => {
-            let acceptance_criteria = bounded_source_issue_entries(
+            let acceptance_criteria = bounded_numbered_source_issue_entries(
                 &source_issue_acceptance_criteria(&issue),
                 SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES,
             );
@@ -266,7 +266,10 @@ pub(super) fn render_source_issue_contract(issue: &IssueDetails) -> String {
     if !acceptance_criteria.is_empty() {
         sections.push(format!(
             "### Acceptance Criteria\n\n{}",
-            render_source_issue_list(&acceptance_criteria, SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES)
+            render_numbered_source_issue_list(
+                &acceptance_criteria,
+                SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES,
+            )
         ));
     }
     if !meta.constraints.is_empty() {
@@ -401,6 +404,22 @@ fn render_source_issue_list(entries: &[String], max_bytes: usize) -> String {
     out
 }
 
+fn render_numbered_source_issue_list(entries: &[String], max_bytes: usize) -> String {
+    let bounded = bounded_numbered_source_issue_entries(entries, max_bytes);
+    let mut out = String::new();
+    for (index, entry) in bounded.iter().enumerate() {
+        let value =
+            indent_untrusted_text(utf8_safe_prefix(entry, SOURCE_ISSUE_LIST_ITEM_MAX_BYTES));
+        out.push_str(&format!("{}. {value}\n", index + 1));
+    }
+    if bounded.len() < entries.len() {
+        out.push_str(&format!(
+            "[List truncated at {max_bytes} bytes; retrieve the source issue for remaining detail.]\n"
+        ));
+    }
+    out
+}
+
 fn source_issue_acceptance_criteria(issue: &IssueDetails) -> Vec<String> {
     let meta = parse_ticket_metadata_from_issue(issue);
     let unheaded_sections = source_issue_sections::extract(&issue.body);
@@ -445,12 +464,32 @@ fn bounded_source_issue_entries(entries: &[String], max_bytes: usize) -> Vec<Str
         .collect()
 }
 
+fn bounded_numbered_source_issue_entries(entries: &[String], max_bytes: usize) -> Vec<String> {
+    let mut used = 0usize;
+    entries
+        .iter()
+        .enumerate()
+        .take_while(|(index, entry)| {
+            let value =
+                indent_untrusted_text(utf8_safe_prefix(entry, SOURCE_ISSUE_LIST_ITEM_MAX_BYTES));
+            let line_bytes = format!("{}. {value}\n", index + 1).len();
+            if used.saturating_add(line_bytes) > max_bytes {
+                return false;
+            }
+            used += line_bytes;
+            true
+        })
+        .map(|(_, entry)| entry.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod source_issue_tests {
     use super::{
-        bounded_source_issue_entries, extract_issue_number_from_text, missing_source_issue_context,
-        render_source_issue_contract, render_untrusted_inline_review_text,
-        render_untrusted_review_text, verified_post_budget_source_contract,
+        bounded_numbered_source_issue_entries, extract_issue_number_from_text,
+        missing_source_issue_context, render_source_issue_contract,
+        render_untrusted_inline_review_text, render_untrusted_review_text,
+        verified_post_budget_source_contract,
     };
     use crate::context::{self, ContextConfig};
     use crate::dispatch::issues::IssueDetails;
@@ -492,7 +531,13 @@ mod source_issue_tests {
             .contains("Include the canonical source issue contract"));
         assert!(built
             .prompt
+            .contains("1.   Include the canonical source issue contract"));
+        assert!(built
+            .prompt
             .contains("Preserve the acceptance criteria in the review context artifact"));
+        assert!(built
+            .prompt
+            .contains("2.   Preserve the acceptance criteria in the review context artifact"));
         assert!(built
             .prompt
             .contains("agent_model: opencode/opencode/hy3-free"));
@@ -539,10 +584,10 @@ mod source_issue_tests {
             "first criterion".to_string(),
             "second criterion".to_string(),
         ];
-        let first_line_bytes = "-   first criterion\n".len();
+        let first_line_bytes = "1.   first criterion\n".len();
 
         assert_eq!(
-            bounded_source_issue_entries(&criteria, first_line_bytes),
+            bounded_numbered_source_issue_entries(&criteria, first_line_bytes),
             vec!["first criterion"]
         );
     }
