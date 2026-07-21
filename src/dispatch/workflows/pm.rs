@@ -1,6 +1,6 @@
 use super::super::attempts::{
-    apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output, preflight,
-    record_route_attempt, resolve_llm, route_identity, route_label, run_backend,
+    apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output_for_identity,
+    preflight, record_route_attempt, resolve_llm, route_identity, route_label, run_backend,
 };
 use super::super::issues::try_discover_open_issues;
 use super::super::prompts::indent_untrusted_text;
@@ -187,10 +187,8 @@ pub(crate) fn pm(
             plan_route.effective_model.as_deref(),
         );
         attempted_routes.insert(route_key);
-        let parsed = mark_backend_unavailable_from_output(
-            &plan_route.effective_backend,
-            plan_route.effective_model.as_deref(),
-            plan_route.effective_quota_pool.as_deref(),
+        let parsed = mark_backend_unavailable_from_output_for_identity(
+            &plan_route.identity,
             &log_text,
             &result.log_path,
         )?;

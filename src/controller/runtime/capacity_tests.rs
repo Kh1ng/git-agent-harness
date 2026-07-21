@@ -291,6 +291,7 @@ fn route_state_fingerprint_changes_when_a_cooldown_expires() {
         version: crate::availability::CURRENT_VERSION,
         records: vec![crate::availability::AvailabilityRecord {
             backend: "agy".into(),
+            backend_instance: None,
             model: Some("Claude Sonnet 4.8 (Thinking)".into()),
             quota_pool: Some("agy-1".into()),
             status: crate::availability::Status::Unavailable,

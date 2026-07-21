@@ -8,10 +8,8 @@ pub(super) fn record_exact_route_unavailability(
     log_text: &str,
     log_path: &str,
 ) -> Result<Option<crate::quota_parser::ParsedFailure>> {
-    super::super::super::attempts::mark_backend_unavailable_from_output(
-        &route.effective_backend,
-        route.effective_model.as_deref(),
-        route.effective_quota_pool.as_deref(),
+    super::super::super::attempts::mark_backend_unavailable_from_output_for_identity(
+        &route.identity,
         log_text,
         log_path,
     )

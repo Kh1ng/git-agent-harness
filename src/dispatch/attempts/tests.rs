@@ -1,5 +1,5 @@
 use super::*;
-use crate::availability::{availability_for, load_state, Reason};
+use crate::availability::{availability_for, availability_for_identity, load_state, Reason};
 use crate::config::RoutingPolicy;
 use crate::dispatch::test_util::{gah_config, gah_config_with_ledger, profile};
 use crate::ledger::LedgerEntry;
@@ -1188,8 +1188,12 @@ fn claude_session_limit_marks_exact_claude_model_unavailable_without_blocking_ba
         "model-only mark must not block backend-wide scope"
     );
 
-    let model_available =
-        availability_for(&state_path, "claude", Some("sonnet"), None, before_reset).unwrap();
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        "claude",
+        Some("sonnet"),
+        None::<String>,
+    );
+    let model_available = availability_for_identity(&state_path, &identity, before_reset).unwrap();
     assert!(!model_available.eligible, "model should be unavailable");
 }
 
@@ -1216,14 +1220,12 @@ fn backend_selected_model_capacity_marks_model_unavailable_with_conservative_coo
         .matched_evidence
         .contains("\"message\":\"Selected model is at capacity. Please try a different model.\""),);
 
-    let decision = availability_for(
-        &state,
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
         "codex",
         Some("gpt-5.4-mini"),
-        None,
-        OffsetDateTime::now_utc(),
-    )
-    .unwrap();
+        None::<String>,
+    );
+    let decision = availability_for_identity(&state, &identity, OffsetDateTime::now_utc()).unwrap();
     assert!(!decision.eligible);
     assert_eq!(decision.reason, Some(Reason::RateLimited));
 }
@@ -1244,14 +1246,12 @@ fn opencode_internal_rate_limit_marks_the_model_unavailable() {
     .unwrap();
 
     assert_eq!(parsed.kind, crate::quota_parser::FailureKind::RateLimited);
-    let decision = availability_for(
-        &state,
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
         "opencode",
         Some("opencode/hy3-free"),
-        None,
-        OffsetDateTime::now_utc(),
-    )
-    .unwrap();
+        None::<String>,
+    );
+    let decision = availability_for_identity(&state, &identity, OffsetDateTime::now_utc()).unwrap();
     assert!(!decision.eligible);
     assert_eq!(decision.reason, Some(Reason::RateLimited));
 }

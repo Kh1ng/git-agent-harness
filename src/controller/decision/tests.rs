@@ -507,6 +507,7 @@ fn backend_error_from_no_eligible_backend_retries_once_a_backend_is_eligible() {
 
     // Now a backend is eligible -> retry, not orphaned.
     snapshot.availability.push(ScopeStatusJson {
+        backend_instance: None,
         backend: "codex".into(),
         model: None,
         quota_pool: None,
@@ -542,6 +543,7 @@ fn infra_failure_retries_only_when_a_backend_is_eligible() {
 
     // Now a backend is eligible -> retry.
     snapshot.availability.push(ScopeStatusJson {
+        backend_instance: None,
         backend: "codex".into(),
         model: None,
         quota_pool: None,
@@ -597,6 +599,7 @@ fn infra_failures_do_not_exhaust_retry_cap() {
     });
     // Without a backend eligible, it should not be retried or escalated
     snapshot.availability.push(ScopeStatusJson {
+        backend_instance: None,
         backend: "codex".into(),
         model: None,
         quota_pool: None,
@@ -637,6 +640,7 @@ fn git_fetch_harness_error_is_retried_not_orphaned() {
         false,
     ));
     snapshot.availability.push(ScopeStatusJson {
+        backend_instance: None,
         backend: "codex".into(),
         model: None,
         quota_pool: None,
@@ -1285,6 +1289,7 @@ fn retry_cap_projects_into_blocked_work_items() {
 fn idle_profile_with_unrelated_known_reset_is_noop() {
     let mut snapshot = empty_snapshot();
     snapshot.availability.push(ScopeStatusJson {
+        backend_instance: None,
         backend: "claude".into(),
         model: None,
         quota_pool: None,
@@ -1313,6 +1318,7 @@ fn failed_infrastructure_ticket_with_known_reset_waits() {
         false,
     ));
     snapshot.availability.push(ScopeStatusJson {
+        backend_instance: None,
         backend: "claude".into(),
         model: None,
         quota_pool: None,

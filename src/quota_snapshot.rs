@@ -25,7 +25,11 @@ pub struct UsageSummary {
 pub struct QuotaObservation {
     pub backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_window: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,6 +48,8 @@ pub struct QuotaObservation {
 pub struct QuotaCandidateStatus {
     pub modes: Vec<String>,
     pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_pool: Option<String>,
@@ -182,6 +188,7 @@ pub fn build_snapshot(
             (
                 (
                     scope.backend.clone(),
+                    scope.backend_instance.clone(),
                     scope.model.clone(),
                     scope.quota_pool.clone(),
                 ),
@@ -305,6 +312,7 @@ pub fn build_snapshot(
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct CandidateKey {
     backend: String,
+    backend_instance: String,
     model: Option<String>,
     quota_pool: Option<String>,
 }
@@ -313,6 +321,9 @@ struct CandidateAggregate {
     modes: Vec<String>,
     candidate: CandidateConfig,
 }
+
+type AvailabilityScopeLookup =
+    HashMap<(String, Option<String>, Option<String>, Option<String>), availability::ScopeStatus>;
 
 const UNKNOWN_MODEL: &str = "__unknown__";
 
@@ -336,7 +347,7 @@ fn build_candidates(
     profile: &config::Profile,
     backend_map: &HashMap<String, ledger::summary::GroupSummary>,
     candidate_map: &HashMap<String, ledger::summary::GroupSummary>,
-    scope_lookup: &HashMap<(String, Option<String>, Option<String>), availability::ScopeStatus>,
+    scope_lookup: &AvailabilityScopeLookup,
     account_quota: &[quota_store::QuotaObservationRecord],
 ) -> Vec<QuotaCandidateStatus> {
     let mut aggregates: Vec<(CandidateKey, CandidateAggregate)> = Vec::new();
@@ -393,13 +404,13 @@ fn build_candidates(
     aggregates
         .into_iter()
         .map(|(key, aggregate)| {
-            let scope = scope_lookup
-                .get(&(
-                    key.backend.clone(),
-                    key.model.clone(),
-                    key.quota_pool.clone(),
-                ))
-                .cloned();
+            let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+                &key.backend,
+                key.model.as_deref(),
+                key.quota_pool.as_deref(),
+            );
+            identity.backend_instance = key.backend_instance.clone();
+            let scope = find_scope_status(scope_lookup, &key);
             let candidate_group = key.model.as_deref().and_then(|model| {
                 candidate_map.get(&candidate_usage_key(&key.backend, Some(model)))
             });
@@ -408,8 +419,7 @@ fn build_candidates(
                 backend_map.get(&key.backend),
                 candidate_group,
                 account_quota,
-                &key.backend,
-                key.model.as_deref(),
+                &identity,
             );
             quota_observations.sort_by(|left, right| {
                 left.quota_window
@@ -421,6 +431,7 @@ fn build_candidates(
             QuotaCandidateStatus {
                 modes: aggregate.modes,
                 backend: key.backend,
+                backend_instance: Some(key.backend_instance),
                 model: key.model,
                 quota_pool: key.quota_pool,
                 configured: profile.is_backend_configured(&aggregate.candidate.backend),
@@ -441,6 +452,37 @@ fn build_candidates(
         .collect()
 }
 
+fn find_scope_status(
+    scope_lookup: &AvailabilityScopeLookup,
+    key: &CandidateKey,
+) -> Option<availability::ScopeStatus> {
+    if let Some(pool) = key.quota_pool.as_deref() {
+        if let Some(status) = scope_lookup
+            .values()
+            .find(|status| status.quota_pool.as_deref() == Some(pool))
+        {
+            return Some(status.clone());
+        }
+    }
+    for (instance, model, pool) in [
+        (
+            Some(key.backend_instance.clone()),
+            key.model.clone(),
+            key.quota_pool.clone(),
+        ),
+        (None, key.model.clone(), key.quota_pool.clone()),
+        (Some(key.backend_instance.clone()), key.model.clone(), None),
+        (None, key.model.clone(), None),
+        (Some(key.backend_instance.clone()), None, None),
+        (None, None, None),
+    ] {
+        if let Some(status) = scope_lookup.get(&(key.backend.clone(), instance, model, pool)) {
+            return Some(status.clone());
+        }
+    }
+    None
+}
+
 fn add_candidate(
     aggregates: &mut Vec<(CandidateKey, CandidateAggregate)>,
     index: &mut HashMap<CandidateKey, usize>,
@@ -454,6 +496,10 @@ fn add_candidate(
     );
     let key = CandidateKey {
         backend: config::canonical_backend_name(&candidate.backend).to_string(),
+        backend_instance: crate::execution_identity::legacy_backend_instance(
+            config::canonical_backend_name(&candidate.backend),
+            effective_quota_pool.as_deref(),
+        ),
         model: candidate.model.clone(),
         quota_pool: effective_quota_pool,
     };
@@ -495,8 +541,7 @@ fn aggregate_observations(
     backend_group: Option<&ledger::summary::GroupSummary>,
     model_group: Option<&ledger::summary::GroupSummary>,
     account_quota: &[quota_store::QuotaObservationRecord],
-    backend: &str,
-    model: Option<&str>,
+    identity: &crate::execution_identity::ExecutionIdentity,
 ) -> Vec<QuotaObservation> {
     let mut out = Vec::new();
     if let Some(group) = backend_group {
@@ -515,10 +560,12 @@ fn aggregate_observations(
                 .map(convert_group_observation),
         );
     }
-    if let Some(account) = quota_store::latest_for(account_quota, backend, model) {
+    if let Some(account) = quota_store::latest_for_identity(account_quota, identity) {
         out.push(QuotaObservation {
             backend: account.backend.clone(),
+            backend_instance: account.backend_instance.clone(),
             model: account.model.clone(),
+            quota_pool: account.quota_pool.clone(),
             quota_window: account.quota_window.clone(),
             quota_used_percent: account.quota_used_percent,
             quota_remaining_percent: account.quota_remaining_percent,
@@ -532,8 +579,16 @@ fn aggregate_observations(
     // after combining them so a same-named model on another backend, another
     // model on this backend, or a sibling account cannot leak into this card.
     out.retain(|observation| {
-        config::canonical_backend_name(&observation.backend) == backend
-            && match model {
+        config::canonical_backend_name(&observation.backend) == identity.logical_backend
+            && observation
+                .backend_instance
+                .as_deref()
+                .is_none_or(|instance| instance == identity.backend_instance)
+            && observation
+                .quota_pool
+                .as_deref()
+                .is_none_or(|pool| Some(pool) == identity.quota_pool.as_deref())
+            && match identity.effective_model.as_deref() {
                 Some(model) => observation
                     .model
                     .as_deref()
@@ -546,7 +601,9 @@ fn aggregate_observations(
     out.retain(|obs| {
         let key = (
             obs.backend.clone(),
+            obs.backend_instance.clone(),
             obs.model.clone(),
+            obs.quota_pool.clone(),
             obs.quota_window.clone(),
             obs.quota_used_percent.map(f64::to_bits),
             obs.quota_remaining_percent.map(f64::to_bits),
@@ -562,7 +619,9 @@ fn aggregate_observations(
 fn convert_group_observation(obs: &ledger::summary::GroupQuotaObservation) -> QuotaObservation {
     QuotaObservation {
         backend: obs.backend.clone(),
+        backend_instance: None,
         model: obs.model.clone(),
+        quota_pool: None,
         quota_window: obs.quota_window.clone(),
         quota_used_percent: obs.quota_used_percent,
         quota_remaining_percent: obs.quota_remaining_percent,
@@ -690,7 +749,9 @@ mod tests {
     ) -> quota_store::QuotaObservationRecord {
         quota_store::QuotaObservationRecord {
             backend: backend.to_string(),
+            backend_instance: None,
             model: model.map(str::to_string),
+            quota_pool: None,
             quota_window: Some(window.to_string()),
             quota_used_percent: None,
             quota_remaining_percent: remaining_percent,
@@ -698,6 +759,74 @@ mod tests {
             observed_at: Some(observed_at.to_string()),
             usage_source: None,
         }
+    }
+
+    fn availability_status(
+        backend: &str,
+        backend_instance: Option<&str>,
+        model: Option<&str>,
+        quota_pool: Option<&str>,
+        eligible: bool,
+        scope: Option<BlockScope>,
+    ) -> ScopeStatus {
+        ScopeStatus {
+            backend: backend.into(),
+            backend_instance: backend_instance.map(str::to_string),
+            model: model.map(str::to_string),
+            quota_pool: quota_pool.map(str::to_string),
+            eligible,
+            reason: (!eligible).then_some(Reason::QuotaExhausted),
+            unavailable_until: None,
+            scope,
+            source: Some(Source::Imported),
+            last_error_summary: None,
+            observed_at: Some("2026-07-20T00:00:00Z".into()),
+        }
+    }
+
+    #[test]
+    fn candidate_status_inherits_backend_wide_and_cross_instance_pool_state() {
+        let candidate = CandidateKey {
+            backend: "opencode".into(),
+            backend_instance: "opencode-account-a".into(),
+            model: Some("shared-model".into()),
+            quota_pool: None,
+        };
+        let mut lookup = AvailabilityScopeLookup::new();
+        lookup.insert(
+            ("opencode".into(), None, None, None),
+            availability_status(
+                "opencode",
+                None,
+                None,
+                None,
+                false,
+                Some(BlockScope::BackendWide),
+            ),
+        );
+        assert!(!find_scope_status(&lookup, &candidate).unwrap().eligible);
+
+        let pooled = CandidateKey {
+            quota_pool: Some("shared-pool".into()),
+            ..candidate
+        };
+        lookup.insert(
+            (
+                "opencode".into(),
+                Some("opencode-account-b".into()),
+                Some("other-model".into()),
+                Some("shared-pool".into()),
+            ),
+            availability_status(
+                "opencode",
+                Some("opencode-account-b"),
+                Some("other-model"),
+                Some("shared-pool"),
+                true,
+                None,
+            ),
+        );
+        assert!(find_scope_status(&lookup, &pooled).unwrap().eligible);
     }
 
     // -- summarize_groups --------------------------------------------------
@@ -830,7 +959,12 @@ mod tests {
             )],
             ..empty_group()
         };
-        let obs = aggregate_observations(Some(&backend), Some(&model), &[], "codex", Some("gpt-5"));
+        let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "codex",
+            Some("gpt-5"),
+            None::<String>,
+        );
+        let obs = aggregate_observations(Some(&backend), Some(&model), &[], &identity);
         assert_eq!(obs.len(), 2);
         assert!(obs
             .iter()
@@ -847,7 +981,12 @@ mod tests {
             Some(42.0),
             "2026-07-03T00:00:00Z",
         )];
-        let obs = aggregate_observations(None, None, &account, "codex", None);
+        let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "codex",
+            None::<String>,
+            None::<String>,
+        );
+        let obs = aggregate_observations(None, None, &account, &identity);
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].quota_remaining_percent, Some(42.0));
     }
@@ -864,7 +1003,12 @@ mod tests {
             Some(42.0),
             "2026-07-03T00:00:00Z",
         )];
-        let obs = aggregate_observations(None, None, &account, "codex", Some("gpt-5"));
+        let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "codex",
+            Some("gpt-5"),
+            None::<String>,
+        );
+        let obs = aggregate_observations(None, None, &account, &identity);
         assert!(obs.is_empty());
     }
 
@@ -897,7 +1041,12 @@ mod tests {
             ..empty_group()
         };
 
-        let obs = aggregate_observations(Some(&backend), None, &[], "agy", Some("Gemini"));
+        let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "agy",
+            Some("Gemini"),
+            None::<String>,
+        );
+        let obs = aggregate_observations(Some(&backend), None, &[], &identity);
 
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].backend, "agy");
@@ -916,7 +1065,12 @@ mod tests {
             quota_observations: vec![dup],
             ..empty_group()
         };
-        let obs = aggregate_observations(Some(&backend), Some(&model), &[], "codex", None);
+        let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "codex",
+            None::<String>,
+            None::<String>,
+        );
+        let obs = aggregate_observations(Some(&backend), Some(&model), &[], &identity);
         assert_eq!(obs.len(), 1, "identical observations must collapse to one");
     }
 
@@ -1019,9 +1173,10 @@ mod tests {
         let model_map = HashMap::new();
         let mut scope_lookup = HashMap::new();
         scope_lookup.insert(
-            ("agy".to_string(), None, Some("agy".to_string())),
+            ("agy".to_string(), None, None, Some("agy".to_string())),
             ScopeStatus {
                 backend: "agy".to_string(),
+                backend_instance: None,
                 model: None,
                 quota_pool: Some("agy".to_string()),
                 eligible: false,

@@ -432,6 +432,7 @@ requires_approval = true
             version: 1,
             records: vec![AvailabilityRecord {
                 backend: "claude".into(),
+                backend_instance: None,
                 model: Some("sonnet".into()),
                 quota_pool: None,
                 status: Status::Unavailable,

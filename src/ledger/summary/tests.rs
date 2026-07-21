@@ -610,7 +610,9 @@ fn account_quota_merges_into_backend_group_only() {
 
     let account = crate::quota_store::QuotaObservationRecord {
         backend: "codex".to_string(),
+        backend_instance: None,
         model: None,
+        quota_pool: None,
         quota_window: Some("weekly".to_string()),
         quota_used_percent: Some(42.0),
         quota_remaining_percent: Some(58.0),

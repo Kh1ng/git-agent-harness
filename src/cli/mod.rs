@@ -27,12 +27,14 @@ pub fn run() -> Result<()> {
         Commands::Availability { json, action } => match action {
             Some(AvailabilityAction::Clear {
                 backend,
+                backend_instance,
                 model,
                 quota_pool,
             }) => {
                 availability::cli::clear(
                     &availability::resolve_state_path(),
                     &backend,
+                    backend_instance.as_deref(),
                     model.as_deref(),
                     quota_pool.as_deref(),
                 )?;
@@ -991,7 +993,9 @@ pub fn run() -> Result<()> {
         Commands::Quota { command } => match command {
             QuotaCommands::Refresh {
                 backend,
+                backend_instance,
                 model,
+                quota_pool,
                 command: cmd,
                 store_path: store_arg,
             } => {
@@ -999,7 +1003,24 @@ pub fn run() -> Result<()> {
                 let path = store_arg
                     .map(PathBuf::from)
                     .unwrap_or_else(quota_store::store_path);
-                match quota_store::refresh_codex_and_store(&codex_cmd, model.as_deref(), &path) {
+                if quota_pool.is_some() && backend_instance.is_none() {
+                    anyhow::bail!("--quota-pool requires --backend-instance for an unambiguous quota observation");
+                }
+                let refreshed = if let Some(instance) = backend_instance {
+                    let mut identity = execution_identity::ExecutionIdentity::legacy_candidate(
+                        &backend,
+                        model.as_deref(),
+                        quota_pool.as_deref(),
+                    );
+                    identity.backend_instance = execution_identity::validate_secret_safe_label(
+                        "backend instance",
+                        &instance,
+                    )?;
+                    quota_store::refresh_codex_and_store_for_identity(&codex_cmd, &identity, &path)
+                } else {
+                    quota_store::refresh_codex_and_store(&codex_cmd, model.as_deref(), &path)
+                };
+                match refreshed {
                     Ok(Some(rec)) => {
                         println!(
                             "Refreshed {} {} quota: used={:?}% remaining={:?}% window={:?} reset={:?} (source={})",

@@ -27,6 +27,10 @@ pub enum AvailabilityAction {
     Clear {
         #[arg(long)]
         backend: String,
+        /// Narrow the override to one configured execution instance. Omit to
+        /// retain the legacy logical-backend-wide selector.
+        #[arg(long, visible_alias = "instance")]
+        backend_instance: Option<String>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -810,10 +814,17 @@ pub enum QuotaCommands {
         /// Backend whose account quota to refresh (e.g. "codex").
         #[arg(long, default_value = "codex")]
         backend: String,
+        /// Stable, secret-safe execution instance for this account reading.
+        /// Omit to write a legacy instance-unknown observation.
+        #[arg(long, visible_alias = "instance")]
+        backend_instance: Option<String>,
         /// Model qualifier for the observation (usually unset for
         /// account-level readings).
         #[arg(long)]
         model: Option<String>,
+        /// Shared capacity/billing pool for this observation.
+        #[arg(long)]
+        quota_pool: Option<String>,
         /// Path/command for the backend CLI (defaults to the backend name on
         /// PATH, e.g. "codex"). Only `codex` has a structured status parser
         /// today; other backends fall back to "no data" rather than guessing.

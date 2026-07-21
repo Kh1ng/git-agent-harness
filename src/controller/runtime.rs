@@ -1369,6 +1369,7 @@ default_target_branch = "main"
         // Add multiple eligible backends (more than max_parallel)
         for _ in 0..5 {
             snapshot.availability.push(ScopeStatusJson {
+                backend_instance: None,
                 backend: "test_backend".to_string(),
                 model: None,
                 quota_pool: None,
@@ -1421,6 +1422,7 @@ default_target_branch = "main"
         // Add 3 eligible backends
         for i in 0..3 {
             snapshot.availability.push(ScopeStatusJson {
+                backend_instance: None,
                 backend: format!("backend_{}", i),
                 model: None,
                 quota_pool: None,
@@ -1451,6 +1453,7 @@ default_target_branch = "main"
         let mut snapshot = empty_snapshot();
         for i in 0..3 {
             snapshot.availability.push(ScopeStatusJson {
+                backend_instance: None,
                 backend: format!("backend_{i}"),
                 model: None,
                 quota_pool: None,

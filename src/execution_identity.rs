@@ -145,6 +145,26 @@ pub fn runner_kind_for_backend(backend: &str) -> &str {
     }
 }
 
+/// Validate an operator-facing identity label before it can enter durable
+/// state. Labels are logical names, never filesystem/auth material.
+pub fn validate_secret_safe_label(field: &str, value: &str) -> anyhow::Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        anyhow::bail!("{field} must be a non-empty label of at most 128 bytes");
+    }
+    if trimmed.chars().any(char::is_whitespace)
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.chars().any(char::is_control)
+    {
+        anyhow::bail!("{field} must be a logical label, not a path or credential source");
+    }
+    if crate::redact::redact(trimmed) != trimmed {
+        anyhow::bail!("{field} looks like credential material and cannot be persisted");
+    }
+    Ok(trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +210,19 @@ mod tests {
         assert_eq!(identity.quota_pool.as_deref(), Some("agy:external"));
         assert_eq!(identity.account_label.as_deref(), Some("agy:external"));
         assert_eq!(identity.backend_instance, "agy:external");
+    }
+
+    #[test]
+    fn durable_labels_reject_paths_and_token_material() {
+        assert!(validate_secret_safe_label("backend instance", "/home/user/codex").is_err());
+        assert!(validate_secret_safe_label(
+            "backend instance",
+            "sk-abcdefghijklmnopqrstuvwxyz123456"
+        )
+        .is_err());
+        assert_eq!(
+            validate_secret_safe_label("backend instance", " codex-main ").unwrap(),
+            "codex-main"
+        );
     }
 }
