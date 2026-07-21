@@ -312,6 +312,11 @@ and merged. Confirmed:
       the cross-system join key; issue numbers alone can never merge projects.
 - [x] The legacy compatibility table in §9 has no system GAH persists
       identity/usage to that is left undocumented.
-- [ ] `cargo test execution_identity`, `cargo test --test
+- [x] `cargo test --test execution_identity`, `cargo test --test
       usage_telemetry_regression`, and `cargo test` all pass on this
       branch.
+
+Verification was completed on the branch merged with current `main` using a
+filesystem with sufficient dispatch-worktree capacity: the focused suites
+passed 12/12 and 11/11, the full Rust suite passed, formatting was clean, and
+strict clippy passed with warnings denied.
