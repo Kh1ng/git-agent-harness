@@ -36,8 +36,9 @@ mod source_issue_context;
 mod source_issue_sections;
 use identity::canonicalize_review_ledger_identity;
 use source_issue_context::{
-    render_untrusted_inline_review_text, render_untrusted_review_text,
-    resolve_source_issue_context, verified_post_budget_source_contract,
+    apply_resolved_source_issue_identity, render_untrusted_inline_review_text,
+    render_untrusted_review_text, resolve_source_issue_context,
+    verified_post_budget_source_contract,
 };
 
 fn review_outcome_allows_reroute(outcome: &runner::ReviewProcessOutcome) -> bool {
@@ -185,6 +186,7 @@ pub(in crate::dispatch) fn review(
         ledger.work_id.as_deref(),
         &target,
     )?;
+    apply_resolved_source_issue_identity(ledger, &source_issue_context);
     let review_gate_context =
         ReviewGateContext::from_diff_bundle(&diff_bundle, target.ci_status.as_deref())
             .with_source_acceptance(
@@ -361,7 +363,7 @@ pub(in crate::dispatch) fn review(
         cfg,
         profile,
         &args.profile,
-        args.work_id.as_deref(),
+        ledger.work_id.as_deref(),
         &route,
         ledger.review_generation.as_deref(),
     )? {

@@ -1,13 +1,10 @@
-import type { ProviderInstance, ProviderStatus, ProviderKind } from '@git-agent-harness/contracts';
+import type { ProviderInstance, ProviderStatus } from '@git-agent-harness/contracts';
 import { StatusBadge, type StatusTone } from './ui/StatusBadge.js';
 import { providerIcon } from '../lib/icons.js';
 
 type ProviderStatusCardProps = {
   provider: ProviderInstance;
   status: ProviderStatus | undefined;
-  // TICKET-157: maps a backend name to whether it is configured for the
-  // active profile (real implementation + profile-level config present).
-  backendConfigured?: Record<string, boolean>;
   onClick?: () => void;
 };
 
@@ -19,39 +16,16 @@ const STATUS_TONE: Record<ProviderStatus['type'], StatusTone> = {
   not_implemented: 'unknown'
 };
 
-// Backends that have a real Rust implementation (vs. pure UI scaffolding
-// like `grok`/`cursor`, which are never wired through the harness).
-const IMPLEMENTED_BACKENDS = new Set<ProviderKind>([
-  'codex',
-  'claude',
-  'agy',
-  'vibe',
-  'opencode',
-  'openhands'
-]);
-
-export function ProviderStatusCard({ provider, status, backendConfigured, onClick }: ProviderStatusCardProps) {
+export function ProviderStatusCard({ provider, status, onClick }: ProviderStatusCardProps) {
   const Icon = providerIcon(provider.providerKind);
-
-  // Determine the effective status: a backend with a real implementation
-  // but no profile-level config should read as "not configured for this
-  // profile" rather than the generic "available" reactive default.
-  let effectiveStatus = status;
-  if (
-    status?.type === 'available' &&
-    IMPLEMENTED_BACKENDS.has(provider.providerKind) &&
-    backendConfigured &&
-    backendConfigured[provider.providerKind] === false
-  ) {
-    effectiveStatus = { type: 'unavailable', reason: 'Not configured for this profile' };
-  }
-
-  const tone = effectiveStatus ? STATUS_TONE[effectiveStatus.type] : 'unknown';
+  const tone = status ? STATUS_TONE[status.type] : 'unknown';
   const label =
-    effectiveStatus?.type === 'unavailable' && effectiveStatus.reason
-      ? effectiveStatus.reason
-      : effectiveStatus
-        ? effectiveStatus.type
+    status?.type === 'unavailable' && status.reason
+      ? status.reason
+      : status?.type === 'error' && status.error
+        ? status.error
+        : status
+          ? status.type
         : 'unknown';
 
   const Wrapper = onClick ? 'button' : 'div';

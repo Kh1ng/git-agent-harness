@@ -102,6 +102,9 @@ pub enum Commands {
         /// declared env files exist, backend executables are present.
         #[arg(long)]
         validate: bool,
+        /// Emit structured node-readiness checks for control-plane clients.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Update the installed CLI and control-plane server deterministically.
     Update {

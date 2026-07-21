@@ -61,7 +61,8 @@ pub fn run() -> Result<()> {
             profile,
             config_path,
             validate,
-        } => doctor::run_with_validate(profile.as_deref(), config_path.as_deref(), validate)?,
+            json,
+        } => doctor::run(profile.as_deref(), config_path.as_deref(), validate, json)?,
 
         Commands::Update {
             repo,

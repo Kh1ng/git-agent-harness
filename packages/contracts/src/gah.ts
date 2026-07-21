@@ -321,16 +321,41 @@ export interface QuotaCandidateStatus {
   last_error_summary?: string | null;
   observed_at?: string | null;
   usage: QuotaUsageSummary;
-  quota_observations: QuotaObservation[];
+  quota_observations?: QuotaObservation[];
 }
 
 export interface QuotaSnapshot {
   schema_version: number;
   generated_at: string;
+  freshness: {
+    ledger_observed_at?: string | null;
+    availability_observed_at?: string | null;
+    quota_observed_at?: string | null;
+  };
   profile: ProfileIdentity;
   since: string;
   usage: QuotaUsageSummary;
   candidates: QuotaCandidateStatus[];
+}
+
+// ---------------------------------------------------------------------------
+// gah doctor --json (src/doctor.rs)
+// ---------------------------------------------------------------------------
+
+export type DoctorCheckStatus = 'ok' | 'warn' | 'fail';
+
+export interface DoctorCheck {
+  profile?: string | null;
+  name: string;
+  status: DoctorCheckStatus;
+  detail: string;
+}
+
+export interface DoctorSnapshot {
+  schema_version: number;
+  generated_at: string;
+  overall_status: DoctorCheckStatus;
+  checks: DoctorCheck[];
 }
 
 // ---------------------------------------------------------------------------

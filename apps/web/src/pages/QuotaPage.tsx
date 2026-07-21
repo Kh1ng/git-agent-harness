@@ -9,6 +9,8 @@ import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { StatTile } from '../components/ui/StatTile.js';
 import { formatPercent, formatRemaining, formatAge, isStale, formatTokens, formatCount, formatCost, formatLocalTime } from '../lib/format.js';
 
+const SNAPSHOT_REFRESH_MS = 5 * 60 * 1000;
+
 /** A quota/availability scope's identity string -- backend + instance
  * (model) + pool must never be collapsed, per the spec: "agy" and
  * "agy-second" are different instances, "5-hour" and "weekly" are
@@ -52,6 +54,12 @@ export function QuotaPage() {
 
   useEffect(() => {
     fetchQuota({ profile: profile ?? undefined, since: '7d' });
+    const refreshTimer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
+      }
+    }, SNAPSHOT_REFRESH_MS);
+    return () => window.clearInterval(refreshTimer);
   }, [profile, fetchQuota]);
 
   const refresh = () => {
@@ -91,10 +99,35 @@ export function QuotaPage() {
   const snapshot = quota.data;
   const candidates = snapshot?.candidates ?? [];
   const usage = snapshot?.usage;
+  const freshness = snapshot?.freshness;
 
   return (
     <div className="space-y-6">
       {header}
+
+      <section className="card-padded">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h3 className="text-sm font-semibold text-primary">Data freshness</h3>
+          <span className="text-xs text-muted">
+            Snapshot {formatAge(snapshot?.generated_at) ?? 'not generated'}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          {([
+            ['Ledger activity', freshness?.ledger_observed_at],
+            ['Availability check', freshness?.availability_observed_at],
+            ['Quota observation', freshness?.quota_observed_at]
+          ] as const).map(([label, observedAt]) => (
+            <div key={label} className="flex items-center justify-between gap-2">
+              <span className="text-secondary">{label}</span>
+              <span className="inline-flex items-center gap-2 text-muted">
+                {formatAge(observedAt) ?? 'Never observed'}
+                {isStale(observedAt) && <StatusBadge tone="serious" label="Stale" />}
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatTile
@@ -147,7 +180,7 @@ export function QuotaPage() {
                       </span>
                       <p className="text-[11px] text-muted mt-1">
                         {candidate.modes.length > 0 ? candidate.modes.join(', ') : 'candidate'}
-                        {!candidate.configured && ' · not configured'}
+                        {!candidate.configured && ' · no profile runner override'}
                       </p>
                     </div>
                     <StatusBadge tone={candidate.eligible_now ? 'good' : 'critical'} label={candidate.eligible_now ? 'Eligible' : 'Unavailable'} />
