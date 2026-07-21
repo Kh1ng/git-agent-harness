@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 
 export function isLocalAddress(ip: string): boolean {
   if (!ip) return false;
@@ -20,9 +21,8 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   }
 
   // Non-loopback endpoints require TLS plus authenticated node/client identity
-  // Trust proxy headers like x-forwarded-proto or check req.secure
-  const isForwardedTls = req.headers['x-forwarded-proto'] === 'https';
-  const isTls = req.secure || isForwardedTls;
+  // Rely on Express's req.secure, which only trusts proxy headers if 'trust proxy' is configured.
+  const isTls = req.secure;
 
   if (!isTls) {
     return res.status(403).json({
@@ -50,7 +50,12 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
     });
   }
 
-  if (token !== expectedToken) {
+  // Use constant-time comparison to prevent timing attacks
+  const tokenHash = crypto.createHash('sha256').update(token).digest();
+  const expectedHash = crypto.createHash('sha256').update(expectedToken).digest();
+  const tokensMatch = crypto.timingSafeEqual(tokenHash, expectedHash);
+
+  if (!tokensMatch) {
     return res.status(401).json({
       error: 'Unauthorized',
       message: 'Invalid authentication token'
@@ -59,3 +64,4 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 
   next();
 }
+

@@ -9,7 +9,9 @@ import crypto from 'node:crypto';
 import { createServer } from './server.js';
 import { RegistryService, containsSecretWords, isSchemaCompatible } from './registryService.js';
 import { getCoordinatorIdentity, resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
+import { authMiddleware } from './authMiddleware.js';
 import type { RegisteredNode, NodeSummary, NodeHealthCheckResult } from '@git-agent-harness/contracts';
+
 
 // Helper to set up temporary registry file
 function createTempRegistryFile(): string {
@@ -535,3 +537,135 @@ test('Server endpoints handle Node CRUD, Secret Rotation and Revocation', async 
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// authMiddleware Unit Tests
+// ---------------------------------------------------------------------------
+
+test('authMiddleware rejects non-loopback requests with spoofed X-Forwarded-Proto header if trust proxy is disabled', () => {
+  const req = {
+    ip: '8.8.8.8',
+    headers: {
+      'x-forwarded-proto': 'https',
+      'authorization': 'Bearer expected-coordinator-token'
+    },
+    secure: false, // Express sets this to false because trust proxy is disabled
+    socket: {
+      remoteAddress: '8.8.8.8'
+    }
+  } as any;
+
+  let statusCalledWith: number | null = null;
+  let jsonCalledWith: any = null;
+  let nextCalled = false;
+
+  const res = {
+    status: (code: number) => {
+      statusCalledWith = code;
+      return {
+        json: (data: any) => {
+          jsonCalledWith = data;
+        }
+      };
+    }
+  } as any;
+
+  const next = () => {
+    nextCalled = true;
+  };
+
+  process.env.COORDINATOR_TOKEN = 'expected-coordinator-token';
+
+  authMiddleware(req, res, next);
+
+  assert.equal(nextCalled, false);
+  assert.equal(statusCalledWith, 403);
+  assert.equal(jsonCalledWith?.error, 'Forbidden');
+  assert.equal(jsonCalledWith?.message, 'Non-loopback endpoints require TLS');
+  
+  delete process.env.COORDINATOR_TOKEN;
+});
+
+test('authMiddleware accepts non-loopback requests when req.secure is true and token is correct', () => {
+  const req = {
+    ip: '8.8.8.8',
+    headers: {
+      'authorization': 'Bearer expected-coordinator-token'
+    },
+    secure: true,
+    socket: {
+      remoteAddress: '8.8.8.8'
+    }
+  } as any;
+
+  let statusCalledWith: number | null = null;
+  let jsonCalledWith: any = null;
+  let nextCalled = false;
+
+  const res = {
+    status: (code: number) => {
+      statusCalledWith = code;
+      return {
+        json: (data: any) => {
+          jsonCalledWith = data;
+        }
+      };
+    }
+  } as any;
+
+  const next = () => {
+    nextCalled = true;
+  };
+
+  process.env.COORDINATOR_TOKEN = 'expected-coordinator-token';
+
+  authMiddleware(req, res, next);
+
+  assert.equal(nextCalled, true);
+  assert.equal(statusCalledWith, null);
+  
+  delete process.env.COORDINATOR_TOKEN;
+});
+
+test('authMiddleware timing-safe comparison rejects invalid tokens', () => {
+  const req = {
+    ip: '8.8.8.8',
+    headers: {
+      'authorization': 'Bearer wrong-token-value'
+    },
+    secure: true,
+    socket: {
+      remoteAddress: '8.8.8.8'
+    }
+  } as any;
+
+  let statusCalledWith: number | null = null;
+  let jsonCalledWith: any = null;
+  let nextCalled = false;
+
+  const res = {
+    status: (code: number) => {
+      statusCalledWith = code;
+      return {
+        json: (data: any) => {
+          jsonCalledWith = data;
+        }
+      };
+    }
+  } as any;
+
+  const next = () => {
+    nextCalled = true;
+  };
+
+  process.env.COORDINATOR_TOKEN = 'expected-coordinator-token';
+
+  authMiddleware(req, res, next);
+
+  assert.equal(nextCalled, false);
+  assert.equal(statusCalledWith, 401);
+  assert.equal(jsonCalledWith?.error, 'Unauthorized');
+  
+  delete process.env.COORDINATOR_TOKEN;
+});
+
