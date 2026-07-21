@@ -6,6 +6,9 @@ use std::thread;
 use std::time::Duration;
 use url::Url;
 
+mod relations;
+pub(crate) use relations::{link_provider_child, link_provider_dependency};
+
 const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
     "gah-needs-fix",
     "gah-ready-for-human",
@@ -183,6 +186,249 @@ pub struct MrResult {
     pub id: String,
 }
 
+/// Secret-safe provider issue identity used by PM publication. `id` is the
+/// provider's opaque database/node identifier; `number` is the project-local
+/// issue number operators see in URLs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderIssue {
+    pub(crate) id: String,
+    pub(crate) number: String,
+    pub(crate) url: String,
+    pub(crate) state: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) labels: Vec<String>,
+}
+
+fn provider_issue_from_value(provider: &str, value: &serde_json::Value) -> Result<ProviderIssue> {
+    let (number, url, body) = match provider {
+        "github" => (
+            value["number"].as_u64().map(|v| v.to_string()),
+            value["html_url"].as_str(),
+            value["body"].as_str().unwrap_or_default(),
+        ),
+        "gitlab" => (
+            value["iid"].as_u64().map(|v| v.to_string()),
+            value["web_url"].as_str(),
+            value["description"].as_str().unwrap_or_default(),
+        ),
+        other => anyhow::bail!("unsupported provider: {other}"),
+    };
+    let id = value["id"]
+        .as_u64()
+        .map(|v| v.to_string())
+        .or_else(|| value["id"].as_str().map(ToOwned::to_owned))
+        .ok_or_else(|| anyhow::anyhow!("provider issue response missing id"))?;
+    let labels = value["labels"]
+        .as_array()
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| {
+                    label
+                        .as_str()
+                        .or_else(|| label["name"].as_str())
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ProviderIssue {
+        id,
+        number: number.ok_or_else(|| anyhow::anyhow!("provider issue response missing number"))?,
+        url: url
+            .ok_or_else(|| anyhow::anyhow!("provider issue response missing URL"))?
+            .to_string(),
+        state: value["state"].as_str().unwrap_or("unknown").to_string(),
+        title: value["title"].as_str().unwrap_or_default().to_string(),
+        body: body.to_string(),
+        labels,
+    })
+}
+
+fn github_json_api(
+    _profile: &Profile,
+    method: &str,
+    endpoint: &str,
+    fields: &[(&str, &str)],
+) -> Result<serde_json::Value> {
+    let mut command = provider_command("gh");
+    command.args(["api", "--method", method, endpoint]);
+    for (name, value) in fields {
+        command.args(["-f", &format!("{name}={value}")]);
+    }
+    let out = command.output().context("gh api issue operation")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "gh api issue operation failed for {endpoint}: {}",
+            redacted_provider_output(&out)
+        );
+    }
+    serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("parsing GitHub API response for {endpoint}"))
+}
+
+pub(crate) fn get_provider_issue(profile: &Profile, number: &str) -> Result<ProviderIssue> {
+    let value = match profile.provider.as_str() {
+        "github" => github_json_api(
+            profile,
+            "GET",
+            &format!("repos/{}/issues/{number}", profile.repo),
+            &[],
+        )?,
+        "gitlab" => {
+            let project_id = profile
+                .provider_project_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            gitlab_api(
+                profile,
+                &format!("projects/{project_id}/issues/{number}"),
+                "GET",
+                &[],
+            )?
+        }
+        other => anyhow::bail!("unsupported provider: {other}"),
+    };
+    provider_issue_from_value(&profile.provider, &value)
+}
+
+pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssue>> {
+    const PAGE_SIZE: usize = 100;
+    const MAX_PAGES: usize = 100;
+    let mut issues = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let value = match profile.provider.as_str() {
+            "github" => github_json_api(
+                profile,
+                "GET",
+                &format!(
+                    "repos/{}/issues?state=all&per_page={PAGE_SIZE}&page={page}",
+                    profile.repo
+                ),
+                &[],
+            )?,
+            "gitlab" => {
+                let project_id = profile.provider_project_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("profile missing provider_project_id for gitlab")
+                })?;
+                gitlab_api(
+                    profile,
+                    &format!(
+                        "projects/{project_id}/issues?scope=all&state=all&per_page={PAGE_SIZE}&page={page}"
+                    ),
+                    "GET",
+                    &[],
+                )?
+            }
+            other => anyhow::bail!("unsupported provider: {other}"),
+        };
+        let page_values = value
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("provider issue listing was not an array"))?;
+        for value in page_values {
+            if profile.provider == "github" && value.get("pull_request").is_some() {
+                continue;
+            }
+            issues.push(provider_issue_from_value(&profile.provider, value)?);
+        }
+        if page_values.len() < PAGE_SIZE {
+            return Ok(issues);
+        }
+    }
+    anyhow::bail!(
+        "provider issue listing reached {} pages; refusing an incomplete idempotency snapshot",
+        MAX_PAGES
+    )
+}
+
+pub(crate) fn list_provider_label_names(profile: &Profile) -> Result<Vec<String>> {
+    const PAGE_SIZE: usize = 100;
+    const MAX_PAGES: usize = 100;
+    let mut labels = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let value = match profile.provider.as_str() {
+            "github" => github_json_api(
+                profile,
+                "GET",
+                &format!(
+                    "repos/{}/labels?per_page={PAGE_SIZE}&page={page}",
+                    profile.repo
+                ),
+                &[],
+            )?,
+            "gitlab" => {
+                let project_id = profile.provider_project_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("profile missing provider_project_id for gitlab")
+                })?;
+                gitlab_api(
+                    profile,
+                    &format!("projects/{project_id}/labels?per_page={PAGE_SIZE}&page={page}"),
+                    "GET",
+                    &[],
+                )?
+            }
+            other => anyhow::bail!("unsupported provider: {other}"),
+        };
+        let page_values = value
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("provider label listing was not an array"))?;
+        labels.extend(
+            page_values
+                .iter()
+                .filter_map(|value| value["name"].as_str().map(ToOwned::to_owned)),
+        );
+        if page_values.len() < PAGE_SIZE {
+            return Ok(labels);
+        }
+    }
+    anyhow::bail!(
+        "provider label listing reached {} pages; refusing an incomplete taxonomy snapshot",
+        MAX_PAGES
+    )
+}
+
+pub(crate) fn create_provider_issue(
+    profile: &Profile,
+    title: &str,
+    body: &str,
+    labels: &[String],
+) -> Result<ProviderIssue> {
+    let title = crate::redact::redact(title);
+    let body = crate::redact::redact(body);
+    let value = match profile.provider.as_str() {
+        "github" => {
+            let mut fields = vec![("title", title.as_str()), ("body", body.as_str())];
+            fields.extend(labels.iter().map(|label| ("labels[]", label.as_str())));
+            github_json_api(
+                profile,
+                "POST",
+                &format!("repos/{}/issues", profile.repo),
+                &fields,
+            )?
+        }
+        "gitlab" => {
+            let project_id = profile
+                .provider_project_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            let labels = labels.join(",");
+            let mut fields = vec![("title", title.as_str()), ("description", body.as_str())];
+            if !labels.is_empty() {
+                fields.push(("labels", labels.as_str()));
+            }
+            gitlab_api(
+                profile,
+                &format!("projects/{project_id}/issues"),
+                "POST",
+                &fields,
+            )?
+        }
+        other => anyhow::bail!("unsupported provider: {other}"),
+    };
+    provider_issue_from_value(&profile.provider, &value)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewTarget {
     pub id: String,
@@ -211,6 +457,9 @@ pub fn create_draft_mr(
     title: &str,
     body: &str,
 ) -> Result<MrResult> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: create_draft_mr is disallowed in handoff mode");
+    }
     let body = crate::redact::redact(body);
     match profile.provider.as_str() {
         "gitlab" => gitlab_mr(profile, branch, title, &body),
@@ -225,6 +474,9 @@ pub fn post_review_comment(
     body: &str,
     labels: &[&str],
 ) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: post_review_comment is disallowed in handoff mode");
+    }
     let body = crate::redact::redact(body);
     match profile.provider.as_str() {
         "gitlab" => gitlab_post_review_comment(profile, branch, &body, labels),
@@ -236,6 +488,9 @@ pub fn post_review_comment(
 /// Post an idempotent comment to a source issue using the configured provider.
 /// The body is redacted before it crosses the provider boundary.
 pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: post_issue_comment is disallowed in handoff mode");
+    }
     let body = crate::redact::redact(body);
     match profile.provider.as_str() {
         "github" => github_post_issue_comment(profile, issue_number, &body),
@@ -266,6 +521,11 @@ pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> 
 /// repair makes it outrank `gah-review-escalating` forever and exhausts the
 /// fix cap without reviewing the new source commit.
 pub fn set_review_state_labels(profile: &Profile, branch: &str, labels: &[&str]) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!(
+            "delivery_mode=handoff: set_review_state_labels is disallowed in handoff mode"
+        );
+    }
     match profile.provider.as_str() {
         "gitlab" => {
             let mr = gitlab_find_mr_by_branch(profile, branch)?;
@@ -581,6 +841,9 @@ fn github_set_review_state_labels(
 /// rather than reimplementing GitLab's title-based draft toggle over raw
 /// REST.
 pub fn mark_ready_for_review(profile: &Profile, branch: &str) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: mark_ready_for_review is disallowed in handoff mode");
+    }
     let target = find_review_target_by_branch(profile, branch)?;
     match profile.provider.as_str() {
         "gitlab" => gitlab_mark_ready_for_review(profile, &target.id),
@@ -593,15 +856,26 @@ fn ensure_review_generation(target: &ReviewTarget, expected: Option<&str>) -> Re
     let Some(expected) = expected else {
         return Ok(());
     };
-    let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+    // Tolerates GAH's own one-way draft-to-ready transition (mark_ready_for_review
+    // runs before merge_mr and flips `draft`, which would otherwise invalidate
+    // every review's generation right before merge — see review_state.rs).
+    if !crate::sync::review_generation_matches(
+        expected,
         target.source_sha.as_deref(),
         target.title.as_deref(),
         target.body.as_deref(),
         target.draft,
-    );
-    let live =
-        crate::ledger::review_generation(target.source_sha.as_deref(), Some(&metadata_fingerprint));
-    if live.as_deref() != Some(expected) {
+    ) {
+        let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+            target.source_sha.as_deref(),
+            target.title.as_deref(),
+            target.body.as_deref(),
+            target.draft,
+        );
+        let live = crate::ledger::review_generation(
+            target.source_sha.as_deref(),
+            Some(&metadata_fingerprint),
+        );
         anyhow::bail!(
             "MR source or metadata changed after review: expected generation '{expected}', live generation is '{}'; re-run review before merge",
             live.as_deref().unwrap_or("unknown")
@@ -615,6 +889,9 @@ pub fn merge_mr(
     branch: &str,
     expected_review_generation: Option<&str>,
 ) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: merge_mr is disallowed in handoff mode");
+    }
     let target = find_review_target_by_branch(profile, branch)?;
     ensure_review_generation(&target, expected_review_generation)?;
     match profile.provider.as_str() {
@@ -672,6 +949,9 @@ pub fn gitlab_set_mwps(
     branch: &str,
     expected_review_generation: &str,
 ) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: gitlab_set_mwps is disallowed in handoff mode");
+    }
     let target = find_review_target_by_branch(profile, branch)?;
     ensure_review_generation(&target, Some(expected_review_generation))?;
     let iid = &target.id;
@@ -712,6 +992,9 @@ pub fn gitlab_set_mwps(
 
 /// Close a GitHub issue by number.
 pub fn github_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: github_close_issue is disallowed in handoff mode");
+    }
     let out = provider_command("gh")
         .args(["issue", "close", issue_number, "--repo", &profile.repo])
         .output()
@@ -725,6 +1008,9 @@ pub fn github_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
 
 /// Close a GitLab issue by number.
 pub fn gitlab_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
+    if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
+        anyhow::bail!("delivery_mode=handoff: gitlab_close_issue is disallowed in handoff mode");
+    }
     let project_id = profile
         .provider_project_id
         .as_deref()

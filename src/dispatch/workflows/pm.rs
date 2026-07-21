@@ -6,7 +6,7 @@ use super::super::issues::try_discover_open_issues;
 use super::super::prompts::indent_untrusted_text;
 use super::super::repo_inspection::count_test_files;
 use super::super::text::utf8_safe_prefix;
-use super::super::text::{extract_first_json_object, first_markdown_heading, normalize_match};
+use super::super::text::{extract_first_json_object, first_markdown_heading};
 use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+mod publish;
+pub(crate) use publish::{publish_plan, validate_source_depth, PmPublicationSummary};
 
 const PM_PLAN_JSON_SCHEMA_VERSION: u32 = 1;
 const PM_PLAN_JSON_MAX_BYTES: usize = 200_000;
@@ -131,7 +135,13 @@ pub(crate) fn pm(
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
 
     let mut attempted_routes = HashSet::new();
+    let backend_budget = Duration::from_secs(profile.publishing.pm_timeout_seconds());
+    let backend_started = Instant::now();
     let log_text = loop {
+        let remaining = backend_budget
+            .checked_sub(backend_started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .context("PM backend attempts exhausted the configured wall-clock budget")?;
         let attempt_index = attempted_routes.len() + 1;
         let attempt_dir = session_dir.join(format!("pm-run-{attempt_index}"));
         fs::create_dir_all(&attempt_dir)?;
@@ -147,6 +157,7 @@ pub(crate) fn pm(
             &llm,
             plan_route.effective_model.as_deref(),
             None,
+            Some(remaining.as_secs().max(1)),
         )?;
         println!(
             "PM backend finished: exit={} duration={:.0}s log={}",
@@ -163,6 +174,14 @@ pub(crate) fn pm(
             crate::ledger::FailureClass::BackendError,
             crate::ledger::FailureStage::AgentRun,
         );
+        if log_text.contains("hard wall-clock timeout") {
+            ledger.validation_result = Some("not_run_hard_timeout".into());
+            anyhow::bail!(
+                "PM backend {} exceeded the configured {}s total wall-clock budget",
+                plan_route.effective_backend,
+                profile.publishing.pm_timeout_seconds()
+            );
+        }
         let route_key = route_identity(
             &plan_route.effective_backend,
             plan_route.effective_model.as_deref(),
@@ -219,18 +238,14 @@ pub(crate) fn pm(
     };
 
     let plan = parse_pm_plan(&log_text)?;
-    let written = persist_and_apply_pm_plan(
-        session_dir,
-        repo,
-        profile,
-        &preflight_ctx,
-        &args.target,
-        &plan,
-    )?;
-    println!("\nCreated {} ticket(s):", written.len());
-    for path in &written {
-        println!("  {}", path.display());
-    }
+    let artifact =
+        persist_pm_plan_artifact(session_dir, profile, &preflight_ctx, &args.target, &plan)?;
+    println!(
+        "Plan validated; no provider issues were created. Publish explicitly with: \
+         gah pm publish --profile {} --plan {}",
+        args.profile,
+        artifact.display()
+    );
 
     Ok(())
 }
@@ -815,91 +830,6 @@ fn detect_overlap_dependency_violations(packets: &[PlannerWorkPacket]) -> Option
     None
 }
 
-fn apply_pm_plan(repo: &Path, ctx: &PmPreflight, plan: &PmPlan) -> Result<Vec<PathBuf>> {
-    let tickets_dir = repo.join("docs/tickets");
-    fs::create_dir_all(&tickets_dir)?;
-    let manager_memory_path = repo.join("docs/MANAGER_MEMORY.md");
-    let next_id = next_ticket_id(&tickets_dir, Some(&manager_memory_path))?;
-
-    let mut kept: Vec<&PlannerWorkPacket> = Vec::new();
-    let mut skipped_keys: HashSet<String> = HashSet::new();
-    for ticket in &plan.tickets {
-        if should_skip_ticket(ctx, ticket) {
-            skipped_keys.insert(ticket.key.trim().to_string());
-        } else {
-            kept.push(ticket);
-        }
-    }
-
-    let mut identities: HashMap<String, usize> = HashMap::new();
-    for (id, ticket) in (next_id..).zip(kept.iter()) {
-        identities.insert(ticket.key.trim().to_string(), id);
-    }
-
-    let mut written = vec![];
-    for ticket in &kept {
-        validate_packet(ticket)?;
-        let assigned_id = identities[ticket.key.trim()];
-        let deps = resolve_dependencies(ticket, &identities, &skipped_keys);
-        let slug = slugify(&ticket.title);
-        let filename = format!("TICKET-{:03}-{}.md", assigned_id, slug);
-        let path = tickets_dir.join(filename);
-        fs::write(&path, render_ticket(ticket, assigned_id, &deps)).with_context(|| {
-            format!(
-                "writing {} for plan-local key '{}'",
-                path.display(),
-                ticket.key
-            )
-        })?;
-        written.push(path);
-    }
-    Ok(written)
-}
-
-struct ResolvedDependencies {
-    blocked_by: Vec<String>,
-    unresolved_duplicate_keys: Vec<String>,
-}
-
-fn resolve_dependencies(
-    ticket: &PlannerWorkPacket,
-    identities: &HashMap<String, usize>,
-    skipped_keys: &HashSet<String>,
-) -> ResolvedDependencies {
-    let mut blocked_by = Vec::new();
-    let mut unresolved_duplicate_keys = Vec::new();
-    for dep in &ticket.depends_on {
-        let key = dep.trim();
-        if let Some(id) = identities.get(key) {
-            blocked_by.push(format!("TICKET-{:03}", id));
-        } else if skipped_keys.contains(key) {
-            unresolved_duplicate_keys.push(key.to_string());
-        }
-    }
-    ResolvedDependencies {
-        blocked_by,
-        unresolved_duplicate_keys,
-    }
-}
-
-fn should_skip_ticket(ctx: &PmPreflight, ticket: &PlannerWorkPacket) -> bool {
-    let title = normalize_match(&ticket.title);
-    if title.is_empty() {
-        return true;
-    }
-
-    context_contains_title(&ctx.existing_tickets, &title)
-        || context_contains_title(&ctx.open_mrs, &title)
-        || context_contains_title(&ctx.merged_mrs, &title)
-        || context_contains_title(&ctx.source_issues, &title)
-}
-
-fn context_contains_title(items: &[String], title: &str) -> bool {
-    items
-        .iter()
-        .any(|item| normalize_match(item).contains(title))
-}
-
 fn validate_packet(ticket: &PlannerWorkPacket) -> Result<()> {
     if ticket.title.trim().is_empty() {
         anyhow::bail!("work packet missing title");
@@ -1078,18 +1008,6 @@ fn validate_routing(routing: &RecommendedRouting, title: &str) -> Result<()> {
     Ok(())
 }
 
-fn persist_and_apply_pm_plan(
-    session_dir: &Path,
-    repo: &Path,
-    profile: &Profile,
-    preflight: &PmPreflight,
-    target: &str,
-    plan: &PmPlan,
-) -> Result<Vec<PathBuf>> {
-    persist_pm_plan_artifact(session_dir, profile, preflight, target, plan)?;
-    apply_pm_plan(repo, preflight, plan)
-}
-
 fn persist_pm_plan_artifact(
     session_dir: &Path,
     profile: &Profile,
@@ -1119,133 +1037,6 @@ fn persist_pm_plan_artifact(
     fs::write(&path, &bytes)?;
     println!("Wrote PM plan artifact: {}", path.display());
     Ok(path)
-}
-
-fn render_ticket(ticket: &PlannerWorkPacket, id: usize, deps: &ResolvedDependencies) -> String {
-    let mut out = format!(
-        "# TICKET-{id:03}: {title}\n\n\
-         Plan key: {key}\n\
-         Summary: {summary}\n\
-         Objective: {objective}\n\
-         Task class: {task_class}\n\
-         Difficulty: {difficulty}\n\
-         Risk: {risk}\n\
-         Execution disposition: {disposition}\n\
-         Recommended routing: capability={capability} min_tier={tier}\n\
-         Source issue/story coverage evidence: {coverage}\n\
-         ## Affected Areas\n",
-        id = id,
-        title = ticket.title,
-        key = ticket.key,
-        summary = effective_packet_summary(ticket),
-        objective = ticket.objective,
-        task_class = ticket.task_class,
-        difficulty = ticket.difficulty,
-        risk = ticket.risk,
-        disposition = ticket.execution_disposition,
-        capability = ticket.recommended_routing.capability,
-        tier = ticket.recommended_routing.min_tier,
-        coverage = if ticket.duplicate_evidence.is_empty() {
-            "(none)".to_string()
-        } else {
-            ticket.duplicate_evidence.join("; ")
-        },
-    );
-    if ticket.affected_areas.is_empty() {
-        out.push_str("(none specified)\n");
-    }
-    for area in &ticket.affected_areas {
-        out.push_str(&format!("- {}\n", area));
-    }
-    out.push_str("\n## Affected Files\n");
-    if ticket.affected_files.is_empty() {
-        out.push_str("(none specified)\n");
-    }
-    for file in &ticket.affected_files {
-        out.push_str(&format!("- {}\n", file));
-    }
-    if !deps.blocked_by.is_empty() {
-        out.push_str(&format!("\nBlocked by: {}\n", deps.blocked_by.join(", ")));
-    }
-    if !deps.unresolved_duplicate_keys.is_empty() {
-        out.push_str("\n## Unresolved Dependencies (duplicate-skipped)\n");
-        for key in &deps.unresolved_duplicate_keys {
-            out.push_str(&format!(
-                "- plan-local key '{}' was judged already covered by existing work and received no new ticket identity; confirm the existing coverage actually satisfies this prerequisite before treating this ticket as unblocked.\n",
-                key
-            ));
-        }
-    }
-    if !ticket.duplicate_evidence.is_empty() {
-        out.push_str("\n## Duplicate Evidence Considered\n");
-        for item in &ticket.duplicate_evidence {
-            out.push_str(&format!("- {}\n", item));
-        }
-    }
-    out.push_str("\n## Acceptance Criteria\n");
-    for item in &ticket.acceptance_criteria {
-        out.push_str(&format!("- {}\n", item));
-    }
-    out.push_str("\n## Verification Commands\n");
-    for cmd in &ticket.verification_commands {
-        out.push_str(&format!("- `{}`\n", cmd));
-    }
-    if !ticket.uncovered_reason.is_empty() {
-        out.push_str("\n## Why This Is Uncovered\n");
-        out.push_str(&ticket.uncovered_reason);
-        out.push('\n');
-    }
-    out
-}
-
-fn next_ticket_id(tickets_dir: &Path, manager_memory_path: Option<&Path>) -> Result<usize> {
-    let mut max_id = 0usize;
-    if tickets_dir.exists() {
-        for entry in fs::read_dir(tickets_dir)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(rest) = name.strip_prefix("TICKET-") {
-                if let Some((num, _)) = rest.split_once('-') {
-                    max_id = max_id.max(num.parse::<usize>().unwrap_or(0));
-                }
-            }
-        }
-    }
-    if let Some(path) = manager_memory_path {
-        if path.exists() {
-            let content = fs::read_to_string(path)?;
-            for id in scan_ticket_ids(&content) {
-                max_id = max_id.max(id);
-            }
-        }
-    }
-    Ok(max_id + 1)
-}
-
-fn scan_ticket_ids(text: &str) -> Vec<usize> {
-    text.split("TICKET-")
-        .skip(1)
-        .filter_map(|rest| {
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse::<usize>().ok()
-        })
-        .collect()
-}
-
-fn slugify(input: &str) -> String {
-    let mut out = String::new();
-    let mut last_dash = false;
-    for ch in input.chars() {
-        let c = ch.to_ascii_lowercase();
-        if c.is_ascii_alphanumeric() {
-            out.push(c);
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
 }
 
 #[cfg(test)]

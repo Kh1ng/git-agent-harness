@@ -28,6 +28,8 @@ import type {
   ProfileSummary,
   WakeAutonomyValue,
   ConfigSummary,
+  ConfigProfileSummary,
+  DoctorSnapshot,
   ConfigSetData
 } from '@git-agent-harness/contracts';
 
@@ -171,6 +173,7 @@ export interface StopLoopResult {
 export interface GahDataSource {
   getStatus(profile?: string): Promise<StatusSnapshot>;
   getQuota(params?: { profile?: string; since?: string }): Promise<QuotaSnapshot>;
+  getDoctor(profile?: string): Promise<DoctorSnapshot>;
   getReport(params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }): Promise<ReportData>;
   getReportSeries(params?: { profile?: string; since?: string; bucket?: string }): Promise<ReportSeriesData>;
   getWorkTimeline(workId: string): Promise<LedgerEntry[]>;
@@ -184,6 +187,7 @@ export interface GahDataSource {
   startLoop(profile: string): Promise<StartLoopResult>;
   stopLoop(profile: string): Promise<StopLoopResult>;
   getConfig(): Promise<ConfigSummary>;
+  getProfileConfig(profile: string): Promise<ConfigProfileSummary>;
   setConfig(data: ConfigSetData): Promise<{ success: boolean; message: string }>;
 }
 
@@ -258,6 +262,9 @@ export const gahApi: GahDataSource = {
       since: params.since
     });
   },
+  getDoctor(profile) {
+    return getJson<DoctorSnapshot>('/api/doctor', { profile });
+  },
   getReport(params = {}) {
     return getJson<ReportData>('/api/report', {
       profile: params.profile,
@@ -326,6 +333,9 @@ export const gahApi: GahDataSource = {
   },
   async getConfig() {
     return getJson<ConfigSummary>('/api/config');
+  },
+  getProfileConfig(profile) {
+    return getJson<ConfigProfileSummary>('/api/config/effective', { profile });
   },
   async setConfig(data) {
     return postJson<{ success: boolean; message: string }, ConfigSetData>('/api/config', data);

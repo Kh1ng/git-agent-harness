@@ -168,7 +168,8 @@ impl ScenarioHarness {
 
     pub fn github_scenario(mut self, name: &str) -> Self {
         let fb = FakeBackend::new(self._temp.path(), "gh");
-        fb.install(load_github_fixture(name));
+        let fixture = load_github_fixture(name);
+        fb.install_github_api(fixture.default, fixture.open_pulls, fixture.check_runs);
         self.fake_gh = Some(fb);
         self
     }
@@ -817,6 +818,29 @@ pub fn github_pr_json(params: GithubPrParams) -> serde_json::Value {
     })
 }
 
+/// Build the equivalent payload returned by GitHub's REST open-PR endpoint.
+pub fn github_rest_pr_json(params: GithubPrParams) -> serde_json::Value {
+    let labels = params
+        .labels
+        .iter()
+        .map(|name| serde_json::json!({"name": name}))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "number": params.number.unwrap_or(1),
+        "title": params.title,
+        "body": null,
+        "html_url": params.url.unwrap_or("https://github.com/owner/repo/pull/1".into()),
+        "state": params.state.as_deref().unwrap_or("open").to_ascii_lowercase(),
+        "draft": params.draft.unwrap_or(true),
+        "head": {
+            "ref": params.branch,
+            "sha": "fixture-source-sha"
+        },
+        "labels": labels,
+        "updated_at": params.updated_at.unwrap_or("2026-07-01T00:00:00Z".into())
+    })
+}
+
 pub struct GithubPrParams {
     pub title: String,
     pub branch: String,
@@ -866,144 +890,185 @@ pub struct GitlabMrParams {
     pub updated_at: Option<String>,
 }
 
-fn load_github_fixture(name: &str) -> Scenario {
+struct GithubFixture {
+    default: Scenario,
+    open_pulls: Scenario,
+    check_runs: Scenario,
+}
+
+fn github_active_fixture(params: GithubPrParams) -> GithubFixture {
+    let conclusion = params.ci_conclusion.clone();
+    let legacy = github_pr_json(GithubPrParams {
+        title: params.title.clone(),
+        branch: params.branch.clone(),
+        labels: params.labels.clone(),
+        ci_conclusion: params.ci_conclusion.clone(),
+        state: params.state.clone(),
+        url: params.url.clone(),
+        number: params.number,
+        draft: params.draft,
+        merged_at: params.merged_at.clone(),
+        updated_at: params.updated_at.clone(),
+    });
+    GithubFixture {
+        default: Scenario::success().with_stdout(serde_json::to_string(&vec![legacy]).unwrap()),
+        open_pulls: Scenario::success()
+            .with_stdout(serde_json::to_string(&vec![github_rest_pr_json(params)]).unwrap()),
+        check_runs: Scenario::success().with_stdout(
+            serde_json::json!({
+                "total_count": usize::from(conclusion.is_some()),
+                "check_runs": conclusion
+                    .into_iter()
+                    .map(|value| serde_json::json!({
+                        "status": "completed",
+                        "conclusion": value.to_ascii_lowercase()
+                    }))
+                    .collect::<Vec<_>>()
+            })
+            .to_string(),
+        ),
+    }
+}
+
+fn uniform_github_fixture(scenario: Scenario) -> GithubFixture {
+    GithubFixture {
+        default: scenario.clone(),
+        open_pulls: scenario,
+        check_runs: Scenario::success().with_stdout(r#"{"total_count":0,"check_runs":[]}"#),
+    }
+}
+
+fn load_github_fixture(name: &str) -> GithubFixture {
     match name {
-        "empty" => Scenario::success().with_stdout("[]"),
-        "malformed" => Scenario::success().with_stdout("not json"),
-        "non_zero_exit" => Scenario::failure(1),
+        "empty" => uniform_github_fixture(Scenario::success().with_stdout("[]")),
+        "malformed" => uniform_github_fixture(Scenario::success().with_stdout("not json")),
+        "non_zero_exit" => uniform_github_fixture(Scenario::failure(1)),
         // Real July 2026 incident: statusCheckRollup: null was the exact payload
         // that historically caused deserialization failure.  The fix is already
         // in place (GithubPr.status_check_rollup is Option<Vec<GithubCheck>>,
         // so null → None), but this controller-level regression proves the full
         // loop handles it without spinning.
-        "prs_closed_null_rollup" => Scenario::success().with_stdout(
-            serde_json::to_string(&vec![github_pr_json(GithubPrParams {
-                title: "Draft: TICKET-001 test".into(),
-                branch: "gah/test-1".into(),
-                labels: vec![],
-                ci_conclusion: None,
-                state: None,
-                url: None,
-                number: None,
-                draft: None,
-                merged_at: None,
-                updated_at: None,
-            })])
-            .unwrap(),
-        ),
+        "prs_closed_null_rollup" => github_active_fixture(GithubPrParams {
+            title: "Draft: TICKET-001 test".into(),
+            branch: "gah/test-1".into(),
+            labels: vec![],
+            ci_conclusion: None,
+            state: None,
+            url: None,
+            number: None,
+            draft: None,
+            merged_at: None,
+            updated_at: None,
+        }),
         // One open gah/ PR with no labels → NEEDS_REVIEW
-        "one_pr_needs_review" => Scenario::success().with_stdout(
-            serde_json::to_string(&vec![github_pr_json(GithubPrParams {
-                title: "Draft: TICKET-001 Add feature".into(),
-                branch: "gah/feature-1".into(),
-                labels: vec![],
-                ci_conclusion: Some("SUCCESS".into()),
-                state: None,
-                url: None,
-                number: None,
-                draft: None,
-                merged_at: None,
-                updated_at: None,
-            })])
-            .unwrap(),
-        ),
+        "one_pr_needs_review" => github_active_fixture(GithubPrParams {
+            title: "Draft: TICKET-001 Add feature".into(),
+            branch: "gah/feature-1".into(),
+            labels: vec![],
+            ci_conclusion: Some("SUCCESS".into()),
+            state: None,
+            url: None,
+            number: None,
+            draft: None,
+            merged_at: None,
+            updated_at: None,
+        }),
         // PR with gah-needs-fix label → NEEDS_FIX
-        "one_pr_needs_fix" => Scenario::success().with_stdout(
-            serde_json::to_string(&vec![github_pr_json(GithubPrParams {
-                title: "Draft: TICKET-001 Fix bug".into(),
-                branch: "gah/fix-1".into(),
-                labels: vec!["gah-needs-fix".into()],
-                ci_conclusion: Some("SUCCESS".into()),
-                state: None,
-                url: None,
-                number: None,
-                draft: None,
-                merged_at: None,
-                updated_at: None,
-            })])
-            .unwrap(),
-        ),
+        "one_pr_needs_fix" => github_active_fixture(GithubPrParams {
+            title: "Draft: TICKET-001 Fix bug".into(),
+            branch: "gah/fix-1".into(),
+            labels: vec!["gah-needs-fix".into()],
+            ci_conclusion: Some("SUCCESS".into()),
+            state: None,
+            url: None,
+            number: None,
+            draft: None,
+            merged_at: None,
+            updated_at: None,
+        }),
         // PR with gah-ready-for-human label → READY_FOR_HUMAN
-        "one_pr_ready_for_human" => Scenario::success().with_stdout(
-            serde_json::to_string(&vec![github_pr_json(GithubPrParams {
-                title: "Draft: TICKET-001 Ready".into(),
-                branch: "gah/ready-1".into(),
-                labels: vec!["gah-ready-for-human".into()],
-                ci_conclusion: Some("SUCCESS".into()),
-                state: None,
-                url: None,
-                number: None,
-                draft: None,
-                merged_at: None,
-                updated_at: None,
-            })])
-            .unwrap(),
-        ),
+        "one_pr_ready_for_human" => github_active_fixture(GithubPrParams {
+            title: "Draft: TICKET-001 Ready".into(),
+            branch: "gah/ready-1".into(),
+            labels: vec!["gah-ready-for-human".into()],
+            ci_conclusion: Some("SUCCESS".into()),
+            state: None,
+            url: None,
+            number: None,
+            draft: None,
+            merged_at: None,
+            updated_at: None,
+        }),
         // PR with CI FAILURE → CI_FAILED
-        "one_pr_ci_failed" => Scenario::success().with_stdout(
-            serde_json::to_string(&vec![github_pr_json(GithubPrParams {
-                title: "Draft: TICKET-001 CI broken".into(),
-                branch: "gah/ci-fail-1".into(),
-                labels: vec![],
-                ci_conclusion: Some("FAILURE".into()),
-                state: None,
-                url: None,
-                number: None,
-                draft: None,
-                merged_at: None,
-                updated_at: None,
-            })])
-            .unwrap(),
-        ),
+        "one_pr_ci_failed" => github_active_fixture(GithubPrParams {
+            title: "Draft: TICKET-001 CI broken".into(),
+            branch: "gah/ci-fail-1".into(),
+            labels: vec![],
+            ci_conclusion: Some("FAILURE".into()),
+            state: None,
+            url: None,
+            number: None,
+            draft: None,
+            merged_at: None,
+            updated_at: None,
+        }),
         // Manual `gah dispatch --mode fix --mr <id>` path for provider/manual fixture.
         // The resolved MR is assumed to target this branch, so resolver + repair
         // context can reuse it without passing --existing-branch.
-        "manual_fix_needs_fix" => Scenario::success().with_stdout(
-            serde_json::to_string(&github_pr_json(GithubPrParams {
-                title: "Draft: TICKET-269 Fix race".into(),
-                branch: "gah/fix-needs-fix".into(),
-                labels: vec!["gah-needs-fix".into()],
-                ci_conclusion: Some("SUCCESS".into()),
-                state: Some("OPEN".into()),
-                url: None,
-                number: Some(269),
-                draft: None,
-                merged_at: None,
-                updated_at: None,
-            }))
-            .unwrap(),
+        "manual_fix_needs_fix" => uniform_github_fixture(
+            Scenario::success().with_stdout(
+                serde_json::to_string(&github_pr_json(GithubPrParams {
+                    title: "Draft: TICKET-269 Fix race".into(),
+                    branch: "gah/fix-needs-fix".into(),
+                    labels: vec!["gah-needs-fix".into()],
+                    ci_conclusion: Some("SUCCESS".into()),
+                    state: Some("OPEN".into()),
+                    url: None,
+                    number: Some(269),
+                    draft: None,
+                    merged_at: None,
+                    updated_at: None,
+                }))
+                .unwrap(),
+            ),
         ),
-        "manual_fix_needs_fix_closed" => Scenario::success().with_stdout(
-            serde_json::to_string(&github_pr_json(GithubPrParams {
-                title: "Draft: TICKET-269 Fix race".into(),
-                branch: "gah/fix-needs-fix".into(),
-                labels: vec!["gah-needs-fix".into()],
-                ci_conclusion: Some("SUCCESS".into()),
-                state: Some("CLOSED".into()),
-                url: None,
-                number: Some(269),
-                draft: None,
-                merged_at: None,
-                updated_at: None,
-            }))
-            .unwrap(),
+        "manual_fix_needs_fix_closed" => uniform_github_fixture(
+            Scenario::success().with_stdout(
+                serde_json::to_string(&github_pr_json(GithubPrParams {
+                    title: "Draft: TICKET-269 Fix race".into(),
+                    branch: "gah/fix-needs-fix".into(),
+                    labels: vec!["gah-needs-fix".into()],
+                    ci_conclusion: Some("SUCCESS".into()),
+                    state: Some("CLOSED".into()),
+                    url: None,
+                    number: Some(269),
+                    draft: None,
+                    merged_at: None,
+                    updated_at: None,
+                }))
+                .unwrap(),
+            ),
         ),
-        "manual_fix_needs_fix_merged" => Scenario::success().with_stdout(
-            serde_json::to_string(&github_pr_json(GithubPrParams {
-                title: "Draft: TICKET-269 Fix race".into(),
-                branch: "gah/fix-needs-fix".into(),
-                labels: vec!["gah-needs-fix".into()],
-                ci_conclusion: Some("SUCCESS".into()),
-                state: Some("MERGED".into()),
-                url: None,
-                number: Some(269),
-                draft: None,
-                merged_at: Some("2026-07-01T00:00:00Z".into()),
-                updated_at: None,
-            }))
-            .unwrap(),
+        "manual_fix_needs_fix_merged" => uniform_github_fixture(
+            Scenario::success().with_stdout(
+                serde_json::to_string(&github_pr_json(GithubPrParams {
+                    title: "Draft: TICKET-269 Fix race".into(),
+                    branch: "gah/fix-needs-fix".into(),
+                    labels: vec!["gah-needs-fix".into()],
+                    ci_conclusion: Some("SUCCESS".into()),
+                    state: Some("MERGED".into()),
+                    url: None,
+                    number: Some(269),
+                    draft: None,
+                    merged_at: Some("2026-07-01T00:00:00Z".into()),
+                    updated_at: None,
+                }))
+                .unwrap(),
+            ),
         ),
-        _ => Scenario::failure(127).with_stderr(format!("unknown github scenario: {name}")),
+        _ => uniform_github_fixture(
+            Scenario::failure(127).with_stderr(format!("unknown github scenario: {name}")),
+        ),
     }
 }
 

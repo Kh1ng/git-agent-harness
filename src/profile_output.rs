@@ -14,6 +14,7 @@ struct ProfileSummary<'a> {
     max_open_managed_mrs: u32,
     validation_timeout_seconds: u64,
     manager_wake_autonomy: &'a str,
+    delivery_mode: &'a str,
 }
 
 pub(crate) fn list_json(cfg: &GahConfig) -> Result<String> {
@@ -38,6 +39,7 @@ pub(crate) fn list_json(cfg: &GahConfig) -> Result<String> {
                     WakeAutonomy::ReviewOnly => "review_only",
                     WakeAutonomy::Full => "full",
                 },
+                delivery_mode: profile.delivery_mode.as_str(),
             }
         })
         .collect::<Vec<_>>();

@@ -160,6 +160,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const tickets = status.data?.available_tickets ?? [];
   const issueIntakeRejections = status.data?.issue_intake_rejections ?? [];
   const activeClaims = status.data?.active_claims ?? [];
+  const heldWorkIds = new Set(status.data?.review_held_work_ids ?? []);
 
   const formatClaimAge = (ageSeconds: number): string => {
     const minutes = Math.floor(ageSeconds / 60);
@@ -282,17 +283,22 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                     </td>
                     <td>{t.prior_attempt_count}</td>
                     <td>
-                      {t.human_required ? (
-                        <StatusBadge tone="warning" label="Human required" />
-                      ) : t.has_active_claim ? (
-                        <StatusBadge tone="warning" label="Claimed" />
-                      ) : t.has_active_mr ? (
-                        <StatusBadge tone="good" label="Active MR" />
-                      ) : t.prior_attempt_count > 0 ? (
-                        <StatusBadge tone="serious" label={t.last_failure_class ?? 'Retrying'} />
-                      ) : (
-                        <StatusBadge tone="unknown" label="Not dispatched" />
-                      )}
+                      <div className="flex flex-wrap gap-1">
+                        {t.work_id && heldWorkIds.has(t.work_id) && (
+                          <StatusBadge tone="warning" label="Review hold" />
+                        )}
+                        {t.human_required ? (
+                          <StatusBadge tone="warning" label="Human required" />
+                        ) : t.has_active_claim ? (
+                          <StatusBadge tone="warning" label="Claimed" />
+                        ) : t.has_active_mr ? (
+                          <StatusBadge tone="good" label="Active MR" />
+                        ) : t.prior_attempt_count > 0 ? (
+                          <StatusBadge tone="serious" label={t.last_failure_class ?? 'Retrying'} />
+                        ) : (
+                          <StatusBadge tone="unknown" label="Not dispatched" />
+                        )}
+                      </div>
                     </td>
                     <td>
                       {t.work_id && (

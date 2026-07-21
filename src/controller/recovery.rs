@@ -386,6 +386,12 @@ pub(super) fn retain_snapshot_candidates(
             .as_ref()
             .is_some_and(|id| excluded_work_ids.contains(id))
     });
+    snapshot.issue_intake_rejections.retain(|issue| {
+        !issue
+            .work_id
+            .as_ref()
+            .is_some_and(|id| excluded_work_ids.contains(id))
+    });
 }
 
 pub(super) fn defer_if_branch_attached(

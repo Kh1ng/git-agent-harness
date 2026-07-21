@@ -103,7 +103,7 @@ pub(in crate::dispatch) fn dry_run(
                     println!("Routing:      {}", route.routing_reason);
                 }
                 println!(
-                    "Steps: collect manager memory/MRs/tickets/repo state → {} backend → structured PM plan → validated tickets in docs/tickets/",
+                    "Steps: collect guidance/issues/PRs/repo state → {} backend → validated pm-plan-v1.json (no provider writes)",
                     route.as_ref().map(|r| r.effective_backend.as_str()).unwrap_or(args.backend.as_str())
                 )
             }

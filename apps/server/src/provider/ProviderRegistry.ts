@@ -9,12 +9,29 @@
 
 import { generateProviderInstanceId, getSupportedProviders } from '@git-agent-harness/shared';
 import { runStatus, type StatusSnapshot } from '../gahCli.js';
-import type { ProviderKind, ProviderStatus, ProviderInstanceId } from '@git-agent-harness/contracts';
+import type { AvailabilityScope, ProviderKind, ProviderStatus, ProviderInstanceId } from '@git-agent-harness/contracts';
 
 interface CachedStatus {
   snapshot: StatusSnapshot;
   timestamp: number;
   ttl: number;
+}
+
+export function aggregateProviderStatus(scopes: AvailabilityScope[], version: string): ProviderStatus {
+  if (scopes.length === 0 || scopes.some((scope) => scope.eligible_now)) {
+    return { type: 'available', version };
+  }
+  if (scopes.some((scope) => scope.reason === 'auth_failure')) {
+    return { type: 'error', error: 'Authentication failed' };
+  }
+  const quotaFailure = scopes.find((scope) => scope.reason === 'quota_exhausted');
+  if (quotaFailure) {
+    return {
+      type: 'error',
+      error: `All routes quota exhausted until ${quotaFailure.unavailable_until || 'unknown time'}`
+    };
+  }
+  return { type: 'unavailable', reason: scopes[0]?.reason ?? 'No eligible routes' };
 }
 
 class ProviderRegistryImpl {
@@ -129,50 +146,26 @@ class ProviderRegistryImpl {
   private updateFromSnapshot(snapshot: StatusSnapshot): void {
     // Reset available providers based on what GAH knows about
     this.availableProviders = new Set(getSupportedProviders());
-    
-    // Map availability entries to provider statuses
-    for (const avail of snapshot.availability) {
-      const kind = avail.backend as ProviderKind;
-      
-      // Skip if not a known provider kind
-      if (!getSupportedProviders().includes(kind)) {
-        continue;
-      }
-      
-      if (avail.eligible_now) {
-        this.providerStatuses.set(kind, { 
-          type: 'available', 
-          version: this.providerVersions.get(kind) || '1.0.0'
-        });
-        this.availableProviders.add(kind);
-      } else {
-        // Map unavailable reasons to status types
-        let statusType: 'unavailable' | 'error' = 'unavailable';
-        let errorMessage: string | undefined;
-        
-        if (avail.reason === 'quota_exhausted') {
-          statusType = 'error';
-          errorMessage = `Quota exhausted until ${avail.unavailable_until || 'unknown time'}`;
-        } else if (avail.reason === 'auth_failure') {
-          statusType = 'error';
-          errorMessage = 'Authentication failed';
-        } else if (avail.reason) {
-          errorMessage = avail.reason;
-        }
-        
-        if (statusType === 'error' && errorMessage) {
-          this.providerStatuses.set(kind, { type: 'error', error: errorMessage });
-        } else {
-          this.providerStatuses.set(kind, { type: 'unavailable' });
-        }
-      }
+
+    // Provider cards are intentionally coarser than quota candidate cards.
+    // A provider is usable when any of its model/account/pool scopes is
+    // eligible; iteration order must never let one blocked model overwrite a
+    // healthy sibling. Exact scope status stays in the canonical Quota view.
+    const scopesByProvider = new Map<ProviderKind, StatusSnapshot['availability']>();
+    for (const scope of snapshot.availability) {
+      const kind = scope.backend as ProviderKind;
+      if (!getSupportedProviders().includes(kind)) continue;
+      const scopes = scopesByProvider.get(kind) ?? [];
+      scopes.push(scope);
+      scopesByProvider.set(kind, scopes);
     }
-    
-    // Ensure all supported providers have at least an unavailable status
+
     for (const kind of getSupportedProviders()) {
-      if (!this.providerStatuses.has(kind)) {
-        this.providerStatuses.set(kind, { type: 'unavailable' });
-      }
+      const scopes = scopesByProvider.get(kind) ?? [];
+      this.providerStatuses.set(
+        kind,
+        aggregateProviderStatus(scopes, this.providerVersions.get(kind) || '1.0.0')
+      );
     }
   }
   

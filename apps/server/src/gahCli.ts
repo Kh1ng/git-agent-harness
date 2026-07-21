@@ -18,7 +18,12 @@ import type {
   ReportSeriesData,
   ReportGroupBy,
   LedgerEntry,
+  ConfigSummary,
+  ConfigSetData,
+  ConfigShowFull,
+  ConfigProfileSummary,
   ProfileSummary,
+  DoctorSnapshot,
 } from '@git-agent-harness/contracts';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -184,7 +189,11 @@ export async function runQuota(
  * runReport/runLedgerWork below -- same spawn/parse/error shape as
  * runStatus above, factored out so those two don't duplicate it.
  */
-function runJsonCommand<T>(args: string[], config?: string): Promise<T> {
+function runJsonCommand<T>(
+  args: string[],
+  config?: string,
+  acceptStructuredFailure = false
+): Promise<T> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(GAH_BINARY, args, getSpawnOptions(config));
 
@@ -200,7 +209,7 @@ function runJsonCommand<T>(args: string[], config?: string): Promise<T> {
     });
 
     child.on('close', (code) => {
-      if (code !== 0) {
+      if (code !== 0 && !acceptStructuredFailure) {
         reject(new Error(`gah ${args[0]} failed with exit code ${code}: ${stderr || stdout}`));
         return;
       }
@@ -216,6 +225,15 @@ Output: ${stdout}`));
       reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
     });
   });
+}
+
+/** Run the canonical, on-demand node readiness checks. Doctor deliberately
+ * exits non-zero when checks fail; a valid JSON failure snapshot is still a
+ * successful transport response and must reach the operator. */
+export function runDoctor(profile: string, config?: string): Promise<DoctorSnapshot> {
+  const args = ['doctor', '--profile', profile, '--validate', '--json'];
+  if (config) args.push('--config-path', config);
+  return runJsonCommand<DoctorSnapshot>(args, config, true);
 }
 
 /**
@@ -891,6 +909,19 @@ export async function runConfigShow(config?: string): Promise<{ current_manager:
     args.push('--config', config);
   }
   return runJsonCommand<{ current_manager: string | null }>(args, config);
+}
+
+export async function runConfigShowProfile(
+  profile: string,
+  config?: string
+): Promise<ConfigProfileSummary> {
+  const args = ['config', 'show', '--json', '--full', '--profile', profile];
+  const response = await runJsonCommand<ConfigShowFull>(args, config);
+  const selected = response.profiles[profile];
+  if (!selected) {
+    throw new Error(`gah config show returned no profile data for '${profile}'`);
+  }
+  return selected;
 }
 
 // ---------------------------------------------------------------------------

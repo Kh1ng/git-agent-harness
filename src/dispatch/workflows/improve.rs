@@ -31,13 +31,17 @@ use crate::notifications::{notify_event, NotifyEvent};
 use crate::routing::RouteRequest;
 use crate::usage_attribution::{normalize_attempt_usage, UsageAttribution};
 use crate::validation_runner::{validate_with_exit_code, VALIDATION_COMMAND_TIMEOUT_EXIT_CODE};
-use crate::{provider, runner, worktree};
+use crate::{runner, worktree};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 mod bounded_validation;
 pub(crate) use bounded_validation::bounded_validation_failure;
 mod conflict_resolution;
+mod handoff;
+use handoff::maybe_perform_handoff;
+mod publish_mr;
+use publish_mr::publish_or_update_mr;
 mod repair;
 mod shutdown;
 use shutdown::record_cancelled_attempt;
@@ -402,6 +406,7 @@ pub(crate) fn improve(
             route.effective_model.as_deref(),
             env_path,
             reserved_route_slot.is_some(),
+            None,
         );
         let result = match result {
             Ok(r) => r,
@@ -1348,6 +1353,21 @@ pub(crate) fn improve(
 
     enforce_generated_artifact_policy(profile, ledger, &wt)?;
 
+    if maybe_perform_handoff(
+        cfg,
+        profile,
+        ledger,
+        &wt,
+        &branch,
+        &commit_msg,
+        ticket_meta.as_ref(),
+        &backend_summary,
+        repo,
+        &wip_checkpoints,
+    )? {
+        return Ok(());
+    }
+
     // TICKET-128: honor the per-profile publishing policy. A restricted profile
     // forbids PR/MR creation and/or LLM-generated commit messages, so we stop
     // at a deterministic human handoff after code generation + validation
@@ -1449,45 +1469,17 @@ pub(crate) fn improve(
         &mr_ctx,
         !validation_failed,
     );
-    if manual_fix.existing_branch.is_some() {
-        // FixMr is repairing a provider MR that the controller already
-        // observed. The pushed branch is the publication; trying to create a
-        // second MR converts a successful repair into a false dispatch
-        // failure (and GitHub/GitLab correctly reject the duplicate).
-        let existing = provider::find_review_target_by_branch(profile, &branch)
-            .with_context(|| format!("resolving existing PR/MR for repaired branch '{branch}'"))?;
-        ledger.mr_url = Some(existing.url.clone());
-        provider::set_review_state_labels(profile, &branch, &["gah-review-escalating"])
-            .context("transitioning repaired PR/MR back to review")?;
-        println!("Updated existing MR: {}", existing.url);
-    } else {
-        ledger.mr_attempted = true;
-        let mr = match provider::create_draft_mr(profile, &branch, &mr_title, &mr_body) {
-            Ok(mr) => mr,
-            Err(err) => {
-                if profile.provider == "gitlab" {
-                    ledger.set_failure(
-                        crate::ledger::FailureClass::EnvironmentError,
-                        crate::ledger::FailureStage::MrCreate,
-                    );
-                }
-                return Err(err);
-            }
-        };
-        ledger.mr_created = true;
-        ledger.mr_url = Some(mr.url.clone());
-        println!("Draft MR: {}", mr.url);
-        notify_event(
-            cfg,
-            profile,
-            NotifyEvent::MrCreated {
-                url: &mr.url,
-                work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
-                backend: &route.effective_backend,
-                model: route.effective_model.as_deref().unwrap_or("unknown"),
-            },
-        );
-    }
+    publish_or_update_mr(
+        cfg,
+        profile,
+        ledger,
+        &branch,
+        &mr_title,
+        &mr_body,
+        manual_fix.existing_branch.is_some(),
+        &route.effective_backend,
+        route.effective_model.as_deref(),
+    )?;
 
     clear_wip_checkpoints(repo, &wip_checkpoints);
     worktree::cleanup(&wt, repo);

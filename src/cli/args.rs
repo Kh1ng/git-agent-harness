@@ -34,6 +34,26 @@ pub enum AvailabilityAction {
     },
 }
 
+/// Explicit product-manager publication operations. Planning and provider
+/// mutation are deliberately separate commands so a model response can never
+/// create issues merely by completing a `dispatch --mode pm` run.
+#[derive(Subcommand)]
+pub enum PmCommands {
+    /// Publish a validated PM plan artifact as native provider issues.
+    Publish {
+        #[arg(long)]
+        profile: String,
+        /// Path to the `pm-plan-v1.json` artifact produced by PM dispatch.
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        /// Resolve and validate the publication without provider writes.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Inspect or set global GAH config defaults (cross-profile facts such as
@@ -82,6 +102,9 @@ pub enum Commands {
         /// declared env files exist, backend executables are present.
         #[arg(long)]
         validate: bool,
+        /// Emit structured node-readiness checks for control-plane clients.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Update the installed CLI and control-plane server deterministically.
     Update {
@@ -269,6 +292,11 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         skip_validation_gate: bool,
     },
+    /// Validate or explicitly publish product-manager decomposition plans.
+    Pm {
+        #[command(subcommand)]
+        command: PmCommands,
+    },
     /// Interactive terminal UI: observe state, confirm and run the one
     /// already-decided next action. Does not let you pick an arbitrary
     /// action -- see docs/MANAGER_MEMORY.md "Stretch Goal -- Optional
@@ -336,12 +364,20 @@ pub enum ConfigCommands {
     Show {
         #[arg(long, default_value_t = false)]
         json: bool,
-        #[arg(long, name = "config")]
+        /// Emit the redacted, versioned effective configuration projection.
+        /// Bare `--json` intentionally retains its legacy one-field shape.
+        #[arg(long, default_value_t = false, requires = "json")]
+        full: bool,
+        /// Restrict `--full` output to one profile while retaining the
+        /// provider-neutral profiles map response shape.
+        #[arg(long, requires = "full")]
+        profile: Option<String>,
+        #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
     },
     /// Set one or more global default values.
     Set {
-        #[arg(long, name = "config")]
+        #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
         /// Which agent CLI is currently acting as the operator's manager
         /// across all profiles/projects (the manager-wake "who's on call").
@@ -458,6 +494,9 @@ pub enum ProfileCommands {
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
+        /// Delivery mode for work results: pr (default) | handoff.
+        #[arg(long)]
+        delivery_mode: Option<String>,
     },
     /// Set/Update fields of an existing profile
     Set {
@@ -531,6 +570,9 @@ pub enum ProfileCommands {
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
+        /// Delivery mode for work results: pr | handoff.
+        #[arg(long)]
+        delivery_mode: Option<String>,
         /// Clear the specified field(s) - for fields that support it
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,
@@ -543,6 +585,30 @@ pub enum ProfileCommands {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+}
+
+/// Parse a `manager_wake_autonomy` value from CLI text (snake_case, matching
+/// the TOML/serde spelling) into the typed enum. Kept as a manual mapping so
+/// the CLI error message can name the accepted values precisely.
+pub fn parse_wake_autonomy(value: &str) -> anyhow::Result<crate::config::WakeAutonomy> {
+    match value.to_ascii_lowercase().as_str() {
+        "off" | "none" => Ok(crate::config::WakeAutonomy::Off),
+        "review_only" | "reviewonly" | "review" => Ok(crate::config::WakeAutonomy::ReviewOnly),
+        "full" => Ok(crate::config::WakeAutonomy::Full),
+        other => anyhow::bail!(
+            "invalid manager_wake_autonomy '{}' (expected off | review_only | full)",
+            other
+        ),
+    }
+}
+
+/// Parse a `delivery_mode` value from CLI text into the typed enum.
+pub fn parse_delivery_mode(value: &str) -> anyhow::Result<crate::config::DeliveryMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "pr" => Ok(crate::config::DeliveryMode::Pr),
+        "handoff" => Ok(crate::config::DeliveryMode::Handoff),
+        other => anyhow::bail!("invalid delivery_mode '{}' (expected pr | handoff)", other),
+    }
 }
 
 #[derive(Subcommand)]
@@ -795,19 +861,4 @@ pub enum ClaimsCommands {
         #[arg(long, default_value = "3600")]
         max_age_secs: u64,
     },
-}
-
-/// Parse a `manager_wake_autonomy` value from CLI text (snake_case, matching
-/// the TOML/serde spelling) into the typed enum. Kept as a manual mapping so
-/// the CLI error message can name the accepted values precisely.
-pub fn parse_wake_autonomy(value: &str) -> anyhow::Result<crate::config::WakeAutonomy> {
-    match value.to_ascii_lowercase().as_str() {
-        "off" | "none" => Ok(crate::config::WakeAutonomy::Off),
-        "review_only" | "reviewonly" | "review" => Ok(crate::config::WakeAutonomy::ReviewOnly),
-        "full" => Ok(crate::config::WakeAutonomy::Full),
-        other => anyhow::bail!(
-            "invalid manager_wake_autonomy '{}' (expected off | review_only | full)",
-            other
-        ),
-    }
 }

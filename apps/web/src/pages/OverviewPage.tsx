@@ -29,6 +29,8 @@ type OverviewPageProps = {
   onNavigate: (page: Page) => void;
 };
 
+const OVERVIEW_REFRESH_MS = 5 * 60 * 1000;
+
 export function OverviewPage({ sessions, onSelectSession, onNavigate }: OverviewPageProps) {
   const { status, quota, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
@@ -44,6 +46,12 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
     fetchStatus(profile ?? undefined);
     fetchQuota({ profile: profile ?? undefined, since: '7d' });
     if (profile) fetchLoopStatus(profile);
+    const refreshTimer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      fetchStatus(profile ?? undefined, { force: true });
+      fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
+    }, OVERVIEW_REFRESH_MS);
+    return () => window.clearInterval(refreshTimer);
   }, [profile, fetchStatus, fetchQuota, fetchLoopStatus]);
 
   const loopRunning = loopStatus.data?.running ?? false;
@@ -95,6 +103,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
   // has entries. See status.rs's own doc comments on StatusSnapshot.
   const blockers = snapshot?.blockers ?? [];
   const blockedWorkItems = snapshot?.blocked_work_items ?? [];
+  const reviewHeldWorkIds = snapshot?.review_held_work_ids ?? [];
   const needsReviewMrs = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'NEEDS_REVIEW');
   const recentMerges = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'MERGED').slice(0, 5);
   const unavailableBackends = (quotaSnapshot?.candidates ?? []).filter((c) => !c.eligible_now);
@@ -147,7 +156,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
         <StatTile label="Active work" value={String(activeWorkCount)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
       </div>
 
-      {(blockers.length > 0 || blockedWorkItems.length > 0) && (
+      {(blockers.length > 0 || blockedWorkItems.length > 0 || reviewHeldWorkIds.length > 0) && (
         <div className="card-padded border-warning/30">
           <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
             <ShieldAlert size={16} className="text-warning" aria-hidden="true" />
@@ -167,6 +176,12 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                   {b.source_reference ?? 'Unknown work item'}
                   {b.message ? ` — ${b.message}` : ''}
                 </span>
+              </li>
+            ))}
+            {reviewHeldWorkIds.map((workId) => (
+              <li key={`review-hold-${workId}`} className="flex items-start gap-2 text-sm">
+                <StatusBadge tone="warning" label="Review hold" />
+                <span className="text-secondary">Manager review hold active on {workId}</span>
               </li>
             ))}
           </ul>

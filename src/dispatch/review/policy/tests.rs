@@ -63,6 +63,15 @@ fn review_escalation_reason(
     )
 }
 
+// No test in this module populates availability state, so a path that never
+// resolves to a real file keeps every existing case exercising the
+// availability-agnostic (fail-open) path unchanged. Tests of the
+// availability-aware preference added on top of this call the `super::`
+// functions directly with a real tempdir instead of this wrapper.
+fn no_availability_state_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/nonexistent/gah-test-availability.json")
+}
+
 fn next_review_candidate(
     cfg: &GahConfig,
     profile: &Profile,
@@ -77,6 +86,7 @@ fn next_review_candidate(
         branch,
         current,
         Some(TEST_REVIEW_GENERATION),
+        &no_availability_state_path(),
     )
 }
 
@@ -94,6 +104,7 @@ fn next_escalatory_reviewer(
         branch,
         current,
         Some(TEST_REVIEW_GENERATION),
+        &no_availability_state_path(),
     )
 }
 
@@ -509,6 +520,66 @@ fn escalation_uses_each_configured_backend_model_once_in_order() {
         Some(("opencode", Some("nous-portal/z-ai/glm-5.2"))),
     )
     .is_none());
+}
+
+#[test]
+fn escalation_skips_an_untried_candidate_under_a_multi_day_quota_cooldown_for_one_that_is_available(
+) {
+    // Regression: the ordered escalatory list is picked strictly by "not yet
+    // attempted," with no live-availability check. A candidate stuck under a
+    // multi-day quota cooldown (or a permanently broken credential --
+    // `authentication_error` never carries a reset time at all) sat first in
+    // line stalls the whole chain waiting on that one backend for days, even
+    // though a later candidate in the same list is eligible right now. Real
+    // incident: sportsball-bets MR !290 (#167) sat in `gah-review-escalating`
+    // for 30+ hours because `agy-second` was quota-exhausted until
+    // 2026-07-24 while `codex`/`opencode` further down the list were fine.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
+    let mut prof = profile(tmp.path());
+    prof.routing.escalatory_reviewers = vec![
+        CandidateConfig {
+            backend: "agy-second".into(),
+            model: Some("Claude Sonnet 4.6 (Thinking)".into()),
+            ..Default::default()
+        },
+        CandidateConfig {
+            backend: "claude".into(),
+            model: Some("sonnet".into()),
+            ..Default::default()
+        },
+    ];
+
+    let availability_path = tmp.path().join("availability.json");
+    let now = time::OffsetDateTime::now_utc();
+    crate::availability::record_unavailable(
+        &availability_path,
+        "agy-second",
+        Some("Claude Sonnet 4.6 (Thinking)"),
+        None,
+        crate::availability::Reason::QuotaExhausted,
+        crate::availability::Source::BackendError,
+        Some(now + time::Duration::days(5)),
+        None,
+        now,
+    )
+    .unwrap();
+
+    let picked = super::next_escalatory_reviewer(
+        &cfg,
+        &prof,
+        "test",
+        "gah/branch-1",
+        None,
+        Some(TEST_REVIEW_GENERATION),
+        &availability_path,
+    )
+    .expect("an available second escalatory reviewer exists");
+    assert_eq!(
+        (picked.backend.as_str(), picked.model.as_deref()),
+        ("claude", Some("sonnet")),
+        "should skip the quota-exhausted agy-second and pick the available claude candidate"
+    );
 }
 
 #[test]

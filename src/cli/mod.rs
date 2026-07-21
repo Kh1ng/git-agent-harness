@@ -61,7 +61,8 @@ pub fn run() -> Result<()> {
             profile,
             config_path,
             validate,
-        } => doctor::run_with_validate(profile.as_deref(), config_path.as_deref(), validate)?,
+            json,
+        } => doctor::run(profile.as_deref(), config_path.as_deref(), validate, json)?,
 
         Commands::Update {
             repo,
@@ -416,6 +417,20 @@ pub fn run() -> Result<()> {
             controller::run_dispatch_and_record(&cfg, "dispatch", None, &args)?;
         }
 
+        Commands::Pm { command } => match command {
+            PmCommands::Publish {
+                profile,
+                plan,
+                config_path,
+                dry_run,
+            } => {
+                let cfg = config::load(config_path.as_deref())?;
+                let resolved_config_path = config::resolve_config_path(config_path.as_deref());
+                let _lock = controller::acquire_profile_lock(&profile, &resolved_config_path)?;
+                dispatch::publish_pm_plan(&cfg, &profile, &plan, dry_run)?;
+            }
+        },
+
         Commands::Tui {
             profile,
             config_path,
@@ -425,19 +440,29 @@ pub fn run() -> Result<()> {
         }
 
         Commands::Config { command } => match command {
-            ConfigCommands::Show { json, config_path } => {
+            ConfigCommands::Show {
+                json,
+                full,
+                profile,
+                config_path,
+            } => {
+                let resolved_config_path = config::resolve_config_path(config_path.as_deref());
                 let cfg = config::load(config_path.as_deref())?;
                 if json {
-                    #[derive(serde::Serialize)]
-                    struct ConfigShow {
-                        current_manager: Option<String>,
+                    if full {
+                        println!(
+                            "{}",
+                            config_show::config_show_full_json(
+                                &cfg,
+                                &resolved_config_path,
+                                profile.as_deref(),
+                            )?
+                        );
+                    } else {
+                        // Compatibility contract: bare `config show --json`
+                        // remains byte-for-byte the original one-field shape.
+                        println!("{}", config_show::config_show_json(&cfg)?);
                     }
-                    println!(
-                        "{}",
-                        serde_json::to_string(&ConfigShow {
-                            current_manager: cfg.defaults.current_manager.clone()
-                        })?
-                    );
                 } else {
                     println!(
                         "current_manager: {}",
@@ -545,6 +570,7 @@ pub fn run() -> Result<()> {
                 max_open_managed_mrs,
                 validation_timeout_seconds,
                 manager_wake_autonomy,
+                delivery_mode,
             } => {
                 let mut cfg = config::load(config_path.as_deref())?;
                 let profile = Profile {
@@ -584,6 +610,10 @@ pub fn run() -> Result<()> {
                     manager_wake_autonomy: match &manager_wake_autonomy {
                         Some(v) => parse_wake_autonomy(v)?,
                         None => config::WakeAutonomy::default(),
+                    },
+                    delivery_mode: match &delivery_mode {
+                        Some(v) => parse_delivery_mode(v)?,
+                        None => config::DeliveryMode::default(),
                     },
                     policy_path,
                     env_file,
@@ -640,6 +670,7 @@ pub fn run() -> Result<()> {
                 max_open_managed_mrs,
                 validation_timeout_seconds,
                 manager_wake_autonomy,
+                delivery_mode,
                 clear,
             } => {
                 let mut cfg = config::load(config_path.as_deref())?;
@@ -829,6 +860,12 @@ pub fn run() -> Result<()> {
                     existing.manager_wake_autonomy = parse_wake_autonomy(v)?;
                 } else if should_clear("manager_wake_autonomy", &clear) {
                     existing.manager_wake_autonomy = config::WakeAutonomy::default();
+                }
+
+                if let Some(v) = &delivery_mode {
+                    existing.delivery_mode = parse_delivery_mode(v)?;
+                } else if should_clear("delivery_mode", &clear) {
+                    existing.delivery_mode = config::DeliveryMode::default();
                 }
 
                 config::save(&cfg, config_path.as_deref())?;

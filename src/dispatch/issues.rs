@@ -264,7 +264,7 @@ fn issue_author_is_trusted(profile: &Profile, author: &IssueAuthorIdentity) -> b
     }
 }
 
-fn issue_disposition_from_labels(labels: &[String]) -> Option<IssueDisposition> {
+fn issue_disposition_from_labels(profile: &Profile, labels: &[String]) -> Option<IssueDisposition> {
     let normalized = labels
         .iter()
         .map(|label| label.trim().to_ascii_lowercase())
@@ -283,10 +283,13 @@ fn issue_disposition_from_labels(labels: &[String]) -> Option<IssueDisposition> 
     {
         return Some(IssueDisposition::Blocked);
     }
-    if normalized
-        .iter()
-        .any(|label| matches!(label.as_str(), "planning" | "plan"))
-    {
+    if normalized.iter().any(|label| {
+        profile
+            .publishing
+            .pm_decomposition_labels()
+            .iter()
+            .any(|configured| label.eq_ignore_ascii_case(configured.trim()))
+    }) {
         return Some(IssueDisposition::Planning);
     }
     None
@@ -314,7 +317,7 @@ fn evaluate_issue_intake(
         return Err(IntakeRejection::UntrustedAuthor);
     }
 
-    if let Some(disposition) = issue_disposition_from_labels(labels) {
+    if let Some(disposition) = issue_disposition_from_labels(profile, labels) {
         return Err(IntakeRejection::Disposition(disposition));
     }
 
@@ -476,20 +479,15 @@ fn fetch_github_issue(
     issue_number: &str,
     allow_label_override: bool,
 ) -> Result<IssueDetails> {
+    let endpoint = format!("repos/{}/issues/{issue_number}", profile.repo);
     let out = provider_command("gh")
-        .arg("issue")
-        .arg("view")
-        .arg(issue_number)
-        .arg("--repo")
-        .arg(&profile.repo)
-        .arg("--json")
-        .arg("title,body,labels,author,state")
+        .args(["api", "--method", "GET", &endpoint])
         .output()
-        .context("gh issue view")?;
+        .context("GitHub REST issue lookup")?;
 
     if !out.status.success() {
         anyhow::bail!(
-            "gh issue view failed: {}",
+            "GitHub REST issue lookup failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
@@ -538,18 +536,13 @@ pub(super) fn fetch_dependency_issue(
         )
     })?;
     let output = match cli {
-        "gh" => provider_command("gh")
-            .args([
-                "issue",
-                "view",
-                issue_number,
-                "--repo",
-                &profile.repo,
-                "--json",
-                "number,body,state",
-            ])
-            .output()
-            .context("gh dependency issue view")?,
+        "gh" => {
+            let endpoint = format!("repos/{}/issues/{issue_number}", profile.repo);
+            provider_command("gh")
+                .args(["api", "--method", "GET", &endpoint])
+                .output()
+                .context("GitHub REST dependency issue lookup")?
+        }
         "glab" => provider_command("glab")
             .args([
                 "issue",

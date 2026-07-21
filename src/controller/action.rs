@@ -55,6 +55,24 @@ pub enum NextAction {
         recommended_model: Option<String>,
         reason: String,
     },
+    /// A trusted provider issue explicitly marked for bounded PM
+    /// decomposition. Planning and publication execute under one durable
+    /// work-item claim, never alongside normal implementation of this source.
+    DecomposeIssue {
+        ticket_path: String,
+        work_id: String,
+        title: Option<String>,
+        reason: String,
+    },
+    /// All provider-native children of a published PM plan are terminal.
+    /// Recording this does not itself close the source issue.
+    ReconcilePmParent {
+        work_id: String,
+        source_issue_number: String,
+        plan_fingerprint: String,
+        child_issue_numbers: Vec<String>,
+        reason: String,
+    },
     /// TICKET-078: redispatch a ticket whose last attempt failed for an
     /// infra reason (harness/environment/backend/unknown) that has since
     /// cleared -- same backend/model as before, not escalated.
@@ -98,6 +116,8 @@ impl NextAction {
             Self::FixMr { .. } => "fix_mr",
             Self::MergeMr { .. } => "merge_mr",
             Self::DispatchTicket { .. } => "dispatch_ticket",
+            Self::DecomposeIssue { .. } => "decompose_issue",
+            Self::ReconcilePmParent { .. } => "reconcile_pm_parent",
             Self::Retry { .. } => "retry",
             Self::Escalate { .. } => "escalate",
             Self::WaitUntil { .. } => "wait_until",
@@ -113,6 +133,8 @@ impl NextAction {
             | Self::FixMr { reason, .. }
             | Self::MergeMr { reason, .. }
             | Self::DispatchTicket { reason, .. }
+            | Self::DecomposeIssue { reason, .. }
+            | Self::ReconcilePmParent { reason, .. }
             | Self::Retry { reason, .. }
             | Self::Escalate { reason, .. }
             | Self::WaitUntil { reason, .. }
@@ -130,7 +152,10 @@ impl NextAction {
             | Self::FixMr { work_id, .. }
             | Self::MergeMr { work_id, .. } => work_id.as_deref(),
             Self::DispatchTicket { work_id, .. } => work_id.as_deref(),
-            Self::Retry { work_id, .. } | Self::Escalate { work_id, .. } => Some(work_id),
+            Self::DecomposeIssue { work_id, .. }
+            | Self::ReconcilePmParent { work_id, .. }
+            | Self::Retry { work_id, .. }
+            | Self::Escalate { work_id, .. } => Some(work_id),
             Self::WaitUntil { .. } | Self::HumanRequired { .. } | Self::NoOp { .. } => None,
         }
     }
@@ -211,6 +236,31 @@ mod tests {
         let json = serde_json::to_string(&action).unwrap();
         let parsed: NextAction = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, action);
+    }
+
+    #[test]
+    fn pm_actions_round_trip_with_durable_identity() {
+        let actions = [
+            NextAction::DecomposeIssue {
+                ticket_path: "#561".into(),
+                work_id: "#561".into(),
+                title: Some("Large story".into()),
+                reason: "planning label".into(),
+            },
+            NextAction::ReconcilePmParent {
+                work_id: "#561".into(),
+                source_issue_number: "561".into(),
+                plan_fingerprint: "plan-a".into(),
+                child_issue_numbers: vec!["600".into()],
+                reason: "children terminal".into(),
+            },
+        ];
+        for action in actions {
+            let parsed: NextAction =
+                serde_json::from_str(&serde_json::to_string(&action).unwrap()).unwrap();
+            assert_eq!(parsed, action);
+            assert_eq!(parsed.work_id(), Some("#561"));
+        }
     }
 
     #[test]

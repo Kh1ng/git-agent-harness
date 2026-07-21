@@ -16,7 +16,71 @@ esac
 }
 
 #[test]
-fn dispatch_pm_target_parses_structured_plan_and_writes_ticket() {
+fn pm_publish_dry_run_uses_explicit_cli_without_provider_writes() {
+    let tmp = test_tempdir();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config_with_extra(&tmp, &repo, "github", "", "");
+    let plan_path = tmp.path().join("pm-plan-v1.json");
+    fs::write(
+        &plan_path,
+        r##"{
+          "schema_version":1,"profile":"Real Repo","repo":"owner/real","target":"#42",
+          "open_issue_count":1,"open_mr_count":0,"merged_mr_count":0,"ticket_count":1,
+          "plan":{"title":"Plan","summary":"Summary","tickets":[{
+            "key":"child","title":"Native child","summary":"Summary","objective":"Objective",
+            "task_class":"feature","difficulty":"easy","risk":"low",
+            "execution_disposition":"autonomous",
+            "recommended_routing":{"capability":"edit","min_tier":"standard"},
+            "affected_areas":["core"],"affected_files":["src/lib.rs"],
+            "acceptance_criteria":["works"],"verification_commands":["cargo test"],
+            "depends_on":[],"duplicate_evidence":["No matching issue"],
+            "uncovered_reason":"No existing work covers it"
+          }]}
+        }"##,
+    )
+    .unwrap();
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        r##"#!/bin/sh
+case "$*" in
+  *"--method POST"*) echo "write attempted during dry run" >&2; exit 91 ;;
+  *"/issues/42"*) printf '{"id":4200,"number":42,"html_url":"https://github.com/owner/real/issues/42","state":"open","title":"Parent","body":"","labels":[]}\n' ;;
+  *"/labels?"*) printf '[{"name":"exec:autonomous"}]\n' ;;
+  *"/issues?state=all"*) printf '[]\n' ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 92 ;;
+esac
+"##,
+    );
+
+    bin()
+        .args([
+            "pm",
+            "publish",
+            "--profile",
+            "real",
+            "--plan",
+            plan_path.to_str().unwrap(),
+            "--config",
+            cfg.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("would create"));
+    assert!(!tmp
+        .path()
+        .join("pm-plan-v1.json.publication-v1.json")
+        .exists());
+}
+
+#[test]
+fn dispatch_pm_target_writes_plan_artifact_without_implicit_publication() {
     let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -53,15 +117,25 @@ fn dispatch_pm_target_parses_structured_plan_and_writes_ticket() {
         .env("PATH", prepend_path(&fake_bin))
         .assert()
         .success()
-        .stdout(predicate::str::contains("Created 1 ticket"));
+        .stdout(predicate::str::contains(
+            "Plan validated; no provider issues were created",
+        ));
 
     let tickets_dir = repo.join("docs/tickets");
-    let entries: Vec<_> = fs::read_dir(&tickets_dir)
+    assert!(
+        !tickets_dir.exists() || fs::read_dir(&tickets_dir).unwrap().next().is_none(),
+        "planning must not write legacy TICKET-NNN files"
+    );
+    let sessions = tmp.path().join("artifacts/real/sessions");
+    let session = fs::read_dir(sessions)
         .unwrap()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
-    assert!(entries.iter().any(|name| name.contains("fix-auth")));
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let artifact: Value =
+        serde_json::from_slice(&fs::read(session.join("pm-plan-v1.json")).unwrap()).unwrap();
+    assert_eq!(artifact["plan"]["tickets"][0]["key"], "fix-auth");
 }
 
 #[test]
@@ -121,7 +195,9 @@ fn dispatch_pm_skips_unavailable_preferred_backend() {
         .env("GAH_LEDGER_PATH", &ledger_path)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Created 1 ticket"));
+        .stdout(predicate::str::contains(
+            "Plan validated; no provider issues were created",
+        ));
 
     assert!(!claude_marker.exists());
     let ledger = fs::read_to_string(&ledger_path).unwrap();

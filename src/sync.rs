@@ -9,7 +9,8 @@ mod review_state;
 pub use repository::fetch_repository_mrs;
 pub(crate) use review_state::review_metadata_fingerprint;
 pub(crate) use review_state::{
-    current_review_generation, review_contract_matches, review_generation_matches_mr,
+    current_review_generation, review_contract_matches, review_generation_matches,
+    review_generation_matches_mr,
 };
 use review_state::{latest_review_for_mr, ledger_info_for_mr};
 
@@ -207,7 +208,10 @@ fn fetch_mrs_for_scope(
     filter_gah_branches: bool,
 ) -> Result<Vec<SyncMr>> {
     let mut mrs = match profile.provider.as_str() {
-        "github" => github_prs(profile, scope, filter_gah_branches),
+        "github" if scope == MrFetchScope::Active => {
+            repository::fetch_active_github_mrs(profile, filter_gah_branches)
+        }
+        "github" => repository::fetch_historical_github_mrs(profile, filter_gah_branches),
         "gitlab" => gitlab_mrs(profile, scope, filter_gah_branches),
         other => anyhow::bail!("unsupported provider: {}", other),
     }?;
@@ -415,74 +419,6 @@ struct GithubLabel {
 struct GithubCheck {
     #[serde(default)]
     conclusion: Option<String>,
-}
-
-fn github_pr_list_args(profile: &crate::config::Profile, scope: MrFetchScope) -> Vec<String> {
-    let (state, limit) = match scope {
-        MrFetchScope::Active => ("open", "100"),
-        MrFetchScope::FullHistory => ("all", "1000"),
-    };
-    [
-        "pr",
-        "list",
-        "--repo",
-        &profile.repo,
-        "--state",
-        state,
-        "--limit",
-        limit,
-        "--json",
-        "title,body,headRefName,headRefOid,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
-}
-
-fn github_prs(
-    profile: &crate::config::Profile,
-    scope: MrFetchScope,
-    filter_gah_branches: bool,
-) -> Result<Vec<SyncMr>> {
-    let out = crate::provider::provider_command("gh")
-        .args(github_pr_list_args(profile, scope))
-        .output()
-        .context("gh pr list")?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "gh pr list failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let prs: Vec<GithubPr> = serde_json::from_slice(&out.stdout)?;
-    if scope == MrFetchScope::Active && prs.len() >= 100 {
-        anyhow::bail!(
-            "gh pr list reached the active observation cap (100); refusing an incomplete snapshot"
-        );
-    }
-    Ok(prs
-        .into_iter()
-        .filter(|pr| !filter_gah_branches || pr.head_ref_name.starts_with("gah/"))
-        .map(|pr| SyncMr {
-            work_id: extract_work_id_from_title(&pr.title),
-            title: pr.title,
-            body: pr.body,
-            branch: pr.head_ref_name,
-            labels: pr.labels.into_iter().map(|l| l.name).collect(),
-            url: pr.url,
-            id: pr.number.map(|n| n.to_string()),
-            state: pr.state,
-            draft: pr.is_draft,
-            source_sha: pr.head_ref_oid,
-            merge_status: pr.merge_state_status,
-            merged: pr.merged_at.is_some(),
-            updated_at: pr.updated_at,
-            merged_at: pr.merged_at,
-            ci_failed: github_ci_failed(pr.status_check_rollup.as_deref()),
-            ci_passed: github_ci_passed(pr.status_check_rollup.as_deref()),
-            ci_pending: false,
-        })
-        .collect())
 }
 
 fn github_ci_failed(checks: Option<&[GithubCheck]>) -> bool {
@@ -1267,6 +1203,7 @@ mod tests {
     ) -> crate::ledger::LedgerEntry {
         let tmp = tempfile::tempdir().unwrap();
         let prof = crate::config::Profile {
+            delivery_mode: crate::config::DeliveryMode::default(),
             manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "test".into(),

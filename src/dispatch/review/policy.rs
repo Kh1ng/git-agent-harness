@@ -1,11 +1,13 @@
 use super::super::text::{extract_first_json_object, utf8_safe_prefix};
 use super::context::ReviewDiffBundle;
+use crate::availability;
 use crate::config::{CandidateConfig, GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::routing::RouteDecision;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::fmt;
+use time::OffsetDateTime;
 
 /// Typed, terminal refusal used when a ticket has exhausted its configured
 /// review budget. Keeping this distinct from backend failures lets the
@@ -274,6 +276,71 @@ pub(in crate::dispatch) fn review_escalation_reason(
     None
 }
 
+/// A candidate left without an explicit model is recorded in the ledger
+/// under whatever effective model routing backfilled for it (e.g. codex's
+/// config-file default, mirroring routing.rs's own decide_route backfill) --
+/// compare against that, not the raw config value, or a once-tried
+/// backfilled candidate looks perpetually untried and the chain never
+/// advances past it.
+fn effective_model_for(candidate: &CandidateConfig, profile: &Profile) -> Option<String> {
+    if candidate.backend == "codex" && candidate.model.is_none() {
+        crate::runner::extract_model_from_args(&profile.codex_args)
+    } else {
+        candidate.model.clone()
+    }
+}
+
+/// Live availability (quota/auth) for one candidate, reusing the same
+/// state store `routing::decide_route` consults. Fails open (treats the
+/// candidate as available) if the store can't be read -- unknown state
+/// should not itself stall the escalation chain.
+fn candidate_is_available(state_path: &std::path::Path, candidate: &CandidateConfig) -> bool {
+    let quota_pool = availability::resolve_candidate_quota_pool(
+        &candidate.backend,
+        candidate.model.as_deref(),
+        candidate.quota_pool.as_deref(),
+    );
+    availability::availability_for(
+        state_path,
+        &candidate.backend,
+        candidate.model.as_deref(),
+        quota_pool.as_deref(),
+        OffsetDateTime::now_utc(),
+    )
+    .map(|decision| decision.eligible)
+    .unwrap_or(true)
+}
+
+/// Among the untried candidates, prefer one that's actually available right
+/// now over the ordered list's plain next-in-line. Without this, a candidate
+/// under a multi-day quota cooldown (or a permanently broken credential --
+/// `authentication_error` never has a reset time) stalls the whole
+/// escalation chain waiting on that one backend, even when a later candidate
+/// in the same ordered list is eligible immediately. Falls back to the
+/// first untried candidate, unavailable or not, so genuine full-exhaustion
+/// (nothing left to try) still surfaces exactly as before.
+fn pick_next_untried(
+    state_path: &std::path::Path,
+    candidates: Vec<CandidateConfig>,
+    profile: &Profile,
+    attempted: &HashSet<(String, Option<String>)>,
+) -> Option<CandidateConfig> {
+    let untried: Vec<CandidateConfig> = candidates
+        .into_iter()
+        .filter(|candidate| {
+            let effective_model = effective_model_for(candidate, profile);
+            !attempted.contains(&(candidate.backend.clone(), effective_model))
+        })
+        .collect();
+    if let Some(available) = untried
+        .iter()
+        .find(|candidate| candidate_is_available(state_path, candidate))
+    {
+        return Some(available.clone());
+    }
+    untried.into_iter().next()
+}
+
 /// Invalid structured output is not an opinion, so it advances through the
 /// complete ordered review pool (for example AGY account 1 -> AGY account 2
 /// -> Claude) before the stronger/paid terminal escalation boundary. This is
@@ -286,6 +353,7 @@ pub(in crate::dispatch) fn next_review_candidate(
     branch: &str,
     current: Option<(&str, Option<&str>)>,
     review_generation: Option<&str>,
+    state_path: &std::path::Path,
 ) -> Option<CandidateConfig> {
     let entries = ledger::read_entries(cfg).ok()?;
     let active_entries = active_branch_review_entries(&entries, profile, profile_name, branch);
@@ -312,19 +380,11 @@ pub(in crate::dispatch) fn next_review_candidate(
         attempted.insert((backend.to_string(), model.map(str::to_string)));
     }
 
-    profile
+    let candidates = profile
         .effective_routing(&cfg.defaults)
         .review_candidates
-        .unwrap_or_default()
-        .into_iter()
-        .find(|candidate| {
-            let effective_model = if candidate.backend == "codex" && candidate.model.is_none() {
-                crate::runner::extract_model_from_args(&profile.codex_args)
-            } else {
-                candidate.model.clone()
-            };
-            !attempted.contains(&(candidate.backend.clone(), effective_model))
-        })
+        .unwrap_or_default();
+    pick_next_untried(state_path, candidates, profile, &attempted)
 }
 
 /// Select the next unused reviewer from the explicitly ordered escalation
@@ -338,6 +398,7 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
     branch: &str,
     current: Option<(&str, Option<&str>)>,
     review_generation: Option<&str>,
+    state_path: &std::path::Path,
 ) -> Option<CandidateConfig> {
     let entries = ledger::read_entries(cfg).ok()?;
     let active_entries = active_branch_review_entries(&entries, profile, profile_name, branch);
@@ -370,24 +431,10 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
         attempted.insert((backend.to_string(), model.map(str::to_string)));
     }
 
-    profile
+    let candidates = profile
         .effective_routing(&cfg.defaults)
-        .effective_escalatory_reviewers()
-        .into_iter()
-        .find(|candidate| {
-            // A candidate left without an explicit model is recorded in the
-            // ledger under whatever effective model routing backfilled for it
-            // (e.g. codex's config-file default, mirroring routing.rs's own
-            // decide_route backfill) -- compare against that, not the raw
-            // config value, or a once-tried backfilled candidate looks
-            // perpetually untried and the chain never advances past it.
-            let effective_model = if candidate.backend == "codex" && candidate.model.is_none() {
-                crate::runner::extract_model_from_args(&profile.codex_args)
-            } else {
-                candidate.model.clone()
-            };
-            !attempted.contains(&(candidate.backend.clone(), effective_model))
-        })
+        .effective_escalatory_reviewers();
+    pick_next_untried(state_path, candidates, profile, &attempted)
 }
 
 /// Return the append-only branch history after the latest operator reset for

@@ -228,6 +228,16 @@ export interface ActiveClaim {
   age_seconds: number;
 }
 
+export interface PmParentStatus {
+  work_id: string;
+  source_issue_number: string;
+  plan_fingerprint: string;
+  child_issue_numbers: string[];
+  open_child_count: number;
+  completed: boolean;
+  reconciled: boolean;
+}
+
 export interface StatusSnapshot {
   schema_version: number;
   review_contract_version: number;
@@ -255,8 +265,17 @@ export interface StatusSnapshot {
   errors: StatusError[];
   available_tickets: AvailableTicket[];
   active_claims: ActiveClaim[];
+  /** Published PM parents and the current provider-native state of their
+   * exact child issue identities. */
+  pm_parent_states: PmParentStatus[];
+  /** Failed PM planning/publication attempts, keyed by native work ID. */
+  pm_decomposition_attempt_counts: Record<string, number>;
+  /** Effective bounded retry ceiling for PM decomposition. */
+  pm_max_attempts: number;
   fix_attempt_counts: Record<string, number>;
   merge_attempt_counts: Record<string, number>;
+  /** Work IDs currently under an out-of-band manager review hold. These
+   * remain blocked from automatic review/merge until explicitly released. */
   review_held_work_ids: string[];
   publishing_allow_pr: boolean;
   /** Effective profile policy used to reject newly tracked generated files
@@ -302,16 +321,41 @@ export interface QuotaCandidateStatus {
   last_error_summary?: string | null;
   observed_at?: string | null;
   usage: QuotaUsageSummary;
-  quota_observations: QuotaObservation[];
+  quota_observations?: QuotaObservation[];
 }
 
 export interface QuotaSnapshot {
   schema_version: number;
   generated_at: string;
+  freshness: {
+    ledger_observed_at?: string | null;
+    availability_observed_at?: string | null;
+    quota_observed_at?: string | null;
+  };
   profile: ProfileIdentity;
   since: string;
   usage: QuotaUsageSummary;
   candidates: QuotaCandidateStatus[];
+}
+
+// ---------------------------------------------------------------------------
+// gah doctor --json (src/doctor.rs)
+// ---------------------------------------------------------------------------
+
+export type DoctorCheckStatus = 'ok' | 'warn' | 'fail';
+
+export interface DoctorCheck {
+  profile?: string | null;
+  name: string;
+  status: DoctorCheckStatus;
+  detail: string;
+}
+
+export interface DoctorSnapshot {
+  schema_version: number;
+  generated_at: string;
+  overall_status: DoctorCheckStatus;
+  checks: DoctorCheck[];
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +467,8 @@ export interface ProfileSummary {
   max_open_managed_mrs: number;
   /** Manager-wake autonomy for this profile (null = unset -> off). */
   manager_wake_autonomy: WakeAutonomyValue | null;
+  /** Delivery mode for work results ('pr' | 'handoff'). Defaults to 'pr' if omitted. */
+  delivery_mode?: 'pr' | 'handoff';
   /** Effective validation command timeout in seconds for this profile (defaults
    * to 300). If unset in TOML, this is computed and returned as the effective
    * timeout. */
@@ -437,6 +483,107 @@ export interface ConfigSummary {
   /** Which agent CLI is currently acting as the operator's manager across
    * all profiles/projects (null = unset, so no manager wake happens). */
   current_manager: string | null;
+}
+
+export interface RoutingCandidateSummary {
+  backend: string;
+  model: string | null;
+  quota_pool: string | null;
+  priority: number;
+  included_in_quota: boolean;
+  marginal_cost_usd: number | null;
+  quota_usage_percent: number | null;
+  quota_days_remaining: number | null;
+  requires_approval: boolean;
+}
+
+export interface ContextOverrideBudgetSummary {
+  enabled?: boolean | null;
+  soft_limit_tokens?: number | null;
+  hard_limit_tokens?: number | null;
+  compact_after_tool_calls?: number | null;
+  fresh_context_on_review?: boolean | null;
+  fresh_context_on_fix?: boolean | null;
+  include_full_git_history?: boolean | null;
+  include_full_worker_transcript_in_review?: boolean | null;
+  recent_history_tokens?: number | null;
+}
+
+export interface ContextBudgetSummary {
+  enabled: boolean;
+  soft_limit_tokens: number;
+  hard_limit_tokens: number;
+  compact_after_tool_calls: number;
+  fresh_context_on_review: boolean;
+  fresh_context_on_fix: boolean;
+  include_full_git_history: boolean;
+  include_full_worker_transcript_in_review: boolean;
+  recent_history_tokens: number;
+}
+
+export interface ConfigBackendContextSummary {
+  backend: string;
+  effective: ContextBudgetSummary;
+  backend_override: ContextOverrideBudgetSummary | null;
+}
+
+export interface ConfigProfileContextSummary {
+  global: ContextBudgetSummary;
+  profile_override: ContextOverrideBudgetSummary | null;
+  /** Effective context budget for every backend this profile actually
+   * routes to (pm/improve/review candidates, routine reviewer, escalatory
+   * reviewers). `context.backends.<name>` overrides are merged in
+   * per-backend, so different routed backends for the same profile can have
+   * different effective budgets -- this is what dispatch actually applies. */
+  effective_by_backend: ConfigBackendContextSummary[];
+}
+
+export interface TaskRoutingRuleSummary {
+  modes: string[];
+  task_classes: string[];
+  difficulties: string[];
+  risks: string[];
+  candidates: RoutingCandidateSummary[];
+}
+
+export interface NotificationSummary {
+  configured: boolean;
+  /** Secret-safe transport classification; the command itself is never sent. */
+  transport: 'telegram' | 'custom_command' | null;
+  manager_wake_autonomy: 'off' | 'review_only' | 'full';
+  /** Paths are configuration metadata only; file contents are never sent. */
+  env_file: string | null;
+  env_file_prod: string | null;
+}
+
+/** Effective read-only profile configuration for Settings’ "effective config"
+ * view. Values reflect inheritance through defaults + canonical + repo config
+ * for the requested profile. */
+export interface ConfigProfileSummary {
+  profile: string;
+  /** Effective delivery behavior for completed work. */
+  delivery_mode: 'pr' | 'handoff';
+  merge_policy: string;
+  max_fix_attempts_per_mr: number;
+  max_implementation_failures_per_ticket: number;
+  max_review_cycles_per_ticket: number;
+  max_paid_reviews_per_ticket: number;
+  pm_candidates: RoutingCandidateSummary[];
+  improve_candidates: RoutingCandidateSummary[];
+  review_candidates: RoutingCandidateSummary[];
+  task_routing_rules: TaskRoutingRuleSummary[];
+  routine_reviewer: RoutingCandidateSummary | null;
+  escalatory_reviewers: RoutingCandidateSummary[];
+  context: ConfigProfileContextSummary;
+  notifications: NotificationSummary;
+}
+
+/** Versioned allowlisted response from `gah config show --json --full`. */
+export interface ConfigShowFull {
+  schema_version: number;
+  config_path: string;
+  current_manager: string | null;
+  profiles: Record<string, ConfigProfileSummary>;
 }
 
 /** Payload for `gah config set` (POST /api/config). `current_manager: null`

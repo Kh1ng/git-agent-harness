@@ -34,6 +34,31 @@ mod workflows;
 pub use self::review::policy::review_budget_exhausted_error;
 pub(crate) use self::text::utf8_safe_prefix;
 
+/// Explicitly publish a previously validated PM plan. Planning itself never
+/// calls this path; the CLI requires a separate operator-visible command.
+pub(crate) fn publish_pm_plan(
+    cfg: &GahConfig,
+    profile_name: &str,
+    plan_path: &std::path::Path,
+    dry_run: bool,
+) -> Result<PmPublicationSummary> {
+    let profile = config::get_profile(cfg, profile_name)?;
+    environment::export_profile_env(profile, false);
+    workflows::run_pm_publish(cfg, profile_name, profile, plan_path, dry_run)
+}
+
+pub(crate) use self::workflows::PmPublicationSummary;
+
+pub(crate) fn validate_pm_source_depth(
+    cfg: &GahConfig,
+    profile_name: &str,
+    target: &str,
+) -> Result<u32> {
+    let profile = config::get_profile(cfg, profile_name)?;
+    environment::export_profile_env(profile, false);
+    workflows::validate_pm_source_depth(profile, target)
+}
+
 pub use self::attempts::review_preflight;
 pub(crate) use self::attempts::routing_runtime_state_from_entries;
 

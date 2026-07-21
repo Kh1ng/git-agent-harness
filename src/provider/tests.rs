@@ -1,7 +1,8 @@
 use super::{
     create_draft_mr, draft_mr_title, find_review_target_by_branch, find_review_target_by_mr,
-    github_review_target_by_number, gitlab_target_from_value, mark_ready_for_review, merge_mr,
-    parse_gitlab_mr_reference, MrReferenceError, TEST_PATH_OVERRIDE,
+    github_review_target_by_number, gitlab_target_from_value, link_provider_child,
+    link_provider_dependency, mark_ready_for_review, merge_mr, parse_gitlab_mr_reference,
+    MrReferenceError, ProviderIssue, TEST_PATH_OVERRIDE,
 };
 use crate::config::{Profile, RoutingPolicy};
 use std::fs;
@@ -41,6 +42,7 @@ fn make_fake_bin(dir: &Path, name: &str, body: &str) {
 
 fn github_profile() -> Profile {
     Profile {
+        delivery_mode: crate::config::DeliveryMode::default(),
         manager_wake_autonomy: crate::config::WakeAutonomy::default(),
         prune_older_than_days: None,
         display_name: "Repo".into(),
@@ -103,6 +105,75 @@ fn gitlab_profile() -> Profile {
         provider_project_id: Some("42".into()),
         ..github_profile()
     }
+}
+
+fn provider_issue(id: &str, number: &str) -> ProviderIssue {
+    ProviderIssue {
+        id: id.to_string(),
+        number: number.to_string(),
+        url: format!("https://provider.example/issues/{number}"),
+        state: "open".to_string(),
+        title: "child".to_string(),
+        body: String::new(),
+        labels: Vec::new(),
+    }
+}
+
+#[test]
+fn github_child_relation_uses_numeric_typed_field() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let args_log = tmp.path().join("args.log");
+    make_fake_bin(
+        &bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\ncase \"$*\" in *\"--method GET\"*) printf '[]\\n' ;; *) printf '{{}}\\n' ;; esac\n",
+            args_log.display()
+        ),
+    );
+    let _guard = PathOverride::set(bin.to_string_lossy().to_string());
+
+    link_provider_child(&github_profile(), "42", &provider_issue("9001", "101")).unwrap();
+
+    let args = fs::read_to_string(args_log).unwrap();
+    assert!(args.contains("sub_issue_id=9001"));
+    assert!(
+        args.lines()
+            .zip(args.lines().skip(1))
+            .any(|(left, right)| left == "-F" && right == "sub_issue_id=9001"),
+        "GitHub sub_issue_id must use gh's typed -F field: {args}"
+    );
+}
+
+#[test]
+fn gitlab_dependency_relation_uses_native_blocks_link() {
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let args_log = tmp.path().join("args.log");
+    make_fake_bin(
+        &bin,
+        "glab",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '{{}}\\n'\n",
+            args_log.display()
+        ),
+    );
+    let _guard = PathOverride::set(bin.to_string_lossy().to_string());
+
+    link_provider_dependency(
+        &gitlab_profile(),
+        &provider_issue("1", "10"),
+        &provider_issue("2", "11"),
+    )
+    .unwrap();
+
+    let args = fs::read_to_string(args_log).unwrap();
+    assert!(args.contains("projects/42/issues/10/links"));
+    assert!(args.contains("target_issue_iid=11"));
+    assert!(args.contains("link_type=blocks"));
 }
 
 #[test]
@@ -729,6 +800,50 @@ esac
 }
 
 #[test]
+fn merge_mr_accepts_generation_computed_before_mark_ready_for_review() {
+    // Regression: gah dispatches MarkReadyForReview before MergeMr, so by the
+    // time merge_mr fetches the live ReviewTarget, draft has already flipped
+    // true -> false. The generation stored at review time was computed with
+    // draft=true; without the one-way transition tolerance, ensure_review_generation
+    // rejected every approved MR right before merging it (never actually landing).
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        r#"#!/bin/sh
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  "pr view 42 --repo") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","title":"test","body":"body","isDraft":false,"headRefName":"gah/test","baseRefName":"main","headRefOid":"source-github-sha"}\n' ;;
+  "pr ready 42 --repo") exit 0 ;;
+  "pr merge 42 --squash") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let fingerprint_at_review_time = crate::sync::review_metadata_fingerprint(
+        Some("source-github-sha"),
+        Some("test"),
+        Some("body"),
+        true,
+    );
+    let expected = crate::ledger::review_generation(
+        Some("source-github-sha"),
+        Some(&fingerprint_at_review_time),
+    )
+    .unwrap();
+
+    merge_mr(&github_profile(), "gah/test", Some(expected.as_str())).unwrap();
+
+    let call = fs::read_to_string(bin_dir.join("merge_call.txt")).unwrap();
+    assert!(call.contains("42"));
+}
+
+#[test]
 fn mark_ready_for_review_github_un_drafts_only() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = TempDir::new().unwrap();
@@ -1151,4 +1266,35 @@ esac
     assert!(fs::read_to_string(bin_dir.join("add_call"))
         .unwrap()
         .contains("labels[]=gah-review-escalating"));
+}
+
+#[test]
+fn handoff_mode_rejects_all_remote_provider_calls() {
+    let mut profile = github_profile();
+    profile.delivery_mode = crate::config::DeliveryMode::Handoff;
+
+    create_draft_mr(&profile, "branch", "title", "body").unwrap_err();
+    super::post_review_comment(&profile, "branch", "body", &[]).unwrap_err();
+    super::post_issue_comment(&profile, "123", "body").unwrap_err();
+    super::set_review_state_labels(&profile, "branch", &["gah-needs-fix"]).unwrap_err();
+    mark_ready_for_review(&profile, "branch").unwrap_err();
+    merge_mr(&profile, "branch", None).unwrap_err();
+    super::gitlab_set_mwps(&profile, "branch", "gen").unwrap_err();
+    super::github_close_issue(&profile, "123").unwrap_err();
+    super::gitlab_close_issue(&profile, "123").unwrap_err();
+
+    // Provider relationship links remain best-effort no-ops in handoff mode:
+    // they are not part of the mr_url/mr_created ledger contract and skipping
+    // them is safe rather than a correctness landmine.
+    let child = ProviderIssue {
+        id: "c1".into(),
+        number: "1".into(),
+        title: "child".into(),
+        body: String::new(),
+        labels: vec![],
+        state: "open".into(),
+        url: "http".into(),
+    };
+    link_provider_child(&profile, "parent", &child).unwrap();
+    link_provider_dependency(&profile, &child, &child).unwrap();
 }

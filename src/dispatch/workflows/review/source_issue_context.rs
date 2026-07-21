@@ -27,6 +27,7 @@ struct SourceIssueIdentity {
 
 #[derive(Debug)]
 pub(super) struct SourceIssueContext {
+    pub(super) issue_number: Option<String>,
     pub(super) prompt_section: Option<String>,
     pub(super) contract: Option<String>,
     /// The exact acceptance criteria rendered into the bounded source
@@ -75,12 +76,13 @@ pub(super) fn resolve_source_issue_context(
 
     match fetch_issue_details(profile, &identity.issue_number, false) {
         Ok(issue) => {
-            let acceptance_criteria = bounded_source_issue_entries(
+            let acceptance_criteria = bounded_numbered_source_issue_entries(
                 &source_issue_acceptance_criteria(&issue),
                 SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES,
             );
             let contract = render_source_issue_contract(&issue);
             Ok(SourceIssueContext {
+                issue_number: Some(identity.issue_number.clone()),
                 prompt_section: Some(contract.clone()),
                 contract: Some(contract.clone()),
                 acceptance_criteria: acceptance_criteria.clone(),
@@ -99,6 +101,7 @@ pub(super) fn resolve_source_issue_context(
                 identity.issue_number
             );
             Ok(SourceIssueContext {
+                issue_number: Some(identity.issue_number.clone()),
                 prompt_section: Some(format!("## Source Issue Lookup\n\n{message}")),
                 contract: None,
                 acceptance_criteria: Vec::new(),
@@ -115,6 +118,7 @@ pub(super) fn resolve_source_issue_context(
 
 fn missing_source_issue_context() -> SourceIssueContext {
     SourceIssueContext {
+        issue_number: None,
         prompt_section: Some(
             "## Source Issue Lookup\n\nSource issue identity could not be resolved from the ledger or MR body; no canonical issue contract was fetched."
                 .to_string(),
@@ -127,6 +131,24 @@ fn missing_source_issue_context() -> SourceIssueContext {
             "issue_number": serde_json::Value::Null,
             "error": "source issue identity not found",
         }),
+    }
+}
+
+/// Carry an MR-body-resolved source issue into the canonical ledger identity.
+/// Explicit dispatch identity always wins; this only fills fields that the
+/// caller could not know before fetching the merge request body.
+pub(super) fn apply_resolved_source_issue_identity(
+    ledger: &mut ledger::LedgerEntry,
+    context: &SourceIssueContext,
+) {
+    let Some(issue_number) = context.issue_number.as_ref() else {
+        return;
+    };
+    if ledger.work_id.is_none() {
+        ledger.work_id = Some(format!("#{issue_number}"));
+    }
+    if ledger.source_issue_number.is_none() {
+        ledger.source_issue_number = Some(issue_number.clone());
     }
 }
 
@@ -266,7 +288,10 @@ pub(super) fn render_source_issue_contract(issue: &IssueDetails) -> String {
     if !acceptance_criteria.is_empty() {
         sections.push(format!(
             "### Acceptance Criteria\n\n{}",
-            render_source_issue_list(&acceptance_criteria, SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES)
+            render_numbered_source_issue_list(
+                &acceptance_criteria,
+                SOURCE_ISSUE_ACCEPTANCE_MAX_BYTES,
+            )
         ));
     }
     if !meta.constraints.is_empty() {
@@ -401,6 +426,22 @@ fn render_source_issue_list(entries: &[String], max_bytes: usize) -> String {
     out
 }
 
+fn render_numbered_source_issue_list(entries: &[String], max_bytes: usize) -> String {
+    let bounded = bounded_numbered_source_issue_entries(entries, max_bytes);
+    let mut out = String::new();
+    for (index, entry) in bounded.iter().enumerate() {
+        let value =
+            indent_untrusted_text(utf8_safe_prefix(entry, SOURCE_ISSUE_LIST_ITEM_MAX_BYTES));
+        out.push_str(&format!("{}. {value}\n", index + 1));
+    }
+    if bounded.len() < entries.len() {
+        out.push_str(&format!(
+            "[List truncated at {max_bytes} bytes; retrieve the source issue for remaining detail.]\n"
+        ));
+    }
+    out
+}
+
 fn source_issue_acceptance_criteria(issue: &IssueDetails) -> Vec<String> {
     let meta = parse_ticket_metadata_from_issue(issue);
     let unheaded_sections = source_issue_sections::extract(&issue.body);
@@ -445,15 +486,75 @@ fn bounded_source_issue_entries(entries: &[String], max_bytes: usize) -> Vec<Str
         .collect()
 }
 
+fn bounded_numbered_source_issue_entries(entries: &[String], max_bytes: usize) -> Vec<String> {
+    let mut used = 0usize;
+    entries
+        .iter()
+        .enumerate()
+        .take_while(|(index, entry)| {
+            let value =
+                indent_untrusted_text(utf8_safe_prefix(entry, SOURCE_ISSUE_LIST_ITEM_MAX_BYTES));
+            let line_bytes = format!("{}. {value}\n", index + 1).len();
+            if used.saturating_add(line_bytes) > max_bytes {
+                return false;
+            }
+            used += line_bytes;
+            true
+        })
+        .map(|(_, entry)| entry.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod source_issue_tests {
     use super::{
-        bounded_source_issue_entries, extract_issue_number_from_text, missing_source_issue_context,
-        render_source_issue_contract, render_untrusted_inline_review_text,
-        render_untrusted_review_text, verified_post_budget_source_contract,
+        apply_resolved_source_issue_identity, bounded_numbered_source_issue_entries,
+        extract_issue_number_from_text, missing_source_issue_context, render_source_issue_contract,
+        render_untrusted_inline_review_text, render_untrusted_review_text,
+        verified_post_budget_source_contract,
     };
+    use crate::config::tests::test_profile_for_notifications;
     use crate::context::{self, ContextConfig};
     use crate::dispatch::issues::IssueDetails;
+    use crate::ledger::LedgerEntry;
+
+    #[test]
+    fn resolved_mr_body_issue_fills_missing_ledger_identity() {
+        let profile = test_profile_for_notifications();
+        let mut ledger = LedgerEntry::new("gah", &profile, "codex", "review", "mr:7", None, None);
+        let context = super::SourceIssueContext {
+            issue_number: Some("616".to_string()),
+            prompt_section: None,
+            contract: None,
+            acceptance_criteria: vec![],
+            lookup_report: serde_json::json!({}),
+        };
+
+        apply_resolved_source_issue_identity(&mut ledger, &context);
+
+        assert_eq!(ledger.work_id.as_deref(), Some("#616"));
+        assert_eq!(ledger.source_issue_number.as_deref(), Some("616"));
+    }
+
+    #[test]
+    fn resolved_mr_body_issue_does_not_override_explicit_ledger_identity() {
+        let profile = test_profile_for_notifications();
+        let mut ledger = LedgerEntry::new("gah", &profile, "codex", "review", "mr:7", None, None);
+        ledger.work_id = Some("#500".to_string());
+        ledger.source_issue_number = Some("500".to_string());
+        let context = super::SourceIssueContext {
+            issue_number: Some("616".to_string()),
+            prompt_section: None,
+            contract: None,
+            acceptance_criteria: vec![],
+            lookup_report: serde_json::json!({}),
+        };
+
+        apply_resolved_source_issue_identity(&mut ledger, &context);
+
+        assert_eq!(ledger.work_id.as_deref(), Some("#500"));
+        assert_eq!(ledger.source_issue_number.as_deref(), Some("500"));
+    }
 
     #[test]
     fn source_issue_contract_includes_acceptance_details_missing_from_the_mr_body() {
@@ -492,7 +593,13 @@ mod source_issue_tests {
             .contains("Include the canonical source issue contract"));
         assert!(built
             .prompt
+            .contains("1.   Include the canonical source issue contract"));
+        assert!(built
+            .prompt
             .contains("Preserve the acceptance criteria in the review context artifact"));
+        assert!(built
+            .prompt
+            .contains("2.   Preserve the acceptance criteria in the review context artifact"));
         assert!(built
             .prompt
             .contains("agent_model: opencode/opencode/hy3-free"));
@@ -539,10 +646,10 @@ mod source_issue_tests {
             "first criterion".to_string(),
             "second criterion".to_string(),
         ];
-        let first_line_bytes = "-   first criterion\n".len();
+        let first_line_bytes = "1.   first criterion\n".len();
 
         assert_eq!(
-            bounded_source_issue_entries(&criteria, first_line_bytes),
+            bounded_numbered_source_issue_entries(&criteria, first_line_bytes),
             vec!["first criterion"]
         );
     }

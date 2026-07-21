@@ -13,7 +13,7 @@ use std::time::Duration;
 /// Deliberately small and inline (not configurable) -- this is a safety
 /// floor, not a policy knob; see TICKET-081 for the broader stuck-loop
 /// detector this complements.
-const AUTO_RETRY_CAP: usize = 2;
+pub(crate) const AUTO_RETRY_CAP: usize = 2;
 
 pub(crate) fn is_genuine_agent_failure(failure_class: &str) -> bool {
     matches!(
@@ -338,6 +338,23 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         };
     }
 
+    if let Some(parent) = snapshot
+        .pm_parent_states
+        .iter()
+        .find(|parent| parent.completed && !parent.reconciled)
+    {
+        return NextAction::ReconcilePmParent {
+            work_id: parent.work_id.clone(),
+            source_issue_number: parent.source_issue_number.clone(),
+            plan_fingerprint: parent.plan_fingerprint.clone(),
+            child_issue_numbers: parent.child_issue_numbers.clone(),
+            reason: format!(
+                "all {} provider-native PM child issue(s) are terminal",
+                parent.child_issue_numbers.len()
+            ),
+        };
+    }
+
     // Native issue discovery/dependency resolution is independent from MR
     // sync. A provider failure must fail closed for new ticket dispatch while
     // still allowing all review, merge, and repair actions above to proceed.
@@ -348,6 +365,49 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     {
         return NextAction::NoOp {
             reason: format!("ticket intake incomplete: {}", error.message),
+        };
+    }
+
+    let published_pm_work_ids = snapshot
+        .pm_parent_states
+        .iter()
+        .map(|parent| parent.work_id.as_str())
+        .collect::<HashSet<_>>();
+    let active_claim_work_ids = snapshot
+        .active_claims
+        .iter()
+        .map(|claim| claim.work_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut planning_candidates = snapshot
+        .issue_intake_rejections
+        .iter()
+        .filter(|issue| issue.reason_code == "planning")
+        .filter_map(|issue| {
+            let work_id = issue.work_id.as_deref()?;
+            (!published_pm_work_ids.contains(work_id)
+                && !active_claim_work_ids.contains(work_id)
+                && snapshot
+                    .pm_decomposition_attempt_counts
+                    .get(work_id)
+                    .copied()
+                    .unwrap_or_default()
+                    < snapshot.pm_max_attempts as usize)
+                .then_some(issue)
+        })
+        .collect::<Vec<_>>();
+    planning_candidates.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
+    if let Some(issue) = planning_candidates.first() {
+        return NextAction::DecomposeIssue {
+            ticket_path: issue.ticket_path.clone(),
+            work_id: issue
+                .work_id
+                .clone()
+                .unwrap_or_else(|| issue.ticket_path.clone()),
+            title: issue.title.clone(),
+            reason: format!(
+                "trusted provider issue carries configured PM decomposition label ({})",
+                issue.labels.join(", ")
+            ),
         };
     }
 
@@ -525,6 +585,33 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 ),
             };
         }
+    }
+
+    if let Some(issue) = snapshot.issue_intake_rejections.iter().find(|issue| {
+        issue.reason_code == "planning"
+            && issue.work_id.as_ref().is_some_and(|work_id| {
+                !published_pm_work_ids.contains(work_id.as_str())
+                    && snapshot
+                        .pm_decomposition_attempt_counts
+                        .get(work_id)
+                        .copied()
+                        .unwrap_or_default()
+                        >= snapshot.pm_max_attempts as usize
+            })
+    }) {
+        return NextAction::HumanRequired {
+            reason: format!(
+                "{} exhausted {} bounded PM decomposition attempt(s)",
+                issue.work_id.as_deref().unwrap_or(&issue.ticket_path),
+                snapshot.pm_max_attempts
+            ),
+            reference: issue.work_id.clone(),
+            reason_code: Some(
+                HumanRequiredReason::RetryBudgetExhausted
+                    .as_str()
+                    .to_string(),
+            ),
+        };
     }
 
     NextAction::NoOp {

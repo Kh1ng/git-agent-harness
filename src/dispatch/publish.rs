@@ -53,11 +53,104 @@ pub(super) fn emit_human_handoff(
     println!("=== end GAH human handoff ===");
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_handoff_delivery(
+    cfg: &crate::config::GahConfig,
+    profile: &Profile,
+    ledger: &mut LedgerEntry,
+    wt: &Path,
+    branch: &str,
+    commit_msg: &str,
+    ticket_id: &str,
+    backend_summary: &str,
+) -> anyhow::Result<()> {
+    if crate::worktree::has_uncommitted_changes(wt)? {
+        ledger.commit_attempted = true;
+        crate::worktree::stage_all(wt)?;
+        crate::worktree::ensure_staged(wt)?;
+        crate::worktree::commit_msg(wt, commit_msg)?;
+        ledger.commit_created = true;
+    } else {
+        ledger.commit_created = true;
+    }
+    crate::dispatch::metrics::apply_diff_stats(ledger, wt, &profile.default_target_branch);
+    perform_handoff_delivery(cfg, profile, ledger, wt, branch, ticket_id, backend_summary)?;
+    Ok(())
+}
+
+pub(super) fn perform_handoff_delivery(
+    cfg: &crate::config::GahConfig,
+    profile: &Profile,
+    ledger: &mut LedgerEntry,
+    wt: &Path,
+    branch: &str,
+    work_id_or_ticket: &str,
+    backend_summary: &str,
+) -> anyhow::Result<()> {
+    let artifact_root = if profile.artifact_root.trim().is_empty() {
+        crate::config::default_config_dir()
+    } else {
+        std::path::PathBuf::from(profile.artifact_root.trim())
+    };
+    let ticket_name = work_id_or_ticket.trim();
+    let handoff_dir = artifact_root.join("handoffs").join(ticket_name);
+    std::fs::create_dir_all(&handoff_dir)?;
+
+    let patch = crate::worktree::diff_patch(wt, &profile.default_target_branch).unwrap_or_default();
+    std::fs::write(handoff_dir.join("diff.patch"), &patch)?;
+
+    let summary_report = format!(
+        "# Handoff Report: {ticket_name}\n\
+         - Profile: {}\n\
+         - Branch: {branch}\n\
+         - Target Branch: {}\n\
+         - Delivery Mode: handoff\n\
+         - Validation Status: {}\n\
+         - Changed Files: {}\n\
+         - Insertions: {}\n\
+         - Deletions: {}\n\n\
+         ## Summary\n\
+         {backend_summary}\n",
+        profile.display_name,
+        profile.default_target_branch,
+        ledger.validation_result.as_deref().unwrap_or("unknown"),
+        ledger.files_changed.unwrap_or(0),
+        ledger.insertions.unwrap_or(0),
+        ledger.deletions.unwrap_or(0),
+    );
+    std::fs::write(handoff_dir.join("report.md"), &summary_report)?;
+
+    let handoff_dir_str = handoff_dir.display().to_string();
+    crate::notifications::notify_event(
+        cfg,
+        profile,
+        crate::notifications::NotifyEvent::HandoffCreated {
+            ticket: ticket_name,
+            path: &handoff_dir_str,
+            summary: &summary_report,
+        },
+    );
+
+    ledger.mode = "handoff".to_string();
+    ledger.mr_url = None;
+    ledger.mr_created = false;
+    ledger.push_attempted = false;
+    ledger.push_succeeded = false;
+
+    println!("=== GAH operator handoff (delivery_mode = handoff) ===");
+    println!("ticket: {ticket_name}");
+    println!("path: {}", handoff_dir.display());
+    println!("=== end GAH operator handoff ===");
+
+    Ok(())
+}
+
 /// TICKET-128: whether the profile may publish the work autonomously. A
 /// restricted profile can still run the full backend and validation pipeline
 /// and write local artifacts; they just must not be published as an agent-authored MR.
 pub(super) fn publishing_allows_publish(profile: &Profile) -> bool {
-    profile.publishing.allow_pull_request_creation
+    profile.delivery_mode != crate::config::DeliveryMode::Handoff
+        && profile.publishing.allow_pull_request_creation
         && profile.publishing.allow_commit_message_generation
 }
 
@@ -1033,5 +1126,70 @@ mod tests {
             !body.contains("Closes #"),
             "MR body should not contain Closes directive without issue number"
         );
+    }
+
+    #[test]
+    fn perform_handoff_delivery_creates_single_canonical_patch_and_report() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::worktree::git(&["init", "-q"], temp.path()).unwrap();
+        crate::worktree::git(
+            &["config", "user.email", "gah@example.invalid"],
+            temp.path(),
+        )
+        .unwrap();
+        crate::worktree::git(&["config", "user.name", "GAH Test"], temp.path()).unwrap();
+        std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+        crate::worktree::git(&["add", "."], temp.path()).unwrap();
+        crate::worktree::git(&["commit", "-q", "-m", "base"], temp.path()).unwrap();
+        crate::worktree::git(&["branch", "-M", "main"], temp.path()).unwrap();
+        crate::worktree::git(&["remote", "add", "origin", "."], temp.path()).unwrap();
+        crate::worktree::git(
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+            temp.path(),
+        )
+        .unwrap();
+
+        std::fs::write(temp.path().join("README.md"), "base\nmodified\n").unwrap();
+
+        let artifact_dir = temp.path().join("artifacts");
+        let mut profile = profile(temp.path());
+        profile.artifact_root = artifact_dir.to_string_lossy().to_string();
+        profile.delivery_mode = crate::config::DeliveryMode::Handoff;
+
+        let cfg = crate::dispatch::test_util::gah_config(Default::default());
+        let mut ledger = LedgerEntry::new(
+            "real",
+            &profile,
+            "codex",
+            "fix",
+            "target",
+            Some("handoff-test".into()),
+            None,
+        );
+
+        perform_handoff_delivery(
+            &cfg,
+            &profile,
+            &mut ledger,
+            temp.path(),
+            "gah/handoff-test",
+            "TICKET-125",
+            "Fixed something substantive.",
+        )
+        .unwrap();
+
+        let handoff_dir = artifact_dir.join("handoffs").join("TICKET-125");
+        assert!(handoff_dir.join("diff.patch").exists());
+        assert!(handoff_dir.join("report.md").exists());
+        assert!(!handoff_dir.join("patch.diff").exists());
+        assert!(!handoff_dir.join("summary.md").exists());
+
+        let report = std::fs::read_to_string(handoff_dir.join("report.md")).unwrap();
+        assert!(report.contains("# Handoff Report: TICKET-125"));
+        assert!(report.contains("Fixed something substantive."));
+
+        assert_eq!(ledger.mode, "handoff");
+        assert_eq!(ledger.mr_url, None);
+        assert!(!ledger.mr_created);
     }
 }

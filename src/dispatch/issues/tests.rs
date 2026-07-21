@@ -10,6 +10,7 @@ use std::path::Path;
 
 fn profile(local_path: &Path) -> Profile {
     Profile {
+        delivery_mode: crate::config::DeliveryMode::default(),
         manager_wake_autonomy: crate::config::WakeAutonomy::default(),
         display_name: "Repo".into(),
         repo_id: "repo".into(),
@@ -671,6 +672,8 @@ fn canonical_autonomous_intake_remains_opt_in_for_legacy_configs() {
 
 #[test]
 fn conflicting_disposition_labels_resolve_to_owner_decision_regardless_of_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile = profile(tmp.path());
     let labels = vec![
         "planning".into(),
         "blocked".into(),
@@ -679,8 +682,20 @@ fn conflicting_disposition_labels_resolve_to_owner_decision_regardless_of_order(
     ];
 
     assert_eq!(
-        issue_disposition_from_labels(&labels),
+        issue_disposition_from_labels(&profile, &labels),
         Some(IssueDisposition::OwnerDecision)
+    );
+}
+
+#[test]
+fn configured_pm_decomposition_label_is_a_planning_disposition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut profile = profile(tmp.path());
+    profile.publishing.pm_decomposition_labels = vec!["epic:decompose".into()];
+
+    assert_eq!(
+        issue_disposition_from_labels(&profile, &["EPIC:DECOMPOSE".into()]),
+        Some(IssueDisposition::Planning)
     );
 }
 
@@ -695,7 +710,7 @@ fn explicit_issue_fetch_requires_visible_override_for_unlabelled_discovery() {
     fs::write(
             &gh_path,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/42\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
                 issue_json.replace('\'', "'\\''")
             ),
         )
@@ -837,7 +852,7 @@ fn github_dependency_query_fixture_releases_653_when_652_closes() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  cat '{}'\nelse\n  exit 2\nfi\n",
+            "#!/bin/sh\nif [ \"$4\" = \"repos/owner/repo/issues?state=open&per_page=100&page=1\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$4\" = \"repos/owner/repo/issues/652\" ]; then\n  cat '{}'\nelse\n  exit 2\nfi\n",
             issues.to_string().replace('\'', "'\\''"),
             dependency_path.display()
         ),

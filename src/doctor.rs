@@ -1,6 +1,8 @@
 use crate::config::{self, Defaults, GahConfig, Profile};
 use crate::provider::provider_command;
 use anyhow::Result;
+use serde::Serialize;
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -10,16 +12,84 @@ pub fn run_with_validate(
     config_path: Option<&str>,
     validate: bool,
 ) -> Result<()> {
+    run(profile_name, config_path, validate, false)
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DoctorCheck {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub name: String,
+    pub status: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorSnapshot {
+    pub schema_version: u32,
+    pub generated_at: String,
+    pub overall_status: String,
+    pub checks: Vec<DoctorCheck>,
+}
+
+#[derive(Default)]
+struct CheckCapture {
+    profile: Option<String>,
+    checks: Vec<DoctorCheck>,
+}
+
+thread_local! {
+    static CHECK_CAPTURE: RefCell<Option<CheckCapture>> = const { RefCell::new(None) };
+}
+
+pub fn run(
+    profile_name: Option<&str>,
+    config_path: Option<&str>,
+    validate: bool,
+    json: bool,
+) -> Result<()> {
+    if json {
+        CHECK_CAPTURE.with(|capture| *capture.borrow_mut() = Some(CheckCapture::default()));
+    }
     let resolved = config::resolve_config_path(config_path);
-    let cfg = config::load(config_path)?;
+    let cfg = match config::load(config_path) {
+        Ok(cfg) => cfg,
+        Err(error) if json => {
+            CHECK_CAPTURE.with(|capture| *capture.borrow_mut() = None);
+            let snapshot = DoctorSnapshot {
+                schema_version: 1,
+                generated_at: generated_at(),
+                overall_status: "fail".to_string(),
+                checks: vec![DoctorCheck {
+                    profile: None,
+                    name: "config".to_string(),
+                    status: "fail".to_string(),
+                    detail: format!("{}: {error:#}", resolved.display()),
+                }],
+            };
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let profiles = selected_profiles(&cfg, profile_name)?;
 
-    println!("Config: {}", resolved.display());
+    if !json {
+        println!("Config: {}", resolved.display());
+    }
     print_check(CheckStatus::Pass, "config", "loaded successfully");
 
     let mut failed = false;
     for (name, profile) in profiles {
-        println!("\n[{}]", name);
+        if json {
+            CHECK_CAPTURE.with(|capture| {
+                if let Some(capture) = capture.borrow_mut().as_mut() {
+                    capture.profile = Some(name.clone());
+                }
+            });
+        } else {
+            println!("\n[{}]", name);
+        }
         failed |= !check_profile(&cfg.defaults, profile);
         if validate {
             failed |= !check_validation_commands(profile);
@@ -31,10 +101,40 @@ pub fn run_with_validate(
         }
     }
 
+    if json {
+        let checks = CHECK_CAPTURE.with(|capture| {
+            capture
+                .borrow_mut()
+                .take()
+                .map(|capture| capture.checks)
+                .unwrap_or_default()
+        });
+        let overall_status = if failed {
+            "fail"
+        } else if checks.iter().any(|check| check.status == "warn") {
+            "warn"
+        } else {
+            "ok"
+        };
+        let snapshot = DoctorSnapshot {
+            schema_version: 1,
+            generated_at: generated_at(),
+            overall_status: overall_status.to_string(),
+            checks,
+        };
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+    }
+
     if failed {
         anyhow::bail!("doctor found failing checks");
     }
     Ok(())
+}
+
+fn generated_at() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 fn selected_profiles<'a>(
@@ -720,7 +820,22 @@ fn which(bin: &str) -> bool {
 }
 
 fn print_check(status: CheckStatus, label: &str, detail: &str) {
-    println!("[{}] {:<16} {}", status.as_str(), label, detail);
+    let captured = CHECK_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        let Some(capture) = capture.as_mut() else {
+            return false;
+        };
+        capture.checks.push(DoctorCheck {
+            profile: capture.profile.clone(),
+            name: label.to_string(),
+            status: status.json_str().to_string(),
+            detail: detail.to_string(),
+        });
+        true
+    });
+    if !captured {
+        println!("[{}] {:<16} {}", status.as_str(), label, detail);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -738,6 +853,14 @@ impl CheckStatus {
             Self::Fail => "FAIL",
         }
     }
+
+    fn json_str(self) -> &'static str {
+        match self {
+            Self::Pass => "ok",
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -747,6 +870,7 @@ mod tests {
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
+            delivery_mode: crate::config::DeliveryMode::default(),
             manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             prune_older_than_days: None,
             display_name: "Repo".into(),
