@@ -1,6 +1,6 @@
 use super::super::attempts::{
     apply_route_to_ledger, classify_git_operation_result, classify_worktree_result, decide_route,
-    preflight, record_route_attempt, resolve_llm, run_backend,
+    preflight_identity, record_route_attempt, resolve_llm, run_backend_for_identity,
 };
 use super::super::identity::timestamp;
 use super::super::issues::resolve_target_to_issue_or_string;
@@ -47,7 +47,7 @@ pub(crate) fn experiment(
         ledger,
     )?;
     apply_route_to_ledger(ledger, &route);
-    preflight(profile, &route.effective_backend)?;
+    preflight_identity(profile, &route.identity)?;
     let llm = resolve_llm(
         cfg,
         args,
@@ -113,14 +113,13 @@ pub(crate) fn experiment(
         None
     };
     record_route_attempt(ledger, &route)?;
-    let result = match run_backend(
-        &route.effective_backend,
+    let result = match run_backend_for_identity(
+        &route.identity,
         profile,
         &wt,
         &task,
         &attempt_dir,
         &llm,
-        route.effective_model.as_deref(),
         env_path,
         None,
     ) {

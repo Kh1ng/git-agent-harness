@@ -16,7 +16,8 @@
 mod support;
 
 use git_agent_harness::config;
-use git_agent_harness::ledger::{AttemptRecord, LedgerEntry, LedgerUsage};
+use git_agent_harness::ledger::{AttemptRecord, AttemptRoutingRecord, LedgerEntry, LedgerUsage};
+use git_agent_harness::routing::{CandidateIdentity, RouteRequest, RoutingRuntimeState};
 use git_agent_harness::usage_attribution::{classify_usage, provider_for_model};
 use support::fake_ledger::TestLedger;
 use support::scenario::ScenarioHarness;
@@ -156,6 +157,150 @@ fn execution_identity_explicit_instances_stay_distinct_in_one_quota_pool() {
     assert_eq!(common.effective_model, second.effective_model);
     assert_ne!(common.backend_instance, second.backend_instance);
     assert_ne!(common.auth_source_label, second.auth_source_label);
+}
+
+#[test]
+fn configured_subscription_and_api_routes_remain_distinct_through_telemetry() {
+    let cfg: config::GahConfig = toml::from_str(
+        r#"
+[defaults]
+artifact_root = ""
+worktree_base = ""
+llm_base_url = ""
+llm_model_local = ""
+llm_model_cloud = ""
+
+[defaults.routing.backend_instances.opencode-subscription]
+runner_kind = "opencode"
+logical_backend = "opencode"
+executable = "/bin/sh"
+state_root = "/tmp/gah-opencode-subscription"
+account_label = "personal-subscription"
+auth_source_label = "opencode-login"
+quota_pool = "opencode-plan"
+supported_models = ["openai/gpt-5"]
+
+[defaults.routing.backend_instances.opencode-api]
+runner_kind = "opencode"
+logical_backend = "opencode"
+executable = "/bin/sh"
+state_root = "/tmp/gah-opencode-api"
+account_label = "team-api"
+auth_source_label = "env-openai-key"
+quota_pool = "openai-api"
+supported_models = ["openai/gpt-5"]
+
+[[defaults.routing.improve_candidates]]
+backend = "opencode"
+instance = "opencode-subscription"
+model = "openai/gpt-5"
+priority = 100
+included_in_quota = true
+
+[[defaults.routing.improve_candidates]]
+backend = "opencode"
+instance = "opencode-api"
+model = "openai/gpt-5"
+priority = 100
+marginal_cost_usd = 1.0
+
+[profiles.test]
+display_name = "Test"
+repo_id = "test"
+provider = "github"
+repo = "owner/repo"
+local_path = "/tmp/repo"
+artifact_root = "/tmp/artifacts"
+default_target_branch = "main"
+"#,
+    )
+    .unwrap();
+    let profile = cfg.profiles.get("test").unwrap();
+    let request = || RouteRequest {
+        mode: "improve",
+        requested_backend: "auto",
+        requested_model: None,
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+        last_failure_class: None,
+        exact_route_required: false,
+    };
+
+    let subscription = git_agent_harness::routing::decide_with_state(
+        &cfg.defaults,
+        profile,
+        request(),
+        &RoutingRuntimeState::default(),
+    )
+    .unwrap();
+    let mut runtime = RoutingRuntimeState::default();
+    runtime.recent_runs.insert(
+        CandidateIdentity::new("opencode-subscription", Some("openai/gpt-5")),
+        1,
+    );
+    let api =
+        git_agent_harness::routing::decide_with_state(&cfg.defaults, profile, request(), &runtime)
+            .unwrap();
+
+    assert_eq!(
+        subscription.identity.backend_instance,
+        "opencode-subscription"
+    );
+    assert_eq!(api.identity.backend_instance, "opencode-api");
+    assert_eq!(subscription.effective_model, api.effective_model);
+
+    let mut ledger = LedgerEntry::new("test", profile, "auto", "improve", "x", None, None);
+    for (attempt_number, route, usage_classification) in [
+        (1, &subscription, "quota_backed"),
+        (2, &api, "api_key_backed"),
+    ] {
+        ledger.attempts.push(AttemptRecord {
+            attempt_number,
+            backend: route.effective_backend.clone(),
+            effective_model: route.effective_model.clone(),
+            usage: LedgerUsage {
+                usage_classification: Some(usage_classification.into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        ledger.attempt_routing.push(AttemptRoutingRecord {
+            attempt_number,
+            backend_instance: route.identity.backend_instance.clone(),
+            effective_model: route.effective_model.clone(),
+            identity: Some(route.identity.clone()),
+            routing_diagnostics: route.routing_diagnostics.clone(),
+        });
+    }
+
+    let telemetry = git_agent_harness::telemetry::extractor::extract_attempt_usage_records(
+        &ledger,
+        "2026-07-21T00:00:00Z",
+    );
+    assert_eq!(telemetry.len(), 2);
+    assert_eq!(
+        telemetry[0].backend_instance.as_deref(),
+        Some("opencode-subscription")
+    );
+    assert_eq!(
+        telemetry[0].account_label.as_deref(),
+        Some("personal-subscription")
+    );
+    assert_eq!(
+        telemetry[0].usage_classification.as_deref(),
+        Some("quota_backed")
+    );
+    assert_eq!(
+        telemetry[1].backend_instance.as_deref(),
+        Some("opencode-api")
+    );
+    assert_eq!(telemetry[1].account_label.as_deref(), Some("team-api"));
+    assert_eq!(
+        telemetry[1].usage_classification.as_deref(),
+        Some("api_key_backed")
+    );
 }
 
 // ── Golden fixture 2: one model through subscription and API ─────────────

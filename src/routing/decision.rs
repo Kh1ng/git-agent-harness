@@ -5,7 +5,8 @@ use super::policy::{
     any_available_backend, append_reorder_reason, auto_candidates, builtin_backend,
     configured_route_candidate, configured_route_requires_approval, explicit_candidates,
     is_genuine_agent_failure, order_candidates, policy_backend_model, policy_candidates,
-    review_fallback_backend, review_fallback_model, task_rule_candidates, RouteCandidate,
+    review_fallback_backend, review_fallback_model, same_destination, task_rule_candidates,
+    RouteCandidate,
 };
 use super::reservation::max_concurrent_skip;
 use super::types::{
@@ -76,10 +77,12 @@ pub fn decide_for_task_with_state(
 }
 
 fn with_resolved_executable(profile: &Profile, mut decision: RouteDecision) -> RouteDecision {
-    if let runner::ExecutableResolution::Found(path) =
-        runner::resolve_backend_executable(profile, &decision.identity.logical_backend)
-    {
-        decision.identity.set_executable(Some(path));
+    if decision.identity.executable.is_none() {
+        if let runner::ExecutableResolution::Found(path) =
+            runner::resolve_backend_executable(profile, &decision.identity.logical_backend)
+        {
+            decision.identity.set_executable(Some(path));
+        }
     }
     decision
 }
@@ -210,6 +213,7 @@ where
                     if skip.reason == "operator_approval_required" {
                         return Err(RouteError::ApprovalRequired {
                             backend: skip.backend.clone(),
+                            backend_instance: Some(candidate.identity.backend_instance.clone()),
                             model: skip.model.clone(),
                             skipped: vec![skip],
                         }
@@ -333,8 +337,7 @@ where
             runtime,
             escalate,
         )?;
-        let fallback_used = selected.identity.logical_backend != preferred.identity.logical_backend
-            || selected.identity.effective_model != preferred.identity.effective_model;
+        let fallback_used = !same_destination(&selected, &preferred);
         let mut reason = format!("task routing rule #{}", rule_index + 1);
         if let Some(reorder) = reorder
             .as_ref()
@@ -413,9 +416,7 @@ where
             reason = append_reorder_reason(reason, &selected, reorder, &profile.pacing);
         }
 
-        if selected.identity.logical_backend != preferred.identity.logical_backend
-            || selected.identity.effective_model != preferred.identity.effective_model
-        {
+        if !same_destination(&selected, &preferred) {
             fallback_used = true;
             reason = append_availability_reason(
                 reason,
@@ -547,9 +548,7 @@ where
         false,
     )?;
 
-    if selected.identity.logical_backend != primary.identity.logical_backend
-        || selected.identity.effective_model != primary.identity.effective_model
-    {
+    if !same_destination(&selected, &primary) {
         fallback_used = true;
         reason =
             append_availability_reason(reason, &skipped, selected.backend(), req.mode == "review");
@@ -659,9 +658,7 @@ where
         exclude_attempted,
     )?;
 
-    if selected.identity.logical_backend == primary.identity.logical_backend
-        && selected.identity.effective_model == primary.identity.effective_model
-    {
+    if same_destination(&selected, &primary) {
         let routing_diagnostics = Some(build_routing_diagnostics(
             &candidates_for_diagnostics,
             &selected,
@@ -751,6 +748,7 @@ where
         .cloned()
         .expect("candidate list must never be empty");
     let mut skipped = Vec::new();
+    let mut approval_backend_instance = None;
     let mut included_capacity_is_temporarily_blocked = false;
     for candidate in candidates {
         if let Some(reason) = skip_reason_for_candidate(
@@ -763,6 +761,10 @@ where
             exclude_attempted,
             candidate.requires_approval,
         )? {
+            if reason.reason == "operator_approval_required" && approval_backend_instance.is_none()
+            {
+                approval_backend_instance = Some(candidate.identity.backend_instance.clone());
+            }
             if candidate.included_in_quota
                 && (reason.reason == "max_concurrent_reached" || reason.unavailable_until.is_some())
             {
@@ -784,6 +786,7 @@ where
     }) {
         return Err(RouteError::ApprovalRequired {
             backend: candidate.backend.clone(),
+            backend_instance: approval_backend_instance,
             model: candidate.model.clone(),
             skipped,
         }
@@ -814,7 +817,16 @@ where
 {
     let backend = identity.logical_backend.as_str();
     let model = identity.effective_model.as_deref();
-    if !backend_available(backend) {
+    let configured_executable_available = identity
+        .executable
+        .as_deref()
+        .is_some_and(runner::is_executable_path);
+    let executable_available = if identity.explicit_instance {
+        configured_executable_available
+    } else {
+        configured_executable_available || backend_available(backend)
+    };
+    if !executable_available {
         return Ok(Some(SkippedBackend {
             backend: backend.to_string(),
             model: model.map(str::to_string),

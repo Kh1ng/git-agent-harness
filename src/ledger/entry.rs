@@ -897,6 +897,30 @@ impl LedgerEntry {
         model: Option<&str>,
         granted: bool,
     ) -> Self {
+        Self::new_paid_route_approval_for_instance(
+            profile_name,
+            profile,
+            work_id,
+            backend,
+            None,
+            model,
+            granted,
+        )
+    }
+
+    pub fn new_paid_route_approval_for_instance(
+        profile_name: &str,
+        profile: &Profile,
+        work_id: &str,
+        backend: &str,
+        backend_instance: Option<&str>,
+        model: Option<&str>,
+        granted: bool,
+    ) -> Self {
+        let usage = LedgerUsage {
+            backend_instance: backend_instance.map(str::to_string),
+            ..LedgerUsage::default()
+        };
         Self {
             mode: if granted {
                 "paid_route_approval_grant".to_string()
@@ -908,6 +932,7 @@ impl LedgerEntry {
             effective_backend: backend.to_string(),
             requested_model: model.map(str::to_string),
             effective_model: model.map(str::to_string),
+            usage,
             // A grant is a controller resume signal, not a failed execution.
             // `ledger_lookup_for_ticket` derives the escalation signal from
             // this control mode without polluting failure telemetry.

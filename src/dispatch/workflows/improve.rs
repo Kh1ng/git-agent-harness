@@ -1,6 +1,6 @@
 use super::super::attempts::{
     apply_route_to_ledger, attempt_usage, classify_git_operation_result, classify_worktree_result,
-    clear_wip_checkpoints, decide_route, failure_text_with_internal_log, preflight,
+    clear_wip_checkpoints, decide_route, failure_text_with_internal_log, preflight_identity,
     record_route_attempt, reserve_backend_slot, resolve_llm, route_after_backend_unavailable,
     route_identity, route_label, run_backend_with_reserved_route, wip_checkpoint_branch,
 };
@@ -140,7 +140,7 @@ pub(crate) fn improve(
         ledger,
     )?;
     apply_route_to_ledger(ledger, &route);
-    preflight(profile, &route.effective_backend)?;
+    preflight_identity(profile, &route.identity)?;
     // Reserve the selected slot before telling a parallel controller that it
     // may choose the next action. The reservation stays alive through this
     // first backend attempt, so a sibling sees the live cap and falls through
@@ -393,13 +393,12 @@ pub(crate) fn improve(
         };
         record_route_attempt(ledger, &route)?;
         let result = run_backend_with_reserved_route(
-            &route.effective_backend,
+            &route.identity,
             profile,
             &wt,
             &task,
             &attempt_session,
             &llm,
-            route.effective_model.as_deref(),
             env_path,
             reserved_route_slot.is_some(),
             None,
@@ -687,7 +686,7 @@ pub(crate) fn improve(
                         );
                         route = rerouted;
                         apply_route_to_ledger(ledger, &route);
-                        preflight(profile, &route.effective_backend)?;
+                        preflight_identity(profile, &route.identity)?;
                         llm = resolve_llm(
                             cfg,
                             args,
@@ -854,7 +853,7 @@ pub(crate) fn improve(
                         );
                         route = rerouted;
                         apply_route_to_ledger(ledger, &route);
-                        preflight(profile, &route.effective_backend)?;
+                        preflight_identity(profile, &route.identity)?;
                         llm = resolve_llm(
                             cfg,
                             args,
@@ -1164,7 +1163,7 @@ pub(crate) fn improve(
                         );
                         route = rerouted;
                         apply_route_to_ledger(ledger, &route);
-                        preflight(profile, &route.effective_backend)?;
+                        preflight_identity(profile, &route.identity)?;
                         llm = resolve_llm(
                             cfg,
                             args,

@@ -74,6 +74,7 @@ fn empty_snapshot() -> crate::status::StatusSnapshot {
         inflight_implementation_count: 0,
         implementation_intake_paused: false,
         backend_configured: std::collections::HashMap::new(),
+        backend_instances: vec![],
     }
 }
 

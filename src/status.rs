@@ -140,6 +140,9 @@ pub struct StatusSnapshot {
     /// simply absent from this map and should be reported as not_implemented
     /// by the frontend.
     pub backend_configured: std::collections::HashMap<String, bool>,
+    /// Effective provider-neutral instance identities. Runtime paths and
+    /// credential values are deliberately excluded from this projection.
+    pub backend_instances: Vec<crate::config_show::BackendInstanceSummary>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -726,8 +729,20 @@ fn build_snapshot_inner(
     let mut backend_configured: std::collections::HashMap<String, bool> =
         std::collections::HashMap::new();
     for backend in implemented_backends {
-        let configured = profile.is_backend_configured(backend);
+        let configured = profile.is_backend_configured_with_defaults(&cfg.defaults, backend);
         backend_configured.insert(backend.to_string(), configured);
+    }
+    let effective_routing = profile.effective_routing(&cfg.defaults);
+    let backend_instances = crate::config_show::backend_instance_summaries(&effective_routing);
+    for instance in effective_routing.backend_instances.into_values() {
+        let configured = instance.executable.is_some();
+        let backend = instance
+            .logical_backend
+            .unwrap_or_else(|| instance.runner_kind.clone());
+        backend_configured
+            .entry(backend)
+            .and_modify(|current| *current |= configured)
+            .or_insert(configured);
     }
 
     let intake = intake::project(
@@ -773,6 +788,7 @@ fn build_snapshot_inner(
         inflight_implementation_count: intake.inflight_implementations,
         implementation_intake_paused: intake.paused,
         backend_configured,
+        backend_instances,
     };
 
     Ok(snapshot)
@@ -803,6 +819,19 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
             snapshot.inflight_implementation_count,
             snapshot.profile.max_open_managed_mrs
         );
+        if !snapshot.backend_instances.is_empty() {
+            println!("Backend instances:");
+            for instance in &snapshot.backend_instances {
+                println!(
+                    "  - {}: runner={} backend={} executable={} isolated_state={}",
+                    instance.backend_instance,
+                    instance.runner_kind,
+                    instance.logical_backend,
+                    instance.executable_configured,
+                    instance.isolated_state_configured
+                );
+            }
+        }
 
         if snapshot.blockers.is_empty() {
             println!("Blockers: None");

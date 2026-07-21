@@ -1,6 +1,8 @@
+mod approvals;
 mod entry;
 mod jsonl;
 
+pub use self::approvals::active_paid_route_approval_destinations_from_entries;
 #[allow(unused_imports)]
 pub use self::entry::{
     review_generation, AttemptBehaviorMetrics, AttemptRecord, AttemptRoutingRecord, BehaviorMetric,

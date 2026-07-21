@@ -291,6 +291,9 @@ export interface StatusSnapshot {
    * profile (explicit path or profile marker). Backends with no
    * implementation are absent and must be shown as not_implemented. */
   backend_configured: Record<string, boolean>;
+  /** Effective normalized instance identities. Optional while schema-v1
+   * clients may still be connected to an older CLI. */
+  backend_instances?: BackendInstanceSummary[];
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +490,7 @@ export interface ConfigSummary {
 
 export interface RoutingCandidateSummary {
   backend: string;
+  instance: string | null;
   model: string | null;
   quota_pool: string | null;
   priority: number;
@@ -495,6 +499,18 @@ export interface RoutingCandidateSummary {
   quota_usage_percent: number | null;
   quota_days_remaining: number | null;
   requires_approval: boolean;
+}
+
+export interface BackendInstanceSummary {
+  backend_instance: string;
+  runner_kind: string;
+  logical_backend: string;
+  account_label: string | null;
+  auth_source_label: string | null;
+  quota_pool: string | null;
+  supported_models: string[];
+  executable_configured: boolean;
+  isolated_state_configured: boolean;
 }
 
 export interface ContextOverrideBudgetSummary {
@@ -568,6 +584,7 @@ export interface ConfigProfileSummary {
   max_implementation_failures_per_ticket: number;
   max_review_cycles_per_ticket: number;
   max_paid_reviews_per_ticket: number;
+  backend_instances: BackendInstanceSummary[];
   pm_candidates: RoutingCandidateSummary[];
   improve_candidates: RoutingCandidateSummary[];
   review_candidates: RoutingCandidateSummary[];

@@ -188,7 +188,7 @@ fn resolve_executable_on_path(name: &str) -> Option<PathBuf> {
         .find(|candidate| is_executable_path(candidate))
 }
 
-fn is_executable_path(path: &Path) -> bool {
+pub fn is_executable_path(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }

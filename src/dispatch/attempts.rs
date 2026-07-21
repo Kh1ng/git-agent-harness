@@ -120,7 +120,43 @@ pub(super) fn apply_backend_instance_env(
     }
 }
 
+pub(super) fn apply_execution_identity_env(
+    profile: &Profile,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    env_vars: &mut Vec<(String, String)>,
+) {
+    if let Some(state_root) = identity.state_root.as_ref() {
+        env_vars.retain(|(key, _)| key != "HOME");
+        env_vars.push((
+            "HOME".to_string(),
+            state_root.to_string_lossy().into_owned(),
+        ));
+    } else {
+        apply_backend_instance_env(profile, &identity.logical_backend, env_vars);
+    }
+}
+
+fn execution_identity_executable(
+    profile: &Profile,
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> Result<std::path::PathBuf> {
+    match identity.executable.as_ref() {
+        Some(path) if path.as_os_str().is_empty() => anyhow::bail!(
+            "backend instance '{}' is missing an explicit executable binding",
+            identity.backend_instance
+        ),
+        Some(path) if crate::runner::is_executable_path(path) => Ok(path.clone()),
+        Some(path) => anyhow::bail!(
+            "configured executable '{}' for instance '{}' does not exist or is not executable",
+            path.display(),
+            identity.backend_instance
+        ),
+        None => runner::require_backend_executable(profile, &identity.logical_backend),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn run_backend(
     backend: &str,
     profile: &Profile,
@@ -132,14 +168,42 @@ pub(super) fn run_backend(
     env_path: Option<&str>,
     hard_timeout_seconds: Option<u64>,
 ) -> Result<runner::RunResult> {
-    run_backend_with_reserved_route(
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
         backend,
+        effective_model,
+        None::<String>,
+    );
+    run_backend_with_reserved_route(
+        &identity,
         profile,
         wt,
         task,
         session_dir,
         llm,
-        effective_model,
+        env_path,
+        false,
+        hard_timeout_seconds,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_backend_for_identity(
+    identity: &crate::execution_identity::ExecutionIdentity,
+    profile: &Profile,
+    wt: &Path,
+    task: &str,
+    session_dir: &Path,
+    llm: &runner::LlmConfig,
+    env_path: Option<&str>,
+    hard_timeout_seconds: Option<u64>,
+) -> Result<runner::RunResult> {
+    run_backend_with_reserved_route(
+        identity,
+        profile,
+        wt,
+        task,
+        session_dir,
+        llm,
         env_path,
         false,
         hard_timeout_seconds,
@@ -148,13 +212,12 @@ pub(super) fn run_backend(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_backend_with_reserved_route(
-    backend: &str,
+    identity: &crate::execution_identity::ExecutionIdentity,
     profile: &Profile,
     wt: &Path,
     task: &str,
     session_dir: &Path,
     llm: &runner::LlmConfig,
-    effective_model: Option<&str>,
     env_path: Option<&str>,
     route_slot_already_reserved: bool,
     hard_timeout_seconds: Option<u64>,
@@ -164,14 +227,13 @@ pub(super) fn run_backend_with_reserved_route(
     // Held for the duration of the actual backend call -- dropped on every
     // exit path (success, error, or panic) -- so routing's
     // `max_concurrent_per_model` check sees an accurate live count.
-    let compatibility_identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
-        backend,
-        effective_model,
-        None::<String>,
-    );
     let _concurrency_slot = (!route_slot_already_reserved)
-        .then(|| reserve_backend_slot(profile, &compatibility_identity))
+        .then(|| reserve_backend_slot(profile, identity))
         .transpose()?;
+    let backend = identity.logical_backend.as_str();
+    let runner_kind = identity.runner_kind.as_str();
+    let effective_model = identity.effective_model.as_deref();
+    let executable = execution_identity_executable(profile, identity)?;
     let origin_before = worktree::git(&["remote", "get-url", "origin"], wt).ok();
     let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
     // Every agent and any test command it launches inherit this repository-
@@ -184,7 +246,7 @@ pub(super) fn run_backend_with_reserved_route(
             .to_string_lossy()
             .into_owned(),
     ));
-    apply_backend_instance_env(profile, backend, &mut env_vars);
+    apply_execution_identity_env(profile, identity, &mut env_vars);
     env_vars.retain(|(key, _)| key != crate::runner::process::HARD_TIMEOUT_ENV);
     if let Some(seconds) = hard_timeout_seconds.filter(|seconds| *seconds > 0) {
         env_vars.push((
@@ -192,9 +254,9 @@ pub(super) fn run_backend_with_reserved_route(
             seconds.to_string(),
         ));
     }
-    let result = match backend {
+    let result = match runner_kind {
         "codex" => runner::run_codex_with_executable(
-            &runner::require_backend_executable(profile, backend)?,
+            &executable,
             wt,
             task,
             session_dir,
@@ -204,7 +266,7 @@ pub(super) fn run_backend_with_reserved_route(
             profile.codex_idle_timeout_seconds(),
         ),
         "claude" => runner::run_claude_with_executable(
-            &runner::require_backend_executable(profile, backend)?,
+            &executable,
             wt,
             task,
             session_dir,
@@ -213,8 +275,8 @@ pub(super) fn run_backend_with_reserved_route(
             &env_vars,
             profile.claude_idle_timeout_seconds(),
         ),
-        "agy" | "agy-main" | "agy-second" => runner::run_agy_with_executable(
-            &runner::require_backend_executable(profile, backend)?,
+        "agy" => runner::run_agy_with_executable(
+            &executable,
             wt,
             task,
             session_dir,
@@ -227,7 +289,7 @@ pub(super) fn run_backend_with_reserved_route(
             profile.agy_idle_timeout_seconds(),
         ),
         "vibe" => runner::run_vibe_with_executable(
-            &runner::require_backend_executable(profile, backend)?,
+            &executable,
             wt,
             task,
             session_dir,
@@ -237,7 +299,7 @@ pub(super) fn run_backend_with_reserved_route(
             profile.vibe_idle_timeout_seconds(),
         ),
         "opencode" => runner::run_opencode_with_executable(
-            &runner::require_backend_executable(profile, backend)?,
+            &executable,
             wt,
             task,
             session_dir,
@@ -253,7 +315,8 @@ pub(super) fn run_backend_with_reserved_route(
                 })
                 .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
         ),
-        _ => runner::run_openhands(
+        "openhands" => runner::run_openhands_with_executable(
+            &executable,
             wt,
             task,
             session_dir,
@@ -262,6 +325,7 @@ pub(super) fn run_backend_with_reserved_route(
             &env_vars,
             profile.openhands_idle_timeout_seconds(),
         ),
+        other => anyhow::bail!("unsupported runner kind '{other}' for backend '{backend}'"),
     };
     if let Some(origin_before) = origin_before {
         let origin_after = worktree::git(&["remote", "get-url", "origin"], wt)
@@ -469,10 +533,41 @@ pub(super) fn review_usage(
     )
 }
 
+#[cfg(test)]
 pub(super) fn preflight(profile: &Profile, backend: &str) -> Result<()> {
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        backend,
+        None::<String>,
+        None::<String>,
+    );
+    preflight_identity(profile, &identity)
+}
+
+pub(super) fn preflight_identity(
+    profile: &Profile,
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> Result<()> {
     ensure_bin("git")?;
-    runner::require_backend_executable(profile, backend)?;
+    ensure_supported_runner_kind(identity)?;
+    execution_identity_executable(profile, identity)?;
     Ok(())
+}
+
+fn ensure_supported_runner_kind(
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> Result<()> {
+    if matches!(
+        identity.runner_kind.as_str(),
+        "agy" | "claude" | "codex" | "openhands" | "opencode" | "vibe"
+    ) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "backend instance '{}' has unsupported runner kind '{}'",
+            identity.backend_instance,
+            identity.runner_kind
+        )
+    }
 }
 
 /// TICKET-109: capabilities required for `backend` during review, profile
@@ -506,12 +601,27 @@ fn required_review_capabilities(cfg: &GahConfig, profile: &Profile, backend: &st
 /// (preflight only) so the two can never drift into inconsistent checks.
 /// Returns the capabilities that will be applied on success.
 pub fn review_preflight(cfg: &GahConfig, profile: &Profile, backend: &str) -> Result<Vec<String>> {
-    if !matches!(
-        runner::resolve_backend_executable(profile, backend),
-        runner::ExecutableResolution::Found(_)
-    ) {
-        anyhow::bail!("backend unavailable: '{}' executable not found", backend);
-    }
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        backend,
+        None::<String>,
+        None::<String>,
+    );
+    review_preflight_for_identity(cfg, profile, &identity)
+}
+
+pub fn review_preflight_for_identity(
+    cfg: &GahConfig,
+    profile: &Profile,
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> Result<Vec<String>> {
+    ensure_supported_runner_kind(identity)?;
+    execution_identity_executable(profile, identity).map_err(|_| {
+        anyhow::anyhow!(
+            "backend unavailable: '{}' executable not found",
+            identity.logical_backend
+        )
+    })?;
+    let backend = identity.logical_backend.as_str();
     let required = required_review_capabilities(cfg, profile, backend);
     for capability in &required {
         if !crate::capability::is_capability_available(capability, None) {
@@ -637,6 +747,7 @@ pub(super) fn decide_route(
                         backend,
                         model,
                         skipped,
+                        ..
                     } => (Some(backend.clone()), model.clone(), skipped),
                     RouteError::NoEligibleBackend {
                         preferred_backend,
@@ -683,15 +794,25 @@ pub(super) fn decide_route(
                         }
                         crate::ledger::FailureClass::BackendError
                     }
-                    RouteError::ApprovalRequired { backend, model, .. } => {
+                    RouteError::ApprovalRequired {
+                        backend,
+                        backend_instance,
+                        model,
+                        ..
+                    } => {
                         ledger.human_required = true;
                         ledger.human_required_reason_code =
                             Some(HumanRequiredReason::PolicyApproval.as_str().to_string());
                         ledger.error_summary = Some(format!(
-                            "paid route approval required; run: gah route-approval grant --profile {} {} --backend {}{}",
+                            "paid route approval required; run: gah route-approval grant --profile {} {} --backend {}{}{}",
                             ledger.profile,
                             ledger.work_id.as_deref().unwrap_or("<work-id>"),
                             backend,
+                            backend_instance
+                                .as_deref()
+                                .filter(|instance| *instance != backend)
+                                .map(|instance| format!(" --instance {instance}"))
+                                .unwrap_or_default(),
                             model
                                 .as_deref()
                                 .map(|model| format!(" --model {model}"))
@@ -745,21 +866,13 @@ pub(crate) fn routing_runtime_state_from_entries(
                 }
             } else {
                 for attempt in &entry.attempts {
-                    record_recent_route_run(
-                        &mut state,
-                        &attempt.backend,
-                        attempt.effective_model.as_deref(),
-                    );
+                    record_recent_attempt_run(&mut state, entry, attempt);
                 }
             }
         }
     }
     for attempt in &current.attempts {
-        record_recent_route_run(
-            &mut state,
-            &attempt.backend,
-            attempt.effective_model.as_deref(),
-        );
+        record_recent_attempt_run(&mut state, current, attempt);
     }
 
     if let Some(work_id) = current.work_id.as_deref() {
@@ -778,12 +891,16 @@ pub(crate) fn routing_runtime_state_from_entries(
             }
             record_genuine_failure_routes(&mut state, current);
         }
-        for (backend, model) in
-            ledger::active_paid_route_approvals_from_entries(entries, &current.profile, work_id)
+        for (backend_instance, model) in
+            ledger::active_paid_route_approval_destinations_from_entries(
+                entries,
+                &current.profile,
+                work_id,
+            )
         {
             state
                 .approved
-                .insert(CandidateIdentity::new(backend, model));
+                .insert(CandidateIdentity::new(backend_instance, model));
         }
     }
     state
@@ -803,6 +920,30 @@ fn record_recent_route_run(state: &mut RoutingRuntimeState, backend: &str, model
         .or_insert(0) += 1;
 }
 
+fn recorded_attempt_identity(
+    entry: &LedgerEntry,
+    attempt_number: u32,
+) -> Option<&crate::execution_identity::ExecutionIdentity> {
+    entry
+        .attempt_routing
+        .iter()
+        .find(|route| route.attempt_number == attempt_number)
+        .and_then(|route| route.identity.as_ref())
+}
+
+fn record_recent_attempt_run(
+    state: &mut RoutingRuntimeState,
+    entry: &LedgerEntry,
+    attempt: &crate::ledger::AttemptRecord,
+) {
+    let key = recorded_attempt_identity(entry, attempt.attempt_number)
+        .map(CandidateIdentity::from_execution_identity)
+        .unwrap_or_else(|| {
+            CandidateIdentity::new(attempt.backend.as_str(), attempt.effective_model.as_deref())
+        });
+    *state.recent_runs.entry(key).or_insert(0) += 1;
+}
+
 fn is_agent_execution_mode(mode: &str) -> bool {
     matches!(mode, "improve" | "fix" | "experiment" | "pm" | "review")
 }
@@ -819,10 +960,15 @@ pub(super) fn record_genuine_failure_routes(state: &mut RoutingRuntimeState, ent
             .as_deref()
             .is_some_and(crate::controller::is_genuine_agent_failure)
         {
-            state.attempted.insert(CandidateIdentity::new(
-                attempt.backend.as_str(),
-                attempt.effective_model.as_deref(),
-            ));
+            let key = recorded_attempt_identity(entry, attempt.attempt_number)
+                .map(CandidateIdentity::from_execution_identity)
+                .unwrap_or_else(|| {
+                    CandidateIdentity::new(
+                        attempt.backend.as_str(),
+                        attempt.effective_model.as_deref(),
+                    )
+                });
+            state.attempted.insert(key);
             recorded_attempt = true;
         }
     }

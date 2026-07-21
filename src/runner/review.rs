@@ -68,6 +68,25 @@ pub fn run_review_backend(
     effective_model: Option<&str>,
     env_vars: &[(String, String)],
 ) -> ReviewRunResult {
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        backend,
+        effective_model,
+        None::<String>,
+    );
+    run_review_backend_for_identity(profile, &identity, worktree, prompt, session_dir, env_vars)
+}
+
+pub fn run_review_backend_for_identity(
+    profile: &Profile,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    worktree: &Path,
+    prompt: &str,
+    session_dir: &Path,
+    env_vars: &[(String, String)],
+) -> ReviewRunResult {
+    let logical_backend = identity.logical_backend.as_str();
+    let backend = identity.runner_kind.as_str();
+    let effective_model = identity.effective_model.as_deref();
     let start = Instant::now();
     let hard_timeout_seconds = profile
         .review_hard_timeout_seconds
@@ -76,7 +95,16 @@ pub fn run_review_backend(
     let stderr_path = session_dir.join("review-stderr.log");
     let _ = write_redacted_task(session_dir, prompt);
 
-    let executable = match resolve_backend_executable(profile, backend) {
+    let configured = identity.executable.as_ref().map(|path| {
+        if crate::runner::is_executable_path(path) {
+            ExecutableResolution::Found(path.clone())
+        } else {
+            ExecutableResolution::MissingExplicitPath(path.clone())
+        }
+    });
+    let executable = match configured
+        .unwrap_or_else(|| resolve_backend_executable(profile, backend))
+    {
         ExecutableResolution::Found(path) => path,
         ExecutableResolution::MissingExplicitPath(_) | ExecutableResolution::MissingFromPath(_) => {
             return ReviewRunResult {
@@ -96,7 +124,7 @@ pub fn run_review_backend(
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
-                stderr: format!("unsupported review backend: {backend}"),
+                stderr: format!("unsupported review backend: {logical_backend}"),
                 idle_timeout_seconds: profile.review_timeout_seconds(),
                 hard_timeout_seconds,
                 last_progress_secs: None,
@@ -178,7 +206,7 @@ pub fn run_review_backend(
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
-                stderr: format!("unsupported review backend: {backend}"),
+                stderr: format!("unsupported review backend: {logical_backend}"),
                 idle_timeout_seconds: profile.review_timeout_seconds(),
                 hard_timeout_seconds,
                 last_progress_secs: None,

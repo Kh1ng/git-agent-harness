@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+mod backend_instances;
+pub use backend_instances::{check_profile_backend_instances, BackendInstanceConfig};
 mod issue_intake;
 pub use issue_intake::IssueIntakeMode;
 mod publishing;
@@ -359,6 +361,9 @@ impl Profile {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct CandidateConfig {
     pub backend: String,
+    /// Optional `routing.backend_instances` reference; absent preserves legacy behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -401,6 +406,9 @@ pub struct TaskRoutingRule {
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct RoutingPolicy {
+    /// Profile entries replace same-key global/default declarations.
+    #[serde(default)]
+    pub backend_instances: HashMap<String, BackendInstanceConfig>,
     #[serde(default)]
     pub default_backend: Option<String>,
     #[serde(default)]
@@ -606,22 +614,6 @@ impl Profile {
             "opencode" => self.opencode_path.as_deref(),
             _ => None,
         }
-    }
-
-    /// Whether `backend` is set up for this profile at all -- distinct from
-    /// `configured_backend_path`, which only reports an *explicit path
-    /// override* and is consumed by `resolve_backend_executable` to find the
-    /// literal binary to run. OpenHands has no such override (its CLI is
-    /// always resolved on PATH); its "configured" signal is instead whether
-    /// this profile sets an `oh_profile`. Settings should call this instead of
-    /// `configured_backend_path`; an earlier version made OpenHands
-    /// unavailable for every explicit
-    /// `--backend openhands` dispatch.
-    pub fn is_backend_configured(&self, backend: &str) -> bool {
-        if backend == "openhands" {
-            return self.oh_profile.is_some();
-        }
-        self.configured_backend_path(backend).is_some()
     }
 
     pub fn review_timeout_seconds(&self) -> u64 {
@@ -862,6 +854,9 @@ fn load_canonical_routing() -> Result<Option<RoutingPolicy>> {
 /// so a repo declaring one backend's capabilities doesn't erase another
 /// backend's canonical-declared ones.
 fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> RoutingPolicy {
+    let mut backend_instances = canonical.backend_instances;
+    backend_instances.extend(repo.backend_instances);
+    repo.backend_instances = backend_instances;
     repo.default_backend = repo.default_backend.or(canonical.default_backend);
     repo.default_model = repo.default_model.or(canonical.default_model);
     repo.pm_backend = repo.pm_backend.or(canonical.pm_backend);
@@ -1414,6 +1409,7 @@ pub mod tests {
         let canonical = RoutingPolicy {
             improve_candidates: Some(vec![CandidateConfig {
                 backend: "codex".into(),
+                instance: None,
                 model: None,
                 quota_pool: None,
                 priority: 0,
@@ -1428,6 +1424,7 @@ pub mod tests {
         let repo = RoutingPolicy {
             improve_candidates: Some(vec![CandidateConfig {
                 backend: "claude".into(),
+                instance: None,
                 model: None,
                 quota_pool: None,
                 priority: 0,
@@ -1678,6 +1675,7 @@ pub mod tests {
             pm_backend: Some("claude".into()),
             pm_candidates: Some(vec![super::CandidateConfig {
                 backend: "claude".into(),
+                instance: None,
                 model: Some("sonnet".into()),
                 quota_pool: Some("claude-main".into()),
                 priority: 2,
@@ -1727,6 +1725,7 @@ pub mod tests {
         let defaults = RoutingPolicy {
             pm_candidates: Some(vec![super::CandidateConfig {
                 backend: "claude".into(),
+                instance: None,
                 model: Some("sonnet".into()),
                 quota_pool: None,
                 priority: 0,
@@ -1741,6 +1740,7 @@ pub mod tests {
         let profile = RoutingPolicy {
             pm_candidates: Some(vec![super::CandidateConfig {
                 backend: "codex".into(),
+                instance: None,
                 model: Some("gpt-5".into()),
                 quota_pool: None,
                 priority: 0,

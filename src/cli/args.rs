@@ -709,6 +709,10 @@ pub enum RouteApprovalCommands {
         work_id: String,
         #[arg(long)]
         backend: String,
+        /// Exact configured backend instance. Required to distinguish paid
+        /// and subscription routes that share a logical backend/model.
+        #[arg(long)]
+        instance: Option<String>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long, name = "config")]
@@ -721,6 +725,9 @@ pub enum RouteApprovalCommands {
         work_id: String,
         #[arg(long)]
         backend: String,
+        /// Exact configured backend instance used by the matching grant.
+        #[arg(long)]
+        instance: Option<String>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long, name = "config")]

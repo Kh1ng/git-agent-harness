@@ -1066,6 +1066,7 @@ fn genuine_agent_failure_escalates_to_stronger_model() {
     profile.routing.pm_candidates = Some(vec![
         crate::config::CandidateConfig {
             backend: "openhands".into(),
+            instance: None,
             model: Some("deepseek-flash".into()),
             quota_pool: None,
             priority: 0,
@@ -1077,6 +1078,7 @@ fn genuine_agent_failure_escalates_to_stronger_model() {
         },
         crate::config::CandidateConfig {
             backend: "codex".into(),
+            instance: None,
             model: Some("gpt-5.4".into()),
             quota_pool: None,
             priority: 0,
@@ -1123,6 +1125,7 @@ fn non_agent_failure_does_not_escalate() {
     profile.routing.pm_candidates = Some(vec![
         crate::config::CandidateConfig {
             backend: "openhands".into(),
+            instance: None,
             model: Some("deepseek-flash".into()),
             quota_pool: None,
             priority: 0,
@@ -1134,6 +1137,7 @@ fn non_agent_failure_does_not_escalate() {
         },
         crate::config::CandidateConfig {
             backend: "codex".into(),
+            instance: None,
             model: Some("gpt-5.4".into()),
             quota_pool: None,
             priority: 0,
@@ -1180,6 +1184,7 @@ fn cost_aware_ordering_prefers_underpace_included_quota() {
     profile.routing.pm_candidates = Some(vec![
         crate::config::CandidateConfig {
             backend: "openhands".into(),
+            instance: None,
             model: Some("gpt-5.4".into()),
             quota_pool: None,
             priority: 0,
@@ -1191,6 +1196,7 @@ fn cost_aware_ordering_prefers_underpace_included_quota() {
         },
         crate::config::CandidateConfig {
             backend: "codex".into(),
+            instance: None,
             model: Some("gpt-5.4".into()),
             quota_pool: Some("codex-main".into()),
             priority: 0,
@@ -1257,6 +1263,7 @@ fn cost_aware_ordering_conserves_scarce_included_quota() {
     profile.routing.pm_candidates = Some(vec![
         crate::config::CandidateConfig {
             backend: "codex".into(),
+            instance: None,
             model: Some("gpt-5.4".into()),
             quota_pool: Some("codex-main".into()),
             priority: 0,
@@ -1268,6 +1275,7 @@ fn cost_aware_ordering_conserves_scarce_included_quota() {
         },
         crate::config::CandidateConfig {
             backend: "openhands".into(),
+            instance: None,
             model: Some("gpt-5.4".into()),
             quota_pool: None,
             priority: 0,
@@ -1313,6 +1321,7 @@ fn cost_aware_ordering_respects_explicit_priority_override() {
     profile.routing.pm_candidates = Some(vec![
         crate::config::CandidateConfig {
             backend: "codex".into(),
+            instance: None,
             model: Some("gpt-5.4".into()),
             quota_pool: Some("codex-main".into()),
             priority: 10,
@@ -1324,6 +1333,7 @@ fn cost_aware_ordering_respects_explicit_priority_override() {
         },
         crate::config::CandidateConfig {
             backend: "openhands".into(),
+            instance: None,
             model: Some("gpt-5.4".into()),
             quota_pool: None,
             priority: 0,

@@ -829,6 +829,7 @@ fn reviewer_tier_escalatory_for_explicit_escalatory_reviewers_list_entry() {
     let mut prof = profile(tmp.path());
     let candidate = |backend: &str, model: &str| crate::config::CandidateConfig {
         backend: backend.into(),
+        instance: None,
         model: Some(model.into()),
         ..Default::default()
     };
@@ -895,6 +896,7 @@ fn reviewer_tier_strong_for_any_review_candidates_entry_not_just_the_exact_stron
     prof.routing.strong_review_model = Some("Claude Sonnet 4.6 (Thinking)".into());
     let candidate = |backend: &str, model: &str| crate::config::CandidateConfig {
         backend: backend.into(),
+        instance: None,
         model: Some(model.into()),
         quota_pool: None,
         priority: 0,
