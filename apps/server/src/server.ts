@@ -31,6 +31,9 @@ import type {
   DoctorSnapshot
 } from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
+import { authMiddleware } from './authMiddleware.js';
+import { getCoordinatorIdentity } from './coordinatorIdentity.js';
+import { RegistryService } from './registryService.js';
 
 const SERVER_VERSION = '0.1.0';
 
@@ -49,27 +52,35 @@ const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
 const DEFAULT_PROFILE = 'gah';
 
 export function createServer(
-  configDeps: Partial<ConfigEffectiveDeps> = {}
+  configDeps: Partial<ConfigEffectiveDeps> & { registryService?: RegistryService } = {}
 ): express.Express {
   const configEffectiveDeps: ConfigEffectiveDeps = {
     ...DEFAULT_CONFIG_EFFECTIVE_DEPS,
     ...configDeps
   };
 
+  const registryService = configDeps.registryService || new RegistryService();
+
   const app = express();
 
   // Middleware
   app.use(cors());
   app.use(express.json());
+  app.use(authMiddleware);
 
   // Health check endpoint
   app.get('/health', (req, res) => {
     const readiness = getServerReadiness();
     const status = readiness.isReady ? 'healthy' : 'starting';
+    const identity = getCoordinatorIdentity();
 
     res.json({
       status,
-      version: SERVER_VERSION,
+      node_id: identity.node_id,
+      display_name: identity.display_name,
+      advertised_url: identity.advertised_url,
+      version: identity.version,
+      schema_digest: identity.schema_digest,
       timestamp: Date.now(),
       checks: readiness.checks
     });
@@ -77,10 +88,18 @@ export function createServer(
 
   // API info endpoint
   app.get('/api/info', (req, res) => {
+    const identity = getCoordinatorIdentity();
     res.json({
       name: 'Git Agent Harness',
       version: SERVER_VERSION,
       description: 'A WebSocket server for managing Git Agent Harness sessions and providers',
+      identity: {
+        node_id: identity.node_id,
+        display_name: identity.display_name,
+        advertised_url: identity.advertised_url,
+        version: identity.version,
+        schema_digest: identity.schema_digest
+      },
       endpoints: {
         health: '/health',
         info: '/api/info',
@@ -97,15 +116,97 @@ export function createServer(
         loopStatus: '/api/loop/status',
         loopStart: '/api/loop/start',
         loopStop: '/api/loop/stop',
-        websocket: '/ws'
+        websocket: '/ws',
+        registryNodes: '/api/registry/nodes',
+        registryNodeHealth: '/api/registry/nodes/:nodeId/health',
+        registryNodeRotateSecret: '/api/registry/nodes/:nodeId/rotate-secret'
       },
       features: {
         webSocket: true,
         providerManagement: true,
         sessionManagement: true,
-        rustBackendProxy: true
+        rustBackendProxy: true,
+        nodeRegistry: true
       }
     });
+  });
+
+  // Registry API endpoints
+  app.get('/api/registry/nodes', (req, res) => {
+    try {
+      res.json(registryService.getNodesSummary());
+    } catch (error) {
+      res.status(500).json({
+        error: 'Internal Server Error',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/registry/nodes', (req, res) => {
+    try {
+      const { warnings } = registryService.registerNode(req.body);
+      res.status(201).json({
+        success: true,
+        message: 'Node registered successfully',
+        warnings
+      });
+    } catch (error) {
+      res.status(400).json({
+        error: 'Bad Request',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.delete('/api/registry/nodes/:nodeId', (req, res) => {
+    try {
+      const revoked = registryService.revokeNode(req.params.nodeId);
+      if (!revoked) {
+        res.status(404).json({
+          error: 'Not Found',
+          message: `Node ${req.params.nodeId} not found`
+        });
+        return;
+      }
+      res.json({
+        success: true,
+        message: 'Node registration revoked successfully'
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: 'Internal Server Error',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/registry/nodes/:nodeId/health', async (req, res) => {
+    try {
+      const health = await registryService.checkNodeHealth(req.params.nodeId);
+      res.json(health);
+    } catch (error) {
+      res.status(404).json({
+        error: 'Not Found',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/registry/nodes/:nodeId/rotate-secret', (req, res) => {
+    try {
+      const { secret_ref } = req.body;
+      registryService.rotateSecret(req.params.nodeId, secret_ref);
+      res.json({
+        success: true,
+        message: 'Secret rotated successfully'
+      });
+    } catch (error) {
+      res.status(400).json({
+        error: 'Bad Request',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
   });
 
   // Pull-data REST endpoints (TICKET-productization): these are on-demand
