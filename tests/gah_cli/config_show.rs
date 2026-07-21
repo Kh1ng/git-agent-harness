@@ -72,9 +72,10 @@ fn full_json_is_versioned_and_profile_keyed() {
         String::from_utf8_lossy(&output.stderr)
     );
     let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(payload["schema_version"], 1);
+    assert_eq!(payload["schema_version"], 2);
     assert_eq!(payload["config_path"], config.to_string_lossy().as_ref());
     assert_eq!(payload["profiles"]["test"]["profile"], "test");
+    assert_eq!(payload["profiles"]["test"]["delivery_mode"], "pr");
     assert_eq!(payload["profiles"].as_object().unwrap().len(), 1);
 }
 

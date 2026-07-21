@@ -5,7 +5,7 @@ use crate::{
 use anyhow::Result;
 use std::{collections::BTreeMap, path::Path};
 
-pub const CONFIG_SHOW_SCHEMA_VERSION: u32 = 1;
+pub const CONFIG_SHOW_SCHEMA_VERSION: u32 = 2;
 
 #[derive(serde::Serialize)]
 pub struct RoutingCandidateSummary {

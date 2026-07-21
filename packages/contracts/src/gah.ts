@@ -536,6 +536,8 @@ export interface NotificationSummary {
  * for the requested profile. */
 export interface ConfigProfileSummary {
   profile: string;
+  /** Effective delivery behavior for completed work. */
+  delivery_mode: 'pr' | 'handoff';
   merge_policy: string;
   max_fix_attempts_per_mr: number;
   max_implementation_failures_per_ticket: number;
