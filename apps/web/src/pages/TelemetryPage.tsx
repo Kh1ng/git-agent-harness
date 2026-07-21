@@ -23,7 +23,7 @@ type SortKey = keyof Pick<
  * metric that actually means something for them -- cost columns stay for
  * backends that do have one (e.g. metered API usage). */
 function latestQuotaUsedPercent(row: BackendModelComparison): { percent: number; window: string | null } | null {
-  const withPercent = row.quota_observations.filter((q) => q.quota_used_percent !== null && q.quota_used_percent !== undefined);
+  const withPercent = (row.quota_observations ?? []).filter((q) => q.quota_used_percent !== null && q.quota_used_percent !== undefined);
   if (withPercent.length === 0) return null;
   const latest = withPercent.reduce((a, b) => ((b.observed_at ?? '') > (a.observed_at ?? '') ? b : a));
   return { percent: latest.quota_used_percent as number, window: latest.quota_window ?? null };

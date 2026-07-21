@@ -29,6 +29,7 @@ import type {
   WakeAutonomyValue,
   ConfigSummary,
   ConfigProfileSummary,
+  DoctorSnapshot,
   ConfigSetData
 } from '@git-agent-harness/contracts';
 
@@ -172,6 +173,7 @@ export interface StopLoopResult {
 export interface GahDataSource {
   getStatus(profile?: string): Promise<StatusSnapshot>;
   getQuota(params?: { profile?: string; since?: string }): Promise<QuotaSnapshot>;
+  getDoctor(profile?: string): Promise<DoctorSnapshot>;
   getReport(params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }): Promise<ReportData>;
   getReportSeries(params?: { profile?: string; since?: string; bucket?: string }): Promise<ReportSeriesData>;
   getWorkTimeline(workId: string): Promise<LedgerEntry[]>;
@@ -259,6 +261,9 @@ export const gahApi: GahDataSource = {
       profile: params.profile,
       since: params.since
     });
+  },
+  getDoctor(profile) {
+    return getJson<DoctorSnapshot>('/api/doctor', { profile });
   },
   getReport(params = {}) {
     return getJson<ReportData>('/api/report', {

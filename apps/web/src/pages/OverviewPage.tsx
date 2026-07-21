@@ -29,6 +29,8 @@ type OverviewPageProps = {
   onNavigate: (page: Page) => void;
 };
 
+const OVERVIEW_REFRESH_MS = 5 * 60 * 1000;
+
 export function OverviewPage({ sessions, onSelectSession, onNavigate }: OverviewPageProps) {
   const { status, quota, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
@@ -44,6 +46,12 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
     fetchStatus(profile ?? undefined);
     fetchQuota({ profile: profile ?? undefined, since: '7d' });
     if (profile) fetchLoopStatus(profile);
+    const refreshTimer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      fetchStatus(profile ?? undefined, { force: true });
+      fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
+    }, OVERVIEW_REFRESH_MS);
+    return () => window.clearInterval(refreshTimer);
   }, [profile, fetchStatus, fetchQuota, fetchLoopStatus]);
 
   const loopRunning = loopStatus.data?.running ?? false;

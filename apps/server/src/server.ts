@@ -15,6 +15,7 @@ import {
   runConfigSet,
   runConfigShow,
   runConfigShowProfile,
+  runDoctor,
   getLoopStatus,
   startLoop,
   stopLoop,
@@ -26,7 +27,8 @@ import {
 import type {
   ReportGroupBy,
   ReportSeriesData,
-  ConfigProfileSummary
+  ConfigProfileSummary,
+  DoctorSnapshot
 } from '@git-agent-harness/contracts';
 import { deriveControllerActivity } from './controllerActivity.js';
 
@@ -34,10 +36,12 @@ const SERVER_VERSION = '0.1.0';
 
 type ConfigEffectiveDeps = {
   runConfigShowProfile: (profile: string) => Promise<ConfigProfileSummary>;
+  runDoctor: (profile: string) => Promise<DoctorSnapshot>;
 };
 
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
-  runConfigShowProfile
+  runConfigShowProfile,
+  runDoctor
 };
 
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
@@ -82,6 +86,7 @@ export function createServer(
         info: '/api/info',
         status: '/api/status',
         quota: '/api/quota',
+        doctor: '/api/doctor',
         report: '/api/report',
         work: '/api/work/:workId',
         events: '/api/events',
@@ -130,6 +135,18 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah quota snapshot',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/doctor', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      res.json(await configEffectiveDeps.runDoctor(profile));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to run gah doctor',
         message: error instanceof Error ? error.message : String(error)
       });
     }

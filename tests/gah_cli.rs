@@ -4,6 +4,8 @@ mod already_satisfied;
 mod args;
 #[path = "gah_cli/conflict_resolution.rs"]
 mod conflict_resolution;
+#[path = "gah_cli/doctor_json.rs"]
+mod doctor_json;
 #[path = "gah_cli/gitlab_review.rs"]
 mod gitlab_review;
 #[path = "gah_cli/pm.rs"]
@@ -1008,34 +1010,6 @@ fn init_prints_profile_snippet() {
         .success()
         .stdout(predicate::str::contains("[profiles.sample]"))
         .stdout(predicate::str::contains("provider = \"github\""));
-}
-
-#[test]
-fn doctor_passes_for_valid_profile() {
-    let tmp = test_tempdir();
-    let repo = tmp.path().join("repo");
-    fs::create_dir_all(&repo).unwrap();
-    init_git_repo(&repo);
-    let cfg = write_real_repo_config(&tmp, &repo, "github");
-
-    let fake_bin = tmp.path().join("bin");
-    fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin(&fake_bin, "gh");
-
-    bin()
-        .args([
-            "doctor",
-            "--profile",
-            "real",
-            "--config-path",
-            cfg.to_str().unwrap(),
-        ])
-        .env("PATH", prepend_path(&fake_bin))
-        .env("GITHUB_TOKEN", "token")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("[PASS]"))
-        .stdout(predicate::str::contains("manager memory"));
 }
 
 #[test]

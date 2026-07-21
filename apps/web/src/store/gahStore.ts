@@ -20,7 +20,8 @@ import type {
   LedgerEntry,
   ControllerEvent,
   ProfileSummary,
-  ConfigProfileSummary
+  ConfigProfileSummary,
+  DoctorSnapshot
 } from '@git-agent-harness/contracts';
 import type { ProfileAddData, ProfileUpdateData, ProfileRemoveParams, LoopStatus } from '../api/client.js';
 import type { ConfigSummary, ConfigSetData } from '@git-agent-harness/contracts';
@@ -56,6 +57,7 @@ interface ProfileCrudState {
 interface GahStoreState {
   status: Resource<StatusSnapshot>;
   quota: Resource<QuotaSnapshot>;
+  doctor: Resource<DoctorSnapshot>;
   report: Resource<ReportData>;
   reportSeries: Resource<ReportSeriesData>;
   events: Resource<ControllerEvent[]>;
@@ -73,6 +75,7 @@ interface GahStoreState {
   clearConfigErrors: () => void;
   fetchStatus: (profile?: string, opts?: { force?: boolean }) => Promise<void>;
   fetchQuota: (params?: { profile?: string; since?: string }, opts?: { force?: boolean }) => Promise<void>;
+  fetchDoctor: (profile?: string, opts?: { force?: boolean }) => Promise<void>;
   fetchReport: (params?: { profile?: string; since?: string; groupBy?: ReportGroupBy }, opts?: { force?: boolean }) => Promise<void>;
   fetchReportSeries: (params?: { profile?: string; since?: string; bucket?: string }, opts?: { force?: boolean }) => Promise<void>;
   fetchEvents: (params?: { profile?: string; since?: string }, opts?: { force?: boolean }) => Promise<void>;
@@ -105,6 +108,7 @@ function errorMessage(error: unknown): string {
 export const useGahStore = create<GahStoreState>((set, get) => ({
   status: emptyResource(),
   quota: emptyResource(),
+  doctor: emptyResource(),
   report: emptyResource(),
   reportSeries: emptyResource(),
   events: emptyResource(),
@@ -149,6 +153,19 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
       set({ quota: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
       set({ quota: { ...get().quota, loading: false, error: errorMessage(error), key } });
+    }
+  },
+
+  async fetchDoctor(profile, opts) {
+    const key = profile ?? '';
+    const current = get().doctor;
+    if (current.loading || (!opts?.force && isFresh(current, key))) return;
+    set({ doctor: { ...current, loading: true, error: null } });
+    try {
+      const data = await gahApi.getDoctor(profile);
+      set({ doctor: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
+    } catch (error) {
+      set({ doctor: { ...get().doctor, loading: false, error: errorMessage(error), key } });
     }
   },
 

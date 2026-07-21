@@ -27,6 +27,7 @@ struct SourceIssueIdentity {
 
 #[derive(Debug)]
 pub(super) struct SourceIssueContext {
+    pub(super) issue_number: Option<String>,
     pub(super) prompt_section: Option<String>,
     pub(super) contract: Option<String>,
     /// The exact acceptance criteria rendered into the bounded source
@@ -81,6 +82,7 @@ pub(super) fn resolve_source_issue_context(
             );
             let contract = render_source_issue_contract(&issue);
             Ok(SourceIssueContext {
+                issue_number: Some(identity.issue_number.clone()),
                 prompt_section: Some(contract.clone()),
                 contract: Some(contract.clone()),
                 acceptance_criteria: acceptance_criteria.clone(),
@@ -99,6 +101,7 @@ pub(super) fn resolve_source_issue_context(
                 identity.issue_number
             );
             Ok(SourceIssueContext {
+                issue_number: Some(identity.issue_number.clone()),
                 prompt_section: Some(format!("## Source Issue Lookup\n\n{message}")),
                 contract: None,
                 acceptance_criteria: Vec::new(),
@@ -115,6 +118,7 @@ pub(super) fn resolve_source_issue_context(
 
 fn missing_source_issue_context() -> SourceIssueContext {
     SourceIssueContext {
+        issue_number: None,
         prompt_section: Some(
             "## Source Issue Lookup\n\nSource issue identity could not be resolved from the ledger or MR body; no canonical issue contract was fetched."
                 .to_string(),
@@ -127,6 +131,24 @@ fn missing_source_issue_context() -> SourceIssueContext {
             "issue_number": serde_json::Value::Null,
             "error": "source issue identity not found",
         }),
+    }
+}
+
+/// Carry an MR-body-resolved source issue into the canonical ledger identity.
+/// Explicit dispatch identity always wins; this only fills fields that the
+/// caller could not know before fetching the merge request body.
+pub(super) fn apply_resolved_source_issue_identity(
+    ledger: &mut ledger::LedgerEntry,
+    context: &SourceIssueContext,
+) {
+    let Some(issue_number) = context.issue_number.as_ref() else {
+        return;
+    };
+    if ledger.work_id.is_none() {
+        ledger.work_id = Some(format!("#{issue_number}"));
+    }
+    if ledger.source_issue_number.is_none() {
+        ledger.source_issue_number = Some(issue_number.clone());
     }
 }
 
@@ -486,13 +508,53 @@ fn bounded_numbered_source_issue_entries(entries: &[String], max_bytes: usize) -
 #[cfg(test)]
 mod source_issue_tests {
     use super::{
-        bounded_numbered_source_issue_entries, extract_issue_number_from_text,
-        missing_source_issue_context, render_source_issue_contract,
+        apply_resolved_source_issue_identity, bounded_numbered_source_issue_entries,
+        extract_issue_number_from_text, missing_source_issue_context, render_source_issue_contract,
         render_untrusted_inline_review_text, render_untrusted_review_text,
         verified_post_budget_source_contract,
     };
+    use crate::config::tests::test_profile_for_notifications;
     use crate::context::{self, ContextConfig};
     use crate::dispatch::issues::IssueDetails;
+    use crate::ledger::LedgerEntry;
+
+    #[test]
+    fn resolved_mr_body_issue_fills_missing_ledger_identity() {
+        let profile = test_profile_for_notifications();
+        let mut ledger = LedgerEntry::new("gah", &profile, "codex", "review", "mr:7", None, None);
+        let context = super::SourceIssueContext {
+            issue_number: Some("616".to_string()),
+            prompt_section: None,
+            contract: None,
+            acceptance_criteria: vec![],
+            lookup_report: serde_json::json!({}),
+        };
+
+        apply_resolved_source_issue_identity(&mut ledger, &context);
+
+        assert_eq!(ledger.work_id.as_deref(), Some("#616"));
+        assert_eq!(ledger.source_issue_number.as_deref(), Some("616"));
+    }
+
+    #[test]
+    fn resolved_mr_body_issue_does_not_override_explicit_ledger_identity() {
+        let profile = test_profile_for_notifications();
+        let mut ledger = LedgerEntry::new("gah", &profile, "codex", "review", "mr:7", None, None);
+        ledger.work_id = Some("#500".to_string());
+        ledger.source_issue_number = Some("500".to_string());
+        let context = super::SourceIssueContext {
+            issue_number: Some("616".to_string()),
+            prompt_section: None,
+            contract: None,
+            acceptance_criteria: vec![],
+            lookup_report: serde_json::json!({}),
+        };
+
+        apply_resolved_source_issue_identity(&mut ledger, &context);
+
+        assert_eq!(ledger.work_id.as_deref(), Some("#500"));
+        assert_eq!(ledger.source_issue_number.as_deref(), Some("500"));
+    }
 
     #[test]
     fn source_issue_contract_includes_acceptance_details_missing_from_the_mr_body() {

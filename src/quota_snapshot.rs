@@ -68,10 +68,24 @@ pub struct QuotaCandidateStatus {
 pub struct QuotaSnapshot {
     pub schema_version: u32,
     pub generated_at: String,
+    pub freshness: QuotaFreshness,
     pub profile: ProfileIdentity,
     pub since: String,
     pub usage: UsageSummary,
     pub candidates: Vec<QuotaCandidateStatus>,
+}
+
+/// Latest source evidence behind a snapshot. `generated_at` only proves the
+/// command ran; these timestamps tell operators how old the underlying facts
+/// are without pretending that an empty recent window is fresh telemetry.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct QuotaFreshness {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger_observed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability_observed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_observed_at: Option<String>,
 }
 
 pub fn run(cfg: &GahConfig, profile_name: &str, since: &str, json: bool) -> Result<()> {
@@ -151,6 +165,12 @@ pub fn build_snapshot(
     let cutoff = ledger::summary::parse_since(since)?;
 
     let mut entries = ledger::read_entries(cfg)?;
+    let ledger_observed_at = latest_timestamp(
+        entries
+            .iter()
+            .filter(|entry| entry.profile == profile_name)
+            .map(|entry| entry.timestamp.clone()),
+    );
     entries.retain(|entry| entry.profile == profile_name && entry.timestamp >= cutoff);
 
     let account_quota = quota_store::load_account_observations();
@@ -179,25 +199,21 @@ pub fn build_snapshot(
         &account_quota,
     )
     .unwrap_or_default();
-    let model_groups = ledger::summary::build_grouped_summary_with_account_quota(
+    let candidate_groups = ledger::summary::build_grouped_summary_with_account_quota(
         &entries,
         |entry| {
-            entry
-                .effective_model
-                .clone()
-                .unwrap_or_else(|| UNKNOWN_MODEL.to_string())
+            candidate_usage_key(
+                config::canonical_backend_name(&entry.effective_backend),
+                entry.effective_model.as_deref(),
+            )
         },
         |observed| {
-            observed
-                .model
-                .map(str::to_string)
-                .unwrap_or_else(|| UNKNOWN_MODEL.to_string())
+            candidate_usage_key(
+                config::canonical_backend_name(observed.backend),
+                observed.model,
+            )
         },
-        |_backend, model| {
-            model
-                .map(str::to_string)
-                .unwrap_or_else(|| UNKNOWN_MODEL.to_string())
-        },
+        |backend, model| candidate_usage_key(config::canonical_backend_name(backend), model),
         false,
         &account_quota,
     )
@@ -207,7 +223,7 @@ pub fn build_snapshot(
         .into_iter()
         .map(|group| (group.group_key.clone(), group))
         .collect();
-    let model_map: HashMap<String, ledger::summary::GroupSummary> = model_groups
+    let candidate_map: HashMap<String, ledger::summary::GroupSummary> = candidate_groups
         .into_iter()
         .map(|group| (group.group_key.clone(), group))
         .collect();
@@ -217,14 +233,30 @@ pub fn build_snapshot(
         &resolved_routing,
         profile,
         &backend_map,
-        &model_map,
+        &candidate_map,
         &scope_lookup,
         &account_quota,
     );
 
+    let freshness = QuotaFreshness {
+        ledger_observed_at,
+        availability_observed_at: latest_timestamp(
+            candidates
+                .iter()
+                .filter_map(|candidate| candidate.observed_at.clone()),
+        ),
+        quota_observed_at: latest_timestamp(
+            candidates
+                .iter()
+                .flat_map(|candidate| candidate.quota_observations.iter())
+                .filter_map(|observation| observation.observed_at.clone()),
+        ),
+    };
+
     Ok(QuotaSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         generated_at,
+        freshness,
         profile: ProfileIdentity {
             profile: profile_name.to_string(),
             display_name: profile.display_name.clone(),
@@ -284,11 +316,26 @@ struct CandidateAggregate {
 
 const UNKNOWN_MODEL: &str = "__unknown__";
 
+fn candidate_usage_key(backend: &str, model: Option<&str>) -> String {
+    format!("{backend}\u{1f}{}", model.unwrap_or(UNKNOWN_MODEL))
+}
+
+fn latest_timestamp(values: impl Iterator<Item = String>) -> Option<String> {
+    values
+        .filter_map(|value| {
+            OffsetDateTime::parse(&value, &Rfc3339)
+                .ok()
+                .map(|parsed| (parsed, value))
+        })
+        .max_by_key(|(parsed, _)| *parsed)
+        .map(|(_, value)| value)
+}
+
 fn build_candidates(
     routing: &RoutingPolicy,
     profile: &config::Profile,
     backend_map: &HashMap<String, ledger::summary::GroupSummary>,
-    model_map: &HashMap<String, ledger::summary::GroupSummary>,
+    candidate_map: &HashMap<String, ledger::summary::GroupSummary>,
     scope_lookup: &HashMap<(String, Option<String>, Option<String>), availability::ScopeStatus>,
     account_quota: &[quota_store::QuotaObservationRecord],
 ) -> Vec<QuotaCandidateStatus> {
@@ -353,13 +400,13 @@ fn build_candidates(
                     key.quota_pool.clone(),
                 ))
                 .cloned();
-            let usage = aggregate_usage(
-                backend_map.get(&key.backend),
-                key.model.as_ref().and_then(|model| model_map.get(model)),
-            );
+            let candidate_group = key.model.as_deref().and_then(|model| {
+                candidate_map.get(&candidate_usage_key(&key.backend, Some(model)))
+            });
+            let usage = aggregate_usage(backend_map.get(&key.backend), candidate_group);
             let mut quota_observations = aggregate_observations(
                 backend_map.get(&key.backend),
-                key.model.as_ref().and_then(|model| model_map.get(model)),
+                candidate_group,
                 account_quota,
                 &key.backend,
                 key.model.as_deref(),
@@ -480,6 +527,20 @@ fn aggregate_observations(
             usage_source: account.usage_source.clone(),
         });
     }
+
+    // Backend and model summaries are intentionally broad aggregates. Filter
+    // after combining them so a same-named model on another backend, another
+    // model on this backend, or a sibling account cannot leak into this card.
+    out.retain(|observation| {
+        config::canonical_backend_name(&observation.backend) == backend
+            && match model {
+                Some(model) => observation
+                    .model
+                    .as_deref()
+                    .is_none_or(|value| value == model),
+                None => observation.model.is_none(),
+            }
+    });
 
     let mut seen = BTreeSet::new();
     out.retain(|obs| {
@@ -700,6 +761,18 @@ mod tests {
         assert_eq!(summary.actual_cost_usd, None);
     }
 
+    #[test]
+    fn latest_timestamp_compares_instants_instead_of_rfc3339_text() {
+        let latest = latest_timestamp(
+            [
+                "2026-07-20T23:00:00-05:00".to_string(),
+                "2026-07-21T02:00:00Z".to_string(),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(latest.as_deref(), Some("2026-07-20T23:00:00-05:00"));
+    }
+
     // -- aggregate_usage -----------------------------------------------------
 
     #[test]
@@ -793,6 +866,43 @@ mod tests {
         )];
         let obs = aggregate_observations(None, None, &account, "codex", Some("gpt-5"));
         assert!(obs.is_empty());
+    }
+
+    #[test]
+    fn aggregate_observations_filters_broad_group_data_to_candidate_identity() {
+        let backend = ledger::summary::GroupSummary {
+            quota_observations: vec![
+                group_obs(
+                    "agy",
+                    Some("Gemini"),
+                    "daily",
+                    Some(70.0),
+                    "2026-07-03T00:00:00Z",
+                ),
+                group_obs(
+                    "agy",
+                    Some("Claude"),
+                    "daily",
+                    Some(20.0),
+                    "2026-07-03T00:00:00Z",
+                ),
+                group_obs(
+                    "agy-second",
+                    Some("Gemini"),
+                    "daily",
+                    Some(5.0),
+                    "2026-07-03T00:00:00Z",
+                ),
+            ],
+            ..empty_group()
+        };
+
+        let obs = aggregate_observations(Some(&backend), None, &[], "agy", Some("Gemini"));
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].backend, "agy");
+        assert_eq!(obs[0].model.as_deref(), Some("Gemini"));
+        assert_eq!(obs[0].quota_remaining_percent, Some(70.0));
     }
 
     #[test]
@@ -990,6 +1100,53 @@ mod tests {
             .map(|o| o.quota_window.clone().unwrap())
             .collect();
         assert_eq!(windows, vec!["5h".to_string(), "weekly".to_string()]);
+    }
+
+    #[test]
+    fn build_candidates_scopes_same_named_model_usage_by_backend() {
+        let routing = RoutingPolicy {
+            review_candidates: Some(vec![
+                CandidateConfig {
+                    backend: "codex".to_string(),
+                    model: Some("shared-name".to_string()),
+                    ..Default::default()
+                },
+                CandidateConfig {
+                    backend: "agy".to_string(),
+                    model: Some("shared-name".to_string()),
+                    ..Default::default()
+                },
+            ]),
+            ..RoutingPolicy::default()
+        };
+        let profile = test_profile_for_notifications();
+        let mut candidate_map = HashMap::new();
+        candidate_map.insert(
+            candidate_usage_key("codex", Some("shared-name")),
+            ledger::summary::GroupSummary {
+                entries: 3,
+                ..empty_group()
+            },
+        );
+        candidate_map.insert(
+            candidate_usage_key("agy", Some("shared-name")),
+            ledger::summary::GroupSummary {
+                entries: 9,
+                ..empty_group()
+            },
+        );
+
+        let candidates = build_candidates(
+            &routing,
+            &profile,
+            &HashMap::new(),
+            &candidate_map,
+            &HashMap::new(),
+            &[],
+        );
+
+        assert_eq!(candidates[0].usage.entries, 3);
+        assert_eq!(candidates[1].usage.entries, 9);
     }
 
     #[test]
