@@ -224,6 +224,11 @@ pub struct AttemptRoutingRecord {
     pub attempt_number: u32,
     pub backend_instance: String,
     pub effective_model: Option<String>,
+    /// Canonical route identity captured before launch. Historical records
+    /// have no value here and remain explicitly unknown rather than being
+    /// reconstructed from overlapping legacy strings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::execution_identity::ExecutionIdentity>,
     #[serde(default)]
     pub routing_diagnostics: Option<RoutingDiagnostics>,
 }
@@ -254,6 +259,16 @@ pub struct LedgerUsage {
     pub provider_unknown_reason: Option<String>,
     #[serde(default)]
     pub account_label: Option<String>,
+    /// Secret-safe credential/session binding label selected by config.
+    #[serde(default)]
+    pub auth_source_label: Option<String>,
+    /// Capacity/billing pool is distinct from both instance and account.
+    #[serde(default)]
+    pub quota_pool: Option<String>,
+    /// Whether provider attribution came from backend output, config, model
+    /// inference, or remained unknown.
+    #[serde(default)]
+    pub provider_attribution_source: Option<String>,
     #[serde(default)]
     pub pricing_source: Option<String>,
     #[serde(default)]
@@ -356,7 +371,9 @@ pub struct RoutingCandidateDiagnostic {
 // v7 adds resumable provider-native PM publication mutation records.
 // v8 adds durable parent publication identity and exact child issue numbers for
 // controller reconciliation. Every added field defaults for historical rows.
-pub const LEDGER_SCHEMA_VERSION: u32 = 8;
+// v9 adds canonical per-attempt route identity and safe usage attribution
+// projections. Historical absence remains unknown via additive Option fields.
+pub const LEDGER_SCHEMA_VERSION: u32 = 9;
 
 /// Version of the machine-enforced review output and lifecycle policy. Bump
 /// this when an older review opinion, retry budget, or derived human gate must
@@ -592,6 +609,29 @@ pub struct LedgerEntry {
 }
 
 impl LedgerEntry {
+    /// Return the additive wire projection used by durable sinks. Per-attempt
+    /// canonical identities are authoritative when present; historical rows
+    /// without them retain their legacy top-level fields unchanged.
+    pub fn normalized_for_persistence(&self) -> Self {
+        let mut normalized = self.clone();
+        let identities = normalized
+            .attempt_routing
+            .iter()
+            .filter_map(|attempt| attempt.identity.as_ref())
+            .collect::<Vec<_>>();
+
+        if let Some(first) = identities.first() {
+            normalized.requested_backend = first.requested_backend.clone();
+            normalized.requested_model = first.requested_model.clone();
+        }
+        if let Some(last) = identities.last() {
+            normalized.backend = last.logical_backend.clone();
+            normalized.effective_backend = last.logical_backend.clone();
+            normalized.effective_model = last.effective_model.clone();
+        }
+        normalized
+    }
+
     pub fn new(
         profile_name: &str,
         profile: &Profile,
@@ -1002,6 +1042,57 @@ mod tests {
                 .as_deref(),
             Some("codex")
         );
+    }
+
+    #[test]
+    fn persistence_derives_entry_route_summary_from_attempt_identities() {
+        let mut entry = LedgerEntry::new("test", &profile(), "auto", "fix", "x", None, None);
+        entry.attempt_routing = vec![
+            AttemptRoutingRecord {
+                attempt_number: 1,
+                backend_instance: "codex:primary".into(),
+                effective_model: Some("gpt-5".into()),
+                identity: Some(crate::execution_identity::ExecutionIdentity::legacy_route(
+                    "auto",
+                    Some("requested-model"),
+                    "codex",
+                    Some("gpt-5"),
+                    Some("primary"),
+                )),
+                routing_diagnostics: None,
+            },
+            AttemptRoutingRecord {
+                attempt_number: 2,
+                backend_instance: "claude:secondary".into(),
+                effective_model: Some("sonnet".into()),
+                identity: Some(crate::execution_identity::ExecutionIdentity::legacy_route(
+                    "auto",
+                    Some("requested-model"),
+                    "claude",
+                    Some("sonnet"),
+                    Some("secondary"),
+                )),
+                routing_diagnostics: None,
+            },
+        ];
+
+        let normalized = entry.normalized_for_persistence();
+
+        assert_eq!(normalized.requested_backend, "auto");
+        assert_eq!(
+            normalized.requested_model.as_deref(),
+            Some("requested-model")
+        );
+        assert_eq!(normalized.effective_backend, "claude");
+        assert_eq!(normalized.backend, "claude");
+        assert_eq!(normalized.effective_model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn historical_attempt_routing_keeps_identity_unknown() {
+        let raw = r#"{"attempt_number":1,"backend_instance":"codex","effective_model":"gpt-5","routing_diagnostics":null}"#;
+        let record: AttemptRoutingRecord = serde_json::from_str(raw).unwrap();
+        assert_eq!(record.identity, None);
     }
 
     #[test]

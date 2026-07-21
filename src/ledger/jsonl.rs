@@ -165,7 +165,8 @@ fn append_locked(cfg: &GahConfig, path: &Path, entry: &LedgerEntry) -> Result<()
         .append(true)
         .open(path)
         .with_context(|| format!("opening ledger {}", path.display()))?;
-    let mut value = serde_json::to_value(entry).context("serializing ledger entry")?;
+    let normalized = entry.normalized_for_persistence();
+    let mut value = serde_json::to_value(&normalized).context("serializing ledger entry")?;
     crate::redact::redact_json_value(&mut value);
     serde_json::to_writer(&mut file, &value).context("serializing ledger entry")?;
     file.write_all(b"\n").context("writing ledger newline")?;
@@ -861,9 +862,28 @@ mod tests {
             None,
         );
         entry.error_summary = Some("Authorization: Bearer abcdefghijklmnopqrstuvwxyz".into());
+        let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "opencode",
+            Some("gpt-5"),
+            Some("sk-proj-abcdefghijklmnopqrstuvwxyz"),
+        );
+        identity.account_label = Some("glpat-abcdefghijklmnopqrstuvwxyz".into());
+        identity.auth_source_label = Some("ghp_abcdefghijklmnopqrstuvwxyz".into());
+        identity.set_executable(Some("/private/credential-home/bin/opencode".into()));
+        entry
+            .attempt_routing
+            .push(crate::ledger::AttemptRoutingRecord {
+                attempt_number: 1,
+                backend_instance: identity.backend_instance.clone(),
+                effective_model: identity.effective_model.clone(),
+                identity: Some(identity),
+                routing_diagnostics: None,
+            });
         let path = append(&cfg, &entry).unwrap();
         let text = std::fs::read_to_string(path).unwrap();
         assert!(!text.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(!text.contains("credential-home"));
+        assert!(!text.contains("executable"));
         assert!(text.contains("[REDACTED:TOKEN]"));
     }
 

@@ -147,7 +147,7 @@ pub(crate) fn pm(
         fs::create_dir_all(&attempt_dir)?;
         fs::write(attempt_dir.join("task.md"), crate::redact::redact(&task))?;
 
-        record_route_attempt(ledger, &plan_route);
+        record_route_attempt(ledger, &plan_route)?;
         let result = run_backend(
             &plan_route.effective_backend,
             profile,

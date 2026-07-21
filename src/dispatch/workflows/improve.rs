@@ -391,7 +391,7 @@ pub(crate) fn improve(
         } else {
             None
         };
-        record_route_attempt(ledger, &route);
+        record_route_attempt(ledger, &route)?;
         let result = run_backend_with_reserved_route(
             &route.effective_backend,
             profile,

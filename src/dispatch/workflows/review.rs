@@ -468,7 +468,7 @@ pub(in crate::dispatch) fn review(
             attempt_index += 1;
             let attempt_session = session_dir.join(format!("review-attempt-{attempt_index}"));
             fs::create_dir_all(&attempt_session)?;
-            record_route_attempt(ledger, &route);
+            record_route_attempt(ledger, &route)?;
             let attempt_env_vars =
                 review_attempt_environment(profile, &route.effective_backend, &env_vars);
             let attempt = runner::run_review_backend(

@@ -112,7 +112,7 @@ pub(crate) fn experiment(
     } else {
         None
     };
-    record_route_attempt(ledger, &route);
+    record_route_attempt(ledger, &route)?;
     let result = match run_backend(
         &route.effective_backend,
         profile,

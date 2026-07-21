@@ -869,8 +869,8 @@ fn record_route_attempt_preserves_each_route_and_its_diagnostics() {
         }),
     );
 
-    record_route_attempt(&mut entry, &first);
-    record_route_attempt(&mut entry, &second);
+    record_route_attempt(&mut entry, &first).unwrap();
+    record_route_attempt(&mut entry, &second).unwrap();
 
     assert!(entry
         .routing_runtime
@@ -878,6 +878,20 @@ fn record_route_attempt_preserves_each_route_and_its_diagnostics() {
         .contains(&CandidateIdentity::new("agy", Some("gemini"))));
     assert_eq!(entry.attempt_routing.len(), 2);
     assert_eq!(entry.attempt_routing[0].backend_instance, "agy");
+    assert_eq!(
+        entry.attempt_routing[0]
+            .identity
+            .as_ref()
+            .map(|identity| identity.runner_kind.as_str()),
+        Some("agy")
+    );
+    assert_eq!(
+        entry.attempt_routing[1]
+            .identity
+            .as_ref()
+            .map(|identity| identity.logical_backend.as_str()),
+        Some("codex")
+    );
     assert_eq!(
         entry.attempt_routing[1]
             .routing_diagnostics
@@ -890,6 +904,20 @@ fn record_route_attempt_preserves_each_route_and_its_diagnostics() {
     let parsed: LedgerEntry = serde_json::from_str(&serialized).unwrap();
     assert_eq!(parsed.attempt_routing, entry.attempt_routing);
     assert!(parsed.routing_runtime.dispatch_attempted.is_empty());
+
+    let mut unsafe_route = first.clone();
+    unsafe_route.identity.auth_source_label = Some("/credential/home".into());
+    let mut rejected = LedgerEntry::new(
+        "test",
+        &profile(tmp.path()),
+        "auto",
+        "improve",
+        "target",
+        None,
+        None,
+    );
+    assert!(record_route_attempt(&mut rejected, &unsafe_route).is_err());
+    assert!(rejected.attempt_routing.is_empty());
 }
 
 #[test]

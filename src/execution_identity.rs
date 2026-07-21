@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 /// Canonical identity selected for one execution attempt.
 ///
 /// This is the typed carrier approved by
@@ -7,7 +9,7 @@ use std::path::PathBuf;
 /// account and instance fields are projected from the legacy backend and
 /// quota-pool strings. Later migration steps replace those projections with
 /// explicit configuration without changing routing policy or candidate order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionIdentity {
     /// Agent CLI family GAH invokes. Multiple logical backends may share one
     /// runner kind (for example `agy`, `agy-main`, and `agy-second`).
@@ -15,6 +17,7 @@ pub struct ExecutionIdentity {
     /// Resolved executable used for the attempt. Candidate construction does
     /// not resolve executables; the production routing boundary fills this in
     /// with the same resolver dispatch uses.
+    #[serde(skip, default)]
     pub executable: Option<PathBuf>,
     /// Backend requested before routing/fallback.
     pub requested_backend: String,
@@ -114,6 +117,26 @@ impl ExecutionIdentity {
 
     pub fn set_executable(&mut self, executable: Option<PathBuf>) {
         self.executable = executable;
+    }
+
+    /// Enforce the durable-label contract at the last boundary before an
+    /// attempted route is recorded. Models are intentionally excluded: they
+    /// are provider identifiers, while these fields are operator labels.
+    pub fn validate_for_persistence(&self) -> anyhow::Result<()> {
+        validate_secret_safe_label("runner kind", &self.runner_kind)?;
+        validate_secret_safe_label("requested backend", &self.requested_backend)?;
+        validate_secret_safe_label("logical backend", &self.logical_backend)?;
+        validate_secret_safe_label("backend instance", &self.backend_instance)?;
+        if let Some(label) = self.account_label.as_deref() {
+            validate_secret_safe_label("account label", label)?;
+        }
+        if let Some(label) = self.auth_source_label.as_deref() {
+            validate_secret_safe_label("auth source label", label)?;
+        }
+        if let Some(label) = self.quota_pool.as_deref() {
+            validate_secret_safe_label("quota pool", label)?;
+        }
+        Ok(())
     }
 }
 
@@ -224,5 +247,20 @@ mod tests {
             validate_secret_safe_label("backend instance", " codex-main ").unwrap(),
             "codex-main"
         );
+    }
+
+    #[test]
+    fn durable_identity_never_serializes_executable_paths() {
+        let mut identity =
+            ExecutionIdentity::legacy_candidate("codex", Some("gpt-5"), Some("codex-main"));
+        identity.set_executable(Some(PathBuf::from("/secret/home/bin/codex")));
+
+        let json = serde_json::to_string(&identity).unwrap();
+
+        assert!(!json.contains("executable"));
+        assert!(!json.contains("/secret"));
+        let restored: ExecutionIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.executable, None);
+        assert_eq!(restored.backend_instance, "codex:codex-main");
     }
 }
