@@ -800,6 +800,50 @@ esac
 }
 
 #[test]
+fn merge_mr_accepts_generation_computed_before_mark_ready_for_review() {
+    // Regression: gah dispatches MarkReadyForReview before MergeMr, so by the
+    // time merge_mr fetches the live ReviewTarget, draft has already flipped
+    // true -> false. The generation stored at review time was computed with
+    // draft=true; without the one-way transition tolerance, ensure_review_generation
+    // rejected every approved MR right before merging it (never actually landing).
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        r#"#!/bin/sh
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  "pr view 42 --repo") printf '{"number":42,"url":"https://github.com/owner/repo/pull/42","title":"test","body":"body","isDraft":false,"headRefName":"gah/test","baseRefName":"main","headRefOid":"source-github-sha"}\n' ;;
+  "pr ready 42 --repo") exit 0 ;;
+  "pr merge 42 --squash") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let fingerprint_at_review_time = crate::sync::review_metadata_fingerprint(
+        Some("source-github-sha"),
+        Some("test"),
+        Some("body"),
+        true,
+    );
+    let expected = crate::ledger::review_generation(
+        Some("source-github-sha"),
+        Some(&fingerprint_at_review_time),
+    )
+    .unwrap();
+
+    merge_mr(&github_profile(), "gah/test", Some(expected.as_str())).unwrap();
+
+    let call = fs::read_to_string(bin_dir.join("merge_call.txt")).unwrap();
+    assert!(call.contains("42"));
+}
+
+#[test]
 fn mark_ready_for_review_github_un_drafts_only() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = TempDir::new().unwrap();

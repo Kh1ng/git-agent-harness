@@ -16,6 +16,7 @@ use super::super::review::policy::{
 };
 use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
+use crate::availability;
 use crate::config::{self, GahConfig, Profile};
 use crate::controller::HumanRequiredReason;
 use crate::ledger::LedgerEntry;
@@ -204,7 +205,7 @@ pub(in crate::dispatch) fn review(
          actionable_findings must be an array of objects with exactly: summary (string), file (an exact path copied from Changed files), line (string or null), status (the literal confirmed), and evidence (an array containing at least one diff:<same-file>:<specific observation> string). non_blocking_findings, risk_notes, evidence, and compatibility_evidence must be JSON arrays of strings, even when empty or when only one item exists.\n\
          NEEDS_FIX and REJECT require at least one actionable_findings object. Never put a withdrawn, speculative, unverified, contradicted, or explicitly non-blocking concern in actionable_findings; put uncertainty in non_blocking_findings or return HUMAN_REVIEW. GAH rejects invalid actionable findings and reroutes to another reviewer instead of dispatching a repair.\n\
          For an APPROVE, evidence must include exactly one or more file:<changed-path> entries copied from Changed files below. You may include ci:passed only when the displayed control-plane CI status is passed. An APPROVE without grounded file evidence is invalid.\n\
-         Every source acceptance criterion is blocking until verified. For criterion N, include a separate evidence entry using `ac:N:file:<changed-path>` or `ac:N:test:<command and result>`. If the criterion claims current, live, latest, exact, open/closed, queued, or other external provider state, file/test evidence alone is insufficient: use `ac:N:provider:<provider>:<queried reference and result>` or `ac:N:snapshot:<changed-path>:<verification command and result>`. The provider must match this profile. If any criterion remains unmet or materially unverified, return NEEDS_FIX with a concrete blocking finding; never hide that admission in non_blocking_findings or risk_notes while approving.\n\
+         Every source acceptance criterion is blocking until verified. The canonical Source Issue Contract numbers them explicitly; criterion N is numbered item N in that list. For criterion N, put a separate string directly inside the existing `evidence` array using `ac:N:file:<changed-path>` or `ac:N:test:<command and result>`. Each string must contain exactly one mapping: never append a second `ac:N:` mapping, prose, or a test result to an `ac:N:file:<changed-path>` entry, because the complete suffix is validated as the path. Do not create an `ac_evidence` field, `actionable_findings_ac` field, or any other JSON field; extra fields are ignored and cannot satisfy the gate. Before returning APPROVE, audit the `evidence` array for a contiguous `ac:1:` through `ac:N:` set; ordinary unprefixed file/test evidence does not satisfy this gate. If the criterion claims current, live, latest, exact, open/closed, queued, or other external provider state, file/test evidence alone is insufficient: use `ac:N:provider:<provider>:<queried reference and result>` or `ac:N:snapshot:<changed-path>:<verification command and result>`. The provider must match this profile. If any criterion remains unmet or materially unverified, return NEEDS_FIX with a concrete blocking finding; never hide that admission in non_blocking_findings or risk_notes while approving.\n\
          If a contract surface is changed, do not APPROVE unless compatibility_evidence includes file:<changed-contract-path> and mechanism:<schema-version|backward-compatible-default|migration> that is actually present in the diff.\n\
          Verdict must be one of APPROVE, NEEDS_FIX, REJECT, HUMAN_REVIEW, defined as:\n\
          - APPROVE: you believe the change is correct, safe, and complete enough to merge. Report your ACTUAL confidence honestly in the separate `confidence` field (high/medium/low) -- do not inflate confidence to sound more certain, and do not downgrade to NEEDS_FIX just to hedge when you'd otherwise approve. A low-confidence approval is a real, useful signal (insufficient context, a domain you couldn't fully verify, a partial review) and will correctly route to a human -- it is not a failure to be avoided.\n\
@@ -267,6 +268,7 @@ pub(in crate::dispatch) fn review(
         &target.source_branch,
         ledger.review_generation.as_deref(),
     );
+    let availability_state_path = availability::resolve_state_path();
     let next_reviewer = escalation_reason.and_then(|reason| {
         if reason == "review_output_invalid" {
             next_review_candidate(
@@ -276,6 +278,7 @@ pub(in crate::dispatch) fn review(
                 &target.source_branch,
                 None,
                 ledger.review_generation.as_deref(),
+                &availability_state_path,
             )
         } else {
             next_escalatory_reviewer(
@@ -285,6 +288,7 @@ pub(in crate::dispatch) fn review(
                 &target.source_branch,
                 None,
                 ledger.review_generation.as_deref(),
+                &availability_state_path,
             )
         }
     });
@@ -773,6 +777,7 @@ pub(in crate::dispatch) fn review(
                     &target.source_branch,
                     Some((&route.effective_backend, route.effective_model.as_deref())),
                     ledger.review_generation.as_deref(),
+                    &availability::resolve_state_path(),
                 )
                 .is_some()
             {

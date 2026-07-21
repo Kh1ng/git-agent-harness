@@ -9,7 +9,8 @@ mod review_state;
 pub use repository::fetch_repository_mrs;
 pub(crate) use review_state::review_metadata_fingerprint;
 pub(crate) use review_state::{
-    current_review_generation, review_contract_matches, review_generation_matches_mr,
+    current_review_generation, review_contract_matches, review_generation_matches,
+    review_generation_matches_mr,
 };
 use review_state::{latest_review_for_mr, ledger_info_for_mr};
 
