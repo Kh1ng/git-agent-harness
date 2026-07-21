@@ -118,18 +118,20 @@ fn shutdown_clears_provisional_fallback_confidence_and_human_hold() {
 fn route_attribution_does_not_clear_a_review_budget_hold() {
     let profile = test_profile_for_notifications();
     let mut ledger = LedgerEntry::new("gah", &profile, "vibe", "review", "test", None, None);
-    let route = RouteDecision {
-        requested_backend: "vibe".into(),
-        effective_backend: "vibe".into(),
-        requested_model: Some("reviewer".into()),
-        effective_model: Some("reviewer".into()),
-        effective_quota_pool: None,
-        routing_reason: "test".into(),
-        fallback_used: false,
-        confidence_impact: None,
-        human_required: false,
-        routing_diagnostics: None,
-    };
+    let route = RouteDecision::from_identity(
+        crate::execution_identity::ExecutionIdentity::legacy_route(
+            "vibe",
+            Some("reviewer"),
+            "vibe",
+            Some("reviewer"),
+            None::<String>,
+        ),
+        "test".into(),
+        false,
+        None,
+        false,
+        None,
+    );
 
     mark_review_budget_exhausted(&mut ledger, &route, "budget exhausted");
 
@@ -150,18 +152,20 @@ fn three_reviews_never_overlap_on_a_backend_model_capped_at_one() {
     profile
         .max_concurrent_per_model
         .insert(format!("{backend}/{model}"), 1);
-    let route = RouteDecision {
-        requested_backend: backend.clone(),
-        effective_backend: backend.clone(),
-        requested_model: Some(model.into()),
-        effective_model: Some(model.into()),
-        effective_quota_pool: None,
-        routing_reason: "test".into(),
-        fallback_used: false,
-        confidence_impact: None,
-        human_required: false,
-        routing_diagnostics: None,
-    };
+    let route = RouteDecision::from_identity(
+        crate::execution_identity::ExecutionIdentity::legacy_route(
+            backend.clone(),
+            Some(model),
+            backend.clone(),
+            Some(model),
+            None::<String>,
+        ),
+        "test".into(),
+        false,
+        None,
+        false,
+        None,
+    );
 
     let profile = Arc::new(profile);
     let route = Arc::new(route);

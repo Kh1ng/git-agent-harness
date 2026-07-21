@@ -2,10 +2,14 @@ use super::super::test_support::{
     backend_available, candidate_config, defaults, path, profile, record_available,
     record_unavailable,
 };
-use super::{decide_with, decide_with_runtime, RouteError, RouteRequest};
+use super::{
+    decide_with, decide_with_runtime, with_resolved_executable, RouteDecision, RouteError,
+    RouteRequest,
+};
 use super::{CandidateIdentity, RoutingRuntimeState};
 use crate::availability::{Reason, Source};
 use crate::config::RoutingPolicy;
+use crate::execution_identity::ExecutionIdentity;
 use tempfile::TempDir;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -542,9 +546,59 @@ fn fallback_route_records_availability_reason() {
     .unwrap();
 
     assert_eq!(decision.effective_backend, "codex");
+    assert_eq!(decision.identity.requested_backend, "claude");
+    assert_eq!(decision.identity.logical_backend, "codex");
+    assert_eq!(decision.identity.runner_kind, "codex");
+    assert_eq!(decision.identity.backend_instance, "codex");
+    assert_eq!(
+        decision.requested_backend,
+        decision.identity.requested_backend
+    );
+    assert_eq!(
+        decision.effective_backend,
+        decision.identity.logical_backend
+    );
+    assert_eq!(decision.requested_model, decision.identity.requested_model);
+    assert_eq!(decision.effective_model, decision.identity.effective_model);
+    assert_eq!(decision.effective_quota_pool, decision.identity.quota_pool);
     assert!(decision.routing_reason.contains("backend_outage"));
     assert!(decision.human_required);
     assert_eq!(decision.confidence_impact.as_deref(), Some("low"));
+}
+
+#[test]
+fn production_boundary_records_the_executable_dispatch_will_use() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let executable = tmp.path().join("codex-explicit");
+    std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    let mut profile = profile();
+    profile.codex_path = Some(executable.display().to_string());
+    let decision = RouteDecision::from_identity(
+        ExecutionIdentity::legacy_route(
+            "codex",
+            None::<String>,
+            "codex",
+            None::<String>,
+            None::<String>,
+        ),
+        "test".into(),
+        false,
+        None,
+        false,
+        None,
+    );
+
+    let decision = with_resolved_executable(&profile, decision);
+
+    assert_eq!(
+        decision.identity.executable.as_deref(),
+        Some(executable.as_path())
+    );
 }
 
 #[test]

@@ -1390,12 +1390,15 @@ fn policy_candidates_attaches_derived_quota_pool_for_agy() {
     let candidates = super::policy_candidates(&policy, "pm").unwrap();
     assert_eq!(candidates.len(), 3);
     assert_eq!(
-        candidates[0].quota_pool.as_deref(),
+        candidates[0].identity.quota_pool.as_deref(),
         Some("agy:google-native")
     );
-    assert_eq!(candidates[1].quota_pool.as_deref(), Some("agy:external"));
     assert_eq!(
-        candidates[2].quota_pool.as_deref(),
+        candidates[1].identity.quota_pool.as_deref(),
+        Some("agy:external")
+    );
+    assert_eq!(
+        candidates[2].identity.quota_pool.as_deref(),
         Some("agy-second:google-native")
     );
 }

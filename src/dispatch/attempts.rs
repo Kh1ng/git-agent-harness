@@ -87,16 +87,18 @@ pub(super) fn resolve_llm(
 
 pub(super) fn reserve_backend_slot(
     profile: &Profile,
-    backend: &str,
-    effective_model: Option<&str>,
+    identity: &crate::execution_identity::ExecutionIdentity,
 ) -> Result<routing::ConcurrencyGuard> {
     let concurrency_cap = profile
         .max_concurrent_per_model
-        .get(&format!("{backend}/{}", effective_model.unwrap_or("")))
+        .get(&format!(
+            "{}/{}",
+            identity.logical_backend,
+            identity.effective_model.as_deref().unwrap_or("")
+        ))
         .copied();
-    routing::ConcurrencyGuard::acquire_shared(
-        backend,
-        effective_model,
+    routing::ConcurrencyGuard::acquire_shared_for_identity(
+        identity,
         concurrency_cap,
         crate::runner::shutdown_requested,
     )
@@ -162,8 +164,13 @@ pub(super) fn run_backend_with_reserved_route(
     // Held for the duration of the actual backend call -- dropped on every
     // exit path (success, error, or panic) -- so routing's
     // `max_concurrent_per_model` check sees an accurate live count.
+    let compatibility_identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        backend,
+        effective_model,
+        None::<String>,
+    );
     let _concurrency_slot = (!route_slot_already_reserved)
-        .then(|| reserve_backend_slot(profile, backend, effective_model))
+        .then(|| reserve_backend_slot(profile, &compatibility_identity))
         .transpose()?;
     let origin_before = worktree::git(&["remote", "get-url", "origin"], wt).ok();
     let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
@@ -548,17 +555,15 @@ pub(super) fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecis
 }
 
 pub(super) fn record_route_attempt(ledger: &mut LedgerEntry, route: &RouteDecision) {
-    let backend = &route.effective_backend;
-    let model = route.effective_model.as_deref();
     ledger
         .routing_runtime
         .dispatch_attempted
-        .insert(CandidateIdentity::new(backend, model));
+        .insert(CandidateIdentity::from_execution_identity(&route.identity));
     ledger
         .attempt_routing
         .push(crate::ledger::AttemptRoutingRecord {
             attempt_number: ledger.attempt_routing.len() as u32 + 1,
-            backend_instance: backend.clone(),
+            backend_instance: route.effective_backend.clone(),
             effective_model: route.effective_model.clone(),
             routing_diagnostics: route.routing_diagnostics.clone(),
         });

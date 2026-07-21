@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use crate::execution_identity::ExecutionIdentity;
+
 /// Request input to the routing decision engine.
 #[derive(Debug, Clone)]
 pub struct RouteRequest<'a> {
@@ -58,6 +60,16 @@ impl CandidateIdentity {
             model: model.map(Into::into),
         }
     }
+
+    /// Compatibility key used during execution-identity carrier migration.
+    /// The approved destination key is backend-instance/model, but changing
+    /// equality here before the availability migration would reorder routes.
+    pub fn from_execution_identity(identity: &ExecutionIdentity) -> Self {
+        Self {
+            backend: identity.logical_backend.clone(),
+            model: identity.effective_model.clone(),
+        }
+    }
 }
 
 /// Trusted ticket metadata used only to choose an operator-configured
@@ -75,6 +87,9 @@ pub struct TaskRoutingContext<'a> {
 /// how the decision was made.
 #[derive(Debug, Clone)]
 pub struct RouteDecision {
+    /// Authoritative typed route identity. The legacy string fields below are
+    /// compatibility projections retained until downstream callers migrate.
+    pub identity: ExecutionIdentity,
     pub requested_backend: String,
     pub effective_backend: String,
     pub requested_model: Option<String>,
@@ -85,6 +100,45 @@ pub struct RouteDecision {
     pub confidence_impact: Option<String>,
     pub human_required: bool,
     pub routing_diagnostics: Option<crate::ledger::RoutingDiagnostics>,
+}
+
+impl RouteDecision {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_identity(
+        identity: ExecutionIdentity,
+        routing_reason: String,
+        fallback_used: bool,
+        confidence_impact: Option<String>,
+        human_required: bool,
+        routing_diagnostics: Option<crate::ledger::RoutingDiagnostics>,
+    ) -> Self {
+        let mut decision = Self {
+            identity,
+            requested_backend: String::new(),
+            effective_backend: String::new(),
+            requested_model: None,
+            effective_model: None,
+            effective_quota_pool: None,
+            routing_reason,
+            fallback_used,
+            confidence_impact,
+            human_required,
+            routing_diagnostics,
+        };
+        decision.refresh_compatibility_projection();
+        decision
+    }
+
+    /// Keep the pre-migration public fields as one-way projections from the
+    /// canonical identity. Routing code must update the identity first and
+    /// call this boundary instead of independently rewriting strings.
+    pub(crate) fn refresh_compatibility_projection(&mut self) {
+        self.requested_backend = self.identity.requested_backend.clone();
+        self.effective_backend = self.identity.logical_backend.clone();
+        self.requested_model = self.identity.requested_model.clone();
+        self.effective_model = self.identity.effective_model.clone();
+        self.effective_quota_pool = self.identity.quota_pool.clone();
+    }
 }
 
 /// A backend+model combination that was considered but not selected, along
