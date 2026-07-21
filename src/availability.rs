@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
+const LEGACY_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +85,11 @@ impl Source {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AvailabilityRecord {
     pub backend: String,
+    /// Stable, secret-safe execution instance. Legacy v1 records omit this
+    /// field and remain explicitly instance-unknown; reads treat those rows as
+    /// broad compatibility state for their logical backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -245,14 +251,19 @@ pub fn load_state(state_path: &Path) -> Result<AvailabilityState> {
     };
     let mut state: AvailabilityState = serde_json::from_str(&text)
         .with_context(|| format!("parsing availability state {}", state_path.display()))?;
-    if state.version != CURRENT_VERSION {
+    if !(LEGACY_VERSION..=CURRENT_VERSION).contains(&state.version) {
         anyhow::bail!(
-            "availability state {} has unsupported schema version {} (expected {}); refusing to read or overwrite it",
+            "availability state {} has unsupported schema version {} (supported {}..={}); refusing to read or overwrite it",
             state_path.display(),
             state.version,
+            LEGACY_VERSION,
             CURRENT_VERSION,
         );
     }
+    // v1 did not carry instance identity. Upgrade the envelope in memory, but
+    // never invent an instance for historical rows. The next lock-protected
+    // update persists this deterministic migration.
+    state.version = CURRENT_VERSION;
     // Canonicalize backend aliases (e.g. "cloud-coder" -> "openhands") at
     // the single load point so every consumer -- list_scopes,
     // availability_for, latest_for_scope/pool, and update_state's
@@ -346,10 +357,14 @@ pub fn record_unavailable(
     last_error_summary: Option<String>,
     now: OffsetDateTime,
 ) -> Result<()> {
+    let quota_pool = quota_pool
+        .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+        .transpose()?;
     let record = AvailabilityRecord {
         backend: backend.to_string(),
+        backend_instance: None,
         model: model.map(str::to_string),
-        quota_pool: quota_pool.map(str::to_string),
+        quota_pool,
         status: Status::Unavailable,
         reason,
         observed_at: now_rfc3339(now),
@@ -370,10 +385,80 @@ pub fn record_available(
     source: Source,
     now: OffsetDateTime,
 ) -> Result<()> {
+    let quota_pool = quota_pool
+        .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+        .transpose()?;
     let record = AvailabilityRecord {
         backend: backend.to_string(),
+        backend_instance: None,
         model: model.map(str::to_string),
-        quota_pool: quota_pool.map(str::to_string),
+        quota_pool,
+        status: Status::Available,
+        reason: Reason::Unknown,
+        observed_at: now_rfc3339(now),
+        unavailable_until: None,
+        source,
+        last_error_summary: None,
+    };
+    update_state(state_path, |state| state.records.push(record))
+}
+
+/// Append unavailability for the exact selected execution identity.
+#[allow(clippy::too_many_arguments)]
+pub fn record_unavailable_for_identity(
+    state_path: &Path,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    reason: Reason,
+    source: Source,
+    unavailable_until: Option<OffsetDateTime>,
+    last_error_summary: Option<String>,
+    now: OffsetDateTime,
+) -> Result<()> {
+    let backend_instance = crate::execution_identity::validate_secret_safe_label(
+        "backend instance",
+        &identity.backend_instance,
+    )?;
+    let quota_pool = identity
+        .quota_pool
+        .as_deref()
+        .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+        .transpose()?;
+    let record = AvailabilityRecord {
+        backend: identity.logical_backend.clone(),
+        backend_instance: Some(backend_instance),
+        model: identity.effective_model.clone(),
+        quota_pool,
+        status: Status::Unavailable,
+        reason,
+        observed_at: now_rfc3339(now),
+        unavailable_until: unavailable_until.map(now_rfc3339),
+        source,
+        last_error_summary,
+    };
+    update_state(state_path, |state| state.records.push(record))
+}
+
+/// Append an exact-instance availability override.
+pub fn record_available_for_identity(
+    state_path: &Path,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    source: Source,
+    now: OffsetDateTime,
+) -> Result<()> {
+    let backend_instance = crate::execution_identity::validate_secret_safe_label(
+        "backend instance",
+        &identity.backend_instance,
+    )?;
+    let quota_pool = identity
+        .quota_pool
+        .as_deref()
+        .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+        .transpose()?;
+    let record = AvailabilityRecord {
+        backend: identity.logical_backend.clone(),
+        backend_instance: Some(backend_instance),
+        model: identity.effective_model.clone(),
+        quota_pool,
         status: Status::Available,
         reason: Reason::Unknown,
         observed_at: now_rfc3339(now),
@@ -404,12 +489,20 @@ fn is_active(record: &AvailabilityRecord, now: OffsetDateTime) -> bool {
 fn latest_for_scope<'a>(
     records: &'a [AvailabilityRecord],
     backend: &str,
+    backend_instance: Option<&str>,
     model: Option<&str>,
 ) -> Option<&'a AvailabilityRecord> {
-    records
-        .iter()
-        .rev()
-        .find(|r| r.backend == backend && r.model.as_deref() == model)
+    records.iter().rev().find(|r| {
+        r.backend == backend
+            && r.model.as_deref() == model
+            && match backend_instance {
+                Some(instance) => r
+                    .backend_instance
+                    .as_deref()
+                    .is_none_or(|value| value == instance),
+                None => r.backend_instance.is_none(),
+            }
+    })
 }
 
 fn latest_for_pool<'a>(
@@ -433,6 +526,35 @@ fn latest_for_pool<'a>(
 pub fn availability_for(
     state_path: &Path,
     backend: &str,
+    model: Option<&str>,
+    quota_pool: Option<&str>,
+    now: OffsetDateTime,
+) -> Result<AvailabilityDecision> {
+    availability_for_key(state_path, backend, None, model, quota_pool, now)
+}
+
+/// Eligibility for one fully selected execution identity. Exact instance
+/// records and legacy instance-unknown records share one ordered timeline;
+/// unrelated explicit instances never match.
+pub fn availability_for_identity(
+    state_path: &Path,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    now: OffsetDateTime,
+) -> Result<AvailabilityDecision> {
+    availability_for_key(
+        state_path,
+        &identity.logical_backend,
+        Some(&identity.backend_instance),
+        identity.effective_model.as_deref(),
+        identity.quota_pool.as_deref(),
+        now,
+    )
+}
+
+fn availability_for_key(
+    state_path: &Path,
+    backend: &str,
+    backend_instance: Option<&str>,
     model: Option<&str>,
     quota_pool: Option<&str>,
     now: OffsetDateTime,
@@ -462,7 +584,7 @@ pub fn availability_for(
         }
     }
 
-    if let Some(record) = latest_for_scope(&state.records, backend, None) {
+    if let Some(record) = latest_for_scope(&state.records, backend, backend_instance, None) {
         if is_active(record, now) {
             return Ok(AvailabilityDecision {
                 eligible: false,
@@ -477,7 +599,9 @@ pub fn availability_for(
     }
 
     if let Some(model) = model {
-        if let Some(record) = latest_for_scope(&state.records, backend, Some(model)) {
+        if let Some(record) =
+            latest_for_scope(&state.records, backend, backend_instance, Some(model))
+        {
             if is_active(record, now) {
                 return Ok(AvailabilityDecision {
                     eligible: false,
@@ -503,6 +627,7 @@ pub fn availability_for(
 #[derive(Debug, Clone)]
 pub struct ScopeStatus {
     pub backend: String,
+    pub backend_instance: Option<String>,
     pub model: Option<String>,
     pub quota_pool: Option<String>,
     pub eligible: bool,
@@ -514,19 +639,28 @@ pub struct ScopeStatus {
     pub observed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ScopeKey {
+    backend: String,
+    backend_instance: Option<String>,
+    model: Option<String>,
+    quota_pool: Option<String>,
+}
+
 /// One row per distinct (backend, model, quota_pool) scope that has ever appeared in
 /// the state file, sorted by backend then model (backend-wide rows, i.e.
 /// model = None, sort first for a given backend).
 pub fn list_scopes(state_path: &Path, now: OffsetDateTime) -> Result<Vec<ScopeStatus>> {
     let state = load_state(state_path)?;
 
-    let mut seen: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    let mut seen: Vec<ScopeKey> = Vec::new();
     for record in &state.records {
-        let key = (
-            record.backend.clone(),
-            record.model.clone(),
-            record.quota_pool.clone(),
-        );
+        let key = ScopeKey {
+            backend: record.backend.clone(),
+            backend_instance: record.backend_instance.clone(),
+            model: record.model.clone(),
+            quota_pool: record.quota_pool.clone(),
+        };
         if !seen.contains(&key) {
             seen.push(key);
         }
@@ -534,25 +668,38 @@ pub fn list_scopes(state_path: &Path, now: OffsetDateTime) -> Result<Vec<ScopeSt
     seen.sort();
 
     let mut out = Vec::with_capacity(seen.len());
-    for (backend, model, quota_pool) in seen {
-        let decision = availability_for(
+    for key in seen {
+        let decision = availability_for_key(
             state_path,
-            &backend,
-            model.as_deref(),
-            quota_pool.as_deref(),
+            &key.backend,
+            key.backend_instance.as_deref(),
+            key.model.as_deref(),
+            key.quota_pool.as_deref(),
             now,
         )?;
         let informative = match decision.scope {
-            Some(BlockScope::BackendWide) => latest_for_scope(&state.records, &backend, None),
-            Some(BlockScope::QuotaPool) => quota_pool
+            Some(BlockScope::BackendWide) => latest_for_scope(
+                &state.records,
+                &key.backend,
+                key.backend_instance.as_deref(),
+                None,
+            ),
+            Some(BlockScope::QuotaPool) => key
+                .quota_pool
                 .as_deref()
                 .and_then(|p| latest_for_pool(&state.records, p)),
-            _ => latest_for_scope(&state.records, &backend, model.as_deref()),
+            _ => latest_for_scope(
+                &state.records,
+                &key.backend,
+                key.backend_instance.as_deref(),
+                key.model.as_deref(),
+            ),
         };
         out.push(ScopeStatus {
-            backend,
-            model,
-            quota_pool,
+            backend: key.backend,
+            backend_instance: key.backend_instance,
+            model: key.model,
+            quota_pool: key.quota_pool,
             eligible: decision.eligible,
             reason: decision.reason,
             unavailable_until: decision.unavailable_until,
@@ -600,6 +747,8 @@ pub mod cli {
     struct Row {
         backend: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        backend_instance: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         quota_pool: Option<String>,
@@ -620,6 +769,7 @@ pub mod cli {
         fn from_status(s: &ScopeStatus, now: OffsetDateTime) -> Self {
             Row {
                 backend: s.backend.clone(),
+                backend_instance: s.backend_instance.clone(),
                 model: s.model.clone(),
                 quota_pool: s.quota_pool.clone(),
                 eligible: s.eligible,
@@ -655,6 +805,9 @@ pub mod cli {
                 Some(model) => format!("{}/{}", row.backend, model),
                 None => row.backend.clone(),
             };
+            if let Some(instance) = &row.backend_instance {
+                name = format!("{} (instance: {})", name, instance);
+            }
             if let Some(pool) = &row.quota_pool {
                 name = format!("{} (pool: {})", name, pool);
             }
@@ -694,15 +847,30 @@ pub mod cli {
     pub fn clear(
         state_path: &std::path::Path,
         backend: &str,
+        backend_instance: Option<&str>,
         model: Option<&str>,
         quota_pool: Option<&str>,
     ) -> Result<()> {
+        if backend_instance.is_some() && quota_pool.is_some() {
+            anyhow::bail!(
+                "--backend-instance and --quota-pool select different scopes; choose one"
+            );
+        }
         let backend = crate::config::canonical_backend_name(backend).to_string();
+        let backend_instance = backend_instance
+            .map(|instance| {
+                crate::execution_identity::validate_secret_safe_label("backend instance", instance)
+            })
+            .transpose()?;
+        let quota_pool = quota_pool
+            .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+            .transpose()?;
         let now = OffsetDateTime::now_utc();
         let record = AvailabilityRecord {
             backend: backend.clone(),
+            backend_instance,
             model: model.map(str::to_string),
-            quota_pool: quota_pool.map(str::to_string),
+            quota_pool,
             status: Status::Available,
             reason: Reason::Unknown,
             observed_at: now_rfc3339(now),

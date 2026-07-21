@@ -300,15 +300,14 @@ fn candidate_is_available(state_path: &std::path::Path, candidate: &CandidateCon
         candidate.model.as_deref(),
         candidate.quota_pool.as_deref(),
     );
-    availability::availability_for(
-        state_path,
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
         &candidate.backend,
         candidate.model.as_deref(),
         quota_pool.as_deref(),
-        OffsetDateTime::now_utc(),
-    )
-    .map(|decision| decision.eligible)
-    .unwrap_or(true)
+    );
+    availability::availability_for_identity(state_path, &identity, OffsetDateTime::now_utc())
+        .map(|decision| decision.eligible)
+        .unwrap_or(true)
 }
 
 /// Among the untried candidates, prefer one that's actually available right

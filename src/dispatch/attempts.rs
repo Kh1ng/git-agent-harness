@@ -884,64 +884,20 @@ fn now_with_local_offset() -> OffsetDateTime {
     OffsetDateTime::now_utc().to_offset(offset)
 }
 
-pub(super) fn mark_backend_unavailable_from_output(
-    backend: &str,
-    model: Option<&str>,
-    quota_pool: Option<&str>,
+pub(super) fn mark_backend_unavailable_from_output_for_identity(
+    identity: &crate::execution_identity::ExecutionIdentity,
     log_text: &str,
     log_path: &str,
 ) -> Result<Option<crate::quota_parser::ParsedFailure>> {
-    mark_backend_unavailable_from_output_at(
+    mark_backend_unavailable_from_output_for_identity_at(
         &crate::availability::resolve_state_path(),
-        backend,
-        model,
-        quota_pool,
+        identity,
         log_text,
         log_path,
     )
 }
 
-pub(super) fn route_after_backend_unavailable<'a>(
-    cfg: &crate::config::GahConfig,
-    profile: &Profile,
-    route_req: &RouteRequest<'a>,
-    ticket_meta: Option<&WorkMetadata>,
-    ledger: &mut LedgerEntry,
-    route: &RouteDecision,
-    failure_output: (&str, &str),
-) -> Result<Option<(crate::quota_parser::ParsedFailure, RouteDecision)>> {
-    let Some(parsed) = mark_backend_unavailable_from_output(
-        &route.effective_backend,
-        route.effective_model.as_deref(),
-        route.effective_quota_pool.as_deref(),
-        failure_output.0,
-        failure_output.1,
-    )?
-    else {
-        return Ok(None);
-    };
-
-    let rerouted = decide_route(cfg, profile, route_req.clone(), ticket_meta, ledger)?;
-
-    Ok(Some((parsed, rerouted)))
-}
-
-/// Combine CLI output with the run-scoped diagnostic tail captured from a
-/// backend-owned internal log. Missing internal logs intentionally preserve
-/// existing output-only behavior.
-pub(super) fn failure_text_with_internal_log(
-    output: &str,
-    internal_log_delta: Option<&str>,
-) -> String {
-    let Some(delta) = internal_log_delta.filter(|delta| !delta.trim().is_empty()) else {
-        return output.to_string();
-    };
-    if output.trim().is_empty() {
-        return format!("[backend internal log]\n{delta}");
-    }
-    format!("{output}\n\n[backend internal log]\n{delta}")
-}
-
+#[cfg(test)]
 fn mark_backend_unavailable_from_output_at(
     state_path: &Path,
     backend: &str,
@@ -950,6 +906,18 @@ fn mark_backend_unavailable_from_output_at(
     log_text: &str,
     log_path: &str,
 ) -> Result<Option<crate::quota_parser::ParsedFailure>> {
+    let identity =
+        crate::execution_identity::ExecutionIdentity::legacy_candidate(backend, model, quota_pool);
+    mark_backend_unavailable_from_output_for_identity_at(state_path, &identity, log_text, log_path)
+}
+
+fn mark_backend_unavailable_from_output_for_identity_at(
+    state_path: &Path,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    log_text: &str,
+    log_path: &str,
+) -> Result<Option<crate::quota_parser::ParsedFailure>> {
+    let backend = identity.logical_backend.as_str();
     let now = now_with_local_offset();
     // An idle watchdog kill is a backend outage signal, not an ordinary agent
     // failure. Keep this route out of the candidate set for a short bounded
@@ -962,11 +930,9 @@ fn mark_backend_unavailable_from_output_at(
         && log_text.contains("not just slow).")
     {
         let cooldown = now + time::Duration::minutes(15);
-        crate::availability::record_unavailable(
+        crate::availability::record_unavailable_for_identity(
             state_path,
-            backend,
-            model.filter(|m| !m.is_empty()),
-            quota_pool,
+            identity,
             crate::availability::Reason::BackendOutage,
             crate::availability::Source::BackendError,
             Some(cooldown),
@@ -1013,11 +979,9 @@ fn mark_backend_unavailable_from_output_at(
         "{}; confidence={:?}; log={}",
         parsed.matched_evidence, parsed.confidence, log_path
     );
-    crate::availability::record_unavailable(
+    crate::availability::record_unavailable_for_identity(
         state_path,
-        backend,
-        model.filter(|m| !m.is_empty()),
-        quota_pool,
+        identity,
         reason,
         crate::availability::Source::BackendError,
         unavailable_until,
@@ -1025,6 +989,45 @@ fn mark_backend_unavailable_from_output_at(
         now,
     )?;
     Ok(Some(parsed))
+}
+
+pub(super) fn route_after_backend_unavailable<'a>(
+    cfg: &crate::config::GahConfig,
+    profile: &Profile,
+    route_req: &RouteRequest<'a>,
+    ticket_meta: Option<&WorkMetadata>,
+    ledger: &mut LedgerEntry,
+    route: &RouteDecision,
+    failure_output: (&str, &str),
+) -> Result<Option<(crate::quota_parser::ParsedFailure, RouteDecision)>> {
+    let Some(parsed) = mark_backend_unavailable_from_output_for_identity(
+        &route.identity,
+        failure_output.0,
+        failure_output.1,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let rerouted = decide_route(cfg, profile, route_req.clone(), ticket_meta, ledger)?;
+
+    Ok(Some((parsed, rerouted)))
+}
+
+/// Combine CLI output with the run-scoped diagnostic tail captured from a
+/// backend-owned internal log. Missing internal logs intentionally preserve
+/// existing output-only behavior.
+pub(super) fn failure_text_with_internal_log(
+    output: &str,
+    internal_log_delta: Option<&str>,
+) -> String {
+    let Some(delta) = internal_log_delta.filter(|delta| !delta.trim().is_empty()) else {
+        return output.to_string();
+    };
+    if output.trim().is_empty() {
+        return format!("[backend internal log]\n{delta}");
+    }
+    format!("{output}\n\n[backend internal log]\n{delta}")
 }
 
 #[cfg(test)]

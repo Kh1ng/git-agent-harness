@@ -814,7 +814,6 @@ where
 {
     let backend = identity.logical_backend.as_str();
     let model = identity.effective_model.as_deref();
-    let quota_pool = identity.quota_pool.as_deref();
     if !backend_available(backend) {
         return Ok(Some(SkippedBackend {
             backend: backend.to_string(),
@@ -828,7 +827,7 @@ where
         return Ok(Some(skip));
     }
 
-    let decision = availability::availability_for(state_path, backend, model, quota_pool, now)?;
+    let decision = availability::availability_for_identity(state_path, identity, now)?;
     if decision.eligible {
         let candidate_key = CandidateIdentity::from_execution_identity(identity);
         if exclude_attempted

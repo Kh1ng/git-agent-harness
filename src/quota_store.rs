@@ -23,7 +23,11 @@ use std::path::{Path, PathBuf};
 pub struct QuotaObservationRecord {
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_pool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_window: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,7 +73,10 @@ pub fn load(state_path: &Path) -> Result<Vec<QuotaObservationRecord>> {
         // record (e.g. a partial write) must not discard every valid
         // observation before/after it. Mirrors availability.rs's resilience.
         match serde_json::from_str::<QuotaObservationRecord>(line) {
-            Ok(rec) => records.push(rec),
+            Ok(mut rec) => {
+                rec.backend = crate::config::canonical_backend_name(&rec.backend).to_string();
+                records.push(rec);
+            }
             Err(_) => continue,
         }
     }
@@ -83,6 +90,17 @@ pub fn load_account_observations() -> Vec<QuotaObservationRecord> {
 
 /// Append one record under an exclusive lock. Missing parent dirs are created.
 pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
+    for (field, value) in [
+        ("backend instance", rec.backend_instance.as_deref()),
+        ("quota pool", rec.quota_pool.as_deref()),
+    ] {
+        if let Some(value) = value {
+            let normalized = crate::execution_identity::validate_secret_safe_label(field, value)?;
+            if normalized != value {
+                anyhow::bail!("{field} must not contain surrounding whitespace");
+            }
+        }
+    }
     if let Some(parent) = state_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -112,12 +130,43 @@ pub fn latest_for<'a>(
         .filter(|r| {
             r.backend == backend
                 && r.model.as_deref() == model
-                && (r.quota_used_percent.is_some()
-                    || r.quota_remaining_percent.is_some()
-                    || r.quota_window.is_some()
-                    || r.quota_reset_at.is_some())
+                && r.backend_instance.is_none()
+                && r.quota_pool.is_none()
+                && has_quota_data(r)
         })
         .max_by(|a, b| a.observed_at.cmp(&b.observed_at))
+}
+
+/// Most-recent observation for an exact execution identity, with a
+/// deterministic fallback to legacy instance-unknown rows. A row for a
+/// different explicit instance never matches, even when backend/model agree.
+pub fn latest_for_identity<'a>(
+    records: &'a [QuotaObservationRecord],
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> Option<&'a QuotaObservationRecord> {
+    records
+        .iter()
+        .filter(|record| {
+            record.backend == identity.logical_backend
+                && (record.model.is_none() || record.model == identity.effective_model)
+                && record
+                    .backend_instance
+                    .as_deref()
+                    .is_none_or(|instance| instance == identity.backend_instance)
+                && record
+                    .quota_pool
+                    .as_deref()
+                    .is_none_or(|pool| Some(pool) == identity.quota_pool.as_deref())
+                && has_quota_data(record)
+        })
+        .max_by(|left, right| left.observed_at.cmp(&right.observed_at))
+}
+
+fn has_quota_data(record: &QuotaObservationRecord) -> bool {
+    record.quota_used_percent.is_some()
+        || record.quota_remaining_percent.is_some()
+        || record.quota_window.is_some()
+        || record.quota_reset_at.is_some()
 }
 
 /// #166: run `codex status --json`, parse its account-level quota, and append
@@ -135,7 +184,9 @@ pub fn refresh_codex_and_store(
         Some(obs) => {
             let rec = QuotaObservationRecord {
                 backend: obs.backend.clone(),
+                backend_instance: None,
                 model: obs.model.clone(),
+                quota_pool: None,
                 quota_window: obs.quota_window.clone(),
                 quota_used_percent: obs.quota_used_percent,
                 quota_remaining_percent: obs.quota_remaining_percent,
@@ -148,6 +199,34 @@ pub fn refresh_codex_and_store(
         }
         None => Ok(None),
     }
+}
+
+/// Refresh and persist account quota for one explicit execution identity.
+pub fn refresh_codex_and_store_for_identity(
+    codex_cmd: &str,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    state_path: &Path,
+) -> Result<Option<QuotaObservationRecord>> {
+    let observation =
+        crate::usage::refresh_codex_quota(codex_cmd, identity.effective_model.as_deref())
+            .map_err(|error| anyhow::anyhow!("`codex status --json` failed: {error}"))?;
+    let Some(observation) = observation else {
+        return Ok(None);
+    };
+    let record = QuotaObservationRecord {
+        backend: identity.logical_backend.clone(),
+        backend_instance: Some(identity.backend_instance.clone()),
+        model: identity.effective_model.clone(),
+        quota_pool: identity.quota_pool.clone(),
+        quota_window: observation.quota_window,
+        quota_used_percent: observation.quota_used_percent,
+        quota_remaining_percent: observation.quota_remaining_percent,
+        quota_reset_at: observation.quota_reset_at,
+        observed_at: observation.observed_at,
+        usage_source: observation.usage_source,
+    };
+    append(state_path, &record)?;
+    Ok(Some(record))
 }
 
 #[cfg(test)]
@@ -174,7 +253,9 @@ mod tests {
             &path,
             &QuotaObservationRecord {
                 backend: "codex".into(),
+                backend_instance: None,
                 model: Some("gpt-5".into()),
+                quota_pool: None,
                 quota_window: Some("300m".into()),
                 quota_used_percent: Some(25.0),
                 quota_remaining_percent: Some(75.0),
@@ -203,7 +284,9 @@ mod tests {
                 &path,
                 &QuotaObservationRecord {
                     backend: "codex".into(),
+                    backend_instance: None,
                     model: None,
+                    quota_pool: None,
                     quota_window: Some("300m".into()),
                     quota_used_percent: Some(pct),
                     quota_remaining_percent: Some(100.0 - pct),
@@ -219,7 +302,9 @@ mod tests {
             &path,
             &QuotaObservationRecord {
                 backend: "agy".into(),
+                backend_instance: None,
                 model: None,
+                quota_pool: None,
                 quota_window: Some("AGY individual quota".into()),
                 quota_used_percent: None,
                 quota_remaining_percent: None,
@@ -243,7 +328,9 @@ mod tests {
         let (_dir, path) = tmp_store();
         let good1 = QuotaObservationRecord {
             backend: "codex".into(),
+            backend_instance: None,
             model: None,
+            quota_pool: None,
             quota_window: Some("weekly".into()),
             quota_used_percent: Some(10.0),
             quota_remaining_percent: Some(90.0),
@@ -280,7 +367,9 @@ mod tests {
             &path,
             &QuotaObservationRecord {
                 backend: "codex".into(),
+                backend_instance: None,
                 model: None,
+                quota_pool: None,
                 quota_window: None,
                 quota_used_percent: None,
                 quota_remaining_percent: None,
@@ -291,5 +380,92 @@ mod tests {
         )
         .unwrap();
         assert!(latest_for(&load(&path).unwrap(), "codex", None).is_none());
+    }
+
+    fn scoped_record(
+        instance: Option<&str>,
+        percent: f64,
+        observed_at: &str,
+    ) -> QuotaObservationRecord {
+        QuotaObservationRecord {
+            backend: "opencode".into(),
+            backend_instance: instance.map(str::to_string),
+            model: Some("shared-model".into()),
+            quota_pool: Some("shared-pool".into()),
+            quota_window: Some("daily".into()),
+            quota_used_percent: Some(percent),
+            quota_remaining_percent: Some(100.0 - percent),
+            quota_reset_at: None,
+            observed_at: Some(observed_at.into()),
+            usage_source: Some("test".into()),
+        }
+    }
+
+    fn identity(instance: &str) -> crate::execution_identity::ExecutionIdentity {
+        let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "opencode",
+            Some("shared-model"),
+            Some("shared-pool"),
+        );
+        identity.backend_instance = instance.into();
+        identity
+    }
+
+    #[test]
+    fn latest_identity_observation_never_crosses_explicit_instances() {
+        let records = vec![
+            scoped_record(Some("account-a"), 10.0, "2026-07-20T10:00:00Z"),
+            scoped_record(Some("account-b"), 70.0, "2026-07-20T11:00:00Z"),
+        ];
+
+        let first = latest_for_identity(&records, &identity("account-a")).unwrap();
+        let second = latest_for_identity(&records, &identity("account-b")).unwrap();
+
+        assert_eq!(first.quota_used_percent, Some(10.0));
+        assert_eq!(second.quota_used_percent, Some(70.0));
+        assert!(
+            latest_for(&records, "opencode", Some("shared-model")).is_none(),
+            "legacy aggregation must not erase explicit instance identity"
+        );
+    }
+
+    #[test]
+    fn identity_observation_reads_legacy_unknown_without_assigning_it() {
+        let records = vec![scoped_record(None, 40.0, "2026-07-20T10:00:00Z")];
+
+        let observed = latest_for_identity(&records, &identity("account-a")).unwrap();
+
+        assert_eq!(observed.backend_instance, None);
+        assert_eq!(observed.quota_used_percent, Some(40.0));
+    }
+
+    #[test]
+    fn account_level_observation_applies_to_models_on_the_same_instance() {
+        let mut account = scoped_record(Some("account-a"), 55.0, "2026-07-20T10:00:00Z");
+        account.model = None;
+        let records = [account];
+
+        let observed = latest_for_identity(&records, &identity("account-a")).unwrap();
+
+        assert_eq!(observed.model, None);
+        assert_eq!(observed.quota_used_percent, Some(55.0));
+    }
+
+    #[test]
+    fn loading_legacy_jsonl_is_idempotent_and_keeps_instance_unknown() {
+        let (_dir, path) = tmp_store();
+        let legacy =
+            r#"{"backend":"codex","model":null,"quota_window":"weekly","quota_used_percent":30.0}"#;
+        std::fs::write(&path, format!("{legacy}\n")).unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        for _ in 0..2 {
+            let records = load(&path).unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].backend_instance, None);
+            assert_eq!(records[0].quota_pool, None);
+        }
+
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 }

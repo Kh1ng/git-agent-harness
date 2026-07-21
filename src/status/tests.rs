@@ -247,6 +247,7 @@ fn active_backend_wide_block() {
         version: 1,
         records: vec![AvailabilityRecord {
             backend: "claude".into(),
+            backend_instance: None,
             model: None,
             quota_pool: None,
             status: Status::Unavailable,
@@ -283,6 +284,7 @@ fn model_specific_availability_block_preserves_scope() {
         version: 1,
         records: vec![AvailabilityRecord {
             backend: "claude".into(),
+            backend_instance: None,
             model: Some("claude-3-5".into()),
             quota_pool: None,
             status: Status::Unavailable,
@@ -317,6 +319,7 @@ fn expired_availability_record_skipped() {
         version: 1,
         records: vec![AvailabilityRecord {
             backend: "claude".into(),
+            backend_instance: None,
             model: None,
             quota_pool: None,
             status: Status::Unavailable,

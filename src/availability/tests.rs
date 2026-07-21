@@ -586,7 +586,7 @@ fn cli_clear_marks_backend_and_model_available_without_touching_others() {
             .eligible
     );
 
-    cli::clear(&p, "codex", Some("gpt-5.4-mini"), None).unwrap();
+    cli::clear(&p, "codex", None, Some("gpt-5.4-mini"), None).unwrap();
 
     let d_codex = availability_for(&p, "codex", Some("gpt-5.4-mini"), now).unwrap();
     assert!(d_codex.eligible, "cleared scope must be eligible again");
@@ -633,7 +633,7 @@ fn cli_clear_without_model_marks_backend_wide_available() {
     )
     .unwrap();
 
-    cli::clear(&p, "agy", None, None).unwrap();
+    cli::clear(&p, "agy", None, None, None).unwrap();
     assert!(
         availability_for(&p, "agy", Some("Gemini 3.5 Flash (Medium)"), now)
             .unwrap()
@@ -763,7 +763,7 @@ fn cli_clear_with_quota_pool_marks_only_that_pool() {
         .eligible
     );
 
-    cli::clear(&p, "claude", None, Some("claude-main")).unwrap();
+    cli::clear(&p, "claude", None, None, Some("claude-main")).unwrap();
 
     assert!(
         super::availability_for(
@@ -787,4 +787,150 @@ fn cli_clear_with_quota_pool_marks_only_that_pool() {
         .collect();
     assert_eq!(manual.len(), 1);
     assert_eq!(manual[0].quota_pool.as_deref(), Some("claude-main"));
+}
+
+fn explicit_identity(
+    instance: &str,
+    quota_pool: Option<&str>,
+) -> crate::execution_identity::ExecutionIdentity {
+    let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        "opencode",
+        Some("shared-model"),
+        quota_pool,
+    );
+    identity.backend_instance = instance.to_string();
+    identity.account_label = Some(instance.to_string());
+    identity
+}
+
+#[test]
+fn explicit_instances_with_one_backend_and_model_remain_independently_eligible() {
+    let tmp = TempDir::new().unwrap();
+    let p = path(&tmp);
+    let now = OffsetDateTime::now_utc();
+    let first = explicit_identity("opencode-account-a", None);
+    let second = explicit_identity("opencode-account-b", None);
+
+    super::record_unavailable_for_identity(
+        &p,
+        &first,
+        Reason::AuthenticationError,
+        Source::BackendError,
+        None,
+        None,
+        now,
+    )
+    .unwrap();
+
+    assert!(
+        !super::availability_for_identity(&p, &first, now)
+            .unwrap()
+            .eligible
+    );
+    assert!(
+        super::availability_for_identity(&p, &second, now)
+            .unwrap()
+            .eligible
+    );
+}
+
+#[test]
+fn pool_block_applies_to_every_instance_in_that_pool_only() {
+    let tmp = TempDir::new().unwrap();
+    let p = path(&tmp);
+    let now = OffsetDateTime::now_utc();
+    let first = explicit_identity("opencode-account-a", Some("shared-paid-pool"));
+    let second = explicit_identity("opencode-account-b", Some("shared-paid-pool"));
+    let other = explicit_identity("opencode-account-c", Some("other-paid-pool"));
+
+    super::record_unavailable_for_identity(
+        &p,
+        &first,
+        Reason::QuotaExhausted,
+        Source::BackendError,
+        None,
+        None,
+        now,
+    )
+    .unwrap();
+
+    assert!(
+        !super::availability_for_identity(&p, &first, now)
+            .unwrap()
+            .eligible
+    );
+    assert!(
+        !super::availability_for_identity(&p, &second, now)
+            .unwrap()
+            .eligible
+    );
+    assert!(
+        super::availability_for_identity(&p, &other, now)
+            .unwrap()
+            .eligible
+    );
+}
+
+#[test]
+fn legacy_v1_migration_is_idempotent_and_keeps_instance_unknown() {
+    let tmp = TempDir::new().unwrap();
+    let p = path(&tmp);
+    std::fs::write(
+        &p,
+        r#"{"version":1,"records":[{"backend":"codex","status":"unavailable","reason":"rate_limited","observed_at":"2026-07-20T00:00:00Z","source":"imported"}]}"#,
+    )
+    .unwrap();
+
+    let loaded = super::load_state(&p).unwrap();
+    assert_eq!(loaded.version, CURRENT_VERSION);
+    assert_eq!(loaded.records[0].backend_instance, None);
+
+    super::update_state(&p, |_| {}).unwrap();
+    let once = std::fs::read(&p).unwrap();
+    super::update_state(&p, |_| {}).unwrap();
+    assert_eq!(std::fs::read(&p).unwrap(), once);
+    let persisted = super::load_state(&p).unwrap();
+    assert_eq!(persisted.version, CURRENT_VERSION);
+    assert_eq!(persisted.records[0].backend_instance, None);
+}
+
+#[test]
+fn instance_clear_does_not_clear_a_sibling_instance() {
+    let tmp = TempDir::new().unwrap();
+    let p = path(&tmp);
+    let now = OffsetDateTime::now_utc();
+    let first = explicit_identity("opencode-account-a", None);
+    let second = explicit_identity("opencode-account-b", None);
+    super::record_unavailable(
+        &p,
+        "opencode",
+        Some("shared-model"),
+        None,
+        Reason::ManualDisable,
+        Source::Manual,
+        None,
+        None,
+        now,
+    )
+    .unwrap();
+
+    cli::clear(
+        &p,
+        "opencode",
+        Some("opencode-account-a"),
+        Some("shared-model"),
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        super::availability_for_identity(&p, &first, now)
+            .unwrap()
+            .eligible
+    );
+    assert!(
+        !super::availability_for_identity(&p, &second, now)
+            .unwrap()
+            .eligible
+    );
 }

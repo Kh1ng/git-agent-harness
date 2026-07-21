@@ -180,6 +180,8 @@ pub struct ObservationStatus {
 #[derive(Serialize, Clone)]
 pub struct ScopeStatusJson {
     pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_pool: Option<String>,
@@ -363,6 +365,7 @@ fn build_snapshot_inner(
                 .into_iter()
                 .map(|s| ScopeStatusJson {
                     backend: s.backend,
+                    backend_instance: s.backend_instance,
                     model: s.model,
                     quota_pool: s.quota_pool,
                     eligible_now: s.eligible,
