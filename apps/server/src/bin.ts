@@ -7,13 +7,29 @@ import { createWebSocketHandler } from './wsServer.js';
 import { isGahCliAvailable } from './gahCli.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { markReadinessCheck } from './serverReadiness.js';
+import {
+  InvalidBindHostError,
+  resolveBindHost,
+  unauthenticatedExposureWarning,
+  validateBindHost
+} from './bindHost.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = resolveBindHost();
 
 async function main() {
+  try {
+    validateBindHost(HOST);
+  } catch (error) {
+    if (error instanceof InvalidBindHostError) {
+      console.error(`Failed to start server: ${error.message}`);
+      process.exit(1);
+    }
+    throw error;
+  }
+
   console.log('Starting Git Agent Harness server...');
-  
+
   // Create Express app
   const app = createExpressServer();
   
@@ -53,6 +69,10 @@ async function main() {
     console.log(`Git Agent Harness server listening on ${HOST}:${PORT}`);
     console.log(`WebSocket server available on ws://${HOST}:${PORT}`);
     console.log(`Health check available on http://${HOST}:${PORT}/health`);
+    const warning = unauthenticatedExposureWarning(HOST);
+    if (warning) {
+      console.warn(warning);
+    }
   });
   
   // Handle graceful shutdown

@@ -68,11 +68,16 @@ The updater never starts or restarts a recurring `gah loop`; with
 
 ### systemd units
 
-- **`gah-server`** — runs `gah server`, the WebSocket server backing the
-  desktop/web dashboard. Defaults: `--host 127.0.0.1 --port 3773`. Keep it bound
-  to loopback (or a Tailscale interface); network-layer access control
-  (Tailscale / Cloudflare Access) is the auth model, there is no app-level
-  login. Verify: `gah server --help`.
+- **`gah-server`** — runs `apps/server/dist/bin.js`, the REST/WebSocket
+  control-plane server backing the desktop/web dashboard (see "Server bind
+  host" below for `HOST`/port configuration). Its mutation routes (profile
+  writes, config changes, loop start/stop) have no app-level authentication
+  yet — that's issue #532. Until it ships, network-layer access control
+  (loopback bind, Tailscale, Cloudflare Access) is the only auth boundary;
+  keep the bind host loopback or restricted to a private interface unless
+  you've deployed one of those in front of it. The server logs its effective
+  bind address at startup and emits a warning there when it is bound
+  non-loopback.
 - **`gah-loop@<profile>`** — the recurring bounded controller. Each iteration
   is one observe → classify → decide → execute-one-action → persist cycle.
   It is a systemd *user* unit, and is the sole parent of that profile's worker
@@ -99,6 +104,33 @@ sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/ga
 sudo systemctl daemon-reload
 sudo systemctl enable --now gah-server
 ```
+
+#### Server bind host (issue #643)
+
+`apps/server` (the process this unit starts) defaults `HOST` to `0.0.0.0` and
+`PORT` to `3773`. Two ways to override, in increasing order of durability:
+
+- **Direct process override**: set `HOST` in the process environment (for
+  example when running `npm start` by hand). An unusable value (not a literal
+  IPv4/IPv6 address) fails startup immediately with a clear error instead of
+  silently falling back to the default.
+- **Persistent systemd override**: `packaging/systemd/gah-server.service`
+  reads `/etc/gah/server.env` via `EnvironmentFile=-` (the file is optional;
+  the unit still starts if it's absent). Set `HOST=127.0.0.1`, a specific
+  interface address, or `0.0.0.0` there instead of editing the installed
+  unit. `scripts/install.sh` creates this file on first install (seed it with
+  `GAH_SERVER_HOST=127.0.0.1 scripts/install.sh`) and leaves an existing file
+  untouched on every later run; `gah update --restart-server` never writes to
+  it either, so an operator's override survives every reinstall/update.
+
+The server logs its effective bind address on every startup. When that
+address is not loopback, it also logs a prominent warning: the mutation
+routes (profile writes, config changes, loop start/stop) have no
+authentication yet (issue #532), so anything that can reach a non-loopback
+bind can call them. This is not new exposure — `0.0.0.0` has always been the
+default — the warning just makes it visible instead of silent. Prefer binding
+loopback and fronting the dashboard with Tailscale/Cloudflare Access (or
+whatever your network boundary is) until #532 ships.
 
 `gah-server` (and hence the dashboard's Start/Stop buttons) drives `systemctl
 --user` for the loop, which requires that user's systemd *user* manager to be

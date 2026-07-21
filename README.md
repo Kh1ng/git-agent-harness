@@ -25,6 +25,22 @@ mkdir -p ~/.config/gah
 cp config/gah-config.example.toml ~/.config/gah/config.toml
 ```
 
+The control-plane server binds `0.0.0.0:3773` by default. To bind a single
+interface instead (recommended, since the server's mutation routes have no
+authentication yet — see issue #532), set `GAH_SERVER_HOST` before first
+install:
+
+```bash
+GAH_SERVER_HOST=127.0.0.1 scripts/install.sh
+```
+
+This writes `/etc/gah/server.env`, read by `packaging/systemd/gah-server.service`
+via `EnvironmentFile=`. Edit that file's `HOST=` value at any time to change
+the bind address without touching the installed unit; reinstalls and `gah
+update --restart-server` never overwrite an existing `/etc/gah/server.env`.
+See `docs/OPERATIONS.md` for details, including the startup warning emitted
+whenever the server binds a non-loopback address.
+
 For every deployed upgrade, use the installed CLI to update the checkout,
 replace the executable selected by `PATH`, rebuild the server, and restart the
 system service only after all build steps succeed:
