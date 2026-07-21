@@ -659,6 +659,9 @@ export interface LedgerUsage {
   actual_model_unknown_reason?: string | null;
   provider_unknown_reason?: string | null;
   account_label?: string | null;
+  auth_source_label?: string | null;
+  quota_pool?: string | null;
+  provider_attribution_source?: 'backend_reported' | 'config_declared' | 'inferred' | 'unknown' | 'mixed' | 'mixed_or_unknown' | null;
   pricing_source?: string | null;
   pricing_version?: string | null;
   cost_unknown_reason?: string | null;
@@ -726,6 +729,28 @@ export interface AttemptRecord {
   usage: LedgerUsage;
 }
 
+/** Secret-safe canonical route identity persisted for a single attempt.
+ * Executable paths and credential values are deliberately excluded. */
+export interface ExecutionIdentity {
+  runner_kind: string;
+  requested_backend: string;
+  logical_backend: string;
+  backend_instance: string;
+  account_label: string | null;
+  auth_source_label: string | null;
+  quota_pool: string | null;
+  requested_model: string | null;
+  effective_model: string | null;
+}
+
+export interface AttemptRoutingRecord {
+  attempt_number: number;
+  backend_instance: string;
+  effective_model: string | null;
+  identity?: ExecutionIdentity | null;
+  routing_diagnostics?: RoutingDiagnostics | null;
+}
+
 export interface LedgerEntry {
   timestamp: string;
   session_id: string | null;
@@ -785,6 +810,8 @@ export interface LedgerEntry {
   attempts_completed?: number;
   /** TICKET-101: per-attempt backend/model/duration/usage, in order. */
   attempts?: AttemptRecord[];
+  /** Canonical route identity for each attempted launch. */
+  attempt_routing?: AttemptRoutingRecord[];
   /** initial | post_review_repair | review | stuck_loop_gate */
   dispatch_reason?: string | null;
   usage: LedgerUsage;

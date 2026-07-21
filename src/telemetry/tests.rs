@@ -75,8 +75,8 @@ pub(crate) mod telemetry_tests {
     #[test]
     fn test_schema_version_in_record() {
         assert_eq!(
-            SCHEMA_VERSION, 8,
-            "provenance-aware per-attempt behavior metrics require telemetry export schema version 8"
+            SCHEMA_VERSION, 9,
+            "canonical attempt identity requires telemetry export schema version 9"
         );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
@@ -96,6 +96,7 @@ pub(crate) mod telemetry_tests {
             mode: "test".to_string(),
             attempt_number: 0,
             backend: "test".to_string(),
+            runner_kind: None,
             effective_backend: "test".to_string(),
             requested_backend: "test".to_string(),
             effective_model: None,
@@ -114,8 +115,11 @@ pub(crate) mod telemetry_tests {
             usage_classification: None,
             backend_instance: None,
             model_provider: None,
+            provider_attribution_source: None,
             model_provider_unknown_reason: None,
             account_label: None,
+            auth_source_label: None,
+            quota_pool: None,
             pricing_source: None,
             pricing_version: None,
             cost_unknown_reason: None,
@@ -382,6 +386,9 @@ pub(crate) mod telemetry_tests {
                 actual_model_unknown_reason: None,
                 provider_unknown_reason: None,
                 account_label: None,
+                auth_source_label: None,
+                quota_pool: None,
+                provider_attribution_source: None,
                 pricing_source: None,
                 pricing_version: None,
                 cost_unknown_reason: None,
@@ -427,6 +434,9 @@ pub(crate) mod telemetry_tests {
                 actual_model_unknown_reason: None,
                 provider_unknown_reason: None,
                 account_label: None,
+                auth_source_label: None,
+                quota_pool: None,
+                provider_attribution_source: None,
                 pricing_source: None,
                 pricing_version: None,
                 cost_unknown_reason: None,
@@ -460,6 +470,9 @@ pub(crate) mod telemetry_tests {
             actual_model_unknown_reason: None,
             provider_unknown_reason: None,
             account_label: None,
+            auth_source_label: None,
+            quota_pool: None,
+            provider_attribution_source: None,
             pricing_source: None,
             pricing_version: None,
             cost_unknown_reason: None,
@@ -506,6 +519,98 @@ pub(crate) mod telemetry_tests {
                 assert_ne!(task_record.input_tokens, Some(500)); // Not the attempt's tokens
             }
         }
+    }
+
+    #[test]
+    fn attempt_export_uses_canonical_route_identity() {
+        let mut entry = create_test_ledger_entry();
+        entry.requested_backend = "stale-entry-value".into();
+        entry.attempts = vec![crate::ledger::AttemptRecord {
+            attempt_number: 1,
+            backend: "agy-second".into(),
+            effective_model: Some("gemini-pro".into()),
+            usage: crate::ledger::LedgerUsage {
+                backend_instance: Some("agy-second:google".into()),
+                account_label: Some("google-secondary".into()),
+                auth_source_label: Some("agy-secondary-session".into()),
+                quota_pool: Some("google".into()),
+                provider: Some("google".into()),
+                provider_attribution_source: Some("backend_reported".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        let mut identity = crate::execution_identity::ExecutionIdentity::legacy_route(
+            "auto",
+            Some("requested-gemini"),
+            "agy-second",
+            Some("gemini-pro"),
+            Some("google"),
+        );
+        identity.account_label = Some("google-secondary".into());
+        identity.auth_source_label = Some("agy-secondary-session".into());
+        entry.attempt_routing = vec![crate::ledger::AttemptRoutingRecord {
+            attempt_number: 1,
+            backend_instance: identity.backend_instance.clone(),
+            effective_model: identity.effective_model.clone(),
+            identity: Some(identity),
+            routing_diagnostics: None,
+        }];
+
+        let records = crate::telemetry::extractor::extract_attempt_usage_records(
+            &entry,
+            "2026-07-10T13:00:00Z",
+        );
+        let record = &records[0];
+        assert_eq!(record.runner_kind.as_deref(), Some("agy"));
+        assert_eq!(record.requested_backend, "auto");
+        assert_eq!(record.requested_model.as_deref(), Some("requested-gemini"));
+        assert_eq!(
+            record.backend_instance.as_deref(),
+            Some("agy-second:google")
+        );
+        assert_eq!(
+            record.auth_source_label.as_deref(),
+            Some("agy-secondary-session")
+        );
+        assert_eq!(record.quota_pool.as_deref(), Some("google"));
+        assert_eq!(
+            record.provider_attribution_source.as_deref(),
+            Some("backend_reported")
+        );
+    }
+
+    #[test]
+    fn historical_attempt_export_does_not_invent_identity_or_provider() {
+        let mut entry = create_test_ledger_entry();
+        entry.provider = "github".into();
+        entry.usage = crate::ledger::LedgerUsage {
+            backend_instance: Some("different-summary-instance".into()),
+            provider: Some("different-summary-provider".into()),
+            usage_classification: Some("api_key_backed".into()),
+            account_label: Some("different-summary-account".into()),
+            ..Default::default()
+        };
+        entry.attempts = vec![crate::ledger::AttemptRecord {
+            attempt_number: 1,
+            backend: "legacy-backend".into(),
+            effective_model: None,
+            usage: crate::ledger::LedgerUsage::default(),
+            ..Default::default()
+        }];
+
+        let records = crate::telemetry::extractor::extract_attempt_usage_records(
+            &entry,
+            "2026-07-10T13:00:00Z",
+        );
+        let record = &records[0];
+        assert_eq!(record.runner_kind, None);
+        assert_eq!(record.backend_instance, None);
+        assert_eq!(record.model_provider, None);
+        assert_eq!(record.usage_classification, None);
+        assert_eq!(record.account_label, None);
+        assert_eq!(record.auth_source_label, None);
+        assert_eq!(record.quota_pool, None);
     }
 
     #[test]
@@ -966,6 +1071,7 @@ default_target_branch = "main"
                 usage_source: Some("test".to_string()),
                 usage_classification: Some("api_key_backed".to_string()),
                 backend_instance: Some("instance-api".to_string()),
+                quota_pool: Some("api-pool".to_string()),
                 provider: Some("openai".to_string()),
                 actual_model: Some("gpt-4".to_string()),
                 account_label: Some("api-acct".to_string()),
@@ -993,6 +1099,7 @@ default_target_branch = "main"
                 usage_source: Some("test".to_string()),
                 usage_classification: Some("api_key_backed".to_string()),
                 backend_instance: Some("instance-api".to_string()),
+                quota_pool: Some("api-pool".to_string()),
                 provider: Some("openai".to_string()),
                 actual_model: Some("gpt-4".to_string()),
                 account_label: Some("api-acct".to_string()),
@@ -1020,6 +1127,7 @@ default_target_branch = "main"
                 usage_source: Some("test".to_string()),
                 usage_classification: Some("subscription".to_string()),
                 backend_instance: Some("instance-sub".to_string()),
+                quota_pool: Some("subscription-pool".to_string()),
                 provider: Some("anthropic".to_string()),
                 actual_model: Some("claude-3-5".to_string()),
                 account_label: Some("sub-acct".to_string()),
@@ -1040,6 +1148,47 @@ default_target_branch = "main"
         entry.effective_backend = "claude".to_string();
         entry.effective_model = Some("claude-3-5".to_string());
         entry.attempts = vec![attempt1, attempt2, attempt3];
+        entry.attempt_routing = vec![
+            crate::ledger::AttemptRoutingRecord {
+                attempt_number: 1,
+                backend_instance: "instance-api".into(),
+                effective_model: Some("gpt-4".into()),
+                identity: Some(crate::execution_identity::ExecutionIdentity::legacy_route(
+                    "auto",
+                    Some("gpt-4"),
+                    "codex",
+                    Some("gpt-4"),
+                    Some("api-pool"),
+                )),
+                routing_diagnostics: None,
+            },
+            crate::ledger::AttemptRoutingRecord {
+                attempt_number: 2,
+                backend_instance: "instance-api".into(),
+                effective_model: Some("gpt-4".into()),
+                identity: Some(crate::execution_identity::ExecutionIdentity::legacy_route(
+                    "auto",
+                    Some("gpt-4"),
+                    "codex",
+                    Some("gpt-4"),
+                    Some("api-pool"),
+                )),
+                routing_diagnostics: None,
+            },
+            crate::ledger::AttemptRoutingRecord {
+                attempt_number: 3,
+                backend_instance: "instance-sub".into(),
+                effective_model: Some("claude-3-5".into()),
+                identity: Some(crate::execution_identity::ExecutionIdentity::legacy_route(
+                    "auto",
+                    Some("gpt-4"),
+                    "claude",
+                    Some("claude-3-5"),
+                    Some("subscription-pool"),
+                )),
+                routing_diagnostics: None,
+            },
+        ];
         entry.attempts_started = Some(3);
         entry.attempts_completed = Some(3);
         // top-level usage would normally be aggregated sum of attempts
@@ -1058,7 +1207,12 @@ default_target_branch = "main"
 
         // Aggregate without filters - should include all 3 attempts
         let params = AggregationParams {
-            dimensions: vec![AggregationDimension::Model],
+            dimensions: vec![
+                AggregationDimension::Model,
+                AggregationDimension::Runner,
+                AggregationDimension::AuthClass,
+                AggregationDimension::QuotaPool,
+            ],
             since: None,
             until: None,
             profile: None,
@@ -1082,6 +1236,19 @@ default_target_branch = "main"
         assert!((report.total_cost_usd - 0.072).abs() < 1e-9);
         assert!((report.quota_backed_cost_usd - 0.05).abs() < 1e-9);
         assert!((report.api_cost_usd - 0.022).abs() < 1e-9);
+        assert!(report.aggregated_data.iter().any(|bucket| {
+            bucket.dimension_key == "runner" && bucket.dimension_value == "codex"
+        }));
+        assert!(report.aggregated_data.iter().any(|bucket| {
+            bucket.dimension_key == "auth_class"
+                && bucket.dimension_value == "api_key_backed"
+                && bucket.attempts == 2
+        }));
+        assert!(report.aggregated_data.iter().any(|bucket| {
+            bucket.dimension_key == "quota_pool"
+                && bucket.dimension_value == "subscription-pool"
+                && bucket.attempts == 1
+        }));
 
         // Aggregate but exclude retried attempts - should only aggregate attempt 3 (the last one)
         let params_no_retries = AggregationParams {

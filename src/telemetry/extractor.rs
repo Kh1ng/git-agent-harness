@@ -5,6 +5,17 @@
 use super::records::*;
 use crate::ledger::{AttemptBehaviorMetrics, BehaviorMetric, BehaviorMetricQuality, LedgerEntry};
 
+fn identity_for_attempt(
+    entry: &LedgerEntry,
+    attempt_number: u32,
+) -> Option<&crate::execution_identity::ExecutionIdentity> {
+    entry
+        .attempt_routing
+        .iter()
+        .find(|route| route.attempt_number == attempt_number)
+        .and_then(|route| route.identity.as_ref())
+}
+
 /// Issue #119: the only structured backend event GAH is allowed to parse for
 /// per-attempt behavior metrics.
 ///
@@ -93,6 +104,7 @@ pub fn extract_attempt_usage_records(
     let mut records = Vec::new();
 
     for attempt in &entry.attempts {
+        let identity = identity_for_attempt(entry, attempt.attempt_number);
         let observed_at = attempt
             .usage
             .observed_at
@@ -124,10 +136,17 @@ pub fn extract_attempt_usage_records(
             mode: entry.mode.clone(),
             attempt_number: attempt.attempt_number,
             backend: attempt.backend.clone(),
+            runner_kind: identity.map(|identity| identity.runner_kind.clone()),
             effective_backend: attempt.backend.clone(),
-            requested_backend: entry.requested_backend.clone(),
-            effective_model: attempt.effective_model.clone(),
-            requested_model: entry.requested_model.clone(),
+            requested_backend: identity
+                .map(|identity| identity.requested_backend.clone())
+                .unwrap_or_else(|| entry.requested_backend.clone()),
+            effective_model: identity
+                .and_then(|identity| identity.effective_model.clone())
+                .or_else(|| attempt.effective_model.clone()),
+            requested_model: identity
+                .and_then(|identity| identity.requested_model.clone())
+                .or_else(|| entry.requested_model.clone()),
             actual_model: attempt.usage.actual_model.clone(),
             actual_model_unknown_reason: attempt.usage.actual_model_unknown_reason.clone(),
             exit_code: attempt.exit_code,
@@ -139,46 +158,33 @@ pub fn extract_attempt_usage_records(
             human_required: entry.human_required,
             routing_reason: entry.routing_reason.clone(),
             usage_source: attempt.usage.usage_source.clone(),
-            usage_classification: attempt
-                .usage
-                .usage_classification
-                .clone()
-                .or_else(|| entry.usage.usage_classification.clone()),
+            usage_classification: attempt.usage.usage_classification.clone(),
             backend_instance: attempt
                 .usage
                 .backend_instance
                 .clone()
-                .or_else(|| Some(attempt.backend.clone())),
-            model_provider: attempt
-                .usage
-                .provider
-                .clone()
-                .or_else(|| entry.usage.provider.clone()),
-            model_provider_unknown_reason: attempt
-                .usage
-                .provider_unknown_reason
-                .clone()
-                .or_else(|| entry.usage.provider_unknown_reason.clone()),
+                .or_else(|| identity.map(|identity| identity.backend_instance.clone())),
+            model_provider: attempt.usage.provider.clone(),
+            provider_attribution_source: attempt.usage.provider_attribution_source.clone(),
+            model_provider_unknown_reason: attempt.usage.provider_unknown_reason.clone(),
             account_label: attempt
                 .usage
                 .account_label
                 .clone()
-                .or_else(|| entry.usage.account_label.clone()),
-            pricing_source: attempt
+                .or_else(|| identity.and_then(|identity| identity.account_label.clone())),
+            auth_source_label: attempt
                 .usage
-                .pricing_source
+                .auth_source_label
                 .clone()
-                .or_else(|| entry.usage.pricing_source.clone()),
-            pricing_version: attempt
+                .or_else(|| identity.and_then(|identity| identity.auth_source_label.clone())),
+            quota_pool: attempt
                 .usage
-                .pricing_version
+                .quota_pool
                 .clone()
-                .or_else(|| entry.usage.pricing_version.clone()),
-            cost_unknown_reason: attempt
-                .usage
-                .cost_unknown_reason
-                .clone()
-                .or_else(|| entry.usage.cost_unknown_reason.clone()),
+                .or_else(|| identity.and_then(|identity| identity.quota_pool.clone())),
+            pricing_source: attempt.usage.pricing_source.clone(),
+            pricing_version: attempt.usage.pricing_version.clone(),
+            cost_unknown_reason: attempt.usage.cost_unknown_reason.clone(),
             input_tokens: attempt.usage.input_tokens,
             output_tokens: attempt.usage.output_tokens,
             reasoning_tokens: attempt.usage.reasoning_tokens,
@@ -266,10 +272,14 @@ pub fn extract_quota_observation_records(
             model: entry.requested_model.clone(),
             effective_model: entry.effective_model.clone(),
             account_scope: entry.usage.account_label.clone(),
-            quota_pool: entry
-                .routing_diagnostics
-                .as_ref()
-                .and_then(|diagnostics| diagnostics.selected_quota_pool.clone()),
+            backend_instance: entry.usage.backend_instance.clone(),
+            auth_source_label: entry.usage.auth_source_label.clone(),
+            quota_pool: entry.usage.quota_pool.clone().or_else(|| {
+                entry
+                    .routing_diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.selected_quota_pool.clone())
+            }),
             quota_window: quota_window.clone(),
             quota_used_percent: entry.usage.quota_used_percent,
             quota_remaining_percent: entry.usage.quota_remaining_percent,
@@ -311,6 +321,8 @@ pub fn extract_quota_observation_records(
             };
 
             let record = QuotaObservationRecord {
+                backend_instance: attempt.usage.backend_instance.clone(),
+                auth_source_label: attempt.usage.auth_source_label.clone(),
                 base,
                 profile: entry.profile.clone(),
                 repo_id: entry.repo_id.clone(),

@@ -16,6 +16,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
             profile TEXT NOT NULL,
+            repo_id TEXT,
             work_id TEXT,
             mode TEXT NOT NULL,
             backend TEXT NOT NULL,
@@ -33,6 +34,15 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             human_required_reason_code TEXT,
             actual_cost_usd REAL,
             estimated_cost_usd REAL,
+            runner_kind TEXT,
+            backend_instance TEXT,
+            account_label TEXT,
+            auth_source_label TEXT,
+            model_provider TEXT,
+            provider_attribution_source TEXT,
+            auth_class TEXT,
+            quota_pool TEXT,
+            actual_model TEXT,
             raw_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS ledger_sync_state (
@@ -47,6 +57,34 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
     )?;
     ensure_human_required_reason_code_column(conn)?;
     ensure_review_generation_columns(conn)?;
+    ensure_execution_identity_columns(conn)?;
+    Ok(())
+}
+
+fn ensure_execution_identity_columns(conn: &Connection) -> Result<()> {
+    for column in [
+        "repo_id",
+        "runner_kind",
+        "backend_instance",
+        "account_label",
+        "auth_source_label",
+        "model_provider",
+        "provider_attribution_source",
+        "auth_class",
+        "quota_pool",
+        "actual_model",
+    ] {
+        if !has_column(conn, "ledger_entries", column)? {
+            conn.execute(
+                &format!("ALTER TABLE ledger_entries ADD COLUMN {column} TEXT"),
+                [],
+            )?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_ledger_entries_identity
+         ON ledger_entries(profile, repo_id, backend_instance, quota_pool);",
+    )?;
     Ok(())
 }
 
@@ -207,18 +245,28 @@ fn sync_incremental_from_jsonl(cfg: &GahConfig) -> Result<()> {
 }
 
 fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
-    let raw_json = serde_json::to_string(entry).context("serializing ledger entry")?;
+    let entry = entry.normalized_for_persistence();
+    let final_identity = entry
+        .attempt_routing
+        .iter()
+        .rev()
+        .find_map(|attempt| attempt.identity.as_ref());
+    let raw_json = serde_json::to_string(&entry).context("serializing ledger entry")?;
     tx.execute(
         "INSERT INTO ledger_entries (
-            timestamp, profile, work_id, mode, backend, effective_backend,
+            timestamp, profile, repo_id, work_id, mode, backend, effective_backend,
             effective_model, requested_model, validation_result, review_verdict,
             review_contract_version, review_generation, human_required,
             duration_seconds, failure_class, total_tokens,
-            human_required_reason_code, actual_cost_usd, estimated_cost_usd, raw_json
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+            human_required_reason_code, actual_cost_usd, estimated_cost_usd,
+            runner_kind, backend_instance, account_label, auth_source_label,
+            model_provider, provider_attribution_source, auth_class, quota_pool,
+            actual_model, raw_json
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)",
         params![
             entry.timestamp,
             entry.profile,
+            entry.repo_id,
             entry.work_id,
             entry.mode,
             entry.backend,
@@ -236,6 +284,15 @@ fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
             entry.human_required_reason_code,
             entry.usage.actual_cost_usd,
             entry.usage.estimated_cost_usd,
+            final_identity.map(|identity| identity.runner_kind.as_str()),
+            entry.usage.backend_instance,
+            entry.usage.account_label,
+            entry.usage.auth_source_label,
+            entry.usage.provider,
+            entry.usage.provider_attribution_source,
+            entry.usage.usage_classification,
+            entry.usage.quota_pool,
+            entry.usage.actual_model,
             raw_json,
         ],
     )?;
@@ -287,6 +344,111 @@ mod tests {
         assert!(has_column(&conn, "ledger_entries", "review_contract_version").unwrap());
         assert!(has_column(&conn, "ledger_entries", "review_generation").unwrap());
         assert!(has_column(&conn, "ledger_entries", "human_required_reason_code").unwrap());
+        for column in [
+            "repo_id",
+            "runner_kind",
+            "backend_instance",
+            "account_label",
+            "auth_source_label",
+            "model_provider",
+            "provider_attribution_source",
+            "auth_class",
+            "quota_pool",
+            "actual_model",
+        ] {
+            assert!(
+                has_column(&conn, "ledger_entries", column).unwrap(),
+                "{column}"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_projects_canonical_identity_without_credentials_or_paths() {
+        let (_tmp, cfg) = test_config();
+        let mut entry =
+            LedgerEntry::new("test", &profile(), "auto", "improve", "target", None, None);
+        let mut identity = crate::execution_identity::ExecutionIdentity::legacy_route(
+            "auto",
+            Some("requested"),
+            "opencode",
+            Some("provider/model"),
+            Some("paid-pool"),
+        );
+        identity.auth_source_label = Some("opencode-key-main".into());
+        identity.set_executable(Some(PathBuf::from("/secret/home/bin/opencode")));
+        entry
+            .attempt_routing
+            .push(crate::ledger::AttemptRoutingRecord {
+                attempt_number: 1,
+                backend_instance: identity.backend_instance.clone(),
+                effective_model: identity.effective_model.clone(),
+                identity: Some(identity),
+                routing_diagnostics: None,
+            });
+        entry.usage = crate::ledger::LedgerUsage {
+            backend_instance: Some("opencode:paid-pool".into()),
+            account_label: Some("billing-main".into()),
+            auth_source_label: Some("opencode-key-main".into()),
+            provider: Some("openai".into()),
+            provider_attribution_source: Some("backend_reported".into()),
+            usage_classification: Some("api_key_backed".into()),
+            quota_pool: Some("paid-pool".into()),
+            actual_model: Some("gpt-5".into()),
+            ..crate::ledger::LedgerUsage::default()
+        };
+
+        append(&cfg, &entry).unwrap();
+        let conn = Connection::open(db_path(&cfg)).unwrap();
+        let values: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT runner_kind, backend_instance, account_label, auth_source_label,
+                        model_provider, auth_class, quota_pool, actual_model
+                 FROM ledger_entries LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            values,
+            (
+                "opencode".into(),
+                "opencode:paid-pool".into(),
+                "billing-main".into(),
+                "opencode-key-main".into(),
+                "openai".into(),
+                "api_key_backed".into(),
+                "paid-pool".into(),
+                "gpt-5".into(),
+            )
+        );
+        let raw: String = conn
+            .query_row("SELECT raw_json FROM ledger_entries LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!raw.contains("/secret/home"));
+        assert!(!raw.contains("executable"));
     }
 
     #[test]

@@ -34,9 +34,12 @@ pub enum AggregationDimension {
     Project,
     Ticket,
     ExecutionType,
+    Runner,
     Backend,
     BackendInstance,
     Provider,
+    AuthClass,
+    QuotaPool,
     Model,
     Account,
     Date,
@@ -186,9 +189,12 @@ impl std::str::FromStr for AggregationDimension {
             "project" => Ok(AggregationDimension::Project),
             "ticket" => Ok(AggregationDimension::Ticket),
             "executiontype" | "execution_type" => Ok(AggregationDimension::ExecutionType),
+            "runner" | "runner_kind" => Ok(AggregationDimension::Runner),
             "backend" => Ok(AggregationDimension::Backend),
             "backendinstance" | "backend_instance" => Ok(AggregationDimension::BackendInstance),
             "provider" => Ok(AggregationDimension::Provider),
+            "authclass" | "auth_class" => Ok(AggregationDimension::AuthClass),
+            "quotapool" | "quota_pool" => Ok(AggregationDimension::QuotaPool),
             "model" => Ok(AggregationDimension::Model),
             "account" => Ok(AggregationDimension::Account),
             "date" => Ok(AggregationDimension::Date),
@@ -272,6 +278,25 @@ fn matches_filter_value(filter: &Option<String>, value: &str) -> bool {
     }
 }
 
+fn identity_for_attempt(
+    entry: &LedgerEntry,
+    attempt_number: u32,
+) -> Option<&crate::execution_identity::ExecutionIdentity> {
+    entry
+        .attempt_routing
+        .iter()
+        .find(|route| route.attempt_number == attempt_number)
+        .and_then(|route| route.identity.as_ref())
+}
+
+fn final_identity(entry: &LedgerEntry) -> Option<&crate::execution_identity::ExecutionIdentity> {
+    entry
+        .attempt_routing
+        .iter()
+        .rev()
+        .find_map(|route| route.identity.as_ref())
+}
+
 /// Build a zeroed `AggregatedTelemetryData` for a given dimension value.
 fn new_aggregated_data(
     dimension: AggregationDimension,
@@ -316,20 +341,17 @@ fn matches_filters(
                     .work_id
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
-                entry
-                    .task_class
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
+                entry.mode.clone(),
                 entry
                     .usage
                     .backend_instance
                     .clone()
-                    .unwrap_or_else(|| entry.effective_backend.clone()),
+                    .unwrap_or_else(|| "unknown".to_string()),
                 entry
                     .usage
                     .provider
                     .clone()
-                    .unwrap_or_else(|| entry.provider.clone()),
+                    .unwrap_or_else(|| "unknown".to_string()),
                 entry.effective_model.clone().unwrap_or_else(|| {
                     entry
                         .requested_model
@@ -348,19 +370,18 @@ fn matches_filters(
                     .work_id
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
-                entry
-                    .task_class
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
+                entry.mode.clone(),
                 att.usage
                     .backend_instance
                     .clone()
-                    .or_else(|| Some(att.backend.clone()))
+                    .or_else(|| {
+                        identity_for_attempt(entry, att.attempt_number)
+                            .map(|identity| identity.backend_instance.clone())
+                    })
                     .unwrap_or_else(|| "unknown".to_string()),
                 att.usage
                     .provider
                     .clone()
-                    .or_else(|| Some(entry.provider.clone()))
                     .unwrap_or_else(|| "unknown".to_string()),
                 att.usage
                     .actual_model
@@ -371,7 +392,10 @@ fn matches_filters(
                 att.usage
                     .account_label
                     .clone()
-                    .or_else(|| entry.usage.account_label.clone())
+                    .or_else(|| {
+                        identity_for_attempt(entry, att.attempt_number)
+                            .and_then(|identity| identity.account_label.clone())
+                    })
                     .unwrap_or_else(|| "unknown".to_string()),
             ),
         };
@@ -687,21 +711,32 @@ fn get_dimension_value_from_attempt(
                 .work_id
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::ExecutionType => entry
-                .task_class
-                .clone()
+            AggregationDimension::ExecutionType => entry.mode.clone(),
+            AggregationDimension::Runner => final_identity(entry)
+                .map(|identity| identity.runner_kind.clone())
                 .unwrap_or_else(|| "unknown".to_string()),
             AggregationDimension::Backend => entry.effective_backend.clone(),
             AggregationDimension::BackendInstance => entry
                 .usage
                 .backend_instance
                 .clone()
-                .unwrap_or_else(|| entry.effective_backend.clone()),
+                .unwrap_or_else(|| "unknown".to_string()),
             AggregationDimension::Provider => entry
                 .usage
                 .provider
                 .clone()
-                .unwrap_or_else(|| entry.provider.clone()),
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::AuthClass => entry
+                .usage
+                .usage_classification
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::QuotaPool => entry
+                .usage
+                .quota_pool
+                .clone()
+                .or_else(|| final_identity(entry).and_then(|identity| identity.quota_pool.clone()))
+                .unwrap_or_else(|| "unknown".to_string()),
             AggregationDimension::Model => entry.effective_model.clone().unwrap_or_else(|| {
                 entry
                     .requested_model
@@ -746,22 +781,40 @@ fn get_dimension_value_from_attempt(
                 .work_id
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::ExecutionType => entry
-                .task_class
-                .clone()
+            AggregationDimension::ExecutionType => entry.mode.clone(),
+            AggregationDimension::Runner => identity_for_attempt(entry, att.attempt_number)
+                .map(|identity| identity.runner_kind.clone())
                 .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Backend => att.backend.clone(),
+            AggregationDimension::Backend => identity_for_attempt(entry, att.attempt_number)
+                .map(|identity| identity.logical_backend.clone())
+                .unwrap_or_else(|| att.backend.clone()),
             AggregationDimension::BackendInstance => att
                 .usage
                 .backend_instance
                 .clone()
-                .or_else(|| Some(att.backend.clone()))
+                .or_else(|| {
+                    identity_for_attempt(entry, att.attempt_number)
+                        .map(|identity| identity.backend_instance.clone())
+                })
                 .unwrap_or_else(|| "unknown".to_string()),
             AggregationDimension::Provider => att
                 .usage
                 .provider
                 .clone()
-                .or_else(|| Some(entry.provider.clone()))
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::AuthClass => att
+                .usage
+                .usage_classification
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            AggregationDimension::QuotaPool => att
+                .usage
+                .quota_pool
+                .clone()
+                .or_else(|| {
+                    identity_for_attempt(entry, att.attempt_number)
+                        .and_then(|identity| identity.quota_pool.clone())
+                })
                 .unwrap_or_else(|| "unknown".to_string()),
             AggregationDimension::Model => att
                 .usage
@@ -774,7 +827,10 @@ fn get_dimension_value_from_attempt(
                 .usage
                 .account_label
                 .clone()
-                .or_else(|| entry.usage.account_label.clone())
+                .or_else(|| {
+                    identity_for_attempt(entry, att.attempt_number)
+                        .and_then(|identity| identity.account_label.clone())
+                })
                 .unwrap_or_else(|| "unknown".to_string()),
             AggregationDimension::Date => {
                 let timestamp = att
@@ -824,9 +880,12 @@ fn dimension_key(dimension: AggregationDimension) -> String {
         AggregationDimension::Project => "project".to_string(),
         AggregationDimension::Ticket => "ticket".to_string(),
         AggregationDimension::ExecutionType => "execution_type".to_string(),
+        AggregationDimension::Runner => "runner".to_string(),
         AggregationDimension::Backend => "backend".to_string(),
         AggregationDimension::BackendInstance => "backend_instance".to_string(),
         AggregationDimension::Provider => "provider".to_string(),
+        AggregationDimension::AuthClass => "auth_class".to_string(),
+        AggregationDimension::QuotaPool => "quota_pool".to_string(),
         AggregationDimension::Model => "model".to_string(),
         AggregationDimension::Account => "account".to_string(),
         AggregationDimension::Date => "date".to_string(),

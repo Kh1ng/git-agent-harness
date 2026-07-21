@@ -5,6 +5,7 @@ use time::OffsetDateTime;
 
 #[derive(Clone, Copy)]
 pub(crate) struct UsageAttribution<'a> {
+    identity: Option<&'a crate::execution_identity::ExecutionIdentity>,
     pub(crate) backend: Option<&'a str>,
     pub(crate) effective_model: Option<&'a str>,
     quota_pool: Option<&'a str>,
@@ -14,6 +15,7 @@ pub(crate) struct UsageAttribution<'a> {
 impl<'a> UsageAttribution<'a> {
     pub(crate) fn from_route(route: &'a RouteDecision) -> Self {
         Self {
+            identity: Some(&route.identity),
             backend: Some(route.effective_backend.as_str()),
             effective_model: route.effective_model.as_deref(),
             quota_pool: route.effective_quota_pool.as_deref(),
@@ -34,6 +36,7 @@ impl<'a> UsageAttribution<'a> {
     #[cfg(test)]
     pub(crate) fn backend(backend: Option<&'a str>, effective_model: Option<&'a str>) -> Self {
         Self {
+            identity: None,
             backend,
             effective_model,
             quota_pool: None,
@@ -49,6 +52,7 @@ impl<'a> UsageAttribution<'a> {
         cost_class: &'a str,
     ) -> Self {
         Self {
+            identity: None,
             backend: Some(backend),
             effective_model: Some(effective_model),
             quota_pool: Some(quota_pool),
@@ -126,19 +130,41 @@ pub(crate) fn normalize_attempt_usage(
     attribution: UsageAttribution<'_>,
     launched: bool,
 ) -> LedgerUsage {
-    usage.backend_instance = attribution.backend.map(|backend| {
-        crate::execution_identity::legacy_backend_instance(backend, attribution.quota_pool)
-    });
-    usage.account_label = attribution.quota_pool.map(str::to_string);
+    usage.backend_instance = attribution
+        .identity
+        .map(|identity| identity.backend_instance.clone())
+        .or_else(|| {
+            attribution.backend.map(|backend| {
+                crate::execution_identity::legacy_backend_instance(backend, attribution.quota_pool)
+            })
+        });
+    usage.account_label = attribution
+        .identity
+        .and_then(|identity| identity.account_label.clone())
+        .or_else(|| attribution.quota_pool.map(str::to_string));
+    usage.auth_source_label = attribution
+        .identity
+        .and_then(|identity| identity.auth_source_label.clone());
+    usage.quota_pool = attribution
+        .identity
+        .and_then(|identity| identity.quota_pool.clone())
+        .or_else(|| attribution.quota_pool.map(str::to_string));
     usage.usage_classification = classify_usage(
         attribution.backend,
         attribution.effective_model,
         attribution.cost_class,
     );
-    if usage.provider.is_none() {
-        usage.provider = provider_for_model(attribution.backend, attribution.effective_model);
+    if usage.provider.is_some() && usage.provider_attribution_source.is_none() {
+        usage.provider_attribution_source = Some("backend_reported".to_string());
     }
     if usage.provider.is_none() {
+        usage.provider = provider_for_model(attribution.backend, attribution.effective_model);
+        if usage.provider.is_some() {
+            usage.provider_attribution_source = Some("inferred".to_string());
+        }
+    }
+    if usage.provider.is_none() {
+        usage.provider_attribution_source = Some("unknown".to_string());
         usage.provider_unknown_reason = Some(
             "backend artifact and configured model did not identify a model provider".to_string(),
         );
@@ -346,6 +372,18 @@ pub(crate) fn aggregate_attempt_usage(attempts: &[AttemptRecord]) -> LedgerUsage
     aggregated.provider = aggregate_label(observed.iter().map(|usage| usage.provider.as_deref()));
     aggregated.account_label =
         aggregate_label(observed.iter().map(|usage| usage.account_label.as_deref()));
+    aggregated.auth_source_label = aggregate_label(
+        observed
+            .iter()
+            .map(|usage| usage.auth_source_label.as_deref()),
+    );
+    aggregated.quota_pool =
+        aggregate_label(observed.iter().map(|usage| usage.quota_pool.as_deref()));
+    aggregated.provider_attribution_source = aggregate_label(
+        observed
+            .iter()
+            .map(|usage| usage.provider_attribution_source.as_deref()),
+    );
     aggregated.pricing_source =
         aggregate_label(observed.iter().map(|usage| usage.pricing_source.as_deref()));
     aggregated.pricing_version = aggregate_label(

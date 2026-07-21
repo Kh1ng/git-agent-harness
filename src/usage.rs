@@ -340,6 +340,11 @@ pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
             .provider_unknown_reason
             .or(other.provider_unknown_reason),
         account_label: base.account_label.or(other.account_label),
+        auth_source_label: base.auth_source_label.or(other.auth_source_label),
+        quota_pool: base.quota_pool.or(other.quota_pool),
+        provider_attribution_source: base
+            .provider_attribution_source
+            .or(other.provider_attribution_source),
         pricing_source: base.pricing_source.or(other.pricing_source),
         pricing_version: base.pricing_version.or(other.pricing_version),
         cost_unknown_reason: base.cost_unknown_reason.or(other.cost_unknown_reason),

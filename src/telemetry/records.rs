@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 /// shell calls, file edits, test runs) to the attempt usage record. Existing
 /// v1-v7 history remains readable because the new fields are optional with
 /// serde defaults; absence is treated as unknown, never as zero.
-pub const SCHEMA_VERSION: u32 = 8;
+/// Version 9 adds canonical runner, instance, account, auth-source, quota-pool,
+/// and provider-attribution fields. All are nullable for historical data.
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -76,6 +78,9 @@ pub struct AttemptUsageRecord {
     pub attempt_number: u32,
     /// Backend used for this attempt
     pub backend: String,
+    /// Agent CLI family selected for the attempt.
+    #[serde(default)]
+    pub runner_kind: Option<String>,
     /// Effective backend (may differ from requested due to fallback)
     pub effective_backend: String,
     /// Requested backend
@@ -115,8 +120,14 @@ pub struct AttemptUsageRecord {
     /// Safe logical backend instance/account attribution.
     pub backend_instance: Option<String>,
     pub model_provider: Option<String>,
+    #[serde(default)]
+    pub provider_attribution_source: Option<String>,
     pub model_provider_unknown_reason: Option<String>,
     pub account_label: Option<String>,
+    #[serde(default)]
+    pub auth_source_label: Option<String>,
+    #[serde(default)]
+    pub quota_pool: Option<String>,
     pub pricing_source: Option<String>,
     pub pricing_version: Option<String>,
     pub cost_unknown_reason: Option<String>,
@@ -198,6 +209,10 @@ pub struct QuotaObservationRecord {
 
     /// Account scope (if known)
     pub account_scope: Option<String>,
+    #[serde(default)]
+    pub backend_instance: Option<String>,
+    #[serde(default)]
+    pub auth_source_label: Option<String>,
     /// Quota pool identifier (if known)
     pub quota_pool: Option<String>,
     /// Quota window identifier
