@@ -3,6 +3,7 @@
 use super::diagnostics::{describe_candidate, DiagnosticCandidate};
 use super::types::{CandidateIdentity, RoutingRuntimeState, TaskRoutingContext};
 use crate::config::{Defaults, Profile, RoutingPolicy, TaskRoutingRule};
+use crate::execution_identity::ExecutionIdentity;
 use crate::quota::{self, PaceBand};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -12,9 +13,7 @@ mod tests;
 
 #[derive(Debug, Clone)]
 pub(super) struct RouteCandidate {
-    pub(super) backend: String,
-    pub(super) model: Option<String>,
-    pub(super) quota_pool: Option<String>,
+    pub(super) identity: ExecutionIdentity,
     pub(super) priority: i32,
     pub(super) included_in_quota: bool,
     pub(super) marginal_cost_usd: Option<f64>,
@@ -26,15 +25,15 @@ pub(super) struct RouteCandidate {
 
 impl DiagnosticCandidate for RouteCandidate {
     fn backend(&self) -> &str {
-        &self.backend
+        &self.identity.logical_backend
     }
 
     fn model(&self) -> Option<&str> {
-        self.model.as_deref()
+        self.identity.effective_model.as_deref()
     }
 
     fn quota_pool(&self) -> Option<&str> {
-        self.quota_pool.as_deref()
+        self.identity.quota_pool.as_deref()
     }
 
     fn priority(&self) -> i32 {
@@ -99,12 +98,10 @@ pub(super) fn auto_candidates(
         if let Some(weak_backend) = review_fallback_backend_name(routing) {
             let weak_model = review_fallback_model(routing)
                 .map(str::to_string)
-                .or_else(|| primary.model.clone());
+                .or_else(|| primary.identity.effective_model.clone());
             let quota_pool = routing.find_quota_pool(mode, weak_backend, weak_model.as_deref());
             candidates.push(RouteCandidate {
-                backend: weak_backend.to_string(),
-                model: weak_model,
-                quota_pool,
+                identity: ExecutionIdentity::legacy_candidate(weak_backend, weak_model, quota_pool),
                 priority: 0,
                 included_in_quota: false,
                 marginal_cost_usd: None,
@@ -142,7 +139,8 @@ pub(super) fn explicit_candidates(
         // OpenHands/Claude and being reported as exit-0 no-progress.
         if let Some(configured) = policy_candidates(routing, mode) {
             if let Some(position) = configured.iter().position(|candidate| {
-                candidate.backend == primary.backend && candidate.model == primary.model
+                candidate.identity.logical_backend == primary.identity.logical_backend
+                    && candidate.identity.effective_model == primary.identity.effective_model
             }) {
                 candidates.extend(configured.into_iter().skip(position + 1));
             } else {
@@ -156,9 +154,11 @@ pub(super) fn explicit_candidates(
                 let quota_pool =
                     routing.find_quota_pool(mode, &weak_backend, weak_model.as_deref());
                 candidates.push(RouteCandidate {
-                    backend: weak_backend,
-                    model: weak_model,
-                    quota_pool,
+                    identity: ExecutionIdentity::legacy_candidate(
+                        weak_backend,
+                        weak_model,
+                        quota_pool,
+                    ),
                     priority: 0,
                     included_in_quota: false,
                     marginal_cost_usd: None,
@@ -181,9 +181,7 @@ fn extend_default_backend_candidates(
     for backend in mode_backend_preference(mode) {
         let quota_pool = routing.find_quota_pool(mode, backend, None);
         candidates.push(RouteCandidate {
-            backend: backend.to_string(),
-            model: None,
-            quota_pool,
+            identity: ExecutionIdentity::legacy_candidate(backend, None::<String>, quota_pool),
             priority: 0,
             included_in_quota: false,
             marginal_cost_usd: None,
@@ -201,8 +199,8 @@ fn dedupe_candidates(candidates: Vec<RouteCandidate>) -> Vec<RouteCandidate> {
     for candidate in candidates {
         let key = format!(
             "{}\u{0}{}",
-            candidate.backend,
-            candidate.model.as_deref().unwrap_or("")
+            candidate.identity.logical_backend,
+            candidate.identity.effective_model.as_deref().unwrap_or("")
         );
         if seen.insert(key) {
             out.push(candidate);
@@ -246,7 +244,8 @@ pub(super) fn order_candidates(
     let selected_over = original
         .iter()
         .take_while(|candidate| {
-            candidate.backend != selected.backend || candidate.model != selected.model
+            candidate.identity.logical_backend != selected.identity.logical_backend
+                || candidate.identity.effective_model != selected.identity.effective_model
         })
         .filter(|candidate| {
             compare_candidates(
@@ -274,7 +273,8 @@ pub(super) fn order_candidates(
 
 fn is_strong_candidate(candidate: &RouteCandidate) -> bool {
     candidate
-        .model
+        .identity
+        .effective_model
         .as_deref()
         .map(crate::ledger::is_strong_model)
         .unwrap_or(true)
@@ -324,8 +324,8 @@ fn candidate_run_count(candidate: &RouteCandidate, runtime: &RoutingRuntimeState
     runtime
         .recent_runs
         .get(&CandidateIdentity::new(
-            candidate.backend.as_str(),
-            candidate.model.as_deref(),
+            candidate.identity.logical_backend.as_str(),
+            candidate.identity.effective_model.as_deref(),
         ))
         .copied()
         .unwrap_or(0)
@@ -510,9 +510,11 @@ fn route_candidates(raw: &[crate::config::CandidateConfig]) -> Vec<RouteCandidat
                 c.quota_pool.as_deref(),
             );
             RouteCandidate {
-                backend: c.backend.clone(),
-                model: c.model.clone(),
-                quota_pool,
+                identity: ExecutionIdentity::legacy_candidate(
+                    c.backend.clone(),
+                    c.model.clone(),
+                    quota_pool,
+                ),
                 priority: c.priority,
                 included_in_quota: c.included_in_quota,
                 marginal_cost_usd: c.marginal_cost_usd,
@@ -575,6 +577,14 @@ pub(super) fn configured_route_candidate(
 }
 
 impl RouteCandidate {
+    pub(super) fn backend(&self) -> &str {
+        &self.identity.logical_backend
+    }
+
+    pub(super) fn model(&self) -> Option<&str> {
+        self.identity.effective_model.as_deref()
+    }
+
     fn has_cost_policy(&self) -> bool {
         self.priority != 0
             || self.included_in_quota

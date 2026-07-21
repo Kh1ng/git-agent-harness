@@ -37,7 +37,7 @@ pub fn decide_with_state(
     req: RouteRequest<'_>,
     runtime: &RoutingRuntimeState,
 ) -> Result<RouteDecision> {
-    decide_with_runtime(
+    let decision = decide_with_runtime(
         defaults,
         profile,
         req,
@@ -45,7 +45,8 @@ pub fn decide_with_state(
         &availability::resolve_state_path(),
         OffsetDateTime::now_utc(),
         |backend| runner::backend_available_for_profile(profile, backend),
-    )
+    )?;
+    Ok(with_resolved_executable(profile, decision))
 }
 
 /// Route an implementation request with deterministic task-class rules. A
@@ -59,7 +60,7 @@ pub fn decide_for_task_with_state(
     task: TaskRoutingContext<'_>,
     runtime: &RoutingRuntimeState,
 ) -> Result<RouteDecision> {
-    decide_with_task_runtime(
+    let decision = decide_with_task_runtime(
         defaults,
         profile,
         req,
@@ -70,7 +71,17 @@ pub fn decide_for_task_with_state(
             now: OffsetDateTime::now_utc(),
         },
         |backend| runner::backend_available_for_profile(profile, backend),
-    )
+    )?;
+    Ok(with_resolved_executable(profile, decision))
+}
+
+fn with_resolved_executable(profile: &Profile, mut decision: RouteDecision) -> RouteDecision {
+    if let runner::ExecutableResolution::Found(path) =
+        runner::resolve_backend_executable(profile, &decision.identity.logical_backend)
+    {
+        decision.identity.set_executable(Some(path));
+    }
+    decision
 }
 
 #[cfg(test)]
@@ -179,18 +190,16 @@ where
         // explicit --model flag would be a standing bypass of the approval
         // gate this routing layer exists to enforce.
         if decision.effective_model.as_deref() != Some(model.as_str()) {
-            if let Some(candidate) = candidates.iter().find(|c| {
-                c.backend == decision.effective_backend
-                    && c.model.as_deref() == Some(model.as_str())
+            if let Some(candidate) = candidates.iter().find(|candidate| {
+                candidate.backend() == decision.effective_backend
+                    && candidate.model() == Some(model.as_str())
             }) {
                 let exclude_attempted = is_genuine_agent_failure(last_failure_class)
                     || !runtime.attempted.is_empty()
                     || !runtime.dispatch_attempted.is_empty();
                 if let Some(skip) = skip_reason_for_candidate(
                     evaluation.state_path,
-                    &candidate.backend,
-                    candidate.model.as_deref(),
-                    candidate.quota_pool.as_deref(),
+                    &candidate.identity,
                     &profile.max_concurrent_per_model,
                     evaluation.now,
                     backend_available,
@@ -207,8 +216,8 @@ where
                         .into());
                     }
                     return Err(RouteError::NoEligibleBackend {
-                        preferred_backend: candidate.backend.clone(),
-                        preferred_model: candidate.model.clone(),
+                        preferred_backend: candidate.backend().to_string(),
+                        preferred_model: candidate.identity.effective_model.clone(),
                         skipped: vec![skip],
                         earliest_reset: None,
                     }
@@ -216,12 +225,15 @@ where
                 }
             }
         }
-        let previous_model = decision.effective_model.replace(model.clone());
-        decision.effective_quota_pool = profile.effective_routing(defaults).find_quota_pool(
-            &mode,
-            &decision.effective_backend,
-            Some(&model),
-        );
+        let previous_model = decision.identity.effective_model.replace(model.clone());
+        decision
+            .identity
+            .set_quota_pool(profile.effective_routing(defaults).find_quota_pool(
+                &mode,
+                &decision.effective_backend,
+                Some(&model),
+            ));
+        decision.refresh_compatibility_projection();
         if let Some(diagnostics) = decision.routing_diagnostics.as_mut() {
             diagnostics.selected_model = Some(model.clone());
             diagnostics.selected_quota_pool = decision.effective_quota_pool.clone();
@@ -251,7 +263,8 @@ where
     }
     if decision.effective_backend == "codex" && decision.effective_model.is_none() {
         if let Some(model) = runner::extract_model_from_args(&profile.codex_args) {
-            decision.effective_model = Some(model);
+            decision.identity.effective_model = Some(model);
+            decision.refresh_compatibility_projection();
         }
     }
     Ok(decision)
@@ -320,8 +333,8 @@ where
             runtime,
             escalate,
         )?;
-        let fallback_used =
-            selected.backend != preferred.backend || selected.model != preferred.model;
+        let fallback_used = selected.identity.logical_backend != preferred.identity.logical_backend
+            || selected.identity.effective_model != preferred.identity.effective_model;
         let mut reason = format!("task routing rule #{}", rule_index + 1);
         if let Some(reorder) = reorder
             .as_ref()
@@ -330,20 +343,18 @@ where
             reason = append_reorder_reason(reason, &selected, reorder, &profile.pacing);
         }
         if fallback_used {
-            reason = append_availability_reason(reason, &skipped, &selected.backend, false);
+            reason = append_availability_reason(reason, &skipped, selected.backend(), false);
         }
         return Ok((
-            RouteDecision {
-                requested_backend,
-                effective_backend: selected.backend.clone(),
-                requested_model,
-                effective_model: selected.model.clone(),
-                effective_quota_pool: selected.quota_pool.clone(),
-                routing_reason: reason,
+            RouteDecision::from_identity(
+                selected
+                    .identity
+                    .with_request(requested_backend, requested_model),
+                reason,
                 fallback_used,
-                confidence_impact: None,
-                human_required: false,
-                routing_diagnostics: Some(build_routing_diagnostics(
+                None,
+                false,
+                Some(build_routing_diagnostics(
                     &candidates_for_diagnostics,
                     &selected,
                     &skipped,
@@ -352,7 +363,7 @@ where
                         .map(|decision| decision.selected_over.as_slice()),
                     &profile.pacing,
                 )),
-            },
+            ),
             candidates_for_diagnostics,
         ));
     }
@@ -402,12 +413,14 @@ where
             reason = append_reorder_reason(reason, &selected, reorder, &profile.pacing);
         }
 
-        if selected.backend != preferred.backend || selected.model != preferred.model {
+        if selected.identity.logical_backend != preferred.identity.logical_backend
+            || selected.identity.effective_model != preferred.identity.effective_model
+        {
             fallback_used = true;
             reason = append_availability_reason(
                 reason,
                 &skipped,
-                &selected.backend,
+                selected.backend(),
                 req.mode == "review",
             );
             if req.mode == "review" {
@@ -426,18 +439,16 @@ where
             &profile.pacing,
         ));
         return Ok((
-            RouteDecision {
-                requested_backend,
-                effective_backend: selected.backend.clone(),
-                requested_model,
-                effective_model: selected.model.clone(),
-                effective_quota_pool: selected.quota_pool.clone(),
-                routing_reason: reason,
+            RouteDecision::from_identity(
+                selected
+                    .identity
+                    .with_request(requested_backend, requested_model),
+                reason,
                 fallback_used,
                 confidence_impact,
                 human_required,
                 routing_diagnostics,
-            },
+            ),
             candidates_for_diagnostics,
         ));
     }
@@ -511,9 +522,11 @@ where
     let primary =
         configured_route_candidate(&effective_routing, req.mode, &backend, model.as_deref())
             .unwrap_or(RouteCandidate {
-                backend: backend.clone(),
-                model: model.clone(),
-                quota_pool: None,
+                identity: crate::execution_identity::ExecutionIdentity::legacy_candidate(
+                    backend.clone(),
+                    model.clone(),
+                    None::<String>,
+                ),
                 priority: 0,
                 included_in_quota: false,
                 marginal_cost_usd: None,
@@ -534,10 +547,12 @@ where
         false,
     )?;
 
-    if selected.backend != primary.backend || selected.model != primary.model {
+    if selected.identity.logical_backend != primary.identity.logical_backend
+        || selected.identity.effective_model != primary.identity.effective_model
+    {
         fallback_used = true;
         reason =
-            append_availability_reason(reason, &skipped, &selected.backend, req.mode == "review");
+            append_availability_reason(reason, &skipped, selected.backend(), req.mode == "review");
         if req.mode == "review" {
             confidence_impact.get_or_insert_with(|| "low".into());
             human_required = true;
@@ -552,18 +567,16 @@ where
         &profile.pacing,
     ));
     Ok((
-        RouteDecision {
-            requested_backend,
-            effective_backend: selected.backend.clone(),
-            requested_model,
-            effective_model: selected.model.clone(),
-            effective_quota_pool: selected.quota_pool.clone(),
-            routing_reason: reason,
+        RouteDecision::from_identity(
+            selected
+                .identity
+                .with_request(requested_backend, requested_model),
+            reason,
             fallback_used,
             confidence_impact,
             human_required,
             routing_diagnostics,
-        },
+        ),
         candidates_for_diagnostics,
     ))
 }
@@ -609,9 +622,11 @@ where
         requested_model.as_deref(),
     )
     .unwrap_or(RouteCandidate {
-        backend: requested_backend.clone(),
-        model: requested_model.clone(),
-        quota_pool: None,
+        identity: crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            requested_backend.clone(),
+            requested_model.clone(),
+            None::<String>,
+        ),
         priority: 0,
         included_in_quota: false,
         marginal_cost_usd: None,
@@ -644,7 +659,9 @@ where
         exclude_attempted,
     )?;
 
-    if selected.backend == primary.backend && selected.model == primary.model {
+    if selected.identity.logical_backend == primary.identity.logical_backend
+        && selected.identity.effective_model == primary.identity.effective_model
+    {
         let routing_diagnostics = Some(build_routing_diagnostics(
             &candidates_for_diagnostics,
             &selected,
@@ -652,18 +669,16 @@ where
             None,
             &profile.pacing,
         ));
-        return Ok(RouteDecision {
-            requested_backend: requested_backend.clone(),
-            effective_backend: requested_backend,
-            requested_model: requested_model.clone(),
-            effective_model: requested_model,
-            effective_quota_pool: primary.quota_pool,
-            routing_reason: "explicit CLI override".into(),
-            fallback_used: false,
-            confidence_impact: None,
-            human_required: false,
+        return Ok(RouteDecision::from_identity(
+            selected
+                .identity
+                .with_request(requested_backend, requested_model),
+            "explicit CLI override".into(),
+            false,
+            None,
+            false,
             routing_diagnostics,
-        });
+        ));
     }
 
     let mut routing_reason = if req.mode == "review" {
@@ -674,7 +689,7 @@ where
     routing_reason = append_availability_reason(
         routing_reason,
         &skipped,
-        &selected.backend,
+        selected.backend(),
         req.mode == "review",
     );
 
@@ -685,22 +700,20 @@ where
         None,
         &profile.pacing,
     ));
-    Ok(RouteDecision {
-        requested_backend,
-        effective_backend: selected.backend.clone(),
-        requested_model: requested_model.clone(),
-        effective_model: selected.model.clone(),
-        effective_quota_pool: selected.quota_pool.clone(),
+    Ok(RouteDecision::from_identity(
+        selected
+            .identity
+            .with_request(requested_backend, requested_model),
         routing_reason,
-        fallback_used: true,
-        confidence_impact: if req.mode == "review" {
+        true,
+        if req.mode == "review" {
             Some("low".into())
         } else {
             Some("medium".into())
         },
-        human_required: req.mode == "review",
+        req.mode == "review",
         routing_diagnostics,
-    })
+    ))
 }
 
 fn append_availability_reason(
@@ -742,9 +755,7 @@ where
     for candidate in candidates {
         if let Some(reason) = skip_reason_for_candidate(
             state_path,
-            &candidate.backend,
-            candidate.model.as_deref(),
-            candidate.quota_pool.as_deref(),
+            &candidate.identity,
             max_concurrent,
             now,
             backend_available,
@@ -779,8 +790,8 @@ where
         .into());
     }
     Err(RouteError::NoEligibleBackend {
-        preferred_backend: preferred.backend,
-        preferred_model: preferred.model,
+        preferred_backend: preferred.identity.logical_backend,
+        preferred_model: preferred.identity.effective_model,
         earliest_reset: earliest_reset(&skipped),
         skipped,
     }
@@ -790,9 +801,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn skip_reason_for_candidate<F>(
     state_path: &Path,
-    backend: &str,
-    model: Option<&str>,
-    quota_pool: Option<&str>,
+    identity: &crate::execution_identity::ExecutionIdentity,
     max_concurrent: &HashMap<String, u32>,
     now: OffsetDateTime,
     backend_available: F,
@@ -803,6 +812,9 @@ fn skip_reason_for_candidate<F>(
 where
     F: Fn(&str) -> bool + Copy,
 {
+    let backend = identity.logical_backend.as_str();
+    let model = identity.effective_model.as_deref();
+    let quota_pool = identity.quota_pool.as_deref();
     if !backend_available(backend) {
         return Ok(Some(SkippedBackend {
             backend: backend.to_string(),
@@ -812,16 +824,16 @@ where
         }));
     }
 
-    if let Some(skip) = max_concurrent_skip(max_concurrent, backend, model) {
+    if let Some(skip) = max_concurrent_skip(max_concurrent, identity) {
         return Ok(Some(skip));
     }
 
     let decision = availability::availability_for(state_path, backend, model, quota_pool, now)?;
     if decision.eligible {
-        let identity = CandidateIdentity::new(backend, model);
+        let candidate_key = CandidateIdentity::from_execution_identity(identity);
         if exclude_attempted
-            && (runtime.attempted.contains(&identity)
-                || runtime.dispatch_attempted.contains(&identity))
+            && (runtime.attempted.contains(&candidate_key)
+                || runtime.dispatch_attempted.contains(&candidate_key))
         {
             return Ok(Some(SkippedBackend {
                 backend: backend.to_string(),
@@ -830,7 +842,7 @@ where
                 unavailable_until: None,
             }));
         }
-        if requires_approval && !runtime.approved.contains(&identity) {
+        if requires_approval && !runtime.approved.contains(&candidate_key) {
             return Ok(Some(SkippedBackend {
                 backend: backend.to_string(),
                 model: model.map(str::to_string),

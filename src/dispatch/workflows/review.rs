@@ -1071,11 +1071,7 @@ fn mark_review_shutdown_cancelled(ledger: &mut LedgerEntry, signal: i32) {
 }
 
 fn reserve_review_route(profile: &Profile, route: &RouteDecision) -> Result<ConcurrencyGuard> {
-    reserve_backend_slot(
-        profile,
-        &route.effective_backend,
-        route.effective_model.as_deref(),
-    )
+    reserve_backend_slot(profile, &route.identity)
 }
 
 fn review_attempt_environment(

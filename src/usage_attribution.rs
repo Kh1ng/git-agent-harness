@@ -127,25 +127,7 @@ pub(crate) fn normalize_attempt_usage(
     launched: bool,
 ) -> LedgerUsage {
     usage.backend_instance = attribution.backend.map(|backend| {
-        match attribution.quota_pool {
-            // Preserve the raw executable/backend identity even when an AGY
-            // alias shares a canonical quota account (`agy-main` -> `agy`).
-            Some(pool)
-                if crate::availability::agy_account(backend).is_some_and(|account| {
-                    pool.split_once(':')
-                        .is_some_and(|(owner, _)| owner == account || owner == backend)
-                }) =>
-            {
-                let (_, family) = pool.split_once(':').expect("qualified AGY pool");
-                format!("{backend}:{family}")
-            }
-            // Already fully-qualified to this backend; respect it verbatim to
-            // avoid a latent double-prefix if a caller passes a qualified pool.
-            Some(pool) if pool.split(':').next() == Some(backend) => pool.to_string(),
-            // Bare pool tag: prefix with the backend to form a qualified tag.
-            Some(pool) => format!("{backend}:{pool}"),
-            None => backend.to_string(),
-        }
+        crate::execution_identity::legacy_backend_instance(backend, attribution.quota_pool)
     });
     usage.account_label = attribution.quota_pool.map(str::to_string);
     usage.usage_classification = classify_usage(

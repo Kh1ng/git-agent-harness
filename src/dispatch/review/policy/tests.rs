@@ -773,18 +773,20 @@ fn review_escalation_reason_respects_configured_fix_budget() {
 }
 
 fn route_decision(backend: &str, model: Option<&str>, fallback_used: bool) -> RouteDecision {
-    RouteDecision {
-        requested_backend: backend.to_string(),
-        effective_backend: backend.to_string(),
-        requested_model: model.map(str::to_string),
-        effective_model: model.map(str::to_string),
-        effective_quota_pool: None,
-        routing_reason: "test".to_string(),
+    RouteDecision::from_identity(
+        crate::execution_identity::ExecutionIdentity::legacy_route(
+            backend,
+            model,
+            backend,
+            model,
+            None::<String>,
+        ),
+        "test".to_string(),
         fallback_used,
-        confidence_impact: None,
-        human_required: false,
-        routing_diagnostics: None,
-    }
+        None,
+        false,
+        None,
+    )
 }
 
 #[test]

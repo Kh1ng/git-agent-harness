@@ -145,11 +145,7 @@ pub(crate) fn improve(
     // may choose the next action. The reservation stays alive through this
     // first backend attempt, so a sibling sees the live cap and falls through
     // to the next configured backend instance (for example agy-second).
-    let mut initial_route_slot = Some(reserve_backend_slot(
-        profile,
-        &route.effective_backend,
-        route.effective_model.as_deref(),
-    )?);
+    let mut initial_route_slot = Some(reserve_backend_slot(profile, &route.identity)?);
     if let Some(route_ready) = &args.route_ready {
         let _ = route_ready.send(());
     }

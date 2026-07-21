@@ -1,4 +1,5 @@
 use super::types::SkippedBackend;
+use crate::execution_identity::ExecutionIdentity;
 use anyhow::{bail, Result};
 use fs2::FileExt;
 use std::collections::HashMap;
@@ -53,6 +54,13 @@ impl ConcurrencyGuard {
             key,
             shared_file: None,
         }
+    }
+
+    pub fn acquire_for_identity(identity: &ExecutionIdentity) -> Self {
+        Self::acquire(
+            &identity.logical_backend,
+            identity.effective_model.as_deref(),
+        )
     }
 
     /// Reserve one configured backend/model slot across processes. A flock is
@@ -122,6 +130,19 @@ impl ConcurrencyGuard {
             thread::sleep(Duration::from_millis(100));
         }
     }
+
+    pub fn acquire_shared_for_identity(
+        identity: &ExecutionIdentity,
+        cap: Option<u32>,
+        shutdown_requested: impl Fn() -> bool,
+    ) -> Result<Self> {
+        Self::acquire_shared(
+            &identity.logical_backend,
+            identity.effective_model.as_deref(),
+            cap,
+            shutdown_requested,
+        )
+    }
 }
 
 impl Drop for ConcurrencyGuard {
@@ -144,9 +165,10 @@ impl Drop for ConcurrencyGuard {
 /// or is still under it.
 pub(super) fn max_concurrent_skip(
     max_concurrent: &HashMap<String, u32>,
-    backend: &str,
-    model: Option<&str>,
+    identity: &ExecutionIdentity,
 ) -> Option<SkippedBackend> {
+    let backend = identity.logical_backend.as_str();
+    let model = identity.effective_model.as_deref();
     let cap = *max_concurrent.get(&concurrency_key(backend, model))?;
     if super::current_concurrent(backend, model) >= cap {
         Some(SkippedBackend {

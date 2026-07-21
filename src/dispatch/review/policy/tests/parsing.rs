@@ -1,18 +1,20 @@
 use super::*;
 
 fn vibe_route(model: Option<&str>) -> crate::routing::RouteDecision {
-    crate::routing::RouteDecision {
-        requested_backend: "vibe".to_string(),
-        effective_backend: "vibe".to_string(),
-        requested_model: model.map(str::to_string),
-        effective_model: model.map(str::to_string),
-        effective_quota_pool: None,
-        routing_reason: "test".to_string(),
-        fallback_used: false,
-        confidence_impact: None,
-        human_required: false,
-        routing_diagnostics: None,
-    }
+    crate::routing::RouteDecision::from_identity(
+        crate::execution_identity::ExecutionIdentity::legacy_route(
+            "vibe",
+            model,
+            "vibe",
+            model,
+            None::<String>,
+        ),
+        "test".to_string(),
+        false,
+        None,
+        false,
+        None,
+    )
 }
 
 #[test]
