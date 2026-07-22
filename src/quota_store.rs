@@ -373,11 +373,52 @@ mod tests {
         let (_dir, path) = tmp_store();
         let bin_dir = tempfile::tempdir().unwrap();
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mistral-admin");
+        let rate_limit_path = bin_dir.path().join("rate_limit.json");
+        let spend_limit_path = bin_dir.path().join("spend_limit.json");
+        std::fs::write(
+            &rate_limit_path,
+            r#"{
+  "requests_per_second": 5,
+  "tokens_limits_by_model": {
+    "mistral-vibe-cli-latest": {
+      "tokens_per_minute": 500000,
+      "tokens_per_month": 200000000
+    },
+    "mistral-medium-3.5": {
+      "tokens_per_minute": 250000,
+      "tokens_per_month": 100000000
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &spend_limit_path,
+            r#"{
+  "limits": {
+    "completion": {
+      "no_monthly_limit": false,
+      "monthly_limit_reached": false,
+      "usage": 128.42,
+      "vibe_usage": 41.1,
+      "total_usage": 169.52,
+      "usage_limit": 500.0,
+      "usage_limit_organization": 500.0
+    },
+    "last_payment_failure": false,
+    "last_payment_failure_protection": null,
+    "currency": "USD"
+  }
+}"#,
+        )
+        .unwrap();
         let script_path = bin_dir.path().join("curl");
         std::fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{fixtures}/rate_limit.json' ;;\n  *api/admin/spend-limit*) cat '{fixtures}/spend_limit.json' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{rate_limit}' ;;\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
+                rate_limit = rate_limit_path.display(),
+                spend_limit = spend_limit_path.display(),
             ),
         )
         .unwrap();
@@ -414,11 +455,47 @@ mod tests {
         let (_dir, path) = tmp_store();
         let bin_dir = tempfile::tempdir().unwrap();
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mistral-admin");
+        let rate_limit_path = bin_dir.path().join("rate_limit.json");
+        let spend_limit_path = bin_dir.path().join("spend_limit.json");
+        std::fs::write(
+            &rate_limit_path,
+            r#"{
+  "requests_per_second": 5,
+  "tokens_limits_by_model": {
+    "mistral-vibe-cli-latest": {
+      "tokens_per_minute": 500000,
+      "tokens_per_month": 200000000
+    },
+    "mistral-medium-3.5": {
+      "tokens_per_minute": 250000,
+      "tokens_per_month": 100000000
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &spend_limit_path,
+            r#"{
+  "limits": {
+    "completion": {
+      "no_monthly_limit": false,
+      "monthly_limit_reached": false
+    },
+    "currency": "USD",
+    "last_payment_failure": false,
+    "last_payment_failure_protection": null
+  }
+}"#,
+        )
+        .unwrap();
         let script_path = bin_dir.path().join("curl");
         std::fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{fixtures}/rate_limit.json' ;;\n  *api/admin/spend-limit*) printf '%s' '{{\"limits\":{{\"completion\":{{\"monthly_limit_reached\":false}},\"currency\":\"USD\",\"last_payment_failure\":false,\"last_payment_failure_protection\":null}}}}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{rate_limit}' ;;\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
+                rate_limit = rate_limit_path.display(),
+                spend_limit = spend_limit_path.display(),
             ),
         )
         .unwrap();

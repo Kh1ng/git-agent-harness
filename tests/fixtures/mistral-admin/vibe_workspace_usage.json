@@ -1,32 +1,65 @@
 {
-  "start_time": 1751328000,
-  "end_time": 1751932800,
-  "sessions": [
-    { "day": "2026-07-01", "nb_sessions": 42, "nb_sessions_cli": 30, "nb_sessions_acp": 4, "nb_sessions_programmatic": 8 },
-    { "day": "2026-07-02", "nb_sessions": 51, "nb_sessions_cli": 33, "nb_sessions_acp": 6, "nb_sessions_programmatic": 12 }
-  ],
-  "user_prompts": [
-    { "day": "2026-07-01", "nb_prompts_total": 210, "nb_prompts_cli": 150, "nb_prompts_acp": 20, "nb_prompts_programmatic": 40 },
-    { "day": "2026-07-02", "nb_prompts_total": 265, "nb_prompts_cli": 180, "nb_prompts_acp": 25, "nb_prompts_programmatic": 60 }
-  ],
   "active_users": [
-    { "day": "2026-07-01", "nb_active_users_total": 9, "nb_active_users_cli": 7, "nb_active_users_acp": 1, "nb_active_users_programmatic": 1 },
-    { "day": "2026-07-02", "nb_active_users_total": 11, "nb_active_users_cli": 8, "nb_active_users_acp": 2, "nb_active_users_programmatic": 1 }
+    {
+      "day": "2025-10-07T20:56:01.974Z",
+      "nb_active_users_acp": 87,
+      "nb_active_users_cli": 14,
+      "nb_active_users_programmatic": 56,
+      "nb_active_users_total": 91
+    }
   ],
   "consumed_tokens": [
-    { "day": "2026-07-01", "model": "mistral-vibe-cli-latest", "cached_tokens": 12000, "input_tokens": 154200, "output_tokens": 38650 },
-    { "day": "2026-07-02", "model": "mistral-vibe-cli-latest", "cached_tokens": 15400, "input_tokens": 188300, "output_tokens": 44210 }
+    {
+      "cached_tokens": 32,
+      "day": "2025-10-07T20:56:01.974Z",
+      "input_tokens": 78,
+      "model": "mistral-small-latest",
+      "output_tokens": 5
+    }
   ],
+  "end_time": 69,
+  "session_durations": [
+    {
+      "day": "2025-10-07T20:56:01.974Z",
+      "total_duration_hours": 41
+    }
+  ],
+  "sessions": [
+    {
+      "day": "2025-10-07T20:56:01.974Z",
+      "nb_sessions": 18,
+      "nb_sessions_acp": 74,
+      "nb_sessions_cli": 29,
+      "nb_sessions_programmatic": 85
+    }
+  ],
+  "start_time": 62,
   "tool_calls": [
-    { "day": "2026-07-01", "total": 320, "status_success": 300, "status_failure": 12, "status_skipped": 8, "approval_ask": 40, "approval_always": 260, "approval_never": 20 },
-    { "day": "2026-07-02", "total": 401, "status_success": 375, "status_failure": 18, "status_skipped": 8, "approval_ask": 55, "approval_always": 320, "approval_never": 26 }
+    {
+      "approval_always": 7,
+      "approval_ask": 93,
+      "approval_never": 36,
+      "day": "2025-10-07T20:56:01.974Z",
+      "status_failure": 51,
+      "status_skipped": 80,
+      "status_success": 13,
+      "total": 47
+    }
   ],
   "tool_calls_by_name": [
-    { "day": "2026-07-01", "tool_name": "edit_file", "count": 120 },
-    { "day": "2026-07-02", "tool_name": "edit_file", "count": 148 }
+    {
+      "count": 25,
+      "day": "2025-10-07T20:56:01.974Z",
+      "tool_name": "search"
+    }
   ],
-  "session_durations": [
-    { "day": "2026-07-01", "total_duration_hours": 18.5 },
-    { "day": "2026-07-02", "total_duration_hours": 22.1 }
+  "user_prompts": [
+    {
+      "day": "2025-10-07T20:56:01.974Z",
+      "nb_prompts_acp": 89,
+      "nb_prompts_cli": 64,
+      "nb_prompts_programmatic": 2,
+      "nb_prompts_total": 71
+    }
   ]
 }

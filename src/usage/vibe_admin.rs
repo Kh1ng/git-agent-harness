@@ -353,11 +353,74 @@ mod tests {
     const VIBE_WORKSPACE_USAGE: &str =
         include_str!("../../tests/fixtures/mistral-admin/vibe_workspace_usage.json");
     const ADMIN_USAGE: &str = include_str!("../../tests/fixtures/mistral-admin/usage.json");
-    const ADMIN_USAGE_EUR: &str = include_str!("../../tests/fixtures/mistral-admin/usage_eur.json");
-    const RATE_LIMIT: &str = include_str!("../../tests/fixtures/mistral-admin/rate_limit.json");
-    const SPEND_LIMIT: &str = include_str!("../../tests/fixtures/mistral-admin/spend_limit.json");
-    const SPEND_LIMIT_REACHED_NO_AMOUNT: &str =
-        include_str!("../../tests/fixtures/mistral-admin/spend_limit_reached_no_amount.json");
+    const ADMIN_USAGE_EUR: &str = r#"{
+  "audio": { "models": [ [ [ [ null ] ] ] ] },
+  "audio_characters": { "models": [ [ [ [ null ] ] ] ] },
+  "chat": { "models": [ [ [ [ null ] ] ] ] },
+  "completion": { "models": [ [ [ [ null ] ] ] ] },
+  "connectors": { "models": [ [ [ [ null ] ] ] ] },
+  "currency": "EUR",
+  "currency_symbol": "€",
+  "date": "2025-12-17T10:25:07.818693Z",
+  "end_date": "2025-12-17T10:25:07.818693Z",
+  "fine_tuning": { "storage": [87], "training": [ [ [ [ null ] ] ] ] },
+  "libraries_api": {
+    "audio_seconds": { "models": [ [ [ [ null ] ] ] ] },
+    "pages": { "models": [ [ [ [ null ] ] ] ] },
+    "tokens": { "models": [ [ [ [ null ] ] ] ] }
+  },
+  "next_month": null,
+  "ocr": { "models": [ [ [ [ null ] ] ] ] },
+  "previous_month": null,
+  "prices": null,
+  "start_date": "2025-12-17T10:25:07.818693Z",
+  "vibe_usage": 37.8
+}"#;
+    const RATE_LIMIT: &str = r#"{
+  "requests_per_second": 5,
+  "tokens_limits_by_model": {
+    "mistral-vibe-cli-latest": {
+      "tokens_per_minute": 500000,
+      "tokens_per_month": 200000000
+    },
+    "mistral-medium-3.5": {
+      "tokens_per_minute": 250000,
+      "tokens_per_month": 100000000
+    }
+  }
+}"#;
+    const SPEND_LIMIT: &str = r#"{
+  "limits": {
+    "completion": {
+      "no_monthly_limit": false,
+      "monthly_limit_reached": false,
+      "usage": 128.42,
+      "vibe_usage": 41.1,
+      "total_usage": 169.52,
+      "usage_limit": 500.0,
+      "usage_limit_organization": 500.0
+    },
+    "last_payment_failure": false,
+    "last_payment_failure_protection": null,
+    "currency": "USD"
+  }
+}"#;
+    const SPEND_LIMIT_REACHED_NO_AMOUNT: &str = r#"{
+  "limits": {
+    "completion": {
+      "no_monthly_limit": false,
+      "monthly_limit_reached": true,
+      "usage": null,
+      "vibe_usage": null,
+      "total_usage": null,
+      "usage_limit": null,
+      "usage_limit_organization": null
+    },
+    "last_payment_failure": true,
+    "last_payment_failure_protection": null,
+    "currency": "USD"
+  }
+}"#;
 
     #[test]
     fn admin_api_key_reads_env_var_and_treats_empty_as_unset() {
@@ -382,15 +445,11 @@ mod tests {
             usage.usage_source.as_deref(),
             Some("mistral_admin_analytics_vibe_by_workspace")
         );
-        // 154200 + 188300
-        assert_eq!(usage.input_tokens, Some(342500));
-        // 38650 + 44210
-        assert_eq!(usage.output_tokens, Some(82860));
-        // 12000 + 15400
-        assert_eq!(usage.cache_read_tokens, Some(27400));
-        assert_eq!(usage.total_tokens, Some(342500 + 82860));
-        // 210 + 265
-        assert_eq!(usage.requests_count, Some(475));
+        assert_eq!(usage.input_tokens, Some(78));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.cache_read_tokens, Some(32));
+        assert_eq!(usage.total_tokens, Some(83));
+        assert_eq!(usage.requests_count, Some(71));
     }
 
     #[test]
@@ -404,12 +463,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_admin_usage_billing_in_usd() {
+    fn parses_admin_usage_billing_example_stays_unknown_when_currency_is_unset() {
         let usage = parse_admin_usage(ADMIN_USAGE);
         assert_eq!(usage.usage_source.as_deref(), Some("mistral_admin_usage"));
-        assert_eq!(usage.actual_cost_usd, Some(41.1));
-        assert!(usage.cost_unknown_reason.is_none());
-        assert_eq!(usage.observed_at.as_deref(), Some("2026-07-31T23:59:59Z"));
+        assert_eq!(usage.actual_cost_usd, None);
+        assert_eq!(
+            usage.cost_unknown_reason.as_deref(),
+            Some("mistral_admin_usage currency unknown")
+        );
+        assert_eq!(
+            usage.observed_at.as_deref(),
+            Some("2025-12-17T10:25:07.818693Z")
+        );
     }
 
     #[test]
@@ -564,19 +629,29 @@ mod tests {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mistral-admin");
+        let rate_limit_path = dir.path().join("rate_limit.json");
+        let spend_limit_path = dir.path().join("spend_limit.json");
+        std::fs::write(&rate_limit_path, RATE_LIMIT).unwrap();
+        std::fs::write(&spend_limit_path, SPEND_LIMIT).unwrap();
         write_fake_curl(
             dir.path(),
             &format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{fixtures}/rate_limit.json' ;;\n  *api/admin/spend-limit*) cat '{fixtures}/spend_limit.json' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{rate_limit}' ;;\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
                 fixtures = fixtures,
+                rate_limit = rate_limit_path.display(),
+                spend_limit = spend_limit_path.display(),
             ),
         );
         let _path_guard = crate::test_support::PathGuard::set(dir.path());
 
         let refresh = refresh_admin_data("sk-test", (1_000, 2_000), "vibe", None);
 
-        assert_eq!(refresh.workspace_usage.requests_count, Some(475));
-        assert_eq!(refresh.billing.actual_cost_usd, Some(41.1));
+        assert_eq!(refresh.workspace_usage.requests_count, Some(71));
+        assert_eq!(refresh.billing.actual_cost_usd, None);
+        assert_eq!(
+            refresh.billing.cost_unknown_reason.as_deref(),
+            Some("mistral_admin_usage currency unknown")
+        );
         assert_eq!(refresh.rate_limits.requests_per_second, Some(5));
         let spend = refresh.spend_limit.expect("spend limit observation");
         assert_eq!(spend.backend, "vibe");
@@ -587,12 +662,13 @@ mod tests {
     fn refresh_admin_data_endpoint_failure_leaves_only_that_field_unknown() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let dir = tempfile::tempdir().unwrap();
-        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mistral-admin");
+        let spend_limit_path = dir.path().join("spend_limit.json");
+        std::fs::write(&spend_limit_path, SPEND_LIMIT).unwrap();
         write_fake_curl(
             dir.path(),
             &format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *api/admin/spend-limit*) cat '{fixtures}/spend_limit.json' ;;\n  *) exit 1 ;;\nesac\n",
-                fixtures = fixtures,
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
+                spend_limit = spend_limit_path.display(),
             ),
         );
         let _path_guard = crate::test_support::PathGuard::set(dir.path());
