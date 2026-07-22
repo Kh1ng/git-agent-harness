@@ -47,6 +47,7 @@ const ENVIRONMENT_ERROR_SIGNATURES: &[&str] = &[
     "Connection refused",              // generic: dependent service (DB, API) not reachable
     "ECONNREFUSED",                    // Node.js: same, as an error code
     "No such file or directory: 'cc'", // Rust: no C toolchain installed
+    "Text file busy",                  // ETXTBSY: concurrent exec of a binary mid-write (#568)
 ];
 
 /// `exit_code` is the POSIX shell exit status of the *validation command
@@ -161,6 +162,18 @@ mod tests {
     fn node_cannot_find_module_is_environment_error() {
         assert_eq!(
             classify_baseline("Error: Cannot find module 'express'", Some(1), &[]),
+            BaselineDisposition::EnvironmentError
+        );
+    }
+
+    #[test]
+    fn text_file_busy_is_environment_error() {
+        assert_eq!(
+            classify_baseline(
+                "fatal: cannot exec '.git/hooks/fake-git': Text file busy",
+                Some(1),
+                &[],
+            ),
             BaselineDisposition::EnvironmentError
         );
     }
