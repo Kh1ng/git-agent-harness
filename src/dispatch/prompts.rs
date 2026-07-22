@@ -694,26 +694,39 @@ mod tests {
     }
 
     #[test]
-    fn live_task_pack_preserves_numbered_acceptance_criteria_570_style() {
-        // Issue #570 (live #363 dispatch): a canonical `## Acceptance
-        // Criteria` section with 12 numbered items was silently omitted
-        // from the generated task pack. Every item must appear, in order,
-        // and the section-parse audit must record it as list-parsed.
+    fn live_task_pack_preserves_numbered_acceptance_criteria_from_github_response_570_style() {
+        // Issue #570 (live #363 dispatch): exercise the GitHub intake
+        // adapter with a realistic REST issue payload so the task-pack
+        // snapshot is grounded in direct provider-shaped evidence rather
+        // than a hand-built `IssueDetails`.
         let tmp = tempfile::tempdir().unwrap();
-        let prof = profile(tmp.path());
+        let mut prof = profile(tmp.path());
+        prof.publishing.trusted_issue_human_authors = Some(vec!["khing".into()]);
         let wt = tmp.path().join("worktree");
         fs::create_dir_all(&wt).unwrap();
         let numbered_list = (1..=12)
             .map(|n| format!("{n}. Requirement number {n}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let issue = IssueDetails {
-            number: "363".to_string(),
-            title: "Numbered acceptance criteria".to_string(),
-            body: format!("## Acceptance Criteria\n\n{numbered_list}\n"),
-            labels: vec![],
-            state: None,
-        };
+        let resp = serde_json::json!({
+            "number": 363,
+            "title": "Numbered acceptance criteria",
+            "body": format!("## Acceptance Criteria\n\n{numbered_list}\n"),
+            "labels": [],
+            "author": {"login": "khing", "type": "User", "is_bot": false},
+            "state": "open",
+        });
+        let issue =
+            crate::dispatch::issues::issue_details_from_github_response(&prof, "363", &resp, false)
+                .unwrap();
+        assert_eq!(issue.number, "363");
+        assert_eq!(issue.title, "Numbered acceptance criteria");
+        assert_eq!(
+            issue.body,
+            format!("## Acceptance Criteria\n\n{numbered_list}\n")
+        );
+        assert!(issue.labels.is_empty());
+        assert_eq!(issue.state.as_deref(), Some("open"));
 
         let task = build_task(&prof, &wt, "improve", "#363", Some(&issue));
 

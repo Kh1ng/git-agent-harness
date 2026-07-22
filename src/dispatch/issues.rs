@@ -344,7 +344,7 @@ pub(super) fn github_issue_author_is_allowed(
     issue_author_is_trusted(profile, &author)
 }
 
-fn issue_details_from_github_response(
+pub(super) fn issue_details_from_github_response(
     profile: &Profile,
     issue_number: &str,
     resp: &serde_json::Value,
@@ -409,7 +409,7 @@ fn issue_details_from_github_response(
     })
 }
 
-fn issue_details_from_gitlab_response(
+pub(super) fn issue_details_from_gitlab_response(
     profile: &Profile,
     issue_number: &str,
     resp: &serde_json::Value,
