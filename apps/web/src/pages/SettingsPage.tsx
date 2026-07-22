@@ -3,14 +3,18 @@ import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw } from 'lucide-
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
+import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
+import { oldestFetchedAt } from '../lib/format.js';
 import type { WakeAutonomyValue, ConfigProfileSummary, RoutingCandidateSummary } from '@git-agent-harness/contracts';
 
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
+const SETTINGS_REFRESH_MS = 60 * 1000;
 const WAKE_AUTONOMY_OPTIONS: { value: WakeAutonomyValue; label: string }[] = [
   { value: 'off', label: 'Off' },
   { value: 'review_only', label: 'Review only' },
@@ -46,6 +50,18 @@ export function SettingsPage() {
     }
   }, [selectedName, fetchProfileConfig, fetchDoctor]);
 
+  const refreshAll = () => {
+    fetchProfiles({ force: true });
+    fetchConfig({ force: true });
+    if (selectedName) {
+      fetchProfileConfig(selectedName, { force: true });
+      fetchDoctor(selectedName, { force: true });
+    }
+  };
+  useAutoRefresh(refreshAll, SETTINGS_REFRESH_MS);
+  useWsReconnectRefresh(refreshAll);
+  const lastUpdated = oldestFetchedAt(profiles.fetchedAt, config.fetchedAt, profileConfig.fetchedAt, doctor.fetchedAt);
+
   const agentBackends = providers.filter((p) => !SCM_PROVIDER_KINDS.has(p.providerKind));
   const activeScmProvider = selected?.provider
     ? providers.find((p) => p.providerKind === selected.provider)
@@ -59,7 +75,13 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Settings" description="Appearance, profile, dispatch, and manager configuration" />
+      <PageHeader
+        title="Settings"
+        description="Appearance, profile, dispatch, and manager configuration"
+        onRefresh={refreshAll}
+        refreshing={profiles.loading || config.loading}
+        lastUpdated={lastUpdated}
+      />
 
       <section className="card-padded max-w-md">
         <h3 className="text-sm font-semibold text-primary mb-3">Appearance</h3>

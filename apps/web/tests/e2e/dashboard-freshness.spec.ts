@@ -50,6 +50,12 @@ async function mockRestApi(page: Page) {
         return route.fulfill({ json: [] });
       case '/api/loop/status':
         return route.fulfill({ json: { running: false } });
+      case '/api/config':
+        return route.fulfill({ json: { current_manager: null } });
+      case '/api/doctor':
+        return route.fulfill({ json: { overall_status: 'ok', checks: [] } });
+      case '/api/config/effective':
+        return route.fulfill({ json: {} });
       default:
         // Anything else matching the broad glob below (notably Vite's own
         // dev-server module requests for files under src/api/) must pass
@@ -83,6 +89,7 @@ test.describe('last-updated indicator', () => {
     { label: 'Telemetry', heading: 'Telemetry' },
     { label: 'Work', heading: 'Work' },
     { label: 'Events', heading: 'Events' },
+    { label: 'Settings', heading: 'Settings' },
   ]) {
     test(`${route.label} shows a live "Updated ... ago" readout once data loads`, async ({ page }) => {
       await page.goto('/');
