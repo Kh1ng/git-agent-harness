@@ -1612,17 +1612,17 @@ fn review_falls_back_to_next_candidate_on_agy_empty_output() {
 
     let fake_home = tmp.path().join("fake-home");
     fs::create_dir_all(fake_home.join(".gemini/antigravity-cli")).unwrap();
-    fs::write(
-        fake_home.join(".gemini/antigravity-cli/cli.log"),
-        "E0000 00:00:00.000000 1 log.go:398] RESOURCE_EXHAUSTED (code 429): \
-         Individual quota reached. Resets in 114h2m37s.\n",
-    )
-    .unwrap();
+    let cli_log = fake_home.join(".gemini/antigravity-cli/cli.log");
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    // Exit 0, empty stdout -- the real live failure mode, not a nonzero exit.
-    make_fake_bin_with_body(&fake_bin, "agy", "#!/bin/sh\nexit 0\n");
+    // Exit 0, empty stdout; quota error appended during the run, not pre-seeded
+    // (the log delta only sees bytes written after this run starts).
+    let agy_body = format!(
+        "#!/bin/sh\nprintf 'E0000 00:00:00.000000 1 log.go:398] RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 114h2m37s.\\n' >> '{}'\nexit 0\n",
+        cli_log.display(),
+    );
+    make_fake_bin_with_body(&fake_bin, "agy", &agy_body);
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
