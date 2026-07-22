@@ -301,6 +301,148 @@ fn parse_ticket_metadata_from_issue_handles_metadata_fields() {
 }
 
 #[test]
+fn parse_ticket_metadata_from_issue_preserves_numbered_acceptance_criteria_570_style() {
+    // Issue #570 (live #363 dispatch): a canonical `## Acceptance Criteria`
+    // section using an ordered Markdown list was silently omitted from the
+    // generated task pack, while the same items as unordered bullets
+    // rendered fine. Ordered lists must be preserved identically.
+    let issue = IssueDetails {
+        number: "363".to_string(),
+        title: "Numbered acceptance criteria".to_string(),
+        body: "## Problem\n\nSomething is broken\n\n\
+               ## Acceptance Criteria\n\n\
+               1. First requirement\n\
+               2. Second requirement\n\
+               3. Third requirement\n"
+            .to_string(),
+        labels: vec![],
+        state: None,
+    };
+
+    let meta = parse_ticket_metadata_from_issue(&issue);
+    assert_eq!(
+        meta.acceptance_criteria,
+        vec![
+            "First requirement",
+            "Second requirement",
+            "Third requirement",
+        ]
+    );
+}
+
+#[test]
+fn parse_ticket_metadata_from_issue_preserves_mixed_bullet_and_numbered_order() {
+    // Issue #570: a section mixing `- ` bullets and `N.`/`N)` ordered
+    // markers must keep original order and exact text for every item.
+    let issue = IssueDetails {
+        number: "570".to_string(),
+        title: "Mixed markers".to_string(),
+        body: "## Acceptance Criteria\n\n\
+               - Bullet one\n\
+               2. Numbered two\n\
+               3) Numbered three with paren\n\
+               - Bullet four\n"
+            .to_string(),
+        labels: vec![],
+        state: None,
+    };
+
+    let meta = parse_ticket_metadata_from_issue(&issue);
+    assert_eq!(
+        meta.acceptance_criteria,
+        vec![
+            "Bullet one",
+            "Numbered two",
+            "Numbered three with paren",
+            "Bullet four",
+        ]
+    );
+}
+
+#[test]
+fn parse_ticket_metadata_from_issue_falls_back_to_raw_text_for_prose_acceptance_criteria() {
+    // Issue #570: a recognized non-empty `Acceptance Criteria` section that
+    // isn't list-formatted at all must never silently vanish -- it must be
+    // recovered as bounded raw text instead.
+    let issue = IssueDetails {
+        number: "571".to_string(),
+        title: "Prose acceptance criteria".to_string(),
+        body: "## Acceptance Criteria\n\nThe fix must resolve the reported crash.".to_string(),
+        labels: vec![],
+        state: None,
+    };
+
+    let meta = parse_ticket_metadata_from_issue(&issue);
+    assert_eq!(
+        meta.acceptance_criteria,
+        vec!["The fix must resolve the reported crash."]
+    );
+}
+
+#[test]
+fn github_issue_response_with_numbered_acceptance_criteria_survives_intake_and_parsing() {
+    // Issue #570 / live #363: exercise the real GitHub REST response shape
+    // (not just a hand-built IssueDetails) to confirm a numbered
+    // `## Acceptance Criteria` section fetched from GitHub survives both
+    // intake and structured-metadata parsing.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut prof = profile(tmp.path());
+    prof.repo = "Kh1ng/git-agent-harness".into();
+    let items: Vec<String> = (1..=12).map(|n| format!("Item number {n}")).collect();
+    let numbered_list = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| format!("{}. {item}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!("## Acceptance Criteria\n\n{numbered_list}\n");
+    let resp = serde_json::json!({
+        "number": 363,
+        "title": "Live numbered acceptance criteria",
+        "body": body,
+        "labels": [],
+        "author": {"login": "kh1ng", "type": "User", "is_bot": false},
+        "state": "open",
+    });
+
+    let details = issue_details_from_github_response(&prof, "363", &resp, false).unwrap();
+    let meta = parse_ticket_metadata_from_issue(&details);
+    assert_eq!(meta.acceptance_criteria, items);
+}
+
+#[test]
+fn gitlab_issue_response_with_numbered_acceptance_criteria_survives_intake_and_parsing() {
+    // Issue #570: the same coverage as the GitHub case, but for the GitLab
+    // `glab issue view -F json` response shape (description field, author
+    // username).
+    let tmp = tempfile::tempdir().unwrap();
+    let mut prof = profile(tmp.path());
+    prof.provider = "gitlab".into();
+    prof.repo = "group/project".into();
+    prof.publishing.trusted_issue_human_authors = Some(vec!["khing".into()]);
+    let items: Vec<String> = (1..=12).map(|n| format!("Item number {n}")).collect();
+    let numbered_list = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| format!("{}. {item}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let description = format!("## Acceptance Criteria\n\n{numbered_list}\n");
+    let resp = serde_json::json!({
+        "iid": 363,
+        "title": "Live numbered acceptance criteria",
+        "description": description,
+        "labels": [],
+        "author": {"username": "khing", "is_bot": false},
+        "state": "opened",
+    });
+
+    let details = issue_details_from_gitlab_response(&prof, "363", &resp, false).unwrap();
+    let meta = parse_ticket_metadata_from_issue(&details);
+    assert_eq!(meta.acceptance_criteria, items);
+}
+
+#[test]
 fn parse_ticket_metadata_from_issue_never_uses_goal_as_provider_title() {
     let issue = IssueDetails {
         number: "159".to_string(),

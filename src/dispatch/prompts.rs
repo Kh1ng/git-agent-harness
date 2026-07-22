@@ -1,7 +1,7 @@
 use super::issues::{
     extract_markdown_code_list_section, extract_markdown_list_section,
-    extract_markdown_requirement_items, extract_markdown_section, parse_ticket_metadata_from_issue,
-    IssueDetails,
+    extract_markdown_list_section_audited, extract_markdown_section,
+    parse_ticket_metadata_from_issue, IssueDetails, SectionParseMode,
 };
 use super::text::utf8_safe_prefix;
 use crate::config::{GahConfig, Profile};
@@ -273,6 +273,7 @@ fn append_live_task_pack(task: &mut String, issue: &IssueDetails) {
             true,
         );
     }
+    append_task_pack_audit(task, &issue.body);
     append_issue_section_snapshot(task, &sections);
     if issue_has_no_structured_body(issue) {
         task.push_str("\n### Issue Description\n\n");
@@ -335,6 +336,52 @@ fn extract_issue_section_heading(line: &str) -> Option<&str> {
     line.strip_prefix("## ")
         .or_else(|| line.strip_prefix("### "))
         .map(str::trim)
+}
+
+/// Recognized task-pack headings that are extracted as lists. Reported
+/// verbatim (not merged into their destination field) so the audit reflects
+/// exactly what the source issue authored under each heading.
+const AUDITED_TASK_PACK_HEADINGS: [&str; 8] = [
+    "Acceptance Criteria",
+    "Constraints",
+    "Invariants",
+    "Required Behavior",
+    "Affected Files",
+    "Move only",
+    "Verification Commands",
+    "Verification",
+];
+
+/// Record, for every recognized list heading present in the source issue,
+/// whether it was parsed as a list or recovered via the raw-text fallback.
+/// This makes the live #363 failure mode (a numbered `Acceptance Criteria`
+/// section rendering as if the heading were never present) directly visible
+/// in the task pack instead of only discoverable by diffing against the
+/// source issue.
+fn append_task_pack_audit(task: &mut String, body: &str) {
+    let entries: Vec<(&str, SectionParseMode, usize)> = AUDITED_TASK_PACK_HEADINGS
+        .iter()
+        .filter_map(|heading| {
+            extract_markdown_list_section_audited(body, heading)
+                .map(|(items, mode)| (*heading, mode, items.len()))
+        })
+        .collect();
+    if entries.is_empty() {
+        return;
+    }
+    task.push_str("\n### Section Parse Audit\n\n");
+    for (heading, mode, count) in entries {
+        let status = match mode {
+            SectionParseMode::List => {
+                let plural = if count == 1 { "" } else { "s" };
+                format!("parsed as list ({count} item{plural})")
+            }
+            SectionParseMode::Fallback => {
+                "recovered by raw-text fallback (not list-formatted)".to_string()
+            }
+        };
+        task.push_str(&format!("- {heading}: {status}\n"));
+    }
 }
 
 fn append_issue_section_snapshot(task: &mut String, sections: &[IssueSection]) {
@@ -420,8 +467,8 @@ fn issue_has_no_structured_body(issue: &IssueDetails) -> bool {
         && extract_markdown_section(&issue.body, "Scope").is_none()
         && extract_markdown_list_section(&issue.body, "Acceptance Criteria").is_empty()
         && extract_markdown_list_section(&issue.body, "Constraints").is_empty()
-        && extract_markdown_requirement_items(&issue.body, "Invariants").is_empty()
-        && extract_markdown_requirement_items(&issue.body, "Required Behavior").is_empty()
+        && extract_markdown_list_section(&issue.body, "Invariants").is_empty()
+        && extract_markdown_list_section(&issue.body, "Required Behavior").is_empty()
         && extract_markdown_list_section(&issue.body, "Affected Files").is_empty()
         && extract_markdown_list_section(&issue.body, "Move only").is_empty()
         && extract_markdown_code_list_section(&issue.body, "Verification Commands").is_empty()
@@ -644,6 +691,61 @@ mod tests {
         let task = build_task(&prof, &wt, "improve", "", None);
 
         assert!(!task.contains("## Project Brief"));
+    }
+
+    #[test]
+    fn live_task_pack_preserves_numbered_acceptance_criteria_570_style() {
+        // Issue #570 (live #363 dispatch): a canonical `## Acceptance
+        // Criteria` section with 12 numbered items was silently omitted
+        // from the generated task pack. Every item must appear, in order,
+        // and the section-parse audit must record it as list-parsed.
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let numbered_list = (1..=12)
+            .map(|n| format!("{n}. Requirement number {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let issue = IssueDetails {
+            number: "363".to_string(),
+            title: "Numbered acceptance criteria".to_string(),
+            body: format!("## Acceptance Criteria\n\n{numbered_list}\n"),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#363", Some(&issue));
+
+        for n in 1..=12 {
+            assert!(
+                task.contains(&format!("Requirement number {n}")),
+                "missing requirement {n} in task pack:\n{task}"
+            );
+        }
+        assert!(task.contains("### Section Parse Audit"));
+        assert!(task.contains("Acceptance Criteria: parsed as list (12 items)"));
+    }
+
+    #[test]
+    fn live_task_pack_reports_fallback_audit_for_prose_acceptance_criteria() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prof = profile(tmp.path());
+        let wt = tmp.path().join("worktree");
+        fs::create_dir_all(&wt).unwrap();
+        let issue = IssueDetails {
+            number: "571".to_string(),
+            title: "Prose acceptance criteria".to_string(),
+            body: "## Acceptance Criteria\n\nThe fix must resolve the reported crash.".to_string(),
+            labels: vec![],
+            state: None,
+        };
+
+        let task = build_task(&prof, &wt, "improve", "#571", Some(&issue));
+
+        assert!(task.contains("The fix must resolve the reported crash."));
+        assert!(task
+            .contains("Acceptance Criteria: recovered by raw-text fallback (not list-formatted)"));
     }
 
     #[test]
