@@ -177,6 +177,7 @@ async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage,
   
   try {
     const session = await sessionManager.startSession({
+      requestId: message.requestId,
       profile: message.profile,
       providerKind: message.providerKind,
       instanceId: message.instanceId,
@@ -187,12 +188,6 @@ async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage,
       backend: message.backend,
       model: message.model,
       budget: message.budget
-    });
-    
-    // Notify all clients about new session
-    pushBus.publish({
-      type: 'session.started',
-      session
     });
     
     // Send success response
@@ -211,12 +206,7 @@ async function handleStopSession(ws: WebSocket, message: Extract<ClientMessage, 
   
   try {
     const session = await sessionManager.stopSession(message.sessionId);
-    
-    pushBus.publish({
-      type: 'session.stopped',
-      session
-    });
-    
+
     ws.send(JSON.stringify({
       type: 'session.stopped' as const,
       session

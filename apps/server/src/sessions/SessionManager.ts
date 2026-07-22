@@ -37,6 +37,24 @@ type SessionOptions = {
   prod?: boolean;
   allowUnknownRedBaseline?: boolean;
   escalate?: boolean;
+  requestId?: string;
+};
+
+type ProviderRegistryLike = {
+  isProviderAvailable(kind: ProviderKind): boolean;
+};
+
+type PushBusLike = {
+  publish(message: Parameters<ReturnType<typeof getServerPushBus>['publish']>[0]): void;
+};
+
+type DispatchRunner = typeof runDispatch;
+
+type SessionManagerDeps = {
+  providerRegistry?: ProviderRegistryLike;
+  pushBus?: PushBusLike;
+  dispatchRunner?: DispatchRunner;
+  disableCleanupTimer?: boolean;
 };
 
 // Active dispatch processes tracked by sessionId
@@ -50,22 +68,68 @@ class ActiveDispatch {
 
 class SessionManagerImpl {
   private sessions: Map<SessionId, Session> = new Map();
+  private requestToSessionId: Map<string, SessionId> = new Map();
   private pendingSessions: Map<string, Promise<Session>> = new Map();
   private outputBuffers: Map<SessionId, { stdout: string[]; stderr: string[] }> = new Map();
   private activeDispatches: Map<SessionId, ActiveDispatch> = new Map();
+  private providerRegistry: ProviderRegistryLike;
+  private pushBus: PushBusLike;
+  private dispatchRunner: DispatchRunner;
   
-  constructor() {
+  constructor(deps: SessionManagerDeps = {}) {
+    this.providerRegistry = deps.providerRegistry ?? getProviderRegistry();
+    this.pushBus = deps.pushBus ?? getServerPushBus();
+    this.dispatchRunner = deps.dispatchRunner ?? runDispatch;
+
     // Set up periodic session cleanup. unref() so this housekeeping timer
     // never keeps the process (or a test importing this singleton) alive.
-    setInterval(() => this.cleanupFinishedSessions(), 60000).unref();
+    if (!deps.disableCleanupTimer) {
+      const timer = setInterval(() => this.cleanupFinishedSessions(), 60000);
+      timer.unref?.();
+    }
+  }
   }
   
   async startSession(options: SessionOptions): Promise<Session> {
+    const { requestId } = options;
+    if (requestId) {
+      const pending = this.pendingSessions.get(requestId);
+      if (pending) {
+        return pending;
+      }
+
+      const existingSessionId = this.requestToSessionId.get(requestId);
+      if (existingSessionId) {
+        const existingSession = this.sessions.get(existingSessionId);
+        if (existingSession) {
+          return existingSession;
+        }
+        this.requestToSessionId.delete(requestId);
+      }
+    }
+
+    const startPromise = this.startSessionFresh(options);
+    if (requestId) {
+      this.pendingSessions.set(requestId, startPromise);
+    }
+    try {
+      const session = await startPromise;
+      if (requestId) {
+        this.requestToSessionId.set(requestId, session.id);
+      }
+      return session;
+    } finally {
+      if (requestId) {
+        this.pendingSessions.delete(requestId);
+      }
+    }
+  }
+
+  private async startSessionFresh(options: SessionOptions): Promise<Session> {
     const sessionId = generateSessionId();
-    const providerRegistry = getProviderRegistry();
-    
+
     // Check if provider is available
-    if (!providerRegistry.isProviderAvailable(options.providerKind)) {
+    if (!this.providerRegistry.isProviderAvailable(options.providerKind)) {
       throw new GAHError(
         `Provider ${options.providerKind} is not available`,
         'PROVIDER_NOT_AVAILABLE'
@@ -92,7 +156,7 @@ class SessionManagerImpl {
     this.outputBuffers.set(sessionId, { stdout: [], stderr: [] });
     
     // Notify about session start immediately
-    getServerPushBus().publish({
+    this.pushBus.publish({
       type: 'session.started',
       session
     });
@@ -149,7 +213,7 @@ class SessionManagerImpl {
     sessionId: SessionId,
     options: DispatchOptions
   ): Promise<DispatchResult> {
-    return runDispatch(options, (line: string) => {
+    return this.dispatchRunner(options, (line: string) => {
       // Forward each line as session.stdout message
       this.addSessionOutput(sessionId, line, false);
     });
@@ -169,7 +233,7 @@ class SessionManagerImpl {
       session.endedAt = new Date().toISOString();
       this.sessions.set(sessionId, session);
       
-      getServerPushBus().publish({
+      this.pushBus.publish({
         type: 'session.stopped',
         session
       });
@@ -182,7 +246,7 @@ class SessionManagerImpl {
       session.endedAt = new Date().toISOString();
       this.sessions.set(sessionId, session);
       
-      getServerPushBus().publish({
+      this.pushBus.publish({
         type: 'session.stopped',
         session
       });
@@ -232,10 +296,10 @@ class SessionManagerImpl {
     this.sessions.set(sessionId, session);
     
     // Notify about session stop
-    getServerPushBus().publish({
-      type: 'session.status',
-      session
-    });
+      this.pushBus.publish({
+        type: 'session.status',
+        session
+      });
     
     // Mark as stopped after a brief delay
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -248,7 +312,7 @@ class SessionManagerImpl {
     this.outputBuffers.delete(sessionId);
     
     // Notify about session stop
-    getServerPushBus().publish({
+    this.pushBus.publish({
       type: 'session.stopped',
       session
     });
@@ -299,7 +363,7 @@ class SessionManagerImpl {
       }
       
       // Publish to push bus
-      getServerPushBus().publish({
+      this.pushBus.publish({
         type: isStderr ? 'session.stderr' : 'session.stdout',
         sessionId,
         data,
@@ -361,6 +425,13 @@ class SessionManagerImpl {
     }
     
     for (const sessionId of finishedSessions) {
+      const requestIdsToRemove = Array.from(this.requestToSessionId.entries())
+        .filter(([, mappedSessionId]) => mappedSessionId === sessionId)
+        .map(([requestId]) => requestId);
+      for (const requestId of requestIdsToRemove) {
+        this.requestToSessionId.delete(requestId);
+        this.pendingSessions.delete(requestId);
+      }
       this.sessions.delete(sessionId);
       this.outputBuffers.delete(sessionId);
     }
@@ -377,6 +448,6 @@ export function getSessionManager(): SessionManagerImpl {
   return sessionManager;
 }
 
-export function createSessionManager(): SessionManagerImpl {
-  return new SessionManagerImpl();
+export function createSessionManager(deps?: SessionManagerDeps): SessionManagerImpl {
+  return new SessionManagerImpl(deps);
 }
