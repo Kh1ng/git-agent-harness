@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import os from 'node:os';
+import { statfsSync } from 'node:fs';
 import { getServerReadiness } from './serverReadiness.js';
 import {
   runStatus,
@@ -55,6 +57,27 @@ const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
 const DEFAULT_PROFILE = 'gah';
+
+function getLocalResourcePressure() {
+  const cpus = os.cpus().length || 0;
+  const loadAvg = os.loadavg()[0] || 0;
+  const cpuPercent = cpus > 0 ? Math.max(0, Math.min(100, (loadAvg / cpus) * 100)) : null;
+  const rssBytes = process.memoryUsage().rss;
+  let diskPercent: number | null = null;
+  try {
+    const stats = statfsSync(process.cwd());
+    if (stats.blocks > 0) {
+      diskPercent = Math.max(0, Math.min(100, ((stats.blocks - stats.bfree) / stats.blocks) * 100));
+    }
+  } catch {
+    diskPercent = null;
+  }
+  return {
+    cpu_percent: cpuPercent,
+    rss_bytes: rssBytes,
+    disk_percent: diskPercent
+  };
+}
 
 export function createServer(
   configDeps: CreateServerOptions = {}
@@ -119,6 +142,7 @@ export function createServer(
         health: '/health',
         info: '/api/info',
         status: '/api/status',
+        fleet: '/api/registry/fleet',
         quota: '/api/quota',
         doctor: '/api/doctor',
         report: '/api/report',
@@ -198,11 +222,24 @@ export function createServer(
 
   app.get('/api/registry/nodes/:nodeId/health', async (req, res) => {
     try {
-      const health = await registryService.checkNodeHealth(req.params.nodeId);
+      const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+      const health = await registryService.checkNodeHealth(req.params.nodeId, profile);
       res.json(health);
     } catch (error) {
       res.status(404).json({
         error: 'Not Found',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/registry/fleet', async (req, res) => {
+    try {
+      const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+      res.json(await registryService.getNodeObservations(profile));
+    } catch (error) {
+      res.status(500).json({
+        error: 'Internal Server Error',
         message: error instanceof Error ? error.message : String(error)
       });
     }
@@ -232,8 +269,23 @@ export function createServer(
   app.get('/api/status', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
-      const status = await runStatus(profile);
-      res.json(status);
+      const [status, nodes] = await Promise.all([
+        runStatus(profile),
+        registryService.getNodeObservations(profile)
+      ]);
+      const identity = getCoordinatorIdentity(undefined, coordinatorPort);
+      const enriched = {
+        ...status,
+        node_id: identity.node_id,
+        display_name: identity.display_name,
+        advertised_url: identity.advertised_url,
+        version: identity.version,
+        schema_digest: identity.schema_digest,
+        resource_pressure: getLocalResourcePressure(),
+        event_cursor: status.recent_ledger?.most_recent_dispatch_timestamp ?? status.generated_at,
+        nodes
+      };
+      res.json(enriched);
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah status',

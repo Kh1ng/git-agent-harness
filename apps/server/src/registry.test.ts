@@ -20,6 +20,70 @@ function createTempRegistryFile(): string {
   return tmpPath;
 }
 
+function statusPayload(overrides: Record<string, any> = {}) {
+  return {
+    schema_version: 1,
+    review_contract_version: 1,
+    generated_at: '2026-07-21T12:00:00Z',
+    profile: {
+      profile: 'gah',
+      display_name: 'GAH Node',
+      repo_id: 'owner/repo',
+      provider: 'github',
+      local_path: '/tmp/repo',
+      default_target_branch: 'main',
+      merge_policy: 'auto',
+      max_fix_attempts_per_mr: 2,
+      max_implementation_failures_per_ticket: 8,
+      max_open_managed_mrs: 1,
+      issue_intake_policy: {
+        mode: 'legacy',
+        canonical_autonomous_label: 'exec:autonomous',
+        trusted_human_authors: [],
+        trusted_bot_authors: [],
+        github_issue_author_allowlist: []
+      }
+    },
+    observations: {
+      sync: { status: 'ok' },
+      availability: { status: 'ok' },
+      ledger: { status: 'ok' }
+    },
+    merge_requests: [],
+    availability: [],
+    recent_ledger: null,
+    constraints: [],
+    blockers: [],
+    blocked_work_items: [],
+    issue_intake_rejections: [],
+    dependency_blockers: [],
+    errors: [],
+    available_tickets: [],
+    active_claims: [],
+    pm_parent_states: [],
+    pm_decomposition_attempt_counts: {},
+    pm_max_attempts: 2,
+    fix_attempt_counts: {},
+    merge_attempt_counts: {},
+    review_held_work_ids: [],
+    publishing_allow_pr: true,
+    generated_artifact_deny_patterns: [],
+    max_parallel_workers: 1,
+    open_managed_mr_count: 0,
+    inflight_implementation_count: 0,
+    implementation_intake_paused: false,
+    backend_configured: {},
+    backend_instances: [],
+    resource_pressure: {
+      cpu_percent: 5,
+      rss_bytes: 123456,
+      disk_percent: 7
+    },
+    event_cursor: '2026-07-21T12:00:00Z',
+    ...overrides
+  };
+}
+
 // Mock node server
 class MockNodeServer {
   server: http.Server;
@@ -432,6 +496,136 @@ test('checkNodeHealth distinguishes different failure kinds', async () => {
   } finally {
     delete process.env.MOCK_NODE_TOKEN;
     await mockNode.stop();
+    if (existsSync(tempPath)) {
+      unlinkSync(tempPath);
+    }
+  }
+});
+
+test('getNodeObservations preserves stale, auth-failed, incompatible, and deduplicated node work identities', async () => {
+  const tempPath = createTempRegistryFile();
+  const registry = new RegistryService(tempPath);
+  const healthyNode = new MockNodeServer();
+  const staleNode = new MockNodeServer();
+  const incompatibleNode = new MockNodeServer();
+  const healthyGeneratedAt = new Date(Date.now() - 5_000).toISOString();
+  const staleGeneratedAt = new Date(Date.now() - (31 * 60 * 1000)).toISOString();
+
+  const healthyPort = await healthyNode.start();
+  const stalePort = await staleNode.start();
+  const incompatiblePort = await incompatibleNode.start();
+
+  const healthyNodeObj: RegisteredNode = {
+    node_id: 'healthy-node',
+    display_name: 'Healthy Node',
+    advertised_url: `http://127.0.0.1:${healthyPort}`,
+    version: '0.1.0',
+    schema_digest: COORDINATOR_SCHEMA_DIGEST,
+    transport_mode: 'loopback',
+    secret_ref: 'env:HEALTHY_NODE_TOKEN'
+  };
+  const staleNodeObj: RegisteredNode = {
+    node_id: 'stale-node',
+    display_name: 'Stale Node',
+    advertised_url: `http://127.0.0.1:${stalePort}`,
+    version: '0.1.0',
+    schema_digest: COORDINATOR_SCHEMA_DIGEST,
+    transport_mode: 'loopback',
+    secret_ref: 'env:STALE_NODE_TOKEN'
+  };
+  const incompatibleNodeObj: RegisteredNode = {
+    node_id: 'incompatible-node',
+    display_name: 'Incompatible Node',
+    advertised_url: `http://127.0.0.1:${incompatiblePort}`,
+    version: '0.1.0',
+    schema_digest: COORDINATOR_SCHEMA_DIGEST,
+    transport_mode: 'loopback',
+    secret_ref: 'env:INCOMPATIBLE_NODE_TOKEN'
+  };
+  const authFailedNodeObj: RegisteredNode = {
+    node_id: 'auth-failed-node',
+    display_name: 'Dormant Node',
+    advertised_url: 'http://127.0.0.1:9',
+    version: '0.1.0',
+    schema_digest: COORDINATOR_SCHEMA_DIGEST,
+    transport_mode: 'authenticated_remote',
+    secret_ref: 'env:DOES_NOT_EXIST'
+  };
+
+  registry.registerNode(healthyNodeObj);
+  registry.registerNode(staleNodeObj);
+  registry.registerNode(incompatibleNodeObj);
+  registry.registerNode(authFailedNodeObj);
+
+  healthyNode.behavior = (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(statusPayload({
+      generated_at: healthyGeneratedAt,
+      active_claims: [
+        {
+          work_id: 'TICKET-1',
+          node_id: 'healthy-node',
+          scope: 'gah@test',
+          hostname: 'host-a',
+          claimed_at: '2026-07-21T11:59:50Z',
+          age_seconds: 8
+        },
+        {
+          work_id: 'TICKET-1',
+          node_id: 'healthy-node',
+          scope: 'gah@test',
+          hostname: 'host-a',
+          claimed_at: '2026-07-21T11:59:50Z',
+          age_seconds: 8
+        }
+      ]
+    })));
+  };
+
+  staleNode.behavior = (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(statusPayload({
+      generated_at: staleGeneratedAt
+    })));
+  };
+
+  incompatibleNode.behavior = (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(statusPayload({
+      version: '0.2.0',
+      schema_digest: 'wrong-digest'
+    })));
+  };
+
+  process.env.HEALTHY_NODE_TOKEN = 'healthy-token';
+  process.env.STALE_NODE_TOKEN = 'stale-token';
+  process.env.INCOMPATIBLE_NODE_TOKEN = 'incompatible-token';
+
+  try {
+    const observations = await registry.getNodeObservations('gah');
+    const byNode = new Map(observations.map((observation) => [observation.node_id, observation]));
+
+    assert.equal(byNode.get('healthy-node')?.state, 'healthy');
+    assert.equal(byNode.get('healthy-node')?.active_work.length, 1);
+    assert.equal(byNode.get('healthy-node')?.active_work[0]?.node_qualified_work_id, 'healthy-node:TICKET-1');
+
+    assert.equal(byNode.get('stale-node')?.state, 'stale');
+    assert.equal(byNode.get('stale-node')?.last_seen_at, staleGeneratedAt);
+
+    assert.equal(byNode.get('incompatible-node')?.state, 'incompatible');
+    assert.equal(byNode.get('auth-failed-node')?.state, 'auth_failed');
+    assert.equal(byNode.get('auth-failed-node')?.last_seen_at, null);
+
+    const listRes = registry.getNodesSummary();
+    const authSummary = listRes.find((node) => node.node_id === 'auth-failed-node');
+    assert.equal(authSummary?.last_observed_state, 'auth_failed');
+  } finally {
+    delete process.env.HEALTHY_NODE_TOKEN;
+    delete process.env.STALE_NODE_TOKEN;
+    delete process.env.INCOMPATIBLE_NODE_TOKEN;
+    await healthyNode.stop();
+    await staleNode.stop();
+    await incompatibleNode.stop();
     if (existsSync(tempPath)) {
       unlinkSync(tempPath);
     }
