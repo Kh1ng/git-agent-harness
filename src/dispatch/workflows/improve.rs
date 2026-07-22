@@ -1068,6 +1068,13 @@ pub(crate) fn improve(
                     prev_failure.as_deref(),
                     &failure_output,
                 );
+                // #568 AC5: a recurring failure isn't always the agent's fault -- reuse
+                // the baseline classifier to catch known harness/environment signatures.
+                let post_validation_disposition = crate::baseline::classify_baseline(
+                    &failure_output,
+                    exit_code,
+                    &profile.known_baseline_failure_markers,
+                );
                 prev_failure = Some(failure_output.clone());
                 prior_phase_context = Some(task.clone());
 
@@ -1186,25 +1193,24 @@ pub(crate) fn improve(
                             utf8_safe_prefix(&failure_output, 4_000),
                         );
                     };
-                    // Identical to baseline and/or the previous attempt: the
-                    // agent made no measurable progress, which is a distinct
-                    // failure mode from "tried and failed differently."
-                    ledger.set_failure(
-                        crate::ledger::FailureClass::AgentNoProgress,
-                        crate::ledger::FailureStage::PostValidation,
-                    );
+                    // No progress -- usually the agent's fault, unless the recurring
+                    // text is a known harness/environment signature (#568 AC5).
+                    use crate::baseline::BaselineDisposition as BD;
+                    use crate::ledger::{FailureClass as FC, FailureStage as FS};
+                    let no_progress_class = match post_validation_disposition {
+                        BD::HarnessError => FC::HarnessError,
+                        BD::EnvironmentError => FC::EnvironmentError,
+                        BD::Clean | BD::ExpectedRed | BD::UnknownRed => FC::AgentNoProgress,
+                    };
+                    ledger.set_failure(no_progress_class, FS::PostValidation);
                     ledger.attempts.push(crate::ledger::AttemptRecord {
                         attempt_number: attempt + 1,
                         backend: route.effective_backend.clone(),
                         effective_model: Some(llm.model.clone()),
                         exit_code: Some(0),
                         validation_result: Some("failed".into()),
-                        failure_class: Some(
-                            crate::ledger::FailureClass::AgentNoProgress.as_str().into(),
-                        ),
-                        failure_stage: Some(
-                            crate::ledger::FailureStage::PostValidation.as_str().into(),
-                        ),
+                        failure_class: Some(no_progress_class.as_str().into()),
+                        failure_stage: Some(FS::PostValidation.as_str().into()),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
                         usage: attempt_usage(
@@ -1222,9 +1228,15 @@ pub(crate) fn improve(
                         &format!("gah: WIP failed {} attempt {}", args.mode, attempt + 1),
                     )?;
                     worktree::cleanup(&wt, repo);
+                    let label = match no_progress_class {
+                        FC::HarnessError | FC::EnvironmentError => {
+                            "Validation infrastructure failure recurred unchanged"
+                        }
+                        _ => reason,
+                    };
                     anyhow::bail!(
                         "{} Aborting early after attempt {}.\n\n{}",
-                        reason,
+                        label,
                         attempt + 1,
                         utf8_safe_prefix(&failure_output, 4_000),
                     );
