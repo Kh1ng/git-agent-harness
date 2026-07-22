@@ -1076,20 +1076,26 @@ pub fn run() -> Result<()> {
                 };
                 match refreshed {
                     Ok(Some(rec)) => {
-                        println!(
-                            "Refreshed {} {} quota: used={:?}% remaining={:?}% window={:?} reset={:?} (source={})",
-                            rec.backend,
-                            rec.model.as_deref().unwrap_or(""),
-                            rec.quota_used_percent,
-                            rec.quota_remaining_percent,
-                            rec.quota_window,
-                            rec.quota_reset_at,
-                            rec.usage_source.as_deref().unwrap_or(""),
-                        );
+                        if is_vibe_admin && rec.quota_used_percent.is_none() {
+                            println!(
+                                "Recorded Mistral Admin account data without a spend-limit reading (workspace/billing/rate-limit data saved; nothing fabricated)."
+                            );
+                        } else {
+                            println!(
+                                "Refreshed {} {} quota: used={:?}% remaining={:?}% window={:?} reset={:?} (source={})",
+                                rec.backend,
+                                rec.model.as_deref().unwrap_or(""),
+                                rec.quota_used_percent,
+                                rec.quota_remaining_percent,
+                                rec.quota_window,
+                                rec.quota_reset_at,
+                                rec.usage_source.as_deref().unwrap_or(""),
+                            );
+                        }
                     }
                     Ok(None) if is_vibe_admin => {
                         println!(
-                            "No account-level quota data from the Mistral Admin API (missing MISTRAL_ADMIN_API_KEY, unreachable, or no spend-limit reading yet -- ok: nothing fabricated)."
+                            "No account-level quota data from the Mistral Admin API (missing MISTRAL_ADMIN_API_KEY or unreachable; nothing fabricated)."
                         );
                     }
                     Ok(None) => {

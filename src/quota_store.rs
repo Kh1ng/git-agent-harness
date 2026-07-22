@@ -262,8 +262,11 @@ pub fn refresh_codex_and_store(
 /// spend-limit reading -- the only piece of that refresh that collapses
 /// into this store's (backend, model) -> quota-percent shape; aggregate
 /// token/billing figures have no durable sink of their own yet. Returns
-/// `Ok(None)` when `MISTRAL_ADMIN_API_KEY` is unset or the account has no
-/// spend-limit reading, never a fabricated percentage.
+/// `Ok(None)` only when `MISTRAL_ADMIN_API_KEY` is unset or the Admin API
+/// yielded no persisted observation at all; partial aggregate data still
+/// gets stored and returned as `Some(...)` so callers can distinguish
+/// "nothing recorded" from "no spend-limit reading, but other admin data was
+/// captured."
 pub fn refresh_vibe_admin_and_store(
     model: Option<&str>,
     state_path: &Path,
@@ -298,6 +301,7 @@ pub fn refresh_vibe_admin_and_store(
                 mistral_admin: Some(admin_refresh),
             };
             append(state_path, &rec)?;
+            return Ok(Some(rec));
         }
         return Ok(None);
     };
@@ -504,11 +508,12 @@ mod tests {
         std::fs::set_permissions(&script_path, perms).unwrap();
         let _path_guard = crate::test_support::PathGuard::set(bin_dir.path());
 
-        assert!(refresh_vibe_admin_and_store(None, &path).unwrap().is_none());
+        let rec = refresh_vibe_admin_and_store(None, &path)
+            .unwrap()
+            .expect("admin refresh observation persisted");
 
         let records = load(&path).unwrap();
         assert_eq!(records.len(), 1);
-        let rec = &records[0];
         assert_eq!(rec.backend, "vibe");
         assert!(rec.quota_used_percent.is_none());
         assert_eq!(rec.usage_source.as_deref(), Some("mistral_admin_refresh"));
@@ -516,6 +521,8 @@ mod tests {
         assert!(admin.workspace_usage.is_some());
         assert!(admin.billing.is_some());
         assert!(admin.rate_limits.is_some());
+        assert_eq!(records[0].backend, "vibe");
+        assert!(records[0].mistral_admin.is_some());
     }
 
     #[test]
