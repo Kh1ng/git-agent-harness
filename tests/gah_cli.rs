@@ -3997,14 +3997,15 @@ fn sync_classifies_closed_unmerged_github_prs() {
         .stdout(predicate::str::contains("gah/test-closed"));
 }
 
-/// Build a fake `glab` that responds to `mr list` with the given JSON body
-/// and exits 0. Anything else exits 0 with no output.
+/// Build a fake `glab` that responds to `api projects/42/merge_requests`
+/// with the given JSON body and exits 0. Anything else exits 0 with no
+/// output.
 fn make_fake_glab(dir: &std::path::Path, mr_list_json: &str) {
     make_fake_bin_with_body(
         dir,
         "glab",
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"mr\" ] && [ \"$2\" = \"list\" ]; then echo '{}'; exit 0; fi\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/merge_requests\" ]; then echo '{}'; exit 0; fi\nexit 0\n",
             mr_list_json.replace('\'', "'\\''"),
         ),
     );
@@ -4022,7 +4023,7 @@ fn sync_gitlab_classifies_open_mr() {
     fs::create_dir_all(&fake_bin).unwrap();
     make_fake_glab(
         &fake_bin,
-        r#"[{"title":"[GAH] fix","source_branch":"gah/test-1","web_url":"https://example/mr/1","labels":["gah-ready-for-human"],"state":"opened","merged_at":null,"updated_at":"2099-01-01T00:00:00Z"}]"#,
+        r#"[{"title":"[GAH] fix","source_branch":"gah/test-1","web_url":"https://example/mr/1","labels":["gah-ready-for-human"],"state":"opened","merged_at":null,"updated_at":"2099-01-01T00:00:00Z","head_pipeline":{"status":"success"}}]"#,
     );
 
     bin()
@@ -4148,11 +4149,7 @@ fn sync_gitlab_malformed_json_fails_loudly() {
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin_with_body(
-        &fake_bin,
-        "glab",
-        "#!/bin/sh\nif [ \"$1\" = \"mr\" ] && [ \"$2\" = \"list\" ]; then echo 'not json at all'; exit 0; fi\nexit 0\n",
-    );
+    make_fake_glab(&fake_bin, "not json at all");
 
     bin()
         .args([
@@ -4177,11 +4174,7 @@ fn sync_gitlab_no_matching_mr() {
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin_with_body(
-        &fake_bin,
-        "glab",
-        "#!/bin/sh\nif [ \"$1\" = \"mr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nexit 0\n",
-    );
+    make_fake_glab(&fake_bin, "[]");
 
     let out = bin()
         .args([
@@ -4217,7 +4210,7 @@ fn sync_gitlab_fails_when_glab_missing() {
         .env("PATH", "")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("glab mr list"));
+        .stderr(predicate::str::contains("glab api GitLab request"));
 }
 
 #[test]

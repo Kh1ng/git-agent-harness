@@ -2,7 +2,7 @@ use super::text::utf8_safe_suffix;
 use super::text::{first_markdown_heading, normalize_match};
 use crate::config::Profile;
 use crate::models::WorkMetadata;
-use crate::provider::provider_command;
+use crate::provider::{gitlab_api, provider_command};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
@@ -226,7 +226,7 @@ fn parse_gitlab_author(
     {
         IssueAuthorKind::Bot
     } else {
-        // `glab issue list/view --output json` returns a GitLab User object
+        // GitLab's issue API returns a User object
         // without a bot discriminator for ordinary users. Trust still
         // requires an exact profile allowlist match, so classifying that
         // documented shape as human does not admit arbitrary authors.
@@ -502,26 +502,16 @@ fn fetch_gitlab_issue(
     issue_number: &str,
     allow_label_override: bool,
 ) -> Result<IssueDetails> {
-    let out = provider_command("glab")
-        .arg("issue")
-        .arg("view")
-        .arg(issue_number)
-        .arg("--repo")
-        .arg(&profile.repo)
-        .arg("-F")
-        .arg("json")
-        .output()
-        .context("glab issue view")?;
-
-    if !out.status.success() {
-        anyhow::bail!(
-            "glab issue view failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-
-    let resp: serde_json::Value =
-        serde_json::from_slice(&out.stdout).context("parsing GitLab issue response")?;
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let resp = gitlab_api(
+        profile,
+        &format!("projects/{project_id}/issues/{issue_number}"),
+        "GET",
+        &[],
+    )?;
     issue_details_from_gitlab_response(profile, issue_number, &resp, allow_label_override)
 }
 
@@ -543,18 +533,32 @@ pub(super) fn fetch_dependency_issue(
                 .output()
                 .context("GitHub REST dependency issue lookup")?
         }
-        "glab" => provider_command("glab")
-            .args([
-                "issue",
-                "view",
-                issue_number,
-                "--repo",
-                &profile.repo,
-                "-F",
-                "json",
-            ])
-            .output()
-            .context("glab dependency issue view")?,
+        "glab" => {
+            let project_id = profile
+                .provider_project_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            let value = gitlab_api(
+                profile,
+                &format!("projects/{project_id}/issues/{issue_number}"),
+                "GET",
+                &[],
+            )?;
+            let number = value["iid"]
+                .as_i64()
+                .map(|number| number.to_string())
+                .unwrap_or_else(|| issue_number.to_string());
+            let body = value["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let state = value["state"].as_str().map(str::to_string);
+            return Ok(DependencyIssue {
+                number,
+                body,
+                state,
+            });
+        }
         other => anyhow::bail!("unsupported provider CLI: {other}"),
     };
     if !output.status.success() {
@@ -715,33 +719,27 @@ fn discover_open_github_issues(profile: &Profile) -> Result<IssueIntakeDiscovery
 
 fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery> {
     const PAGE_SIZE: usize = 100;
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
     let mut allowed = Vec::new();
     let mut rejected = Vec::new();
     let mut page = 1;
     loop {
-        let out = provider_command("glab")
-            .arg("issue")
-            .arg("list")
-            .arg("--repo")
-            .arg(&profile.repo)
-            .arg("--per-page")
-            .arg(PAGE_SIZE.to_string())
-            .arg("--page")
-            .arg(page.to_string())
-            .arg("-O")
-            .arg("json")
-            .output()
-            .context("glab issue list")?;
-
-        if !out.status.success() {
-            anyhow::bail!(
-                "glab issue list failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-
+        let items = gitlab_api(
+            profile,
+            &format!("projects/{project_id}/issues"),
+            "GET",
+            &[
+                ("scope", "all"),
+                ("state", "opened"),
+                ("per_page", &PAGE_SIZE.to_string()),
+                ("page", &page.to_string()),
+            ],
+        )?;
         let items: Vec<serde_json::Value> =
-            serde_json::from_slice(&out.stdout).context("parsing GitLab issue list response")?;
+            serde_json::from_value(items).context("parsing GitLab issue list response")?;
         let count = items.len();
 
         for resp in items {

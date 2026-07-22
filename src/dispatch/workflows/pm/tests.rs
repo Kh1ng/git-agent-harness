@@ -21,7 +21,7 @@ fn make_fake_bin(bin_dir: &Path, name: &str, body: &str) {
 
 fn setup_fake_gh(bin_dir: &Path, issue_json: &str, open_pr_json: &str, merged_pr_json: &str) {
     let body = format!(
-        "if [ \"$1\" = \"api\" ] && printf '%s' \"$*\" | grep -q '/issues?state=open'; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"api\" ] && printf '%s' \"$*\" | grep -q '/pulls?'; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"api\" ] && printf '%s' \"$*\" | grep -q 'search/issues'; then\n  printf '%s\\n' '{{\"incomplete_results\":false,\"items\":{}}}'\nelse\n  exit 97\nfi\n",
+        "case \"$*\" in\n  *'/issues?state=open'*) printf '%s\\n' '{}'\n  ;;\n  *'/pulls?'*) printf '%s\\n' '{}'\n  ;;\n  *'search/issues'*) printf '%s\\n' '{{\"incomplete_results\":false,\"items\":{}}}'\n  ;;\n  *) exit 97 ;;\nesac\n",
         issue_json.replace('\'', "'\\''"),
         open_pr_json.replace('\'', "'\\''"),
         merged_pr_json.replace('\'', "'\\''")
@@ -31,7 +31,7 @@ fn setup_fake_gh(bin_dir: &Path, issue_json: &str, open_pr_json: &str, merged_pr
 
 fn setup_fake_glab(bin_dir: &Path, issue_json: &str, mr_json: &str) {
     let body = format!(
-        "if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"mr\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+        "case \"$*\" in\n  *projects/5/issues*--hostname*) printf '%s\\n' '{}'\n  ;;\n  *projects/5/merge_requests*--hostname*) printf '%s\\n' '{}'\n  ;;\n  *) exit 97 ;;\nesac\n",
         issue_json.replace('\'', "'\\''"),
         mr_json.replace('\'', "'\\''")
     );
@@ -104,7 +104,7 @@ fn pm_preflight_fails_closed_when_mr_snapshot_fails() {
     make_fake_bin(
         &bin_dir,
         "gh",
-        "if printf '%s' \"$*\" | grep -q '/issues?state=open'; then printf '%s\\n' '[]'; exit 0; fi\nif [ \"$1\" = \"api\" ]; then exit 1; fi\nexit 97",
+        "case \"$*\" in\n  *'/issues?state=open'*) printf '%s\\n' '[]'; exit 0 ;;\n  *) exit 97 ;;\nesac\n",
     );
     let _guard = PathGuard::set(&bin_dir);
     let cfg = gah_config(RoutingPolicy::default());
@@ -201,6 +201,7 @@ fn pm_preflight_collects_gitlab_source_issues_and_mrs() {
     prof.local_path = tmp.path().display().to_string();
     prof.provider = "gitlab".into();
     prof.repo = "group/project".into();
+    prof.provider_api_base = Some("https://gitlab.example.com/api/v4".into());
     prof.provider_project_id = Some("5".into());
     prof.publishing.trusted_issue_human_authors = Some(vec!["project_5_bot_77".into()]);
 

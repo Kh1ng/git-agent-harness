@@ -906,11 +906,21 @@ fn merge_mr_gitlab_un_drafts_then_merges() {
         &bin_dir,
         "glab",
         r#"#!/bin/sh
-case "$1 $2" in
-  "api projects/42/merge_requests") printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"test","description":"body","draft":false,"sha":"source-gitlab-sha","head_pipeline":{"sha":"source-gitlab-sha","status":"success"}}]\n' ;;
-  "mr update") exit 0 ;;
-  "mr merge") echo "$@" > "${0%/*}/merge_call.txt"; exit 0 ;;
-  *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;
+case "$*" in
+  *projects/42/merge_requests/7/merge*)
+  echo "$@" > "${0%/*}/merge_call.txt"
+  printf '{}\n'
+  ;;
+  *projects/42/merge_requests*--hostname*)
+  printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"test","description":"body","draft":false,"sha":"source-gitlab-sha","head_pipeline":{"sha":"source-gitlab-sha","status":"success"}}]\n'
+  ;;
+  *"mr update"*)
+  exit 0
+  ;;
+  *)
+  echo "unexpected glab invocation: $@" >&2
+  exit 1
+  ;;
 esac
 "#,
     );
@@ -919,10 +929,61 @@ esac
     merge_mr(&gitlab_profile(), "gah/test", None).unwrap();
 
     let call = fs::read_to_string(bin_dir.join("merge_call.txt")).unwrap();
-    assert!(call.contains(" 7 "));
-    assert!(call.contains("--squash"));
-    assert!(call.contains("--remove-source-branch"));
-    assert!(call.contains("--sha source-gitlab-sha"));
+    assert!(call.contains("projects/42/merge_requests/7/merge"));
+    assert!(call.contains("squash=true"));
+    assert!(call.contains("should_remove_source_branch=true"));
+    assert!(call.contains("sha=source-gitlab-sha"));
+}
+
+#[test]
+fn gitlab_set_mwps_uses_api_merge_with_auto_merge() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        r#"#!/bin/sh
+case "$*" in
+  *projects/42/merge_requests/7/merge*)
+  echo "$@" > "${0%/*}/mwps_call.txt"
+  printf '{}\n'
+  ;;
+  *projects/42/merge_requests*--hostname*)
+  printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"Draft: test","description":"body","draft":true,"sha":"source-gitlab-sha","head_pipeline":{"sha":"source-gitlab-sha","status":"success"}}]\n'
+  ;;
+  *"mr update"*)
+  exit 0
+  ;;
+  *)
+  echo "unexpected glab invocation: $@" >&2
+  exit 1
+  ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let fingerprint_at_review_time = crate::sync::review_metadata_fingerprint(
+        Some("source-gitlab-sha"),
+        Some("Draft: test"),
+        Some("body"),
+        true,
+    );
+    let expected = crate::ledger::review_generation(
+        Some("source-gitlab-sha"),
+        Some(&fingerprint_at_review_time),
+    )
+    .unwrap();
+
+    super::gitlab_set_mwps(&gitlab_profile(), "gah/test", expected.as_str()).unwrap();
+
+    let call = fs::read_to_string(bin_dir.join("mwps_call.txt")).unwrap();
+    assert!(call.contains("projects/42/merge_requests/7/merge"));
+    assert!(call.contains("auto_merge=true"));
+    assert!(call.contains("sha=source-gitlab-sha"));
+    assert!(call.contains("should_remove_source_branch=true"));
 }
 
 #[test]

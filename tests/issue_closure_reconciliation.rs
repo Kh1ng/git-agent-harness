@@ -170,17 +170,10 @@ fn gitlab_dry_run_observes_open_issue_without_writing() {
     );
     assert_eq!(glab.call_count(), 2);
     assert_eq!(
-        glab.argv_for_call(1),
-        vec![
-            "mr",
-            "list",
-            "--repo",
-            "group/repo",
-            "--all",
-            "--output",
-            "json"
-        ]
+        &glab.argv_for_call(1)[..2],
+        ["api", "projects/123/merge_requests"]
     );
+    assert!(glab.argv_for_call(1).contains(&"--hostname".to_string()));
     assert_eq!(
         glab.argv_for_call(2)[..2],
         ["api", "projects/123/issues/42"]

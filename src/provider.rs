@@ -161,7 +161,7 @@ pub fn clear_test_provider_path() {
     TEST_PATH_OVERRIDE.with(|p| *p.borrow_mut() = None);
 }
 
-/// Construct a Command for an external provider CLI (`gh`, `curl`). In test
+/// Construct a Command for an external provider CLI (`gh`, `glab`). In test
 /// builds, honors a thread-local PATH override so tests can hide/replace
 /// these binaries without touching the process-wide PATH.
 pub fn provider_command(name: &str) -> Command {
@@ -922,21 +922,16 @@ fn gitlab_mark_ready_for_review(profile: &Profile, iid: &str) -> Result<()> {
 }
 
 fn gitlab_merge_mr(profile: &Profile, iid: &str, source_sha: Option<&str>) -> Result<()> {
-    let mut args = vec!["mr", "merge", iid, "--squash", "--remove-source-branch"];
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let endpoint = format!("projects/{project_id}/merge_requests/{iid}/merge");
+    let mut fields = vec![("squash", "true"), ("should_remove_source_branch", "true")];
     if let Some(source_sha) = source_sha {
-        args.extend(["--sha", source_sha]);
+        fields.push(("sha", source_sha));
     }
-    args.extend(["--yes", "--repo", &profile.repo]);
-    let merge = provider_command("glab")
-        .args(args)
-        .output()
-        .context("glab mr merge")?;
-    if !merge.status.success() {
-        anyhow::bail!(
-            "glab mr merge failed: {}",
-            String::from_utf8_lossy(&merge.stderr).trim()
-        );
-    }
+    gitlab_api(profile, &endpoint, "PUT", &fields)?;
     Ok(())
 }
 
@@ -954,39 +949,21 @@ pub fn gitlab_set_mwps(
     }
     let target = find_review_target_by_branch(profile, branch)?;
     ensure_review_generation(&target, Some(expected_review_generation))?;
-    let iid = &target.id;
-    let ready = provider_command("glab")
-        .args(["mr", "update", iid, "--ready", "--repo", &profile.repo])
-        .output()
-        .context("glab mr update --ready")?;
-    if !ready.status.success() {
-        anyhow::bail!(
-            "glab mr update --ready failed: {}",
-            String::from_utf8_lossy(&ready.stderr).trim()
-        );
-    }
-    let mut args = vec![
-        "mr",
-        "merge",
-        iid,
-        "--auto-merge",
-        "--squash",
-        "--remove-source-branch",
+    gitlab_mark_ready_for_review(profile, &target.id)?;
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let endpoint = format!("projects/{project_id}/merge_requests/{}/merge", target.id);
+    let mut fields = vec![
+        ("auto_merge", "true"),
+        ("squash", "true"),
+        ("should_remove_source_branch", "true"),
     ];
     if let Some(source_sha) = target.source_sha.as_deref() {
-        args.extend(["--sha", source_sha]);
+        fields.push(("sha", source_sha));
     }
-    args.extend(["--yes", "--repo", &profile.repo]);
-    let mwps = provider_command("glab")
-        .args(args)
-        .output()
-        .context("glab mr merge --auto-merge")?;
-    if !mwps.status.success() {
-        anyhow::bail!(
-            "glab mr merge --auto-merge failed: {}",
-            String::from_utf8_lossy(&mwps.stderr).trim()
-        );
-    }
+    gitlab_api(profile, &endpoint, "PUT", &fields)?;
     Ok(())
 }
 
