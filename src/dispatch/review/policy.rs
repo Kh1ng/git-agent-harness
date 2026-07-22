@@ -1114,24 +1114,28 @@ fn enforce_review_evidence_gate(
 
 /// Whether a criterion's *own wording* asserts something about live/current
 /// provider state (so only `provider:`/`snapshot:` evidence should satisfy
-/// it) rather than merely naming the provider a feature integrates with.
+/// it) rather than merely naming the provider a feature integrates with, or
+/// describing present-tense code/design in general terms.
 ///
 /// Deliberately excludes bare "github"/"gitlab": in a tool whose entire
 /// purpose is GitHub/GitLab integration, nearly every criterion mentions the
 /// provider by name regardless of whether it's asking about live state or
 /// just describing what the feature does (e.g. "Unit tests cover GitHub and
 /// GitLab issue bodies..." or "Add contract tests ... without GITLAB_PAT").
-/// Those markers made this classifier fire on almost any criterion in a
-/// provider-integration ticket, rejecting perfectly good `test:`-grounded
-/// evidence as "not grounded in direct provider evidence". Genuine live-state
-/// criteria are still caught: they describe *when*/*what state*
-/// ("current", "latest", "stale", "open issue", "queue", ...), and a
-/// criterion that truly needs a live GitHub/GitLab check almost always uses
-/// one of those words too, not just the provider's name.
+///
+/// Also excludes bare "current": across this repo's real open issues it is
+/// used overwhelmingly to describe the present state of the *code/design*
+/// ("current behavior", "current implementation", "the page currently
+/// depends on") rather than to assert a live external fact. A criterion that
+/// truly needs a live check almost always also uses a more specific marker
+/// ("latest", "stale", "open issue", "queue", "remaining quota", ...), so
+/// dropping the bare, universally generic "current" removes false positives
+/// without weakening real detection -- the existing test fixture ("List the
+/// current live GitLab issue queue") is still caught via "live" and "queue"
+/// alone.
 fn criterion_requires_external_state(criterion: &str) -> bool {
     let lower = criterion.to_ascii_lowercase();
     [
-        "current",
         "live",
         "latest",
         "stale",

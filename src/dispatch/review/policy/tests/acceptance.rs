@@ -121,3 +121,49 @@ fn criterion_naming_a_provider_for_test_coverage_is_not_external_state() {
     assert_eq!(verdict.verdict, "APPROVE");
     assert!(!verdict.human_required);
 }
+
+/// Regression: "current" used as a plain present-tense adverb describing
+/// code/design ("the page currently depends on") is not a live-provider-state
+/// assertion, and must not force `provider:`/`snapshot:`-only evidence.
+#[test]
+fn criterion_using_current_as_present_tense_adverb_is_not_external_state() {
+    let json = r#"{
+        "verdict":"APPROVE",
+        "confidence":"high",
+        "human_required":false,
+        "blocking_findings":[],
+        "non_blocking_findings":[],
+        "risk_notes":[],
+        "evidence":[
+            "file:src/ws/context.rs",
+            "ac:1:file:src/ws/context.rs"
+        ]
+    }"#;
+    let route = route_decision("claude", Some("sonnet"), false);
+    let context = ReviewGateContext::from_diff_bundle(
+        &ReviewDiffBundle {
+            files: "src/ws/context.rs\n".to_string(),
+            diff: "+fn on_reconnect() {}\n".to_string(),
+        },
+        Some("passed"),
+    )
+    .with_source_acceptance(
+        vec![
+            "WS reconnect re-triggers a fresh pull of whatever REST data the page currently depends on"
+                .to_string(),
+        ],
+        "github",
+    );
+
+    let verdict = parse_review_verdict_with_context(
+        json,
+        &route,
+        &crate::ledger::LedgerUsage::default(),
+        ReviewerTier::Strong,
+        &context,
+    )
+    .unwrap();
+
+    assert_eq!(verdict.verdict, "APPROVE");
+    assert!(!verdict.human_required);
+}
