@@ -836,10 +836,9 @@ fn github_set_review_state_labels(
 
 /// TICKET-127: un-draft then merge the MR/PR for `branch`. gah always
 /// creates MRs as drafts, so both providers require an explicit
-/// "ready"/un-draft step before their merge endpoint will accept the MR --
-/// shelling out to the same `glab`/`gh` CLIs already used elsewhere here
-/// rather than reimplementing GitLab's title-based draft toggle over raw
-/// REST.
+/// "ready"/un-draft step before their merge endpoint will accept the MR.
+/// GitLab uses the same `glab api` path as the rest of the adapter and clears
+/// any draft-style title prefix before updating the MR title.
 pub fn mark_ready_for_review(profile: &Profile, branch: &str) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
         anyhow::bail!("delivery_mode=handoff: mark_ready_for_review is disallowed in handoff mode");

@@ -11,16 +11,19 @@ fn annotated_evidence_context() -> ReviewGateContext {
     .with_source_acceptance(vec!["Commands are copy/pasteable".to_string()], "gitlab")
 }
 
-fn live_queue_evidence_context() -> ReviewGateContext {
+fn gitlab_provider_auth_evidence_context() -> ReviewGateContext {
     ReviewGateContext::from_diff_bundle(
         &ReviewDiffBundle {
-            files: "docs/queue.md\n".to_string(),
-            diff: "+- #146 is ready\n".to_string(),
+            files: "tests/doctor_provider_auth.rs\n".to_string(),
+            diff: "+// GitLab provider auth passes via glab CLI session\n".to_string(),
         },
         Some("passed"),
     )
     .with_source_acceptance(
-        vec!["List the current live GitLab issue queue".to_string()],
+        vec![
+            "GitLab profiles authenticated via glab CLI session pass doctor without a PAT"
+                .to_string(),
+        ],
         "gitlab",
     )
 }
@@ -55,7 +58,7 @@ fn approval_accepts_annotated_changed_file_acceptance_evidence() {
 }
 
 #[test]
-fn approval_accepts_snapshot_grounded_acceptance_evidence() {
+fn approval_accepts_provider_grounded_gitlab_acceptance_evidence() {
     let json = r#"{
         "verdict":"APPROVE",
         "confidence":"high",
@@ -64,8 +67,8 @@ fn approval_accepts_snapshot_grounded_acceptance_evidence() {
         "non_blocking_findings":[],
         "risk_notes":[],
         "evidence":[
-            "file:docs/queue.md",
-            "ac:1:snapshot:docs/queue.md:verified against rendered snapshot"
+            "file:tests/doctor_provider_auth.rs",
+            "ac:1:provider:gitlab:glab api /projects/42 returned authenticated session"
         ]
     }"#;
     let route = route_decision("agy", Some("Claude Sonnet 4.6 (Thinking)"), false);
@@ -75,7 +78,7 @@ fn approval_accepts_snapshot_grounded_acceptance_evidence() {
         &route,
         &crate::ledger::LedgerUsage::default(),
         ReviewerTier::Strong,
-        &live_queue_evidence_context(),
+        &gitlab_provider_auth_evidence_context(),
     )
     .unwrap();
 
