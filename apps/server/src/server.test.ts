@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from './server.js';
+import { resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import type { ConfigProfileSummary, DoctorSnapshot } from '@git-agent-harness/contracts';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -49,11 +50,14 @@ function profilePayload(profile: string): ConfigProfileSummary {
 async function withTestServer(
   runProfile: (profile: string) => Promise<ConfigProfileSummary>,
   testFn: (url: string) => Promise<void>,
-  runDoctor?: (profile: string) => Promise<DoctorSnapshot>
+  runDoctor?: (profile: string) => Promise<DoctorSnapshot>,
+  coordinatorPort?: number
 ) {
+  resetCachedCoordinatorIdentity();
   const app = createServer({
     runConfigShowProfile: runProfile,
-    ...(runDoctor ? { runDoctor } : {})
+    ...(runDoctor ? { runDoctor } : {}),
+    ...(coordinatorPort !== undefined ? { coordinatorPort } : {})
   });
   const server = http.createServer(app);
 
@@ -151,5 +155,24 @@ test('GET /api/config/effective returns 502 on lookup failures', async () => {
       assert.equal(body.error, 'Failed to load effective config');
       assert.equal(body.message, 'unknown profile');
     }
+  );
+});
+
+test('GET /api/info advertises the configured coordinator port', async () => {
+  await withTestServer(
+    async (profile) => profilePayload(profile),
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/info`);
+      const body = (await response.json()) as {
+        identity?: {
+          advertised_url?: string;
+        };
+      };
+
+      assert.equal(response.status, 200);
+      assert.equal(body.identity?.advertised_url, 'http://localhost:9123');
+    },
+    undefined,
+    9123
   );
 });

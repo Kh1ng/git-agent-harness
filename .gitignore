@@ -79,3 +79,4 @@ artifacts/
 dist/
 deploy/
 .worktrees/
+apps/server/config/coordinator-identity.json
