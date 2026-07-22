@@ -127,6 +127,16 @@ fn run_doctor_provider_auth(
     cli: &str,
     cli_body: &str,
 ) -> assert_cmd::assert::Assert {
+    run_doctor_provider_auth_with_env(tmp, provider, cli, cli_body, &[])
+}
+
+fn run_doctor_provider_auth_with_env(
+    tmp: &TempDir,
+    provider: &str,
+    cli: &str,
+    cli_body: &str,
+    extra_env: &[(&str, &str)],
+) -> assert_cmd::assert::Assert {
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_git_repo(&repo);
@@ -149,6 +159,9 @@ fn run_doctor_provider_auth(
         cmd.env_remove("GITHUB_TOKEN").env_remove("GH_TOKEN");
     } else {
         cmd.env_remove("GITLAB_PAT").env_remove("GITLAB_PAT2");
+    }
+    for (name, value) in extra_env {
+        cmd.env(name, value);
     }
     cmd.assert()
 }
@@ -193,6 +206,25 @@ fn doctor_gitlab_wrong_host_fails_auth() {
         "gitlab",
         "glab",
         "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then echo \"You are not logged into the GitLab host 'gitlab.example.com'. Run 'glab auth login'.\" >&2; exit 1; fi\nexit 0\n",
+    )
+    .failure()
+    .stdout(
+        predicate::str::contains("[FAIL]")
+            .and(predicate::str::contains("provider auth"))
+            .and(predicate::str::contains("authenticate")),
+    );
+}
+
+/// A bare `GITLAB_PAT` does not override a failed `glab` session check.
+#[test]
+fn doctor_gitlab_pat_without_glab_session_fails_auth() {
+    let tmp = tempfile::tempdir().unwrap();
+    run_doctor_provider_auth_with_env(
+        &tmp,
+        "gitlab",
+        "glab",
+        "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then echo \"You are not logged into the GitLab host 'gitlab.example.com'. Run 'glab auth login'.\" >&2; exit 1; fi\nexit 0\n",
+        &[("GITLAB_PAT", "token")],
     )
     .failure()
     .stdout(
