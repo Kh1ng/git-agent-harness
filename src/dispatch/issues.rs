@@ -344,7 +344,7 @@ pub(super) fn github_issue_author_is_allowed(
     issue_author_is_trusted(profile, &author)
 }
 
-fn issue_details_from_github_response(
+pub(super) fn issue_details_from_github_response(
     profile: &Profile,
     issue_number: &str,
     resp: &serde_json::Value,
@@ -409,7 +409,7 @@ fn issue_details_from_github_response(
     })
 }
 
-fn issue_details_from_gitlab_response(
+pub(super) fn issue_details_from_gitlab_response(
     profile: &Profile,
     issue_number: &str,
     resp: &serde_json::Value,
@@ -856,35 +856,69 @@ pub(super) fn extract_markdown_section(body: &str, heading: &str) -> Option<Stri
     }
 }
 
-pub(super) fn extract_markdown_list_section(body: &str, heading: &str) -> Vec<String> {
-    extract_markdown_section(body, heading)
-        .map(|section| {
-            section
-                .lines()
-                .map(str::trim)
-                .filter_map(|line| {
-                    line.strip_prefix("- ")
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_string)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// How a recognized section's items were obtained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SectionParseMode {
+    /// Every line matched a bullet (`- `) or ordered (`1. ` / `1) `) list marker.
+    List,
+    /// The section exists but isn't list-formatted; its whole raw text was
+    /// kept as a single item so a recognized non-empty section can never
+    /// silently disappear (issue #405, #570).
+    Fallback,
 }
 
-/// Bullet-list items under `heading`, falling back to the whole section as a
-/// single entry when its content isn't formatted as a list (issue #405:
-/// `Invariants`/`Required Behavior` sections written as prose were
-/// previously discarded entirely by the list-only extractor).
-pub(super) fn extract_markdown_requirement_items(body: &str, heading: &str) -> Vec<String> {
-    let items = extract_markdown_list_section(body, heading);
-    if !items.is_empty() {
-        return items;
+/// Strip a single bullet (`- `) or ordered (`1. ` / `1) `) list marker from a
+/// trimmed line, preserving the remaining text exactly. Numbered markers are
+/// recognized the same as bullets so ordered lists (issue #570) survive
+/// task-pack extraction identically to unordered ones.
+fn strip_list_marker(line: &str) -> Option<&str> {
+    if let Some(rest) = line.strip_prefix("- ") {
+        return Some(rest);
     }
-    extract_markdown_section(body, heading)
-        .into_iter()
+    let digit_bytes = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digit_bytes == 0 {
+        return None;
+    }
+    let after_digits = &line[digit_bytes..];
+    after_digits
+        .strip_prefix(". ")
+        .or_else(|| after_digits.strip_prefix(") "))
+}
+
+fn parse_list_items(section: &str) -> Vec<String> {
+    section
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            strip_list_marker(line)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
         .collect()
+}
+
+/// Items (bullet- or number-formatted) under `heading`, together with how
+/// they were obtained. A recognized non-empty section that isn't
+/// list-formatted falls back to its whole raw text as a single item rather
+/// than vanishing.
+pub(super) fn extract_markdown_list_section_audited(
+    body: &str,
+    heading: &str,
+) -> Option<(Vec<String>, SectionParseMode)> {
+    let section = extract_markdown_section(body, heading)?;
+    let items = parse_list_items(&section);
+    if items.is_empty() {
+        Some((vec![section], SectionParseMode::Fallback))
+    } else {
+        Some((items, SectionParseMode::List))
+    }
+}
+
+pub(super) fn extract_markdown_list_section(body: &str, heading: &str) -> Vec<String> {
+    extract_markdown_list_section_audited(body, heading)
+        .map(|(items, _)| items)
+        .unwrap_or_default()
 }
 
 pub(super) fn extract_markdown_code_list_section(body: &str, heading: &str) -> Vec<String> {
@@ -1125,7 +1159,7 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
     // as a bullet list.
     for heading in ["Invariants", "Required Behavior"] {
         meta.constraints
-            .extend(extract_markdown_requirement_items(&issue.body, heading));
+            .extend(extract_markdown_list_section(&issue.body, heading));
     }
     let mut verification_commands =
         extract_markdown_code_list_section(&issue.body, "Verification Commands");
