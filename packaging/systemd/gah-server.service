@@ -14,6 +14,15 @@
 # to work fine even when it's missing, which is what let this go unnoticed.
 # Adjust the cargo/node paths below to match your actual toolchain install.
 #
+# HOST/PORT (issue #643): the app defaults HOST to 0.0.0.0 and PORT to 3773.
+# Override either persistently by writing /etc/gah/server.env (not tracked in
+# this repo) rather than editing this unit -- `scripts/install.sh` creates it
+# on first install and never overwrites it afterward, and `gah update
+# --restart-server` never touches it either, so an operator's HOST choice
+# (loopback, one interface, or 0.0.0.0) survives every reinstall/update.
+# Example /etc/gah/server.env:
+#   HOST=127.0.0.1
+#
 # Install:
 #   sudo cp gah-server.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
@@ -31,6 +40,10 @@ Environment=NODE_ENV=production
 Environment=PORT=3773
 Environment=GAH_CONFIG_PATH=/home/khing/.config/gah/config.toml
 Environment=PATH=/home/khing/.cargo/bin:/home/khing/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Optional persistent override file; the leading "-" means systemd does not
+# fail the unit if it doesn't exist. Values here win over the Environment=
+# lines above since it's read after them.
+EnvironmentFile=-/etc/gah/server.env
 ExecStart=/home/khing/.nvm/versions/node/v22.23.1/bin/node apps/server/dist/bin.js
 Restart=always
 RestartSec=5
