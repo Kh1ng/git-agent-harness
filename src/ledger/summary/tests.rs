@@ -619,6 +619,7 @@ fn account_quota_merges_into_backend_group_only() {
         quota_reset_at: Some("2026-07-12T00:00:00Z".to_string()),
         observed_at: Some("2026-07-10T00:00:00Z".to_string()),
         usage_source: Some("codex status --json".to_string()),
+        mistral_admin: None,
     };
     let observations = vec![account];
 

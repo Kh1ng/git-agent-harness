@@ -1,0 +1,9 @@
+{
+  "requests_per_second": 87,
+  "tokens_limits_by_model": [
+    {
+      "tokens_per_minute": 14,
+      "tokens_per_month": 56
+    }
+  ]
+}

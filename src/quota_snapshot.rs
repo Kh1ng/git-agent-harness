@@ -775,6 +775,7 @@ mod tests {
             quota_reset_at: None,
             observed_at: Some(observed_at.to_string()),
             usage_source: None,
+            mistral_admin: None,
         }
     }
 

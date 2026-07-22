@@ -1,0 +1,65 @@
+{
+  "active_users": [
+    {
+      "day": "2025-10-07T20:56:01.974Z",
+      "nb_active_users_acp": 87,
+      "nb_active_users_cli": 14,
+      "nb_active_users_programmatic": 56,
+      "nb_active_users_total": 91
+    }
+  ],
+  "consumed_tokens": [
+    {
+      "cached_tokens": 32,
+      "day": "2025-10-07T20:56:01.974Z",
+      "input_tokens": 78,
+      "model": "mistral-small-latest",
+      "output_tokens": 5
+    }
+  ],
+  "end_time": 69,
+  "session_durations": [
+    {
+      "day": "2025-10-07T20:56:01.974Z",
+      "total_duration_hours": 41
+    }
+  ],
+  "sessions": [
+    {
+      "day": "2025-10-07T20:56:01.974Z",
+      "nb_sessions": 18,
+      "nb_sessions_acp": 74,
+      "nb_sessions_cli": 29,
+      "nb_sessions_programmatic": 85
+    }
+  ],
+  "start_time": 62,
+  "tool_calls": [
+    {
+      "approval_always": 7,
+      "approval_ask": 93,
+      "approval_never": 36,
+      "day": "2025-10-07T20:56:01.974Z",
+      "status_failure": 51,
+      "status_skipped": 80,
+      "status_success": 13,
+      "total": 47
+    }
+  ],
+  "tool_calls_by_name": [
+    {
+      "count": 25,
+      "day": "2025-10-07T20:56:01.974Z",
+      "tool_name": "search"
+    }
+  ],
+  "user_prompts": [
+    {
+      "day": "2025-10-07T20:56:01.974Z",
+      "nb_prompts_acp": 89,
+      "nb_prompts_cli": 64,
+      "nb_prompts_programmatic": 2,
+      "nb_prompts_total": 71
+    }
+  ]
+}

@@ -815,14 +815,19 @@ pub enum TelemetryCommands {
 /// Quota/usage observation management (issue #151 / #166).
 #[derive(Subcommand)]
 pub enum QuotaCommands {
-    /// Refresh account-level quota (e.g. `codex status --json`) and persist
-    /// the observation so the Quota/Telemetry pages show real data.
+    /// Refresh account-level quota (e.g. `codex status --json`, or the
+    /// Mistral Admin API for `--backend vibe`) and persist the observation
+    /// so the Quota/Telemetry pages show real data.
     Refresh {
-        /// Backend whose account quota to refresh (e.g. "codex").
+        /// Backend whose account quota to refresh (e.g. "codex"). "vibe"
+        /// refreshes from the Mistral Admin API (`MISTRAL_ADMIN_API_KEY`)
+        /// instead of running a CLI subprocess.
         #[arg(long, default_value = "codex")]
         backend: String,
         /// Stable, secret-safe execution instance for this account reading.
-        /// Omit to write a legacy instance-unknown observation.
+        /// Omit to write a legacy instance-unknown observation. Not
+        /// supported for `--backend vibe`: the Admin API key is a single
+        /// org-wide credential, not a per-instance one.
         #[arg(long, visible_alias = "instance")]
         backend_instance: Option<String>,
         /// Model qualifier for the observation (usually unset for
@@ -834,7 +839,9 @@ pub enum QuotaCommands {
         quota_pool: Option<String>,
         /// Path/command for the backend CLI (defaults to the backend name on
         /// PATH, e.g. "codex"). Only `codex` has a structured status parser
-        /// today; other backends fall back to "no data" rather than guessing.
+        /// today; other backends fall back to "no data" rather than
+        /// guessing. Ignored for `--backend vibe`, which always uses the
+        /// Mistral Admin API rather than a subprocess.
         #[arg(long)]
         command: Option<String>,
         /// Override the durable store path (default: $XDG_STATE_HOME/gah/...).

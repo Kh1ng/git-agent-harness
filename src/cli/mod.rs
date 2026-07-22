@@ -1052,7 +1052,15 @@ pub fn run() -> Result<()> {
                 if quota_pool.is_some() && backend_instance.is_none() {
                     anyhow::bail!("--quota-pool requires --backend-instance for an unambiguous quota observation");
                 }
-                let refreshed = if let Some(instance) = backend_instance {
+                let is_vibe_admin = crate::config::canonical_backend_name(&backend) == "vibe";
+                if is_vibe_admin && backend_instance.is_some() {
+                    anyhow::bail!(
+                        "--backend-instance is not supported for --backend vibe: the Mistral Admin API key is a single org-wide credential, not a per-instance one"
+                    );
+                }
+                let refreshed = if is_vibe_admin {
+                    quota_store::refresh_vibe_admin_and_store(model.as_deref(), &path)
+                } else if let Some(instance) = backend_instance {
                     let mut identity = execution_identity::ExecutionIdentity::legacy_candidate(
                         &backend,
                         model.as_deref(),
@@ -1068,15 +1076,26 @@ pub fn run() -> Result<()> {
                 };
                 match refreshed {
                     Ok(Some(rec)) => {
+                        if is_vibe_admin && rec.quota_used_percent.is_none() {
+                            println!(
+                                "Recorded Mistral Admin account data without a spend-limit reading (workspace/billing/rate-limit data saved; nothing fabricated)."
+                            );
+                        } else {
+                            println!(
+                                "Refreshed {} {} quota: used={:?}% remaining={:?}% window={:?} reset={:?} (source={})",
+                                rec.backend,
+                                rec.model.as_deref().unwrap_or(""),
+                                rec.quota_used_percent,
+                                rec.quota_remaining_percent,
+                                rec.quota_window,
+                                rec.quota_reset_at,
+                                rec.usage_source.as_deref().unwrap_or(""),
+                            );
+                        }
+                    }
+                    Ok(None) if is_vibe_admin => {
                         println!(
-                            "Refreshed {} {} quota: used={:?}% remaining={:?}% window={:?} reset={:?} (source={})",
-                            rec.backend,
-                            rec.model.as_deref().unwrap_or(""),
-                            rec.quota_used_percent,
-                            rec.quota_remaining_percent,
-                            rec.quota_window,
-                            rec.quota_reset_at,
-                            rec.usage_source.as_deref().unwrap_or(""),
+                            "No account-level quota data from the Mistral Admin API (missing MISTRAL_ADMIN_API_KEY or unreachable; nothing fabricated)."
                         );
                     }
                     Ok(None) => {

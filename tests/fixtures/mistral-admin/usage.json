@@ -1,0 +1,126 @@
+{
+  "audio": {
+    "models": [
+      [
+        [
+          [
+            null
+          ]
+        ]
+      ]
+    ]
+  },
+  "audio_characters": {
+    "models": [
+      [
+        [
+          [
+            null
+          ]
+        ]
+      ]
+    ]
+  },
+  "chat": {
+    "models": [
+      [
+        [
+          [
+            null
+          ]
+        ]
+      ]
+    ]
+  },
+  "completion": {
+    "models": [
+      [
+        [
+          [
+            null
+          ]
+        ]
+      ]
+    ]
+  },
+  "connectors": {
+    "models": [
+      [
+        [
+          [
+            null
+          ]
+        ]
+      ]
+    ]
+  },
+  "currency": null,
+  "currency_symbol": null,
+  "date": "2025-12-17T10:25:07.818693Z",
+  "end_date": "2025-12-17T10:25:07.818693Z",
+  "fine_tuning": {
+    "storage": [
+      87
+    ],
+    "training": [
+      [
+        [
+          [
+            null
+          ]
+        ]
+      ]
+    ]
+  },
+  "libraries_api": {
+    "audio_seconds": {
+      "models": [
+        [
+          [
+            [
+              null
+            ]
+          ]
+        ]
+      ]
+    },
+    "pages": {
+      "models": [
+        [
+          [
+            [
+              null
+            ]
+          ]
+        ]
+      ]
+    },
+    "tokens": {
+      "models": [
+        [
+          [
+            [
+              null
+            ]
+          ]
+        ]
+      ]
+    }
+  },
+  "next_month": null,
+  "ocr": {
+    "models": [
+      [
+        [
+          [
+            null
+          ]
+        ]
+      ]
+    ]
+  },
+  "previous_month": null,
+  "prices": null,
+  "start_date": "2025-12-17T10:25:07.818693Z",
+  "vibe_usage": 14
+}
