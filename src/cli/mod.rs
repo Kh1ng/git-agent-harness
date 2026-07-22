@@ -1052,7 +1052,15 @@ pub fn run() -> Result<()> {
                 if quota_pool.is_some() && backend_instance.is_none() {
                     anyhow::bail!("--quota-pool requires --backend-instance for an unambiguous quota observation");
                 }
-                let refreshed = if let Some(instance) = backend_instance {
+                let is_vibe_admin = crate::config::canonical_backend_name(&backend) == "vibe";
+                if is_vibe_admin && backend_instance.is_some() {
+                    anyhow::bail!(
+                        "--backend-instance is not supported for --backend vibe: the Mistral Admin API key is a single org-wide credential, not a per-instance one"
+                    );
+                }
+                let refreshed = if is_vibe_admin {
+                    quota_store::refresh_vibe_admin_and_store(model.as_deref(), &path)
+                } else if let Some(instance) = backend_instance {
                     let mut identity = execution_identity::ExecutionIdentity::legacy_candidate(
                         &backend,
                         model.as_deref(),
@@ -1077,6 +1085,11 @@ pub fn run() -> Result<()> {
                             rec.quota_window,
                             rec.quota_reset_at,
                             rec.usage_source.as_deref().unwrap_or(""),
+                        );
+                    }
+                    Ok(None) if is_vibe_admin => {
+                        println!(
+                            "No account-level quota data from the Mistral Admin API (missing MISTRAL_ADMIN_API_KEY, unreachable, or no spend-limit reading yet -- ok: nothing fabricated)."
                         );
                     }
                     Ok(None) => {

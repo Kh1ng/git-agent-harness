@@ -22,6 +22,50 @@ static PATH_LOCK: Mutex<()> = Mutex::new(());
 static EXEC_LOCK: Mutex<()> = Mutex::new(());
 static AVAILABILITY_LOCK: Mutex<()> = Mutex::new(());
 static CLAIM_STATE_LOCK: Mutex<()> = Mutex::new(());
+static MISTRAL_ADMIN_KEY_LOCK: Mutex<()> = Mutex::new(());
+
+/// Scoped override for `MISTRAL_ADMIN_API_KEY`, serialized against every
+/// other test that reads/writes this process-global env var (in both
+/// `usage::vibe_admin` and `quota_store`).
+pub struct MistralAdminKeyEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    original: Option<OsString>,
+}
+
+impl MistralAdminKeyEnvGuard {
+    pub fn set(value: &str) -> Self {
+        let lock = MISTRAL_ADMIN_KEY_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let original = std::env::var_os("MISTRAL_ADMIN_API_KEY");
+        std::env::set_var("MISTRAL_ADMIN_API_KEY", value);
+        Self {
+            _lock: lock,
+            original,
+        }
+    }
+
+    pub fn unset() -> Self {
+        let lock = MISTRAL_ADMIN_KEY_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let original = std::env::var_os("MISTRAL_ADMIN_API_KEY");
+        std::env::remove_var("MISTRAL_ADMIN_API_KEY");
+        Self {
+            _lock: lock,
+            original,
+        }
+    }
+}
+
+impl Drop for MistralAdminKeyEnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => std::env::set_var("MISTRAL_ADMIN_API_KEY", value),
+            None => std::env::remove_var("MISTRAL_ADMIN_API_KEY"),
+        }
+    }
+}
 
 /// Scoped override for the process-global availability store path used by
 /// tests. Just like the ledger override, it must be restored before another

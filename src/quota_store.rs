@@ -201,6 +201,47 @@ pub fn refresh_codex_and_store(
     }
 }
 
+/// #154: refresh account-level Mistral Admin API data (aggregate usage,
+/// billing, rate-limit ceilings, spend-limit percent) and persist the
+/// spend-limit reading -- the only piece of that refresh that collapses
+/// into this store's (backend, model) -> quota-percent shape; aggregate
+/// token/billing figures have no durable sink of their own yet. Returns
+/// `Ok(None)` when `MISTRAL_ADMIN_API_KEY` is unset or the account has no
+/// spend-limit reading, never a fabricated percentage.
+pub fn refresh_vibe_admin_and_store(
+    model: Option<&str>,
+    state_path: &Path,
+) -> Result<Option<QuotaObservationRecord>> {
+    let Some(api_key) = crate::usage::admin_api_key() else {
+        return Ok(None);
+    };
+    let end_time = time::OffsetDateTime::now_utc().unix_timestamp();
+    let thirty_days_secs = 30 * 24 * 60 * 60;
+    let refresh = crate::usage::refresh_admin_data(
+        &api_key,
+        (end_time - thirty_days_secs, end_time),
+        "vibe",
+        model,
+    );
+    let Some(obs) = refresh.spend_limit else {
+        return Ok(None);
+    };
+    let rec = QuotaObservationRecord {
+        backend: obs.backend,
+        backend_instance: None,
+        model: obs.model,
+        quota_pool: None,
+        quota_window: obs.quota_window,
+        quota_used_percent: obs.quota_used_percent,
+        quota_remaining_percent: obs.quota_remaining_percent,
+        quota_reset_at: obs.quota_reset_at,
+        observed_at: obs.observed_at,
+        usage_source: obs.usage_source,
+    };
+    append(state_path, &rec)?;
+    Ok(Some(rec))
+}
+
 /// Refresh and persist account quota for one explicit execution identity.
 pub fn refresh_codex_and_store_for_identity(
     codex_cmd: &str,
@@ -237,6 +278,50 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("quota_observations.jsonl");
         (dir, path)
+    }
+
+    #[test]
+    fn refresh_vibe_admin_and_store_returns_none_without_api_key() {
+        let _key_guard = crate::test_support::MistralAdminKeyEnvGuard::unset();
+        let (_dir, path) = tmp_store();
+
+        assert!(refresh_vibe_admin_and_store(None, &path).unwrap().is_none());
+        assert!(load(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn refresh_vibe_admin_and_store_persists_spend_limit_observation() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let _key_guard = crate::test_support::MistralAdminKeyEnvGuard::set("sk-test");
+        let (_dir, path) = tmp_store();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mistral-admin");
+        let script_path = bin_dir.path().join("curl");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *api/admin/spend-limit*) cat '{fixtures}/spend_limit.json' ;;\n  *) exit 1 ;;\nesac\n",
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+        let _path_guard = crate::test_support::PathGuard::set(bin_dir.path());
+
+        let rec = refresh_vibe_admin_and_store(None, &path)
+            .unwrap()
+            .expect("spend limit observation persisted");
+        assert_eq!(rec.backend, "vibe");
+        assert_eq!(rec.quota_used_percent, Some(33.904));
+        assert_eq!(
+            rec.usage_source.as_deref(),
+            Some("mistral_admin_spend_limit")
+        );
+
+        let records = load(&path).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].backend, "vibe");
     }
 
     #[test]

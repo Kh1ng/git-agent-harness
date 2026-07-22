@@ -10,8 +10,8 @@ pub use vibe::parse_vibe_session_metadata;
 mod vibe_admin;
 pub use vibe_admin::{
     admin_api_key, admin_spend_limit_to_quota_observation, parse_admin_rate_limit,
-    parse_admin_spend_limit, parse_admin_usage, parse_vibe_workspace_analytics,
-    AdminModelRateLimit, AdminRateLimits,
+    parse_admin_spend_limit, parse_admin_usage, parse_vibe_workspace_analytics, refresh_admin_data,
+    AdminModelRateLimit, AdminRateLimits, AdminRefresh,
 };
 
 /// Parse generic usage text from backend output logs.

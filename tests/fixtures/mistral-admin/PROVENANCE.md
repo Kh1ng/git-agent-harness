@@ -31,3 +31,18 @@ Do not add a fixture here without checking it against the live schema (or a
 real captured response, once account access exists) first. If Mistral changes
 these schemas, re-derive the fixtures from the updated spec rather than
 hand-editing field names to match old code.
+
+## Known gap: not yet real captures
+
+Issue #154's AC4 ("real test fixtures backing the parser") is not fully met by
+this directory today, unlike every fixture in `../quota-logs/`. These four
+files are schema-conformant synthetic data, not a captured response from a
+live Mistral organization -- no Admin API key/account was available in this
+environment to make that call. Per this repo's own review-approval rule
+("missing evidence is a human-review outcome"), this gap is intentionally
+left visible here rather than papered over: replacing these four fixtures
+with real captured `/api/admin/...` responses (and updating this file the
+way `quota-logs/PROVENANCE.md` documents its captures) requires a human with
+a live Mistral Admin API key to run `refresh_admin_data`
+(`src/usage/vibe_admin.rs`) once against a real account and save the
+responses verbatim.

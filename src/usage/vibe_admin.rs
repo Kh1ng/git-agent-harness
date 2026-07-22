@@ -8,18 +8,20 @@
 //! account-level aggregate/billing/limit data, never to override a known
 //! per-attempt observation.
 //!
-//! This module only parses response bodies already captured elsewhere (see
-//! `tests/fixtures/mistral-admin/PROVENANCE.md`) -- like `quota_parser.rs`,
-//! it makes no live HTTP calls itself. GAH has no HTTP client dependency
-//! today (every other backend/provider integration is CLI-subprocess or
-//! PTY-mediated); wiring an actual `/api/admin/...` fetch is a mechanical
-//! follow-up once that dependency lands, matching this ticket's
-//! `queue:dependency-blocked` status.
-#![allow(dead_code)]
+//! `fetch_admin_endpoint`/`refresh_admin_data` below are the real callers:
+//! GAH has no HTTP client *dependency* (every other backend/provider
+//! integration is CLI-subprocess or PTY-mediated), so the Admin API is
+//! fetched the same way -- shelling out to `curl` -- rather than pulling in
+//! `reqwest`/`hyper`. The response bodies these parsers were developed
+//! against are captured in `tests/fixtures/mistral-admin/PROVENANCE.md`.
 
 use crate::ledger::summary::GroupQuotaObservation;
 use crate::ledger::LedgerUsage;
 use serde_json::Value;
+use std::io::Write as _;
+use std::process::{Command, Stdio};
+
+const MISTRAL_ADMIN_API_BASE: &str = "https://api.mistral.ai";
 
 /// Env var carrying the Mistral Admin API key. Sourced the same way as
 /// every other GAH-internal API credential (`Defaults::llm_api_key`,
@@ -36,6 +38,95 @@ pub fn admin_api_key() -> Option<String> {
     std::env::var(MISTRAL_ADMIN_API_KEY_ENV)
         .ok()
         .filter(|v| !v.is_empty())
+}
+
+/// Fetch one Mistral Admin API endpoint via `curl`. The key is handed to
+/// curl through its stdin config (`-K -`), never as a command-line
+/// argument, so it never appears in `ps`/`/proc/<pid>/cmdline` on a shared
+/// host. Any transport, auth, or non-2xx failure returns `Ok(None)` -- a
+/// failed fetch means "no observation this cycle", never a fabricated
+/// reading.
+pub fn fetch_admin_endpoint(path: &str, api_key: &str) -> std::io::Result<Option<String>> {
+    let mut child = Command::new("curl")
+        .args(["-sS", "-K", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let escaped_key = api_key.replace('\\', "\\\\").replace('"', "\\\"");
+        let config = format!(
+            "silent\nfail\nurl = \"{MISTRAL_ADMIN_API_BASE}{path}\"\nheader = \"Authorization: Bearer {escaped_key}\"\nheader = \"Accept: application/json\"\n"
+        );
+        stdin.write_all(config.as_bytes())?;
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// One refresh cycle's worth of account-level Mistral Admin API data.
+/// Each field independently falls back to its type's "no data" default when
+/// its own endpoint fails to fetch or parse -- a rate-limit outage must not
+/// also hide a spend-limit reading that came back clean.
+#[derive(Debug, Clone, Default)]
+pub struct AdminRefresh {
+    pub workspace_usage: LedgerUsage,
+    pub billing: LedgerUsage,
+    pub rate_limits: AdminRateLimits,
+    pub spend_limit: Option<GroupQuotaObservation>,
+}
+
+/// The real caller for every parser in this module: fetch all four Admin
+/// API endpoints for the configured account and parse each response.
+/// `window` bounds the aggregate-usage query as Unix-second
+/// `(start_time, end_time)`.
+pub fn refresh_admin_data(
+    api_key: &str,
+    window: (i64, i64),
+    backend: &str,
+    model: Option<&str>,
+) -> AdminRefresh {
+    let (start_time, end_time) = window;
+
+    let workspace_usage = fetch_admin_endpoint(
+        &format!(
+            "/api/admin/analytics/vibe/usage/by_workspace?start_time={start_time}&end_time={end_time}"
+        ),
+        api_key,
+    )
+    .ok()
+    .flatten()
+    .map(|body| parse_vibe_workspace_analytics(&body))
+    .unwrap_or_default();
+
+    let billing = fetch_admin_endpoint("/api/admin/usage", api_key)
+        .ok()
+        .flatten()
+        .map(|body| parse_admin_usage(&body))
+        .unwrap_or_default();
+
+    let rate_limits = fetch_admin_endpoint("/api/admin/rate-limit", api_key)
+        .ok()
+        .flatten()
+        .map(|body| parse_admin_rate_limit(&body))
+        .unwrap_or_default();
+
+    let spend_limit = fetch_admin_endpoint("/api/admin/spend-limit", api_key)
+        .ok()
+        .flatten()
+        .and_then(|body| admin_spend_limit_to_quota_observation(&body, backend, model));
+
+    AdminRefresh {
+        workspace_usage,
+        billing,
+        rate_limits,
+        spend_limit,
+    }
 }
 
 fn sum_u64_field(entries: &[Value], field: &str) -> Option<u64> {
@@ -269,20 +360,18 @@ mod tests {
 
     #[test]
     fn admin_api_key_reads_env_var_and_treats_empty_as_unset() {
-        // Serialized via the shared env-mutation lock pattern used
-        // elsewhere in this crate would be ideal, but this crate has no
-        // such lock yet for this specific var; keep this test narrowly
-        // scoped to avoid cross-test interference.
-        std::env::remove_var(MISTRAL_ADMIN_API_KEY_ENV);
-        assert_eq!(admin_api_key(), None);
-
-        std::env::set_var(MISTRAL_ADMIN_API_KEY_ENV, "");
-        assert_eq!(admin_api_key(), None);
-
-        std::env::set_var(MISTRAL_ADMIN_API_KEY_ENV, "sk-admin-test-key");
-        assert_eq!(admin_api_key().as_deref(), Some("sk-admin-test-key"));
-
-        std::env::remove_var(MISTRAL_ADMIN_API_KEY_ENV);
+        {
+            let _guard = crate::test_support::MistralAdminKeyEnvGuard::unset();
+            assert_eq!(admin_api_key(), None);
+        }
+        {
+            let _guard = crate::test_support::MistralAdminKeyEnvGuard::set("");
+            assert_eq!(admin_api_key(), None);
+        }
+        {
+            let _guard = crate::test_support::MistralAdminKeyEnvGuard::set("sk-admin-test-key");
+            assert_eq!(admin_api_key().as_deref(), Some("sk-admin-test-key"));
+        }
     }
 
     #[test]
@@ -404,5 +493,114 @@ mod tests {
             AdminRateLimits::default()
         );
         assert!(parse_admin_spend_limit("not json").usage_source.is_none());
+    }
+
+    fn write_fake_curl(dir: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("curl");
+        std::fs::write(&path, body).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+
+    #[test]
+    fn fetch_admin_endpoint_returns_stdout_on_success() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_curl(
+            dir.path(),
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{\"ok\":true}'\n",
+        );
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+
+        let body = fetch_admin_endpoint("/api/admin/spend-limit", "sk-test")
+            .unwrap()
+            .expect("successful fetch returns a body");
+        assert_eq!(body, r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn fetch_admin_endpoint_returns_none_on_curl_failure() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_curl(dir.path(), "#!/bin/sh\ncat > /dev/null\nexit 22\n");
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+
+        let body = fetch_admin_endpoint("/api/admin/spend-limit", "sk-test").unwrap();
+        assert!(body.is_none());
+    }
+
+    // The Admin API key must never be observable via `ps`/`/proc/<pid>/cmdline`
+    // while curl runs -- it is passed through curl's stdin config (`-K -`),
+    // never as a command-line argument.
+    #[test]
+    fn fetch_admin_endpoint_never_puts_api_key_in_argv() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let argv_path = dir.path().join("argv.txt");
+        let stdin_path = dir.path().join("stdin.txt");
+        write_fake_curl(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{argv}'\ncat > '{stdin}'\nprintf '{{}}'\n",
+                argv = argv_path.display(),
+                stdin = stdin_path.display(),
+            ),
+        );
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+
+        fetch_admin_endpoint("/api/admin/usage", "sk-super-secret").unwrap();
+
+        let argv = std::fs::read_to_string(&argv_path).unwrap();
+        assert!(!argv.contains("sk-super-secret"), "got argv: {argv}");
+        let stdin = std::fs::read_to_string(&stdin_path).unwrap();
+        assert!(stdin.contains("sk-super-secret"), "got stdin: {stdin}");
+    }
+
+    #[test]
+    fn refresh_admin_data_fetches_and_parses_all_four_endpoints() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mistral-admin");
+        write_fake_curl(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{fixtures}/rate_limit.json' ;;\n  *api/admin/spend-limit*) cat '{fixtures}/spend_limit.json' ;;\n  *) exit 1 ;;\nesac\n",
+                fixtures = fixtures,
+            ),
+        );
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+
+        let refresh = refresh_admin_data("sk-test", (1_000, 2_000), "vibe", None);
+
+        assert_eq!(refresh.workspace_usage.requests_count, Some(475));
+        assert_eq!(refresh.billing.actual_cost_usd, Some(41.1));
+        assert_eq!(refresh.rate_limits.requests_per_second, Some(5));
+        let spend = refresh.spend_limit.expect("spend limit observation");
+        assert_eq!(spend.backend, "vibe");
+        assert_eq!(spend.quota_used_percent, Some(33.904));
+    }
+
+    #[test]
+    fn refresh_admin_data_endpoint_failure_leaves_only_that_field_unknown() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mistral-admin");
+        write_fake_curl(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *api/admin/spend-limit*) cat '{fixtures}/spend_limit.json' ;;\n  *) exit 1 ;;\nesac\n",
+                fixtures = fixtures,
+            ),
+        );
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+
+        let refresh = refresh_admin_data("sk-test", (1_000, 2_000), "vibe", None);
+
+        assert!(refresh.workspace_usage.usage_source.is_none());
+        assert!(refresh.billing.usage_source.is_none());
+        assert_eq!(refresh.rate_limits, AdminRateLimits::default());
+        assert!(refresh.spend_limit.is_some(), "spend limit still succeeds");
     }
 }
