@@ -17,6 +17,7 @@
 
 use crate::ledger::summary::GroupQuotaObservation;
 use crate::ledger::LedgerUsage;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -236,14 +237,14 @@ pub fn parse_admin_usage(json: &str) -> LedgerUsage {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AdminModelRateLimit {
     pub model: String,
     pub tokens_per_minute: Option<u64>,
     pub tokens_per_month: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AdminRateLimits {
     pub requests_per_second: Option<u64>,
     pub model_limits: Vec<AdminModelRateLimit>,

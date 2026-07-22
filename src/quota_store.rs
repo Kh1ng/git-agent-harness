@@ -40,6 +40,21 @@ pub struct QuotaObservationRecord {
     pub observed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mistral_admin: Option<MistralAdminObservationRecord>,
+}
+
+/// Persisted Mistral Admin API payloads associated with a single refresh.
+/// These stay optional so a refresh with only one successful endpoint never
+/// fabricates the others.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MistralAdminObservationRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_usage: Option<crate::ledger::LedgerUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing: Option<crate::ledger::LedgerUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<crate::usage::AdminRateLimits>,
 }
 
 /// Global, not per-profile (like `availability.rs`): Codex/Claude/AGY
@@ -86,6 +101,46 @@ pub fn load(state_path: &Path) -> Result<Vec<QuotaObservationRecord>> {
 /// Load from the canonical global path, swallowing any error to an empty list.
 pub fn load_account_observations() -> Vec<QuotaObservationRecord> {
     load(&store_path()).unwrap_or_default()
+}
+
+fn has_ledger_usage_data(usage: &crate::ledger::LedgerUsage) -> bool {
+    usage.usage_source.is_some()
+        || usage.input_tokens.is_some()
+        || usage.output_tokens.is_some()
+        || usage.reasoning_tokens.is_some()
+        || usage.cache_read_tokens.is_some()
+        || usage.cache_write_tokens.is_some()
+        || usage.total_tokens.is_some()
+        || usage.requests_count.is_some()
+        || usage.estimated_cost_usd.is_some()
+        || usage.actual_cost_usd.is_some()
+        || usage.quota_window.is_some()
+        || usage.quota_used_percent.is_some()
+        || usage.quota_remaining_percent.is_some()
+        || usage.quota_reset_at.is_some()
+}
+
+fn has_admin_rate_limits_data(limits: &crate::usage::AdminRateLimits) -> bool {
+    limits.requests_per_second.is_some() || !limits.model_limits.is_empty()
+}
+
+fn mistral_admin_observation(
+    refresh: &crate::usage::AdminRefresh,
+) -> Option<MistralAdminObservationRecord> {
+    let workspace_usage =
+        has_ledger_usage_data(&refresh.workspace_usage).then_some(refresh.workspace_usage.clone());
+    let billing = has_ledger_usage_data(&refresh.billing).then_some(refresh.billing.clone());
+    let rate_limits =
+        has_admin_rate_limits_data(&refresh.rate_limits).then_some(refresh.rate_limits.clone());
+    if workspace_usage.is_none() && billing.is_none() && rate_limits.is_none() {
+        None
+    } else {
+        Some(MistralAdminObservationRecord {
+            workspace_usage,
+            billing,
+            rate_limits,
+        })
+    }
 }
 
 /// Append one record under an exclusive lock. Missing parent dirs are created.
@@ -193,6 +248,7 @@ pub fn refresh_codex_and_store(
                 quota_reset_at: obs.quota_reset_at.clone(),
                 observed_at: obs.observed_at.clone(),
                 usage_source: obs.usage_source.clone(),
+                mistral_admin: None,
             };
             append(state_path, &rec)?;
             Ok(Some(rec))
@@ -223,7 +279,26 @@ pub fn refresh_vibe_admin_and_store(
         "vibe",
         model,
     );
+    let admin_refresh = mistral_admin_observation(&refresh);
     let Some(obs) = refresh.spend_limit else {
+        if let Some(admin_refresh) = admin_refresh {
+            let rec = QuotaObservationRecord {
+                backend: "vibe".to_string(),
+                backend_instance: None,
+                model: model.map(str::to_string),
+                quota_pool: None,
+                quota_window: None,
+                quota_used_percent: None,
+                quota_remaining_percent: None,
+                quota_reset_at: None,
+                observed_at: time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .ok(),
+                usage_source: Some("mistral_admin_refresh".to_string()),
+                mistral_admin: Some(admin_refresh),
+            };
+            append(state_path, &rec)?;
+        }
         return Ok(None);
     };
     let rec = QuotaObservationRecord {
@@ -237,6 +312,7 @@ pub fn refresh_vibe_admin_and_store(
         quota_reset_at: obs.quota_reset_at,
         observed_at: obs.observed_at,
         usage_source: obs.usage_source,
+        mistral_admin: admin_refresh,
     };
     append(state_path, &rec)?;
     Ok(Some(rec))
@@ -265,6 +341,7 @@ pub fn refresh_codex_and_store_for_identity(
         quota_reset_at: observation.quota_reset_at,
         observed_at: observation.observed_at,
         usage_source: observation.usage_source,
+        mistral_admin: None,
     };
     append(state_path, &record)?;
     Ok(Some(record))
@@ -300,7 +377,7 @@ mod tests {
         std::fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *api/admin/spend-limit*) cat '{fixtures}/spend_limit.json' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{fixtures}/rate_limit.json' ;;\n  *api/admin/spend-limit*) cat '{fixtures}/spend_limit.json' ;;\n  *) exit 1 ;;\nesac\n",
             ),
         )
         .unwrap();
@@ -318,10 +395,50 @@ mod tests {
             rec.usage_source.as_deref(),
             Some("mistral_admin_spend_limit")
         );
+        assert!(rec.mistral_admin.is_some());
+        let admin = rec.mistral_admin.as_ref().unwrap();
+        assert!(admin.workspace_usage.is_some());
+        assert!(admin.billing.is_some());
+        assert!(admin.rate_limits.is_some());
 
         let records = load(&path).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].backend, "vibe");
+        assert!(records[0].mistral_admin.is_some());
+    }
+
+    #[test]
+    fn refresh_vibe_admin_and_store_persists_admin_refresh_without_spend_limit() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let _key_guard = crate::test_support::MistralAdminKeyEnvGuard::set("sk-test");
+        let (_dir, path) = tmp_store();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mistral-admin");
+        let script_path = bin_dir.path().join("curl");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{fixtures}/rate_limit.json' ;;\n  *api/admin/spend-limit*) printf '%s' '{{\"limits\":{{\"completion\":{{\"monthly_limit_reached\":false}},\"currency\":\"USD\",\"last_payment_failure\":false,\"last_payment_failure_protection\":null}}}}' ;;\n  *) exit 1 ;;\nesac\n",
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+        let _path_guard = crate::test_support::PathGuard::set(bin_dir.path());
+
+        assert!(refresh_vibe_admin_and_store(None, &path).unwrap().is_none());
+
+        let records = load(&path).unwrap();
+        assert_eq!(records.len(), 1);
+        let rec = &records[0];
+        assert_eq!(rec.backend, "vibe");
+        assert!(rec.quota_used_percent.is_none());
+        assert_eq!(rec.usage_source.as_deref(), Some("mistral_admin_refresh"));
+        let admin = rec.mistral_admin.as_ref().expect("admin payload persisted");
+        assert!(admin.workspace_usage.is_some());
+        assert!(admin.billing.is_some());
+        assert!(admin.rate_limits.is_some());
     }
 
     #[test]
@@ -347,6 +464,7 @@ mod tests {
                 quota_reset_at: Some("2026-04-29T12:00:00Z".into()),
                 observed_at: Some("2026-04-28T10:00:00Z".into()),
                 usage_source: Some("codex_status_json".into()),
+                mistral_admin: None,
             },
         )
         .unwrap();
@@ -378,6 +496,7 @@ mod tests {
                     quota_reset_at: None,
                     observed_at: Some(ts.into()),
                     usage_source: Some("codex_status_json".into()),
+                    mistral_admin: None,
                 },
             )
             .unwrap();
@@ -396,6 +515,7 @@ mod tests {
                 quota_reset_at: Some("in 16m44s".into()),
                 observed_at: Some("2026-04-29T11:00:00Z".into()),
                 usage_source: Some("agy_cli_log_delta".into()),
+                mistral_admin: None,
             },
         )
         .unwrap();
@@ -422,10 +542,12 @@ mod tests {
             quota_reset_at: None,
             observed_at: Some("2026-04-28T10:00:00Z".into()),
             usage_source: Some("codex_status_json".into()),
+            mistral_admin: None,
         };
         let good2 = QuotaObservationRecord {
             quota_used_percent: Some(20.0),
             observed_at: Some("2026-04-29T10:00:00Z".into()),
+            mistral_admin: None,
             ..good1.clone()
         };
         let mut contents = serde_json::to_string(&good1).unwrap();
@@ -461,6 +583,7 @@ mod tests {
                 quota_reset_at: None,
                 observed_at: Some("2026-04-29T10:00:00Z".into()),
                 usage_source: Some("codex_status_json".into()),
+                mistral_admin: None,
             },
         )
         .unwrap();
@@ -483,6 +606,7 @@ mod tests {
             quota_reset_at: None,
             observed_at: Some(observed_at.into()),
             usage_source: Some("test".into()),
+            mistral_admin: None,
         }
     }
 
