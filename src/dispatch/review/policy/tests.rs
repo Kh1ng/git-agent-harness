@@ -8,6 +8,7 @@ mod acceptance;
 mod actionable;
 mod budget_reservation;
 mod format_retry;
+mod external_acceptance;
 mod parsing;
 mod reset;
 
@@ -1163,8 +1164,10 @@ fn live_acceptance_can_be_approved_with_direct_matching_provider_evidence() {
     )
     .with_source_acceptance(
         vec![
-            "List the current live GitLab issue queue".to_string(),
+            "Mirror the review contract".to_string(),
             "Document the result".to_string(),
+            "Keep the source snapshot stable".to_string(),
+            "List the current live GitLab issue queue".to_string(),
         ],
         "gitlab",
     );
