@@ -1112,10 +1112,30 @@ fn enforce_review_evidence_gate(
     verdict.safety_gate_reason = Some(reason);
 }
 
+/// Whether a criterion's *own wording* asserts something about live/current
+/// provider state (so only `provider:`/`snapshot:` evidence should satisfy
+/// it) rather than merely naming the provider a feature integrates with, or
+/// describing present-tense code/design in general terms.
+///
+/// Deliberately excludes bare "github"/"gitlab": in a tool whose entire
+/// purpose is GitHub/GitLab integration, nearly every criterion mentions the
+/// provider by name regardless of whether it's asking about live state or
+/// just describing what the feature does (e.g. "Unit tests cover GitHub and
+/// GitLab issue bodies..." or "Add contract tests ... without GITLAB_PAT").
+///
+/// Also excludes bare "current": across this repo's real open issues it is
+/// used overwhelmingly to describe the present state of the *code/design*
+/// ("current behavior", "current implementation", "the page currently
+/// depends on") rather than to assert a live external fact. A criterion that
+/// truly needs a live check almost always also uses a more specific marker
+/// ("latest", "stale", "open issue", "queue", "remaining quota", ...), so
+/// dropping the bare, universally generic "current" removes false positives
+/// without weakening real detection -- the existing test fixture ("List the
+/// current live GitLab issue queue") is still caught via "live" and "queue"
+/// alone.
 fn criterion_requires_external_state(criterion: &str) -> bool {
     let lower = criterion.to_ascii_lowercase();
     [
-        "current",
         "live",
         "latest",
         "stale",
@@ -1123,8 +1143,6 @@ fn criterion_requires_external_state(criterion: &str) -> bool {
         "closed issue",
         "queue",
         "backlog",
-        "github",
-        "gitlab",
         "provider state",
         "remaining quota",
         "availability",
