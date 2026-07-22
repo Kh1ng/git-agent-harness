@@ -16,6 +16,8 @@
  * optional with `?` below where that's the case).
  */
 
+import type { NodeObservationSnapshot, NodeResourcePressure } from './registry.js';
+
 // ---------------------------------------------------------------------------
 // gah status --json (src/status.rs)
 // ---------------------------------------------------------------------------
@@ -243,6 +245,13 @@ export interface StatusSnapshot {
   review_contract_version: number;
   generated_at: string;
   profile: ProfileIdentity;
+  /** Per-node observations aggregated by the coordinator. Optional for
+   * standalone CLI callers that only want the local node snapshot. */
+  nodes?: NodeObservationSnapshot[];
+  /** Local node resource pressure (best-effort; nulls preserve unknowns). */
+  resource_pressure?: NodeResourcePressure | null;
+  /** Event replay cursor for the local node's controller event stream. */
+  event_cursor?: string | null;
   observations: Observations;
   merge_requests: MergeRequest[];
   availability: AvailabilityScope[];
