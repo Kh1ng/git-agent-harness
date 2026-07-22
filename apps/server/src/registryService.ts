@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, sep } from 'node:path';
 import crypto from 'node:crypto';
 import type { RegisteredNode, NodeSummary, NodeHealthCheckResult } from '@git-agent-harness/contracts';
 import { COORDINATOR_SCHEMA_DIGEST } from './coordinatorIdentity.js';
@@ -39,6 +39,17 @@ export function isSchemaCompatible(schemaDigest: string): boolean {
   return schemaDigest === COORDINATOR_SCHEMA_DIGEST;
 }
 
+/** Node health checks fetch an operator-supplied `advertised_url`, so a `file:`
+ * secret ref must never resolve outside a known directory -- otherwise a
+ * registrant could point advertised_url at a server they control and use the
+ * coordinator as an oracle to read (and exfiltrate, via the Authorization
+ * header it sends) any file readable by the server process. */
+const DEFAULT_NODE_SECRETS_ROOT = '/etc/gah/node-secrets';
+
+export function nodeSecretsRoot(): string {
+  return resolve(process.env.GAH_NODE_SECRETS_ROOT || DEFAULT_NODE_SECRETS_ROOT);
+}
+
 export function resolveSecret(secretRef: string): string {
   if (!secretRef) {
     throw new Error('Secret reference is empty');
@@ -52,7 +63,11 @@ export function resolveSecret(secretRef: string): string {
     return val;
   }
   if (secretRef.startsWith('file:')) {
-    const filePath = secretRef.slice(5);
+    const root = nodeSecretsRoot();
+    const filePath = resolve(secretRef.slice(5));
+    if (filePath !== root && !filePath.startsWith(root + sep)) {
+      throw new Error(`Secret file path must be inside ${root}`);
+    }
     try {
       return readFileSync(filePath, 'utf8').trim();
     } catch (e: any) {
@@ -132,6 +147,18 @@ export class RegistryService {
     }
     if (!node.schema_digest || typeof node.schema_digest !== 'string') {
       throw new Error('Invalid or missing schema_digest');
+    }
+    const validTransportModes: RegisteredNode['transport_mode'][] = [
+      'loopback',
+      'authenticated_remote',
+      'trusted_lan'
+    ];
+    if (!validTransportModes.includes(node.transport_mode)) {
+      // Fail closed: an unrecognized value must never silently skip the
+      // transport/TLS enforcement below.
+      throw new Error(
+        `Invalid transport_mode '${node.transport_mode}': must be one of ${validTransportModes.join(', ')}`
+      );
     }
 
     // 2. Reject duplicate IDs

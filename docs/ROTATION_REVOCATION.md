@@ -11,7 +11,14 @@ GAH implements a **secrets-by-reference** policy. Registry configuration files (
 
 ### Supported Secret Reference Formats:
 1. **Environment Variables**: Prefix `env:`, followed by the environment variable name (e.g., `env:NODE_TOKEN_1`).
-2. **File References**: Prefix `file:`, followed by the absolute file path containing the secret/token (e.g., `file:/etc/certs/node-1.token`).
+2. **File References**: Prefix `file:`, followed by the absolute path to a file
+   containing the secret/token. The path must live under the node-secrets root
+   (default `/etc/gah/node-secrets`, override with `GAH_NODE_SECRETS_ROOT`) --
+   e.g. `file:/etc/gah/node-secrets/node-1.token`. This restriction exists
+   because health checks fetch an operator-supplied `advertised_url`; without
+   it, a registrant could point that URL at a server they control and use the
+   coordinator to read (and exfiltrate) any file readable by the server
+   process.
 
 ### Triggering Secret Rotation:
 To rotate the secret reference of a registered node, use the `POST /api/registry/nodes/:nodeId/rotate-secret` endpoint.

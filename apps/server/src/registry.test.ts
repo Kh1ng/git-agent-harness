@@ -263,6 +263,60 @@ test('RegistryService validates non-loopback endpoints and TLS modes', () => {
   }
 });
 
+test('RegistryService rejects an unrecognized transport_mode instead of silently skipping TLS enforcement', () => {
+  const tempPath = createTempRegistryFile();
+  const registry = new RegistryService(tempPath);
+
+  try {
+    assert.throws(() => {
+      registry.registerNode({
+        node_id: 'node-bogus-mode',
+        display_name: 'Bogus Mode Node',
+        advertised_url: 'http://node.remote.com',
+        version: '0.1.0',
+        schema_digest: COORDINATOR_SCHEMA_DIGEST,
+        secret_ref: 'env:NODE_SECRET',
+        // Not a member of the transport_mode union -- must fail closed, not
+        // fall through the loopback/authenticated_remote/trusted_lan chain
+        // unenforced.
+        transport_mode: 'carrier-pigeon' as RegisteredNode['transport_mode']
+      });
+    }, /Invalid transport_mode/);
+  } finally {
+    if (existsSync(tempPath)) {
+      unlinkSync(tempPath);
+    }
+  }
+});
+
+test('resolveSecret rejects file: references outside the configured secrets root', async () => {
+  const { mkdirSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const testRoot = resolve(tmpdir(), `gah-node-secrets-test-${crypto.randomBytes(6).toString('hex')}`);
+  const previousRoot = process.env.GAH_NODE_SECRETS_ROOT;
+  process.env.GAH_NODE_SECRETS_ROOT = testRoot;
+
+  try {
+    mkdirSync(testRoot, { recursive: true });
+    const { resolveSecret } = await import('./registryService.js');
+
+    // Outside the root entirely, and a `../` traversal attempt out of the root.
+    assert.throws(() => resolveSecret('file:/etc/passwd'), /must be inside/);
+    assert.throws(() => resolveSecret(`file:${testRoot}/../escape.txt`), /must be inside/);
+
+    const allowedPath = resolve(testRoot, 'allowed-secret.txt');
+    writeFileSync(allowedPath, 'super-secret-value\n');
+    assert.equal(resolveSecret(`file:${allowedPath}`), 'super-secret-value');
+  } finally {
+    if (previousRoot === undefined) {
+      delete process.env.GAH_NODE_SECRETS_ROOT;
+    } else {
+      process.env.GAH_NODE_SECRETS_ROOT = previousRoot;
+    }
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Health check status mapping tests
 // ---------------------------------------------------------------------------
@@ -410,7 +464,10 @@ test('Server endpoints enforce loopback check and authentication', async () => {
     assert.equal(localRes.status, 200);
     assert.ok(Array.isArray(localRes.body));
 
-    assert.equal(app.get('trust proxy'), true);
+    // Only trust X-Forwarded-* from a loopback hop, never from any direct peer
+    // (see server.ts) -- otherwise a remote attacker could forge
+    // X-Forwarded-Proto: https and defeat the TLS requirement below.
+    assert.equal(app.get('trust proxy'), 'loopback');
 
     // 2. Non-loopback request: no TLS -> returns 403 Forbidden
     const headersNoTls = {

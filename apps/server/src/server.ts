@@ -68,14 +68,20 @@ export function createServer(
   const registryService = configDeps.registryService || new RegistryService();
 
   const app = express();
-  // Trust proxy headers so TLS-terminated deployments can satisfy req.secure
-  // for authenticated_remote registry traffic.
-  app.set('trust proxy', true);
+  // Trust X-Forwarded-* only when the immediate hop is loopback (a TLS-terminating
+  // reverse proxy on this same host). `true` would trust those headers from any
+  // direct peer, letting a remote attacker forge `X-Forwarded-Proto: https` and
+  // defeat authMiddleware's TLS requirement outright.
+  app.set('trust proxy', 'loopback');
 
   // Middleware
   app.use(cors());
   app.use(express.json());
-  app.use(authMiddleware);
+  // authMiddleware only guards the node registry -- it is new, narrowly scoped
+  // surface. The rest of the API (loop start/stop, config mutation, etc.) is
+  // unauthenticated pending #532; applying this globally would silently change
+  // that pre-existing contract.
+  app.use('/api/registry', authMiddleware);
 
   // Health check endpoint
   app.get('/health', (req, res) => {
