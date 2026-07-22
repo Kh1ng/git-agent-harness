@@ -24,7 +24,8 @@ function makeSnapshot(
   advertisedUrl: string,
   cpuPercent: number,
   activeWorkCount: number,
-  activeClaimCount: number
+  activeClaimCount: number,
+  overrides: Partial<NodeObservationSnapshot> = {}
 ): NodeObservationSnapshot {
   return {
     node_id: nodeId,
@@ -67,7 +68,8 @@ function makeSnapshot(
       rss_bytes: 128_000_000,
       disk_percent: cpuPercent
     },
-    error: null
+    error: null,
+    ...overrides
   };
 }
 
@@ -133,7 +135,8 @@ class FakeTransport {
 
   constructor(
     private readonly nodeId: string,
-    private readonly onTerminal: (session: Session) => void
+    private readonly onTerminal: (session: Session) => void,
+    private readonly startDelayMs = 0
   ) {}
 
   async startSession(options: {
@@ -149,6 +152,11 @@ class FakeTransport {
     budget?: number;
   }): Promise<Session> {
     this.startCalls += 1;
+    if (this.startDelayMs > 0) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, this.startDelayMs);
+      });
+    }
     const session: Session = {
       id: options.requestId ?? `${this.nodeId}-${this.startCalls}`,
       providerKind: options.providerKind,
@@ -284,6 +292,7 @@ test('fleet dispatch routes to the least-loaded healthy node and honors explicit
       providerKind: 'codex',
       instanceId: 'codex-0',
       repo: 'owner/repo',
+      branch: 'feature/pinned-route',
       mode: 'improve'
     });
 
@@ -298,6 +307,7 @@ test('fleet dispatch routes to the least-loaded healthy node and honors explicit
         providerKind: 'codex',
         instanceId: 'codex-0',
         repo: 'owner/repo',
+        branch: 'feature/bad-pin',
         mode: 'improve'
       }),
       (error: unknown) =>
@@ -387,6 +397,298 @@ test('fleet dispatch reuses request ids across coordinator restarts and reconcil
     assert.equal(reconciled?.nodeId, 'worker-1');
   } finally {
     await mockNode.close();
+    try {
+      unlinkSync(leaseStorePath);
+    } catch {
+      // ignore cleanup failures
+    }
+  }
+});
+
+test('fleet dispatch deduplicates concurrent starts with the same request id', async () => {
+  const leaseDir = mkdtempSync(resolve(tmpdir(), 'gah-fleet-'));
+  const leaseStorePath = resolve(leaseDir, 'dispatch-leases.json');
+  const published: PublishedMessage[] = [];
+  const transportMap = new Map<string, FakeTransport>();
+
+  const registryService = {
+    async getNodeObservations() {
+      return [
+        makeSnapshot('coordinator-1', 'http://127.0.0.1:9999', 10, 0, 0)
+      ];
+    }
+  } as unknown as RegistryService;
+
+  transportMap.set(
+    'coordinator-1',
+    new FakeTransport('coordinator-1', () => {}, 50)
+  );
+
+  const coordinator = createCoordinatorHarness({
+    leaseStorePath,
+    registryService,
+    coordinatorNodeId: 'coordinator-1',
+    coordinatorUrl: 'http://127.0.0.1:9999',
+    transportMap,
+    published
+  });
+
+  try {
+    const options = {
+      requestId: 'dispatch-race',
+      profile: 'gah',
+      providerKind: 'codex',
+      instanceId: 'codex-0',
+      repo: 'owner/repo',
+      branch: 'feature/request-dedupe',
+      mode: 'improve',
+      backend: 'codex',
+      model: 'gpt-4.1'
+    } as const;
+
+    const first = coordinator.startSession(options);
+    const second = coordinator.startSession(options);
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    assert.equal(transportMap.get('coordinator-1')?.startCalls, 1);
+
+    const [firstSession, secondSession] = await Promise.all([first, second]);
+    assert.equal(firstSession.id, secondSession.id);
+    assert.equal(firstSession.nodeId, 'coordinator-1');
+    assert.equal(
+      published.filter((message) => message.type === 'session.started').length,
+      0
+    );
+  } finally {
+    try {
+      unlinkSync(leaseStorePath);
+    } catch {
+      // ignore cleanup failures
+    }
+  }
+});
+
+test('fleet dispatch deduplicates concurrent starts for the same work identity across request ids', async () => {
+  const leaseDir = mkdtempSync(resolve(tmpdir(), 'gah-fleet-'));
+  const leaseStorePath = resolve(leaseDir, 'dispatch-leases.json');
+  const published: PublishedMessage[] = [];
+  const transportMap = new Map<string, FakeTransport>();
+
+  const registryService = {
+    async getNodeObservations() {
+      return [
+        makeSnapshot('worker-1', 'http://127.0.0.1:9998', 15, 0, 0, {
+          backend_instances: [
+            {
+              backend_instance: 'codex-main',
+              runner_kind: 'codex',
+              logical_backend: 'codex',
+              account_label: null,
+              auth_source_label: null,
+              quota_pool: null,
+              supported_models: ['gpt-4.1'],
+              executable_configured: true,
+              isolated_state_configured: true
+            }
+          ],
+          availability: [
+            {
+              backend: 'codex',
+              model: 'gpt-4.1',
+              quota_pool: null,
+              eligible_now: true,
+              reason: null,
+              unavailable_until: null,
+              source: 'test',
+              last_error_summary: null,
+              observed_at: new Date().toISOString(),
+              scope: 'model_specific'
+            }
+          ]
+        })
+      ];
+    }
+  } as unknown as RegistryService;
+
+  const coordinator = createCoordinatorHarness({
+    leaseStorePath,
+    registryService,
+    coordinatorNodeId: 'coordinator-1',
+    coordinatorUrl: 'http://127.0.0.1:9999',
+    transportMap,
+    published
+  });
+
+  try {
+    const firstOptions = {
+      requestId: 'dispatch-work-1',
+      profile: 'gah',
+      providerKind: 'codex',
+      instanceId: 'codex-0',
+      repo: 'owner/repo',
+      branch: 'feature/work-dedupe',
+      mode: 'improve',
+      backend: 'codex',
+      model: 'gpt-4.1'
+    } as const;
+    const secondOptions = {
+      ...firstOptions,
+      requestId: 'dispatch-work-2'
+    } as const;
+
+    const first = coordinator.startSession(firstOptions);
+    const second = coordinator.startSession(secondOptions);
+    const [firstSession, secondSession] = await Promise.all([first, second]);
+
+    assert.equal(firstSession.id, secondSession.id);
+    assert.equal(transportMap.get('worker-1')?.startCalls, 1);
+    assert.equal(
+      published.filter((message) => message.type === 'session.started').length,
+      1
+    );
+  } finally {
+    try {
+      unlinkSync(leaseStorePath);
+    } catch {
+      // ignore cleanup failures
+    }
+  }
+});
+
+test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and marks a partitioned lease uncertain', async () => {
+  const leaseDir = mkdtempSync(resolve(tmpdir(), 'gah-fleet-'));
+  const leaseStorePath = resolve(leaseDir, 'dispatch-leases.json');
+  const published: PublishedMessage[] = [];
+  const transportMap = new Map<string, FakeTransport>();
+  const unreachableWorkerUrl = 'http://127.0.0.1:65535';
+
+  const registryService = {
+    async getNodeObservations() {
+      return [
+        makeSnapshot('blocked-availability', 'http://127.0.0.1:9997', 5, 0, 0, {
+          backend_instances: [
+            {
+              backend_instance: 'codex-main',
+              runner_kind: 'codex',
+              logical_backend: 'codex',
+              account_label: null,
+              auth_source_label: null,
+              quota_pool: null,
+              supported_models: ['gpt-4.1'],
+              executable_configured: true,
+              isolated_state_configured: true
+            }
+          ],
+          availability: [
+            {
+              backend: 'codex',
+              model: 'gpt-4.1',
+              quota_pool: null,
+              eligible_now: false,
+              reason: 'quota exhausted',
+              unavailable_until: null,
+              source: 'test',
+              last_error_summary: 'quota exhausted',
+              observed_at: new Date().toISOString(),
+              scope: 'model_specific'
+            }
+          ]
+        }),
+        makeSnapshot('blocked-model', 'http://127.0.0.1:9996', 5, 0, 0, {
+          backend_instances: [
+            {
+              backend_instance: 'codex-main',
+              runner_kind: 'codex',
+              logical_backend: 'codex',
+              account_label: null,
+              auth_source_label: null,
+              quota_pool: null,
+              supported_models: ['gpt-4.1'],
+              executable_configured: true,
+              isolated_state_configured: true
+            }
+          ]
+        }),
+        makeSnapshot('saturated-node', 'http://127.0.0.1:9995', 10, 1, 0, {
+          backend_instances: [
+            {
+              backend_instance: 'codex-main',
+              runner_kind: 'codex',
+              logical_backend: 'codex',
+              account_label: null,
+              auth_source_label: null,
+              quota_pool: null,
+              supported_models: ['gpt-5.4'],
+              executable_configured: true,
+              isolated_state_configured: true
+            }
+          ]
+        }),
+        makeSnapshot('worker-1', unreachableWorkerUrl, 10, 0, 0, {
+          backend_instances: [
+            {
+              backend_instance: 'codex-main',
+              runner_kind: 'codex',
+              logical_backend: 'codex',
+              account_label: null,
+              auth_source_label: null,
+              quota_pool: null,
+              supported_models: ['gpt-5.4'],
+              executable_configured: true,
+              isolated_state_configured: true
+            }
+          ],
+          availability: [
+            {
+              backend: 'codex',
+              model: 'gpt-5.4',
+              quota_pool: null,
+              eligible_now: true,
+              reason: null,
+              unavailable_until: null,
+              source: 'test',
+              last_error_summary: null,
+              observed_at: new Date().toISOString(),
+              scope: 'model_specific'
+            }
+          ]
+        })
+      ];
+    }
+  } as unknown as RegistryService;
+
+  const coordinator = createCoordinatorHarness({
+    leaseStorePath,
+    registryService,
+    coordinatorNodeId: 'coordinator-1',
+    coordinatorUrl: 'http://127.0.0.1:9999',
+    transportMap,
+    published
+  });
+
+  try {
+    const routed = await coordinator.startSession({
+      requestId: 'dispatch-policy',
+      profile: 'gah',
+      providerKind: 'codex',
+      instanceId: 'codex-0',
+      repo: 'owner/repo',
+      branch: 'feature/policy-route',
+      mode: 'improve',
+      backend: 'codex',
+      model: 'gpt-5.4'
+    });
+
+    assert.equal(routed.nodeId, 'worker-1');
+    assert.equal(transportMap.get('worker-1')?.startCalls, 1);
+    assert.equal(transportMap.get('blocked-availability')?.startCalls ?? 0, 0);
+    assert.equal(transportMap.get('blocked-model')?.startCalls ?? 0, 0);
+    assert.equal(transportMap.get('saturated-node')?.startCalls ?? 0, 0);
+
+    await coordinator.reconcileLeases('gah');
+    const reconciled = coordinator.getSession(routed.id);
+    assert.equal(reconciled?.leaseState, 'uncertain_reconciling');
+  } finally {
     try {
       unlinkSync(leaseStorePath);
     } catch {

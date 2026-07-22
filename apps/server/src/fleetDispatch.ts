@@ -39,6 +39,8 @@ type FleetDispatchDeps = {
 
 type LeaseRecord = {
   requestId: string;
+  workKey: string;
+  profile: string;
   nodeId: string;
   nodeUrl: string;
   session: Session;
@@ -101,8 +103,37 @@ function leaseStorePath(defaultPath: string): string {
   return defaultPath;
 }
 
+function encodeKeyPart(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function deriveDispatchWorkKey(options: Pick<RoutedSessionOptions, 'profile' | 'repo' | 'branch' | 'target' | 'mode'>): string {
+  return [
+    options.profile,
+    options.repo,
+    options.branch ?? '',
+    options.target ?? '',
+    options.mode
+  ].map(encodeKeyPart).join('|');
+}
+
+function deriveLeaseWorkKey(lease: Pick<LeaseRecord, 'profile' | 'session'>): string | null {
+  const { profile, session } = lease;
+  if (!profile || !session.repo || !session.mode) {
+    return null;
+  }
+  return deriveDispatchWorkKey({
+    profile,
+    repo: session.repo,
+    branch: session.branch,
+    target: session.target,
+    mode: session.mode
+  });
+}
+
 class LeaseStore {
   private leases = new Map<string, LeaseRecord>();
+  private leasesByWorkKey = new Map<string, LeaseRecord>();
 
   constructor(private readonly path: string) {
     this.load();
@@ -117,7 +148,18 @@ class LeaseStore {
       if (Array.isArray(payload.leases)) {
         for (const lease of payload.leases) {
           if (lease?.requestId && lease?.session?.id && lease?.nodeId && lease?.nodeUrl) {
-            this.leases.set(lease.requestId, lease);
+            const normalizedLease = {
+              ...lease,
+              profile: typeof lease.profile === 'string' ? lease.profile : '',
+              workKey: typeof lease.workKey === 'string'
+                ? lease.workKey
+                : deriveLeaseWorkKey({
+                    profile: typeof lease.profile === 'string' ? lease.profile : '',
+                    session: lease.session
+                  }) ?? lease.requestId
+            } satisfies LeaseRecord;
+            this.leases.set(normalizedLease.requestId, normalizedLease);
+            this.leasesByWorkKey.set(normalizedLease.workKey, normalizedLease);
           }
         }
       }
@@ -141,6 +183,10 @@ class LeaseStore {
     return this.leases.get(requestId);
   }
 
+  getByWorkKey(workKey: string): LeaseRecord | undefined {
+    return this.leasesByWorkKey.get(workKey);
+  }
+
   getBySessionId(sessionId: string): LeaseRecord | undefined {
     for (const lease of this.leases.values()) {
       if (lease.session.id === sessionId) {
@@ -155,14 +201,25 @@ class LeaseStore {
   }
 
   upsert(record: LeaseRecord): void {
+    const existing = this.leasesByWorkKey.get(record.workKey);
+    if (existing && existing.requestId !== record.requestId) {
+      this.leases.delete(existing.requestId);
+    }
     this.leases.set(record.requestId, record);
+    this.leasesByWorkKey.set(record.workKey, record);
     this.save();
   }
 
   delete(requestId: string): void {
-    if (this.leases.delete(requestId)) {
-      this.save();
+    const existing = this.leases.get(requestId);
+    if (!existing) {
+      return;
     }
+    this.leases.delete(requestId);
+    if (this.leasesByWorkKey.get(existing.workKey)?.requestId === requestId) {
+      this.leasesByWorkKey.delete(existing.workKey);
+    }
+    this.save();
   }
 
   cleanup(): void {
@@ -173,6 +230,9 @@ class LeaseStore {
         const endedAt = Date.parse(lease.session.endedAt ?? lease.updatedAt);
         if (!Number.isNaN(endedAt) && now - endedAt > TERMINAL_LEASE_TTL_MS) {
           this.leases.delete(requestId);
+          if (this.leasesByWorkKey.get(lease.workKey)?.requestId === requestId) {
+            this.leasesByWorkKey.delete(lease.workKey);
+          }
           changed = true;
         }
       }
@@ -459,6 +519,8 @@ export class FleetDispatchCoordinator {
   private readonly localSessionManager: ReturnType<typeof getSessionManager>;
   private readonly leaseStore: LeaseStore;
   private readonly remoteTransports = new Map<string, NodeDispatchTransport>();
+  private readonly pendingRequestStarts = new Map<string, Promise<Session>>();
+  private readonly pendingWorkStarts = new Map<string, Promise<Session>>();
   private readonly localTransport: LocalNodeTransport;
   private readonly transportFactory: NonNullable<FleetDispatchDeps['transportFactory']>;
 
@@ -475,13 +537,43 @@ export class FleetDispatchCoordinator {
   }
 
   async startSession(options: RoutedSessionOptions): Promise<Session> {
-    await this.reconcileLeases(options.profile);
-    const requestId = options.requestId;
-    if (requestId) {
-      const existing = this.leaseStore.getByRequestId(requestId);
-      if (existing) {
-        return existing.session;
+    const requestId = options.requestId ?? generateRequestId();
+    const workKey = deriveDispatchWorkKey(options);
+    const pendingRequest = this.pendingRequestStarts.get(requestId);
+    if (pendingRequest) {
+      return pendingRequest;
+    }
+    const pendingWork = this.pendingWorkStarts.get(workKey);
+    if (pendingWork) {
+      return pendingWork;
+    }
+
+    const startPromise = this.startSessionFresh(options, requestId, workKey);
+    this.pendingRequestStarts.set(requestId, startPromise);
+    this.pendingWorkStarts.set(workKey, startPromise);
+    try {
+      return await startPromise;
+    } finally {
+      if (this.pendingRequestStarts.get(requestId) === startPromise) {
+        this.pendingRequestStarts.delete(requestId);
       }
+      if (this.pendingWorkStarts.get(workKey) === startPromise) {
+        this.pendingWorkStarts.delete(workKey);
+      }
+    }
+  }
+
+  private async startSessionFresh(options: RoutedSessionOptions, requestId: string, workKey: string): Promise<Session> {
+    await this.reconcileLeases(options.profile);
+
+    const existingByRequest = this.leaseStore.getByRequestId(requestId);
+    if (existingByRequest) {
+      return existingByRequest.session;
+    }
+
+    const existingByWorkKey = this.leaseStore.getByWorkKey(workKey);
+    if (existingByWorkKey) {
+      return existingByWorkKey.session;
     }
 
     const target = await this.selectNode(options);
@@ -496,7 +588,9 @@ export class FleetDispatchCoordinator {
       const routed = decorateSession(session, this.coordinatorIdentity.node_id, 'running');
       this.remoteTransports.set(routed.id, transport);
       this.recordLease({
-        requestId: requestId ?? routed.id,
+        requestId,
+        workKey,
+        profile: options.profile,
         nodeId: this.coordinatorIdentity.node_id,
         nodeUrl: this.coordinatorIdentity.advertised_url,
         session: routed,
@@ -523,7 +617,9 @@ export class FleetDispatchCoordinator {
     this.remoteTransports.set(session.id, transport);
     const routed = decorateSession(session, target.nodeId, 'running');
     this.recordLease({
-      requestId: requestId ?? routed.id,
+      requestId,
+      workKey,
+      profile: options.profile,
       nodeId: target.nodeId,
       nodeUrl: target.advertisedUrl,
       session: routed,
@@ -626,6 +722,9 @@ export class FleetDispatchCoordinator {
     }
 
     for (const lease of leases) {
+      if (lease.profile !== profile) {
+        continue;
+      }
       if (lease.state === 'terminal') {
         continue;
       }
@@ -646,6 +745,7 @@ export class FleetDispatchCoordinator {
       if (!probe) {
         this.recordLease({
           ...lease,
+          session: decorateSession(lease.session, lease.nodeId, 'uncertain_reconciling'),
           state: 'uncertain_reconciling',
           updatedAt: nowIso()
         });
@@ -655,6 +755,7 @@ export class FleetDispatchCoordinator {
       if (!matched) {
         this.recordLease({
           ...lease,
+          session: decorateSession(lease.session, lease.nodeId, 'expired'),
           state: 'expired',
           updatedAt: nowIso()
         });
@@ -725,7 +826,7 @@ export class FleetDispatchCoordinator {
       return pinned;
     }
 
-    candidates.sort((left, right) => this.compareNodeSelection(left, right));
+    candidates.sort((left, right) => this.compareNodeSelection(left, right, options));
     const selected = candidates[0];
     if (!selected) {
       throw new GAHError(`No healthy node available for profile ${options.profile}`, 'NODE_UNAVAILABLE');
@@ -733,9 +834,9 @@ export class FleetDispatchCoordinator {
     return selected;
   }
 
-  private compareNodeSelection(left: NodeSelection, right: NodeSelection): number {
-    const leftScore = this.scoreSnapshot(left.snapshot);
-    const rightScore = this.scoreSnapshot(right.snapshot);
+  private compareNodeSelection(left: NodeSelection, right: NodeSelection, options: RoutedSessionOptions): number {
+    const leftScore = this.scoreSnapshot(left.snapshot, options);
+    const rightScore = this.scoreSnapshot(right.snapshot, options);
     if (leftScore !== rightScore) {
       return leftScore - rightScore;
     }
@@ -748,15 +849,19 @@ export class FleetDispatchCoordinator {
     return left.nodeId.localeCompare(right.nodeId);
   }
 
-  private scoreSnapshot(snapshot: NodeObservationSnapshot | null): number {
+  private scoreSnapshot(snapshot: NodeObservationSnapshot | null, options: RoutedSessionOptions): number {
     if (!snapshot) {
-      return 0;
+      return Number.MAX_SAFE_INTEGER / 4;
     }
     const cpu = snapshot.resource_pressure.cpu_percent ?? 100;
     const disk = snapshot.resource_pressure.disk_percent ?? 100;
     const rss = snapshot.resource_pressure.rss_bytes ?? Number.MAX_SAFE_INTEGER;
     const active = snapshot.active_work.length + snapshot.active_claims.length;
-    return active * 1_000_000 + cpu * 10_000 + disk * 100 + Math.min(rss / 1_000_000, 99);
+    const capacity = this.getConfiguredConcurrencyCap(snapshot, options);
+    const normalizedLoad = capacity && capacity > 0 ? active / capacity : active;
+    const modelBonus = this.nodeHasKnownModelSupport(snapshot, options) ? -25_000 : 0;
+    const availabilityBonus = this.nodeAvailabilityBonus(snapshot, options);
+    return normalizedLoad * 1_000_000 + cpu * 10_000 + disk * 100 + Math.min(rss / 1_000_000, 99) + availabilityBonus + modelBonus;
   }
 
   private isSnapshotEligible(snapshot: NodeObservationSnapshot, options: RoutedSessionOptions): boolean {
@@ -772,7 +877,115 @@ export class FleetDispatchCoordinator {
     if (options.backend && snapshot.backend_configured[options.backend] === false) {
       return false;
     }
+    if (!this.nodeMatchesModel(snapshot, options)) {
+      return false;
+    }
+    if (!this.nodeAvailabilityAllows(snapshot, options)) {
+      return false;
+    }
+    if (!this.nodeHasConcurrencyHeadroom(snapshot, options)) {
+      return false;
+    }
     return true;
+  }
+
+  private nodeMatchesModel(snapshot: NodeObservationSnapshot, options: RoutedSessionOptions): boolean {
+    if (!options.model) {
+      return true;
+    }
+    const backendInstances = this.relevantBackendInstances(snapshot, options);
+    if (backendInstances.length === 0) {
+      return true;
+    }
+    return backendInstances.some((instance) => {
+      if (instance.supported_models.length === 0) {
+        return true;
+      }
+      return instance.supported_models.includes(options.model as string);
+    });
+  }
+
+  private nodeAvailabilityAllows(snapshot: NodeObservationSnapshot, options: RoutedSessionOptions): boolean {
+    if (!options.backend) {
+      return true;
+    }
+    const relevant = snapshot.availability.filter((scope) => scope.backend === options.backend);
+    if (relevant.length === 0) {
+      return true;
+    }
+    return !relevant.some((scope) => {
+      if (scope.eligible_now) {
+        return false;
+      }
+      if (scope.scope === 'backend_wide') {
+        return true;
+      }
+      if (scope.model && options.model && scope.model === options.model) {
+        return true;
+      }
+      if (scope.quota_pool) {
+        return snapshot.backend_instances.some((instance) => {
+          const matchesBackend = instance.logical_backend === options.backend || instance.backend_instance === options.backend;
+          return matchesBackend && instance.quota_pool === scope.quota_pool;
+        });
+      }
+      return scope.model === null;
+    });
+  }
+
+  private nodeAvailabilityBonus(snapshot: NodeObservationSnapshot, options: RoutedSessionOptions): number {
+    if (!options.backend || !snapshot.availability.length) {
+      return 0;
+    }
+    const eligibleNow = snapshot.availability.some((scope) => scope.backend === options.backend && scope.eligible_now);
+    return eligibleNow ? -10_000 : 0;
+  }
+
+  private relevantBackendInstances(snapshot: NodeObservationSnapshot, options: RoutedSessionOptions): typeof snapshot.backend_instances {
+    return snapshot.backend_instances.filter((instance) => {
+      if (!options.backend) {
+        return true;
+      }
+      return instance.logical_backend === options.backend || instance.backend_instance === options.backend;
+    });
+  }
+
+  private getConfiguredConcurrencyCap(snapshot: NodeObservationSnapshot, options: RoutedSessionOptions): number | null {
+    const matchingInstances = this.relevantBackendInstances(snapshot, options).filter((instance) => {
+      if (!instance.executable_configured) {
+        return false;
+      }
+      if (options.model && instance.supported_models.length > 0 && !instance.supported_models.includes(options.model)) {
+        return false;
+      }
+      return true;
+    });
+    if (matchingInstances.length === 0) {
+      return null;
+    }
+    return Math.max(1, matchingInstances.length);
+  }
+
+  private nodeHasConcurrencyHeadroom(snapshot: NodeObservationSnapshot, options: RoutedSessionOptions): boolean {
+    const cap = this.getConfiguredConcurrencyCap(snapshot, options);
+    if (cap === null) {
+      return true;
+    }
+    const active = snapshot.active_work.length + snapshot.active_claims.length;
+    return active < cap;
+  }
+
+  private nodeHasKnownModelSupport(snapshot: NodeObservationSnapshot, options: RoutedSessionOptions): boolean {
+    if (!options.model) {
+      return false;
+    }
+    const relevant = this.relevantBackendInstances(snapshot, options);
+    return relevant.some((instance) => {
+      if (instance.supported_models.length === 0) {
+        return false;
+      }
+      return instance.supported_models.includes(options.model as string);
+    });
   }
 
   private resolveNodeSelectionByLease(lease: LeaseRecord): NodeSelection {
