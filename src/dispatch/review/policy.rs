@@ -367,6 +367,13 @@ pub(in crate::dispatch) fn next_review_candidate(
                 && entry.review_source_sha.is_some()
                 && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
                 && entry.validation_result.as_deref() != Some("cancelled_shutdown")
+                // A deferred_capacity entry is a routing-decision failure: no
+                // backend ever launched and no verdict was produced. Treating
+                // it as a spent attempt strands the escalation chain on the
+                // same unreachable candidate forever, even after the
+                // candidate's own transient unavailability (e.g. a quota
+                // cooldown) has since cleared.
+                && entry.validation_result.as_deref() != Some("deferred_capacity")
         })
         .map(|entry| {
             (
@@ -418,6 +425,13 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
                 // An operator-requested shutdown is not a reviewer opinion
                 // and must remain retryable after the daemon restarts.
                 && entry.validation_result.as_deref() != Some("cancelled_shutdown")
+                // A deferred_capacity entry is a routing-decision failure: no
+                // backend ever launched and no verdict was produced. Treating
+                // it as a spent attempt strands the escalation chain on the
+                // same unreachable candidate forever, even after the
+                // candidate's own transient unavailability (e.g. a quota
+                // cooldown) has since cleared.
+                && entry.validation_result.as_deref() != Some("deferred_capacity")
         })
         .map(|entry| {
             (
@@ -1098,10 +1112,30 @@ fn enforce_review_evidence_gate(
     verdict.safety_gate_reason = Some(reason);
 }
 
+/// Whether a criterion's *own wording* asserts something about live/current
+/// provider state (so only `provider:`/`snapshot:` evidence should satisfy
+/// it) rather than merely naming the provider a feature integrates with, or
+/// describing present-tense code/design in general terms.
+///
+/// Deliberately excludes bare "github"/"gitlab": in a tool whose entire
+/// purpose is GitHub/GitLab integration, nearly every criterion mentions the
+/// provider by name regardless of whether it's asking about live state or
+/// just describing what the feature does (e.g. "Unit tests cover GitHub and
+/// GitLab issue bodies..." or "Add contract tests ... without GITLAB_PAT").
+///
+/// Also excludes bare "current": across this repo's real open issues it is
+/// used overwhelmingly to describe the present state of the *code/design*
+/// ("current behavior", "current implementation", "the page currently
+/// depends on") rather than to assert a live external fact. A criterion that
+/// truly needs a live check almost always also uses a more specific marker
+/// ("latest", "stale", "open issue", "queue", "remaining quota", ...), so
+/// dropping the bare, universally generic "current" removes false positives
+/// without weakening real detection -- the existing test fixture ("List the
+/// current live GitLab issue queue") is still caught via "live" and "queue"
+/// alone.
 fn criterion_requires_external_state(criterion: &str) -> bool {
     let lower = criterion.to_ascii_lowercase();
     [
-        "current",
         "live",
         "latest",
         "stale",
@@ -1109,8 +1143,6 @@ fn criterion_requires_external_state(criterion: &str) -> bool {
         "closed issue",
         "queue",
         "backlog",
-        "github",
-        "gitlab",
         "provider state",
         "remaining quota",
         "availability",

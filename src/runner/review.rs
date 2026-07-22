@@ -403,7 +403,10 @@ pub fn run_review_backend_for_identity(
         && matches!(outcome, ReviewProcessOutcome::Success)
         && stdout.trim().is_empty()
     {
-        stdout = agy_empty_output_diagnosis(env_vars, &executable);
+        stdout = agy_empty_output_diagnosis(
+            &usage_artifacts.agy_cli_log_path,
+            usage_artifacts.agy_cli_log_delta.as_deref(),
+        );
         ReviewProcessOutcome::NonZeroExit(-1)
     } else {
         outcome
