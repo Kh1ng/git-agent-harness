@@ -34,22 +34,26 @@ pub fn run_agy(
 /// by the worker path (run_agy_with_executable) and the review path
 /// (run_review_backend), both of which treat that as a failure needing a
 /// real diagnosis, not a silently-empty "success".
+///
+/// Takes the already-resolved log path and the already-computed run-scoped
+/// delta (see `agy_cli_log_path`/`log_delta`) instead of re-resolving and
+/// re-reading cli.log itself. Two bugs that fixes: (1) this used to hardcode
+/// the pre-1.0.0 flat `cli.log` path, so on any AGY version using the
+/// TICKET-242 rotated `log/cli-*.log` layout it silently found nothing and
+/// always fell through to the generic "check the log" message; (2) it used
+/// to re-read the *whole* log file rather than this run's delta, so a
+/// concurrent AGY invocation against the same account/log could make this
+/// run's diagnosis (falsely) claim quota exhaustion or auth failure that
+/// actually belonged to the other run.
 pub(crate) fn agy_empty_output_diagnosis(
-    env_vars: &[(String, String)],
-    executable: &Path,
+    agy_cli_log: &Option<PathBuf>,
+    agy_cli_log_delta: Option<&str>,
 ) -> String {
-    let agy_home = env_vars
-        .iter()
-        .find(|(k, _)| k == "HOME")
-        .map(|(_, v)| v.as_str())
-        .map(|h| h.to_string())
-        .or_else(|| std::env::var("HOME").ok());
-    let Some(home) = agy_home else {
-        return "AGY produced no output (exit=0) and HOME is unset — cannot inspect cli.log."
+    let Some(agy_log) = agy_cli_log else {
+        return "AGY produced no output (exit=0) and no cli.log could be resolved (HOME unset, or AGY has never run under this account)."
             .to_string();
     };
-    let agy_log = PathBuf::from(home).join(".gemini/antigravity-cli/cli.log");
-    let Ok(contents) = fs::read_to_string(&agy_log) else {
+    let Some(contents) = agy_cli_log_delta.filter(|c| !c.trim().is_empty()) else {
         return format!(
             "AGY produced no output (exit=0).  Check {} for details.",
             agy_log.display(),
@@ -59,14 +63,11 @@ pub(crate) fn agy_empty_output_diagnosis(
         format!(
             "AGY quota exhausted (exit=0 empty output).  See {}.  Resets ~{}.",
             agy_log.display(),
-            extract_reset_time(&contents).unwrap_or_else(|| "unknown".into()),
+            extract_reset_time(contents).unwrap_or_else(|| "unknown".into()),
         )
     } else if contents.contains("not logged into Antigravity") || contents.contains("not logged in")
     {
-        format!(
-            "AGY not authenticated.  Run `{}` interactively to log in.",
-            executable.display(),
-        )
+        "AGY not authenticated.  Run it interactively to log in.".to_string()
     } else {
         format!(
             "AGY produced no output (exit=0).  Check {} for details.",
@@ -344,7 +345,7 @@ pub fn run_agy_with_executable(
             }
         }
 
-        let err_msg = agy_empty_output_diagnosis(env_vars, executable);
+        let err_msg = agy_empty_output_diagnosis(&agy_cli_log, agy_cli_log_delta.as_deref());
 
         if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&log_path) {
             let _ = writeln!(file, "{}", err_msg);
@@ -641,17 +642,21 @@ mod tests {
     fn agy_empty_output_with_quota_log_detected_as_error() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
-        // Fake agy that exits 0 with no stdout/stderr.
-        make_fake_bin(&f.bin_dir, "agy", "#!/bin/sh\nexit 0\n");
-        // Write a cli.log with quota error text.
         let agy_home = f.record_dir.parent().unwrap();
         let agy_log_dir = agy_home.join(".gemini/antigravity-cli");
         fs::create_dir_all(&agy_log_dir).unwrap();
-        fs::write(
-            agy_log_dir.join("cli.log"),
-            "RESOURCE_EXHAUSTED (code 429): quota. Resets in 10m.\n",
-        )
-        .unwrap();
+        // Real AGY appends to its own cli.log as a side effect of running, so
+        // the fake binary must append (not the test writing the file up
+        // front) -- the run-scoped delta only sees bytes written after this
+        // run's pre-offset is captured.
+        make_fake_bin(
+            &f.bin_dir,
+            "agy",
+            &format!(
+                "#!/bin/sh\nprintf 'RESOURCE_EXHAUSTED (code 429): quota. Resets in 10m.\\n' >> '{}'\nexit 0\n",
+                agy_log_dir.join("cli.log").display(),
+            ),
+        );
 
         let envs = vec![
             ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
@@ -682,15 +687,17 @@ mod tests {
     fn agy_empty_output_with_auth_log_detected_as_auth_failure() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
-        make_fake_bin(&f.bin_dir, "agy", "#!/bin/sh\nexit 0\n");
         let agy_home = f.record_dir.parent().unwrap();
         let agy_log_dir = agy_home.join(".gemini/antigravity-cli");
         fs::create_dir_all(&agy_log_dir).unwrap();
-        fs::write(
-            agy_log_dir.join("cli.log"),
-            "error getting token source: You are not logged into Antigravity.\n",
-        )
-        .unwrap();
+        make_fake_bin(
+            &f.bin_dir,
+            "agy",
+            &format!(
+                "#!/bin/sh\nprintf 'error getting token source: You are not logged into Antigravity.\\n' >> '{}'\nexit 0\n",
+                agy_log_dir.join("cli.log").display(),
+            ),
+        );
 
         let envs = vec![
             ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
@@ -715,6 +722,62 @@ mod tests {
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("not authenticated"), "got log: {log}");
+    }
+
+    /// A concurrent AGY invocation against the same account (same HOME, same
+    /// cli.log) can leave a quota/auth error in the log from *before* this
+    /// run's own pre-offset is captured. This run's own delta must stay
+    /// empty in that case -- diagnosing this run's failure from the other
+    /// run's error would misattribute the cause. Regression test for the bug
+    /// `agy_empty_output_diagnosis` had: it used to re-read the whole file
+    /// regardless of when the content was written, so unrelated history
+    /// (including a concurrent instance's error) always leaked in.
+    #[test]
+    fn agy_empty_output_ignores_pre_existing_log_content_from_another_run() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        let agy_home = f.record_dir.parent().unwrap();
+        let agy_log_dir = agy_home.join(".gemini/antigravity-cli");
+        fs::create_dir_all(&agy_log_dir).unwrap();
+        // Simulates another concurrent AGY process against the same account
+        // having already written a quota error before this run starts.
+        fs::write(
+            agy_log_dir.join("cli.log"),
+            "RESOURCE_EXHAUSTED (code 429): quota. Resets in 10m.\n",
+        )
+        .unwrap();
+        // This run's own fake binary appends nothing -- its own delta is empty.
+        make_fake_bin(&f.bin_dir, "agy", "#!/bin/sh\nexit 0\n");
+
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            ("HOME".to_string(), agy_home.to_string_lossy().to_string()),
+        ];
+        let result = run_agy_with_executable(
+            &f.bin_dir.join("agy"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "gpt-5.4".into(),
+            },
+            &envs,
+            None,
+            120,
+        )
+        .unwrap();
+        assert_eq!(result.exit_code, -1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(
+            !log.contains("quota exhausted") && !log.contains("not authenticated"),
+            "must not misattribute another run's pre-existing log content; got log: {log}"
+        );
+        assert!(
+            log.contains("Check") && log.contains("cli.log"),
+            "should fall back to the generic 'check the log' message; got log: {log}"
+        );
     }
 
     #[test]

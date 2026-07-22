@@ -36,6 +36,10 @@ pub(crate) enum ReviewUsageCapture {
 pub(crate) struct ReviewUsageArtifacts {
     pub(crate) artifact_path: Option<String>,
     pub(crate) agy_cli_log_delta: Option<String>,
+    /// The AGY cli.log path this delta was read from (same resolution as
+    /// `agy_cli_log_delta`), so callers can build a diagnostic message
+    /// without re-resolving it themselves.
+    pub(crate) agy_cli_log_path: Option<PathBuf>,
     /// Authoritative assistant text extracted from a structured backend
     /// stream. `None` means the review runner should keep captured stdout.
     pub(crate) review_text: Option<String>,
@@ -124,6 +128,7 @@ impl ReviewUsageCapture {
                 pre_offset,
             } => ReviewUsageArtifacts {
                 agy_cli_log_delta: agy::log_delta(&log_path, pre_offset),
+                agy_cli_log_path: log_path,
                 ..ReviewUsageArtifacts::default()
             },
             Self::Vibe {
