@@ -804,7 +804,6 @@ pub fn cleanup(worktree: &Path, repo: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
@@ -1108,23 +1107,25 @@ mod tests {
 
     #[test]
     fn push_retries_fake_git_timeout_once_then_completes() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
+        // This fixture is a checked-in, immutable script (see the file for
+        // why) rather than one written+chmod'd here at test run time, so
+        // that this test can never race a concurrent fork() elsewhere in the
+        // parallel suite into an ETXTBSY ("Text file busy") failure.
+        let fake_git = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fake_git_push_retry.sh"
+        ));
         let tmp = TempDir::new().unwrap();
         let count_path = tmp.path().join("push-count");
-        let fake_git = tmp.path().join("git");
-        fs::write(
+
+        push_branch_with_executable(
             &fake_git,
-            format!(
-                "#!/bin/sh\ncount=0\n[ -f '{count}' ] && count=$(cat '{count}')\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{count}'\nif [ \"$count\" -eq 1 ]; then echo 'ssh: connect to host github.com port 22: Connection timed out' >&2; exit 1; fi\nexit 0\n",
-                count = count_path.display()
-            ),
+            tmp.path(),
+            "main",
+            count_path.to_str().unwrap(),
+            "",
         )
         .unwrap();
-        let mut perms = fs::metadata(&fake_git).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&fake_git, perms).unwrap();
-
-        push_branch_with_executable(&fake_git, tmp.path(), "main", "origin", "").unwrap();
 
         assert_eq!(fs::read_to_string(count_path).unwrap(), "2");
     }
