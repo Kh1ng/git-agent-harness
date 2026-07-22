@@ -846,7 +846,12 @@ pub fn mark_ready_for_review(profile: &Profile, branch: &str) -> Result<()> {
     }
     let target = find_review_target_by_branch(profile, branch)?;
     match profile.provider.as_str() {
-        "gitlab" => gitlab_mark_ready_for_review(profile, &target.id),
+        "gitlab" => {
+            let title = target.title.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("GitLab MR missing title for ready-for-review transition")
+            })?;
+            gitlab_mark_ready_for_review(profile, &target.id, title)
+        }
         "github" => github_mark_ready_for_review(profile, &target.id),
         other => anyhow::bail!("unsupported provider: {}", other),
     }
@@ -896,7 +901,10 @@ pub fn merge_mr(
     ensure_review_generation(&target, expected_review_generation)?;
     match profile.provider.as_str() {
         "gitlab" => {
-            gitlab_mark_ready_for_review(profile, &target.id)?;
+            let title = target.title.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("GitLab MR missing title for ready-for-review transition")
+            })?;
+            gitlab_mark_ready_for_review(profile, &target.id, title)?;
             gitlab_merge_mr(profile, &target.id, target.source_sha.as_deref())
         }
         "github" => {
@@ -907,17 +915,22 @@ pub fn merge_mr(
     }
 }
 
-fn gitlab_mark_ready_for_review(profile: &Profile, iid: &str) -> Result<()> {
-    let ready = provider_command("glab")
-        .args(["mr", "update", iid, "--ready", "--repo", &profile.repo])
-        .output()
-        .context("glab mr update --ready")?;
-    if !ready.status.success() {
-        anyhow::bail!(
-            "glab mr update --ready failed: {}",
-            String::from_utf8_lossy(&ready.stderr).trim()
-        );
-    }
+fn gitlab_ready_title(title: &str) -> &str {
+    title
+        .strip_prefix("Draft: ")
+        .or_else(|| title.strip_prefix("[Draft] "))
+        .or_else(|| title.strip_prefix("(Draft) "))
+        .unwrap_or(title)
+}
+
+fn gitlab_mark_ready_for_review(profile: &Profile, iid: &str, title: &str) -> Result<()> {
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let endpoint = format!("projects/{project_id}/merge_requests/{iid}");
+    let ready_title = gitlab_ready_title(title);
+    gitlab_api(profile, &endpoint, "PUT", &[("title", ready_title)])?;
     Ok(())
 }
 
@@ -949,7 +962,10 @@ pub fn gitlab_set_mwps(
     }
     let target = find_review_target_by_branch(profile, branch)?;
     ensure_review_generation(&target, Some(expected_review_generation))?;
-    gitlab_mark_ready_for_review(profile, &target.id)?;
+    let title = target.title.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("GitLab MR missing title for ready-for-review transition")
+    })?;
+    gitlab_mark_ready_for_review(profile, &target.id, title)?;
     let project_id = profile
         .provider_project_id
         .as_deref()

@@ -911,11 +911,12 @@ case "$*" in
   echo "$@" > "${0%/*}/merge_call.txt"
   printf '{}\n'
   ;;
-  *projects/42/merge_requests*--hostname*)
-  printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"test","description":"body","draft":false,"sha":"source-gitlab-sha","head_pipeline":{"sha":"source-gitlab-sha","status":"success"}}]\n'
+  *projects/42/merge_requests/7*"--method PUT"*)
+  echo "$@" > "${0%/*}/ready_call.txt"
+  printf '{}\n'
   ;;
-  *"mr update"*)
-  exit 0
+  *projects/42/merge_requests*"--method GET"*source_branch=gah/test*)
+  printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"test","description":"body","draft":false,"sha":"source-gitlab-sha","head_pipeline":{"sha":"source-gitlab-sha","status":"success"}}]\n'
   ;;
   *)
   echo "unexpected glab invocation: $@" >&2
@@ -927,6 +928,11 @@ esac
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
     merge_mr(&gitlab_profile(), "gah/test", None).unwrap();
+
+    let ready_call = fs::read_to_string(bin_dir.join("ready_call.txt")).unwrap();
+    assert!(ready_call.contains("projects/42/merge_requests/7"));
+    assert!(ready_call.contains("--method PUT"));
+    assert!(ready_call.contains("title=test"));
 
     let call = fs::read_to_string(bin_dir.join("merge_call.txt")).unwrap();
     assert!(call.contains("projects/42/merge_requests/7/merge"));
@@ -950,11 +956,12 @@ case "$*" in
   echo "$@" > "${0%/*}/mwps_call.txt"
   printf '{}\n'
   ;;
-  *projects/42/merge_requests*--hostname*)
-  printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"Draft: test","description":"body","draft":true,"sha":"source-gitlab-sha","head_pipeline":{"sha":"source-gitlab-sha","status":"success"}}]\n'
+  *projects/42/merge_requests/7*"--method PUT"*)
+  echo "$@" > "${0%/*}/ready_call.txt"
+  printf '{}\n'
   ;;
-  *"mr update"*)
-  exit 0
+  *projects/42/merge_requests*"--method GET"*source_branch=gah/test*)
+  printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"Draft: test","description":"body","draft":true,"sha":"source-gitlab-sha","head_pipeline":{"sha":"source-gitlab-sha","status":"success"}}]\n'
   ;;
   *)
   echo "unexpected glab invocation: $@" >&2
@@ -979,6 +986,11 @@ esac
 
     super::gitlab_set_mwps(&gitlab_profile(), "gah/test", expected.as_str()).unwrap();
 
+    let ready_call = fs::read_to_string(bin_dir.join("ready_call.txt")).unwrap();
+    assert!(ready_call.contains("projects/42/merge_requests/7"));
+    assert!(ready_call.contains("--method PUT"));
+    assert!(ready_call.contains("title=test"));
+
     let call = fs::read_to_string(bin_dir.join("mwps_call.txt")).unwrap();
     assert!(call.contains("projects/42/merge_requests/7/merge"));
     assert!(call.contains("auto_merge=true"));
@@ -996,9 +1008,9 @@ fn mark_ready_for_review_gitlab_un_drafts_only() {
         &bin_dir,
         "glab",
         r#"#!/bin/sh
-case "$1 $2" in
-  "api projects/42/merge_requests") printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main"}]\n' ;;
-  "mr update") echo "$@" > "${0%/*}/ready_call.txt"; exit 0 ;;
+case "$*" in
+  *projects/42/merge_requests*"--method GET"*source_branch=gah/test*) printf '[{"iid":7,"web_url":"https://gitlab.example.com/x/-/merge_requests/7","source_branch":"gah/test","target_branch":"main","title":"Draft: test","description":"body","draft":true,"sha":"source-gitlab-sha","head_pipeline":{"sha":"source-gitlab-sha","status":"success"}}]\n' ;;
+  *projects/42/merge_requests/7*"--method PUT"*) echo "$@" > "${0%/*}/ready_call.txt"; printf '{}\n' ;;
   *) echo "unexpected glab invocation: $@" >&2; exit 1 ;;
 esac
 "#,
@@ -1008,8 +1020,9 @@ esac
     mark_ready_for_review(&gitlab_profile(), "gah/test").unwrap();
 
     let call = fs::read_to_string(bin_dir.join("ready_call.txt")).unwrap();
-    assert!(call.contains(" 7 "));
-    assert!(call.contains("--ready"));
+    assert!(call.contains("projects/42/merge_requests/7"));
+    assert!(call.contains("--method PUT"));
+    assert!(call.contains("title=test"));
 }
 
 #[test]
