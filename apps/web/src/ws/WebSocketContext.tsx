@@ -48,6 +48,13 @@ type WebSocketContextType = {
   errors: StatusError[];
   recentLedger: RecentLedgerSummary | null;
   controllerActivity: ControllerActivity[];
+  /** Increments each time the socket re-establishes a connection after
+   * having previously been connected (i.e. actual reconnects, not the
+   * initial connect on mount). Pages use this to re-trigger a fresh REST
+   * pull of whatever they depend on -- a dropped/restored connection
+   * would otherwise leave a panel stale until its own timer or a manual
+   * refresh fires. See useWsReconnectRefresh. */
+  reconnectSeq: number;
   sendMessage: (message: ClientMessage) => void;
   reconnect: () => void;
   disconnect: () => void;
@@ -91,7 +98,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [errors, setErrors] = useState<StatusError[]>([]);
   const [recentLedger, setRecentLedger] = useState<RecentLedgerSummary | null>(null);
   const [controllerActivity, setControllerActivity] = useState<ControllerActivity[]>([]);
+  const [reconnectSeq, setReconnectSeq] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
+  const hasConnectedOnceRef = useRef(false);
 
   const activityProfile = profileOverride ?? profile ?? 'gah';
   useEffect(() => {
@@ -124,6 +133,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         setIsConnecting(false);
         setSocket(newSocket);
         socketRef.current = newSocket;
+
+        if (hasConnectedOnceRef.current) {
+          setReconnectSeq((n) => n + 1);
+        }
+        hasConnectedOnceRef.current = true;
 
         newSocket.send(JSON.stringify({
           type: 'client.hello' as const,
@@ -330,6 +344,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     errors,
     recentLedger,
     controllerActivity,
+    reconnectSeq,
     sendMessage,
     reconnect,
     disconnect

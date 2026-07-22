@@ -3,6 +3,8 @@ import { Gauge, Clock, ListChecks, CheckCircle2, Coins, Timer } from 'lucide-rea
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
+import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
@@ -54,17 +56,13 @@ export function QuotaPage() {
 
   useEffect(() => {
     fetchQuota({ profile: profile ?? undefined, since: '7d' });
-    const refreshTimer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
-      }
-    }, SNAPSHOT_REFRESH_MS);
-    return () => window.clearInterval(refreshTimer);
   }, [profile, fetchQuota]);
 
   const refresh = () => {
     fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
   };
+  useAutoRefresh(refresh, SNAPSHOT_REFRESH_MS);
+  useWsReconnectRefresh(refresh);
 
   const header = (
     <PageHeader
@@ -72,6 +70,7 @@ export function QuotaPage() {
       description="Canonical candidate usage, availability, and quota observations"
       onRefresh={refresh}
       refreshing={quota.loading}
+      lastUpdated={quota.fetchedAt}
     />
   );
 

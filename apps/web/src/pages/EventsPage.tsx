@@ -4,9 +4,13 @@ import type { LucideIcon } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
+import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { formatLocalTime, formatAge } from '../lib/format.js';
+
+const EVENTS_REFRESH_MS = 30 * 1000;
 
 /** `details` is free-form text from the controller (src/events.rs) --
  * for the routine per-tick "observation_completed" event it's always
@@ -49,6 +53,10 @@ export function EventsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [since, profile]);
 
+  const refresh = () => fetchEvents({ profile: profile ?? undefined, since }, { force: true });
+  useAutoRefresh(refresh, EVENTS_REFRESH_MS);
+  useWsReconnectRefresh(refresh);
+
   const list = events.data ?? [];
 
   return (
@@ -56,8 +64,9 @@ export function EventsPage() {
       <PageHeader
         title="Events"
         description="Controller event stream: observations, decisions, dispatches, waits"
-        onRefresh={() => fetchEvents({ profile: profile ?? undefined, since }, { force: true })}
+        onRefresh={refresh}
         refreshing={events.loading}
+        lastUpdated={events.fetchedAt}
         actions={
           <select
             value={since}

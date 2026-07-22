@@ -1,4 +1,6 @@
 import { useEffect } from 'react';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
+import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import {
   ListChecks,
   CheckCircle2,
@@ -20,7 +22,7 @@ import { StatusBadge, classificationTone } from '../components/ui/StatusBadge.js
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { SessionCard } from '../components/SessionCard.js';
-import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount } from '../lib/format.js';
+import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
 
 type OverviewPageProps = {
@@ -46,13 +48,14 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
     fetchStatus(profile ?? undefined);
     fetchQuota({ profile: profile ?? undefined, since: '7d' });
     if (profile) fetchLoopStatus(profile);
-    const refreshTimer = window.setInterval(() => {
-      if (document.visibilityState !== 'visible') return;
-      fetchStatus(profile ?? undefined, { force: true });
-      fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
-    }, OVERVIEW_REFRESH_MS);
-    return () => window.clearInterval(refreshTimer);
   }, [profile, fetchStatus, fetchQuota, fetchLoopStatus]);
+
+  const refresh = () => {
+    fetchStatus(profile ?? undefined, { force: true });
+    fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
+  };
+  useAutoRefresh(refresh, OVERVIEW_REFRESH_MS);
+  useWsReconnectRefresh(refresh);
 
   const loopRunning = loopStatus.data?.running ?? false;
   const toggleLoop = () => {
@@ -67,11 +70,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
   const activeSessions = sessions.filter((s) => ['starting', 'running'].includes(s.status));
   const activeControllerRuns = controllerActivity.filter((run) => run.status === 'running');
   const activeWorkCount = activeSessions.length + activeControllerRuns.length;
-
-  const refresh = () => {
-    fetchStatus(profile ?? undefined, { force: true });
-    fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
-  };
+  const lastUpdated = oldestFetchedAt(status.fetchedAt, quota.fetchedAt);
 
   // The page's own title/refresh control renders unconditionally below --
   // only the content area swaps to loading/error, so a total data-fetch
@@ -80,7 +79,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
   if ((status.loading && !status.data) || (quota.loading && !quota.data)) {
     return (
       <div className="space-y-6">
-        <PageHeader title="Overview" onRefresh={refresh} refreshing />
+        <PageHeader title="Overview" onRefresh={refresh} refreshing lastUpdated={lastUpdated} />
         <LoadingState label="Loading status…" />
       </div>
     );
@@ -88,7 +87,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
   if ((status.error && !status.data) || (quota.error && !quota.data)) {
     return (
       <div className="space-y-6">
-        <PageHeader title="Overview" onRefresh={refresh} />
+        <PageHeader title="Overview" onRefresh={refresh} lastUpdated={lastUpdated} />
         <ErrorState message={status.error ?? quota.error ?? 'Failed to load overview data'} endpoint="/api/status" onRetry={refresh} />
       </div>
     );
@@ -118,6 +117,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
         description={snapshot ? `Profile: ${snapshot.profile.display_name}` : undefined}
         onRefresh={refresh}
         refreshing={status.loading}
+        lastUpdated={lastUpdated}
         actions={
           profile && (
             <div className="flex items-center gap-2">

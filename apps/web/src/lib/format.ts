@@ -85,6 +85,34 @@ export function formatLocalTime(iso: string | null | undefined): string | null {
   });
 }
 
+/** "Updated 3s ago" / "Updated 4m ago" style staleness indicator for a
+ * fetch timestamp (epoch ms, as stored on gahStore's Resource.fetchedAt).
+ * Finer-grained than formatAge (seconds, not just minutes) since this
+ * drives a live "how stale is this panel" readout rather than an
+ * observation age buried in a table cell. */
+export function formatUpdatedAge(fetchedAt: number | null | undefined, now: number = Date.now()): string {
+  if (fetchedAt === null || fetchedAt === undefined) return 'never';
+  const deltaMs = now - fetchedAt;
+  if (deltaMs < 1000) return 'just now';
+  const totalSeconds = Math.floor(deltaMs / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s ago`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ago`;
+  const hours = Math.floor(totalMinutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+/** Oldest (most stale) of a set of fetch timestamps, or null if none have
+ * ever resolved -- when a page depends on more than one resource, the
+ * overall "last updated" should reflect the panel a viewer is least
+ * likely to trust, not the freshest one. */
+export function oldestFetchedAt(...timestamps: (number | null | undefined)[]): number | null {
+  const valid = timestamps.filter((t): t is number => t !== null && t !== undefined);
+  return valid.length > 0 ? Math.min(...valid) : null;
+}
+
 /** An observation older than this is flagged stale in the UI -- old
  * enough that a human should not trust it as "current." */
 export const STALE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
