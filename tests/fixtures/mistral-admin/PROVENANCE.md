@@ -15,7 +15,8 @@ on Mistral's official Admin API docs pages, not from the OpenAPI spec:
 | `usage.json` | `https://docs.mistral.ai/api/endpoint/beta/admin/billing` example response for `GET /api/admin/usage` |
 | `vibe_workspace_usage.json` | `https://docs.mistral.ai/api/endpoint/beta/admin/analytics` example response for `GET /api/admin/analytics/vibe/usage/by_workspace` |
 | `rate_limit.json` | `https://docs.mistral.ai/api/endpoint/beta/admin/billing` playground example response for `GET /api/admin/rate-limit` |
-| `spend_limit.json` | `https://docs.mistral.ai/api/endpoint/beta/admin/billing` playground example response for `GET /api/admin/spend-limit` |
 
 The spend-limit exact-ratio math branch is covered directly in a unit-test
-helper because the public docs only publish a non-numeric spend-limit example.
+helper because the public docs only publish a placeholder spend-limit example,
+so that payload is embedded inline in the parser test rather than stored as a
+fixture.

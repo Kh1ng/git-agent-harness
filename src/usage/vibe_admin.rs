@@ -402,8 +402,18 @@ mod tests {
   "vibe_usage": 37.8
 }"#;
     const RATE_LIMIT: &str = include_str!("../../tests/fixtures/mistral-admin/rate_limit.json");
-    const SPEND_LIMIT_DOCS: &str =
-        include_str!("../../tests/fixtures/mistral-admin/spend_limit.json");
+    // The public docs only publish this spend-limit example inline, so keep it
+    // local to the parser test instead of presenting it as a captured fixture.
+    const SPEND_LIMIT_DOCS: &str = r#"{
+  "limits": {
+    "completion": {
+      "monthly_limit_reached": false
+    },
+    "currency": "ipsum eiusmod",
+    "last_payment_failure": false,
+    "last_payment_failure_protection": null
+  }
+}"#;
 
     fn spend_limit_ratio_body() -> String {
         serde_json::json!({
