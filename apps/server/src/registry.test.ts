@@ -689,6 +689,11 @@ test('Server endpoints enforce loopback check and authentication', async () => {
     const remoteWrongTokenRes = await makeRequest(baseUrl, '/api/registry/nodes', 'GET', undefined, headersWrongToken);
     assert.equal(remoteWrongTokenRes.status, 401);
 
+    // 4b. Non-loopback request to the aggregated fleet snapshot also requires auth
+    const remoteStatusNoAuthRes = await makeRequest(baseUrl, '/api/status', 'GET', undefined, headersTlsNoAuth);
+    assert.equal(remoteStatusNoAuthRes.status, 401);
+    assert.equal(remoteStatusNoAuthRes.body.error, 'Unauthorized');
+
     // 5. Non-loopback request: TLS and correct token -> returns 200 Success
     const headersCorrect = {
       'X-Forwarded-For': '8.8.8.8',

@@ -266,7 +266,11 @@ export function createServer(
   // fit the WS welcome message's connect-once push shape. Live/push data
   // (sessions, provider status) stays on the WebSocket; this is
   // additive, it does not replace or narrow the existing WS contract.
-  app.get('/api/status', async (req, res) => {
+  //
+  // `/api/status` fans out to registered nodes and returns an aggregated
+  // fleet snapshot, so it must be auth-gated even though loopback callers may
+  // still access it without credentials via authMiddleware's local exemption.
+  app.get('/api/status', authMiddleware, async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
       const [status, nodes] = await Promise.all([
