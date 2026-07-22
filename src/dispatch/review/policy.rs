@@ -367,6 +367,13 @@ pub(in crate::dispatch) fn next_review_candidate(
                 && entry.review_source_sha.is_some()
                 && entry.validation_result.as_deref() != Some("skipped_duplicate_review")
                 && entry.validation_result.as_deref() != Some("cancelled_shutdown")
+                // A deferred_capacity entry is a routing-decision failure: no
+                // backend ever launched and no verdict was produced. Treating
+                // it as a spent attempt strands the escalation chain on the
+                // same unreachable candidate forever, even after the
+                // candidate's own transient unavailability (e.g. a quota
+                // cooldown) has since cleared.
+                && entry.validation_result.as_deref() != Some("deferred_capacity")
         })
         .map(|entry| {
             (
@@ -418,6 +425,13 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
                 // An operator-requested shutdown is not a reviewer opinion
                 // and must remain retryable after the daemon restarts.
                 && entry.validation_result.as_deref() != Some("cancelled_shutdown")
+                // A deferred_capacity entry is a routing-decision failure: no
+                // backend ever launched and no verdict was produced. Treating
+                // it as a spent attempt strands the escalation chain on the
+                // same unreachable candidate forever, even after the
+                // candidate's own transient unavailability (e.g. a quota
+                // cooldown) has since cleared.
+                && entry.validation_result.as_deref() != Some("deferred_capacity")
         })
         .map(|entry| {
             (
