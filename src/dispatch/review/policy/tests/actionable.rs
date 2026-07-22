@@ -187,3 +187,61 @@ fn invalid_output_advances_through_ordered_review_candidates() {
     let third = next_review_candidate(&cfg, &prof, "test", "gah/review-output", None).unwrap();
     assert_eq!(third.backend, "claude");
 }
+
+/// TICKET-739 regression: a `deferred_capacity` entry is a routing-decision
+/// failure -- no backend ever launched, no verdict was ever produced. Before
+/// this fix, both escalation pickers still counted it as a spent attempt, so
+/// once the only other configured candidate was a paid, `requires_approval`
+/// route, the escalation chain had nothing left to try but that gated route
+/// forever, even after the deferred candidate's transient unavailability
+/// (e.g. a quota cooldown) had since cleared. This is the sportsball-bets
+/// #150 livelock: the escalation chain must still offer the deferred
+/// candidate up again instead of skipping straight to the paid gate.
+#[test]
+fn deferred_capacity_failure_does_not_retire_the_candidate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let candidates = vec![
+        CandidateConfig {
+            backend: "claude".into(),
+            model: Some("sonnet".into()),
+            ..CandidateConfig::default()
+        },
+        CandidateConfig {
+            backend: "opencode".into(),
+            model: Some("nous-portal/z-ai/glm-5.2".into()),
+            requires_approval: true,
+            ..CandidateConfig::default()
+        },
+    ];
+    let cfg = gah_config_with_ledger(
+        tmp.path(),
+        RoutingPolicy {
+            escalatory_reviewers: candidates.clone(),
+            review_candidates: Some(candidates),
+            ..RoutingPolicy::default()
+        },
+    );
+    let mut prof = profile(tmp.path());
+    prof.routing = RoutingPolicy::default();
+
+    let mut deferred =
+        review_ledger_entry("test", &prof, "gah/livelock", "deferred_capacity", "high");
+    deferred.effective_backend = "claude".into();
+    deferred.effective_model = Some("sonnet".into());
+    crate::ledger::append(&cfg, &deferred).unwrap();
+
+    let next = next_escalatory_reviewer(&cfg, &prof, "test", "gah/livelock", None)
+        .expect("a deferred_capacity failure must not exhaust the escalation chain");
+    assert_eq!(
+        (next.backend.as_str(), next.model.as_deref()),
+        ("claude", Some("sonnet")),
+        "claude was never actually attempted and must be retried before the paid gate"
+    );
+
+    let next_review = next_review_candidate(&cfg, &prof, "test", "gah/livelock", None)
+        .expect("a deferred_capacity failure must not exhaust the review candidate pool");
+    assert_eq!(
+        (next_review.backend.as_str(), next_review.model.as_deref()),
+        ("claude", Some("sonnet"))
+    );
+}
