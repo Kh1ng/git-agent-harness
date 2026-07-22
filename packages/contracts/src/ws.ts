@@ -31,6 +31,13 @@ export type ProviderStatus =
 // Session types
 export type SessionId = string;
 export type SessionStatus = "idle" | "starting" | "running" | "stopping" | "stopped" | "error";
+export type DispatchLeaseState =
+  | "offered"
+  | "accepted"
+  | "running"
+  | "terminal"
+  | "expired"
+  | "uncertain_reconciling";
 
 // Session type - manually defined instead of using Effect Schema
 // to avoid version compatibility issues
@@ -39,6 +46,10 @@ export interface Session {
   providerKind: ProviderKind;
   instanceId: ProviderInstanceId;
   status: SessionStatus;
+  /** Node that currently owns the dispatch/session, when routed through a fleet coordinator. */
+  nodeId?: string;
+  /** Distributed lease state for fleet-coordinated dispatches. */
+  leaseState?: DispatchLeaseState;
   startedAt?: string;
   endedAt?: string;
   error?: string;
@@ -126,6 +137,10 @@ export type ClientMessage =
   | {
       type: "session.start";
       requestId: string;
+      /** Optional explicit node pin for fleet routing. */
+      nodeId?: string;
+      /** Internal routing context used when the coordinator forwards a request to a worker. */
+      coordinatorNodeId?: string;
       // GAH profile id (config.toml's [profiles.<id>], e.g. "gah",
       // "worldcup-props") -- NOT a backend name like "codex"/"claude".
       // `gah dispatch --profile <profile>` needs this exact value.

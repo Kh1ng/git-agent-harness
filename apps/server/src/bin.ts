@@ -6,6 +6,8 @@ import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
 import { isGahCliAvailable } from './gahCli.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
+import { RegistryService } from './registryService.js';
+import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { markReadinessCheck } from './serverReadiness.js';
 import {
   InvalidBindHostError,
@@ -30,8 +32,14 @@ async function main() {
 
   console.log('Starting Git Agent Harness server...');
 
+  const registryService = new RegistryService();
+  const coordinatorIdentity = getCoordinatorIdentity(undefined, PORT);
+
   // Create Express app
-  const app = createExpressServer({ coordinatorPort: PORT });
+  const app = createExpressServer({
+    coordinatorPort: PORT,
+    registryService
+  });
   
   // Create HTTP server from Express app
   const server = createHttpServer(app);
@@ -61,7 +69,10 @@ async function main() {
   markReadinessCheck('providerRegistry', true);
   
   // Set up WebSocket handler
-  createWebSocketHandler(wss);
+  createWebSocketHandler(wss, {
+    registryService,
+    coordinatorIdentity
+  });
   markReadinessCheck('webSocket', true);
   
   // Start HTTP server

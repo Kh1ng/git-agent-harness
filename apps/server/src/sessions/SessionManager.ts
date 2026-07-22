@@ -18,7 +18,7 @@ import type {
   SessionStatus
 } from '@git-agent-harness/contracts';
 
-type SessionOptions = {
+export type SessionOptions = {
   // GAH profile id (config.toml's [profiles.<id>]) -- NOT a backend name.
   // Required: there's no sane default to guess from providerKind/repo.
   profile: string;
@@ -267,7 +267,7 @@ class SessionManagerImpl {
     session.endedAt = new Date().toISOString();
     this.sessions.set(sessionId, session);
     
-    getServerPushBus().publish({
+    this.pushBus.publish({
       type: 'session.stopped',
       session
     });
@@ -344,7 +344,7 @@ class SessionManagerImpl {
       buffers.stdout.push(`> ${command}`);
       
       // Publish the command to the push bus
-      getServerPushBus().publish({
+      this.pushBus.publish({
         type: 'session.stdout',
         sessionId,
         data: `> ${command}\n`,
