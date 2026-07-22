@@ -12,11 +12,16 @@ export function isLocalAddress(ip: string): boolean {
   );
 }
 
+function isLoopbackRequest(req: Request): boolean {
+  const socketAddress = req.socket.remoteAddress || '';
+  const clientIp = req.ip || socketAddress;
+  return isLocalAddress(socketAddress) && isLocalAddress(clientIp);
+}
+
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
-  // Check if request is loopback
-  const clientIp = req.ip || req.socket.remoteAddress || '';
-  if (isLocalAddress(clientIp)) {
-    // Localhost development remains explicit
+  // Only skip auth for direct loopback requests. If a proxy sits in front of
+  // the server, forwarded headers must not be enough to claim localhost access.
+  if (isLoopbackRequest(req)) {
     return next();
   }
 
@@ -64,4 +69,3 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 
   next();
 }
-

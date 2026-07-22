@@ -617,6 +617,50 @@ test('authMiddleware accepts non-loopback requests when req.secure is true and t
   delete process.env.COORDINATOR_TOKEN;
 });
 
+test('authMiddleware does not treat spoofed loopback headers as local on a remote socket', () => {
+  const req = {
+    ip: '127.0.0.1',
+    headers: {
+      'x-forwarded-for': '127.0.0.1',
+      'x-forwarded-proto': 'https'
+    },
+    secure: true,
+    socket: {
+      remoteAddress: '203.0.113.10'
+    }
+  } as any;
+
+  let statusCalledWith: number | null = null;
+  let jsonCalledWith: any = null;
+  let nextCalled = false;
+
+  const res = {
+    status: (code: number) => {
+      statusCalledWith = code;
+      return {
+        json: (data: any) => {
+          jsonCalledWith = data;
+        }
+      };
+    }
+  } as any;
+
+  const next = () => {
+    nextCalled = true;
+  };
+
+  process.env.COORDINATOR_TOKEN = 'expected-coordinator-token';
+
+  authMiddleware(req, res, next);
+
+  assert.equal(nextCalled, false);
+  assert.equal(statusCalledWith, 401);
+  assert.equal(jsonCalledWith?.error, 'Unauthorized');
+  assert.equal(jsonCalledWith?.message, 'Authentication token required for non-loopback access');
+
+  delete process.env.COORDINATOR_TOKEN;
+});
+
 test('authMiddleware timing-safe comparison rejects invalid tokens', () => {
   const req = {
     ip: '8.8.8.8',
