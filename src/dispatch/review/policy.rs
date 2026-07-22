@@ -1146,6 +1146,7 @@ fn criterion_requires_external_state(criterion: &str) -> bool {
         "provider state",
         "remaining quota",
         "availability",
+        "without a pat",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
