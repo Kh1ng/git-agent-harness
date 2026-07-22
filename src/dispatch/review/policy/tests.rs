@@ -1164,10 +1164,8 @@ fn live_acceptance_can_be_approved_with_direct_matching_provider_evidence() {
     )
     .with_source_acceptance(
         vec![
-            "Mirror the review contract".to_string(),
-            "Document the result".to_string(),
-            "Keep the source snapshot stable".to_string(),
             "List the current live GitLab issue queue".to_string(),
+            "Document the result".to_string(),
         ],
         "gitlab",
     );
