@@ -577,7 +577,7 @@ mod source_issue_tests {
             &prompt,
             &ContextConfig {
                 soft_limit_tokens: 10,
-                hard_limit_tokens: 300,
+                hard_limit_tokens: 2_000,
                 ..Default::default()
             },
         )

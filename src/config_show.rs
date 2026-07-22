@@ -500,6 +500,7 @@ mod tests {
                 fresh_context_on_fix: Some(false),
                 include_full_git_history: Some(true),
                 include_full_worker_transcript_in_review: Some(true),
+                include_review_project_brief: Some(false),
                 recent_history_tokens: Some(12_500),
             },
         );
@@ -589,6 +590,7 @@ mod tests {
             fresh_context_on_fix: Some(false),
             include_full_git_history: Some(true),
             include_full_worker_transcript_in_review: Some(false),
+            include_review_project_brief: Some(false),
             recent_history_tokens: Some(300),
         };
 

@@ -75,9 +75,17 @@ pub struct ContextOverride {
     pub include_full_git_history: Option<bool>,
     pub include_full_worker_transcript_in_review: Option<bool>,
     pub recent_history_tokens: Option<u64>,
+    pub include_review_project_brief: Option<bool>,
 }
 
 impl ContextConfig {
+    pub fn include_review_project_brief_for_profile(&self, profile: &str) -> bool {
+        self.profiles
+            .get(profile)
+            .and_then(|override_cfg| override_cfg.include_review_project_brief)
+            .unwrap_or(false)
+    }
+
     pub fn effective(&self, profile: &str, backend: &str) -> Self {
         let mut out = self.clone();
         for override_cfg in [self.profiles.get(profile), self.backends.get(backend)]
@@ -119,6 +127,20 @@ impl ContextConfig {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReviewProjectBriefContext {
+    /// Whether `PROJECT_BRIEF.md` was injected into the prompt.
+    pub included: bool,
+    /// Deterministic SHA-256 hash of the raw source brief, when available.
+    pub source_hash: Option<String>,
+    /// Byte size of `docs/PROJECT_BRIEF.md` on disk.
+    pub source_bytes: u64,
+    /// Byte size of the bounded bytes injected into the prompt.
+    pub sent_bytes: u64,
+    /// Whether the source bytes were truncated before injection.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ContextBuild {
     pub prompt: String,
     pub estimated_tokens_before_reduction: u64,
@@ -135,6 +157,7 @@ pub struct ContextBuild {
     /// backend after compaction. This makes the context artifact an audit
     /// record rather than just a token counter.
     pub sources: Vec<ContextSource>,
+    pub review_project_brief: Option<ReviewProjectBriefContext>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -169,6 +192,7 @@ pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
             issue_section_names,
             largest_sections: section_sizes(prompt),
             sources: context_sources(prompt),
+            review_project_brief: None,
         });
     }
 
@@ -229,6 +253,7 @@ pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
         // pre-compaction prompt that was merely considered.
         largest_sections,
         sources,
+        review_project_brief: None,
     })
 }
 
@@ -259,6 +284,7 @@ fn split_sections(prompt: &str) -> Vec<Section> {
                 "Repair Findings",
                 "Source Issue Contract",
                 "Source Issue Lookup",
+                "Diff",
                 "Warning",
                 "Current Git",
                 "Unresolved",
@@ -527,5 +553,41 @@ mod tests {
         let effective = cfg.effective("repo", "claude");
         assert_eq!(effective.soft_limit_tokens, 10);
         assert_eq!(effective.hard_limit_tokens, 20);
+    }
+
+    #[test]
+    fn review_project_brief_is_profile_scoped() {
+        let mut cfg = ContextConfig::default();
+        cfg.profiles.insert(
+            "gah".into(),
+            ContextOverride {
+                include_review_project_brief: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(cfg.include_review_project_brief_for_profile("gah"));
+        assert!(!cfg.include_review_project_brief_for_profile("other"));
+    }
+
+    #[test]
+    fn review_project_brief_sections_are_less_protected_than_diff_in_compaction() {
+        let cfg = ContextConfig {
+            soft_limit_tokens: 300,
+            hard_limit_tokens: 600,
+            ..Default::default()
+        };
+        let prompt = format!(
+            "## Review Pack\n\nReview pack details.\n## Source Issue Contract\n\nContract surface.\n## Project Brief\n{}\n## Diff\n\nCritical patch.\n## Safety\n\nValidate changes.\n",
+            "x".repeat(2_000)
+        );
+
+        let result = enforce(&prompt, &cfg).unwrap();
+
+        assert!(result.compacted);
+        assert!(result.prompt.contains("## Review Pack"));
+        assert!(result.prompt.contains("## Source Issue Contract"));
+        assert!(result.prompt.contains("## Diff"));
+        assert!(result.prompt.contains("## Safety"));
+        assert!(!result.prompt.contains(&"x".repeat(2_000)));
     }
 }

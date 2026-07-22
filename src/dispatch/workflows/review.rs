@@ -18,6 +18,7 @@ use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
 use crate::availability;
 use crate::config::{self, GahConfig, Profile};
+use crate::context;
 use crate::controller::HumanRequiredReason;
 use crate::ledger::LedgerEntry;
 use crate::notifications::{notify_event, NotifyEvent};
@@ -27,6 +28,7 @@ use crate::usage_attribution::{
 };
 use crate::{provider, runner};
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -102,6 +104,81 @@ fn review_terminal_failure_summary(ledger: &LedgerEntry, final_failure: &str) ->
             routes.join(" -> ")
         )
     }
+}
+
+fn build_review_project_brief_section(
+    cfg: &GahConfig,
+    profile_name: &str,
+    profile: &Profile,
+) -> (String, Option<context::ReviewProjectBriefContext>) {
+    if !cfg
+        .context
+        .include_review_project_brief_for_profile(profile_name)
+    {
+        return (String::new(), None);
+    }
+
+    let brief_path = Path::new(&profile.local_path).join("docs/PROJECT_BRIEF.md");
+    let Ok(brief) = fs::read_to_string(&brief_path) else {
+        return (
+            String::new(),
+            Some(context::ReviewProjectBriefContext {
+                included: false,
+                source_hash: None,
+                source_bytes: 0,
+                sent_bytes: 0,
+                truncated: false,
+            }),
+        );
+    };
+
+    let source_bytes = brief.len() as u64;
+    if source_bytes == 0 {
+        return (
+            String::new(),
+            Some(context::ReviewProjectBriefContext {
+                included: false,
+                source_hash: Some(format!("{:x}", Sha256::digest(brief.as_bytes()))),
+                source_bytes,
+                sent_bytes: 0,
+                truncated: false,
+            }),
+        );
+    }
+
+    let normalized = render_untrusted_review_text(&brief, 10_000);
+    let mut bounded = utf8_safe_prefix(&normalized, REVIEW_PROJECT_BRIEF_MAX_BYTES);
+    let truncation_note =
+        "[Project Brief truncated at 4096 bytes; retrieve the remaining context from docs/PROJECT_BRIEF.md if needed.]\n";
+    let truncated =
+        source_bytes > REVIEW_PROJECT_BRIEF_MAX_BYTES as u64 || bounded.len() < normalized.len();
+    if truncated && bounded.len() + truncation_note.len() > REVIEW_PROJECT_BRIEF_MAX_BYTES {
+        bounded = utf8_safe_prefix(
+            bounded,
+            REVIEW_PROJECT_BRIEF_MAX_BYTES - truncation_note.len(),
+        );
+    }
+    let sent_bytes = bounded.len() as u64;
+
+    let mut section = String::from("## Project Brief\n\n");
+    section.push_str(bounded);
+    if !section.ends_with('\n') {
+        section.push('\n');
+    }
+    if truncated {
+        section.push_str(truncation_note);
+    }
+
+    (
+        section,
+        Some(context::ReviewProjectBriefContext {
+            included: true,
+            source_hash: Some(format!("{:x}", Sha256::digest(brief.as_bytes()))),
+            source_bytes,
+            sent_bytes,
+            truncated,
+        }),
+    )
 }
 
 pub(in crate::dispatch) fn review(
@@ -197,9 +274,11 @@ pub(in crate::dispatch) fn review(
         bundle.join("source-issue-lookup.json"),
         serde_json::to_string_pretty(&source_issue_context.lookup_report)?,
     )?;
+    let (project_brief_section, project_brief_context) =
+        build_review_project_brief_section(cfg, &args.profile, profile);
     // Everything except the capability-activation prefix is identical
     // regardless of which backend ends up running the review.
-    let prompt_suffix = format!(
+    let mut prompt_suffix = format!(
         "## Review Pack\n\n\
          Review this diff for correctness, test coverage, and safety. \
          Return a JSON object. You may precede it only with the inert heading `Review notes`; put every substantive finding in the JSON arrays, never in prose.\n\
@@ -217,7 +296,7 @@ pub(in crate::dispatch) fn review(
          Repo: {}. MR: {}. Source: {}. Target: {}. Draft: {}. CI status: {}. Mergeability status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
          {}\n\
-         ## Prior Run State\n\n{}\n\n## Diff\n\n```\n{}\n```\nChanged files:\n{}",
+         ## Prior Run State\n\n{}\n",
         profile.repo,
         target.mr_id.as_deref().unwrap_or("n/a"),
         target.source_branch,
@@ -241,9 +320,18 @@ pub(in crate::dispatch) fn review(
             target.prior_state.as_deref().unwrap_or("not found"),
             REVIEW_PRIOR_STATE_MAX_BYTES,
         ),
+    );
+    if !project_brief_section.is_empty() {
+        if !prompt_suffix.ends_with('\n') {
+            prompt_suffix.push('\n');
+        }
+        prompt_suffix.push_str(&project_brief_section);
+    }
+    prompt_suffix.push_str(&format!(
+        "\n## Diff\n\n```\n{}\n```\nChanged files:\n{}",
         utf8_safe_prefix(&diff_bundle.diff, 60_000),
         diff_bundle.files,
-    );
+    ));
 
     let resolved_env = if args.prod {
         profile.env_file_prod.as_deref().unwrap_or("")
@@ -457,7 +545,9 @@ pub(in crate::dispatch) fn review(
                 session_dir,
                 args.run_id.as_deref(),
                 ledger,
+                project_brief_context.clone(),
             )?;
+            let prompt = prompt.prompt;
             if let Some(contract) = verified_post_budget_source_contract(
                 source_issue_context.contract.as_deref(),
                 &prompt,
@@ -1038,6 +1128,7 @@ pub(in crate::dispatch) fn review(
 const REVIEW_MR_TITLE_MAX_BYTES: usize = 1_024;
 const REVIEW_MR_BODY_MAX_BYTES: usize = 16_384;
 const REVIEW_PRIOR_STATE_MAX_BYTES: usize = 8_192;
+const REVIEW_PROJECT_BRIEF_MAX_BYTES: usize = 4_096;
 const REVIEW_FORMAT_REPAIR_INSTRUCTIONS: &str =
     "Retrying: respond with ONLY the inert heading `Review notes` followed by the JSON object. \
 Include no extra prose before or after the JSON.";
@@ -1329,3 +1420,69 @@ fn invalid_review_attempt_chain(
 #[cfg(test)]
 #[path = "review/reservation_tests.rs"]
 mod reservation_tests;
+
+#[cfg(test)]
+mod project_brief_tests {
+    use super::build_review_project_brief_section;
+    use crate::config;
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+
+    #[test]
+    fn review_project_brief_section_is_injected_bounded_in_invariant_order() {
+        let mut cfg = config::GahConfig {
+            context: Default::default(),
+            defaults: config::Defaults::default(),
+            profiles: HashMap::new(),
+        };
+        cfg.context.profiles.insert(
+            "gah".into(),
+            crate::context::ContextOverride {
+                include_review_project_brief: Some(true),
+                ..Default::default()
+            },
+        );
+
+        let tmp = tempdir().unwrap();
+        let mut profile = crate::config::tests::test_profile_for_notifications();
+        profile.local_path = tmp.path().display().to_string();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(
+            tmp.path().join("docs/PROJECT_BRIEF.md"),
+            format!("## Project heading\n{}", "x".repeat(5_000)),
+        )
+        .unwrap();
+
+        let (section, metadata) = build_review_project_brief_section(&cfg, "gah", &profile);
+        let metadata = metadata.unwrap();
+        let full_prompt = format!("## Review Pack\n\n{}\n## Diff\n{}", section, "diff");
+
+        assert!(metadata.included);
+        assert!(metadata.truncated);
+        assert!(metadata.source_bytes > 4_096);
+        assert!(metadata.sent_bytes <= 4_096);
+        assert_eq!(metadata.source_hash.as_ref().unwrap().len(), 64);
+        assert!(section.contains("## Project Brief"));
+        assert!(section.contains("  ## Project heading"));
+        assert!(!section.contains("\n## Project heading"));
+        assert!(
+            full_prompt.find("## Project Brief").unwrap() < full_prompt.find("## Diff").unwrap()
+        );
+        assert!(full_prompt.contains("[Project Brief truncated at 4096 bytes"));
+    }
+
+    #[test]
+    fn review_project_brief_section_respects_profile_gate() {
+        let cfg = config::GahConfig {
+            context: Default::default(),
+            defaults: config::Defaults::default(),
+            profiles: HashMap::new(),
+        };
+        let profile = crate::config::tests::test_profile_for_notifications();
+
+        let (section, metadata) = build_review_project_brief_section(&cfg, "gah", &profile);
+
+        assert!(section.is_empty());
+        assert!(metadata.is_none());
+    }
+}
