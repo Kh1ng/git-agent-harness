@@ -1,0 +1,16 @@
+{
+  "limits": {
+    "completion": {
+      "no_monthly_limit": false,
+      "monthly_limit_reached": false,
+      "usage": 128.42,
+      "vibe_usage": 41.1,
+      "total_usage": 169.52,
+      "usage_limit": 500.0,
+      "usage_limit_organization": 500.0
+    },
+    "last_payment_failure": false,
+    "last_payment_failure_protection": null,
+    "currency": "USD"
+  }
+}

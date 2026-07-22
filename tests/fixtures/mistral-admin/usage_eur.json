@@ -1,0 +1,26 @@
+{
+  "completion": { "models": {} },
+  "ocr": { "models": {} },
+  "connectors": { "models": {} },
+  "libraries_api": {
+    "pages": { "models": {} },
+    "tokens": { "models": {} },
+    "audio_seconds": { "models": {} }
+  },
+  "fine_tuning": {
+    "training": {},
+    "storage": {}
+  },
+  "audio": { "models": {} },
+  "audio_characters": { "models": {} },
+  "vibe_usage": 37.8,
+  "chat": { "models": {} },
+  "date": "2026-07-01T00:00:00Z",
+  "previous_month": "2026-06",
+  "next_month": "2026-08",
+  "start_date": "2026-07-01T00:00:00Z",
+  "end_date": "2026-07-31T23:59:59Z",
+  "currency": "EUR",
+  "currency_symbol": "€",
+  "prices": null
+}
