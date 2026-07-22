@@ -1,0 +1,10 @@
+{
+  "limits": {
+    "completion": {
+      "monthly_limit_reached": false
+    },
+    "currency": "ipsum eiusmod",
+    "last_payment_failure": false,
+    "last_payment_failure_protection": null
+  }
+}

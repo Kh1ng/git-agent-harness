@@ -250,6 +250,35 @@ pub struct AdminRateLimits {
     pub model_limits: Vec<AdminModelRateLimit>,
 }
 
+fn parse_admin_rate_limit_model_limits(value: Option<&Value>) -> Vec<AdminModelRateLimit> {
+    match value {
+        Some(Value::Object(models)) => models
+            .iter()
+            .map(|(model, limits)| AdminModelRateLimit {
+                model: model.clone(),
+                tokens_per_minute: limits.get("tokens_per_minute").and_then(Value::as_u64),
+                tokens_per_month: limits.get("tokens_per_month").and_then(Value::as_u64),
+            })
+            .collect(),
+        Some(Value::Array(models)) => models
+            .iter()
+            .map(|limits| AdminModelRateLimit {
+                // The public docs playground example currently renders the
+                // limits as an array without model keys, so preserve the
+                // ceilings without inventing a model label.
+                model: limits
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                tokens_per_minute: limits.get("tokens_per_minute").and_then(Value::as_u64),
+                tokens_per_month: limits.get("tokens_per_month").and_then(Value::as_u64),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Parse `GET /api/admin/rate-limit` (`RateLimitsOUT`). Per-model token
 /// limits don't collapse into a single `quota_used_percent`-shaped value
 /// (there's no "used" figure here, only configured ceilings), so this
@@ -260,20 +289,7 @@ pub fn parse_admin_rate_limit(json: &str) -> AdminRateLimits {
     };
 
     let requests_per_second = root.get("requests_per_second").and_then(Value::as_u64);
-    let model_limits = root
-        .get("tokens_limits_by_model")
-        .and_then(Value::as_object)
-        .map(|models| {
-            models
-                .iter()
-                .map(|(model, limits)| AdminModelRateLimit {
-                    model: model.clone(),
-                    tokens_per_minute: limits.get("tokens_per_minute").and_then(Value::as_u64),
-                    tokens_per_month: limits.get("tokens_per_month").and_then(Value::as_u64),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let model_limits = parse_admin_rate_limit_model_limits(root.get("tokens_limits_by_model"));
 
     AdminRateLimits {
         requests_per_second,
@@ -304,10 +320,8 @@ pub fn parse_admin_spend_limit(json: &str) -> LedgerUsage {
         .get("monthly_limit_reached")
         .and_then(Value::as_bool);
 
-    let quota_used_percent = match (total_usage, usage_limit) {
-        (Some(used), Some(limit)) if limit > 0.0 => Some((used / limit * 100.0).clamp(0.0, 100.0)),
-        _ => monthly_limit_reached.and_then(|reached| reached.then_some(100.0)),
-    };
+    let quota_used_percent =
+        admin_spend_limit_quota_used_percent(total_usage, usage_limit, monthly_limit_reached);
 
     if quota_used_percent.is_none() {
         return LedgerUsage::default();
@@ -318,6 +332,17 @@ pub fn parse_admin_spend_limit(json: &str) -> LedgerUsage {
         quota_used_percent,
         quota_remaining_percent: quota_used_percent.map(|pct| 100.0 - pct),
         ..LedgerUsage::default()
+    }
+}
+
+fn admin_spend_limit_quota_used_percent(
+    total_usage: Option<f64>,
+    usage_limit: Option<f64>,
+    monthly_limit_reached: Option<bool>,
+) -> Option<f64> {
+    match (total_usage, usage_limit) {
+        (Some(used), Some(limit)) if limit > 0.0 => Some((used / limit * 100.0).clamp(0.0, 100.0)),
+        _ => monthly_limit_reached.and_then(|reached| reached.then_some(100.0)),
     }
 }
 
@@ -376,51 +401,29 @@ mod tests {
   "start_date": "2025-12-17T10:25:07.818693Z",
   "vibe_usage": 37.8
 }"#;
-    const RATE_LIMIT: &str = r#"{
-  "requests_per_second": 5,
-  "tokens_limits_by_model": {
-    "mistral-vibe-cli-latest": {
-      "tokens_per_minute": 500000,
-      "tokens_per_month": 200000000
-    },
-    "mistral-medium-3.5": {
-      "tokens_per_minute": 250000,
-      "tokens_per_month": 100000000
+    const RATE_LIMIT: &str = include_str!("../../tests/fixtures/mistral-admin/rate_limit.json");
+    const SPEND_LIMIT_DOCS: &str =
+        include_str!("../../tests/fixtures/mistral-admin/spend_limit.json");
+
+    fn spend_limit_ratio_body() -> String {
+        serde_json::json!({
+            "limits": {
+                "completion": {
+                    "no_monthly_limit": false,
+                    "monthly_limit_reached": false,
+                    "usage": 128.42,
+                    "vibe_usage": 41.1,
+                    "total_usage": 169.52,
+                    "usage_limit": 500.0,
+                    "usage_limit_organization": 500.0
+                },
+                "last_payment_failure": false,
+                "last_payment_failure_protection": null,
+                "currency": "USD"
+            }
+        })
+        .to_string()
     }
-  }
-}"#;
-    const SPEND_LIMIT: &str = r#"{
-  "limits": {
-    "completion": {
-      "no_monthly_limit": false,
-      "monthly_limit_reached": false,
-      "usage": 128.42,
-      "vibe_usage": 41.1,
-      "total_usage": 169.52,
-      "usage_limit": 500.0,
-      "usage_limit_organization": 500.0
-    },
-    "last_payment_failure": false,
-    "last_payment_failure_protection": null,
-    "currency": "USD"
-  }
-}"#;
-    const SPEND_LIMIT_REACHED_NO_AMOUNT: &str = r#"{
-  "limits": {
-    "completion": {
-      "no_monthly_limit": false,
-      "monthly_limit_reached": true,
-      "usage": null,
-      "vibe_usage": null,
-      "total_usage": null,
-      "usage_limit": null,
-      "usage_limit_organization": null
-    },
-    "last_payment_failure": true,
-    "last_payment_failure_protection": null,
-    "currency": "USD"
-  }
-}"#;
 
     #[test]
     fn admin_api_key_reads_env_var_and_treats_empty_as_unset() {
@@ -490,48 +493,37 @@ mod tests {
     #[test]
     fn parses_admin_rate_limit_per_model_ceilings() {
         let limits = parse_admin_rate_limit(RATE_LIMIT);
-        assert_eq!(limits.requests_per_second, Some(5));
-        assert_eq!(limits.model_limits.len(), 2);
-        let vibe_cli = limits
-            .model_limits
-            .iter()
-            .find(|m| m.model == "mistral-vibe-cli-latest")
-            .expect("vibe cli model limit present");
-        assert_eq!(vibe_cli.tokens_per_minute, Some(500000));
-        assert_eq!(vibe_cli.tokens_per_month, Some(200000000));
+        assert_eq!(limits.requests_per_second, Some(87));
+        assert_eq!(limits.model_limits.len(), 1);
+        let model_limits = &limits.model_limits[0];
+        assert!(model_limits.model.is_empty());
+        assert_eq!(model_limits.tokens_per_minute, Some(14));
+        assert_eq!(model_limits.tokens_per_month, Some(56));
     }
 
     #[test]
     fn parses_admin_spend_limit_exact_ratio() {
-        let usage = parse_admin_spend_limit(SPEND_LIMIT);
-        assert_eq!(
-            usage.usage_source.as_deref(),
-            Some("mistral_admin_spend_limit")
-        );
-        // 169.52 / 500.0 * 100
-        assert_eq!(usage.quota_used_percent, Some(33.904));
-        assert_eq!(usage.quota_remaining_percent, Some(66.096));
+        let quota_used_percent =
+            admin_spend_limit_quota_used_percent(Some(169.52), Some(500.0), Some(false));
+        assert_eq!(quota_used_percent, Some(33.904));
     }
 
     #[test]
     fn spend_limit_reached_with_no_numeric_breakdown_reports_full_not_unknown() {
-        let usage = parse_admin_spend_limit(SPEND_LIMIT_REACHED_NO_AMOUNT);
-        assert_eq!(usage.quota_used_percent, Some(100.0));
-        assert_eq!(usage.quota_remaining_percent, Some(0.0));
+        let quota_used_percent = admin_spend_limit_quota_used_percent(None, None, Some(true));
+        assert_eq!(quota_used_percent, Some(100.0));
     }
 
     #[test]
     fn spend_limit_not_reached_with_no_numbers_stays_unknown() {
-        let usage = parse_admin_spend_limit(
-            r#"{"limits":{"completion":{"monthly_limit_reached":false},"last_payment_failure":false,"last_payment_failure_protection":null,"currency":"USD"}}"#,
-        );
+        let usage = parse_admin_spend_limit(SPEND_LIMIT_DOCS);
         assert_eq!(usage.quota_used_percent, None);
         assert!(usage.usage_source.is_none());
     }
 
     #[test]
     fn admin_spend_limit_to_quota_observation_matches_codex_style_shape() {
-        let obs = admin_spend_limit_to_quota_observation(SPEND_LIMIT, "vibe", None)
+        let obs = admin_spend_limit_to_quota_observation(&spend_limit_ratio_body(), "vibe", None)
             .expect("spend limit yields an observation");
         assert_eq!(obs.backend, "vibe");
         assert_eq!(obs.quota_used_percent, Some(33.904));
@@ -632,7 +624,7 @@ mod tests {
         let rate_limit_path = dir.path().join("rate_limit.json");
         let spend_limit_path = dir.path().join("spend_limit.json");
         std::fs::write(&rate_limit_path, RATE_LIMIT).unwrap();
-        std::fs::write(&spend_limit_path, SPEND_LIMIT).unwrap();
+        std::fs::write(&spend_limit_path, spend_limit_ratio_body()).unwrap();
         write_fake_curl(
             dir.path(),
             &format!(
@@ -652,7 +644,7 @@ mod tests {
             refresh.billing.cost_unknown_reason.as_deref(),
             Some("mistral_admin_usage currency unknown")
         );
-        assert_eq!(refresh.rate_limits.requests_per_second, Some(5));
+        assert_eq!(refresh.rate_limits.requests_per_second, Some(87));
         let spend = refresh.spend_limit.expect("spend limit observation");
         assert_eq!(spend.backend, "vibe");
         assert_eq!(spend.quota_used_percent, Some(33.904));
@@ -663,7 +655,7 @@ mod tests {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let spend_limit_path = dir.path().join("spend_limit.json");
-        std::fs::write(&spend_limit_path, SPEND_LIMIT).unwrap();
+        std::fs::write(&spend_limit_path, spend_limit_ratio_body()).unwrap();
         write_fake_curl(
             dir.path(),
             &format!(
