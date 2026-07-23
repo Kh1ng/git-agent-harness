@@ -181,6 +181,9 @@ export interface MergeRequest {
 export interface AvailableTicket {
   ticket_path: string;
   work_id: string | null;
+  normalized_work_identity: string;
+  source: CandidateSource;
+  execution_policy: CandidateExecutionPolicy;
   title: string | null;
   recommended_backend: string | null;
   recommended_model: string | null;
@@ -191,6 +194,17 @@ export interface AvailableTicket {
   has_active_claim: boolean;
   human_required: boolean;
   human_required_reason_code?: string | null;
+}
+
+export type CandidateSource = 'legacy_ticket' | 'github_issue' | 'gitlab_issue';
+
+export interface CandidateExecutionPolicy {
+  intake_mode: string;
+  explicit_autonomy_required: boolean;
+  autonomous_metadata_present: boolean;
+  dispatchable_now: boolean;
+  exclusion_reason_code: string | null;
+  exclusion_reason: string | null;
 }
 
 export interface IssueIntakeRejection {

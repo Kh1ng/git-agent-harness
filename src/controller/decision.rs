@@ -5,6 +5,7 @@
 
 use super::{HumanRequiredReason, NextAction};
 use crate::status::StatusSnapshot;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -29,6 +30,10 @@ fn is_infra_failure(failure_class: &str) -> bool {
     )
 }
 
+fn ticket_consumes_worker_slot(ticket: &crate::models::AvailableTicket) -> bool {
+    ticket.execution_policy.dispatchable_now
+}
+
 /// Issue #156: produce an RFC3339 timestamp `offset` from "now" for a
 /// `WaitUntil` re-check. Used when a READY_FOR_HUMAN MR's CI is pending so the
 /// controller records a visible, observable deferral instead of a silent no-op.
@@ -41,6 +46,56 @@ fn now_plus(offset: Duration) -> String {
     let dt =
         chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or(chrono::DateTime::UNIX_EPOCH);
     format!("{}", dt.format("%Y-%m-%dT%H:%M:%SZ"))
+}
+
+fn issue_path_identity_key(path: &str) -> IssuePathIdentity {
+    let trimmed = path.trim();
+    if let Some(stripped) = trimmed.strip_prefix('#') {
+        if stripped.bytes().all(|b| b.is_ascii_digit()) {
+            return IssuePathIdentity::Numeric(stripped.parse().unwrap_or(u64::MAX));
+        }
+    }
+    if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return IssuePathIdentity::Numeric(trimmed.parse().unwrap_or(u64::MAX));
+    }
+    IssuePathIdentity::Lexical(trimmed.to_string())
+}
+
+#[derive(Eq, PartialEq)]
+enum IssuePathIdentity {
+    Numeric(u64),
+    Lexical(String),
+}
+
+impl Ord for IssuePathIdentity {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Numeric(left), Self::Numeric(right)) => left.cmp(right),
+            (Self::Lexical(left), Self::Lexical(right)) => left.cmp(right),
+            (Self::Numeric(_), Self::Lexical(_)) => Ordering::Less,
+            (Self::Lexical(_), Self::Numeric(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for IssuePathIdentity {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn ticket_order_key(ticket: &crate::models::AvailableTicket) -> (u8, IssuePathIdentity) {
+    (
+        ticket.priority.to_sort_rank(),
+        issue_path_identity_key(&ticket.ticket_path),
+    )
+}
+
+fn ticket_order(
+    a: &crate::models::AvailableTicket,
+    b: &crate::models::AvailableTicket,
+) -> Ordering {
+    ticket_order_key(a).cmp(&ticket_order_key(b))
 }
 
 /// TICKET-078: pure, deterministic, no LLM, no I/O -- consumes an
@@ -431,14 +486,19 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut failed_tickets: Vec<_> = snapshot
         .available_tickets
         .iter()
-        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count > 0)
+        .filter(|t| {
+            ticket_consumes_worker_slot(t)
+                && !t.has_active_mr
+                && !t.has_active_claim
+                && t.prior_attempt_count > 0
+        })
         // TICKET-human-required-scoping: a work-item-scoped human_required
         // ticket is blocked at the item level. Skip it so it is neither
         // retried, escalated, nor redispatched -- but unrelated eligible
         // tickets keep flowing.
         .filter(|t| !t.human_required)
         .collect();
-    failed_tickets.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
+    failed_tickets.sort_by(|a, b| ticket_order(a, b));
 
     // Collect tickets that have exhausted the retry cap (issue #95: only
     // genuine agent failures count toward the cap; infra-class failures
@@ -465,7 +525,11 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 .is_some_and(|fc| is_infra_failure(fc) && some_backend_eligible)
     });
     let has_undispatched = snapshot.available_tickets.iter().any(|t| {
-        !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0 && !t.human_required
+        ticket_consumes_worker_slot(t)
+            && !t.has_active_mr
+            && !t.has_active_claim
+            && t.prior_attempt_count == 0
+            && !t.human_required
     });
 
     // Handle exhausted tickets: if there are exhausted tickets and NO other actionable items,
@@ -516,12 +580,17 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut undispatched: Vec<_> = snapshot
         .available_tickets
         .iter()
-        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0)
+        .filter(|t| {
+            ticket_consumes_worker_slot(t)
+                && !t.has_active_mr
+                && !t.has_active_claim
+                && t.prior_attempt_count == 0
+        })
         // TICKET-human-required-scoping: skip work-item-scoped
         // human_required tickets; they await human action, not dispatch.
         .filter(|t| !t.human_required)
         .collect();
-    undispatched.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
+    undispatched.sort_by(|a, b| ticket_order(a, b));
     if let Some(ticket) = undispatched.first() {
         return NextAction::DispatchTicket {
             ticket_path: ticket.ticket_path.clone(),

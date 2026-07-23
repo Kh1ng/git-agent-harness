@@ -1,5 +1,140 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum TicketPriority {
+    P0,
+    P1,
+    P2,
+    P3,
+    Unspecified,
+    Malformed,
+}
+
+impl TicketPriority {
+    pub fn parse_metadata(raw: &str) -> Self {
+        match raw.trim().to_ascii_uppercase().as_str() {
+            "" => Self::Unspecified,
+            "P0" => Self::P0,
+            "P1" => Self::P1,
+            "P2" => Self::P2,
+            "P3" => Self::P3,
+            _ => Self::Malformed,
+        }
+    }
+
+    fn parse_provider_label(label: &str) -> Option<Self> {
+        let value = label.trim();
+        let bytes = value.as_bytes();
+        if bytes.len() != 2 {
+            return None;
+        }
+
+        if bytes[0] != b'P' && bytes[0] != b'p' {
+            return None;
+        }
+
+        match bytes[1] {
+            b'0' => Some(Self::P0),
+            b'1' => Some(Self::P1),
+            b'2' => Some(Self::P2),
+            b'3' => Some(Self::P3),
+            _ => None,
+        }
+    }
+
+    fn is_malformed_priority_label(label: &str) -> bool {
+        let value = label.trim();
+        let bytes = value.as_bytes();
+        if bytes.len() != 2 {
+            return false;
+        }
+
+        (bytes[0] == b'P' || bytes[0] == b'p')
+            && (bytes[1] as char).is_ascii_digit()
+            && bytes[1] != b'0'
+            && bytes[1] != b'1'
+            && bytes[1] != b'2'
+            && bytes[1] != b'3'
+    }
+
+    pub fn parse_provider_labels(labels: &[String]) -> Self {
+        let mut priority = Self::Unspecified;
+        let mut malformed = false;
+
+        for label in labels {
+            if let Some(parsed) = Self::parse_provider_label(label) {
+                priority = priority.min(parsed);
+            } else if Self::is_malformed_priority_label(label) {
+                malformed = true;
+            }
+        }
+
+        match priority {
+            Self::Unspecified if malformed => Self::Malformed,
+            _ => priority,
+        }
+    }
+
+    pub const fn is_explicit(self) -> bool {
+        !matches!(self, Self::Unspecified)
+    }
+
+    pub const fn to_sort_rank(self) -> u8 {
+        match self {
+            Self::P0 => 0,
+            Self::P1 => 1,
+            Self::P2 => 2,
+            Self::P3 => 3,
+            Self::Malformed => 4,
+            Self::Unspecified => 5,
+        }
+    }
+}
+
+#[cfg(test)]
+mod ticket_priority_tests {
+    use super::TicketPriority;
+
+    #[test]
+    fn parse_ticket_priority_from_metadata() {
+        assert_eq!(TicketPriority::parse_metadata("P1"), TicketPriority::P1);
+        assert_eq!(TicketPriority::parse_metadata("p2"), TicketPriority::P2);
+        assert_eq!(
+            TicketPriority::parse_metadata(""),
+            TicketPriority::Unspecified
+        );
+        assert_eq!(
+            TicketPriority::parse_metadata("P4"),
+            TicketPriority::Malformed
+        );
+        assert_eq!(
+            TicketPriority::parse_metadata("not-a-priority"),
+            TicketPriority::Malformed
+        );
+    }
+
+    #[test]
+    fn parse_ticket_priority_from_provider_labels() {
+        assert_eq!(
+            TicketPriority::parse_provider_labels(&["bug".into(), "P1".into(), "p2".into()]),
+            TicketPriority::P1
+        );
+        assert_eq!(
+            TicketPriority::parse_provider_labels(&["bug".into(), "p9".into(), "P1".into()]),
+            TicketPriority::P1
+        );
+        assert_eq!(
+            TicketPriority::parse_provider_labels(&["p9".into(), "garbage".into()]),
+            TicketPriority::Malformed
+        );
+        assert_eq!(
+            TicketPriority::parse_provider_labels(&["bug".into(), "maintenance".into()]),
+            TicketPriority::Unspecified
+        );
+    }
+}
+
 /// TICKET-078: a ticket in `docs/tickets/` observed as a dispatch candidate.
 /// `has_active_mr` tickets are excluded from consideration entirely --
 /// their work_id is already covered by the MR-classification rules in
@@ -12,9 +147,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub struct AvailableTicket {
     pub ticket_path: String,
     pub work_id: Option<String>,
+    /// Provider-neutral identity used for deduplication and claims.
+    pub normalized_work_identity: String,
+    pub source: CandidateSource,
+    pub execution_policy: CandidateExecutionPolicy,
     pub title: Option<String>,
     pub recommended_backend: Option<String>,
     pub recommended_model: Option<String>,
+    pub priority: TicketPriority,
     pub prior_attempt_count: usize,
     /// Issue #95: count of attempts whose failure_class is a genuine agent
     /// failure (agent_no_progress | agent_failure). Infra-class failures
@@ -42,6 +182,25 @@ pub struct AvailableTicket {
     /// the same way `has_active_mr` tickets are -- there's no point
     /// picking a ticket a sibling worker is already mid-flight on.
     pub has_active_claim: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateSource {
+    #[default]
+    LegacyTicket,
+    GithubIssue,
+    GitlabIssue,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct CandidateExecutionPolicy {
+    pub intake_mode: String,
+    pub explicit_autonomy_required: bool,
+    pub autonomous_metadata_present: bool,
+    pub dispatchable_now: bool,
+    pub exclusion_reason_code: Option<String>,
+    pub exclusion_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -102,6 +261,8 @@ pub struct WorkMetadata {
     #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
     pub problem: Option<String>,
     #[serde(default)]
     pub goal: Option<String>,
@@ -117,6 +278,8 @@ pub struct WorkMetadata {
     pub recommended_backend: Option<String>,
     #[serde(default)]
     pub recommended_model: Option<String>,
+    #[serde(default)]
+    pub execution_disposition: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]

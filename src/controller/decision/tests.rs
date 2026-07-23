@@ -9,6 +9,8 @@ mod backpressure;
 mod lifecycle_priority;
 #[path = "tests/pm.rs"]
 mod pm;
+#[path = "tests/priority.rs"]
+mod priority;
 #[path = "tests/review_handoff.rs"]
 mod review_handoff;
 #[path = "tests/support.rs"]
@@ -99,9 +101,22 @@ fn ticket(
     AvailableTicket {
         ticket_path: path.into(),
         work_id: work_id.map(str::to_string),
+        normalized_work_identity: crate::work_claim::normalize_work_identity(
+            work_id.unwrap_or(path),
+        ),
+        source: crate::models::CandidateSource::LegacyTicket,
+        execution_policy: crate::models::CandidateExecutionPolicy {
+            intake_mode: "legacy".into(),
+            explicit_autonomy_required: false,
+            autonomous_metadata_present: false,
+            dispatchable_now: true,
+            exclusion_reason_code: None,
+            exclusion_reason: None,
+        },
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count,
         genuine_agent_failure_count,
         last_failure_class: last_failure_class.map(str::to_string),
@@ -586,9 +601,20 @@ fn infra_failures_do_not_exhaust_retry_cap() {
     snapshot.available_tickets.push(AvailableTicket {
         ticket_path: "docs/tickets/TICKET-INFRA-x.md".into(),
         work_id: Some("TICKET-INFRA".into()),
+        normalized_work_identity: crate::work_claim::normalize_work_identity("TICKET-INFRA"),
+        source: crate::models::CandidateSource::LegacyTicket,
+        execution_policy: crate::models::CandidateExecutionPolicy {
+            intake_mode: "legacy".into(),
+            explicit_autonomy_required: false,
+            autonomous_metadata_present: false,
+            dispatchable_now: true,
+            exclusion_reason_code: None,
+            exclusion_reason: None,
+        },
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 3,
         genuine_agent_failure_count: 0, // all were infra failures
         last_failure_class: Some("backend_error".into()),
@@ -685,9 +711,20 @@ fn mixed_failures_only_agent_count_toward_cap() {
     snapshot.available_tickets.push(AvailableTicket {
         ticket_path: "docs/tickets/TICKET-MIXED-x.md".into(),
         work_id: Some("TICKET-MIXED".into()),
+        normalized_work_identity: crate::work_claim::normalize_work_identity("TICKET-MIXED"),
+        source: crate::models::CandidateSource::LegacyTicket,
+        execution_policy: crate::models::CandidateExecutionPolicy {
+            intake_mode: "legacy".into(),
+            explicit_autonomy_required: false,
+            autonomous_metadata_present: false,
+            dispatchable_now: true,
+            exclusion_reason_code: None,
+            exclusion_reason: None,
+        },
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 4,         // 2 agent + 2 infra
         genuine_agent_failure_count: 2, // == AUTO_RETRY_CAP
         last_failure_class: Some("backend_error".into()),
@@ -709,9 +746,20 @@ fn infra_exhausted_ticket_does_not_block_others() {
     snapshot.available_tickets.push(AvailableTicket {
         ticket_path: "docs/tickets/TICKET-INFRA-x.md".into(),
         work_id: Some("TICKET-INFRA".into()),
+        normalized_work_identity: crate::work_claim::normalize_work_identity("TICKET-INFRA"),
+        source: crate::models::CandidateSource::LegacyTicket,
+        execution_policy: crate::models::CandidateExecutionPolicy {
+            intake_mode: "legacy".into(),
+            explicit_autonomy_required: false,
+            autonomous_metadata_present: false,
+            dispatchable_now: true,
+            exclusion_reason_code: None,
+            exclusion_reason: None,
+        },
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 3,
         genuine_agent_failure_count: 0,
         last_failure_class: Some("environment_error".into()),
