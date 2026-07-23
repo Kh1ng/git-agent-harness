@@ -51,6 +51,7 @@ mod work_identity;
 use work_identity::{
     apply_manual_fix_context_to_ledger, resolve_manual_fix_context, resolve_target,
 };
+
 pub(crate) fn improve(
     cfg: &GahConfig,
     profile: &Profile,
@@ -58,14 +59,10 @@ pub(crate) fn improve(
     session_dir: &Path,
     ledger: &mut LedgerEntry,
 ) -> Result<()> {
-    // Resolve the Claude executable path so the optional live `/usage` PTY
-    // probe (issue #153) can drive a real session when explicitly enabled.
     let claude_path = profile
         .claude_path
         .clone()
         .unwrap_or_else(|| "claude".to_string());
-
-    // Enforce policy before any mutations
     let push_action = if args.prod {
         "git-push-prod"
     } else {
@@ -84,12 +81,6 @@ pub(crate) fn improve(
     )?;
 
     let target = resolve_target(args, profile, &manual_fix)?;
-
-    // Try to resolve target as an issue number. Propagate a real fetch
-    // error (bad issue number, auth, rate limit) instead of silently
-    // swallowing it and dispatching an agent against garbage content --
-    // `resolve_target_to_issue_or_string` already returns `Ok(None)`
-    // cleanly for a target that isn't an issue reference at all.
     let issue_details =
         resolve_target_to_issue_or_string(profile, &target, args.issue_intake_override)?;
     if issue_details.is_some() && args.issue_intake_override {
@@ -141,10 +132,6 @@ pub(crate) fn improve(
     )?;
     apply_route_to_ledger(ledger, &route);
     preflight_identity(profile, &route.identity)?;
-    // Reserve the selected slot before telling a parallel controller that it
-    // may choose the next action. The reservation stays alive through this
-    // first backend attempt, so a sibling sees the live cap and falls through
-    // to the next configured backend instance (for example agy-second).
     let mut initial_route_slot = Some(reserve_backend_slot(profile, &route.identity)?);
     if let Some(route_ready) = &args.route_ready {
         let _ = route_ready.send(());
@@ -155,8 +142,6 @@ pub(crate) fn improve(
         profile.oh_profile.as_deref(),
         route.effective_model.as_deref(),
     )?;
-
-    // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
     let resolved_env = if args.prod {
         profile.env_file_prod.as_deref().unwrap_or("")
     } else {
@@ -178,8 +163,6 @@ pub(crate) fn improve(
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
     let repo = Path::new(&profile.local_path);
     ensure_dispatch_capacity(profile, &worktree_base)?;
-
-    // TICKET-118: Handle existing branch for FixMr action
     let (branch, wt) = if let Some(ref existing_branch) = manual_fix.existing_branch {
         println!(
             "Creating worktree from existing branch '{}'...",
@@ -271,10 +254,6 @@ pub(crate) fn improve(
             Err((text, code)) => (Some(text), code),
         }
     };
-    // TICKET-110/111: classify why the baseline failed, then apply policy.
-    // clean/expected_red proceed (existing warning-in-prompt behavior);
-    // harness_error/environment_error always stop; unknown_red stops unless
-    // explicitly overridden. Never let this improvise -- see baseline.rs.
     let baseline_disposition = crate::baseline::classify_baseline(
         baseline_failure.as_deref().unwrap_or(""),
         baseline_exit_code,
@@ -330,10 +309,18 @@ pub(crate) fn improve(
     let mut prev_failure: Option<String> = None;
     let mut prior_phase_context: Option<String> = None;
     let mut backend_summary = String::new();
-    // Retry checkpoints are temporary recovery refs. They are deliberately
-    // retained on any terminal failure, then removed only after a successful
-    // publish so real partial work is never silently discarded.
     let mut wip_checkpoints = Vec::new();
+    let run_id = args.run_id.clone().unwrap_or_else(|| {
+        session_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    });
+    let source_work_id = ledger
+        .work_id
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
     for attempt in 0..max_attempts {
         println!(
             "\nAttempt {}/{}: running {} backend...",
@@ -408,9 +395,6 @@ pub(crate) fn improve(
         let result = match result {
             Ok(r) => r,
             Err(e) => {
-                // The backend process itself couldn't launch (binary missing,
-                // exec failure) — this is a setup/harness problem, not the
-                // agent or backend failing at its job.
                 ledger.set_failure(
                     crate::ledger::FailureClass::HarnessError,
                     crate::ledger::FailureStage::BackendLaunch,
@@ -436,49 +420,86 @@ pub(crate) fn improve(
                 return Err(e);
             }
         };
-        // The backend process launched and ran to an exit code, regardless
-        // of what that code was — "completed" tracks whether the attempt
-        // got a fair shot, not whether it succeeded.
         ledger.attempts_completed = Some(ledger.attempts_completed.unwrap_or(0) + 1);
         println!(
             "Backend finished: exit={} duration={:.0}s log={}",
             result.exit_code, result.duration_secs, result.log_path
         );
         ledger.backend_exit_code = Some(result.exit_code);
-        conflict_session.snapshot_if_unresolved(attempt + 1)?;
-
-        // SIGINT/SIGTERM is an operator lifecycle event, not a backend
-        // failure to retry. The runner already killed and reaped the backend
-        // process group; return so the controller can write the matching
-        // terminal dispatch event.
-        if crate::runner::shutdown_requested() {
-            record_cancelled_attempt(
-                ledger,
-                attempt + 1,
-                &route.effective_backend,
-                &llm.model,
-                result.exit_code,
-                crate::ledger::FailureStage::AgentRun,
-                attempt_start.elapsed().as_secs_f64(),
-                attempt_usage(
-                    &result.log_path,
+        shutdown::pause_after_backend_result_for_shutdown_race();
+        let shutdown_requested_after_result = crate::runner::shutdown_requested();
+        let shutdown_usage_attribution =
+            UsageAttribution::from_route(&route).with_fallback_model(&llm.model);
+        let shutdown_result_log_path = result.log_path.as_str();
+        let shutdown_result_transcript_path = result.transcript_path.as_deref();
+        let shutdown_result_agy_version = result.agy_version.clone();
+        macro_rules! finalize_shutdown {
+            ($bail_message:expr, $record_cancelled:expr $(,)?) => {
+                shutdown::maybe_finalize_after_backend_result(
+                    shutdown_requested_after_result,
+                    ledger,
+                    &route.effective_backend,
+                    &llm.model,
+                    shutdown_usage_attribution,
+                    shutdown_result_log_path,
                     result.agy_cli_log_delta.as_deref(),
-                    UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
-                    result.transcript_path.as_deref(),
-                    Some(&claude_path),
+                    shutdown_result_transcript_path,
+                    result.exit_code,
+                    shutdown_result_agy_version.clone(),
+                    &attempt_start,
+                    &wt,
+                    repo,
+                    &profile.default_target_branch,
+                    &attempt_session,
+                    &branch,
+                    &run_id,
+                    &source_work_id,
+                    attempt + 1,
+                    &args.mode,
+                    &claude_path,
+                    crate::ledger::FailureStage::AgentRun,
+                    $record_cancelled,
+                    $bail_message,
+                )
+            };
+            ($bail_message:expr, $failure_stage:expr, $record_cancelled:expr $(,)?) => {
+                shutdown::maybe_finalize_after_backend_result(
+                    shutdown_requested_after_result,
+                    ledger,
+                    &route.effective_backend,
+                    &llm.model,
+                    shutdown_usage_attribution,
+                    shutdown_result_log_path,
+                    result.agy_cli_log_delta.as_deref(),
+                    shutdown_result_transcript_path,
+                    result.exit_code,
+                    shutdown_result_agy_version.clone(),
+                    &attempt_start,
+                    &wt,
+                    repo,
+                    &profile.default_target_branch,
+                    &attempt_session,
+                    &branch,
+                    &run_id,
+                    &source_work_id,
+                    attempt + 1,
+                    &args.mode,
+                    &claude_path,
+                    $failure_stage,
+                    $record_cancelled,
+                    $bail_message,
+                )
+            };
+        }
+        conflict_session.snapshot_if_unresolved(attempt + 1)?;
+        if shutdown_requested_after_result && result.exit_code == -2 {
+            finalize_shutdown!(
+                &format!(
+                    "shutdown requested while {} was running",
+                    route.effective_backend
                 ),
-                result.agy_version.clone(),
-            );
-            worktree::preserve_wip(
-                &wt,
-                &profile.default_target_branch,
-                &format!("gah: WIP interrupted {} attempt {}", args.mode, attempt + 1),
+                result.exit_code == -2,
             )?;
-            worktree::cleanup(&wt, repo);
-            anyhow::bail!(
-                "shutdown requested while {} was running",
-                route.effective_backend
-            );
         }
 
         backend_summary = runner::output::publishable_summary(
@@ -488,8 +509,6 @@ pub(crate) fn improve(
         );
 
         if result.exit_code != 0 {
-            // The backend launched but exited nonzero — the backend itself
-            // failed at its job, distinct from it never starting at all.
             let output_log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
             let log_text = failure_text_with_internal_log(
                 &output_log_text,
@@ -551,6 +570,10 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
+            finalize_shutdown!(
+                "shutdown requested after backend completed; not retrying",
+                false,
+            )?;
             if stalled {
                 notify_event(
                     cfg,
@@ -594,10 +617,6 @@ pub(crate) fn improve(
                 );
             }
             if stalled_during_validation {
-                // Issue #579: backend produced a diff and was validating when
-                // the watchdog fired. Checkpoint the WIP diff on a repo-local
-                // branch (the worktree is removed by cleanup) so a later
-                // attempt can resume it instead of losing the work.
                 let checkpoint = wip_checkpoint_branch(&branch, attempt + 1);
                 let resumed = worktree::checkpoint_wip(
                     &wt,
@@ -698,15 +717,6 @@ pub(crate) fn improve(
                         continue;
                     }
                 }
-                // Live-observed bug: a generic backend error (an idle-timeout
-                // kill, a transient crash, anything `mark_backend_unavailable_from_output`
-                // doesn't recognize as a quota/rate-limit message) fell straight
-                // through to bail!() below, ending the ENTIRE dispatch after a
-                // single attempt regardless of --retries -- the reroute branch
-                // above was the ONLY retry path that existed, so a non-quota
-                // failure never got a second attempt at all. Retry with the
-                // SAME backend/model instead, mirroring the validation-failure
-                // retry path (wipe partial changes, rebuild task with context).
                 println!(
                     "Backend error (exit {}) on attempt {}/{}, not a recognized quota/rate-limit signal -- retrying with the same backend...",
                     result.exit_code, attempt + 1, max_attempts
@@ -754,12 +764,6 @@ pub(crate) fn improve(
                 attempt + 1
             );
         }
-
-        // An exit-0 process that leaves the worktree unchanged did not
-        // complete the ticket. Treating it as success would let a backend
-        // consume quota, pass the repository's unchanged test suite, and
-        // falsely advance the controller with no patch or PR to show for it.
-        // Stop before post-change validation: there is no change to validate.
         let attempt_state_after = classify_git_operation_result(
             ledger,
             crate::ledger::FailureStage::PostValidation,
@@ -788,10 +792,6 @@ pub(crate) fn improve(
             }
         }
         if attempt_state_after == attempt_state_before {
-            // OpenCode can exit successfully after a provider rejection and
-            // put the useful diagnostic only in its internal log. Inspect
-            // that run-scoped tail before treating this as generic no-progress
-            // so the next route cannot select the unavailable model again.
             let output_log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
             let failure_text = failure_text_with_internal_log(
                 &output_log_text,
@@ -904,11 +904,6 @@ pub(crate) fn improve(
                 return Ok(());
             }
             if attempt + 1 < max_attempts {
-                // No progress is recoverable: a fresh attempt can get a
-                // clearer instruction or a transient backend condition may
-                // have cleared. Preserve the failed attempt in the ledger,
-                // but do not stamp the overall dispatch as failed unless all
-                // bounded attempts make no progress.
                 println!(
                     "Backend made no changes on attempt {}/{}; retrying with explicit no-progress context...",
                     attempt + 1,
@@ -955,6 +950,10 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
+            finalize_shutdown!(
+                "shutdown requested after backend completed; not retrying",
+                false,
+            )?;
             break;
         }
 
@@ -993,6 +992,10 @@ pub(crate) fn improve(
                     ),
                     cli_version: result.agy_version.clone(),
                 });
+                finalize_shutdown!(
+                    "shutdown requested after backend completed; not retrying",
+                    false,
+                )?;
                 break;
             }
             Err((e, exit_code)) => {
@@ -1020,13 +1023,11 @@ pub(crate) fn improve(
                         ),
                         result.agy_version.clone(),
                     );
-                    worktree::preserve_wip(
-                        &wt,
-                        &profile.default_target_branch,
-                        &format!("gah: WIP interrupted {} attempt {}", args.mode, attempt + 1),
+                    finalize_shutdown!(
+                        "shutdown requested during post-validation; not retrying",
+                        crate::ledger::FailureStage::PostValidation,
+                        true,
                     )?;
-                    worktree::cleanup(&wt, repo);
-                    anyhow::bail!("shutdown requested during post-validation; not retrying");
                 }
 
                 if exit_code == Some(VALIDATION_COMMAND_TIMEOUT_EXIT_CODE) {
@@ -1057,21 +1058,18 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    finalize_shutdown!(
+                        "shutdown requested after backend completed; not retrying",
+                        false,
+                    )?;
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!("validation timed out (harness error). {}", failure_output);
                 }
-
-                // Identical failure to the previous attempt means the agent's
-                // changes had no effect on the error — almost always an
-                // environment/config problem the agent cannot fix. Stop burning
-                // attempts.
                 let failure_progress = classify_validation_failure_progress(
                     baseline_failure.as_deref(),
                     prev_failure.as_deref(),
                     &failure_output,
                 );
-                // #568 AC5: a recurring failure isn't always the agent's fault -- reuse
-                // the baseline classifier to catch known harness/environment signatures.
                 let post_validation_disposition = crate::baseline::classify_baseline(
                     &failure_output,
                     exit_code,
@@ -1084,8 +1082,6 @@ pub(crate) fn improve(
                     && !failure_progress.unchanged_from_baseline()
                     && !failure_progress.unchanged_from_previous_attempt()
                 {
-                    // Save the failed attempt's diff before wiping, so the
-                    // session artifact shows what the agent actually wrote.
                     let _ = worktree::git(&["add", "-A"], &wt);
                     let mut diff_path = None;
                     if let Ok(diff) = worktree::git(&["diff", "--cached"], &wt) {
@@ -1094,10 +1090,6 @@ pub(crate) fn improve(
                             diff_path = Some(path.display().to_string());
                         }
                     }
-                    // Checkpoint the actual failed tree before the clean
-                    // retry. The old implementation reset it in place and
-                    // permanently lost substantial, often nearly-correct
-                    // work whenever later attempts also failed.
                     let checkpoint = wip_checkpoint_branch(&branch, attempt + 1);
                     if worktree::checkpoint_wip(
                         &wt,
@@ -1135,8 +1127,10 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
-                    // Rebuild from the base task with only the latest failure —
-                    // accumulating retry blocks confuses smaller models.
+                    finalize_shutdown!(
+                        "shutdown requested after backend completed; not retrying",
+                        false,
+                    )?;
                     task = format!(
                         "{}\n\n## Previous attempt failed validation (attempt {}/{})\n\nThe previous tree was checkpointed locally as `{}`. This retry starts from a clean target branch. Fix the following before completing the task:\n\n```\n{}\n```",
                         base_task,
@@ -1145,11 +1139,6 @@ pub(crate) fn improve(
                         checkpoint,
                         utf8_safe_prefix(&failure_output, 8_000),
                     );
-                    // TICKET-089 AC7: made real (if imperfect) progress and
-                    // failed validation again -- a genuine agent-capability
-                    // failure, distinct from harness/backend/quota failures.
-                    // Route again with that context so cost-aware ordering
-                    // may escalate to a stronger model for the retry.
                     let mut escalation_req = route_req.clone();
                     escalation_req.last_failure_class =
                         Some(crate::ledger::FailureClass::ValidationFailure.as_str());
@@ -1195,8 +1184,6 @@ pub(crate) fn improve(
                             utf8_safe_prefix(&failure_output, 4_000),
                         );
                     };
-                    // No progress -- usually the agent's fault, unless the recurring
-                    // text is a known harness/environment signature (#568 AC5).
                     use crate::baseline::BaselineDisposition as BD;
                     use crate::ledger::{FailureClass as FC, FailureStage as FS};
                     let no_progress_class = match post_validation_disposition {
@@ -1224,6 +1211,10 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    finalize_shutdown!(
+                        "shutdown requested after backend completed; not retrying",
+                        false,
+                    )?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,
@@ -1266,6 +1257,10 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    finalize_shutdown!(
+                        "shutdown requested after backend completed; not retrying",
+                        false,
+                    )?;
                     break;
                 } else {
                     ledger.attempts.push(crate::ledger::AttemptRecord {
@@ -1293,6 +1288,10 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    finalize_shutdown!(
+                        "shutdown requested after backend completed; not retrying",
+                        false,
+                    )?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,
@@ -1313,16 +1312,11 @@ pub(crate) fn improve(
         ledger.validation_result = Some("not_run".into());
     }
 
-    // Retries cold-start a backend with bounded failure context; validation
-    // commands run sequentially and feed bounded output into the next attempt.
-
     let has_changes = classify_git_operation_result(
         ledger,
         crate::ledger::FailureStage::PostValidation,
         worktree::has_changes(&wt, &profile.default_target_branch),
     )?;
-    // Reconcile a structured, grounded no-diff completion before the generic
-    // no-progress backstop. This is the primary already-satisfied path.
     if !has_changes
         && already_satisfied.reconcile(
             ledger,
@@ -1334,9 +1328,6 @@ pub(crate) fn improve(
         return Ok(());
     }
     already_satisfied.enforce_post_validation_changes(ledger, has_changes)?;
-
-    // Reject an explicitly claimed already-satisfied completion that consists
-    // only of a coverage-weakening test diff before publishing.
     if already_satisfied.reconcile(
         ledger,
         &backend_summary,
@@ -1376,15 +1367,7 @@ pub(crate) fn improve(
     )? {
         return Ok(());
     }
-
-    // TICKET-128: honor the per-profile publishing policy. A restricted profile
-    // forbids PR/MR creation and/or LLM-generated commit messages, so we stop
-    // at a deterministic human handoff after code generation + validation
-    // instead of publishing the work. This is independent of reviewer routing
-    // and merge policy: review still runs, the worktree is still cleaned up,
-    // only the autonomous publish step is suppressed.
     if !publishing_allows_publish(profile) {
-        // Commit only if the policy still permits agent-authored commit text.
         if profile.publishing.allow_commit_message_generation {
             if worktree::has_uncommitted_changes(&wt)? {
                 ledger.commit_attempted = true;
@@ -1439,15 +1422,9 @@ pub(crate) fn improve(
         worktree::commit_msg(&wt, &commit_msg)?;
         ledger.commit_created = true;
     } else {
-        // Backend committed its own work already (e.g. vibe) -- nothing left
-        // to stage, just push what's already on HEAD.
         ledger.commit_created = true;
     }
     conflict_session.verify_before_publish(ledger)?;
-    // Must run after the commit above -- diff_stats/changed_files compare
-    // origin/<target> against HEAD, so computing them beforehand (while the
-    // real changes are still uncommitted working-tree modifications) always
-    // reported "0 file(s) changed, +0, -0" in the MR body.
     apply_diff_stats(ledger, &wt, &profile.default_target_branch);
     ledger.push_attempted = true;
     classify_git_operation_result(
