@@ -4,5 +4,5 @@
 // initializes the library-owned CLI entry point. See ticket #406.
 
 fn main() -> anyhow::Result<()> {
-    git_agent_harness::cli::run()
+    git_agent_harness::run()
 }

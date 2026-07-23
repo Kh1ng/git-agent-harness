@@ -50,3 +50,7 @@ pub mod test_support;
 pub mod tui_state;
 pub mod validation_check;
 pub mod validation_runner;
+
+pub fn run() -> anyhow::Result<()> {
+    cli::run()
+}
