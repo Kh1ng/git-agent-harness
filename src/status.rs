@@ -1,6 +1,8 @@
 use crate::availability;
 use crate::config::{GahConfig, Profile};
-use crate::controller::HumanRequiredReason;
+use crate::controller::{
+    plan_remediation, HumanRequiredReason, RemediationContext, RemediationPlan,
+};
 use crate::ledger::{self, LedgerEntry, RoutingDiagnostics};
 use crate::sync;
 use anyhow::Result;
@@ -248,6 +250,45 @@ pub struct Blocker {
     /// TICKET-505: stable reason code for why autonomy stopped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation_plan: Option<RemediationPlan>,
+}
+
+fn remediation_plan_for_blocker(
+    profile_name: &str,
+    profile: &Profile,
+    blocker_kind: &str,
+    source_reference: Option<&str>,
+    reason_code: Option<&str>,
+    backend: Option<&str>,
+    model: Option<&str>,
+) -> Option<RemediationPlan> {
+    let plan = match blocker_kind {
+        "human_required" => plan_remediation(RemediationContext {
+            profile_name,
+            profile,
+            work_id: source_reference,
+            reference: source_reference,
+            reason_code: reason_code
+                .map(HumanRequiredReason::from_code)
+                .unwrap_or(HumanRequiredReason::Unknown),
+            blocker_kind: Some(blocker_kind),
+            backend,
+            model,
+        }),
+        "backend_unavailable" => plan_remediation(RemediationContext {
+            profile_name,
+            profile,
+            work_id: source_reference,
+            reference: source_reference,
+            reason_code: HumanRequiredReason::ConfigurationInfra,
+            blocker_kind: Some(blocker_kind),
+            backend,
+            model,
+        }),
+        _ => return None,
+    };
+    Some(plan)
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq, Clone)]
@@ -467,6 +508,15 @@ fn build_snapshot_inner(
                 until: avail.unavailable_until.clone(),
                 source_reference: None,
                 reason_code: None,
+                remediation_plan: remediation_plan_for_blocker(
+                    profile_name,
+                    profile,
+                    "backend_unavailable",
+                    None,
+                    None,
+                    Some(avail.backend.as_str()),
+                    avail.model.as_deref(),
+                ),
             });
         }
     }
@@ -525,6 +575,15 @@ fn build_snapshot_inner(
                 until: None,
                 source_reference: Some(work_id.to_string()),
                 reason_code: Some("retry_budget_exhausted".into()),
+                remediation_plan: remediation_plan_for_blocker(
+                    profile_name,
+                    profile,
+                    "human_required",
+                    Some(work_id),
+                    Some("retry_budget_exhausted"),
+                    None,
+                    None,
+                ),
             });
         }
     }
@@ -625,6 +684,15 @@ fn build_snapshot_inner(
                 until: None,
                 source_reference: ticket.work_id.clone(),
                 reason_code,
+                remediation_plan: remediation_plan_for_blocker(
+                    profile_name,
+                    profile,
+                    "human_required",
+                    ticket.work_id.as_deref(),
+                    ticket.human_required_reason_code.as_deref(),
+                    None,
+                    None,
+                ),
             });
         }
     }
@@ -652,6 +720,7 @@ fn build_snapshot_inner(
             until: None,
             source_reference: Some(dependency.work_id.clone()),
             reason_code: Some(dependency.reason_code.clone()),
+            remediation_plan: None,
         });
     }
 
@@ -677,6 +746,15 @@ fn build_snapshot_inner(
                     until: None,
                     source_reference: Some(mr.branch.clone()),
                     reason_code: Some(HumanRequiredReason::FixRetryCapExceeded.as_str().into()),
+                    remediation_plan: remediation_plan_for_blocker(
+                        profile_name,
+                        profile,
+                        "human_required",
+                        mr.work_id.as_deref().or(Some(mr.branch.as_str())),
+                        Some(HumanRequiredReason::FixRetryCapExceeded.as_str()),
+                        None,
+                        None,
+                    ),
                 });
             }
         }
@@ -707,6 +785,15 @@ fn build_snapshot_inner(
                     until: None,
                     source_reference: Some(mr.branch.clone()),
                     reason_code: Some(HumanRequiredReason::MergeRetryCapExceeded.as_str().into()),
+                    remediation_plan: remediation_plan_for_blocker(
+                        profile_name,
+                        profile,
+                        "human_required",
+                        mr.work_id.as_deref().or(Some(mr.branch.as_str())),
+                        Some(HumanRequiredReason::MergeRetryCapExceeded.as_str()),
+                        None,
+                        None,
+                    ),
                 });
             }
         }

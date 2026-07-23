@@ -148,6 +148,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // item in `snapshot.blocked_work_items` and must NOT freeze the
         // whole profile (TICKET-human-required-scoping).
         return NextAction::HumanRequired {
+            work_id: None,
             reason: blocker
                 .message
                 .clone()
@@ -298,6 +299,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         let merge_policy = snapshot.profile.merge_policy;
         if merge_policy == crate::config::MergePolicy::StopForHuman {
             return NextAction::HumanRequired {
+                work_id: mr.work_id.clone(),
                 reason: format!(
                     "MR on branch '{}' strong-reviewed with CI passing; merge policy is 'stop_for_human' -- awaiting human merge",
                     mr.branch
@@ -313,6 +315,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // independent axis from reviewer routing and merge policy.
         if !snapshot.publishing_allow_pr {
             return NextAction::HumanRequired {
+                work_id: mr.work_id.clone(),
                 reason: format!(
                     "MR on branch '{}' approved with CI passing, but profile publishing policy forbids PR/MR creation (human handoff)",
                     mr.branch
@@ -384,6 +387,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     {
         let (mr, reason_code) = human_blocked_mrs[0];
         return NextAction::HumanRequired {
+            work_id: mr.work_id.clone(),
             reason: format!(
                 "MR on branch '{}' classified {} (human decision required)",
                 mr.branch, mr.classification
@@ -541,6 +545,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             .find(|t| t.genuine_agent_failure_count >= implementation_failure_cap as usize)
         {
             return NextAction::HumanRequired {
+                work_id: first_exhausted.work_id.clone(),
                 reason: format!(
                     "{} failed {} time(s) (agent failures) with no active MR; stopping automatic retries",
                     first_exhausted
@@ -669,6 +674,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             })
     }) {
         return NextAction::HumanRequired {
+            work_id: issue.work_id.clone(),
             reason: format!(
                 "{} exhausted {} bounded PM decomposition attempt(s)",
                 issue.work_id.as_deref().unwrap_or(&issue.ticket_path),
