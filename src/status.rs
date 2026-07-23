@@ -581,7 +581,8 @@ fn build_snapshot_inner(
                     .signed_duration_since(claim.claimed_at)
                     .num_seconds()
                     .max(0) as u64;
-                active_claim_work_ids.insert(claim.work_id.clone());
+                active_claim_work_ids
+                    .insert(crate::work_claim::normalize_work_identity(&claim.work_id));
                 active_claims.push(ActiveClaimSnapshot {
                     work_id: claim.work_id,
                     pid: claim.pid,
@@ -600,7 +601,8 @@ fn build_snapshot_inner(
     }
     for ticket in &mut available_tickets {
         if let Some(work_id) = ticket.work_id.as_deref() {
-            if active_claim_work_ids.contains(work_id) {
+            if active_claim_work_ids.contains(&crate::work_claim::normalize_work_identity(work_id))
+            {
                 ticket.has_active_claim = true;
             }
         }

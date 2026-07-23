@@ -12,6 +12,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub struct AvailableTicket {
     pub ticket_path: String,
     pub work_id: Option<String>,
+    /// Provider-neutral identity used for deduplication and claims.
+    pub normalized_work_identity: String,
+    pub source: CandidateSource,
+    pub execution_policy: CandidateExecutionPolicy,
     pub title: Option<String>,
     pub recommended_backend: Option<String>,
     pub recommended_model: Option<String>,
@@ -42,6 +46,25 @@ pub struct AvailableTicket {
     /// the same way `has_active_mr` tickets are -- there's no point
     /// picking a ticket a sibling worker is already mid-flight on.
     pub has_active_claim: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateSource {
+    #[default]
+    LegacyTicket,
+    GithubIssue,
+    GitlabIssue,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct CandidateExecutionPolicy {
+    pub intake_mode: String,
+    pub explicit_autonomy_required: bool,
+    pub autonomous_metadata_present: bool,
+    pub dispatchable_now: bool,
+    pub exclusion_reason_code: Option<String>,
+    pub exclusion_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -117,6 +140,8 @@ pub struct WorkMetadata {
     pub recommended_backend: Option<String>,
     #[serde(default)]
     pub recommended_model: Option<String>,
+    #[serde(default)]
+    pub execution_disposition: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]

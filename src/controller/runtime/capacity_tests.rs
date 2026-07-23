@@ -82,6 +82,16 @@ fn available_ticket(work_id: &str) -> AvailableTicket {
     AvailableTicket {
         ticket_path: work_id.trim_start_matches('#').into(),
         work_id: Some(work_id.into()),
+        normalized_work_identity: crate::work_claim::normalize_work_identity(work_id),
+        source: crate::models::CandidateSource::LegacyTicket,
+        execution_policy: crate::models::CandidateExecutionPolicy {
+            intake_mode: "canonical_autonomous_only".into(),
+            explicit_autonomy_required: true,
+            autonomous_metadata_present: true,
+            dispatchable_now: true,
+            exclusion_reason_code: None,
+            exclusion_reason: None,
+        },
         title: Some(format!("Work {work_id}")),
         has_active_mr: false,
         prior_attempt_count: 0,

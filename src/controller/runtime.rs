@@ -394,24 +394,27 @@ pub fn run_once(
             original_review_generation.as_deref(),
         )?;
 
-        let outcome = if let Some(work_id) = action.work_id().filter(|_| {
-            !matches!(
-                action,
-                NextAction::WaitUntil { .. }
-                    | NextAction::HumanRequired { .. }
-                    | NextAction::NoOp { .. }
-            )
-        }) {
-            if !crate::work_claim::try_claim_work(&claim_scope, work_id)? {
+        let outcome = if let Some(work_id) = action
+            .work_id()
+            .map(crate::work_claim::normalize_work_identity)
+            .filter(|_| {
+                !matches!(
+                    action,
+                    NextAction::WaitUntil { .. }
+                        | NextAction::HumanRequired { .. }
+                        | NextAction::NoOp { .. }
+                )
+            }) {
+            if !crate::work_claim::try_claim_work(&claim_scope, &work_id)? {
                 format!("Skipped already-claimed work '{work_id}'")
             } else {
                 match execute_action(cfg, profile_name, &action, skip_validation_gate, None) {
                     Ok(outcome) => {
-                        crate::work_claim::release_work(&claim_scope, work_id)?;
+                        crate::work_claim::release_work(&claim_scope, &work_id)?;
                         outcome
                     }
                     Err(error) => {
-                        crate::work_claim::release_work(&claim_scope, work_id)?;
+                        crate::work_claim::release_work(&claim_scope, &work_id)?;
                         return Err(error);
                     }
                 }
@@ -591,7 +594,9 @@ fn run_parallel_once(
                     action = redispatch;
                 }
 
-                let action_work_id = action.work_id().map(str::to_string);
+                let action_work_id = action
+                    .work_id()
+                    .map(crate::work_claim::normalize_work_identity);
                 if let Some(work_id) = action_work_id.as_deref() {
                     if claimed_work_ids.iter().any(|claimed| claimed == work_id)
                         || executed_work_ids.contains(work_id)
@@ -1389,6 +1394,19 @@ default_target_branch = "main"
             snapshot.available_tickets.push(AvailableTicket {
                 ticket_path: format!("ticket_{}.md", i),
                 work_id: Some(format!("TICKET-{}", i + 100)),
+                normalized_work_identity: crate::work_claim::normalize_work_identity(&format!(
+                    "TICKET-{}",
+                    i + 100
+                )),
+                source: crate::models::CandidateSource::LegacyTicket,
+                execution_policy: crate::models::CandidateExecutionPolicy {
+                    intake_mode: "canonical_autonomous_only".into(),
+                    explicit_autonomy_required: true,
+                    autonomous_metadata_present: true,
+                    dispatchable_now: true,
+                    exclusion_reason_code: None,
+                    exclusion_reason: None,
+                },
                 title: Some(format!("Test ticket {}", i)),
                 has_active_mr: false,
                 prior_attempt_count: 0,
