@@ -170,14 +170,18 @@ pub(crate) fn admission_for(
 /// this host. A lock is held on each lease file for the worker lifetime. If a
 /// controller is killed, the kernel releases that lock and the next admission
 /// sweep removes the stale file, so crashed managers cannot strand capacity.
-pub(crate) fn try_acquire(action: &NextAction) -> std::io::Result<LiveAdmission> {
-    acquire_in_dir(&capacity_dir(), action, sample()?)
+pub(crate) fn try_acquire(
+    action: &NextAction,
+    local_active_workers: usize,
+) -> std::io::Result<LiveAdmission> {
+    acquire_in_dir(&capacity_dir(), action, sample()?, local_active_workers)
 }
 
 fn acquire_in_dir(
     dir: &Path,
     action: &NextAction,
     pressure: NodePressure,
+    local_active_workers: usize,
 ) -> std::io::Result<LiveAdmission> {
     std::fs::create_dir_all(dir)?;
     let registry_lock = open_registry_lock(dir)?;
@@ -213,7 +217,8 @@ fn acquire_in_dir(
         }
     }
 
-    let reservation = match admission_for(action, active_workers, committed, pressure) {
+    let admission_active_workers = active_workers.max(local_active_workers);
+    let reservation = match admission_for(action, admission_active_workers, committed, pressure) {
         Admission::Admit(reservation) => reservation,
         Admission::Defer(reason) => return Ok(LiveAdmission::Defer(reason)),
     };
@@ -562,28 +567,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let node = pressure(15, 10, 0.5);
         let LiveAdmission::Admit(first) =
-            acquire_in_dir(dir.path(), &implementation(), node).unwrap()
+            acquire_in_dir(dir.path(), &implementation(), node, 0).unwrap()
         else {
             panic!("first worker should be admitted");
         };
         let LiveAdmission::Admit(_second) =
-            acquire_in_dir(dir.path(), &implementation(), node).unwrap()
+            acquire_in_dir(dir.path(), &implementation(), node, 0).unwrap()
         else {
             panic!("second worker should be admitted");
         };
         let LiveAdmission::Admit(_third) =
-            acquire_in_dir(dir.path(), &implementation(), node).unwrap()
+            acquire_in_dir(dir.path(), &implementation(), node, 0).unwrap()
         else {
             panic!("third worker should be admitted");
         };
         assert!(matches!(
-            acquire_in_dir(dir.path(), &implementation(), node).unwrap(),
+            acquire_in_dir(dir.path(), &implementation(), node, 0).unwrap(),
             LiveAdmission::Defer(reason) if reason.contains("memory reserve")
         ));
 
         drop(first);
         assert!(matches!(
-            acquire_in_dir(dir.path(), &review(), node).unwrap(),
+            acquire_in_dir(dir.path(), &review(), node, 0).unwrap(),
             LiveAdmission::Admit(_)
         ));
     }
@@ -602,7 +607,7 @@ mod tests {
         file.write_all(b"not-a-reservation\n").unwrap();
         file.sync_data().unwrap();
 
-        let error = acquire_in_dir(dir.path(), &review(), pressure(15, 10, 0.5))
+        let error = acquire_in_dir(dir.path(), &review(), pressure(15, 10, 0.5), 0)
             .expect_err("a corrupt live lease must not be ignored");
         assert!(error.to_string().contains("memory reservation"));
     }
@@ -611,7 +616,7 @@ mod tests {
     fn lease_drop_serializes_with_registry_scan_lock() {
         let dir = tempfile::tempdir().unwrap();
         let LiveAdmission::Admit(lease) =
-            acquire_in_dir(dir.path(), &review(), pressure(15, 10, 0.5)).unwrap()
+            acquire_in_dir(dir.path(), &review(), pressure(15, 10, 0.5), 0).unwrap()
         else {
             panic!("review should be admitted");
         };

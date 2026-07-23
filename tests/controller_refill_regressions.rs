@@ -43,12 +43,45 @@ fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
     cmd.env("XDG_RUNTIME_DIR", state_root.join("runtime"));
     cmd.env("TMPDIR", support::test_temp_root());
     cmd.env("GAH_TEST_NODE_PRESSURE_FILE", node_pressure);
+    cmd.env("GAH_TEST_NODE_CAPACITY_REPROBE_MS", "100");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
     cmd
+}
+
+fn write_node_pressure_with_load(
+    path: &std::path::Path,
+    available_gib: u64,
+    logical_cpus: u64,
+    load_one: f64,
+) {
+    fs::write(
+        path,
+        format!(
+            r#"{{
+  "memory_total_bytes": 68719476736,
+  "memory_available_bytes": {},
+  "logical_cpus": {},
+  "load_one": {},
+  "memory_full_psi_avg10": 0.0,
+  "cpu_some_psi_avg10": 0.0
+}}"#,
+            available_gib * 1024 * 1024 * 1024,
+            logical_cpus,
+            load_one
+        ),
+    )
+    .unwrap();
+}
+
+fn read_u32_file(path: &std::path::Path) -> u32 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]
@@ -502,4 +535,338 @@ fn parallel_loop_does_not_refill_after_shutdown() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 2);
+}
+
+#[test]
+fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
+    let tmp = test_tempdir();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    for id in 601..=602 {
+        fs::write(
+            repo.join(format!("docs/tickets/TICKET-{id}-pressure.md")),
+            format!(
+                "# TICKET-{id}: Node pressure recovery\n\nGoal: prove refill can happen while active work remains.\nRecommended backend: codex\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let node_pressure = tmp.path().join("node-pressure.json");
+
+    let fake_bin = tmp.path().join("bin");
+    let calls = tmp.path().join("codex-calls");
+    let active_count = tmp.path().join("codex-active");
+    let second_started = tmp.path().join("codex-second-started");
+    let active_lock_dir = tmp.path().join("codex-active.lock");
+    let slow_release = tmp.path().join("slow-release");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nlock='{active_lock_dir}'\n\
+             call_count_file='{calls}'\n\
+             active_count_file='{active_count}'\n\
+             second_started='{second_started}'\n\
+             slow_release='{slow_release}'\n\
+             acquire_active_lock() {{ while ! mkdir \"$lock\" 2>/dev/null; do sleep 0.01; done; }}\n\
+             release_active_lock() {{ rmdir \"$lock\"; }}\n\
+             inc_active() {{\n               acquire_active_lock\n\
+               count=$( [ -f \"$active_count_file\" ] && cat \"$active_count_file\" || echo 0 )\n\
+               count=$((count + 1))\n\
+               echo \"$count\" > \"$active_count_file\"\n\
+               release_active_lock\n\
+             }}\n\
+             dec_active() {{\n               acquire_active_lock\n\
+               count=$( [ -f \"$active_count_file\" ] && cat \"$active_count_file\" || echo 0 )\n\
+               if [ \"$count\" -gt 0 ]; then count=$((count - 1)); fi\n\
+               echo \"$count\" > \"$active_count_file\"\n\
+               release_active_lock\n\
+             }}\n\
+             n=$( [ -f \"${{call_count_file}}.count\" ] && cat \"${{call_count_file}}.count\" || echo 0 )\n\
+             n=$((n + 1))\n\
+             echo \"$n\" > \"${{call_count_file}}.count\"\n\
+             printf 'agent edit %s\n' \"$n\" > \"agent-edit-$n.txt\"\n\
+             inc_active\n\
+             echo \"call-$n\" >> \"$call_count_file\"\n\
+             case \"$n\" in\n\
+               1) while [ ! -f \"$slow_release\" ]; do sleep 0.05; done ;;\n\
+               2) echo started > \"$second_started\"; sleep 2 ;;\n\
+             esac\n\
+             dec_active\n\
+             ",
+            active_lock_dir = active_lock_dir.display(),
+            calls = calls.display(),
+            active_count = active_count.display(),
+            second_started = second_started.display(),
+            slow_release = slow_release.display()
+        ),
+    );
+
+    let mut command = spawn_bin(tmp.path());
+    write_node_pressure_with_load(&node_pressure, 16, 32, 50.0);
+    std::thread::spawn({
+        let node_pressure = node_pressure.clone();
+        move || {
+            std::thread::sleep(Duration::from_millis(500));
+            write_node_pressure_with_load(&node_pressure, 16, 32, 0.5);
+        }
+    });
+
+    let mut child = ProcessGroupGuard::new(
+        command
+            .args([
+                "loop",
+                "--profile",
+                "real",
+                "--config-path",
+                cfg.to_str().unwrap(),
+                "--once",
+                "--parallel",
+                "2",
+            ])
+            .env(
+                "PATH",
+                format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("HOME", &home)
+            .env("GITHUB_TOKEN", "token")
+            .env("GAH_TEST_NODE_PRESSURE_FILE", node_pressure.clone())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    let start_deadline = Instant::now() + Duration::from_secs(5);
+    while read_u32_file(&active_count) < 1 {
+        assert!(
+            Instant::now() < start_deadline,
+            "first worker did not start"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let refill_deadline = Instant::now() + Duration::from_secs(10);
+    while !second_started.exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "controller exited before refill opportunity"
+        );
+        assert!(
+            Instant::now() < refill_deadline,
+            "second worker did not start while first was active"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(read_u32_file(&active_count), 2);
+
+    fs::write(&slow_release, "release").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(calls).unwrap();
+    assert!(calls.contains("call-2"));
+}
+
+#[test]
+fn parallel_loop_waits_to_refill_until_node_pressure_recedes() {
+    let tmp = test_tempdir();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    for id in 603..=604 {
+        fs::write(
+            repo.join(format!("docs/tickets/TICKET-{id}-pressure.md")),
+            format!(
+                "# TICKET-{id}: Persistent pressure\n\nGoal: prove no refill is launched until pressure normalizes.\nRecommended backend: codex\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let node_pressure = tmp.path().join("node-pressure.json");
+
+    let fake_bin = tmp.path().join("bin");
+    let calls = tmp.path().join("codex-calls");
+    let provider_calls = tmp.path().join("gh-calls");
+    let slow_release = tmp.path().join("slow-release");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+            provider_calls.display()
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nn=$( [ -f '{calls}.count' ] && cat '{calls}.count' || echo 0 )\nn=$((n + 1))\necho \"$n\" > '{calls}.count'\nprintf 'agent edit %s\\n' \"$n\" >> 'agent-edits-$n.txt'\nif [ \"$n\" -eq 1 ]; then while [ ! -f '{slow_release}' ]; do sleep 0.05; done; fi\n",
+            calls = calls.display(),
+            slow_release = slow_release.display()
+        ),
+    );
+
+    let mut command = spawn_bin(tmp.path());
+    write_node_pressure_with_load(&node_pressure, 16, 32, 50.0);
+    let child = ProcessGroupGuard::new(
+        command
+            .args([
+                "loop",
+                "--profile",
+                "real",
+                "--config-path",
+                cfg.to_str().unwrap(),
+                "--once",
+                "--parallel",
+                "2",
+            ])
+            .env(
+                "PATH",
+                format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("HOME", &home)
+            .env("GITHUB_TOKEN", "token")
+            .env("GAH_TEST_NODE_PRESSURE_FILE", node_pressure.clone())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    let start_deadline = Instant::now() + Duration::from_secs(5);
+    while read_u32_file(&calls.with_extension("count")) == 0 {
+        assert!(
+            Instant::now() < start_deadline,
+            "first worker did not start"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // Let the initial fill attempt finish, then span several 100 ms capacity
+    // re-probes. They must sample only local node state; rebuilding provider
+    // snapshots on every tick would create an API request storm.
+    thread::sleep(Duration::from_millis(400));
+    let provider_calls_before = fs::read_to_string(&provider_calls).unwrap().lines().count();
+    thread::sleep(Duration::from_millis(600));
+    let provider_calls_after = fs::read_to_string(&provider_calls).unwrap().lines().count();
+    assert_eq!(read_u32_file(&calls.with_extension("count")), 1);
+    assert_eq!(
+        provider_calls_after, provider_calls_before,
+        "persistent node pressure must not re-observe provider state"
+    );
+
+    let shutdown_start = Instant::now();
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        shutdown_start.elapsed() < Duration::from_secs(5),
+        "shutdown should remain prompt while pressure remains deferred"
+    );
+    assert_eq!(read_u32_file(&calls.with_extension("count")), 1);
+}
+
+#[test]
+fn parallel_loop_remains_prompt_on_shutdown_while_node_capacity_is_deferred() {
+    let tmp = test_tempdir();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    for id in 605..=606 {
+        fs::write(
+            repo.join(format!("docs/tickets/TICKET-{id}-pressure-shutdown.md")),
+            format!(
+                "# TICKET-{id}: Shutdown under deferred capacity\n\nGoal: prove shutdown exits before worker pool completes naturally.\nRecommended backend: codex\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let node_pressure = tmp.path().join("node-pressure.json");
+
+    let fake_bin = tmp.path().join("bin");
+    let calls = tmp.path().join("codex-calls");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/real/pull/1\\n'; exit 0; fi\nexit 0\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nn=$( [ -f '{calls}.count' ] && cat '{calls}.count' || echo 0 )\nn=$((n + 1))\necho \"$n\" > '{calls}.count'\nprintf 'agent edit %s\\n' \"$n\" >> 'agent-edits-$n.txt'\nprintf \"call-$n\\n\" >> '{calls}'\nwhile :; do sleep 0.05; done\n",
+            calls = calls.display()
+        ),
+    );
+
+    let mut command = spawn_bin(tmp.path());
+    write_node_pressure_with_load(&node_pressure, 16, 32, 50.0);
+    let child = ProcessGroupGuard::new(
+        command
+            .args([
+                "loop",
+                "--profile",
+                "real",
+                "--config-path",
+                cfg.to_str().unwrap(),
+                "--once",
+                "--parallel",
+                "2",
+            ])
+            .env(
+                "PATH",
+                format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("HOME", &home)
+            .env("GITHUB_TOKEN", "token")
+            .env("GAH_TEST_NODE_PRESSURE_FILE", node_pressure.clone())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    let start_deadline = Instant::now() + Duration::from_secs(5);
+    while read_u32_file(&calls.with_extension("count")) == 0 {
+        assert!(
+            Instant::now() < start_deadline,
+            "first worker did not start"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let shutdown_start = Instant::now();
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        shutdown_start.elapsed() < Duration::from_secs(5),
+        "shutdown should remain prompt while capacity is deferred"
+    );
+    assert_eq!(read_u32_file(&calls.with_extension("count")), 1);
 }

@@ -52,41 +52,21 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use support::{isolate_command, test_tempdir, FakeBackend, IsolatedCommand, Scenario};
+use support::{isolate_gah_command, test_tempdir, FakeBackend, IsolatedCommand, Scenario};
 use tempfile::TempDir;
 fn bin() -> IsolatedCommand<Command> {
     let cmd = Command::cargo_bin("gah").unwrap();
     // CLI integration tests may run under the real systemd loop, which sets
     // XDG_STATE_HOME to the operator's persistent state directory. Never let
     // fake profiles and work claims leak into (or inherit from) that state.
-    isolate_command(cmd, |cmd, root| {
-        let tmp = root.join("tmp");
-        fs::create_dir_all(&tmp).unwrap();
-        cmd.env("XDG_STATE_HOME", root.join("xdg-state"));
-        cmd.env("GAH_AVAILABILITY_PATH", root.join("availability.json"));
-        cmd.env(
-            "GAH_VALIDATION_CHECK_PATH",
-            root.join("validation-check.json"),
-        );
-        cmd.env("TMPDIR", tmp);
-    })
+    isolate_gah_command(cmd)
 }
 
 fn spawn_bin() -> IsolatedCommand<ProcessCommand> {
     let cmd = ProcessCommand::new(
         std::env::var("CARGO_BIN_EXE_gah").unwrap_or_else(|_| "target/debug/gah".into()),
     );
-    isolate_command(cmd, |cmd, root| {
-        let tmp = root.join("tmp");
-        fs::create_dir_all(&tmp).unwrap();
-        cmd.env("XDG_STATE_HOME", root.join("xdg-state"));
-        cmd.env("GAH_AVAILABILITY_PATH", root.join("availability.json"));
-        cmd.env(
-            "GAH_VALIDATION_CHECK_PATH",
-            root.join("validation-check.json"),
-        );
-        cmd.env("TMPDIR", tmp);
-    })
+    isolate_gah_command(cmd)
 }
 
 fn write_fixture_dir() -> TempDir {
