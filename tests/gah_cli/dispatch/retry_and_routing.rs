@@ -903,6 +903,116 @@ fn dispatch_fix_shutdown_records_cancelled_shutdown_and_dispatch_finished_event(
 }
 
 #[test]
+fn dispatch_fix_shutdown_after_backend_exit_preserves_completed_worktree_and_skips_publish() {
+    let tmp = test_tempdir();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = []\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let pause_gate = tmp.path().join("backend-result-gate");
+    let pause_ready = pause_gate.with_extension("ready");
+    let gh_called = tmp.path().join("gh-called");
+    let started = tmp.path().join("backend-started");
+    fs::write(&pause_gate, "pause\n").unwrap();
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\nprintf 'completed-race\\n' >> README.md\ntouch '{}'\nexit 0\n",
+            started.display()
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!("#!/bin/sh\ntouch '{}'\nexit 0\n", gh_called.display()),
+    );
+
+    let mut child = spawn_bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "fix",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "TICKET-434",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .env("GAH_TEST_PAUSE_AFTER_BACKEND_RESULT_FILE", &pause_gate)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !started.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("child exited before backend started: {status:?}");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "backend did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    while !pause_ready.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("child exited before post-result pause: {status:?}");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "backend result pause did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    #[cfg(unix)]
+    send_signal(child.id(), libc::SIGTERM);
+    fs::write(&pause_gate, "resume\n").unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        !gh_called.exists(),
+        "shutdown after backend exit must not publish"
+    );
+
+    let ledger_text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(ledger_text.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["backend_exit_code"], 0);
+    assert_ne!(entry["validation_result"], "cancelled_shutdown");
+    assert_eq!(entry["attempts"].as_array().unwrap().len(), 1);
+
+    let sessions_root = tmp.path().join("artifacts/real/sessions");
+    let session = latest_child_dir(&sessions_root);
+    let recovery = session.join("attempt-1/shutdown-recovery.json");
+    assert!(recovery.exists(), "missing shutdown recovery artifact");
+    let recovery_json: Value =
+        serde_json::from_str(&fs::read_to_string(&recovery).unwrap()).unwrap();
+    assert_eq!(recovery_json["attempt_number"], 1);
+    assert_eq!(recovery_json["source_work_id"], entry["work_id"]);
+    assert!(!recovery_json["run_id"].as_str().unwrap().is_empty());
+    assert!(recovery_json["checkpointed"].as_bool().unwrap());
+    let recovery_branch = recovery_json["recovery_branch"].as_str().unwrap();
+    let readme = ProcessCommand::new("git")
+        .args(["show", &format!("{recovery_branch}:README.md")])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&readme.stdout).contains("completed-race"),
+        "recovery branch must retain the completed backend change"
+    );
+}
+
+#[test]
 fn dispatch_fix_escalate_flag_picks_stronger_backend_on_first_attempt() {
     let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");

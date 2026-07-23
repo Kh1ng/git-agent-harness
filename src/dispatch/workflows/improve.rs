@@ -51,6 +51,7 @@ mod work_identity;
 use work_identity::{
     apply_manual_fix_context_to_ledger, resolve_manual_fix_context, resolve_target,
 };
+
 pub(crate) fn improve(
     cfg: &GahConfig,
     profile: &Profile,
@@ -335,6 +336,16 @@ pub(crate) fn improve(
         );
         let attempt_session = session_dir.join(format!("attempt-{}", attempt + 1));
         fs::create_dir_all(&attempt_session)?;
+        let shutdown_ctx = shutdown::ShutdownContext::new(
+            &wt,
+            repo,
+            &profile.default_target_branch,
+            &branch,
+            &attempt_session,
+            args.run_id.clone(),
+            attempt + 1,
+            ledger.work_id.clone(),
+        );
         let attempt_state_before = classify_git_operation_result(
             ledger,
             crate::ledger::FailureStage::AgentRun,
@@ -439,39 +450,22 @@ pub(crate) fn improve(
         );
         ledger.backend_exit_code = Some(result.exit_code);
         conflict_session.snapshot_if_unresolved(attempt + 1)?;
+        shutdown::pause_after_backend_result_if_requested()?;
 
         // SIGINT/SIGTERM is an operator lifecycle event, not a backend
         // failure to retry. The runner already killed and reaped the backend
         // process group; return so the controller can write the matching
         // terminal dispatch event.
-        if crate::runner::shutdown_requested() {
-            record_cancelled_attempt(
+        let shutdown_after_result = crate::runner::shutdown_requested();
+        if shutdown_after_result && result.exit_code == -2 {
+            shutdown_ctx.record_cancelled_backend_result_and_cleanup(
                 ledger,
-                attempt + 1,
-                &route.effective_backend,
+                &route,
                 &llm.model,
-                result.exit_code,
-                crate::ledger::FailureStage::AgentRun,
+                &result,
+                Some(&claude_path),
                 attempt_start.elapsed().as_secs_f64(),
-                attempt_usage(
-                    &result.log_path,
-                    result.agy_cli_log_delta.as_deref(),
-                    UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
-                    result.transcript_path.as_deref(),
-                    Some(&claude_path),
-                ),
-                result.agy_version.clone(),
-            );
-            worktree::preserve_wip(
-                &wt,
-                &profile.default_target_branch,
-                &format!("gah: WIP interrupted {} attempt {}", args.mode, attempt + 1),
             )?;
-            worktree::cleanup(&wt, repo);
-            anyhow::bail!(
-                "shutdown requested while {} was running",
-                route.effective_backend
-            );
         }
 
         backend_summary = runner::output::publishable_summary(
@@ -544,6 +538,7 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
+            shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
             if stalled {
                 notify_event(
                     cfg,
@@ -826,6 +821,7 @@ pub(crate) fn improve(
                     ),
                     cli_version: result.agy_version.clone(),
                 });
+                shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                 if attempt + 1 < max_attempts {
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
@@ -885,6 +881,7 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
+            shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
             if already_satisfied.reconcile(
                 ledger,
                 &backend_summary,
@@ -929,6 +926,7 @@ pub(crate) fn improve(
         }
 
         if profile.validation_commands.is_empty() {
+            ledger.validation_result = Some("not_run".into());
             ledger.attempts.push(crate::ledger::AttemptRecord {
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
@@ -948,6 +946,7 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
+            shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
             break;
         }
 
@@ -1050,6 +1049,7 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!("validation timed out (harness error). {}", failure_output);
                 }
@@ -1128,6 +1128,7 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
                     task = format!(
@@ -1217,6 +1218,7 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,
@@ -1259,6 +1261,7 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                     break;
                 } else {
                     ledger.attempts.push(crate::ledger::AttemptRecord {
@@ -1286,6 +1289,7 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,
