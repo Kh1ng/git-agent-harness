@@ -215,7 +215,7 @@ fn three_reviews_never_overlap_on_a_backend_model_capped_at_one() {
             let max_seen = Arc::clone(&max_seen);
             std::thread::spawn(move || {
                 start.wait();
-                let _slot = reserve_review_route(&profile, &route, true).unwrap();
+                let _slot = reserve_review_route(&profile, &route, None).unwrap();
                 max_seen.fetch_max(
                     current_concurrent(&route.effective_backend, route.effective_model.as_deref()),
                     Ordering::SeqCst,

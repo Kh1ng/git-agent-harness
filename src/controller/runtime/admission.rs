@@ -1,6 +1,6 @@
 use crate::controller::NextAction;
 use anyhow::{bail, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ const ADMISSION_RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 pub(crate) enum RouteAdmissionResponse {
-    Admitted,
+    Admitted(super::node_capacity::NodeCapacityLease),
     Deferred(String),
     Shutdown,
 }
@@ -18,6 +18,12 @@ pub(crate) struct RouteAdmissionRequest {
     pub(crate) sequence: usize,
     pub(crate) action: NextAction,
     pub(crate) response: Sender<RouteAdmissionResponse>,
+}
+
+#[derive(Debug)]
+pub(crate) enum AdmissionMessage {
+    Request(RouteAdmissionRequest),
+    Released(usize),
 }
 
 /// The route side of the controller's two-phase admission handshake.
@@ -30,14 +36,14 @@ pub(crate) struct RouteAdmissionRequest {
 pub struct RouteNodeAdmission {
     sequence: usize,
     action: NextAction,
-    requests: Sender<RouteAdmissionRequest>,
+    requests: Sender<AdmissionMessage>,
 }
 
 impl RouteNodeAdmission {
     pub(crate) fn new(
         sequence: usize,
         action: NextAction,
-        requests: Sender<RouteAdmissionRequest>,
+        requests: Sender<AdmissionMessage>,
     ) -> Self {
         Self {
             sequence,
@@ -46,22 +52,28 @@ impl RouteNodeAdmission {
         }
     }
 
-    pub(crate) fn wait_for_node(&self) -> Result<()> {
+    pub(crate) fn wait_for_node(&self) -> Result<WorkerNodeLease> {
         if crate::runner::shutdown_requested() {
             bail!("shutdown requested before node admission");
         }
         let (response, responses) = channel();
         self.requests
-            .send(RouteAdmissionRequest {
+            .send(AdmissionMessage::Request(RouteAdmissionRequest {
                 sequence: self.sequence,
                 action: self.action.clone(),
                 response,
-            })
+            }))
             .map_err(|_| anyhow::anyhow!("controller closed node-admission requests"))?;
 
         loop {
             match responses.recv_timeout(ADMISSION_RESPONSE_POLL_INTERVAL) {
-                Ok(RouteAdmissionResponse::Admitted) => return Ok(()),
+                Ok(RouteAdmissionResponse::Admitted(lease)) => {
+                    return Ok(WorkerNodeLease {
+                        _lease: lease,
+                        sequence: self.sequence,
+                        requests: self.requests.clone(),
+                    });
+                }
                 Ok(RouteAdmissionResponse::Deferred(reason)) => {
                     return Err(NodeAdmissionDeferred(reason).into());
                 }
@@ -78,6 +90,46 @@ impl RouteNodeAdmission {
             }
         }
     }
+
+    #[cfg(test)]
+    fn test_with_response(action: NextAction, response: RouteAdmissionResponse) -> Self {
+        let (requests, receiver) = request_channel();
+        std::thread::spawn(move || {
+            let Ok(AdmissionMessage::Request(request)) = receiver.recv() else {
+                return;
+            };
+            let _ = request.response.send(response);
+        });
+        Self::new(1, action, requests)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_admitted(
+        action: NextAction,
+        lease: super::node_capacity::NodeCapacityLease,
+    ) -> Self {
+        Self::test_with_response(action, RouteAdmissionResponse::Admitted(lease))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_deferred(action: NextAction, reason: impl Into<String>) -> Self {
+        Self::test_with_response(action, RouteAdmissionResponse::Deferred(reason.into()))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct WorkerNodeLease {
+    _lease: super::node_capacity::NodeCapacityLease,
+    sequence: usize,
+    requests: Sender<AdmissionMessage>,
+}
+
+impl Drop for WorkerNodeLease {
+    fn drop(&mut self) {
+        let _ = self
+            .requests
+            .send(AdmissionMessage::Released(self.sequence));
+    }
 }
 
 #[derive(Debug)]
@@ -91,10 +143,7 @@ impl std::fmt::Display for NodeAdmissionDeferred {
 
 impl std::error::Error for NodeAdmissionDeferred {}
 
-pub(crate) fn request_channel() -> (
-    Sender<RouteAdmissionRequest>,
-    Receiver<RouteAdmissionRequest>,
-) {
+pub(crate) fn request_channel() -> (Sender<AdmissionMessage>, Receiver<AdmissionMessage>) {
     channel()
 }
 
@@ -103,20 +152,19 @@ pub(crate) enum PollOutcome {
     Admitted,
     Deferred { action: NextAction, reason: String },
     Shutdown,
+    Released,
     Disconnected,
 }
 
 pub(crate) struct Coordinator {
-    requests: Receiver<RouteAdmissionRequest>,
-    route_node_leases: HashMap<usize, super::node_capacity::NodeCapacityLease>,
+    requests: Receiver<AdmissionMessage>,
     node_admitted_sequences: HashSet<usize>,
 }
 
 impl Coordinator {
-    pub(crate) fn new(requests: Receiver<RouteAdmissionRequest>) -> Self {
+    pub(crate) fn new(requests: Receiver<AdmissionMessage>) -> Self {
         Self {
             requests,
-            route_node_leases: HashMap::new(),
             node_admitted_sequences: HashSet::new(),
         }
     }
@@ -130,13 +178,16 @@ impl Coordinator {
     }
 
     pub(crate) fn complete_worker(&mut self, sequence: usize) {
-        self.route_node_leases.remove(&sequence);
         self.node_admitted_sequences.remove(&sequence);
     }
 
     pub(crate) fn poll(&mut self) -> PollOutcome {
         let request = match self.requests.try_recv() {
-            Ok(request) => request,
+            Ok(AdmissionMessage::Request(request)) => request,
+            Ok(AdmissionMessage::Released(sequence)) => {
+                self.complete_worker(sequence);
+                return PollOutcome::Released;
+            }
             Err(std::sync::mpsc::TryRecvError::Empty) => return PollOutcome::Empty,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 return PollOutcome::Disconnected;
@@ -151,11 +202,10 @@ impl Coordinator {
 
         match super::node_capacity::try_acquire(&action, self.active_node_workers()) {
             Ok(super::node_capacity::LiveAdmission::Admit(lease)) => {
-                self.route_node_leases.insert(sequence, lease);
                 self.node_admitted_sequences.insert(sequence);
                 if request
                     .response
-                    .send(RouteAdmissionResponse::Admitted)
+                    .send(RouteAdmissionResponse::Admitted(lease))
                     .is_err()
                 {
                     self.complete_worker(sequence);
@@ -199,7 +249,7 @@ pub(crate) fn service_pending_request(
             }
             Ok(true)
         }
-        PollOutcome::Shutdown => Ok(true),
+        PollOutcome::Shutdown | PollOutcome::Released => Ok(true),
         PollOutcome::Empty => Ok(false),
         PollOutcome::Disconnected if active_workers > 0 => {
             bail!("parallel route-admission channel closed unexpectedly")
@@ -267,6 +317,15 @@ mod tests {
         }
     }
 
+    fn admission_request(message: AdmissionMessage) -> RouteAdmissionRequest {
+        match message {
+            AdmissionMessage::Request(request) => request,
+            AdmissionMessage::Released(sequence) => {
+                panic!("unexpected release for sequence {sequence}")
+            }
+        }
+    }
+
     #[test]
     fn route_blocked_worker_requests_no_node_capacity() {
         let (requests, receiver) = request_channel();
@@ -285,14 +344,58 @@ mod tests {
             "a worker still waiting for its route must not request a node lease"
         );
         route_available.store(true, Ordering::Release);
-        let request = receiver
-            .recv_timeout(Duration::from_secs(1))
-            .expect("route-ready worker should request node admission");
+        let request = admission_request(
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("route-ready worker should request node admission"),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let lease = super::super::node_capacity::test_lease(temp.path())
+            .unwrap()
+            .0;
         request
             .response
-            .send(RouteAdmissionResponse::Admitted)
+            .send(RouteAdmissionResponse::Admitted(lease))
             .unwrap();
         worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn admitted_worker_keeps_node_lease_after_scheduler_side_exits() {
+        let temp = tempfile::tempdir().unwrap();
+        let (lease, lease_path) = super::super::node_capacity::test_lease(temp.path()).unwrap();
+        let (requests, receiver) = request_channel();
+        let handshake = RouteNodeAdmission::new(4, implementation(), requests);
+        let (backend_started, started) = channel();
+        let (release, released) = channel();
+        let worker = std::thread::spawn(move || {
+            let _node_lease = handshake.wait_for_node()?;
+            backend_started.send(()).unwrap();
+            released.recv().unwrap();
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let request = admission_request(receiver.recv_timeout(Duration::from_secs(1)).unwrap());
+        request
+            .response
+            .send(RouteAdmissionResponse::Admitted(lease))
+            .unwrap();
+        started.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        // Model an early scheduler error: its receiver and request-side state
+        // disappear while the scoped backend thread remains blocked.
+        drop(receiver);
+        assert!(
+            lease_path.exists(),
+            "worker, not scheduler, must own the live node lease"
+        );
+
+        release.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        assert!(
+            !lease_path.exists(),
+            "lease must release only after the backend worker exits"
+        );
     }
 
     #[test]
@@ -317,7 +420,7 @@ mod tests {
             Ok::<_, anyhow::Error>(())
         });
 
-        let request = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let request = admission_request(receiver.recv_timeout(Duration::from_secs(1)).unwrap());
         request
             .response
             .send(RouteAdmissionResponse::Deferred("memory reserve".into()))
@@ -345,7 +448,7 @@ mod tests {
             let _route = RouteProbe(released);
             handshake.wait_for_node()
         });
-        let request = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let request = admission_request(receiver.recv_timeout(Duration::from_secs(1)).unwrap());
         request
             .response
             .send(RouteAdmissionResponse::Shutdown)

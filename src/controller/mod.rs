@@ -27,8 +27,10 @@ mod runtime;
 pub(crate) use self::runtime::execute_action;
 #[allow(unused_imports)]
 pub(crate) use self::runtime::loop_parallel_argument;
-pub(crate) use self::runtime::NodeAdmissionDeferred;
+#[cfg(test)]
+pub(crate) use self::runtime::test_node_lease;
 pub use self::runtime::RouteNodeAdmission;
+pub(crate) use self::runtime::{NodeAdmissionDeferred, WorkerNodeLease};
 // `main.rs` declares its own `mod controller` tree (see the `[[bin]]` target
 // in Cargo.toml) and is the only caller of this path; that's a separate
 // compilation from this lib target, so this re-export is invisible to the

@@ -4,6 +4,7 @@ use crate::dispatch::test_util::{gah_config, init_repo, profile};
 use crate::test_support::{ExecGuard, PathGuard};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -17,6 +18,67 @@ fn make_fake_bin(bin_dir: &Path, name: &str, body: &str) {
         perms.set_mode(0o755);
         fs::set_permissions(&path, perms).unwrap();
     }
+}
+
+fn pm_action() -> crate::controller::NextAction {
+    crate::controller::NextAction::DecomposeIssue {
+        ticket_path: "#781".into(),
+        work_id: "#781".into(),
+        title: Some("Admission test".into()),
+        reason: "test".into(),
+    }
+}
+
+fn pm_identity() -> crate::execution_identity::ExecutionIdentity {
+    crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        format!("pm-admission-test-{}", std::process::id()),
+        Some("planner"),
+        None::<String>,
+    )
+}
+
+#[test]
+fn pm_backend_starts_only_after_node_admission() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prof = profile(tmp.path());
+    let (lease, lease_path) = crate::controller::test_node_lease(tmp.path()).unwrap();
+    let admission = crate::controller::RouteNodeAdmission::test_admitted(pm_action(), lease);
+
+    let backend_started = AtomicBool::new(false);
+    run_pm_backend_attempt(&prof, &pm_identity(), Some(&admission), 0, || {
+        assert!(
+            lease_path.exists(),
+            "PM callback must run only while its admitted lease is live"
+        );
+        backend_started.store(true, Ordering::Release);
+        Ok(())
+    })
+    .unwrap();
+    assert!(backend_started.load(Ordering::Acquire));
+    assert!(
+        !lease_path.exists(),
+        "PM attempt must release its node lease after the backend slot"
+    );
+}
+
+#[test]
+fn pm_node_deferral_launches_no_backend() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prof = profile(tmp.path());
+    let admission =
+        crate::controller::RouteNodeAdmission::test_deferred(pm_action(), "memory reserve");
+    let backend_started = AtomicBool::new(false);
+
+    let result = run_pm_backend_attempt(&prof, &pm_identity(), Some(&admission), 0, || {
+        backend_started.store(true, Ordering::Release);
+        Ok(())
+    });
+
+    let error = result.expect_err("node pressure must defer PM");
+    assert!(error
+        .downcast_ref::<crate::controller::NodeAdmissionDeferred>()
+        .is_some());
+    assert!(!backend_started.load(Ordering::Acquire));
 }
 
 fn setup_fake_gh(bin_dir: &Path, issue_json: &str, open_pr_json: &str, merged_pr_json: &str) {

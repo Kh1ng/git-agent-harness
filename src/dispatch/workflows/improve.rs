@@ -1,9 +1,8 @@
 use super::super::attempts::{
     apply_route_to_ledger, attempt_usage, classify_git_operation_result, classify_worktree_result,
     clear_wip_checkpoints, decide_route, failure_text_with_internal_log, preflight_identity,
-    record_route_attempt, reserve_initial_backend_slot, resolve_llm,
-    route_after_backend_unavailable, route_identity, route_label, run_backend_with_reserved_route,
-    wip_checkpoint_branch,
+    record_route_attempt, reserve_backend_attempt, resolve_llm, route_after_backend_unavailable,
+    route_identity, route_label, run_backend_with_reserved_route, wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
@@ -142,14 +141,6 @@ pub(crate) fn improve(
     )?;
     apply_route_to_ledger(ledger, &route);
     preflight_identity(profile, &route.identity)?;
-    // Reserve the selected route before requesting node admission. The route
-    // stays alive through the first backend attempt; if node admission is
-    // rejected, both guards unwind before any backend starts.
-    let mut initial_route_slot = Some(reserve_initial_backend_slot(
-        profile,
-        &route.identity,
-        args,
-    )?);
     let mut llm = resolve_llm(
         cfg,
         args,
@@ -389,11 +380,11 @@ pub(crate) fn improve(
             }
         };
         task = context;
-        let reserved_route_slot = if attempt == 0 {
-            initial_route_slot.take()
-        } else {
-            None
-        };
+        let admission_guard =
+            reserve_backend_attempt(profile, &route.identity, args.route_admission.as_ref())
+                .map_err(|error| {
+                    super::super::contextualize_capacity_deferral(error, attempt as usize)
+                })?;
         record_route_attempt(ledger, &route)?;
         let result = run_backend_with_reserved_route(
             &route.identity,
@@ -403,9 +394,10 @@ pub(crate) fn improve(
             &attempt_session,
             &llm,
             env_path,
-            reserved_route_slot.is_some(),
+            true,
             None,
         );
+        drop(admission_guard);
         let result = match result {
             Ok(r) => r,
             Err(e) => {

@@ -392,6 +392,32 @@ fn read_psi_avg10(path: &str, class: &str) -> Option<f64> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_lease(dir: &Path) -> std::io::Result<(NodeCapacityLease, PathBuf)> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("test-{}.lease", uuid::Uuid::new_v4()));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    file.lock_exclusive()?;
+    file.write_all(
+        encode_reservation(WorkerReservation {
+            memory_bytes: GIB,
+            cpu_units: 0.5,
+        })
+        .as_bytes(),
+    )?;
+    Ok((
+        NodeCapacityLease {
+            path: path.clone(),
+            _file: file,
+        },
+        path,
+    ))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -38,10 +38,12 @@ mod admission;
 mod merge;
 #[path = "runtime/node_capacity.rs"]
 mod node_capacity;
+#[cfg(test)]
+pub(crate) use node_capacity::test_lease as test_node_lease;
 #[path = "runtime/node_reprobe.rs"]
 mod node_reprobe;
-pub(crate) use admission::NodeAdmissionDeferred;
 pub use admission::RouteNodeAdmission;
+pub(crate) use admission::{NodeAdmissionDeferred, WorkerNodeLease};
 use node_reprobe::{NodeCapacityReprobe, WaitOutcome as ReprobeWaitOutcome};
 #[path = "runtime/pm.rs"]
 mod pm;

@@ -123,16 +123,94 @@ pub(super) fn reserve_backend_slot(
     }
 }
 
-pub(super) fn reserve_initial_backend_slot(
+pub(super) struct BackendAdmissionGuard {
+    _route: routing::ConcurrencyGuard,
+    _node: Option<crate::controller::WorkerNodeLease>,
+}
+
+/// A parallel sibling reached routing after another worker reserved the only
+/// available backend/model slot. This is typed capacity contention, not a
+/// failed backend execution.
+pub fn capacity_deferred_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::routing::RouteError>()
+            .is_some_and(crate::routing::RouteError::is_capacity_deferral)
+            || cause
+                .downcast_ref::<crate::controller::NodeAdmissionDeferred>()
+                .is_some()
+            || cause
+                .downcast_ref::<PostAttemptCapacityDeferred>()
+                .is_some()
+    })
+}
+
+pub fn node_capacity_deferred_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::controller::NodeAdmissionDeferred>()
+            .is_some()
+            || cause
+                .downcast_ref::<PostAttemptCapacityDeferred>()
+                .is_some_and(|deferred| deferred.node_capacity)
+    })
+}
+
+#[derive(Debug)]
+struct PostAttemptCapacityDeferred {
+    attempts_completed: usize,
+    node_capacity: bool,
+    detail: String,
+}
+
+impl std::fmt::Display for PostAttemptCapacityDeferred {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "fallback capacity deferred after {} backend attempt(s): {}",
+            self.attempts_completed, self.detail
+        )
+    }
+}
+
+impl std::error::Error for PostAttemptCapacityDeferred {}
+
+pub(crate) fn contextualize_capacity_deferral(
+    error: anyhow::Error,
+    attempts_completed: usize,
+) -> anyhow::Error {
+    if attempts_completed == 0 || !capacity_deferred_error(&error) {
+        return error;
+    }
+    PostAttemptCapacityDeferred {
+        attempts_completed,
+        node_capacity: node_capacity_deferred_error(&error),
+        detail: error.to_string(),
+    }
+    .into()
+}
+
+pub(crate) fn post_attempt_capacity_deferral(error: &anyhow::Error) -> Option<usize> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<PostAttemptCapacityDeferred>()
+            .map(|deferred| deferred.attempts_completed)
+    })
+}
+
+pub(super) fn reserve_backend_attempt(
     profile: &Profile,
     identity: &crate::execution_identity::ExecutionIdentity,
-    args: &DispatchArgs,
-) -> Result<routing::ConcurrencyGuard> {
-    let slot = reserve_backend_slot(profile, identity, args.route_admission.is_none())?;
-    if let Some(route_admission) = &args.route_admission {
-        route_admission.wait_for_node()?;
-    }
-    Ok(slot)
+    route_admission: Option<&crate::controller::RouteNodeAdmission>,
+) -> Result<BackendAdmissionGuard> {
+    let route = reserve_backend_slot(profile, identity, route_admission.is_none())?;
+    let node = route_admission
+        .map(crate::controller::RouteNodeAdmission::wait_for_node)
+        .transpose()?;
+    Ok(BackendAdmissionGuard {
+        _route: route,
+        _node: node,
+    })
 }
 
 pub(super) fn apply_backend_instance_env(

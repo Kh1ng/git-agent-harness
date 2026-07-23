@@ -43,14 +43,21 @@ pub(super) fn record_capacity_deferral(
         args.run_id.as_deref(),
         format!("{label}: deferred_capacity: {error:#}{route_state}"),
     )?;
+    Ok(Some(capacity_deferral_outcome(label, error)))
+}
+
+fn capacity_deferral_outcome(label: &str, error: &anyhow::Error) -> String {
     let capacity = if crate::dispatch::node_capacity_deferred_error(error) {
         "node"
     } else {
         "configured route"
     };
-    Ok(Some(format!(
-        "Deferred {label} because {capacity} capacity is busy; no backend launched"
-    )))
+    if let Some(attempts) = crate::dispatch::post_attempt_capacity_deferral(error) {
+        return format!(
+            "Deferred {label} fallback because {capacity} capacity is busy after {attempts} backend attempt(s); prior backend outcome preserved"
+        );
+    }
+    format!("Deferred {label} because {capacity} capacity is busy; no backend launched")
 }
 
 /// Hash JSON objects by sorted key, not serializer iteration order. Profile
@@ -89,5 +96,37 @@ fn hash_canonical_json(value: &serde_json::Value, hasher: &mut impl Hasher) {
                 hash_canonical_json(&values[key], hasher);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capacity_deferral_outcome;
+
+    #[test]
+    fn prelaunch_node_deferral_says_no_backend_launched() {
+        let error = anyhow::Error::new(crate::controller::NodeAdmissionDeferred(
+            "memory reserve".into(),
+        ));
+        assert_eq!(
+            capacity_deferral_outcome("review_mr", &error),
+            "Deferred review_mr because node capacity is busy; no backend launched"
+        );
+    }
+
+    #[test]
+    fn review_fallback_deferral_preserves_prior_attempt_attribution() {
+        let error = crate::dispatch::contextualize_capacity_deferral(
+            anyhow::Error::new(crate::controller::NodeAdmissionDeferred(
+                "memory reserve".into(),
+            )),
+            1,
+        );
+        let outcome = capacity_deferral_outcome("review_mr", &error);
+        assert_eq!(
+            outcome,
+            "Deferred review_mr fallback because node capacity is busy after 1 backend attempt(s); prior backend outcome preserved"
+        );
+        assert!(!outcome.contains("no backend launched"));
     }
 }

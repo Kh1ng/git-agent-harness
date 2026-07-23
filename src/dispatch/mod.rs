@@ -58,37 +58,17 @@ pub(crate) fn validate_pm_source_depth(
     workflows::validate_pm_source_depth(profile, target)
 }
 
-pub use self::attempts::review_preflight;
-pub(crate) use self::attempts::routing_runtime_state_from_entries;
+pub use self::attempts::{capacity_deferred_error, node_capacity_deferred_error, review_preflight};
+pub(crate) use self::attempts::{
+    contextualize_capacity_deferral, post_attempt_capacity_deferral,
+    routing_runtime_state_from_entries,
+};
 
 use self::claims::check_duplicate_work;
 pub(crate) use self::claims::duplicate_work_error;
 pub(crate) use self::claims::scan_available_tickets_with_dependencies;
 pub use self::claims::{merge_branch, MergeExecution};
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
-
-/// A parallel sibling reached routing after another worker reserved the only
-/// available backend/model slot. This is typed capacity contention, not a
-/// failed backend execution; the controller should close the run as deferred
-/// and retry it on a later iteration without alarming the operator.
-pub fn capacity_deferred_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<crate::routing::RouteError>()
-            .is_some_and(crate::routing::RouteError::is_capacity_deferral)
-            || cause
-                .downcast_ref::<crate::controller::NodeAdmissionDeferred>()
-                .is_some()
-    })
-}
-
-pub fn node_capacity_deferred_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<crate::controller::NodeAdmissionDeferred>()
-            .is_some()
-    })
-}
 
 fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
     review_budget_exhausted_error(error).is_none() && !capacity_deferred_error(error)
