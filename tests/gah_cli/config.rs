@@ -1,12 +1,12 @@
-use serde_json::Value;
+use super::*;
 
 fn config_with_profile() -> (tempfile::TempDir, std::path::PathBuf) {
-    let tmp = super::super::test_tempdir();
+    let tmp = test_tempdir();
     let config = tmp.path().join("config.toml");
     let artifact_root = tmp.path().join("artifacts");
     std::fs::write(&config, "[defaults]\ncurrent_manager = \"codex\"\n").unwrap();
 
-    super::super::bin()
+    bin()
         .args([
             "profile",
             "add",
@@ -36,7 +36,7 @@ fn config_with_profile() -> (tempfile::TempDir, std::path::PathBuf) {
 fn bare_json_shape_remains_byte_for_byte_compatible() {
     let (_tmp, config) = config_with_profile();
 
-    super::super::bin()
+    bin()
         .args([
             "config",
             "show",
@@ -52,7 +52,7 @@ fn bare_json_shape_remains_byte_for_byte_compatible() {
 #[test]
 fn full_json_is_versioned_and_profile_keyed() {
     let (_tmp, config) = config_with_profile();
-    let output = super::super::bin()
+    let output = bin()
         .args([
             "config",
             "show",
@@ -81,11 +81,8 @@ fn full_json_is_versioned_and_profile_keyed() {
 
 #[test]
 fn full_and_profile_require_machine_readable_mode() {
-    super::super::bin()
-        .args(["config", "show", "--full"])
-        .assert()
-        .failure();
-    super::super::bin()
+    bin().args(["config", "show", "--full"]).assert().failure();
+    bin()
         .args(["config", "show", "--json", "--profile", "test"])
         .assert()
         .failure();
