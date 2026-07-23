@@ -25,9 +25,10 @@ pub(in crate::dispatch) fn enforce_context_budget(
     session_dir: &Path,
     run_id: Option<&str>,
     ledger: &mut LedgerEntry,
-) -> Result<String> {
+    review_project_brief: Option<crate::context::ReviewProjectBriefContext>,
+) -> Result<crate::context::ContextBuild> {
     let context_cfg = cfg.context.effective(profile_name, backend);
-    let build = match crate::context::enforce(prompt, &context_cfg) {
+    let mut build = match crate::context::enforce(prompt, &context_cfg) {
         Ok(build) => build,
         Err(err) => {
             ledger.set_failure(
@@ -41,6 +42,7 @@ pub(in crate::dispatch) fn enforce_context_budget(
             return Err(err);
         }
     };
+    build.review_project_brief = review_project_brief;
     ledger.context_phase = Some(phase.to_string());
     ledger.context_estimated_tokens_before = Some(build.estimated_tokens_before_reduction);
     ledger.context_estimated_tokens_after = Some(build.estimated_tokens_after_reduction);
@@ -62,6 +64,7 @@ pub(in crate::dispatch) fn enforce_context_budget(
         "issue_section_names": build.issue_section_names,
         "largest_sections": build.largest_sections,
         "sources": build.sources,
+        "review_project_brief": build.review_project_brief,
     });
     let _ = crate::events::record_with_run_id(
         cfg,
@@ -71,7 +74,7 @@ pub(in crate::dispatch) fn enforce_context_budget(
         run_id,
         details.to_string(),
     );
-    Ok(build.prompt)
+    Ok(build)
 }
 
 pub(super) const PROJECT_BRIEF_MAX_BYTES: usize = 10_000;

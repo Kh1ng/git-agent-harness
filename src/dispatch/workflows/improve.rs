@@ -368,7 +368,7 @@ pub(crate) fn improve(
                 task = format!("{task}\n\n## Prior Phase Context\n{previous}");
             }
         }
-        task = match enforce_context_budget(
+        let context = match enforce_context_budget(
             cfg,
             profile,
             &args.profile,
@@ -379,13 +379,15 @@ pub(crate) fn improve(
             &attempt_session,
             args.run_id.as_deref(),
             ledger,
+            None,
         ) {
-            Ok(prompt) => prompt,
+            Ok(build) => build.prompt,
             Err(err) => {
                 worktree::cleanup(&wt, repo);
                 return Err(err);
             }
         };
+        task = context;
         let reserved_route_slot = if attempt == 0 {
             initial_route_slot.take()
         } else {

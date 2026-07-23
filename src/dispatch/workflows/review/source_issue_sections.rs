@@ -295,7 +295,7 @@ mod tests {
             &prompt,
             &ContextConfig {
                 soft_limit_tokens: 10,
-                hard_limit_tokens: 250,
+                hard_limit_tokens: 2_000,
                 ..Default::default()
             },
         )
