@@ -36,6 +36,11 @@ fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
         "GAH_VALIDATION_CHECK_PATH",
         state_root.join("validation.json"),
     );
+    // Capacity leases are node-global in production. These integration
+    // children use fake workers and run concurrently, so give each test its
+    // own registry instead of letting unrelated test processes reserve slots
+    // from one another.
+    cmd.env("XDG_RUNTIME_DIR", state_root.join("runtime"));
     cmd.env("TMPDIR", support::test_temp_root());
     cmd.env("GAH_TEST_NODE_PRESSURE_FILE", node_pressure);
     #[cfg(unix)]

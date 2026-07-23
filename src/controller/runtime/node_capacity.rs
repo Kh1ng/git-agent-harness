@@ -297,10 +297,15 @@ fn decode_reservation(encoded: &str) -> std::io::Result<WorkerReservation> {
         .next()
         .and_then(|value| value.parse().ok())
         .ok_or_else(|| std::io::Error::other("invalid node-capacity memory reservation"))?;
-    let cpu_units = fields
+    let cpu_units: f64 = fields
         .next()
         .and_then(|value| value.parse().ok())
         .ok_or_else(|| std::io::Error::other("invalid node-capacity CPU reservation"))?;
+    if !cpu_units.is_finite() || cpu_units < 0.0 {
+        return Err(std::io::Error::other(
+            "node-capacity CPU reservation must be finite and non-negative",
+        ));
+    }
     if fields.next().is_some() {
         return Err(std::io::Error::other(
             "unexpected fields in node-capacity reservation",
@@ -533,6 +538,23 @@ mod tests {
                 cpu_units: 2.0,
             }
         );
+    }
+
+    #[test]
+    fn reservation_decoder_rejects_non_finite_and_negative_cpu() {
+        for encoded in [
+            "1073741824 NaN\n",
+            "1073741824 inf\n",
+            "1073741824 -inf\n",
+            "1073741824 -0.5\n",
+        ] {
+            let error =
+                decode_reservation(encoded).expect_err("unsafe CPU reservation must fail closed");
+            assert!(
+                error.to_string().contains("finite and non-negative"),
+                "unexpected error for {encoded:?}: {error}"
+            );
+        }
     }
 
     #[test]
