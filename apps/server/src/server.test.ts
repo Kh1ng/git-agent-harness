@@ -5,6 +5,9 @@ import { resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import type { ConfigProfileSummary, DoctorSnapshot } from '@git-agent-harness/contracts';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function profilePayload(profile: string): ConfigProfileSummary {
   return {
@@ -54,6 +57,10 @@ async function withTestServer(
   coordinatorPort?: number
 ) {
   resetCachedCoordinatorIdentity();
+  const tmpIdentityDir = mkdtempSync(join(tmpdir(), 'gah-test-identity-'));
+  const savedIdentityPath = process.env.GAH_COORDINATOR_IDENTITY_PATH;
+  process.env.GAH_COORDINATOR_IDENTITY_PATH = join(tmpIdentityDir, 'coordinator-identity.json');
+  resetCachedCoordinatorIdentity();
   const app = createServer({
     runConfigShowProfile: runProfile,
     ...(runDoctor ? { runDoctor } : {}),
@@ -75,6 +82,12 @@ async function withTestServer(
         resolve();
       });
     });
+    if (savedIdentityPath !== undefined) {
+      process.env.GAH_COORDINATOR_IDENTITY_PATH = savedIdentityPath;
+    } else {
+      delete process.env.GAH_COORDINATOR_IDENTITY_PATH;
+    }
+    resetCachedCoordinatorIdentity();
   }
 }
 
