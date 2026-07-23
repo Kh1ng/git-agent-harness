@@ -982,6 +982,7 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
                         format!("; {states}")
                     }
                 );
+                println!("      eligible when: {}", blocked.eligible_when);
             }
         }
 

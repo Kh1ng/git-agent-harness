@@ -175,6 +175,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const recentSessions = sessions.filter((s) => ['stopped', 'error'].includes(s.status)).slice(0, 5);
   const tickets = status.data?.available_tickets ?? [];
   const issueIntakeRejections = status.data?.issue_intake_rejections ?? [];
+  const dependencyBlockers = status.data?.dependency_blockers ?? [];
   const activeClaims = status.data?.active_claims ?? [];
   const heldWorkIds = new Set(status.data?.review_held_work_ids ?? []);
 
@@ -381,6 +382,68 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                       <StatusBadge tone="warning" label={rejection.reason_code} />
                     </td>
                     <td className="text-sm text-muted">{rejection.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h3 className="text-sm font-semibold text-primary mb-3">
+          Dependency blockers ({dependencyBlockers.length})
+        </h3>
+        {status.loading && !status.data ? (
+          <LoadingState label="Loading dependency blockers…" />
+        ) : dependencyBlockers.length === 0 ? (
+          <EmptyState
+            icon={ListChecks}
+            title="No dependency blockers"
+            description="All discovered issues are currently eligible or blocked for other reasons."
+          />
+        ) : (
+          <div className="card overflow-x-auto">
+            <table className="table-base min-w-[860px]">
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Block reason</th>
+                  <th>Dependencies</th>
+                  <th>Eligibility</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dependencyBlockers.map((blocked) => (
+                  <tr key={`${blocked.work_id}-${blocked.reason_code}`}>
+                    <td className="text-primary">
+                      <span className="font-mono text-xs text-muted mr-1.5">{blocked.work_id}</span>
+                      {blocked.title}
+                    </td>
+                    <td>
+                      <div className="flex flex-col gap-1">
+                        <StatusBadge tone="warning" label={blocked.reason_code} />
+                        <span className="text-sm text-muted">{blocked.reason}</span>
+                      </div>
+                    </td>
+                    <td className="text-sm text-muted">
+                      {blocked.dependencies.length === 0 ? (
+                        'No resolved dependency details'
+                      ) : (
+                        <ul className="space-y-1">
+                          {blocked.dependencies.map((dependency) => (
+                            <li key={`${blocked.work_id}-${dependency.identity}`}>
+                              <span className="font-mono text-xs text-primary">{dependency.identity}</span>
+                              <span className="ml-2">
+                                {dependency.normalized_state}
+                                {dependency.provider_state ? ` (${dependency.provider_state})` : ''}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </td>
+                    <td className="text-sm text-muted">{blocked.eligible_when}</td>
                   </tr>
                 ))}
               </tbody>

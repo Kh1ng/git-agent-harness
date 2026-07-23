@@ -22,11 +22,63 @@ pub(crate) struct IssueDetails {
 /// Minimal provider record used for dependency graph resolution. Unlike
 /// autonomous intake, prerequisite lookup intentionally does not require the
 /// dependency issue itself to carry an execution label or trusted author.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) struct DependencyIssue {
     pub(super) number: String,
+    pub(super) target: DependencyLookupTarget,
     pub(super) body: String,
     pub(super) state: Option<String>,
+    pub(super) native_dependencies: Vec<DependencyLookupTarget>,
+}
+
+/// Provider-neutral identity for a dependency relationship target.
+///
+/// `SameProject` is the canonical same-repo/project fallback used by the
+/// legacy `Blocked by: #N, #M` parser. Native issue relations can also carry
+/// explicit cross-project identity when the provider exposes it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) enum DependencyLookupTarget {
+    SameProject { number: String },
+    GithubRepo { repo: String, number: String },
+    GitlabProject { project_id: String, number: String },
+}
+
+impl DependencyLookupTarget {
+    pub(super) fn same_project(number: impl Into<String>) -> Self {
+        Self::SameProject {
+            number: number.into(),
+        }
+    }
+
+    pub(super) fn number(&self) -> &str {
+        match self {
+            Self::SameProject { number }
+            | Self::GithubRepo { number, .. }
+            | Self::GitlabProject { number, .. } => number,
+        }
+    }
+
+    pub(super) fn display_identity(&self) -> String {
+        match self {
+            Self::SameProject { number } => format!("#{number}"),
+            Self::GithubRepo { repo, number } => format!("{repo}#{number}"),
+            Self::GitlabProject { project_id, number } => {
+                format!("project:{project_id}#{number}")
+            }
+        }
+    }
+
+    pub(super) fn cache_key(&self, provider: &str) -> String {
+        match self {
+            Self::SameProject { number } => format!("{provider}:#{number}"),
+            Self::GithubRepo { repo, number } => format!("github:{repo}#{number}"),
+            Self::GitlabProject { project_id, number } => {
+                format!("gitlab:project:{project_id}#{number}")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +215,187 @@ fn login_matches(login: &str, candidates: &[String]) -> bool {
     candidates
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(login))
+}
+
+#[allow(dead_code)]
+fn github_repo_from_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let segments = parsed.path_segments()?;
+    let parts = segments.collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["repos", owner, repo] => Some(format!("{owner}/{repo}")),
+        ["repos", owner, repo, ..] => Some(format!("{owner}/{repo}")),
+        _ => None,
+    }
+}
+
+fn github_issue_endpoint(repo: &str, issue_number: &str) -> String {
+    format!("repos/{repo}/issues/{issue_number}")
+}
+
+#[allow(dead_code)]
+fn github_dependency_endpoint(repo: &str, issue_number: &str) -> String {
+    format!("repos/{repo}/issues/{issue_number}/dependencies/blocked_by")
+}
+
+fn github_request(endpoint: &str) -> Result<serde_json::Value> {
+    let out = provider_command("gh")
+        .args(["api", "--method", "GET", endpoint])
+        .output()
+        .context("GitHub REST issue dependency lookup")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "GitHub REST issue dependency lookup failed for {}: {}",
+            endpoint,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("parsing GitHub REST response for {endpoint}"))
+}
+
+fn gitlab_issue_endpoint(project_id: &str, issue_number: &str) -> String {
+    format!("projects/{project_id}/issues/{issue_number}")
+}
+
+#[allow(dead_code)]
+fn gitlab_dependency_endpoint(project_id: &str, issue_number: &str) -> String {
+    format!("projects/{project_id}/issues/{issue_number}/links")
+}
+
+#[allow(dead_code)]
+fn target_for_native_issue(
+    profile: &Profile,
+    number: &str,
+    value: &serde_json::Value,
+) -> DependencyLookupTarget {
+    match profile.provider.to_ascii_lowercase().as_str() {
+        "github" => {
+            let repo = value
+                .get("repository_url")
+                .and_then(|url| url.as_str())
+                .and_then(github_repo_from_url)
+                .unwrap_or_else(|| profile.repo.clone());
+            if repo.eq_ignore_ascii_case(&profile.repo) {
+                DependencyLookupTarget::same_project(number)
+            } else {
+                DependencyLookupTarget::GithubRepo {
+                    repo,
+                    number: number.to_string(),
+                }
+            }
+        }
+        "gitlab" => {
+            let project_id = value
+                .get("project_id")
+                .and_then(|id| id.as_i64().map(|value| value.to_string()))
+                .or_else(|| {
+                    value
+                        .get("project_id")
+                        .and_then(|id| id.as_str().map(ToOwned::to_owned))
+                })
+                .unwrap_or_else(|| profile.provider_project_id.clone().unwrap_or_default());
+            if profile
+                .provider_project_id
+                .as_deref()
+                .is_some_and(|configured| configured == project_id)
+            {
+                DependencyLookupTarget::same_project(number)
+            } else {
+                DependencyLookupTarget::GitlabProject {
+                    project_id,
+                    number: number.to_string(),
+                }
+            }
+        }
+        _ => DependencyLookupTarget::same_project(number),
+    }
+}
+
+#[allow(dead_code)]
+pub(super) fn fetch_native_dependency_targets(
+    profile: &Profile,
+    target: &DependencyLookupTarget,
+) -> Result<Vec<DependencyLookupTarget>> {
+    match profile.provider.to_ascii_lowercase().as_str() {
+        "github" => {
+            let repo = match target {
+                DependencyLookupTarget::SameProject { .. } => profile.repo.as_str(),
+                DependencyLookupTarget::GithubRepo { repo, .. } => repo.as_str(),
+                DependencyLookupTarget::GitlabProject { .. } => {
+                    anyhow::bail!("gitlab dependency target cannot be resolved by GitHub")
+                }
+            };
+            let endpoint = github_dependency_endpoint(repo, target.number());
+            let value = github_request(&endpoint)?;
+            let issues = value
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("GitHub dependency response was not an array"))?;
+            let mut dependencies = Vec::new();
+            for issue in issues {
+                let number = issue["number"]
+                    .as_u64()
+                    .map(|value| value.to_string())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("GitHub dependency response missing issue number")
+                    })?;
+                dependencies.push(target_for_native_issue(profile, &number, issue));
+            }
+            Ok(dependencies)
+        }
+        "gitlab" => {
+            let project_id = match target {
+                DependencyLookupTarget::SameProject { .. } => {
+                    profile.provider_project_id.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("profile missing provider_project_id for gitlab")
+                    })?
+                }
+                DependencyLookupTarget::GitlabProject { project_id, .. } => project_id.as_str(),
+                DependencyLookupTarget::GithubRepo { .. } => {
+                    anyhow::bail!("github dependency target cannot be resolved by GitLab")
+                }
+            };
+            let value = gitlab_api(
+                profile,
+                &gitlab_dependency_endpoint(project_id, target.number()),
+                "GET",
+                &[],
+            )?;
+            let issues = value
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("GitLab dependency response was not an array"))?;
+            let mut dependencies = Vec::new();
+            for issue in issues {
+                if issue["link_type"].as_str() != Some("is_blocked_by") {
+                    continue;
+                }
+                let number = issue["iid"]
+                    .as_i64()
+                    .map(|value| value.to_string())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("GitLab dependency response missing issue iid")
+                    })?;
+                let project_id = issue["project_id"]
+                    .as_i64()
+                    .map(|value| value.to_string())
+                    .or_else(|| issue["project_id"].as_str().map(ToOwned::to_owned))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("GitLab dependency response missing project_id")
+                    })?;
+                if profile
+                    .provider_project_id
+                    .as_deref()
+                    .is_some_and(|configured| configured == project_id)
+                {
+                    dependencies.push(DependencyLookupTarget::same_project(number));
+                } else {
+                    dependencies.push(DependencyLookupTarget::GitlabProject { project_id, number });
+                }
+            }
+            Ok(dependencies)
+        }
+        other => anyhow::bail!("unsupported provider: {other}"),
+    }
 }
 
 fn issue_author_kind_to_str(kind: IssueAuthorKind) -> &'static str {
@@ -517,72 +750,57 @@ fn fetch_gitlab_issue(
 
 pub(super) fn fetch_dependency_issue(
     profile: &Profile,
-    issue_number: &str,
+    target: &DependencyLookupTarget,
 ) -> Result<DependencyIssue> {
-    let cli = profile.provider_cli().ok_or_else(|| {
-        anyhow::anyhow!(
-            "provider '{}' does not support dependency lookup",
-            profile.provider
-        )
-    })?;
-    let output = match cli {
-        "gh" => {
-            let endpoint = format!("repos/{}/issues/{issue_number}", profile.repo);
-            provider_command("gh")
-                .args(["api", "--method", "GET", &endpoint])
-                .output()
-                .context("GitHub REST dependency issue lookup")?
+    let value = match profile.provider.to_ascii_lowercase().as_str() {
+        "github" => {
+            let repo = match target {
+                DependencyLookupTarget::SameProject { .. } => profile.repo.as_str(),
+                DependencyLookupTarget::GithubRepo { repo, .. } => repo.as_str(),
+                DependencyLookupTarget::GitlabProject { .. } => {
+                    anyhow::bail!("gitlab dependency target cannot be resolved by GitHub")
+                }
+            };
+            github_request(&github_issue_endpoint(repo, target.number()))?
         }
-        "glab" => {
-            let project_id = profile
-                .provider_project_id
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
-            let value = gitlab_api(
+        "gitlab" => {
+            let project_id = match target {
+                DependencyLookupTarget::SameProject { .. } => {
+                    profile.provider_project_id.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("profile missing provider_project_id for gitlab")
+                    })?
+                }
+                DependencyLookupTarget::GitlabProject { project_id, .. } => project_id.as_str(),
+                DependencyLookupTarget::GithubRepo { .. } => {
+                    anyhow::bail!("github dependency target cannot be resolved by GitLab")
+                }
+            };
+            gitlab_api(
                 profile,
-                &format!("projects/{project_id}/issues/{issue_number}"),
+                &gitlab_issue_endpoint(project_id, target.number()),
                 "GET",
                 &[],
-            )?;
-            let number = value["iid"]
-                .as_i64()
-                .map(|number| number.to_string())
-                .unwrap_or_else(|| issue_number.to_string());
-            let body = value["description"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            let state = value["state"].as_str().map(str::to_string);
-            return Ok(DependencyIssue {
-                number,
-                body,
-                state,
-            });
+            )?
         }
-        other => anyhow::bail!("unsupported provider CLI: {other}"),
+        other => anyhow::bail!("unsupported provider: {other}"),
     };
-    if !output.status.success() {
-        anyhow::bail!(
-            "{} dependency issue #{} query failed: {}",
-            profile.provider,
-            issue_number,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("parsing {} dependency issue response", profile.provider))?;
-    let number = if cli == "gh" {
-        value["number"].as_i64()
-    } else {
-        value["iid"].as_i64()
+    let number = match profile.provider.to_ascii_lowercase().as_str() {
+        "github" => value["number"].as_u64(),
+        _ => value["iid"].as_i64().map(|number| number as u64),
     }
     .map(|number| number.to_string())
-    .unwrap_or_else(|| issue_number.to_string());
-    let body_key = if cli == "gh" { "body" } else { "description" };
+    .unwrap_or_else(|| target.number().to_string());
+    let body_key = if profile.provider.eq_ignore_ascii_case("github") {
+        "body"
+    } else {
+        "description"
+    };
     Ok(DependencyIssue {
         number,
+        target: target.clone(),
         body: value[body_key].as_str().unwrap_or_default().to_string(),
         state: value["state"].as_str().map(str::to_string),
+        native_dependencies: vec![],
     })
 }
 

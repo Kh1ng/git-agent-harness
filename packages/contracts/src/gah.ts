@@ -278,6 +278,7 @@ export interface DependencyBlocker {
   reason_code: string;
   reason: string;
   dependencies: DependencyObservation[];
+  eligible_when: string;
 }
 
 export interface ActiveClaim {

@@ -246,6 +246,7 @@ pub struct DependencyBlocker {
     pub reason_code: String,
     pub reason: String,
     pub dependencies: Vec<DependencyObservation>,
+    pub eligible_when: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

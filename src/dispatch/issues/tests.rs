@@ -955,7 +955,7 @@ fn github_dependency_chain_excludes_653_while_652_is_open() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            "#!/bin/sh\nif [ \"$4\" = \"repos/owner/repo/issues?state=open&per_page=100&page=1\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$4\" = \"repos/owner/repo/issues/652\" ]; then\n  printf '%s\\n' '{{\"number\":652,\"title\":\"Approval scope\",\"body\":\"\",\"labels\":[],\"author\":{{\"login\":\"owner\",\"type\":\"User\",\"is_bot\":false}},\"state\":\"OPEN\"}}'\nelse\n  exit 2\nfi\n",
             issues.to_string().replace('\'', "'\\''")
         ),
     )
@@ -1082,7 +1082,7 @@ fn gitlab_provider_fixture_reproduces_sportsball_dependency_chains() {
     fs::write(
         &glab_path,
         format!(
-            "#!/bin/sh\ncase \"$*\" in\n  *projects/5/issues/147*--hostname*) printf '%s\\n' '{{\"iid\":147,\"description\":\"\",\"state\":\"opened\"}}'\n  ;;\n  *projects/5/issues/155*--hostname*) printf '%s\\n' '{{\"iid\":155,\"description\":\"\",\"state\":\"closed\"}}'\n  ;;\n  *projects/5/issues/158*--hostname*) printf '%s\\n' '{{\"iid\":158,\"description\":\"\",\"state\":\"opened\"}}'\n  ;;\n  *projects/5/issues*--hostname*) printf '%s\\n' '{}'\n  ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$*\" in\n  *projects/5/issues/147*--hostname*) printf '%s\\n' '{{\"iid\":147,\"description\":\"\",\"state\":\"opened\"}}'\n  ;;\n  *projects/5/issues/148*--hostname*) printf '%s\\n' '{{\"iid\":148,\"description\":\"Blocked by: #147\",\"state\":\"opened\"}}'\n  ;;\n  *projects/5/issues/155*--hostname*) printf '%s\\n' '{{\"iid\":155,\"description\":\"\",\"state\":\"closed\"}}'\n  ;;\n  *projects/5/issues/158*--hostname*) printf '%s\\n' '{{\"iid\":158,\"description\":\"\",\"state\":\"opened\"}}'\n  ;;\n  *projects/5/issues*--hostname*) printf '%s\\n' '{}'\n  ;;\n  *) exit 2 ;;\nesac\n",
             issues.to_string().replace('\'', "'\\''")
         ),
     )

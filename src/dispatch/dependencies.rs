@@ -1,4 +1,6 @@
-use super::issues::{fetch_dependency_issue, DependencyIssue, IssueDetails};
+use super::issues::{
+    fetch_dependency_issue, DependencyIssue, DependencyLookupTarget, IssueDetails,
+};
 use crate::config::Profile;
 use crate::models::{DependencyBlocker, DependencyObservation};
 use std::collections::{HashMap, HashSet};
@@ -83,9 +85,49 @@ fn normalize_state(state: Option<&str>) -> &'static str {
     }
 }
 
+fn dependency_targets_from_body(
+    body: &str,
+) -> Result<Option<Vec<DependencyLookupTarget>>, DependencyFailure> {
+    parse_dependency_line(body).map(|parsed| {
+        parsed.map(|numbers| {
+            numbers
+                .into_iter()
+                .map(DependencyLookupTarget::same_project)
+                .collect::<Vec<_>>()
+        })
+    })
+}
+
+fn dedupe_dependency_targets(targets: Vec<DependencyLookupTarget>) -> Vec<DependencyLookupTarget> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for target in targets {
+        if seen.insert(target.cache_key("dedupe")) {
+            deduped.push(target);
+        }
+    }
+    deduped
+}
+
+fn dependency_targets_for_issue(
+    issue: &DependencyIssue,
+) -> Result<Vec<DependencyLookupTarget>, DependencyFailure> {
+    Ok(dependency_targets_from_body(&issue.body)?
+        .map(dedupe_dependency_targets)
+        .unwrap_or_default())
+}
+
+fn dependency_identity_list(targets: &[DependencyLookupTarget]) -> String {
+    targets
+        .iter()
+        .map(DependencyLookupTarget::display_identity)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 struct Resolver<'a, F>
 where
-    F: FnMut(&str) -> Result<DependencyIssue, String>,
+    F: FnMut(&DependencyLookupTarget) -> Result<DependencyIssue, String>,
 {
     provider: &'a str,
     cache: HashMap<String, CachedIssue>,
@@ -94,46 +136,49 @@ where
 
 impl<'a, F> Resolver<'a, F>
 where
-    F: FnMut(&str) -> Result<DependencyIssue, String>,
+    F: FnMut(&DependencyLookupTarget) -> Result<DependencyIssue, String>,
 {
-    fn resolve(&mut self, number: &str) -> CachedIssue {
-        if let Some(cached) = self.cache.get(number) {
+    fn resolve(&mut self, target: &DependencyLookupTarget) -> CachedIssue {
+        let cache_key = target.cache_key(self.provider);
+        if let Some(cached) = self.cache.get(&cache_key) {
             return cached.clone();
         }
-        let resolved = match (self.fetch)(number) {
+        let resolved = match (self.fetch)(target) {
             Ok(issue) => CachedIssue::Found(issue),
             Err(error) => CachedIssue::Error(error),
         };
-        self.cache.insert(number.to_string(), resolved.clone());
+        self.cache.insert(cache_key, resolved.clone());
         resolved
     }
 
     fn walk(
         &mut self,
-        current: &str,
-        references: &[String],
-        stack: &mut Vec<String>,
+        current: &DependencyLookupTarget,
+        references: &[DependencyLookupTarget],
+        stack: &mut Vec<DependencyLookupTarget>,
         observations: &mut Vec<DependencyObservation>,
     ) -> Result<bool, DependencyFailure> {
+        let current_key = current.cache_key(self.provider);
         let mut has_open = false;
-        for number in references {
-            if number == current || stack.contains(number) {
-                let mut cycle = stack.clone();
-                cycle.push(number.clone());
+        for target in references {
+            let target_key = target.cache_key(self.provider);
+            if target_key == current_key
+                || stack
+                    .iter()
+                    .any(|seen| seen.cache_key(self.provider) == target_key)
+            {
+                let mut cycle = stack
+                    .iter()
+                    .map(DependencyLookupTarget::display_identity)
+                    .collect::<Vec<_>>();
+                cycle.push(target.display_identity());
                 return Err(DependencyFailure {
                     code: "dependency_cycle",
-                    message: format!(
-                        "dependency cycle detected: {}",
-                        cycle
-                            .iter()
-                            .map(|part| format!("#{part}"))
-                            .collect::<Vec<_>>()
-                            .join(" -> ")
-                    ),
+                    message: format!("dependency cycle detected: {}", cycle.join(" -> ")),
                 });
             }
 
-            let issue = match self.resolve(number) {
+            let issue = match self.resolve(target) {
                 CachedIssue::Found(issue) => issue,
                 CachedIssue::Error(error) => {
                     let lower = error.to_ascii_lowercase();
@@ -143,14 +188,17 @@ where
                         ("dependency_query_failed", "inaccessible")
                     };
                     observations.push(DependencyObservation {
-                        identity: format!("#{number}"),
+                        identity: target.display_identity(),
                         provider: self.provider.to_string(),
                         provider_state: None,
                         normalized_state: label.into(),
                     });
                     return Err(DependencyFailure {
                         code,
-                        message: format!("could not resolve dependency #{number}: {error}"),
+                        message: format!(
+                            "could not resolve dependency {}: {error}",
+                            target.display_identity()
+                        ),
                     });
                 }
             };
@@ -158,10 +206,10 @@ where
             let normalized = normalize_state(issue.state.as_deref());
             if !observations
                 .iter()
-                .any(|seen| seen.identity == format!("#{number}"))
+                .any(|seen| seen.identity == target.display_identity())
             {
                 observations.push(DependencyObservation {
-                    identity: format!("#{}", issue.number),
+                    identity: target.display_identity(),
                     provider: self.provider.to_string(),
                     provider_state: issue.state.clone(),
                     normalized_state: normalized.into(),
@@ -172,19 +220,24 @@ where
                 "unknown" => {
                     return Err(DependencyFailure {
                         code: "dependency_unknown_state",
-                        message: format!("dependency #{number} has unknown provider state"),
+                        message: format!(
+                            "dependency {} has unknown provider state",
+                            target.display_identity()
+                        ),
                     });
                 }
                 "open" => has_open = true,
                 _ => unreachable!(),
             }
 
-            let nested = parse_dependency_line(&issue.body)?;
-            if let Some(nested) = nested {
-                stack.push(number.clone());
-                let nested_open = self.walk(number, &nested, stack, observations)?;
-                stack.pop();
-                has_open |= nested_open;
+            if normalized == "open" {
+                let nested = dependency_targets_for_issue(&issue)?;
+                if !nested.is_empty() {
+                    stack.push(target.clone());
+                    let nested_open = self.walk(target, &nested, stack, observations)?;
+                    stack.pop();
+                    has_open |= nested_open;
+                }
             }
         }
         Ok(has_open)
@@ -193,19 +246,9 @@ where
 
 fn evaluate_with<F>(provider: &str, issues: &[IssueDetails], mut fetch: F) -> Vec<DependencyBlocker>
 where
-    F: FnMut(&str) -> Result<DependencyIssue, String>,
+    F: FnMut(&DependencyLookupTarget) -> Result<DependencyIssue, String>,
 {
-    let mut cache = HashMap::new();
-    for issue in issues {
-        cache.insert(
-            issue.number.clone(),
-            CachedIssue::Found(DependencyIssue {
-                number: issue.number.clone(),
-                body: issue.body.clone(),
-                state: issue.state.clone(),
-            }),
-        );
-    }
+    let cache = HashMap::new();
     let mut resolver = Resolver {
         provider,
         cache,
@@ -214,30 +257,62 @@ where
     let mut blockers = Vec::new();
 
     for issue in issues {
-        let parsed = parse_dependency_line(&issue.body);
         let mut observations = Vec::new();
-        let outcome = match parsed {
+        let current_target = DependencyLookupTarget::same_project(issue.number.clone());
+        let references = match dependency_targets_from_body(&issue.body) {
+            Ok(Some(body_refs)) => body_refs,
             Ok(None) => continue,
-            Ok(Some(references)) => resolver
-                .walk(
-                    &issue.number,
-                    &references,
-                    &mut vec![issue.number.clone()],
-                    &mut observations,
-                )
-                .and_then(|has_open| {
-                    if has_open {
-                        Err(DependencyFailure {
-                            code: "dependency_open",
-                            message: "one or more declared prerequisites remain open".into(),
-                        })
-                    } else {
-                        Ok(false)
-                    }
-                }),
-            Err(error) => Err(error),
+            Err(error) => {
+                blockers.push(DependencyBlocker {
+                    ticket_path: issue.number.clone(),
+                    work_id: format!("#{}", issue.number),
+                    title: issue.title.clone(),
+                    reason_code: error.code.into(),
+                    reason: error.message,
+                    dependencies: observations,
+                    eligible_when: "eligible when all prerequisites are closed".into(),
+                });
+                continue;
+            }
         };
+        let outcome = resolver
+            .walk(
+                &current_target,
+                &references,
+                &mut vec![current_target.clone()],
+                &mut observations,
+            )
+            .and_then(|has_open| {
+                if has_open {
+                    Err(DependencyFailure {
+                        code: "dependency_open",
+                        message: "one or more declared prerequisites remain open".into(),
+                    })
+                } else {
+                    Ok(false)
+                }
+            });
         if let Err(error) = outcome {
+            let eligible_when = if observations.is_empty() {
+                dependency_targets_from_body(&issue.body)
+                    .ok()
+                    .and_then(|parsed| parsed)
+                    .map(|body_refs| {
+                        format!(
+                            "eligible when {} close",
+                            dependency_identity_list(&body_refs)
+                        )
+                    })
+            } else {
+                Some(format!(
+                    "eligible when {} close",
+                    observations
+                        .iter()
+                        .map(|dependency| dependency.identity.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            };
             blockers.push(DependencyBlocker {
                 ticket_path: issue.number.clone(),
                 work_id: format!("#{}", issue.number),
@@ -245,6 +320,8 @@ where
                 reason_code: error.code.into(),
                 reason: error.message,
                 dependencies: observations,
+                eligible_when: eligible_when
+                    .unwrap_or_else(|| "eligible when all prerequisites are closed".into()),
             });
         }
     }
@@ -255,8 +332,8 @@ pub(super) fn evaluate_issue_dependencies(
     profile: &Profile,
     issues: &[IssueDetails],
 ) -> Vec<DependencyBlocker> {
-    evaluate_with(&profile.provider, issues, |number| {
-        fetch_dependency_issue(profile, number).map_err(|error| format!("{error:#}"))
+    evaluate_with(&profile.provider, issues, |target| {
+        fetch_dependency_issue(profile, target).map_err(|error| format!("{error:#}"))
     })
 }
 
@@ -275,6 +352,16 @@ mod tests {
         }
     }
 
+    fn dependency_issue(number: &str, state: Option<&str>, body: &str) -> DependencyIssue {
+        DependencyIssue {
+            number: number.into(),
+            target: DependencyLookupTarget::same_project(number),
+            body: body.into(),
+            state: state.map(str::to_string),
+            native_dependencies: vec![],
+        }
+    }
+
     #[test]
     fn strict_parser_rejects_malformed_duplicate_self_and_ambiguous_lines() {
         assert_eq!(parse_dependency_line("no dependencies").unwrap(), None);
@@ -289,7 +376,13 @@ mod tests {
         }
 
         let roots = vec![issue("2", Some("OPEN"), "Blocked by: #2")];
-        let blockers = evaluate_with("github", &roots, |_| unreachable!());
+        let blockers = evaluate_with("github", &roots, |target| {
+            Ok(dependency_issue(
+                target.number(),
+                Some("OPEN"),
+                "Blocked by: #2",
+            ))
+        });
         assert_eq!(blockers[0].reason_code, "dependency_cycle");
     }
 
@@ -300,23 +393,29 @@ mod tests {
             issue("2", Some("OPEN"), "Blocked by: #9"),
         ];
         let calls = RefCell::new(0);
-        let blockers = evaluate_with("github", &roots, |_| {
+        let blockers = evaluate_with("github", &roots, |target| {
             *calls.borrow_mut() += 1;
-            Ok(DependencyIssue {
-                number: "9".into(),
-                body: String::new(),
-                state: Some("OPEN".into()),
-            })
+            match target.number() {
+                "1" | "2" => Ok(dependency_issue(
+                    target.number(),
+                    Some("OPEN"),
+                    "Blocked by: #9",
+                )),
+                "9" => Ok(dependency_issue("9", Some("OPEN"), "")),
+                other => unreachable!("unexpected target {other}"),
+            }
         });
         assert_eq!(blockers.len(), 2);
         assert_eq!(*calls.borrow(), 1, "one controller tick must share lookups");
 
-        let released = evaluate_with("github", &roots, |_| {
-            Ok(DependencyIssue {
-                number: "9".into(),
-                body: String::new(),
-                state: Some("CLOSED".into()),
-            })
+        let released = evaluate_with("github", &roots, |target| match target.number() {
+            "1" | "2" => Ok(dependency_issue(
+                target.number(),
+                Some("OPEN"),
+                "Blocked by: #9",
+            )),
+            "9" => Ok(dependency_issue("9", Some("CLOSED"), "")),
+            other => unreachable!("unexpected target {other}"),
         });
         assert!(released.is_empty());
     }
@@ -327,7 +426,11 @@ mod tests {
             issue("1", Some("opened"), "Blocked by: #2"),
             issue("2", Some("opened"), "Blocked by: #1"),
         ];
-        let cycle = evaluate_with("gitlab", &roots, |_| unreachable!());
+        let cycle = evaluate_with("gitlab", &roots, |target| match target.number() {
+            "1" => Ok(dependency_issue("1", Some("opened"), "Blocked by: #2")),
+            "2" => Ok(dependency_issue("2", Some("opened"), "Blocked by: #1")),
+            other => unreachable!("unexpected target {other}"),
+        });
         assert!(cycle
             .iter()
             .all(|block| block.reason_code == "dependency_cycle"));
@@ -339,7 +442,10 @@ mod tests {
             let blocked = evaluate_with(
                 "gitlab",
                 &[issue("3", Some("opened"), "Blocked by: #99")],
-                |_| Err(error.into()),
+                |target| match target.number() {
+                    "3" => Ok(dependency_issue("3", Some("opened"), "Blocked by: #99")),
+                    _ => Err(error.into()),
+                },
             );
             assert_eq!(blocked[0].reason_code, expected);
         }
@@ -347,12 +453,10 @@ mod tests {
         let unknown = evaluate_with(
             "gitlab",
             &[issue("4", Some("opened"), "Blocked by: #8")],
-            |_| {
-                Ok(DependencyIssue {
-                    number: "8".into(),
-                    body: String::new(),
-                    state: None,
-                })
+            |target| match target.number() {
+                "4" => Ok(dependency_issue("4", Some("opened"), "Blocked by: #8")),
+                "8" => Ok(dependency_issue("8", None, "")),
+                other => unreachable!("unexpected target {other}"),
             },
         );
         assert_eq!(unknown[0].reason_code, "dependency_unknown_state");
