@@ -34,6 +34,8 @@ use intake::{
 };
 #[path = "runtime/merge.rs"]
 mod merge;
+#[path = "runtime/node_capacity.rs"]
+mod node_capacity;
 #[path = "runtime/pm.rs"]
 mod pm;
 
@@ -550,6 +552,30 @@ fn run_parallel_once(
                         }
                     }
                     _ => {
+                        let admission = match node_capacity::try_acquire(&action) {
+                            Ok(admission) => admission,
+                            Err(error) => {
+                                // Keep the existing configured ceiling as the
+                                // portability fallback on platforms without
+                                // Linux pressure interfaces.
+                                eprintln!(
+                                    "gah loop: node pressure unavailable ({error}); using configured parallel ceiling"
+                                );
+                                node_capacity::LiveAdmission::Admit(
+                                    node_capacity::NodeCapacityLease::untracked(),
+                                )
+                            }
+                        };
+                        let node_capacity_lease = match admission {
+                            node_capacity::LiveAdmission::Admit(lease) => lease,
+                            node_capacity::LiveAdmission::Defer(reason) => {
+                                eprintln!(
+                                    "gah loop: deferring additional worker at {active}/{effective_parallel_limit}: {reason}"
+                                );
+                                break;
+                            }
+                        };
+
                         record_action_events(
                             cfg,
                             profile_name,
@@ -587,6 +613,7 @@ fn run_parallel_once(
                         let done_tx = done_tx.clone();
                         active += 1;
                         scope.spawn(move || {
+                            let _node_capacity_lease = node_capacity_lease;
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     execute_action(
