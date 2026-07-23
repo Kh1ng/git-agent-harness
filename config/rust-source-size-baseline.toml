@@ -3,5 +3,3 @@ threshold = 1500
 [files]
 "src/config.rs" = 1901
 "tests/gah_cli.rs" = 691
-"tests/gah_cli/dispatch.rs" = 3707
-"src/dispatch/issues/tests.rs" = 1534
