@@ -374,29 +374,6 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             ),
         };
     }
-    // Fallback: if no active MR needs review/fix/merge but there are
-    // human-blocked MRs under StopForHuman merge policy, surface the
-    // first one as HumanRequired.  All other blocked MRs (retry-cap
-    // exhausted, CI not yet passed) no-op — they appear in status
-    // reports but don't park the profile.
-    if !human_blocked_mrs.is_empty()
-        && review_candidates.is_empty()
-        && merge_candidates.is_empty()
-        && fix_candidates.is_empty()
-        && snapshot.profile.merge_policy == crate::config::MergePolicy::StopForHuman
-    {
-        let (mr, reason_code) = human_blocked_mrs[0];
-        return NextAction::HumanRequired {
-            work_id: mr.work_id.clone(),
-            reason: format!(
-                "MR on branch '{}' classified {} (human decision required)",
-                mr.branch, mr.classification
-            ),
-            reference: mr.url.clone(),
-            reason_code: Some(reason_code.as_str().to_string()),
-        };
-    }
-
     if let Some(parent) = snapshot
         .pm_parent_states
         .iter()
@@ -476,6 +453,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     // refuse every action that could publish another managed MR until the
     // profile falls below its configured limit.
     if snapshot.implementation_intake_paused {
+        if let Some((mr, reason_code)) = human_blocked_mrs.first().copied() {
+            return human_required_for_blocked_mr(snapshot, mr, reason_code);
+        }
         return NextAction::NoOp {
             reason: format!(
                 "implementation intake paused: {} open managed MR(s) + {} in-flight implementation(s) reached limit {}; draining review/fix/merge work",
@@ -689,8 +669,45 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         };
     }
 
+    if let Some((mr, reason_code)) = human_blocked_mrs.first().copied() {
+        return human_required_for_blocked_mr(snapshot, mr, reason_code);
+    }
+
     NextAction::NoOp {
         reason: "nothing actionable".into(),
+    }
+}
+
+fn human_required_for_blocked_mr(
+    snapshot: &StatusSnapshot,
+    mr: &crate::sync::SyncMrJson,
+    reason_code: HumanRequiredReason,
+) -> NextAction {
+    let gate_message = snapshot
+        .blocked_work_items
+        .iter()
+        .find(|blocker| {
+            blocker.kind == "human_required"
+                && blocker
+                    .source_reference
+                    .as_deref()
+                    .is_some_and(|reference| {
+                        mr.work_id.as_deref() == Some(reference) || mr.branch == reference
+                    })
+        })
+        .and_then(|blocker| blocker.message.as_deref());
+    NextAction::HumanRequired {
+        work_id: mr.work_id.clone(),
+        reason: gate_message.map(str::to_string).unwrap_or_else(|| {
+            format!(
+                "MR on branch '{}' classified {} (human decision required: {})",
+                mr.branch,
+                mr.classification,
+                reason_code.as_str()
+            )
+        }),
+        reference: mr.url.clone(),
+        reason_code: Some(reason_code.as_str().to_string()),
     }
 }
 

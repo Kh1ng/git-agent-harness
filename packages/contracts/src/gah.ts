@@ -717,6 +717,7 @@ export type HumanRequiredReasonCode =
   | 'configuration_infra'
   | 'fix_retry_cap_exceeded'
   | 'merge_retry_cap_exceeded'
+  | 'stuck_loop_gate'
   | 'unknown';
 
 export type ControllerActivityStatus = 'running' | 'finished' | 'failed';
