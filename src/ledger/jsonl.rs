@@ -1,6 +1,5 @@
 use crate::config::GahConfig;
 use anyhow::{Context, Result};
-use fs2::FileExt;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -10,6 +9,7 @@ use std::sync::{LazyLock, Mutex};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use super::entry::LedgerEntry;
+use super::locking;
 
 #[cfg(test)]
 static READ_ENTRIES_CALLS: LazyLock<Mutex<std::collections::HashMap<PathBuf, usize>>> =
@@ -129,29 +129,7 @@ pub fn active_review_hold_work_ids_from_entries(
         .collect()
 }
 
-fn lock_ledger(path: &Path) -> Result<std::fs::File> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating ledger directory {}", parent.display()))?;
-    }
-    // Dispatch workers append and review backfills concurrently. Serialize
-    // both operations with a sidecar lock so a backfill cannot rewrite a
-    // stale snapshot and erase another worker's append.
-    let lock_path = path.with_extension("lock");
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("opening ledger lock {}", lock_path.display()))?;
-    lock_file
-        .lock_exclusive()
-        .with_context(|| format!("locking ledger {}", lock_path.display()))?;
-    Ok(lock_file)
-}
-
-fn append_locked(cfg: &GahConfig, path: &Path, entry: &LedgerEntry) -> Result<()> {
+fn append_locked(path: &Path, entry: &LedgerEntry) -> Result<()> {
     if let Some(offset) = truncated_tail_offset(&fs::read(path).unwrap_or_default()) {
         anyhow::bail!(
             "ledger {} has an unterminated invalid final record at byte {}; run `gah ledger repair-tail` before appending",
@@ -170,23 +148,22 @@ fn append_locked(cfg: &GahConfig, path: &Path, entry: &LedgerEntry) -> Result<()
     crate::redact::redact_json_value(&mut value);
     serde_json::to_writer(&mut file, &value).context("serializing ledger entry")?;
     file.write_all(b"\n").context("writing ledger newline")?;
-    drop(file);
+    Ok(())
+}
 
-    // Redundant SQLite mirror, kept in lockstep with the JSONL file (still
-    // the sole source of truth). Best-effort: a mirror failure must never
-    // fail the real dispatch write path.
+fn sync_mirror(cfg: &GahConfig) {
     if let Err(err) = super::sqlite_store::sync_from_jsonl(cfg) {
         eprintln!("warning: failed to sync sqlite ledger mirror: {err:#}");
     }
-
-    Ok(())
 }
 
 pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
     let path = cfg.defaults.ledger_path();
-    let _lock = lock_ledger(&path)?;
-    append_locked(cfg, &path, entry)?;
-
+    {
+        let _lock = locking::exclusive(&path)?;
+        append_locked(&path, entry)?;
+    }
+    sync_mirror(cfg);
     Ok(path)
 }
 
@@ -204,7 +181,7 @@ pub fn append_human_gate_if_transition(cfg: &GahConfig, entry: &LedgerEntry) -> 
         .as_deref()
         .context("conditional gate entry must have a work_id")?;
     let path = cfg.defaults.ledger_path();
-    let _lock = lock_ledger(&path)?;
+    let _lock = locking::exclusive(&path)?;
     let existing = if path.exists() {
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -225,7 +202,9 @@ pub fn append_human_gate_if_transition(cfg: &GahConfig, entry: &LedgerEntry) -> 
             return Ok(false);
         }
     }
-    append_locked(cfg, &path, entry)?;
+    append_locked(&path, entry)?;
+    drop(_lock);
+    sync_mirror(cfg);
     Ok(true)
 }
 
@@ -251,17 +230,7 @@ pub fn repair_truncated_tail(cfg: &GahConfig, dry_run: bool) -> Result<TailRepai
             dropped_bytes: 0,
         });
     }
-    let lock_path = path.with_extension("lock");
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("opening ledger lock {}", lock_path.display()))?;
-    lock_file
-        .lock_exclusive()
-        .with_context(|| format!("locking ledger {}", lock_path.display()))?;
+    let _lock = locking::exclusive(&path)?;
     repair_truncated_tail_at(&path, dry_run)
 }
 
@@ -344,7 +313,12 @@ pub(super) fn parse_jsonl_entries(
     Ok(entries)
 }
 
-pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
+pub(super) struct LedgerSnapshot {
+    pub(super) entries: Vec<LedgerEntry>,
+    pub(super) byte_len: u64,
+}
+
+pub(super) fn read_snapshot(cfg: &GahConfig) -> Result<LedgerSnapshot> {
     let path = cfg.defaults.ledger_path();
     #[cfg(test)]
     {
@@ -354,11 +328,30 @@ pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
             .entry(path.clone())
             .or_default() += 1;
     }
+    let _lock = locking::shared(&path)?;
+    if !path.exists() {
+        return Ok(LedgerSnapshot {
+            entries: vec![],
+            byte_len: 0,
+        });
+    }
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(LedgerSnapshot {
+        byte_len: text.len() as u64,
+        entries: parse_jsonl_entries(&text, &path, 0)?,
+    })
+}
+
+pub fn read_entries(cfg: &GahConfig) -> Result<Vec<LedgerEntry>> {
+    Ok(read_snapshot(cfg)?.entries)
+}
+
+pub(super) fn read_entries_unlocked(path: &Path) -> Result<Vec<LedgerEntry>> {
     if !path.exists() {
         return Ok(vec![]);
     }
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    parse_jsonl_entries(&text, &path, 0)
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    parse_jsonl_entries(&text, path, 0)
 }
 
 #[cfg(test)]
@@ -412,19 +405,8 @@ pub fn backfill_review_verdict(
     backfill: ReviewVerdictBackfill<'_>,
 ) -> Result<bool> {
     let path = cfg.defaults.ledger_path();
-    let lock_path = path.with_extension("lock");
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("opening ledger lock {}", lock_path.display()))?;
-    lock_file
-        .lock_exclusive()
-        .with_context(|| format!("locking ledger {}", lock_path.display()))?;
-
-    let mut entries = read_entries(cfg)?;
+    let lock_file = locking::exclusive(&path)?;
+    let mut entries = read_entries_unlocked(&path)?;
     let target_idx = entries
         .iter()
         .enumerate()
@@ -463,6 +445,7 @@ pub fn backfill_review_verdict(
         out.push('\n');
     }
     fs::write(&path, out).with_context(|| format!("rewriting ledger {}", path.display()))?;
+    drop(lock_file);
 
     if let Err(err) = super::sqlite_store::rebuild_from_jsonl(cfg) {
         eprintln!("warning: failed to sync sqlite ledger mirror: {err:#}");
@@ -771,6 +754,10 @@ pub fn index_entries_by_work_id(entries: &[LedgerEntry]) -> LedgerEntriesByWorkI
     }
     index
 }
+
+#[cfg(test)]
+#[path = "jsonl/concurrency_tests.rs"]
+mod concurrency_tests;
 
 #[cfg(test)]
 mod tests {
