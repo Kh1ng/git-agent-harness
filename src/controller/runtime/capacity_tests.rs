@@ -84,6 +84,7 @@ fn available_ticket(work_id: &str) -> AvailableTicket {
         work_id: Some(work_id.into()),
         title: Some(format!("Work {work_id}")),
         has_active_mr: false,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 0,
         genuine_agent_failure_count: 0,
         last_failure_class: None,

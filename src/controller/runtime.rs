@@ -1391,6 +1391,7 @@ default_target_branch = "main"
                 work_id: Some(format!("TICKET-{}", i + 100)),
                 title: Some(format!("Test ticket {}", i)),
                 has_active_mr: false,
+                priority: crate::models::TicketPriority::Unspecified,
                 prior_attempt_count: 0,
                 genuine_agent_failure_count: 0,
                 last_failure_class: None,

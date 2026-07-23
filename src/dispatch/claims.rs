@@ -517,6 +517,9 @@ pub(crate) fn scan_available_tickets_with_dependencies(
                 title: meta.title.clone(),
                 recommended_backend: meta.recommended_backend.clone(),
                 recommended_model: meta.recommended_model.clone(),
+                priority: crate::models::TicketPriority::parse_metadata(
+                    meta.priority.as_deref().unwrap_or(""),
+                ),
                 prior_attempt_count,
                 genuine_agent_failure_count,
                 last_failure_class,
@@ -583,6 +586,14 @@ pub(crate) fn scan_available_tickets_with_dependencies(
             .title
             .find("TICKET-")
             .and_then(|idx| ticket_number_prefix(&issue.title[idx..]));
+        let issue_priority = crate::models::TicketPriority::parse_provider_labels(&issue.labels);
+        let issue_metadata_priority =
+            crate::models::TicketPriority::parse_metadata(meta.priority.as_deref().unwrap_or(""));
+        let priority = if issue_priority.is_explicit() {
+            issue_priority
+        } else {
+            issue_metadata_priority
+        };
         if work_id
             .as_deref()
             .and_then(ticket_number_prefix)
@@ -615,6 +626,7 @@ pub(crate) fn scan_available_tickets_with_dependencies(
             title: meta.title.clone(),
             recommended_backend: meta.recommended_backend.clone(),
             recommended_model: meta.recommended_model.clone(),
+            priority,
             prior_attempt_count,
             genuine_agent_failure_count,
             last_failure_class,
