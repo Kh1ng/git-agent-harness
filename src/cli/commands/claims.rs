@@ -19,12 +19,8 @@ pub fn run(command: ClaimsCommands) -> Result<()> {
                 .transpose()?;
             work_claim::handle_claims_list(scope.as_deref(), json)?;
         }
-        ClaimsCommands::Clear {
-            work_id,
-            profile,
-            config_path,
-        } => {
-            let scope = canonical_scope_for_profile(&profile, config_path.as_deref())?;
+        ClaimsCommands::Clear { work_id, profile } => {
+            let scope = canonical_scope_for_profile(&profile, None)?;
             work_claim::handle_claims_clear(&scope, &work_id)?;
             println!("Cleared claim for work_id {work_id} on profile {profile}");
         }

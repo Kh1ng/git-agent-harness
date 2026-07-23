@@ -69,16 +69,8 @@ fn claims_clear_removes_existing_claim() {
     fs::write(&claim_state, serde_json::to_string_pretty(&state).unwrap()).unwrap();
 
     bin()
-        .args([
-            "claims",
-            "clear",
-            "--work-id",
-            "#436",
-            "--profile",
-            "real",
-            "--config-path",
-            cfg.to_str().unwrap(),
-        ])
+        .args(["claims", "clear", "--work-id", "#436", "--profile", "real"])
+        .env("GAH_CONFIG", cfg.to_str().unwrap())
         .env("GAH_CLAIM_STATE_PATH", claim_state.to_str().unwrap())
         .assert()
         .success()

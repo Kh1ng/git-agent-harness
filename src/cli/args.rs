@@ -879,8 +879,6 @@ pub enum ClaimsCommands {
         work_id: String,
         #[arg(long)]
         profile: String,
-        #[arg(long, name = "config")]
-        config_path: Option<String>,
     },
     Reclaim {
         #[arg(long)]
