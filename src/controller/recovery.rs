@@ -3,7 +3,9 @@
 //! loop -- see `controller::runtime` for what actually drives these from
 //! `run_once`/`run_parallel_once`.
 
-use super::{decide_next_action, NextAction};
+use super::{
+    decide_next_action, plan_remediation, HumanRequiredReason, NextAction, RemediationContext,
+};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -286,11 +288,13 @@ pub(super) fn record_action_events(
 ) -> Result<()> {
     let original_reason_code = original_action.human_required_reason_code();
     let effective_reason_code = effective_action.human_required_reason_code();
+    let original_plan = remediation_plan_for_action(cfg, profile_name, original_action);
+    let effective_plan = remediation_plan_for_action(cfg, profile_name, effective_action);
 
     let generation_suffix = review_generation
         .map(|generation| format!(" review_generation={generation}"))
         .unwrap_or_default();
-    crate::events::record_with_reason_code(
+    crate::events::record_with_reason_code_and_plan(
         cfg,
         crate::events::EventType::ActionDecided,
         Some(profile_name),
@@ -302,9 +306,10 @@ pub(super) fn record_action_events(
             generation_suffix
         ),
         original_reason_code,
+        original_plan.as_ref(),
     )?;
     if original_action != effective_action {
-        crate::events::record_with_reason_code(
+        crate::events::record_with_reason_code_and_plan(
             cfg,
             crate::events::EventType::ActionOverridden,
             Some(profile_name),
@@ -317,9 +322,29 @@ pub(super) fn record_action_events(
                 generation_suffix
             ),
             effective_reason_code,
+            effective_plan.as_ref(),
         )?;
     }
     Ok(())
+}
+
+pub(super) fn remediation_plan_for_action(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    action: &NextAction,
+) -> Option<crate::controller::RemediationPlan> {
+    let reason_code = action.human_required_reason_code()?;
+    let profile = crate::config::get_profile(cfg, profile_name).ok()?;
+    Some(plan_remediation(RemediationContext {
+        profile_name,
+        profile,
+        work_id: action.human_required_work_id().or_else(|| action.work_id()),
+        reference: action.human_required_reference(),
+        reason_code: HumanRequiredReason::from_code(reason_code),
+        blocker_kind: Some("human_required"),
+        backend: None,
+        model: None,
+    }))
 }
 
 /// TICKET-282: before reusing an existing branch for a `FixMr`, detect a
@@ -554,6 +579,7 @@ mod tests {
             reason_code: None,
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: format!("{kind}: test"),
+            remediation_plan: None,
         }
     }
 
@@ -679,6 +705,7 @@ mod tests {
             reason_code: None,
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: "fix_existing: deferred_capacity: claude/sonnet busy".into(),
+            remediation_plan: None,
         });
 
         assert_eq!(
@@ -697,6 +724,7 @@ mod tests {
             reason_code: None,
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: "fix_existing: deferred_capacity: claude/sonnet busy".into(),
+            remediation_plan: None,
         }
     }
 
@@ -948,6 +976,7 @@ default_target_branch = "main"
             reason: "MR on branch 'gah/real-1' classified NEEDS_REVIEW".into(),
         };
         let effective = NextAction::HumanRequired {
+            work_id: Some("TICKET-500".into()),
             reason: "stuck-loop detected: 'review_mr' selected 3 times in a row for TICKET-500 with no intervening state change".into(),
             reference: Some("TICKET-500".into()),
             reason_code: Some("policy_approval".into()),
@@ -981,6 +1010,7 @@ default_target_branch = "main"
             details: "review_mr: MR needs review".into(),
             reason_code: None,
             review_contract_version: None, // Pre-bump event
+            remediation_plan: None,
         };
 
         let events = vec![old_event.clone(), old_event.clone(), old_event.clone()];

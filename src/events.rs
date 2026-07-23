@@ -3,6 +3,7 @@
 //! rewritten, only ever appended to.
 
 use crate::config::GahConfig;
+use crate::controller::RemediationPlan;
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,8 @@ pub struct ControllerEvent {
     pub reason_code: Option<String>,
     #[serde(default)]
     pub review_contract_version: Option<u32>,
+    #[serde(default)]
+    pub remediation_plan: Option<RemediationPlan>,
 }
 
 pub fn append(cfg: &GahConfig, event: &ControllerEvent) -> Result<()> {
@@ -178,6 +181,33 @@ pub fn record_with_reason_code(
     )
 }
 
+pub fn record_with_reason_code_and_plan(
+    cfg: &GahConfig,
+    event_type: EventType,
+    profile: Option<&str>,
+    work_id: Option<&str>,
+    details: impl Into<String>,
+    reason_code: Option<&str>,
+    remediation_plan: Option<&RemediationPlan>,
+) -> Result<()> {
+    append(
+        cfg,
+        &ControllerEvent {
+            timestamp: OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap_or_default(),
+            event_type: event_type.as_str().to_string(),
+            profile: profile.map(str::to_string),
+            work_id: work_id.map(str::to_string),
+            run_id: None,
+            details: details.into(),
+            reason_code: reason_code.map(str::to_string),
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
+            remediation_plan: remediation_plan.cloned(),
+        },
+    )
+}
+
 pub fn record_with_run_id_and_reason_code(
     cfg: &GahConfig,
     event_type: EventType,
@@ -200,6 +230,7 @@ pub fn record_with_run_id_and_reason_code(
             details: details.into(),
             reason_code: reason_code.map(str::to_string),
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
+            remediation_plan: None,
         },
     )
 }
@@ -439,6 +470,7 @@ mod tests {
             reason_code: None,
             review_contract_version: None,
             details: String::new(),
+            remediation_plan: None,
         };
         append(&cfg, &event).unwrap();
         append(&cfg, &event).unwrap();

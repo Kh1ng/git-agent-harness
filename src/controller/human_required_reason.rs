@@ -225,6 +225,7 @@ mod tests {
     #[test]
     fn human_required_action_with_reason_code_serialization() {
         let action = NextAction::HumanRequired {
+            work_id: Some("TICKET-001".into()),
             reason: "Merge policy forbids auto-merge".into(),
             reference: Some("https://example.com/mr/1".into()),
             reason_code: Some("merge_policy".into()),
@@ -261,6 +262,7 @@ mod tests {
         for reason in HumanRequiredReason::all() {
             let code = reason.as_str();
             let action = NextAction::HumanRequired {
+                work_id: Some("TICKET-002".into()),
                 reason: format!("Test reason for {code}"),
                 reference: None,
                 reason_code: Some(code.to_string()),

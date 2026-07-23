@@ -130,7 +130,52 @@ export interface Blocker {
   source_reference?: string | null;
   /** TICKET-505: stable reason code for HumanRequired blockers. */
   reason_code?: string | null;
+  /** Deterministic operator remediation plan for this blocked work item. */
+  remediation_plan?: RemediationPlan;
 }
+
+export type RemediationAuthority =
+  | 'operator'
+  | 'paid_route_approver'
+  | 'human_reviewer'
+  | 'merge_approver'
+  | 'profile_maintainer';
+
+export type RemediationActionKind =
+  | 'command'
+  | 'api_action'
+  | 'manual_review'
+  | 'manual_merge'
+  | 'config_change'
+  | 'inspect';
+
+export interface RemediationAction {
+  kind: RemediationActionKind;
+  summary: string;
+  command?: string | null;
+  api_action?: string | null;
+}
+
+export type RemediationPlan =
+  | {
+      result: 'plan';
+      profile: string;
+      work_id?: string | null;
+      reference?: string | null;
+      reason_code: HumanRequiredReasonCode;
+      required_authority: RemediationAuthority;
+      safe_actions: RemediationAction[];
+    }
+  | {
+      result: 'no_automatic_remediation';
+      profile: string;
+      work_id?: string | null;
+      reference?: string | null;
+      reason_code: HumanRequiredReasonCode;
+      required_authority: RemediationAuthority;
+      safe_actions: RemediationAction[];
+      reason: string;
+    };
 
 export interface StatusError {
   subsystem: string;
@@ -657,6 +702,7 @@ export interface ControllerEvent {
   run_id?: string | null;
   reason_code?: string | null;
   details: string;
+  remediation_plan?: RemediationPlan | null;
 }
 
 // TICKET-505: HumanRequired reason codes
@@ -664,6 +710,8 @@ export type HumanRequiredReasonCode =
   | 'policy_approval'
   | 'retry_budget_exhausted'
   | 'review_evidence_gate'
+  | 'review_output_invalid_exhausted'
+  | 'review_ceiling_exhausted'
   | 'merge_policy'
   | 'publishing_restriction'
   | 'configuration_infra'
