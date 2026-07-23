@@ -65,6 +65,42 @@ fn undispatched_tickets_are_ordered_by_priority_then_numeric_issue_identity() {
 }
 
 #[test]
+fn undispatched_non_numeric_ticket_paths_fall_back_to_lexical_ordering() {
+    let mut snapshot = empty_snapshot();
+    snapshot.available_tickets.push(ticket_with_priority(
+        "docs/tickets/TICKET-beta.md",
+        Some("TICKET-beta"),
+        0,
+        None,
+        false,
+        false,
+        TicketPriority::P1,
+    ));
+    snapshot.available_tickets.push(ticket_with_priority(
+        "docs/tickets/TICKET-alpha.md",
+        Some("TICKET-alpha"),
+        0,
+        None,
+        false,
+        false,
+        TicketPriority::P1,
+    ));
+
+    let action = decide_next_action(&snapshot);
+    match action {
+        NextAction::DispatchTicket {
+            work_id,
+            ticket_path,
+            ..
+        } => {
+            assert_eq!(work_id.as_deref(), Some("TICKET-alpha"));
+            assert_eq!(ticket_path, "docs/tickets/TICKET-alpha.md");
+        }
+        other => panic!("expected DispatchTicket for lexical fallback, got {other:?}"),
+    }
+}
+
+#[test]
 fn missing_priority_does_not_preempt_explicit_p0() {
     let mut snapshot = empty_snapshot();
     snapshot.available_tickets.push(ticket_with_priority(
