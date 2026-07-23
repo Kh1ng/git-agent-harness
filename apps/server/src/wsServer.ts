@@ -8,6 +8,9 @@ import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { getSessionManager } from './sessions/SessionManager.js';
+import { createFleetDispatchCoordinator } from './fleetDispatch.js';
+import { RegistryService } from './registryService.js';
+import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
@@ -61,11 +64,30 @@ class WebSocketSessionStore {
 
 const sessionStore = new WebSocketSessionStore();
 const pushBus = createServerPushBus();
+let fleetDispatch = createFleetDispatchCoordinator({
+  registryService: new RegistryService(),
+  pushBus,
+  coordinatorIdentity: getCoordinatorIdentity(),
+  localSessionManager: getSessionManager()
+});
 
 // Temporary storage for profile from query params, used before client.hello arrives
 const pendingProfiles = new Map<WebSocket, string>();
 
-export function createWebSocketHandler(wss: WebSocketServer) {
+export function createWebSocketHandler(
+  wss: WebSocketServer,
+  deps: {
+    registryService?: RegistryService;
+    coordinatorIdentity?: ReturnType<typeof getCoordinatorIdentity>;
+  } = {}
+) {
+  fleetDispatch = createFleetDispatchCoordinator({
+    registryService: deps.registryService ?? new RegistryService(),
+    pushBus,
+    coordinatorIdentity: deps.coordinatorIdentity ?? getCoordinatorIdentity(),
+    localSessionManager: getSessionManager()
+  });
+
   wss.on('connection', (ws: WebSocket, req) => {
     console.log('WebSocket client connected');
     
@@ -173,10 +195,11 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
 }
 
 async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage, { type: 'session.start' }>, requestId: string) {
-  const sessionManager = getSessionManager();
-  
   try {
-    const session = await sessionManager.startSession({
+    const session = await fleetDispatch.startSession({
+      requestId: message.requestId,
+      nodeId: message.nodeId,
+      coordinatorNodeId: message.coordinatorNodeId,
       profile: message.profile,
       providerKind: message.providerKind,
       instanceId: message.instanceId,
@@ -187,12 +210,6 @@ async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage,
       backend: message.backend,
       model: message.model,
       budget: message.budget
-    });
-    
-    // Notify all clients about new session
-    pushBus.publish({
-      type: 'session.started',
-      session
     });
     
     // Send success response
@@ -207,16 +224,9 @@ async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage,
 }
 
 async function handleStopSession(ws: WebSocket, message: Extract<ClientMessage, { type: 'session.stop' }>, requestId: string) {
-  const sessionManager = getSessionManager();
-  
   try {
-    const session = await sessionManager.stopSession(message.sessionId);
-    
-    pushBus.publish({
-      type: 'session.stopped',
-      session
-    });
-    
+    const session = await fleetDispatch.stopSession(message.sessionId);
+
     ws.send(JSON.stringify({
       type: 'session.stopped' as const,
       session
@@ -228,14 +238,12 @@ async function handleStopSession(ws: WebSocket, message: Extract<ClientMessage, 
 }
 
 async function handleSendCommand(ws: WebSocket, message: Extract<ClientMessage, { type: 'session.sendCommand' }>, requestId: string) {
-  const sessionManager = getSessionManager();
-  
   try {
-    await sessionManager.sendCommand(message.sessionId, message.command);
+    await fleetDispatch.sendCommand(message.sessionId, message.command);
     
     ws.send(JSON.stringify({
       type: 'session.status' as const,
-      session: await sessionManager.getSession(message.sessionId)
+      session: await fleetDispatch.getSession(message.sessionId)
     }));
     
   } catch (error) {
@@ -285,13 +293,12 @@ async function handleProviderList(ws: WebSocket, message: Extract<ClientMessage,
 async function sendWelcomeMessage(ws: WebSocket) {
   try {
     const providerRegistry = getProviderRegistry();
-    const sessionManager = getSessionManager();
 
     const serverProviderCatalog = {
       providers: providerRegistry.getProviderInstances()
     };
 
-    const sessions = sessionManager.getAllSessions();
+    const sessions = fleetDispatch.getAllSessions();
     const providers = providerRegistry.getAllProviderStatuses();
 
     // Include real GAH data (TICKET-114) via the same gahCli.runStatus()
