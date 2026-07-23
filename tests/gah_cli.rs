@@ -3,7 +3,11 @@ mod already_satisfied;
 #[path = "gah_cli/args.rs"]
 mod args;
 #[path = "gah_cli/availability.rs"]
-mod availability_cli;
+mod availability;
+#[path = "gah_cli/claims.rs"]
+mod claims;
+#[path = "gah_cli/cli_helpers.rs"]
+mod cli_helpers;
 #[path = "gah_cli/config.rs"]
 mod config;
 #[path = "gah_cli/conflict_resolution.rs"]
@@ -18,10 +22,16 @@ mod doctor;
 mod gitlab_review;
 #[path = "gah_cli/init.rs"]
 mod init;
+#[path = "gah_cli/ledger.rs"]
+mod ledger;
 #[path = "gah_cli/pm.rs"]
 mod pm;
 #[path = "gah_cli/profile.rs"]
 mod profile;
+#[path = "gah_cli/quota.rs"]
+mod quota;
+#[path = "gah_cli/report.rs"]
+mod report;
 #[path = "gah_cli/review_format_retry.rs"]
 mod review_format_retry;
 #[path = "gah_cli/route_approval.rs"]
@@ -29,9 +39,12 @@ mod route_approval;
 #[path = "gah_cli/stall_retry.rs"]
 mod stall_retry;
 mod support;
+#[path = "gah_cli/telemetry.rs"]
+mod telemetry;
 #[path = "gah_cli/validation_gate.rs"]
 mod validation_gate;
 use assert_cmd::Command;
+pub(crate) use cli_helpers::*;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
@@ -589,103 +602,3 @@ validation_commands   = ["cargo test --quiet", "cargo clippy -- -D warnings"]
     .unwrap();
     cfg
 }
-
-fn setup_review_repo_and_gh(
-    tmp: &TempDir,
-) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-    let repo = tmp.path().join("repo");
-    fs::create_dir_all(&repo).unwrap();
-    init_git_repo(&repo);
-    add_origin_and_feature_commit(&repo);
-    checkout_branch(&repo, "main");
-
-    let fake_bin = tmp.path().join("bin");
-    fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_github_review_api(&fake_bin);
-    (repo, fake_bin, tmp.path().join("home"))
-}
-
-fn setup_fix_dispatch_repo(
-    tmp: &TempDir,
-    extra_profile: &str,
-) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-    let repo = tmp.path().join("repo");
-    let home = tmp.path().join("home");
-    let github_root = tmp.path().join("github-root");
-    let origin = github_root.join("owner/real.git");
-    fs::create_dir_all(&repo).unwrap();
-    fs::create_dir_all(&home).unwrap();
-    init_git_repo(&repo);
-    fs::create_dir_all(origin.parent().unwrap()).unwrap();
-    ProcessCommand::new("git")
-        .args(["init", "--bare", origin.to_str().unwrap()])
-        .output()
-        .unwrap();
-    configure_git_url_instead_of(
-        &home,
-        "https://github.com/",
-        &format!("file://{}/", github_root.display()),
-    );
-    ProcessCommand::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/owner/real.git",
-        ])
-        .current_dir(&repo)
-        .output()
-        .unwrap();
-    ProcessCommand::new("git")
-        .args(["push", "-u", "origin", "main"])
-        .current_dir(&repo)
-        .env("HOME", &home)
-        .output()
-        .unwrap();
-
-    // Plain keys must appear before the nested [profiles.real.routing] table
-    // in TOML, or they get parsed as belonging to that subtable instead.
-    let cfg = write_real_repo_config_with_extra(
-        tmp,
-        &repo,
-        "github",
-        &format!(
-            "{}\n[profiles.real.routing]\nimprove_backend = \"codex\"\n",
-            extra_profile
-        ),
-        "",
-    );
-    (repo, home, cfg)
-}
-
-fn branch_exists_on_bare_origin(github_root: &std::path::Path, branch: &str) -> bool {
-    let origin = github_root.join("owner/real.git");
-    let out = ProcessCommand::new("git")
-        .args(["branch", "--list", branch])
-        .current_dir(&origin)
-        .output()
-        .unwrap();
-    !String::from_utf8_lossy(&out.stdout).trim().is_empty()
-}
-
-fn make_fake_glab(dir: &std::path::Path, mr_list_json: &str) {
-    make_fake_bin_with_body(
-        dir,
-        "glab",
-        &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/merge_requests\" ]; then echo '{}'; exit 0; fi\nexit 0\n",
-            mr_list_json.replace('\'', "'\\''"),
-        ),
-    );
-}
-
-// ── TDD: machine-readable state for autonomous manager agents ──────────────
-// These define the contract for junior-agent tickets. Remove #[ignore] when
-// implementing.
-
-// ── TICKET-128: per-profile publishing policy ───────────────────────────────
-//
-// A restricted profile forbids agent-authored repository prose (PR/MR text,
-// generated commit messages, issue/MR comments) while preserving autonomous
-// code execution and code review. Each axis is configured independently and
-// must NOT be overloaded onto `human_required`.
