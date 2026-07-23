@@ -173,6 +173,11 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut merge_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     // Track human-blocked MRs along with their specific reason code
     let mut human_blocked_mrs: Vec<(&crate::sync::SyncMrJson, HumanRequiredReason)> = Vec::new();
+    // Manager review holds are deliberately not human-required gates: an
+    // operator is already handling them and the hold self-expires. Keep them
+    // visible, though, so a held queue at the intake cap cannot collapse into
+    // an indefinite "nothing actionable" / backpressure NoOp loop.
+    let mut review_held_mrs: Vec<&crate::sync::SyncMrJson> = Vec::new();
     // Issue #156: READY_FOR_HUMAN MRs whose CI is non-terminal / unknown
     // (GitLab head_pipeline gap). They wait for CI to resolve and are not
     // silently dropped.
@@ -231,10 +236,12 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 if snapshot.review_held_work_ids.contains(work_id_str) {
                     // A manager session is actively reviewing this MR out of
                     // band (`gah hold set`). Don't auto-merge out from under
-                    // them, but don't freeze the rest of the profile either
-                    // -- just skip this MR for this loop tick. The manager
-                    // clears the hold (`gah hold clear`) when done, or it
-                    // self-expires after REVIEW_HOLD_STALE_AFTER_HOURS.
+                    // them, but don't freeze unrelated actionable work either.
+                    // If the hold is all that remains, surface a timed re-check
+                    // below. The manager clears it (`gah hold clear`) when
+                    // done, or it self-expires after
+                    // REVIEW_HOLD_STALE_AFTER_HOURS.
+                    review_held_mrs.push(mr);
                     continue;
                 }
                 let merge_policy = snapshot.profile.merge_policy;
@@ -456,6 +463,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         if let Some((mr, reason_code)) = human_blocked_mrs.first().copied() {
             return human_required_for_blocked_mr(snapshot, mr, reason_code);
         }
+        if let Some(mr) = review_held_mrs.first().copied() {
+            return wait_for_review_hold(mr);
+        }
         return NextAction::NoOp {
             reason: format!(
                 "implementation intake paused: {} open managed MR(s) + {} in-flight implementation(s) reached limit {}; draining review/fix/merge work",
@@ -672,9 +682,22 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     if let Some((mr, reason_code)) = human_blocked_mrs.first().copied() {
         return human_required_for_blocked_mr(snapshot, mr, reason_code);
     }
+    if let Some(mr) = review_held_mrs.first().copied() {
+        return wait_for_review_hold(mr);
+    }
 
     NextAction::NoOp {
         reason: "nothing actionable".into(),
+    }
+}
+
+fn wait_for_review_hold(mr: &crate::sync::SyncMrJson) -> NextAction {
+    NextAction::WaitUntil {
+        until: now_plus(Duration::from_secs(300)),
+        reason: format!(
+            "MR on branch '{}' is under an active manager review hold; waiting to re-check without merging it",
+            mr.branch
+        ),
     }
 }
 
