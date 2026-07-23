@@ -287,7 +287,7 @@ pub fn run_once(
                     work_id: original_action.work_id().map(str::to_string),
                     reason,
                     reference: original_action.work_id().map(str::to_string),
-                    reason_code: Some(HumanRequiredReason::PolicyApproval.as_str().to_string()),
+                    reason_code: Some(HumanRequiredReason::StuckLoopGate.as_str().to_string()),
                 };
             } else {
                 action = redispatched;
@@ -506,7 +506,7 @@ fn run_parallel_once(
                             reason,
                             reference: original_action.work_id().map(str::to_string),
                             reason_code: Some(
-                                HumanRequiredReason::PolicyApproval.as_str().to_string(),
+                                HumanRequiredReason::StuckLoopGate.as_str().to_string(),
                             ),
                         };
                     } else {

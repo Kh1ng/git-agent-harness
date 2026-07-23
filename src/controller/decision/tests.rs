@@ -119,13 +119,15 @@ fn ci_failed_mr_retries_until_cap() {
     snapshot.fix_attempt_counts = fix_attempts;
     snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
     let action = decide_next_action(&snapshot);
-    // TICKET-skip-and-continue: an exhausted MR is a work-item block, not a
-    // profile-wide freeze. With nothing else actionable, the loop no-ops
-    // (supervisor re-checks next cycle); the item stays in blocked_work_items.
-    assert_eq!(action.kind(), "no_op");
-    assert!(
-        action.reason().contains("nothing actionable") || action.reason().contains("fix retry cap")
-    );
+    // With no unrelated work to continue, report the actual gate instead of
+    // emitting a misleading idle/backpressure no-op forever.
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "fix_retry_cap_exceeded"
+    ));
 }
 
 #[test]
@@ -135,10 +137,13 @@ fn ready_for_human_mr_maps_to_human_required() {
         .merge_requests
         .push(mr("gah/real-1", "READY_FOR_HUMAN"));
     let action = decide_next_action(&snapshot);
-    // TICKET-skip-and-continue: a single READY_FOR_HUMAN MR awaiting a
-    // human merge decision is a work-item block, not a profile freeze.
-    // With nothing else actionable, the loop no-ops (re-checks later).
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "merge_policy"
+    ));
 }
 
 #[test]
@@ -180,8 +185,13 @@ fn ready_for_human_mr_ci_passed_but_merge_retry_cap_exceeded_becomes_human_requi
         .merge_attempt_counts
         .insert("gah/real-1".to_string(), 2); // == AUTO_RETRY_CAP
     let action = decide_next_action(&snapshot);
-    // TICKET-skip-and-continue: work-item block, not a profile freeze.
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "merge_retry_cap_exceeded"
+    ));
 }
 
 // Issue #124: default auto policy merges a strong-approved, green MR.
@@ -738,8 +748,8 @@ fn exhausted_mr_does_not_block_others() {
     }
 }
 
-// A profile with ONLY an exhausted MR (nothing else actionable) no-ops
-// rather than freezing the profile -- the MR stays in blocked_work_items.
+// A profile with ONLY an exhausted MR reports the exact gate instead of
+// pretending the controller is idle.
 #[test]
 fn exhausted_mr_alone_is_human_required() {
     let mut snapshot = empty_snapshot();
@@ -748,7 +758,13 @@ fn exhausted_mr_alone_is_human_required() {
         .insert("gah/stuck-1".into(), AUTO_RETRY_CAP);
     snapshot.merge_requests.push(mr("gah/stuck-1", "NEEDS_FIX"));
     let action = decide_next_action(&snapshot);
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "fix_retry_cap_exceeded"
+    ));
 }
 
 #[test]
@@ -1037,8 +1053,13 @@ fn retry_cap_triggers_after_configured_post_review_repairs() {
         .merge_requests
         .push(needs_fix_mr("branch-A", "TICKET-A"));
     let action = decide_next_action(&snapshot);
-    // TICKET-skip-and-continue: work-item block, not a profile freeze.
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "fix_retry_cap_exceeded"
+    ));
 }
 
 // One repair used, one more allowed.
@@ -1070,7 +1091,13 @@ fn configured_fix_cap_allows_requested_number_of_repairs() {
     ));
 
     snapshot.fix_attempt_counts.insert("branch-A".into(), 4);
-    assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
+    assert!(matches!(
+        decide_next_action(&snapshot),
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "fix_retry_cap_exceeded"
+    ));
 }
 
 // ===== Bug 2: stuck-loop gate persists to ledger and skips ticket =====
@@ -1161,7 +1188,13 @@ fn stuck_loop_gated_needs_fix_mr_is_not_selected_again() {
         remediation_plan: None,
     });
 
-    assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
+    assert!(matches!(
+        decide_next_action(&snapshot),
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "stuck_loop_gate"
+    ));
 }
 
 #[test]

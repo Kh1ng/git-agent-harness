@@ -391,6 +391,15 @@ pub fn plan_remediation(context: RemediationContext<'_>) -> RemediationPlan {
                 )
             }
         }
+        HumanRequiredReason::StuckLoopGate => no_auto(
+            profile_name,
+            work_id,
+            reference,
+            reason_code,
+            RemediationAuthority::Operator,
+            "The same lifecycle action repeated without an observable state transition; inspect and correct the work item before explicitly releasing its gate",
+            inspect_actions(profile_name, work_id, reference),
+        ),
         HumanRequiredReason::Unknown => no_auto(
             profile_name,
             work_id,

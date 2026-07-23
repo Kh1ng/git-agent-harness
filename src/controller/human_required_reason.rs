@@ -56,6 +56,10 @@ pub enum HumanRequiredReason {
     FixRetryCapExceeded,
     /// Merge retry cap exceeded for an MR (AUTO_RETRY_CAP merge attempts reached).
     MergeRetryCapExceeded,
+    /// The controller selected the same work-item action repeatedly without
+    /// observing a state transition. The durable gate prevents an infinite
+    /// retry loop until an operator inspects and releases the item.
+    StuckLoopGate,
     /// Unknown reason - for historical records without a code or genuinely
     /// unclassifiable cases. Missing data is never inferred as a different reason.
     #[default]
@@ -76,6 +80,7 @@ impl HumanRequiredReason {
             Self::ConfigurationInfra => "configuration_infra",
             Self::FixRetryCapExceeded => "fix_retry_cap_exceeded",
             Self::MergeRetryCapExceeded => "merge_retry_cap_exceeded",
+            Self::StuckLoopGate => "stuck_loop_gate",
             Self::Unknown => "unknown",
         }
     }
@@ -96,6 +101,7 @@ impl HumanRequiredReason {
             Self::ConfigurationInfra => "Configuration or infrastructure failure",
             Self::FixRetryCapExceeded => "Fix retry cap exceeded for MR",
             Self::MergeRetryCapExceeded => "Merge retry cap exceeded for MR",
+            Self::StuckLoopGate => "Repeated lifecycle action made no observable progress",
             Self::Unknown => "Unknown reason",
         }
     }
@@ -115,6 +121,7 @@ impl HumanRequiredReason {
             "configuration_infra" => Self::ConfigurationInfra,
             "fix_retry_cap_exceeded" => Self::FixRetryCapExceeded,
             "merge_retry_cap_exceeded" => Self::MergeRetryCapExceeded,
+            "stuck_loop_gate" => Self::StuckLoopGate,
             _ => Self::Unknown,
         }
     }
@@ -133,6 +140,7 @@ impl HumanRequiredReason {
             Self::ConfigurationInfra,
             Self::FixRetryCapExceeded,
             Self::MergeRetryCapExceeded,
+            Self::StuckLoopGate,
             Self::Unknown,
         ]
     }
