@@ -55,8 +55,9 @@ class SessionManagerImpl {
   private activeDispatches: Map<SessionId, ActiveDispatch> = new Map();
   
   constructor() {
-    // Set up periodic session cleanup
-    setInterval(() => this.cleanupFinishedSessions(), 60000);
+    // Set up periodic session cleanup. unref() so this housekeeping timer
+    // never keeps the process (or a test importing this singleton) alive.
+    setInterval(() => this.cleanupFinishedSessions(), 60000).unref();
   }
   
   async startSession(options: SessionOptions): Promise<Session> {

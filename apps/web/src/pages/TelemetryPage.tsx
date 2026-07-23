@@ -4,10 +4,14 @@ import type { BackendModelComparison, ReportGroupBy } from '@git-agent-harness/c
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
+import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { TrendChart } from '../components/TrendChart.js';
-import { formatCost, formatDuration, formatPercent, formatTokens, formatCount } from '../lib/format.js';
+import { formatCost, formatDuration, formatPercent, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
+
+const TELEMETRY_REFRESH_MS = 60 * 1000;
 
 type SortKey = keyof Pick<
   BackendModelComparison,
@@ -65,6 +69,14 @@ export function TelemetryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupBy, profile]);
 
+  const refreshAll = () => {
+    fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true });
+    fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true });
+  };
+  useAutoRefresh(refreshAll, TELEMETRY_REFRESH_MS);
+  useWsReconnectRefresh(refreshAll);
+  const lastUpdated = oldestFetchedAt(report.fetchedAt, reportSeries.fetchedAt);
+
   const sorted = useMemo(() => {
     const rows = [...(report.data?.comparisons ?? [])];
     rows.sort((a, b) => {
@@ -100,8 +112,9 @@ export function TelemetryPage() {
       <PageHeader
         title="Telemetry"
         description="Backend & model performance, tokens, and cost"
-        onRefresh={() => fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true })}
+        onRefresh={refreshAll}
         refreshing={report.loading}
+        lastUpdated={lastUpdated}
         actions={
           <div className="flex rounded-md border border-subtle overflow-hidden text-xs">
             {(['backend', 'model'] as const).map((g) => (

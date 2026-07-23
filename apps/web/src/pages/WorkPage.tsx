@@ -5,12 +5,17 @@ import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
+import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
+import { LastUpdated } from '../components/ui/LastUpdated.js';
 import { SessionCard } from '../components/SessionCard.js';
 import { AttemptTimeline } from '../components/AttemptTimeline.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
+
+const WORK_REFRESH_MS = 30 * 1000;
 
 const DISPATCH_MODES = ['fix', 'improve', 'review', 'pm', 'experiment'] as const;
 const DISPATCH_BACKENDS = ['auto', 'openhands', 'codex', 'claude', 'agy', 'vibe', 'opencode'] as const;
@@ -106,13 +111,20 @@ function WorkDetail({ workId, onBack }: { workId: string; onBack: () => void }) 
     fetchWorkTimeline(workId);
   }, [workId, fetchWorkTimeline]);
 
+  const refresh = () => fetchWorkTimeline(workId, { force: true });
+  useAutoRefresh(refresh, WORK_REFRESH_MS);
+  useWsReconnectRefresh(refresh);
+
   return (
     <div>
       <button onClick={onBack} className="inline-flex items-center gap-1.5 text-sm text-secondary hover:text-primary mb-4">
         <ArrowLeft size={15} aria-hidden="true" />
         Back to work list
       </button>
-      <h2 className="text-lg font-semibold text-primary mb-1">{workId}</h2>
+      <div className="flex items-start justify-between gap-4 mb-1">
+        <h2 className="text-lg font-semibold text-primary">{workId}</h2>
+        <LastUpdated at={timeline?.fetchedAt ?? null} />
+      </div>
       <p className="text-sm text-muted mb-5">
         Dispatch → attempt → fallback → validation → repair → review → merge, in order.
       </p>
@@ -149,6 +161,10 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
     fetchProfiles();
   }, [profile, fetchStatus, fetchProfiles]);
 
+  const refresh = () => fetchStatus(profile ?? undefined, { force: true });
+  useAutoRefresh(refresh, WORK_REFRESH_MS);
+  useWsReconnectRefresh(refresh);
+
   const activeProfileRepo = profiles.data?.find((p) => p.name === profile)?.repo ?? null;
 
   if (selectedWorkId) {
@@ -176,8 +192,9 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
       <PageHeader
         title="Work"
         description="Active sessions and dispatchable tickets"
-        onRefresh={() => fetchStatus(profile ?? undefined, { force: true })}
+        onRefresh={refresh}
         refreshing={status.loading}
+        lastUpdated={status.fetchedAt}
       />
 
       <NewDispatchForm profile={profile ?? 'gah'} repo={activeProfileRepo} />
