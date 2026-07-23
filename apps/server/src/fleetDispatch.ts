@@ -34,6 +34,8 @@ type FleetDispatchDeps = {
     pushBus: PushBusLike;
     onTerminal: (session: Session) => void;
     localSessionManager: ReturnType<typeof getSessionManager>;
+    profile?: string;
+    session?: Session;
   }) => NodeDispatchTransport;
 };
 
@@ -107,13 +109,15 @@ function encodeKeyPart(value: string): string {
   return encodeURIComponent(value);
 }
 
-function deriveDispatchWorkKey(options: Pick<RoutedSessionOptions, 'profile' | 'repo' | 'branch' | 'target' | 'mode'>): string {
+function deriveDispatchWorkKey(options: Pick<RoutedSessionOptions, 'profile' | 'repo' | 'branch' | 'target' | 'mode' | 'backend' | 'model'>): string {
   return [
     options.profile,
     options.repo,
     options.branch ?? '',
     options.target ?? '',
-    options.mode
+    options.mode,
+    options.backend ?? '',
+    options.model ?? ''
   ].map(encodeKeyPart).join('|');
 }
 
@@ -127,7 +131,9 @@ function deriveLeaseWorkKey(lease: Pick<LeaseRecord, 'profile' | 'session'>): st
     repo: session.repo,
     branch: session.branch,
     target: session.target,
-    mode: session.mode
+    mode: session.mode,
+    backend: session.backend,
+    model: session.model
   });
 }
 
@@ -151,12 +157,10 @@ class LeaseStore {
             const normalizedLease = {
               ...lease,
               profile: typeof lease.profile === 'string' ? lease.profile : '',
-              workKey: typeof lease.workKey === 'string'
-                ? lease.workKey
-                : deriveLeaseWorkKey({
-                    profile: typeof lease.profile === 'string' ? lease.profile : '',
-                    session: lease.session
-                  }) ?? lease.requestId
+              workKey: deriveLeaseWorkKey({
+                profile: typeof lease.profile === 'string' ? lease.profile : '',
+                session: lease.session
+              }) ?? (typeof lease.workKey === 'string' ? lease.workKey : lease.requestId)
             } satisfies LeaseRecord;
             this.leases.set(normalizedLease.requestId, normalizedLease);
             this.leasesByWorkKey.set(normalizedLease.workKey, normalizedLease);
@@ -184,7 +188,14 @@ class LeaseStore {
   }
 
   getByWorkKey(workKey: string): LeaseRecord | undefined {
-    return this.leasesByWorkKey.get(workKey);
+    const lease = this.leasesByWorkKey.get(workKey);
+    if (!lease) {
+      return undefined;
+    }
+    if (lease.state === 'terminal' || lease.state === 'expired') {
+      return undefined;
+    }
+    return lease;
   }
 
   getBySessionId(sessionId: string): LeaseRecord | undefined {
@@ -272,7 +283,7 @@ class LocalNodeTransport implements NodeDispatchTransport {
 
 class RemoteNodeTransport implements NodeDispatchTransport {
   private socket: WebSocket | null = null;
-  private profile = 'gah';
+  private profile: string;
   private startedSession: Session | undefined;
   private startResolver:
     | { resolve: (session: Session) => void; reject: (error: Error) => void }
@@ -287,8 +298,15 @@ class RemoteNodeTransport implements NodeDispatchTransport {
     private readonly node: NodeSelection,
     private readonly pushBus: PushBusLike,
     private readonly coordinatorNodeId: string,
-    private readonly onTerminal: (session: Session) => void
-  ) {}
+    private readonly onTerminal: (session: Session) => void,
+    initialProfile = 'gah',
+    initialSession?: Session
+  ) {
+    this.profile = initialProfile;
+    if (initialSession) {
+      this.startedSession = initialSession;
+    }
+  }
 
   async startSession(options: RoutedSessionOptions): Promise<Session> {
     if (this.startedSession) {
@@ -504,12 +522,21 @@ function defaultTransportFactory(
     pushBus: PushBusLike;
     onTerminal: (session: Session) => void;
     localSessionManager: ReturnType<typeof getSessionManager>;
+    profile?: string;
+    session?: Session;
   }
 ): NodeDispatchTransport {
   if (node.isLocal) {
     return new LocalNodeTransport(context.localSessionManager);
   }
-  return new RemoteNodeTransport(node, context.pushBus, context.coordinatorNodeId, context.onTerminal);
+  return new RemoteNodeTransport(
+    node,
+    context.pushBus,
+    context.coordinatorNodeId,
+    context.onTerminal,
+    context.profile,
+    context.session
+  );
 }
 
 export class FleetDispatchCoordinator {
@@ -582,7 +609,8 @@ export class FleetDispatchCoordinator {
         coordinatorNodeId: this.coordinatorIdentity.node_id,
         pushBus: this.pushBus,
         onTerminal: (session) => this.updateLeaseForSession(session),
-        localSessionManager: this.localSessionManager
+        localSessionManager: this.localSessionManager,
+        profile: options.profile
       });
       const session = await transport.startSession(options);
       const routed = decorateSession(session, this.coordinatorIdentity.node_id, 'running');
@@ -607,7 +635,8 @@ export class FleetDispatchCoordinator {
       coordinatorNodeId: this.coordinatorIdentity.node_id,
       pushBus: this.pushBus,
       onTerminal: (session) => this.updateLeaseForSession(session),
-      localSessionManager: this.localSessionManager
+      localSessionManager: this.localSessionManager,
+      profile: options.profile
     });
     const session = await transport.startSession({
       ...options,
@@ -655,7 +684,9 @@ export class FleetDispatchCoordinator {
         coordinatorNodeId: this.coordinatorIdentity.node_id,
         pushBus: this.pushBus,
         onTerminal: (session) => this.updateLeaseForSession(session),
-        localSessionManager: this.localSessionManager
+        localSessionManager: this.localSessionManager,
+        profile: lease.profile,
+        session: lease.session
       }
     );
     const session = await transport.stopSession(sessionId);
@@ -691,7 +722,9 @@ export class FleetDispatchCoordinator {
         coordinatorNodeId: this.coordinatorIdentity.node_id,
         pushBus: this.pushBus,
         onTerminal: (session) => this.updateLeaseForSession(session),
-        localSessionManager: this.localSessionManager
+        localSessionManager: this.localSessionManager,
+        profile: lease.profile,
+        session: lease.session
       }
     );
     await transport.sendCommand(sessionId, command);

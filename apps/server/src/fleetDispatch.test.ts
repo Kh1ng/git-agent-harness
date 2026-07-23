@@ -130,14 +130,20 @@ async function createMockNode(initialSessions: Session[] = []): Promise<MockNode
 
 class FakeTransport {
   private sessions = new Map<string, Session>();
+  private startedSession: Session | undefined;
   public startCalls = 0;
   public stopCalls = 0;
 
   constructor(
     private readonly nodeId: string,
     private readonly onTerminal: (session: Session) => void,
+    private readonly initialSession?: Session,
     private readonly startDelayMs = 0
-  ) {}
+  ) {
+    if (initialSession) {
+      this.startedSession = initialSession;
+    }
+  }
 
   async startSession(options: {
     requestId?: string;
@@ -172,13 +178,14 @@ class FakeTransport {
       budget: options.budget
     };
     this.sessions.set(session.id, session);
+    this.startedSession = session;
     return session;
   }
 
   async stopSession(sessionId: string): Promise<Session> {
     this.stopCalls += 1;
-    const session = this.sessions.get(sessionId);
-    if (!session) {
+    const session = this.startedSession;
+    if (!session || session.id !== sessionId) {
       throw new Error(`Missing session ${sessionId}`);
     }
     const stopped: Session = {
@@ -187,11 +194,16 @@ class FakeTransport {
       endedAt: new Date().toISOString()
     };
     this.sessions.set(sessionId, stopped);
+    this.startedSession = stopped;
     this.onTerminal(stopped);
     return stopped;
   }
 
-  async sendCommand(): Promise<void> {}
+  async sendCommand(sessionId: string, _command: string): Promise<void> {
+    if (!this.startedSession || this.startedSession.id !== sessionId) {
+      throw new Error(`Missing session ${sessionId}`);
+    }
+  }
 
   getSession(sessionId: string): Session | undefined {
     return this.sessions.get(sessionId);
@@ -231,7 +243,7 @@ function createCoordinatorHarness(options: {
     transportFactory: (node, context) => {
       let transport = transportMap.get(node.nodeId);
       if (!transport) {
-        transport = new FakeTransport(node.nodeId, context.onTerminal);
+        transport = new FakeTransport(node.nodeId, context.onTerminal, context.session);
         transportMap.set(node.nodeId, transport);
       }
       return transport as any;
@@ -390,11 +402,91 @@ test('fleet dispatch reuses request ids across coordinator restarts and reconcil
       1
     );
 
+    await restartedCoordinator.sendCommand(first.id, 'status');
+
     await restartedCoordinator.reconcileLeases('gah');
 
     const reconciled = restartedCoordinator.getSession(first.id);
     assert.equal(reconciled?.leaseState, 'running');
     assert.equal(reconciled?.nodeId, 'worker-1');
+  } finally {
+    await mockNode.close();
+    try {
+      unlinkSync(leaseStorePath);
+    } catch {
+      // ignore cleanup failures
+    }
+  }
+});
+
+test('fleet dispatch can stop a remote lease after a coordinator restart', async () => {
+  const mockNode = await createMockNode();
+  const leaseDir = mkdtempSync(resolve(tmpdir(), 'gah-fleet-'));
+  const leaseStorePath = resolve(leaseDir, 'dispatch-leases.json');
+  const published: PublishedMessage[] = [];
+  const transportMap = new Map<string, FakeTransport>();
+  const coordinatorIdentity = {
+    node_id: 'coordinator-1',
+    display_name: 'GAH Coordinator',
+    advertised_url: 'http://127.0.0.1:9999',
+    version: '0.1.0',
+    schema_digest: 'schema'
+  };
+
+  const registryService = {
+    async getNodeObservations() {
+      return [
+        makeSnapshot('coordinator-1', coordinatorIdentity.advertised_url, 90, 4, 2),
+        makeSnapshot('worker-1', mockNode.url, 10, 0, 0)
+      ];
+    }
+  } as unknown as RegistryService;
+
+  const firstCoordinator = createCoordinatorHarness({
+    leaseStorePath,
+    registryService,
+    coordinatorNodeId: coordinatorIdentity.node_id,
+    coordinatorUrl: coordinatorIdentity.advertised_url,
+    transportMap,
+    published
+  });
+
+  try {
+    const first = await firstCoordinator.startSession({
+      requestId: 'dispatch-stop-restart',
+      profile: 'gah',
+      providerKind: 'codex',
+      instanceId: 'codex-0',
+      repo: 'owner/repo',
+      mode: 'improve'
+    });
+
+    mockNode.sessions = [first];
+
+    const restartedTransportMap = new Map<string, FakeTransport>();
+    const restartedCoordinator = createCoordinatorHarness({
+      leaseStorePath,
+      registryService,
+      coordinatorNodeId: coordinatorIdentity.node_id,
+      coordinatorUrl: coordinatorIdentity.advertised_url,
+      transportMap: restartedTransportMap,
+      published
+    });
+
+    const retry = await restartedCoordinator.startSession({
+      requestId: 'dispatch-stop-restart',
+      profile: 'gah',
+      providerKind: 'codex',
+      instanceId: 'codex-0',
+      repo: 'owner/repo',
+      mode: 'improve'
+    });
+
+    assert.equal(retry.id, first.id);
+
+    const stopped = await restartedCoordinator.stopSession(first.id);
+    assert.equal(stopped.status, 'stopped');
+    assert.equal(restartedTransportMap.get('worker-1')?.stopCalls, 1);
   } finally {
     await mockNode.close();
     try {
@@ -421,7 +513,7 @@ test('fleet dispatch deduplicates concurrent starts with the same request id', a
 
   transportMap.set(
     'coordinator-1',
-    new FakeTransport('coordinator-1', () => {}, 50)
+    new FakeTransport('coordinator-1', () => {}, undefined, 50)
   );
 
   const coordinator = createCoordinatorHarness({
@@ -546,6 +638,111 @@ test('fleet dispatch deduplicates concurrent starts for the same work identity a
       published.filter((message) => message.type === 'session.started').length,
       1
     );
+  } finally {
+    try {
+      unlinkSync(leaseStorePath);
+    } catch {
+      // ignore cleanup failures
+    }
+  }
+});
+
+test('fleet dispatch allows redispatch after terminal completion and keeps backend/model scoped work identities distinct', async () => {
+  const leaseDir = mkdtempSync(resolve(tmpdir(), 'gah-fleet-'));
+  const leaseStorePath = resolve(leaseDir, 'dispatch-leases.json');
+  const published: PublishedMessage[] = [];
+  const transportMap = new Map<string, FakeTransport>();
+
+  const registryService = {
+    async getNodeObservations() {
+      return [
+        makeSnapshot('coordinator-1', 'http://127.0.0.1:9999', 10, 0, 0, {
+          backend_configured: { codex: true, claude: true },
+          backend_instances: [
+            {
+              backend_instance: 'codex-main',
+              runner_kind: 'codex',
+              logical_backend: 'codex',
+              account_label: null,
+              auth_source_label: null,
+              quota_pool: null,
+              supported_models: ['gpt-4.1'],
+              executable_configured: true,
+              isolated_state_configured: true
+            },
+            {
+              backend_instance: 'claude-main',
+              runner_kind: 'claude',
+              logical_backend: 'claude',
+              account_label: null,
+              auth_source_label: null,
+              quota_pool: null,
+              supported_models: ['sonnet-4.1'],
+              executable_configured: true,
+              isolated_state_configured: true
+            }
+          ]
+        })
+      ];
+    }
+  } as unknown as RegistryService;
+
+  const coordinator = createCoordinatorHarness({
+    leaseStorePath,
+    registryService,
+    coordinatorNodeId: 'coordinator-1',
+    coordinatorUrl: 'http://127.0.0.1:9999',
+    transportMap,
+    published
+  });
+
+  try {
+    const first = await coordinator.startSession({
+      requestId: 'dispatch-terminal-1',
+      profile: 'gah',
+      providerKind: 'codex',
+      instanceId: 'codex-0',
+      repo: 'owner/repo',
+      branch: 'feature/terminal-redispatch',
+      mode: 'improve',
+      backend: 'codex',
+      model: 'gpt-4.1'
+    });
+
+    const stopped = await coordinator.stopSession(first.id);
+    assert.equal(stopped.status, 'stopped');
+
+    const second = await coordinator.startSession({
+      requestId: 'dispatch-terminal-2',
+      profile: 'gah',
+      providerKind: 'codex',
+      instanceId: 'codex-0',
+      repo: 'owner/repo',
+      branch: 'feature/terminal-redispatch',
+      mode: 'improve',
+      backend: 'codex',
+      model: 'gpt-4.1'
+    });
+
+    assert.notEqual(second.id, first.id);
+    assert.equal(second.status, 'running');
+
+    const modelScoped = await coordinator.startSession({
+      requestId: 'dispatch-model-scope',
+      profile: 'gah',
+      providerKind: 'claude',
+      instanceId: 'claude-0',
+      repo: 'owner/repo',
+      branch: 'feature/terminal-redispatch',
+      mode: 'improve',
+      backend: 'claude',
+      model: 'sonnet-4.1'
+    });
+
+    assert.notEqual(modelScoped.id, second.id);
+    assert.notEqual(modelScoped.id, first.id);
+    assert.equal(modelScoped.backend, 'claude');
+    assert.equal(modelScoped.model, 'sonnet-4.1');
   } finally {
     try {
       unlinkSync(leaseStorePath);
