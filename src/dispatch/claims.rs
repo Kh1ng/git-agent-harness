@@ -1,14 +1,17 @@
 use super::command::command_output;
 use super::dependencies::evaluate_issue_dependencies;
 use super::issues::{
-    issue_is_auto_dispatch_blocked, parse_ticket_metadata, parse_ticket_metadata_from_issue,
-    ticket_number_prefix, try_discover_open_issues,
+    issue_is_auto_dispatch_blocked, issue_is_canonical_autonomous, parse_ticket_metadata,
+    parse_ticket_metadata_from_issue, ticket_number_prefix, try_discover_open_issues,
 };
 use super::{DispatchArgs, MIN_DISPATCH_FREE_BYTES};
 use crate::config::{GahConfig, Profile};
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
-use crate::models::{AvailableTicket, DependencyBlocker, IssueIntakeRejection};
+use crate::models::{
+    AvailableTicket, CandidateExecutionPolicy, CandidateSource, DependencyBlocker,
+    IssueIntakeRejection,
+};
 use crate::notifications::{
     notify_event, notify_terminal_failure_resolved, notify_terminal_failure_resolved_with_run_id,
     NotifyEvent,
@@ -30,6 +33,30 @@ use time::OffsetDateTime;
 /// that a live, still-working claim is never mistaken for abandoned, short
 /// enough that a genuinely dead claim doesn't block a ticket for days.
 const CLAIM_STALE_AFTER_HOURS: i64 = 6;
+
+fn normalized_work_identity(work_id: Option<&str>, ticket_path: &str) -> String {
+    crate::work_claim::normalize_work_identity(work_id.unwrap_or(ticket_path))
+}
+
+fn execution_policy(
+    profile: &Profile,
+    autonomous_metadata_present: bool,
+    dispatchable_now: bool,
+    exclusion_reason_code: Option<&str>,
+    exclusion_reason: Option<String>,
+) -> CandidateExecutionPolicy {
+    CandidateExecutionPolicy {
+        intake_mode: profile.publishing.issue_intake_mode.as_str().to_string(),
+        explicit_autonomy_required: matches!(
+            profile.publishing.issue_intake_mode,
+            crate::config::IssueIntakeMode::CanonicalAutonomousOnly
+        ),
+        autonomous_metadata_present,
+        dispatchable_now,
+        exclusion_reason_code: exclusion_reason_code.map(str::to_string),
+        exclusion_reason,
+    }
+}
 
 fn is_claim_stale(entry: &LedgerEntry) -> bool {
     let entry_time = if let Ok(parsed) = OffsetDateTime::parse(&entry.timestamp, &Rfc3339) {
@@ -511,9 +538,40 @@ pub(crate) fn scan_available_tickets_with_dependencies(
                 continue;
             };
 
+            let autonomous_metadata_present = meta
+                .execution_disposition
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("autonomous"));
+            let explicit_autonomy_required = matches!(
+                profile.publishing.issue_intake_mode,
+                crate::config::IssueIntakeMode::CanonicalAutonomousOnly
+            );
+            let dispatchable_now = !explicit_autonomy_required || autonomous_metadata_present;
+            let exclusion_reason_code = if dispatchable_now {
+                None
+            } else {
+                Some("autonomous_metadata_required")
+            };
+            let exclusion_reason = if dispatchable_now {
+                None
+            } else {
+                Some("legacy ticket missing execution disposition 'autonomous'".to_string())
+            };
+            let normalized_work_identity =
+                normalized_work_identity(work_id.as_deref(), &path.display().to_string());
+
             candidates.push(AvailableTicket {
                 ticket_path: path.display().to_string(),
                 work_id,
+                normalized_work_identity,
+                source: CandidateSource::LegacyTicket,
+                execution_policy: execution_policy(
+                    profile,
+                    autonomous_metadata_present,
+                    dispatchable_now,
+                    exclusion_reason_code,
+                    exclusion_reason,
+                ),
                 title: meta.title.clone(),
                 recommended_backend: meta.recommended_backend.clone(),
                 recommended_model: meta.recommended_model.clone(),
@@ -620,9 +678,27 @@ pub(crate) fn scan_available_tickets_with_dependencies(
             continue;
         };
 
+        let autonomous_metadata_present = issue_is_canonical_autonomous(
+            &issue.labels,
+            &profile.publishing.canonical_autonomous_label,
+        );
+        let normalized_work_identity = normalized_work_identity(work_id.as_deref(), &issue.number);
+
         candidates.push(AvailableTicket {
             ticket_path: issue.number.clone(),
             work_id,
+            normalized_work_identity,
+            source: match profile.provider.to_ascii_lowercase().as_str() {
+                "gitlab" => CandidateSource::GitlabIssue,
+                _ => CandidateSource::GithubIssue,
+            },
+            execution_policy: execution_policy(
+                profile,
+                autonomous_metadata_present,
+                true,
+                None,
+                None,
+            ),
             title: meta.title.clone(),
             recommended_backend: meta.recommended_backend.clone(),
             recommended_model: meta.recommended_model.clone(),
@@ -637,11 +713,31 @@ pub(crate) fn scan_available_tickets_with_dependencies(
         });
     }
 
+    candidates.sort_by(|a, b| {
+        a.normalized_work_identity
+            .cmp(&b.normalized_work_identity)
+            .then_with(|| candidate_source_rank(&a.source).cmp(&candidate_source_rank(&b.source)))
+            .then_with(|| {
+                b.execution_policy
+                    .dispatchable_now
+                    .cmp(&a.execution_policy.dispatchable_now)
+            })
+            .then_with(|| a.ticket_path.cmp(&b.ticket_path))
+    });
+    candidates.dedup_by(|a, b| a.normalized_work_identity == b.normalized_work_identity);
+
     TicketScan {
         available_tickets: candidates,
         dependency_blockers,
         issue_intake_rejections,
         provider_error,
+    }
+}
+
+fn candidate_source_rank(source: &CandidateSource) -> u8 {
+    match source {
+        CandidateSource::GithubIssue | CandidateSource::GitlabIssue => 0,
+        CandidateSource::LegacyTicket => 1,
     }
 }
 

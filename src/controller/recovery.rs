@@ -47,7 +47,7 @@ pub(super) fn recently_capacity_deferred_work_ids(
     // fingerprint handles configuration and backend availability changes;
     // the five-minute bound is the fallback for historical/unfingerprinted
     // events and routing inputs GAH cannot observe directly.
-    let mut reset_at: HashMap<&str, time::OffsetDateTime> = HashMap::new();
+    let mut reset_at: HashMap<String, time::OffsetDateTime> = HashMap::new();
     for entry in entries {
         if entry.profile != profile_name || entry.repo_id != repo_id {
             continue;
@@ -62,6 +62,7 @@ pub(super) fn recently_capacity_deferred_work_ids(
         else {
             continue;
         };
+        let work_id = crate::work_claim::normalize_work_identity(work_id);
         reset_at
             .entry(work_id)
             .and_modify(|current| *current = (*current).max(timestamp))
@@ -78,7 +79,8 @@ pub(super) fn recently_capacity_deferred_work_ids(
         let Some(work_id) = event.work_id.as_deref() else {
             continue;
         };
-        if !terminal_seen.insert(work_id) {
+        let work_id = crate::work_claim::normalize_work_identity(work_id);
+        if !terminal_seen.insert(work_id.clone()) {
             continue;
         }
         if !event.details.contains(": deferred_capacity:") {
@@ -99,13 +101,13 @@ pub(super) fn recently_capacity_deferred_work_ids(
             continue;
         };
         if reset_at
-            .get(work_id)
+            .get(work_id.as_str())
             .is_some_and(|reset| *reset > timestamp)
         {
             continue;
         }
         if now < capacity_deferral_retry_at(&event.details, timestamp) {
-            deferred.insert(work_id.to_string());
+            deferred.insert(work_id);
         }
     }
     deferred
@@ -358,7 +360,7 @@ pub(super) fn resolve_attached_branch_conflicts(
 
         deferred_branches.insert(branch.clone());
         if let Some(work_id) = work_id {
-            deferred_work_ids.insert(work_id.clone());
+            deferred_work_ids.insert(crate::work_claim::normalize_work_identity(work_id));
         }
         record_deferral(branch, work_id.as_deref(), &attachment)?;
         candidate = choose_next(&deferred_work_ids, &deferred_branches)?;
@@ -374,23 +376,22 @@ pub(super) fn retain_snapshot_candidates(
     excluded_work_ids: &HashSet<String>,
     excluded_branches: &HashSet<String>,
 ) {
+    let excluded_work_ids = excluded_work_ids
+        .iter()
+        .map(|id| crate::work_claim::normalize_work_identity(id))
+        .collect::<HashSet<_>>();
     snapshot.merge_requests.retain(|mr| {
-        !mr.work_id
-            .as_ref()
-            .is_some_and(|id| excluded_work_ids.contains(id))
-            && !excluded_branches.contains(&mr.branch)
+        !mr.work_id.as_ref().is_some_and(|id| {
+            excluded_work_ids.contains(&crate::work_claim::normalize_work_identity(id))
+        }) && !excluded_branches.contains(&mr.branch)
     });
-    snapshot.available_tickets.retain(|ticket| {
-        !ticket
-            .work_id
-            .as_ref()
-            .is_some_and(|id| excluded_work_ids.contains(id))
-    });
+    snapshot
+        .available_tickets
+        .retain(|ticket| !excluded_work_ids.contains(&ticket.normalized_work_identity));
     snapshot.issue_intake_rejections.retain(|issue| {
-        !issue
-            .work_id
-            .as_ref()
-            .is_some_and(|id| excluded_work_ids.contains(id))
+        !issue.work_id.as_ref().is_some_and(|id| {
+            excluded_work_ids.contains(&crate::work_claim::normalize_work_identity(id))
+        })
     });
 }
 

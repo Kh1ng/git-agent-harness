@@ -30,6 +30,10 @@ fn is_infra_failure(failure_class: &str) -> bool {
     )
 }
 
+fn ticket_consumes_worker_slot(ticket: &crate::models::AvailableTicket) -> bool {
+    ticket.execution_policy.dispatchable_now
+}
+
 /// Issue #156: produce an RFC3339 timestamp `offset` from "now" for a
 /// `WaitUntil` re-check. Used when a READY_FOR_HUMAN MR's CI is pending so the
 /// controller records a visible, observable deferral instead of a silent no-op.
@@ -482,7 +486,12 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut failed_tickets: Vec<_> = snapshot
         .available_tickets
         .iter()
-        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count > 0)
+        .filter(|t| {
+            ticket_consumes_worker_slot(t)
+                && !t.has_active_mr
+                && !t.has_active_claim
+                && t.prior_attempt_count > 0
+        })
         // TICKET-human-required-scoping: a work-item-scoped human_required
         // ticket is blocked at the item level. Skip it so it is neither
         // retried, escalated, nor redispatched -- but unrelated eligible
@@ -516,7 +525,11 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 .is_some_and(|fc| is_infra_failure(fc) && some_backend_eligible)
     });
     let has_undispatched = snapshot.available_tickets.iter().any(|t| {
-        !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0 && !t.human_required
+        ticket_consumes_worker_slot(t)
+            && !t.has_active_mr
+            && !t.has_active_claim
+            && t.prior_attempt_count == 0
+            && !t.human_required
     });
 
     // Handle exhausted tickets: if there are exhausted tickets and NO other actionable items,
@@ -567,7 +580,12 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut undispatched: Vec<_> = snapshot
         .available_tickets
         .iter()
-        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0)
+        .filter(|t| {
+            ticket_consumes_worker_slot(t)
+                && !t.has_active_mr
+                && !t.has_active_claim
+                && t.prior_attempt_count == 0
+        })
         // TICKET-human-required-scoping: skip work-item-scoped
         // human_required tickets; they await human action, not dispatch.
         .filter(|t| !t.human_required)

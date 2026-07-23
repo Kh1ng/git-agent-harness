@@ -97,6 +97,16 @@ fn exhausted_pm_parent_does_not_block_unrelated_agent_ready_work() {
         .push(crate::models::AvailableTicket {
             ticket_path: "#562".into(),
             work_id: Some("#562".into()),
+            normalized_work_identity: crate::work_claim::normalize_work_identity("#562"),
+            source: crate::models::CandidateSource::LegacyTicket,
+            execution_policy: crate::models::CandidateExecutionPolicy {
+                intake_mode: "canonical_autonomous_only".into(),
+                explicit_autonomy_required: true,
+                autonomous_metadata_present: true,
+                dispatchable_now: true,
+                exclusion_reason_code: None,
+                exclusion_reason: None,
+            },
             title: Some("Independent fix".into()),
             recommended_backend: None,
             recommended_model: None,

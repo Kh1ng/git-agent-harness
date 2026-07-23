@@ -846,6 +846,67 @@ fn canonical_autonomous_intake_remains_opt_in_for_legacy_configs() {
 }
 
 #[test]
+fn legacy_ticket_without_explicit_autonomy_metadata_stays_visible_but_cannot_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let tickets_dir = repo.join("docs/tickets");
+    fs::create_dir_all(&tickets_dir).unwrap();
+    fs::write(
+        tickets_dir.join("TICKET-200-legacy.md"),
+        "# TICKET-200: Legacy intake\n\nGoal: stay visible\n",
+    )
+    .unwrap();
+
+    let cfg = ticket_cfg(repo);
+    let mut prof = profile(repo);
+    prof.local_path = repo.display().to_string();
+    prof.publishing.issue_intake_mode = IssueIntakeMode::CanonicalAutonomousOnly;
+
+    let candidates = scan_available_tickets(
+        &prof,
+        &[],
+        &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
+    );
+    assert_eq!(candidates.len(), 1);
+    let ticket = &candidates[0];
+    assert_eq!(ticket.normalized_work_identity, "#200");
+    assert!(!ticket.execution_policy.dispatchable_now);
+    assert_eq!(
+        ticket.execution_policy.exclusion_reason_code.as_deref(),
+        Some("autonomous_metadata_required")
+    );
+}
+
+#[test]
+fn legacy_ticket_with_explicit_autonomy_metadata_dispatches_in_explicit_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let tickets_dir = repo.join("docs/tickets");
+    fs::create_dir_all(&tickets_dir).unwrap();
+    fs::write(
+        tickets_dir.join("TICKET-201-legacy.md"),
+        "# TICKET-201: Explicit intake\n\nGoal: dispatch\nExecution disposition: autonomous\n",
+    )
+    .unwrap();
+
+    let cfg = ticket_cfg(repo);
+    let mut prof = profile(repo);
+    prof.local_path = repo.display().to_string();
+    prof.publishing.issue_intake_mode = IssueIntakeMode::CanonicalAutonomousOnly;
+
+    let candidates = scan_available_tickets(
+        &prof,
+        &[],
+        &ledger::index_entries_by_work_id(&ledger::read_entries(&cfg).unwrap()),
+    );
+    assert_eq!(candidates.len(), 1);
+    let ticket = &candidates[0];
+    assert_eq!(ticket.normalized_work_identity, "#201");
+    assert!(ticket.execution_policy.dispatchable_now);
+    assert!(ticket.execution_policy.exclusion_reason_code.is_none());
+}
+
+#[test]
 fn conflicting_disposition_labels_resolve_to_owner_decision_regardless_of_order() {
     let tmp = tempfile::tempdir().unwrap();
     let profile = profile(tmp.path());

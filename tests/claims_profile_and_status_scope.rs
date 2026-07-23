@@ -126,7 +126,7 @@ default_target_branch = "main"
     let claims_by_profile: Value = serde_json::from_slice(&claims_by_profile_out).unwrap();
     let claims_by_profile = claims_by_profile.as_array().unwrap();
     assert_eq!(claims_by_profile.len(), 1);
-    assert_eq!(claims_by_profile[0]["work_id"], "TICKET-436");
+    assert_eq!(claims_by_profile[0]["work_id"], "#436");
 
     let claims_all_out = bin()
         .current_dir(&repo)
@@ -181,7 +181,7 @@ default_target_branch = "main"
     let active_claims = status["active_claims"].as_array().unwrap();
     let active = active_claims
         .iter()
-        .find(|item| item["work_id"] == "TICKET-436")
+        .find(|item| item["work_id"] == "#436")
         .expect("status should include active claim snapshot");
     assert_eq!(active["scope"], "gah@gah");
 }

@@ -295,7 +295,7 @@ fn issue_disposition_from_labels(profile: &Profile, labels: &[String]) -> Option
     None
 }
 
-fn issue_is_canonical_autonomous(labels: &[String], canonical_label: &str) -> bool {
+pub(super) fn issue_is_canonical_autonomous(labels: &[String], canonical_label: &str) -> bool {
     labels
         .iter()
         .any(|label| label.trim().eq_ignore_ascii_case(canonical_label.trim()))
@@ -1031,6 +1031,14 @@ pub(super) fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata
             let value = value.trim();
             if !value.is_empty() && value != "unspecified" {
                 meta.recommended_model = Some(value.to_string());
+            }
+        } else if let Some(value) = line
+            .strip_prefix("Execution disposition:")
+            .or_else(|| line.strip_prefix("Execution Disposition:"))
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                meta.execution_disposition = Some(value.to_string());
             }
         } else if let Some(value) = line.strip_prefix("Goal:") {
             let value = value.trim();
