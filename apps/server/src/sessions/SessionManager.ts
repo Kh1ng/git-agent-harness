@@ -88,8 +88,6 @@ class SessionManagerImpl {
       timer.unref?.();
     }
   }
-  }
-  
   async startSession(options: SessionOptions): Promise<Session> {
     const { requestId } = options;
     if (requestId) {
