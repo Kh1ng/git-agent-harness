@@ -73,9 +73,7 @@ pub fn run_claude_with_executable(
         cmd.args(["--model", model]);
     }
     cmd.args(filtered_backend_args("claude", extra_args));
-    for (k, v) in env_vars {
-        cmd.env(k, v);
-    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
 
     let (exit_code, duration_secs) = spawn_with_idle_watch(
         cmd,

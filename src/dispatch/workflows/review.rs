@@ -34,6 +34,8 @@ use std::fs;
 use std::path::Path;
 
 mod identity;
+#[path = "review_external_env.rs"]
+mod review_external_env;
 mod source_issue_context;
 mod source_issue_sections;
 use identity::canonicalize_review_ledger_identity;
@@ -557,7 +559,15 @@ pub(in crate::dispatch) fn review(
                     )
                 })?;
             record_route_attempt(ledger, &route)?;
-            let attempt_env_vars = review_attempt_environment(profile, &route.identity, &env_vars);
+            let mut attempt_env_vars =
+                review_attempt_environment(profile, &route.identity, &env_vars);
+            attempt_env_vars = review_external_env::filter_attempt_env_vars(
+                cfg,
+                profile,
+                &args.profile,
+                ledger.work_id.as_deref(),
+                attempt_env_vars,
+            );
             let attempt = runner::run_review_backend_for_identity(
                 profile,
                 &route.identity,

@@ -65,9 +65,7 @@ pub fn run_vibe_with_executable(
     cmd.args(["-p", task, "--trust", "--auto-approve"])
         .args(extra_args)
         .current_dir(worktree);
-    for (k, v) in env_vars {
-        cmd.env(k, v);
-    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
     // Vibe has no per-invocation --model flag. Its documented environment
     // selector must receive the route's effective model so the actual model
     // and the ledger attribution cannot diverge. Set this after env_file

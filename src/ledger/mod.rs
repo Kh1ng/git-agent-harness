@@ -3,12 +3,16 @@ mod entry;
 mod jsonl;
 mod locking;
 
-pub use self::approvals::active_paid_route_approval_destinations_from_entries;
+pub use self::approvals::{
+    active_external_approval_env_vars_from_entries,
+    active_paid_route_approval_destinations_from_entries, external_approval_snapshot_from_entries,
+    ExternalApprovalSnapshot,
+};
 #[allow(unused_imports)]
 pub use self::entry::{
     review_generation, AttemptBehaviorMetrics, AttemptRecord, AttemptRoutingRecord, BehaviorMetric,
-    BehaviorMetricQuality, FailureClass, FailureStage, LedgerEntry, LedgerUsage,
-    RoutingCandidateDiagnostic, RoutingDiagnostics, CURRENT_REVIEW_CONTRACT_VERSION,
+    BehaviorMetricQuality, ExternalApprovalRecord, FailureClass, FailureStage, LedgerEntry,
+    LedgerUsage, RoutingCandidateDiagnostic, RoutingDiagnostics, CURRENT_REVIEW_CONTRACT_VERSION,
     LEDGER_SCHEMA_VERSION, REVIEW_CONTRACT_VERSION,
 };
 #[allow(unused_imports)]

@@ -24,6 +24,7 @@ use std::process::Command;
 
 pub(crate) fn experiment(
     cfg: &GahConfig,
+    profile_name: &str,
     profile: &Profile,
     args: &DispatchArgs,
     session_dir: &Path,
@@ -114,6 +115,8 @@ pub(crate) fn experiment(
     };
     record_route_attempt(ledger, &route)?;
     let result = match run_backend_for_identity(
+        cfg,
+        profile_name,
         &route.identity,
         profile,
         &wt,
@@ -121,6 +124,7 @@ pub(crate) fn experiment(
         &attempt_dir,
         &llm,
         env_path,
+        ledger.work_id.as_deref(),
         None,
     ) {
         Ok(r) => r,

@@ -405,6 +405,9 @@ pub(crate) fn improve(
             &attempt_session,
             &llm,
             env_path,
+            cfg,
+            &args.profile,
+            ledger.work_id.as_deref(),
             true,
             None,
         );

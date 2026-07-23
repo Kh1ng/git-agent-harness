@@ -245,6 +245,30 @@ pub(super) fn apply_execution_identity_env(
     }
 }
 
+pub(super) fn external_env_vars_for_work_item(
+    cfg: &GahConfig,
+    profile_name: &str,
+    profile: &Profile,
+    work_id: Option<&str>,
+    env_path: Option<&str>,
+) -> Vec<(String, String)> {
+    let Some(work_id) = work_id else {
+        return Vec::new();
+    };
+    let Ok(entries) = ledger::read_entries(cfg) else {
+        return Vec::new();
+    };
+    let allowed = ledger::active_external_approval_env_vars_from_entries(
+        &entries,
+        profile_name,
+        &profile.repo_id,
+        work_id,
+    );
+    let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
+    env_vars.retain(|(key, _)| allowed.contains(key));
+    env_vars
+}
+
 fn execution_identity_executable(
     profile: &Profile,
     identity: &crate::execution_identity::ExecutionIdentity,
@@ -267,6 +291,8 @@ fn execution_identity_executable(
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 pub(super) fn run_backend(
+    cfg: &GahConfig,
+    profile_name: &str,
     backend: &str,
     profile: &Profile,
     wt: &Path,
@@ -275,6 +301,7 @@ pub(super) fn run_backend(
     llm: &runner::LlmConfig,
     effective_model: Option<&str>,
     env_path: Option<&str>,
+    work_id: Option<&str>,
     hard_timeout_seconds: Option<u64>,
 ) -> Result<runner::RunResult> {
     let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
@@ -290,6 +317,9 @@ pub(super) fn run_backend(
         session_dir,
         llm,
         env_path,
+        cfg,
+        profile_name,
+        work_id,
         false,
         hard_timeout_seconds,
     )
@@ -297,6 +327,8 @@ pub(super) fn run_backend(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_backend_for_identity(
+    cfg: &GahConfig,
+    profile_name: &str,
     identity: &crate::execution_identity::ExecutionIdentity,
     profile: &Profile,
     wt: &Path,
@@ -304,6 +336,7 @@ pub(super) fn run_backend_for_identity(
     session_dir: &Path,
     llm: &runner::LlmConfig,
     env_path: Option<&str>,
+    work_id: Option<&str>,
     hard_timeout_seconds: Option<u64>,
 ) -> Result<runner::RunResult> {
     run_backend_with_reserved_route(
@@ -314,6 +347,9 @@ pub(super) fn run_backend_for_identity(
         session_dir,
         llm,
         env_path,
+        cfg,
+        profile_name,
+        work_id,
         false,
         hard_timeout_seconds,
     )
@@ -328,6 +364,9 @@ pub(super) fn run_backend_with_reserved_route(
     session_dir: &Path,
     llm: &runner::LlmConfig,
     env_path: Option<&str>,
+    cfg: &GahConfig,
+    profile_name: &str,
+    work_id: Option<&str>,
     route_slot_already_reserved: bool,
     hard_timeout_seconds: Option<u64>,
 ) -> Result<runner::RunResult> {
@@ -344,7 +383,8 @@ pub(super) fn run_backend_with_reserved_route(
     let effective_model = identity.effective_model.as_deref();
     let executable = execution_identity_executable(profile, identity)?;
     let origin_before = worktree::git(&["remote", "get-url", "origin"], wt).ok();
-    let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
+    let mut env_vars =
+        external_env_vars_for_work_item(cfg, profile_name, profile, work_id, env_path);
     // Every agent and any test command it launches inherit this repository-
     // scoped target directory. Cargo safely serializes concurrent builds in a
     // shared target dir, while separate worktree-local `target/` directories

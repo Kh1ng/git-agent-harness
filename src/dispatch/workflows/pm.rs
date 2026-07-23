@@ -59,6 +59,7 @@ const PM_EXISTING_TICKETS_MAX: usize = 50;
 
 pub(crate) fn pm(
     cfg: &GahConfig,
+    profile_name: &str,
     profile: &Profile,
     args: &DispatchArgs,
     session_dir: &Path,
@@ -163,6 +164,9 @@ pub(crate) fn pm(
                     &attempt_dir,
                     &llm,
                     None,
+                    cfg,
+                    profile_name,
+                    ledger.work_id.as_deref(),
                     true,
                     Some(remaining.as_secs().max(1)),
                 )

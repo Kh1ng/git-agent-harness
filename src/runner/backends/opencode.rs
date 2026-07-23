@@ -81,9 +81,7 @@ pub fn run_opencode_with_executable(
     cmd.args(filtered_backend_args("opencode", extra_args));
 
     cmd.current_dir(worktree);
-    for (k, v) in env_vars {
-        cmd.env(k, v);
-    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
 
     let (exit_code, duration_secs) = spawn_with_worktree_progress_watch(
         cmd,

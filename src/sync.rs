@@ -1257,6 +1257,7 @@ mod tests {
             review_hard_timeout_seconds: None,
             validation_timeout_seconds: None,
             routing: crate::config::RoutingPolicy::default(),
+            external_credential_scopes: std::collections::HashMap::new(),
             pacing: crate::quota::PacingConfig::default(),
             publishing: Default::default(),
         };

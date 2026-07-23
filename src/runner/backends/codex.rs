@@ -56,9 +56,7 @@ pub fn run_codex_with_executable(
         .args(filtered_codex_args(extra_args))
         .args(codex_model_args(model))
         .current_dir(worktree);
-    for (k, v) in env_vars {
-        cmd.env(k, v);
-    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
 
     let (exit_code, duration_secs) = spawn_with_idle_watch(
         cmd,
