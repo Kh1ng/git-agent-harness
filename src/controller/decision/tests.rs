@@ -9,6 +9,8 @@ mod backpressure;
 mod lifecycle_priority;
 #[path = "tests/pm.rs"]
 mod pm;
+#[path = "tests/priority.rs"]
+mod priority;
 #[path = "tests/review_handoff.rs"]
 mod review_handoff;
 #[path = "tests/support.rs"]
@@ -102,6 +104,7 @@ fn ticket(
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count,
         genuine_agent_failure_count,
         last_failure_class: last_failure_class.map(str::to_string),
@@ -589,6 +592,7 @@ fn infra_failures_do_not_exhaust_retry_cap() {
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 3,
         genuine_agent_failure_count: 0, // all were infra failures
         last_failure_class: Some("backend_error".into()),
@@ -688,6 +692,7 @@ fn mixed_failures_only_agent_count_toward_cap() {
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 4,         // 2 agent + 2 infra
         genuine_agent_failure_count: 2, // == AUTO_RETRY_CAP
         last_failure_class: Some("backend_error".into()),
@@ -712,6 +717,7 @@ fn infra_exhausted_ticket_does_not_block_others() {
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 3,
         genuine_agent_failure_count: 0,
         last_failure_class: Some("environment_error".into()),

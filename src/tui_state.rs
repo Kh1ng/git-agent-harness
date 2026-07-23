@@ -280,6 +280,7 @@ mod tests {
             title: None,
             recommended_backend: None,
             recommended_model: None,
+            priority: crate::models::TicketPriority::Unspecified,
             prior_attempt_count,
             genuine_agent_failure_count: 0,
             last_failure_class: None,

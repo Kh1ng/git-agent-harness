@@ -5,6 +5,7 @@
 
 use super::{HumanRequiredReason, NextAction};
 use crate::status::StatusSnapshot;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -41,6 +42,56 @@ fn now_plus(offset: Duration) -> String {
     let dt =
         chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or(chrono::DateTime::UNIX_EPOCH);
     format!("{}", dt.format("%Y-%m-%dT%H:%M:%SZ"))
+}
+
+fn issue_path_identity_key(path: &str) -> IssuePathIdentity {
+    let trimmed = path.trim();
+    if let Some(stripped) = trimmed.strip_prefix('#') {
+        if stripped.bytes().all(|b| b.is_ascii_digit()) {
+            return IssuePathIdentity::Numeric(stripped.parse().unwrap_or(u64::MAX));
+        }
+    }
+    if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return IssuePathIdentity::Numeric(trimmed.parse().unwrap_or(u64::MAX));
+    }
+    IssuePathIdentity::Lexical(trimmed.to_string())
+}
+
+#[derive(Eq, PartialEq)]
+enum IssuePathIdentity {
+    Numeric(u64),
+    Lexical(String),
+}
+
+impl Ord for IssuePathIdentity {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Numeric(left), Self::Numeric(right)) => left.cmp(right),
+            (Self::Lexical(left), Self::Lexical(right)) => left.cmp(right),
+            (Self::Numeric(_), Self::Lexical(_)) => Ordering::Less,
+            (Self::Lexical(_), Self::Numeric(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for IssuePathIdentity {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn ticket_order_key(ticket: &crate::models::AvailableTicket) -> (u8, IssuePathIdentity) {
+    (
+        ticket.priority.to_sort_rank(),
+        issue_path_identity_key(&ticket.ticket_path),
+    )
+}
+
+fn ticket_order(
+    a: &crate::models::AvailableTicket,
+    b: &crate::models::AvailableTicket,
+) -> Ordering {
+    ticket_order_key(a).cmp(&ticket_order_key(b))
 }
 
 /// TICKET-078: pure, deterministic, no LLM, no I/O -- consumes an
@@ -438,7 +489,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // tickets keep flowing.
         .filter(|t| !t.human_required)
         .collect();
-    failed_tickets.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
+    failed_tickets.sort_by(|a, b| ticket_order(a, b));
 
     // Collect tickets that have exhausted the retry cap (issue #95: only
     // genuine agent failures count toward the cap; infra-class failures
@@ -521,7 +572,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // human_required tickets; they await human action, not dispatch.
         .filter(|t| !t.human_required)
         .collect();
-    undispatched.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
+    undispatched.sort_by(|a, b| ticket_order(a, b));
     if let Some(ticket) = undispatched.first() {
         return NextAction::DispatchTicket {
             ticket_path: ticket.ticket_path.clone(),

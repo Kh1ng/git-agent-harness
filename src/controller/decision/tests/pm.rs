@@ -100,6 +100,7 @@ fn exhausted_pm_parent_does_not_block_unrelated_agent_ready_work() {
             title: Some("Independent fix".into()),
             recommended_backend: None,
             recommended_model: None,
+            priority: crate::models::TicketPriority::Unspecified,
             prior_attempt_count: 0,
             genuine_agent_failure_count: 0,
             last_failure_class: None,

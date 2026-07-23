@@ -1013,6 +1013,8 @@ pub(super) fn parse_ticket_metadata(path: &Path) -> Result<Option<TicketMetadata
     for line in body.lines().map(str::trim) {
         if let Some(value) = line.strip_prefix("Difficulty:") {
             meta.difficulty = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Priority:") {
+            meta.priority = Some(value.trim().to_string());
         } else if let Some(value) = line
             .strip_prefix("Task class:")
             .or_else(|| line.strip_prefix("Task Class:"))
@@ -1104,6 +1106,8 @@ pub(super) fn parse_ticket_metadata_from_issue(issue: &IssueDetails) -> TicketMe
     for line in issue.body.lines().map(str::trim) {
         if let Some(value) = line.strip_prefix("Difficulty:") {
             meta.difficulty = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("Priority:") {
+            meta.priority = Some(value.trim().to_string());
         } else if let Some(value) = line
             .strip_prefix("Task class:")
             .or_else(|| line.strip_prefix("Task Class:"))
