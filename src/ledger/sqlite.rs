@@ -1,4 +1,4 @@
-use super::{jsonl::parse_jsonl_entries, jsonl::read_entries, LedgerEntry};
+use super::{jsonl, locking, LedgerEntry};
 use crate::config::GahConfig;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -155,7 +155,11 @@ fn store_sync_state(
     Ok(())
 }
 
-fn sync_full_from_entries(cfg: &GahConfig, entries: &[LedgerEntry]) -> Result<()> {
+fn sync_full_from_entries(
+    cfg: &GahConfig,
+    entries: &[LedgerEntry],
+    synced_byte_len: u64,
+) -> Result<()> {
     let db_path = db_path(cfg);
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent).ok();
@@ -163,14 +167,6 @@ fn sync_full_from_entries(cfg: &GahConfig, entries: &[LedgerEntry]) -> Result<()
     let mut conn = Connection::open(&db_path)
         .with_context(|| format!("opening sqlite ledger {}", db_path.display()))?;
     ensure_schema(&conn)?;
-    let synced_byte_len = fs::metadata(cfg.defaults.ledger_path())
-        .with_context(|| {
-            format!(
-                "reading metadata for {}",
-                cfg.defaults.ledger_path().display()
-            )
-        })?
-        .len();
     let tx = conn.transaction().context("opening sqlite transaction")?;
     tx.execute("DELETE FROM ledger_entries", [])
         .context("clearing sqlite ledger mirror before resync")?;
@@ -192,9 +188,17 @@ fn sync_incremental_from_jsonl(cfg: &GahConfig) -> Result<()> {
         .with_context(|| format!("opening sqlite ledger {}", db_path.display()))?;
     ensure_schema(&conn)?;
 
+    let sync_state = load_sync_state(&conn)?;
+    let Some((synced_byte_len, synced_entry_count)) = sync_state else {
+        let snapshot = jsonl::read_snapshot(cfg)?;
+        return sync_full_from_entries(cfg, &snapshot.entries, snapshot.byte_len);
+    };
+
+    let ledger_lock = locking::shared(&ledger_path)?;
     let ledger_meta = match fs::metadata(&ledger_path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            drop(ledger_lock);
             let tx = conn.transaction().context("opening sqlite transaction")?;
             tx.execute("DELETE FROM ledger_entries", [])
                 .context("clearing sqlite ledger mirror before resync")?;
@@ -206,15 +210,10 @@ fn sync_incremental_from_jsonl(cfg: &GahConfig) -> Result<()> {
     };
 
     let ledger_len = ledger_meta.len();
-    let sync_state = load_sync_state(&conn)?;
-    let Some((synced_byte_len, synced_entry_count)) = sync_state else {
-        let entries = read_entries(cfg)?;
-        return sync_full_from_entries(cfg, &entries);
-    };
-
     if ledger_len < synced_byte_len {
-        let entries = read_entries(cfg)?;
-        return sync_full_from_entries(cfg, &entries);
+        drop(ledger_lock);
+        let snapshot = jsonl::read_snapshot(cfg)?;
+        return sync_full_from_entries(cfg, &snapshot.entries, snapshot.byte_len);
     }
 
     if ledger_len == synced_byte_len {
@@ -232,7 +231,8 @@ fn sync_incremental_from_jsonl(cfg: &GahConfig) -> Result<()> {
         return Ok(());
     }
 
-    let entries = parse_jsonl_entries(&tail, &ledger_path, synced_entry_count as usize)?;
+    let entries = jsonl::parse_jsonl_entries(&tail, &ledger_path, synced_entry_count as usize)?;
+    drop(ledger_lock);
 
     let mut conn = conn;
     let tx = conn.transaction().context("opening sqlite transaction")?;
@@ -306,12 +306,14 @@ fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
 /// incremental dual-write easily could (e.g. `backfill_review_verdict`
 /// rewrites an arbitrary earlier line, not just the latest one).
 pub fn sync_from_jsonl(cfg: &GahConfig) -> Result<()> {
+    let _mirror_lock = locking::mirror_exclusive(&cfg.defaults.ledger_path())?;
     sync_incremental_from_jsonl(cfg)
 }
 
 pub fn rebuild_from_jsonl(cfg: &GahConfig) -> Result<()> {
-    let entries = read_entries(cfg)?;
-    sync_full_from_entries(cfg, &entries)
+    let _mirror_lock = locking::mirror_exclusive(&cfg.defaults.ledger_path())?;
+    let snapshot = jsonl::read_snapshot(cfg)?;
+    sync_full_from_entries(cfg, &snapshot.entries, snapshot.byte_len)
 }
 
 #[cfg(test)]
@@ -555,6 +557,68 @@ mod tests {
     }
 
     #[test]
+    fn incremental_sync_waits_for_complete_jsonl_tail_and_records_exact_offset() {
+        use std::io::Write as _;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (_tmp, cfg) = test_config();
+        let first = LedgerEntry::new("test", &profile(), "codex", "improve", "first", None, None);
+        append(&cfg, &first).unwrap();
+
+        let second = LedgerEntry::new("test", &profile(), "codex", "improve", "second", None, None);
+        let encoded = serde_json::to_vec(&second).unwrap();
+        let split = encoded.len() / 2;
+        let ledger_path = cfg.defaults.ledger_path();
+        let writer_lock = crate::ledger::locking::exclusive(&ledger_path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&ledger_path)
+            .unwrap();
+        file.write_all(&encoded[..split]).unwrap();
+        file.flush().unwrap();
+
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let sync_cfg = &cfg;
+            scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                done_tx.send(sync_from_jsonl(sync_cfg)).unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(matches!(
+                done_rx.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+
+            file.write_all(&encoded[split..]).unwrap();
+            file.write_all(b"\n").unwrap();
+            file.flush().unwrap();
+            drop(file);
+            drop(writer_lock);
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
+        });
+
+        let conn = Connection::open(db_path(&cfg)).unwrap();
+        let row_count: u64 = conn
+            .query_row("SELECT COUNT(*) FROM ledger_entries", [], |row| row.get(0))
+            .unwrap();
+        let synced_len: u64 = conn
+            .query_row(
+                "SELECT synced_byte_len FROM ledger_sync_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_count, 2);
+        assert_eq!(synced_len, fs::metadata(ledger_path).unwrap().len());
+    }
+
+    #[test]
     fn failed_full_rebuild_preserves_previous_rows_and_sync_state() {
         let (_tmp, cfg) = test_config();
         let first = LedgerEntry::new(
@@ -593,7 +657,8 @@ mod tests {
             None,
             None,
         );
-        let error = sync_full_from_entries(&cfg, &[replacement]).unwrap_err();
+        let error =
+            sync_full_from_entries(&cfg, &[replacement], state_before.0 as u64).unwrap_err();
         assert!(error.to_string().contains("injected rebuild failure"));
 
         let conn = Connection::open(&db_path).unwrap();

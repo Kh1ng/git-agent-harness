@@ -1,6 +1,7 @@
 mod approvals;
 mod entry;
 mod jsonl;
+mod locking;
 
 pub use self::approvals::active_paid_route_approval_destinations_from_entries;
 #[allow(unused_imports)]

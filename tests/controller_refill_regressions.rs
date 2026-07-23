@@ -252,7 +252,7 @@ fn setup_fix_dispatch_repo(
         &repo,
         "github",
         &format!(
-            "{}\n[profiles.real.routing]\nimprove_backend = \"codex\"\n",
+            "{}\n[profiles.real.routing]\nimprove_backend = \"codex\"\nreview_backend = \"claude\"\n",
             extra_profile
         ),
     );
@@ -676,6 +676,143 @@ fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
     );
     let calls = fs::read_to_string(calls).unwrap();
     assert!(calls.contains("call-2"));
+}
+
+#[test]
+fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
+    let tmp = test_tempdir();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    fs::write(
+        repo.join("docs/tickets/TICKET-700-heavy.md"),
+        "# TICKET-700: Heavy implementation\n\nGoal: defer under tight memory.\nRecommended backend: codex\n",
+    )
+    .unwrap();
+
+    ProcessCommand::new("git")
+        .args(["switch", "-c", "gah/real-review"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    fs::write(repo.join("review-change.txt"), "review me\n").unwrap();
+    ProcessCommand::new("git")
+        .args(["add", "review-change.txt"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["commit", "-m", "review fixture"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "gah/real-review"])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["switch", "main"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+
+    let fake_bin = tmp.path().join("bin");
+    let pulls_count = tmp.path().join("pulls-count");
+    let review_started = tmp.path().join("review-started");
+    let implementation_started = tmp.path().join("implementation-started");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\n\
+             case \"$4\" in\n\
+               */pulls\\?*)\n\
+                 n=$(cat '{pulls_count}' 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > '{pulls_count}'\n\
+                 if [ \"$n\" -le 2 ]; then echo '[]'; else echo '[{{\"title\":\"[GAH] Fix: TICKET-701\",\"body\":\"Review fixture\",\"head\":{{\"ref\":\"gah/real-review\",\"sha\":\"source-sha\"}},\"html_url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"open\",\"draft\":true,\"updated_at\":\"2026-07-23T00:00:00Z\"}}]'; fi\n\
+                 exit 0 ;;\n\
+               */pulls) echo '[{{\"number\":7}}]'; exit 0 ;;\n\
+               */check-runs\\?*) echo '{{\"total_count\":1,\"check_runs\":[{{\"status\":\"completed\",\"conclusion\":\"success\"}}]}}'; exit 0 ;;\n\
+             esac\n\
+             if [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\n\
+             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"[GAH] Fix: TICKET-701\",\"body\":\"Review fixture\",\"headRefName\":\"gah/real-review\",\"baseRefName\":\"main\",\"headRefOid\":\"source-sha\",\"statusCheckRollup\":[{{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}]}}'; exit 0; fi\n\
+             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\n\
+             exit 0\n",
+            pulls_count = pulls_count.display(),
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            "#!/bin/sh\necho started > '{}'\nexit 0\n",
+            implementation_started.display()
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        &format!(
+            "#!/bin/sh\necho started > '{}'\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:review-change.txt\"]}}\nEOF\n",
+            review_started.display()
+        ),
+    );
+
+    let node_pressure = tmp.path().join("node-pressure.json");
+    let mut command = spawn_bin(tmp.path());
+    fs::write(
+        &node_pressure,
+        r#"{
+  "memory_total_bytes": 17179869184,
+  "memory_available_bytes": 5368709120,
+  "logical_cpus": 32,
+  "load_one": 0.5,
+  "memory_full_psi_avg10": 0.0,
+  "cpu_some_psi_avg10": 0.0
+}"#,
+    )
+    .unwrap();
+    let output = command
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+            "--parallel",
+            "2",
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_TEST_NODE_PRESSURE_FILE", &node_pressure)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        review_started.exists(),
+        "lighter review must launch after heavy work is node-deferred"
+    );
+    assert!(
+        !implementation_started.exists(),
+        "heavy implementation backend must not launch through node pressure"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Deferred dispatch_ticket because node capacity is busy"),
+        "heavy deferral must remain observable"
+    );
 }
 
 #[test]
