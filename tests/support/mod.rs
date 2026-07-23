@@ -26,8 +26,12 @@
 #![allow(dead_code)] // this file is shared support code, not a test binary — individual helpers are used non-uniformly across consumers
 
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fs;
 use std::ops::{Deref, DerefMut};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -37,23 +41,61 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+#[cfg(unix)]
+const TEST_INTEGRATION_MIN_DISPATCH_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
 /// Keep integration-test repositories and child-process temporary files on
 /// the same filesystem as Cargo's build output. Some development hosts mount
 /// `/tmp` as a small tmpfs; production dispatch capacity checks must remain
 /// strict without making the test suite depend on that unrelated filesystem's
 /// current free-space level.
 pub fn test_temp_root() -> PathBuf {
-    let root = std::env::var_os("CARGO_TARGET_DIR")
+    let fallback_root = std::env::temp_dir();
+    let default_root = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::current_exe()
                 .ok()
                 .and_then(|path| path.parent()?.parent().map(Path::to_path_buf))
         })
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(|| fallback_root.clone());
+
+    let candidates = [
+        default_root.clone(),
+        PathBuf::from("/dev/shm"),
+        fallback_root.clone(),
+    ];
+    let root = candidates
+        .into_iter()
+        .find(|candidate| has_minimum_dispatch_space(candidate))
+        .unwrap_or(default_root)
         .join("gah-integration-test-tmp");
     fs::create_dir_all(&root).unwrap();
     root
+}
+
+#[cfg(unix)]
+fn has_minimum_dispatch_space(path: &Path) -> bool {
+    match free_space_bytes(path) {
+        Some(available) => available >= TEST_INTEGRATION_MIN_DISPATCH_BYTES,
+        None => false,
+    }
+}
+
+#[cfg(unix)]
+fn free_space_bytes(path: &Path) -> Option<u64> {
+    let filesystem_path = path.ancestors().find(|ancestor| ancestor.exists())?;
+    let path_c = CString::new(filesystem_path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path_c.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    Some(stat.f_bavail.saturating_mul(stat.f_frsize) as u64)
+}
+
+#[cfg(not(unix))]
+fn has_minimum_dispatch_space(_path: &Path) -> bool {
+    true
 }
 
 pub fn test_tempdir() -> TempDir {

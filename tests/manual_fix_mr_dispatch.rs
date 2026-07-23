@@ -80,6 +80,8 @@ exit 0\n"
 
 #[test]
 fn github_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
+    let temp_root = support::test_temp_root();
+    let tmp_dir = tempfile::tempdir_in(temp_root).unwrap();
     let branch = "gah/fix-needs-fix";
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("manual_fix_needs_fix")
@@ -87,6 +89,8 @@ fn github_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
         .with_config_append(
             "[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
         )
+        .with_temp_dir(tmp_dir.path())
+        .with_worktree_base(tmp_dir.path().join("worktrees"))
         .with_ledger(
             TestLedger::new().with_entry(manual_fix_review_ledger_entry(
                 branch,
@@ -137,6 +141,8 @@ fn github_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
 
 #[test]
 fn gitlab_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
+    let temp_root = support::test_temp_root();
+    let tmp_dir = tempfile::tempdir_in(temp_root).unwrap();
     let branch = "gah/fix-needs-fix";
     let mut harness = ScenarioHarness::new("gitlab")
         .gitlab_scenario("manual_fix_needs_fix")
@@ -144,6 +150,8 @@ fn gitlab_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
         .with_config_append(
             "provider_api_base = \"https://gitlab.example.com\"\nprovider_project_id = \"42\"\n\n[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
         )
+        .with_temp_dir(tmp_dir.path())
+        .with_worktree_base(tmp_dir.path().join("worktrees"))
         .with_ledger(
             TestLedger::new().with_entry(manual_fix_review_ledger_entry(
                 branch,

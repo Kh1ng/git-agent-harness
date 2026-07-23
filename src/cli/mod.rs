@@ -8,13 +8,10 @@
 use anyhow::Result;
 use clap::Parser;
 
-// Bring the crate-root modules into scope so the command handlers can call
-// them exactly as they did from the binary crate root.
-use crate::*;
 // Bring the parser structs/enums and `parse_wake_autonomy` into scope.
 use crate::cli::args::*;
-
-use crate::update;
+use crate::init;
+use crate::{config, controller, dispatch};
 
 pub mod args;
 pub mod commands;
@@ -30,11 +27,19 @@ pub fn run() -> Result<()> {
             gate_artifact,
             include_warnings,
             out_root,
-        } => candidates::run(&gate_artifact, include_warnings, &out_root)?,
+        } => commands::candidates::run(commands::candidates::Args {
+            gate_artifact,
+            include_warnings,
+            out_root,
+        })?,
 
-        Commands::PriceGuard { watchlist, model } => price_guard::run(&watchlist, &model)?,
+        Commands::PriceGuard { watchlist, model } => {
+            commands::price_guard::run(commands::price_guard::Args { watchlist, model })?
+        }
 
-        Commands::PolicyCheck { config, action } => policy::run(&config, &action)?,
+        Commands::PolicyCheck { config, action } => {
+            commands::policy::run(commands::policy::Args { config, action })?
+        }
 
         Commands::Doctor {
             profile,
@@ -47,7 +52,7 @@ pub fn run() -> Result<()> {
             repo,
             restart_server,
             server_service,
-        } => update::run(update::UpdateArgs {
+        } => commands::update::run(commands::update::Args {
             repo,
             restart_server,
             server_service,
@@ -88,12 +93,12 @@ pub fn run() -> Result<()> {
             older_than,
             profile,
             config_path,
-        } => prune::run(
-            profile.as_deref(),
-            config_path.as_deref(),
+        } => commands::prune::run(commands::prune::Args {
+            profile,
+            config_path,
             older_than,
             dry_run,
-        )?,
+        })?,
 
         Commands::Ledger { command } => commands::ledger::run(command)?,
 
@@ -210,10 +215,10 @@ pub fn run() -> Result<()> {
         Commands::Tui {
             profile,
             config_path,
-        } => {
-            let cfg = config::load(config_path.as_deref())?;
-            tui::run(&cfg, profile.as_deref())?;
-        }
+        } => commands::tui::run(commands::tui::Args {
+            profile,
+            config_path,
+        })?,
 
         Commands::Config { command } => commands::config::run(command)?,
 
@@ -238,10 +243,7 @@ pub fn run() -> Result<()> {
         })?,
 
         Commands::Server { port, host } => {
-            println!("Starting WebSocket server on {}:{}", host, port);
-            server::run_blocking(&host, port)?;
-            // This will run forever, so we don't need to return
-            std::thread::park();
+            commands::server::run(commands::server::Args { port, host })?
         }
         Commands::Telemetry { command } => commands::telemetry::run(command)?,
         Commands::Quota { command } => commands::quota::run(command)?,
