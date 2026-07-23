@@ -1,7 +1,8 @@
 use super::super::attempts::{
     apply_execution_identity_env, apply_route_to_ledger, decide_route, mark_shutdown_cancelled,
-    record_route_attempt, reserve_backend_slot, review_preflight_for_identity, review_usage,
-    route_after_backend_unavailable, route_identity, route_label,
+    record_route_attempt, reserve_backend_slot, reserve_initial_backend_slot,
+    review_preflight_for_identity, review_usage, route_after_backend_unavailable, route_identity,
+    route_label,
 };
 use super::super::prompts::enforce_context_budget;
 use super::super::publish::{render_review_comment, review_labels};
@@ -476,14 +477,13 @@ pub(in crate::dispatch) fn review(
         return Err(ReviewBudgetExhausted::new(block.reason).into());
     }
 
-    // Reserve the selected reviewer before the controller lets the next
-    // parallel slot route. Implementation dispatches already use this same
-    // rendezvous; reviews must participate too or sibling reviews can all
-    // observe a zero live count and select a backend/model capped at one.
-    let mut review_slot = Some(reserve_review_route(profile, &route)?);
-    if let Some(route_ready) = &args.route_ready {
-        let _ = route_ready.send(());
-    }
+    // Route-first admission prevents a rejected reviewer from stranding resources.
+    let wait_for_route_capacity = args.route_admission.is_none();
+    let mut review_slot = Some(reserve_initial_backend_slot(
+        profile,
+        &route.identity,
+        args,
+    )?);
 
     // Bounded retry across review_candidates: an empty/unavailable-backend
     // outcome (e.g. AGY quota exhaustion -- see agy_empty_output_diagnosis)
@@ -754,7 +754,11 @@ pub(in crate::dispatch) fn review(
                         MAX_REVIEW_ATTEMPTS
                     );
                 }
-                review_slot = Some(reserve_review_route(profile, &route)?);
+                review_slot = Some(reserve_review_route(
+                    profile,
+                    &route,
+                    wait_for_route_capacity,
+                )?);
                 continue 'attempts;
             }
             if matches!(attempt.outcome, runner::ReviewProcessOutcome::Success) {
@@ -789,7 +793,11 @@ pub(in crate::dispatch) fn review(
                             // Reacquire before the same reviewer performs the
                             // bounded format-only repair attempt.
                             debug_assert!(review_slot.is_none());
-                            review_slot = Some(reserve_review_route(profile, &route)?);
+                            review_slot = Some(reserve_review_route(
+                                profile,
+                                &route,
+                                wait_for_route_capacity,
+                            )?);
                             // Bounded retry to the same reviewer/route: this
                             // `continue` targets the inner loop only, so it
                             // does not advance `attempt_number` or consume a
@@ -1159,8 +1167,12 @@ fn mark_review_shutdown_cancelled(ledger: &mut LedgerEntry, signal: i32) {
     ledger.human_required_reason_code = None;
 }
 
-fn reserve_review_route(profile: &Profile, route: &RouteDecision) -> Result<ConcurrencyGuard> {
-    reserve_backend_slot(profile, &route.identity)
+fn reserve_review_route(
+    profile: &Profile,
+    route: &RouteDecision,
+    wait_for_capacity: bool,
+) -> Result<ConcurrencyGuard> {
+    reserve_backend_slot(profile, &route.identity, wait_for_capacity)
 }
 
 fn review_attempt_environment(

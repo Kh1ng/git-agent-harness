@@ -24,6 +24,35 @@ pub(super) fn route_state_fingerprint(
     Ok(format!("{:016x}", hasher.finish()))
 }
 
+pub(super) fn record_capacity_deferral(
+    cfg: &crate::config::GahConfig,
+    args: &crate::dispatch::DispatchArgs,
+    label: &str,
+    work_id: Option<&str>,
+    error: &anyhow::Error,
+) -> Result<Option<String>> {
+    let route_state = route_state_fingerprint(cfg, &args.profile, time::OffsetDateTime::now_utc())
+        .ok()
+        .map(|fingerprint| format!(" route_state={fingerprint}"))
+        .unwrap_or_default();
+    crate::events::record_with_run_id(
+        cfg,
+        crate::events::EventType::DispatchFinished,
+        Some(args.profile.as_str()),
+        work_id,
+        args.run_id.as_deref(),
+        format!("{label}: deferred_capacity: {error:#}{route_state}"),
+    )?;
+    let capacity = if crate::dispatch::node_capacity_deferred_error(error) {
+        "node"
+    } else {
+        "configured route"
+    };
+    Ok(Some(format!(
+        "Deferred {label} because {capacity} capacity is busy; no backend launched"
+    )))
+}
+
 /// Hash JSON objects by sorted key, not serializer iteration order. Profile
 /// configuration contains HashMaps whose order is intentionally randomized
 /// each time the recurring loop reloads TOML; hashing `serde_json::to_string`

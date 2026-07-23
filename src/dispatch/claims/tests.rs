@@ -869,7 +869,7 @@ fn test_check_duplicate_work_cases() {
         dispatch_reason: None,
         work_id: None,
         run_id: None,
-        route_ready: None,
+        route_admission: None,
     };
 
     // No ledger exists yet.
@@ -1025,7 +1025,7 @@ fn check_duplicate_work_blocks_on_active_claim() {
         dispatch_reason: None,
         work_id: None,
         run_id: None,
-        route_ready: None,
+        route_admission: None,
     };
 
     // Fresh claim -> blocked.

@@ -8,7 +8,7 @@ use super::recovery::{
 use super::NextAction;
 use anyhow::Result;
 use serde::Serialize;
-use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
 #[path = "runtime/profile_lock.rs"]
@@ -18,7 +18,7 @@ use profile_lock::reload_config_for_profile;
 
 #[path = "runtime/route_state.rs"]
 mod route_state;
-use route_state::route_state_fingerprint;
+use route_state::{record_capacity_deferral, route_state_fingerprint};
 #[path = "runtime/dispatch_policy.rs"]
 mod dispatch_policy;
 #[path = "runtime/dispatch_state.rs"]
@@ -32,12 +32,16 @@ mod intake;
 use intake::{
     action_creates_managed_mr, action_intake_key, apply_parallel_projection, retain_unclaimed_work,
 };
+#[path = "runtime/admission.rs"]
+mod admission;
 #[path = "runtime/merge.rs"]
 mod merge;
 #[path = "runtime/node_capacity.rs"]
 mod node_capacity;
 #[path = "runtime/node_reprobe.rs"]
 mod node_reprobe;
+pub(crate) use admission::NodeAdmissionDeferred;
+pub use admission::RouteNodeAdmission;
 use node_reprobe::{NodeCapacityReprobe, WaitOutcome as ReprobeWaitOutcome};
 #[path = "runtime/pm.rs"]
 mod pm;
@@ -432,9 +436,21 @@ fn run_parallel_once(
         let mut fill_attempts_remaining = effective_parallel_limit;
         let mut refill_suppressed = false;
         let mut node_capacity_reprobe = NodeCapacityReprobe::default();
+        let mut node_alternative_attempts_remaining = effective_parallel_limit;
         let (done_tx, done_rx) = sync_channel::<(usize, LoopOnceResult)>(effective_parallel_limit);
+        let (route_admission_tx, route_admission_rx) = admission::request_channel();
+        let mut admission_coordinator = admission::Coordinator::new(route_admission_rx);
 
-        loop {
+        'scheduler: loop {
+            if admission::service_pending_request(
+                &mut admission_coordinator,
+                active,
+                effective_parallel_limit,
+                &mut node_capacity_reprobe,
+            )? {
+                continue;
+            }
+
             while active < effective_parallel_limit && fill_attempts_remaining > 0 {
                 if crate::runner::shutdown_requested() {
                     break;
@@ -556,30 +572,40 @@ fn run_parallel_once(
                         }
                     }
                     _ => {
-                        let admission = match node_capacity::try_acquire(&action, active) {
-                            Ok(admission) => admission,
-                            Err(error) => {
-                                eprintln!(
-                                    "gah loop: deferring worker because node pressure could not be verified: {error}"
-                                );
-                                node_capacity::LiveAdmission::Defer(format!(
-                                    "node pressure unavailable: {error}"
-                                ))
-                            }
-                        };
-                        let node_capacity_lease = match admission {
-                            node_capacity::LiveAdmission::Admit(lease) => lease,
-                            node_capacity::LiveAdmission::Defer(reason) => {
-                                eprintln!(
-                                    "gah loop: deferring additional worker at {active}/{effective_parallel_limit}: {reason}"
-                                );
-                                if active > 0 {
-                                    node_capacity_reprobe.schedule(action.clone());
+                        let waits_for_route = admission::action_needs_handshake(&action);
+                        let node_capacity_lease = if waits_for_route {
+                            None
+                        } else {
+                            let admission = match node_capacity::try_acquire(
+                                &action,
+                                admission_coordinator.active_node_workers(),
+                            ) {
+                                Ok(admission) => admission,
+                                Err(error) => {
+                                    eprintln!(
+                                        "gah loop: deferring worker because node pressure could not be verified: {error}"
+                                    );
+                                    node_capacity::LiveAdmission::Defer(format!(
+                                        "node pressure unavailable: {error}"
+                                    ))
                                 }
-                                break;
+                            };
+                            match admission {
+                                node_capacity::LiveAdmission::Admit(lease) => Some(lease),
+                                node_capacity::LiveAdmission::Defer(reason) => {
+                                    eprintln!(
+                                        "gah loop: deferring additional worker at {active}/{effective_parallel_limit}: {reason}"
+                                    );
+                                    if active > 0 {
+                                        node_capacity_reprobe.schedule(action.clone());
+                                    }
+                                    break;
+                                }
                             }
                         };
-                        node_capacity_reprobe.clear();
+                        if node_capacity_lease.is_some() {
+                            node_capacity_reprobe.clear();
+                        }
 
                         record_action_events(
                             cfg,
@@ -608,13 +634,18 @@ fn run_parallel_once(
                         next_sequence += 1;
                         saw_real_work = true;
 
-                        let waits_for_route = action_waits_for_route(&action_for_thread);
-                        let (route_ready, route_receiver) = if waits_for_route {
-                            let (sender, receiver) = sync_channel(0);
-                            (Some(sender), Some(receiver))
+                        let route_admission = if waits_for_route {
+                            Some(RouteNodeAdmission::new(
+                                sequence,
+                                action_for_thread.clone(),
+                                route_admission_tx.clone(),
+                            ))
                         } else {
-                            (None, None)
+                            None
                         };
+                        if node_capacity_lease.is_some() {
+                            admission_coordinator.register_lifecycle_worker(sequence);
+                        }
                         let done_tx = done_tx.clone();
                         active += 1;
                         scope.spawn(move || {
@@ -626,7 +657,7 @@ fn run_parallel_once(
                                         &profile_for_thread,
                                         &action_for_thread,
                                         skip_validation_gate,
-                                        route_ready,
+                                        route_admission,
                                     )
                                 }));
                             let (outcome, event_outcome) = match result {
@@ -661,9 +692,9 @@ fn run_parallel_once(
                                 },
                             ));
                         });
-                        if let Some(receiver) = route_receiver {
-                            let _ = receiver.recv();
-                        }
+                        // Give a route-ready worker its node decision before
+                        // the next provider observation or worker launch.
+                        continue 'scheduler;
                     }
                 }
             }
@@ -706,7 +737,11 @@ fn run_parallel_once(
             }
 
             let (sequence, result) = if node_capacity_reprobe.is_scheduled() {
-                match node_capacity_reprobe.wait(&done_rx, active, effective_parallel_limit)? {
+                match node_capacity_reprobe.wait(
+                    &done_rx,
+                    admission_coordinator.active_node_workers(),
+                    effective_parallel_limit,
+                )? {
                     ReprobeWaitOutcome::WorkerCompleted(result) => result,
                     ReprobeWaitOutcome::RetryFill => {
                         fill_attempts_remaining = 1;
@@ -716,23 +751,32 @@ fn run_parallel_once(
                     ReprobeWaitOutcome::Shutdown => break,
                 }
             } else {
-                done_rx.recv().map_err(|_| {
-                    anyhow::anyhow!("parallel GAH worker channel closed unexpectedly")
-                })?
+                match admission::recv_worker_done(&done_rx)? {
+                    Some(result) => result,
+                    None if crate::runner::shutdown_requested() => break,
+                    None => continue,
+                }
             };
-            node_capacity_reprobe.clear();
+            admission_coordinator.complete_worker(sequence);
             active -= 1;
             if action_creates_managed_mr(&result.action) {
                 if let Some(key) = action_intake_key(&result.action) {
                     active_intake_keys.remove(&key);
                 }
             }
-            update_parallel_refill_budget(
+            if !admission::allow_bounded_node_alternative(
                 &result.outcome,
-                effective_parallel_limit,
+                &mut node_alternative_attempts_remaining,
                 &mut fill_attempts_remaining,
-                &mut refill_suppressed,
-            );
+                refill_suppressed,
+            ) {
+                update_parallel_refill_budget(
+                    &result.outcome,
+                    effective_parallel_limit,
+                    &mut fill_attempts_remaining,
+                    &mut refill_suppressed,
+                );
+            }
             results.push((sequence, result));
         }
         Ok(())
@@ -779,17 +823,6 @@ fn run_parallel_once(
     Ok(())
 }
 
-fn action_waits_for_route(action: &NextAction) -> bool {
-    matches!(
-        action,
-        NextAction::DispatchTicket { .. }
-            | NextAction::Retry { .. }
-            | NextAction::Escalate { .. }
-            | NextAction::FixMr { .. }
-            | NextAction::ReviewMr { .. }
-    )
-}
-
 fn update_parallel_refill_budget(
     outcome: &str,
     parallel_limit: usize,
@@ -819,7 +852,7 @@ pub(crate) fn execute_action(
     profile_name: &str,
     action: &NextAction,
     skip_validation_gate: bool,
-    route_ready: Option<SyncSender<()>>,
+    route_admission: Option<RouteNodeAdmission>,
 ) -> Result<String> {
     let base_args = || crate::dispatch::DispatchArgs {
         profile: profile_name.to_string(),
@@ -844,7 +877,7 @@ pub(crate) fn execute_action(
         dispatch_reason: None,
         work_id: action.work_id().map(str::to_string),
         run_id: Some(uuid::Uuid::new_v4().to_string()),
-        route_ready: route_ready.clone(),
+        route_admission: route_admission.clone(),
     };
 
     match action {
@@ -904,7 +937,7 @@ pub(crate) fn execute_action(
             work_id,
             title.as_deref(),
             skip_validation_gate,
-            route_ready.clone(),
+            route_admission.clone(),
         ),
         NextAction::ReconcilePmParent {
             work_id,
@@ -1007,22 +1040,7 @@ pub(crate) fn run_dispatch_and_record(
             Ok(None)
         }
         Err(e) if crate::dispatch::capacity_deferred_error(&e) => {
-            let route_state =
-                route_state_fingerprint(cfg, &args.profile, time::OffsetDateTime::now_utc())
-                    .ok()
-                    .map(|fingerprint| format!(" route_state={fingerprint}"))
-                    .unwrap_or_default();
-            crate::events::record_with_run_id(
-                cfg,
-                crate::events::EventType::DispatchFinished,
-                Some(args.profile.as_str()),
-                work_id,
-                args.run_id.as_deref(),
-                format!("{label}: deferred_capacity: {e:#}{route_state}"),
-            )?;
-            Ok(Some(format!(
-                "Deferred {label} because configured route capacity is busy; no backend launched"
-            )))
+            record_capacity_deferral(cfg, args, label, work_id, &e)
         }
         Err(e) => {
             let event_type = if crate::dispatch::duplicate_work_error(&e).is_some() {
@@ -1057,8 +1075,8 @@ mod capacity_tests;
 mod tests {
     use super::profile_lock::{acquire_profile_lock, loop_lock_path, reload_config_for_profile};
     use super::{
-        action_waits_for_route, append_stuck_loop_gate_if_transition, is_validation_gate_failure,
-        loop_parallel_argument, wait_interruptibly,
+        append_stuck_loop_gate_if_transition, is_validation_gate_failure, loop_parallel_argument,
+        wait_interruptibly,
     };
 
     #[test]
@@ -1077,7 +1095,7 @@ mod tests {
             mr_url: None,
             reason: "review required".into(),
         };
-        assert!(action_waits_for_route(&action));
+        assert!(super::admission::action_needs_handshake(&action));
     }
 
     #[test]

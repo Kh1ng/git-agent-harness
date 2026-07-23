@@ -1,8 +1,9 @@
 use super::super::attempts::{
     apply_route_to_ledger, attempt_usage, classify_git_operation_result, classify_worktree_result,
     clear_wip_checkpoints, decide_route, failure_text_with_internal_log, preflight_identity,
-    record_route_attempt, reserve_backend_slot, resolve_llm, route_after_backend_unavailable,
-    route_identity, route_label, run_backend_with_reserved_route, wip_checkpoint_branch,
+    record_route_attempt, reserve_initial_backend_slot, resolve_llm,
+    route_after_backend_unavailable, route_identity, route_label, run_backend_with_reserved_route,
+    wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
@@ -141,14 +142,14 @@ pub(crate) fn improve(
     )?;
     apply_route_to_ledger(ledger, &route);
     preflight_identity(profile, &route.identity)?;
-    // Reserve the selected slot before telling a parallel controller that it
-    // may choose the next action. The reservation stays alive through this
-    // first backend attempt, so a sibling sees the live cap and falls through
-    // to the next configured backend instance (for example agy-second).
-    let mut initial_route_slot = Some(reserve_backend_slot(profile, &route.identity)?);
-    if let Some(route_ready) = &args.route_ready {
-        let _ = route_ready.send(());
-    }
+    // Reserve the selected route before requesting node admission. The route
+    // stays alive through the first backend attempt; if node admission is
+    // rejected, both guards unwind before any backend starts.
+    let mut initial_route_slot = Some(reserve_initial_backend_slot(
+        profile,
+        &route.identity,
+        args,
+    )?);
     let mut llm = resolve_llm(
         cfg,
         args,

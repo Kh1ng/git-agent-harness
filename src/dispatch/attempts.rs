@@ -88,6 +88,7 @@ pub(super) fn resolve_llm(
 pub(super) fn reserve_backend_slot(
     profile: &Profile,
     identity: &crate::execution_identity::ExecutionIdentity,
+    wait_for_capacity: bool,
 ) -> Result<routing::ConcurrencyGuard> {
     let concurrency_cap = profile
         .max_concurrent_per_model
@@ -97,11 +98,41 @@ pub(super) fn reserve_backend_slot(
             identity.effective_model.as_deref().unwrap_or("")
         ))
         .copied();
-    routing::ConcurrencyGuard::acquire_shared_for_identity(
-        identity,
-        concurrency_cap,
-        crate::runner::shutdown_requested,
-    )
+    if wait_for_capacity {
+        routing::ConcurrencyGuard::acquire_shared_for_identity(
+            identity,
+            concurrency_cap,
+            crate::runner::shutdown_requested,
+        )
+    } else {
+        routing::ConcurrencyGuard::try_acquire_shared_for_identity(identity, concurrency_cap)?
+            .ok_or_else(|| {
+                crate::routing::RouteError::NoEligibleBackend {
+                    preferred_backend: identity.logical_backend.clone(),
+                    preferred_model: identity.effective_model.clone(),
+                    skipped: vec![crate::routing::SkippedBackend {
+                        backend: identity.logical_backend.clone(),
+                        model: identity.effective_model.clone(),
+                        reason: "max_concurrent_reached".into(),
+                        unavailable_until: None,
+                    }],
+                    earliest_reset: None,
+                }
+                .into()
+            })
+    }
+}
+
+pub(super) fn reserve_initial_backend_slot(
+    profile: &Profile,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    args: &DispatchArgs,
+) -> Result<routing::ConcurrencyGuard> {
+    let slot = reserve_backend_slot(profile, identity, args.route_admission.is_none())?;
+    if let Some(route_admission) = &args.route_admission {
+        route_admission.wait_for_node()?;
+    }
+    Ok(slot)
 }
 
 pub(super) fn apply_backend_instance_env(
@@ -228,7 +259,7 @@ pub(super) fn run_backend_with_reserved_route(
     // exit path (success, error, or panic) -- so routing's
     // `max_concurrent_per_model` check sees an accurate live count.
     let _concurrency_slot = (!route_slot_already_reserved)
-        .then(|| reserve_backend_slot(profile, identity))
+        .then(|| reserve_backend_slot(profile, identity, true))
         .transpose()?;
     let backend = identity.logical_backend.as_str();
     let runner_kind = identity.runner_kind.as_str();

@@ -5,7 +5,6 @@ use crate::usage_attribution::{aggregate_attempt_usage, usage_has_observation};
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
 mod already_satisfied;
@@ -77,6 +76,17 @@ pub fn capacity_deferred_error(error: &anyhow::Error) -> bool {
         cause
             .downcast_ref::<crate::routing::RouteError>()
             .is_some_and(crate::routing::RouteError::is_capacity_deferral)
+            || cause
+                .downcast_ref::<crate::controller::NodeAdmissionDeferred>()
+                .is_some()
+    })
+}
+
+pub fn node_capacity_deferred_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::controller::NodeAdmissionDeferred>()
+            .is_some()
     })
 }
 
@@ -152,10 +162,10 @@ pub struct DispatchArgs {
     /// Controller-assigned identity shared by start/finish events and the
     /// resulting ledger entry. Direct CLI dispatches generate one in `run`.
     pub run_id: Option<String>,
-    /// Parallel-controller rendezvous: sent only after the selected coding
-    /// route has reserved its backend/model slot. This prevents a sibling
-    /// from choosing the same capped route before the first worker starts.
-    pub route_ready: Option<SyncSender<()>>,
+    /// Parallel-controller two-phase admission: after reserving the selected
+    /// route, request node capacity and wait for the controller's decision.
+    /// Direct CLI dispatches leave this unset and retain blocking route waits.
+    pub route_admission: Option<crate::controller::RouteNodeAdmission>,
 }
 
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
