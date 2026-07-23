@@ -8,7 +8,6 @@
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
-use uuid::Uuid;
 
 // Bring the crate-root modules into scope so the command handlers can call
 // them exactly as they did from the binary crate root.
@@ -224,125 +223,9 @@ pub fn run() -> Result<()> {
             }
         },
 
-        Commands::Hold { command } => match command {
-            HoldCommands::Set {
-                profile,
-                work_id,
-                reason,
-                config_path,
-            } => {
-                let cfg = config::load(config_path.as_deref())?;
-                let prof = config::get_profile(&cfg, &profile)?;
-                let entry = ledger::LedgerEntry::new_review_hold(&profile, prof, &work_id, reason);
-                let path = ledger::append(&cfg, &entry)?;
-                println!(
-                    "Review hold set for work_id '{}' on profile '{}' ({})",
-                    work_id,
-                    profile,
-                    path.display()
-                );
-            }
-            HoldCommands::Clear {
-                profile,
-                work_id,
-                config_path,
-            } => {
-                let cfg = config::load(config_path.as_deref())?;
-                let prof = config::get_profile(&cfg, &profile)?;
-                let entry = ledger::LedgerEntry::new_review_hold_release(&profile, prof, &work_id);
-                let path = ledger::append(&cfg, &entry)?;
-                println!(
-                    "Review hold cleared for work_id '{}' on profile '{}' ({})",
-                    work_id,
-                    profile,
-                    path.display()
-                );
-            }
-        },
+        Commands::Hold { command } => commands::controller::run_hold(command)?,
 
-        Commands::RouteApproval { command } => {
-            let (profile, work_id, backend, instance, model, config_path, granted) = match command {
-                RouteApprovalCommands::Grant {
-                    profile,
-                    work_id,
-                    backend,
-                    instance,
-                    model,
-                    config_path,
-                } => (
-                    profile,
-                    work_id,
-                    backend,
-                    instance,
-                    model,
-                    config_path,
-                    true,
-                ),
-                RouteApprovalCommands::Revoke {
-                    profile,
-                    work_id,
-                    backend,
-                    instance,
-                    model,
-                    config_path,
-                } => (
-                    profile,
-                    work_id,
-                    backend,
-                    instance,
-                    model,
-                    config_path,
-                    false,
-                ),
-            };
-            let cfg = config::load(config_path.as_deref())?;
-            let prof = config::get_profile(&cfg, &profile)?;
-            if let Some(instance_name) = instance.as_deref() {
-                let routing = prof.effective_routing(&cfg.defaults);
-                let declared = routing
-                    .backend_instances
-                    .get(instance_name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "unknown backend instance '{instance_name}' for profile '{profile}'"
-                        )
-                    })?;
-                let logical_backend = declared
-                    .logical_backend
-                    .as_deref()
-                    .unwrap_or(declared.runner_kind.as_str());
-                if logical_backend != backend {
-                    anyhow::bail!(
-                        "backend instance '{}' belongs to logical backend '{}', not '{}'",
-                        instance_name,
-                        logical_backend,
-                        backend
-                    );
-                }
-            }
-            let entry = ledger::LedgerEntry::new_paid_route_approval_for_instance(
-                &profile,
-                prof,
-                &work_id,
-                &backend,
-                instance.as_deref(),
-                model.as_deref(),
-                granted,
-            );
-            let path = ledger::append(&cfg, &entry)?;
-            println!(
-                "Paid route approval {} for work_id '{}' on {}{}/{} ({})",
-                if granted { "granted" } else { "revoked" },
-                work_id,
-                backend,
-                instance
-                    .as_deref()
-                    .map(|instance| format!(" [{instance}]"))
-                    .unwrap_or_default(),
-                model.as_deref().unwrap_or("default"),
-                path.display()
-            );
-        }
+        Commands::RouteApproval { command } => commands::controller::run_route_approval(command)?,
 
         Commands::Loop {
             profile,
@@ -351,64 +234,46 @@ pub fn run() -> Result<()> {
             once,
             parallel,
             skip_validation_gate,
-        } => {
-            runner::install_shutdown_handler()?;
-            let cfg = config::load(config_path.as_deref())?;
-            let resolved_config_path = config::resolve_config_path(config_path.as_deref());
-            let parallel = controller::loop_parallel_argument(
-                once,
-                parallel,
-                config::get_profile(&cfg, &profile)?.max_parallel_workers() as usize,
-            );
-            if once {
-                // `--once` still does real execution (spawns backends, claims
-                // tickets, writes ledger entries) so it must coordinate via
-                // the same profile lock as the daemon (`gah loop` with no
-                // `--once`) -- otherwise both can run concurrently against
-                // the same profile. `run_loop` acquires this lock itself for
-                // the daemon case; do not acquire it again from within
-                // `run_once` itself, only here at the entry point.
-                let _lock = controller::acquire_profile_lock(&profile, &resolved_config_path)?;
-                controller::run_once(&cfg, &profile, json, parallel, skip_validation_gate)?;
-            } else {
-                controller::run_loop(
-                    &cfg,
-                    &profile,
-                    json,
-                    parallel,
-                    skip_validation_gate,
-                    &resolved_config_path,
-                )?;
-            }
-        }
+        } => commands::controller::run_loop(commands::controller::LoopArgs {
+            profile,
+            config_path,
+            json,
+            once,
+            parallel,
+            skip_validation_gate,
+        })?,
 
         Commands::Events {
             config_path,
             profile,
             json,
             since,
-        } => {
-            let cfg = config::load(config_path.as_deref())?;
-            events::run(&cfg, &since, profile.as_deref(), json)?;
-        }
+        } => commands::controller::run_events(commands::controller::EventsArgs {
+            config_path,
+            profile,
+            json,
+            since,
+        })?,
 
         Commands::Status {
             profile,
             json,
             config_path,
-        } => {
-            let cfg = config::load(config_path.as_deref())?;
-            status::run(&cfg, &profile, json)?;
-        }
+        } => commands::controller::run_status(commands::controller::StatusArgs {
+            profile,
+            json,
+            config_path,
+        })?,
 
         Commands::Sync {
             profile,
             config_path,
             json,
-        } => {
-            let cfg = config::load(config_path.as_deref())?;
-            sync::run(&cfg, &profile, json)?;
-        }
+        } => commands::controller::run_sync(commands::controller::SyncArgs {
+            profile,
+            config_path,
+            json,
+        })?,
 
         Commands::Dispatch {
             profile,
@@ -418,7 +283,7 @@ pub fn run() -> Result<()> {
             branch,
             mr,
             current_branch,
-            budget: _budget,
+            budget,
             dry_run,
             config_path,
             model,
@@ -431,39 +296,28 @@ pub fn run() -> Result<()> {
             escalate,
             existing_branch,
             skip_validation_gate,
-        } => {
-            runner::install_shutdown_handler()?;
-            let cfg = config::load(config_path.as_deref())?;
-            let run_id = Uuid::new_v4().to_string();
-            let resolved_config_path = config::resolve_config_path(config_path.as_deref());
-            let _lock = controller::acquire_profile_lock(&profile, &resolved_config_path)?;
-            let args = dispatch::DispatchArgs {
-                profile,
-                mode,
-                backend,
-                target,
-                branch,
-                mr,
-                current_branch,
-                dry_run,
-                model,
-                oh_profile,
-                retries,
-                allow_draft_fail,
-                prod,
-                issue_intake_override,
-                allow_unknown_red_baseline,
-                escalate,
-                existing_branch,
-                expected_review_generation: None,
-                skip_validation_gate,
-                dispatch_reason: None,
-                work_id: None,
-                run_id: Some(run_id),
-                route_ready: None,
-            };
-            controller::run_dispatch_and_record(&cfg, "dispatch", None, &args)?;
-        }
+        } => commands::dispatch::run(commands::dispatch::Args {
+            profile,
+            mode,
+            backend,
+            target,
+            branch,
+            mr,
+            current_branch,
+            budget,
+            dry_run,
+            config_path,
+            oh_profile,
+            model,
+            retries,
+            allow_draft_fail,
+            prod,
+            issue_intake_override,
+            allow_unknown_red_baseline,
+            escalate,
+            existing_branch,
+            skip_validation_gate,
+        })?,
 
         Commands::Pm { command } => match command {
             PmCommands::Publish {

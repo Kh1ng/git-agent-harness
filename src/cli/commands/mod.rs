@@ -4,6 +4,8 @@
 // `crate::cli::run`.
 
 pub mod config;
+pub mod controller;
+pub mod dispatch;
 pub mod doctor;
 pub mod init;
 pub mod profile;
