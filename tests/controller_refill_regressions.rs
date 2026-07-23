@@ -8,6 +8,22 @@ use support::test_tempdir;
 use support::ProcessGroupGuard;
 
 fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
+    // These tests exercise refill state transitions, not host sizing. The
+    // real debug binary accepts this explicit fixture; release binaries never
+    // compile the hook and therefore cannot use it to bypass live pressure.
+    let node_pressure = state_root.join("node-pressure.json");
+    fs::write(
+        &node_pressure,
+        r#"{
+  "memory_total_bytes": 68719476736,
+  "memory_available_bytes": 64424509440,
+  "logical_cpus": 32,
+  "load_one": 0.5,
+  "memory_full_psi_avg10": 0.0,
+  "cpu_some_psi_avg10": 0.0
+}"#,
+    )
+    .unwrap();
     let mut cmd = ProcessCommand::new(
         std::env::var("CARGO_BIN_EXE_gah").unwrap_or_else(|_| "target/debug/gah".into()),
     );
@@ -21,6 +37,7 @@ fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
         state_root.join("validation.json"),
     );
     cmd.env("TMPDIR", support::test_temp_root());
+    cmd.env("GAH_TEST_NODE_PRESSURE_FILE", node_pressure);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

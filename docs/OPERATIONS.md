@@ -167,6 +167,17 @@ worker near the memory floor. Set the ceiling high enough for the node and let
 the pressure gate reduce live concurrency; route capacity and work claims
 remain independent limits.
 
+`MemAvailable` includes memory already materialized by running workers, while
+lease reservations account for workers that have not reached peak use. The
+gate takes the smaller of live available memory and total memory minus active
+reservations before charging the new worker. CPU admission similarly uses the
+larger of live load and committed CPU rather than adding them. This prevents a
+launch burst from repeatedly spending one idle sample without double-counting
+workers already visible in the live metrics. Reservations are released as soon
+as each worker completes. If live pressure or reservation integrity cannot be
+verified, admission fails closed rather than silently falling back to the
+configured ceiling.
+
 The pressure-aware admission code runs inside the `gah` binary. Updating a
 source checkout alone does not change an already-installed loop service.
 After upgrading, rebuild/install and restart the affected user units:

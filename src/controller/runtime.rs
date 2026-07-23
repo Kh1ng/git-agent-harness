@@ -555,15 +555,12 @@ fn run_parallel_once(
                         let admission = match node_capacity::try_acquire(&action) {
                             Ok(admission) => admission,
                             Err(error) => {
-                                // Keep the existing configured ceiling as the
-                                // portability fallback on platforms without
-                                // Linux pressure interfaces.
                                 eprintln!(
-                                    "gah loop: node pressure unavailable ({error}); using configured parallel ceiling"
+                                    "gah loop: deferring worker because node pressure could not be verified: {error}"
                                 );
-                                node_capacity::LiveAdmission::Admit(
-                                    node_capacity::NodeCapacityLease::untracked(),
-                                )
+                                node_capacity::LiveAdmission::Defer(format!(
+                                    "node pressure unavailable: {error}"
+                                ))
                             }
                         };
                         let node_capacity_lease = match admission {

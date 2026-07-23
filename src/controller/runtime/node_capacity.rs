@@ -13,6 +13,7 @@ const MIN_CRITICAL_MEMORY: u64 = 512 * 1024 * 1024;
 /// adding a monitoring dependency. If a platform does not expose one of the
 /// Linux pressure files, the remaining signals still provide a useful bound.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(debug_assertions, derive(serde::Deserialize))]
 pub(crate) struct NodePressure {
     pub(crate) memory_total_bytes: u64,
     pub(crate) memory_available_bytes: u64,
@@ -50,8 +51,8 @@ pub(crate) enum Admission {
 
 #[derive(Debug)]
 pub(crate) struct NodeCapacityLease {
-    path: Option<PathBuf>,
-    _file: Option<std::fs::File>,
+    path: PathBuf,
+    _file: std::fs::File,
 }
 
 #[derive(Debug)]
@@ -110,13 +111,16 @@ pub(crate) fn admission_for(
         ));
     }
 
-    // MemAvailable already reflects memory materialized by running children.
-    // The committed reservation additionally prevents a burst of newly
-    // launched children from all observing the same still-idle node.
-    let projected_available = pressure
-        .memory_available_bytes
-        .saturating_sub(committed.memory_bytes)
-        .saturating_sub(requested.memory_bytes);
+    // Bound headroom by both independent views of the node: live availability
+    // captures materialized usage and total-minus-commitments captures workers
+    // that have not reached peak yet. Taking the minimum avoids counting the
+    // same active worker twice while still preventing a launch burst from
+    // spending one idle MemAvailable sample repeatedly.
+    let uncommitted_capacity = pressure
+        .memory_total_bytes
+        .saturating_sub(committed.memory_bytes);
+    let effective_available = pressure.memory_available_bytes.min(uncommitted_capacity);
+    let projected_available = effective_available.saturating_sub(requested.memory_bytes);
     if projected_available < memory_reserve {
         return Admission::Defer(format!(
             "node memory reserve would be crossed ({} MiB available, {} MiB reserved for active/new workers, {} MiB safety floor)",
@@ -138,12 +142,16 @@ pub(crate) fn admission_for(
     // below both the CPU headroom and PSI thresholds.
     if active_workers > 0 {
         let cpu_ceiling = (pressure.logical_cpus.max(1) as f64 * 0.90).max(1.0);
-        let projected_cpu = pressure.load_one + committed.cpu_units + requested.cpu_units;
+        // Load already includes CPU consumed by active GAH workers. Compare
+        // the larger of live load and projected commitments to the ceiling,
+        // rather than adding both representations of the same work.
+        let projected_cpu = pressure.load_one.max(committed.cpu_units) + requested.cpu_units;
         if projected_cpu > cpu_ceiling {
             return Admission::Defer(format!(
-                "node CPU reserve would be crossed (load {:.2} + {:.2} reserved > {:.2})",
+                "node CPU reserve would be crossed (max(load {:.2}, committed {:.2}) + {:.2} requested > {:.2})",
                 pressure.load_one,
-                committed.cpu_units + requested.cpu_units,
+                committed.cpu_units,
+                requested.cpu_units,
                 cpu_ceiling
             ));
         }
@@ -172,13 +180,7 @@ fn acquire_in_dir(
     pressure: NodePressure,
 ) -> std::io::Result<LiveAdmission> {
     std::fs::create_dir_all(dir)?;
-    let lock_path = dir.join("registry.lock");
-    let registry_lock = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(lock_path)?;
+    let registry_lock = open_registry_lock(dir)?;
     registry_lock.lock_exclusive()?;
 
     let mut committed = WorkerReservation::default();
@@ -189,10 +191,11 @@ fn acquire_in_dir(
         if path.extension().and_then(|value| value.to_str()) != Some("lease") {
             continue;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)?;
+        let Some(mut file) = open_existing_lease(&path)? else {
+            // A previous process may have completed between read_dir and
+            // open. That is a normal release race, not an integrity failure.
+            continue;
+        };
         match file.try_lock_exclusive() {
             Ok(()) => {
                 // No process holds this lease anymore.
@@ -226,28 +229,47 @@ fn acquire_in_dir(
     lease_file.sync_data()?;
 
     Ok(LiveAdmission::Admit(NodeCapacityLease {
-        path: Some(lease_path),
-        _file: Some(lease_file),
+        path: lease_path,
+        _file: lease_file,
     }))
-}
-
-impl NodeCapacityLease {
-    pub(crate) fn untracked() -> Self {
-        Self {
-            path: None,
-            _file: None,
-        }
-    }
 }
 
 impl Drop for NodeCapacityLease {
     fn drop(&mut self) {
-        // Removing a locked file is atomic on the supported Unix service
-        // hosts. A failed removal is harmless: the next sweep observes the
-        // released lock and cleans it up.
-        if let Some(path) = self.path.as_deref() {
-            let _ = std::fs::remove_file(path);
+        // Serialize release with scans so a scanner never observes a directory
+        // entry disappear midway through validation. On an I/O failure, leave
+        // the path behind; once this File drops, its lock is released and the
+        // next successful scan reclaims it as stale.
+        let Some(dir) = self.path.parent() else {
+            return;
+        };
+        let Ok(registry_lock) = open_registry_lock(dir) else {
+            return;
+        };
+        if registry_lock.lock_exclusive().is_ok() {
+            let _ = std::fs::remove_file(&self.path);
         }
+    }
+}
+
+fn open_registry_lock(dir: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join("registry.lock"))
+}
+
+fn open_existing_lease(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -291,6 +313,25 @@ fn decode_reservation(encoded: &str) -> std::io::Result<WorkerReservation> {
 }
 
 pub(crate) fn sample() -> std::io::Result<NodePressure> {
+    // Integration tests execute the real `gah` binary, so `cfg(test)` is not
+    // available inside that child. Debug builds accept an explicit fixture
+    // file to make pressure-sensitive process tests deterministic. Release
+    // binaries do not compile this branch and always read the live kernel.
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("GAH_TEST_NODE_PRESSURE_FILE") {
+        eprintln!(
+            "gah loop: using explicit debug-only node pressure fixture {}",
+            Path::new(&path).display()
+        );
+        let encoded = std::fs::read_to_string(path)?;
+        return serde_json::from_str(&encoded).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid debug node pressure fixture: {error}"),
+            )
+        });
+    }
+
     let meminfo = std::fs::read_to_string("/proc/meminfo")?;
     let memory_total_bytes = meminfo_kib(&meminfo, "MemTotal")
         .ok_or_else(|| std::io::Error::other("MemTotal missing from /proc/meminfo"))?
@@ -410,7 +451,7 @@ mod tests {
 
     #[test]
     fn light_review_can_use_headroom_that_cannot_fit_another_implementation() {
-        let node = pressure(8, 10, 1.0);
+        let node = pressure(5, 10, 1.0);
         let committed = WorkerReservation {
             memory_bytes: 4 * GIB,
             cpu_units: 2.0,
@@ -523,5 +564,63 @@ mod tests {
             acquire_in_dir(dir.path(), &review(), node).unwrap(),
             LiveAdmission::Admit(_)
         ));
+    }
+
+    #[test]
+    fn corrupt_live_lease_fails_admission_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.lease");
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        file.write_all(b"not-a-reservation\n").unwrap();
+        file.sync_data().unwrap();
+
+        let error = acquire_in_dir(dir.path(), &review(), pressure(15, 10, 0.5))
+            .expect_err("a corrupt live lease must not be ignored");
+        assert!(error.to_string().contains("memory reservation"));
+    }
+
+    #[test]
+    fn lease_drop_serializes_with_registry_scan_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let LiveAdmission::Admit(lease) =
+            acquire_in_dir(dir.path(), &review(), pressure(15, 10, 0.5)).unwrap()
+        else {
+            panic!("review should be admitted");
+        };
+        let lease_path = lease.path.clone();
+        let registry_lock = open_registry_lock(dir.path()).unwrap();
+        registry_lock.lock_exclusive().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let dropper = std::thread::spawn(move || {
+            drop(lease);
+            done_tx.send(()).unwrap();
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "lease release must wait for the registry scan lock"
+        );
+        FileExt::unlock(&registry_lock).unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        dropper.join().unwrap();
+        assert!(!lease_path.exists());
+    }
+
+    #[test]
+    fn vanished_lease_is_a_tolerated_release_race() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(open_existing_lease(&dir.path().join("already-gone.lease"))
+            .unwrap()
+            .is_none());
     }
 }
