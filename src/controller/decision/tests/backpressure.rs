@@ -96,6 +96,28 @@ fn managed_mr_limit_reports_the_durable_gate_instead_of_blaming_backpressure() {
 }
 
 #[test]
+fn managed_mr_limit_surfaces_active_review_hold_instead_of_backpressure_noop() {
+    let mut snapshot = empty_snapshot();
+    snapshot.profile.max_open_managed_mrs = 1;
+    snapshot.open_managed_mr_count = 1;
+    snapshot.implementation_intake_paused = true;
+    snapshot
+        .merge_requests
+        .push(mr_with_ci("gah/held", "READY_FOR_HUMAN", true));
+    snapshot
+        .review_held_work_ids
+        .insert("TICKET-gah/held".into());
+    add_fresh_ticket(&mut snapshot);
+
+    assert!(matches!(
+        decide_next_action(&snapshot),
+        NextAction::WaitUntil { reason, .. }
+            if reason.contains("active manager review hold")
+                && reason.contains("gah/held")
+    ));
+}
+
+#[test]
 fn implementation_resumes_below_the_managed_mr_limit() {
     let mut snapshot = empty_snapshot();
     snapshot.profile.max_open_managed_mrs = 3;

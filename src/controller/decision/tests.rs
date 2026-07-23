@@ -317,7 +317,8 @@ fn ready_for_human_green_ci_auto_policy_never_human_required() {
 // even though every other input (READY_FOR_HUMAN, green CI, auto
 // policy) would otherwise produce MergeMr. The MR is simply skipped for
 // this tick, not escalated -- with no other actionable work in the
-// snapshot, that means NoOp.
+// snapshot, the controller emits a visible timed re-check rather than an
+// indefinite NoOp.
 #[test]
 fn ready_for_human_review_held_work_id_does_not_auto_merge() {
     let mut snapshot = empty_snapshot();
@@ -331,7 +332,12 @@ fn ready_for_human_review_held_work_id_does_not_auto_merge() {
 
     let action = decide_next_action(&snapshot);
     assert_ne!(action.kind(), "merge_mr");
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::WaitUntil { reason, .. }
+            if reason.contains("active manager review hold")
+                && reason.contains("gah/real-1")
+    ));
 }
 
 // Issue #129 Bug A: the complement -- the only case READY_FOR_HUMAN parks
