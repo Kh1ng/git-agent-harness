@@ -4,6 +4,7 @@ use super::*;
 fn telemetry_status_reports_missing_repository() {
     let tmp = test_tempdir();
     let repo = tmp.path().join("telemetry");
+    let cfg = write_real_repo_config(&tmp, tmp.path(), "github");
 
     bin()
         .args([
@@ -11,6 +12,8 @@ fn telemetry_status_reports_missing_repository() {
             "status",
             "--telemetry-repo-path",
             repo.to_str().unwrap(),
+            "--config-path",
+            cfg.to_str().unwrap(),
         ])
         .assert()
         .success()
