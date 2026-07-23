@@ -159,6 +159,39 @@ pub fn isolate_command<C>(
     IsolatedCommand { command, state }
 }
 
+pub trait TestCommandEnvironment {
+    fn env_path(&mut self, key: &str, value: &Path);
+}
+
+impl TestCommandEnvironment for assert_cmd::Command {
+    fn env_path(&mut self, key: &str, value: &Path) {
+        self.env(key, value);
+    }
+}
+
+impl TestCommandEnvironment for std::process::Command {
+    fn env_path(&mut self, key: &str, value: &Path) {
+        self.env(key, value);
+    }
+}
+
+/// Isolate all process-global GAH state used by CLI integration children,
+/// including the node-wide capacity lease registry.
+pub fn isolate_gah_command<C: TestCommandEnvironment>(command: C) -> IsolatedCommand<C> {
+    isolate_command(command, |command, root| {
+        let tmp = root.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        command.env_path("XDG_STATE_HOME", &root.join("xdg-state"));
+        command.env_path("XDG_RUNTIME_DIR", &root.join("xdg-runtime"));
+        command.env_path("GAH_AVAILABILITY_PATH", &root.join("availability.json"));
+        command.env_path(
+            "GAH_VALIDATION_CHECK_PATH",
+            &root.join("validation-check.json"),
+        );
+        command.env_path("TMPDIR", &tmp);
+    })
+}
+
 #[test]
 fn isolated_command_removes_its_state_on_drop() {
     let command = isolate_command((), |_, _| {});

@@ -36,6 +36,9 @@ use intake::{
 mod merge;
 #[path = "runtime/node_capacity.rs"]
 mod node_capacity;
+#[path = "runtime/node_reprobe.rs"]
+mod node_reprobe;
+use node_reprobe::{NodeCapacityReprobe, WaitOutcome as ReprobeWaitOutcome};
 #[path = "runtime/pm.rs"]
 mod pm;
 
@@ -428,6 +431,7 @@ fn run_parallel_once(
         let mut pending_terminal: Option<(NextAction, NextAction, Option<String>)> = None;
         let mut fill_attempts_remaining = effective_parallel_limit;
         let mut refill_suppressed = false;
+        let mut node_capacity_reprobe = NodeCapacityReprobe::default();
         let (done_tx, done_rx) = sync_channel::<(usize, LoopOnceResult)>(effective_parallel_limit);
 
         loop {
@@ -552,7 +556,7 @@ fn run_parallel_once(
                         }
                     }
                     _ => {
-                        let admission = match node_capacity::try_acquire(&action) {
+                        let admission = match node_capacity::try_acquire(&action, active) {
                             Ok(admission) => admission,
                             Err(error) => {
                                 eprintln!(
@@ -569,9 +573,13 @@ fn run_parallel_once(
                                 eprintln!(
                                     "gah loop: deferring additional worker at {active}/{effective_parallel_limit}: {reason}"
                                 );
+                                if active > 0 {
+                                    node_capacity_reprobe.schedule(action.clone());
+                                }
                                 break;
                             }
                         };
+                        node_capacity_reprobe.clear();
 
                         record_action_events(
                             cfg,
@@ -697,9 +705,22 @@ fn run_parallel_once(
                 break;
             }
 
-            let (sequence, result) = done_rx
-                .recv()
-                .map_err(|_| anyhow::anyhow!("parallel GAH worker channel closed unexpectedly"))?;
+            let (sequence, result) = if node_capacity_reprobe.is_scheduled() {
+                match node_capacity_reprobe.wait(&done_rx, active, effective_parallel_limit)? {
+                    ReprobeWaitOutcome::WorkerCompleted(result) => result,
+                    ReprobeWaitOutcome::RetryFill => {
+                        fill_attempts_remaining = 1;
+                        continue;
+                    }
+                    ReprobeWaitOutcome::KeepWaiting => continue,
+                    ReprobeWaitOutcome::Shutdown => break,
+                }
+            } else {
+                done_rx.recv().map_err(|_| {
+                    anyhow::anyhow!("parallel GAH worker channel closed unexpectedly")
+                })?
+            };
+            node_capacity_reprobe.clear();
             active -= 1;
             if action_creates_managed_mr(&result.action) {
                 if let Some(key) = action_intake_key(&result.action) {
