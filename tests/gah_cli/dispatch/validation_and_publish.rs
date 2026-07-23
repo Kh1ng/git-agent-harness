@@ -695,6 +695,21 @@ fn parallel_loop_slot_terminal_action_does_not_abort_later_slots() {
         "validation_commands = [\"true\"]\n",
         "",
     );
+    let runtime_dir = tmp.path().join("node-runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let node_pressure_path = tmp.path().join("node-pressure.json");
+    std::fs::write(
+        &node_pressure_path,
+        r#"{
+  "memory_total_bytes": 68719476736,
+  "memory_available_bytes": 64424509440,
+  "logical_cpus": 32,
+  "load_one": 0.5,
+  "memory_full_psi_avg10": 0.0,
+  "cpu_some_psi_avg10": 0.0
+}"#,
+    )
+    .unwrap();
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
@@ -728,7 +743,8 @@ fn parallel_loop_slot_terminal_action_does_not_abort_later_slots() {
     let ledger_path = tmp.path().join("ledger.jsonl");
     let events_path = tmp.path().join("events.jsonl");
 
-    bin()
+    let mut command = bin();
+    command
         .args([
             "loop",
             "--profile",
@@ -739,6 +755,8 @@ fn parallel_loop_slot_terminal_action_does_not_abort_later_slots() {
             "--parallel",
             "3",
         ])
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("GAH_TEST_NODE_PRESSURE_FILE", node_pressure_path)
         .env("PATH", prepend_path(&fake_bin))
         .env("HOME", &home)
         .env("GITHUB_TOKEN", "token")

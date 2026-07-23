@@ -31,10 +31,9 @@ pub(crate) use self::runtime::loop_parallel_argument;
 pub(crate) use self::runtime::test_node_lease;
 pub use self::runtime::RouteNodeAdmission;
 pub(crate) use self::runtime::{NodeAdmissionDeferred, WorkerNodeLease};
-// `main.rs` declares its own `mod controller` tree (see the `[[bin]]` target
-// in Cargo.toml) and is the only caller of this path; that's a separate
-// compilation from this lib target, so this re-export is invisible to the
-// lib's own reachability analysis and would otherwise warn as unused here.
+// The CLI facade is the only production caller of this crate-private path.
+// Keep the explicit allowance because library reachability analysis otherwise
+// reports the re-export as unused in non-binary targets.
 #[allow(unused_imports)]
 pub(crate) use self::runtime::run_dispatch_and_record;
 pub use self::runtime::{acquire_profile_lock, run_loop, run_once};

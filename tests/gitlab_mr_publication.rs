@@ -7,24 +7,26 @@ use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
+mod support;
+
 fn bin() -> Command {
     static COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
     let invocation_id = COMMAND_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let invocation_dir = support::test_temp_root().join(format!(
+        "gah-gitlab-publication-{}-{invocation_id}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&invocation_dir).unwrap();
     let mut cmd = Command::cargo_bin("gah").unwrap();
-    cmd.env(
-        "XDG_STATE_HOME",
-        std::env::temp_dir().join(format!(
-            "gah-gitlab-publication-state-{}-{invocation_id}",
-            std::process::id()
-        )),
-    );
+    cmd.env("XDG_STATE_HOME", invocation_dir.join("state"));
+    cmd.env("TMPDIR", support::test_temp_root());
     cmd.env(
         "GAH_AVAILABILITY_PATH",
         "/nonexistent-availability-path.json",
     );
     cmd.env(
         "GAH_VALIDATION_CHECK_PATH",
-        std::env::temp_dir().join(format!(
+        invocation_dir.join(format!(
             "gah-gitlab-publication-validation-{}-{invocation_id}.json",
             std::process::id()
         )),
@@ -109,7 +111,7 @@ fn make_executable(dir: &std::path::Path, name: &str, body: &str) {
 
 #[test]
 fn invalid_gitlab_mr_response_fails_publication_closed() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = support::test_tempdir();
     let repo = tmp.path().join("repo");
     let home = tmp.path().join("home");
     let gitlab_root = tmp.path().join("gitlab-root");
