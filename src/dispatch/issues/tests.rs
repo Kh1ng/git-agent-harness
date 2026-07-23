@@ -1226,9 +1226,7 @@ fn provider_list_failure_is_visible_and_fails_native_intake_closed() {
     assert!(scan.available_tickets.is_empty());
     assert!(scan.provider_error.as_deref().is_some_and(|error| {
         let lower = error.to_ascii_lowercase();
-        lower.contains("provider offline")
-            || lower.contains("github rest open-issue snapshot failed")
-            || lower.contains("failed")
+        lower == "github rest open-issue snapshot failed: provider offline"
     }));
 }
 
