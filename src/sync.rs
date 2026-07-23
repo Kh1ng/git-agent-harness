@@ -1,5 +1,6 @@
 use crate::config::{self, GahConfig};
-use anyhow::{Context, Result};
+use crate::provider::gitlab_api;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
@@ -478,71 +479,74 @@ struct GitlabPipeline {
     status: Option<String>,
 }
 
-fn gitlab_mr_list_args(profile: &crate::config::Profile, scope: MrFetchScope) -> Vec<String> {
-    let mut args = vec![
-        "mr".to_string(),
-        "list".to_string(),
-        "--repo".to_string(),
-        profile.repo.clone(),
-    ];
-    match scope {
-        MrFetchScope::Active => args.extend(["--per-page".into(), "100".into()]),
-        MrFetchScope::FullHistory => args.push("--all".into()),
-    }
-    args.extend(["--output".into(), "json".into()]);
-    args
-}
-
 fn gitlab_mrs(
     profile: &crate::config::Profile,
     scope: MrFetchScope,
     filter_gah_branches: bool,
 ) -> Result<Vec<SyncMr>> {
-    let out = crate::provider::provider_command("glab")
-        .args(gitlab_mr_list_args(profile, scope))
-        .output()
-        .context("glab mr list")?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "glab mr list failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let mrs: Vec<GitlabMr> = serde_json::from_slice(&out.stdout)?;
     let mut synced = Vec::new();
-    for mr in mrs
-        .into_iter()
-        .filter(|mr| !filter_gah_branches || mr.source_branch.starts_with("gah/"))
-    {
-        let iid = mr
-            .iid
-            .as_ref()
-            .map(|value| value.to_string().trim_matches('"').to_string());
-        let mut pipeline_status = mr.head_pipeline.and_then(|pipeline| pipeline.status);
-        if pipeline_status.is_none() && mr.state.as_deref() == Some("opened") {
-            if let Some(iid) = iid.as_deref() {
-                pipeline_status = gitlab_latest_pipeline_status(profile, iid)?;
+    const PAGE_SIZE: usize = 100;
+    let project_id = profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let state = match scope {
+        MrFetchScope::Active => "opened",
+        MrFetchScope::FullHistory => "all",
+    };
+    let mut page = 1;
+    loop {
+        let response = gitlab_api(
+            profile,
+            &format!("projects/{project_id}/merge_requests"),
+            "GET",
+            &[
+                ("scope", "all"),
+                ("state", state),
+                ("per_page", &PAGE_SIZE.to_string()),
+                ("page", &page.to_string()),
+            ],
+        )?;
+        let mrs: Vec<GitlabMr> = serde_json::from_value(response)?;
+        let count = mrs.len();
+        for mr in mrs
+            .into_iter()
+            .filter(|mr| !filter_gah_branches || mr.source_branch.starts_with("gah/"))
+        {
+            let iid = mr
+                .iid
+                .as_ref()
+                .map(|value| value.to_string().trim_matches('"').to_string());
+            let mut pipeline_status = mr.head_pipeline.and_then(|pipeline| pipeline.status);
+            if pipeline_status.is_none() && mr.state.as_deref() == Some("opened") {
+                if let Some(iid) = iid.as_deref() {
+                    pipeline_status = gitlab_latest_pipeline_status(profile, iid)?;
+                }
             }
+            synced.push(SyncMr {
+                work_id: extract_work_id_from_title(&mr.title),
+                title: mr.title,
+                body: mr.description,
+                branch: mr.source_branch,
+                labels: mr.labels,
+                url: mr.web_url,
+                id: iid,
+                state: mr.state,
+                draft: mr.draft,
+                source_sha: mr.sha,
+                merge_status: mr.detailed_merge_status.or(mr.merge_status),
+                merged: mr.merged_at.is_some(),
+                updated_at: mr.updated_at,
+                merged_at: mr.merged_at,
+                ci_failed: gitlab_ci_failed(pipeline_status.as_deref()),
+                ci_passed: gitlab_ci_passed(pipeline_status.as_deref()),
+                ci_pending: gitlab_ci_pending(pipeline_status.as_deref()),
+            });
         }
-        synced.push(SyncMr {
-            work_id: extract_work_id_from_title(&mr.title),
-            title: mr.title,
-            body: mr.description,
-            branch: mr.source_branch,
-            labels: mr.labels,
-            url: mr.web_url,
-            id: iid,
-            state: mr.state,
-            draft: mr.draft,
-            source_sha: mr.sha,
-            merge_status: mr.detailed_merge_status.or(mr.merge_status),
-            merged: mr.merged_at.is_some(),
-            updated_at: mr.updated_at,
-            merged_at: mr.merged_at,
-            ci_failed: gitlab_ci_failed(pipeline_status.as_deref()),
-            ci_passed: gitlab_ci_passed(pipeline_status.as_deref()),
-            ci_pending: gitlab_ci_pending(pipeline_status.as_deref()),
-        });
+        if count < PAGE_SIZE {
+            break;
+        }
+        page += 1;
     }
     Ok(synced)
 }

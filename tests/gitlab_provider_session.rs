@@ -72,7 +72,7 @@ fn missing_list_pipeline_is_resolved_through_host_scoped_glab_api() {
         &bin.join("glab"),
         r#"#!/bin/sh
 echo "$@" >> "${0%/*}/calls.txt"
-if [ "$1 $2" = "mr list" ]; then
+if [ "$1 $2" = "api projects/42/merge_requests" ]; then
   printf '%s\n' '[{"title":"[GAH] fix #1","source_branch":"gah/test","web_url":"https://gitlab.example.com/group/project/-/merge_requests/7","labels":["gah-ready-for-human"],"iid":7,"state":"opened","draft":false}]'
 elif [ "$1 $2" = "api projects/42/merge_requests/7/pipelines" ]; then
   printf '%s\n' '[{"id":99,"status":"success"}]'
@@ -102,7 +102,7 @@ fn pipeline_api_auth_failure_is_not_silently_reported_as_pending() {
     write_executable(
         &bin.join("glab"),
         r#"#!/bin/sh
-if [ "$1 $2" = "mr list" ]; then
+if [ "$1 $2" = "api projects/42/merge_requests" ]; then
   printf '%s\n' '[{"title":"[GAH] fix #1","source_branch":"gah/test","iid":7,"state":"opened"}]'
 else
   echo '401 Unauthorized' >&2

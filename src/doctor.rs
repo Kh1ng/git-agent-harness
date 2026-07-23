@@ -354,15 +354,20 @@ fn github_provider_auth(profile: &Profile) -> ProviderAuthResult {
         return ProviderAuthResult::Authenticated(ProviderAuthMethod::Token);
     }
     let host = "github.com";
-    run_provider_cli_preflight("gh", host, &format!("repos/{}", profile.repo), "github")
+    run_provider_cli_preflight(
+        "gh",
+        host,
+        &format!("repos/{}", profile.repo),
+        "no github token env var set",
+    )
 }
 
-/// GitLab adapter: accept a `GITLAB_PAT`/`GITLAB_PAT2` env var, or a successful
-/// `glab api` preflight against the exact configured GitLab host and project.
+/// GitLab adapter: require a successful `glab api` preflight against the
+/// exact configured GitLab host and project.
+///
+/// GitLab runtime paths use the host-scoped `glab` session directly, so a bare
+/// `GITLAB_PAT`/`GITLAB_PAT2` value is not enough for `doctor` to report PASS.
 fn gitlab_provider_auth(profile: &Profile) -> ProviderAuthResult {
-    if !profile.pat().is_empty() {
-        return ProviderAuthResult::Authenticated(ProviderAuthMethod::Token);
-    }
     let Some(host) = gitlab_host(profile) else {
         return ProviderAuthResult::Failed(ProviderAuthFailure::HostUnconfigured(
             "gitlab profile missing provider_api_base; cannot determine the exact host to \
@@ -370,15 +375,18 @@ fn gitlab_provider_auth(profile: &Profile) -> ProviderAuthResult {
                 .into(),
         ));
     };
-    let project_ref = match profile.provider_project_id.as_deref() {
-        Some(id) => id.to_string(),
-        None => profile.repo.replace('/', "%2F"),
+    let Some(project_ref) = profile.provider_project_id.as_deref() else {
+        return ProviderAuthResult::Failed(ProviderAuthFailure::HostUnconfigured(
+            "gitlab profile missing provider_project_id; cannot determine the exact project to \
+             authenticate against"
+                .into(),
+        ));
     };
     run_provider_cli_preflight(
         "glab",
         &host,
         &format!("/projects/{}", project_ref),
-        "gitlab",
+        "no authenticated glab session available",
     )
 }
 
@@ -407,11 +415,11 @@ fn run_provider_cli_preflight(
     cli: &str,
     host: &str,
     api_path: &str,
-    provider: &str,
+    no_credential_detail: &str,
 ) -> ProviderAuthResult {
     if !which(cli) {
         return ProviderAuthResult::Failed(ProviderAuthFailure::NoCredential(format!(
-            "{cli} not found on PATH and no {provider} token env var set"
+            "{cli} not found on PATH and {no_credential_detail}"
         )));
     }
     let output = match provider_command(cli)
@@ -886,7 +894,7 @@ impl CheckStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::check_push_url;
+    use super::{check_push_url, gitlab_provider_auth, ProviderAuthFailure, ProviderAuthResult};
     use crate::config::{Profile, RoutingPolicy};
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
@@ -951,6 +959,19 @@ mod tests {
         assert!(check_push_url(&gitlab_profile(Some(
             "https://gitlab.example.internal/api/v4"
         ))));
+    }
+
+    #[test]
+    fn doctor_gitlab_preflight_requires_provider_project_id() {
+        let mut profile = gitlab_profile(Some("https://gitlab.example.internal/api/v4"));
+        profile.provider_project_id = None;
+
+        match gitlab_provider_auth(&profile) {
+            ProviderAuthResult::Failed(ProviderAuthFailure::HostUnconfigured(message)) => {
+                assert!(message.contains("provider_project_id"));
+            }
+            _ => panic!("expected provider_project_id to be required"),
+        }
     }
 
     // Issue #124 / TICKET-127: `gitlab_mwps` is only valid on GitLab providers.

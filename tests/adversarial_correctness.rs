@@ -639,6 +639,12 @@ fn gitlab_status_reports_only_open_merge_requests() {
 
     let mut harness = ScenarioHarness::new("gitlab")
         .gitlab_scenario("empty")
+        .with_config_append(
+            r#"
+provider_api_base = "https://gitlab.example.com/api/v4"
+provider_project_id = "42"
+"#,
+        )
         .with_ledger(TestLedger::new());
     harness.install_custom_glab(&glab);
 

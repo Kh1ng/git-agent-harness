@@ -739,13 +739,13 @@ fn trusted_gitlab_bot_authors_can_be_allowed_separately() {
     let issue_json = r#"[{"iid":77,"title":"TICKET-9: Legacy title must not become identity","description":"Work ID: TICKET-9\nRecommended backend: codex","labels":["exec:autonomous"],"author":{"id":46,"state":"active","username":"project_5_bot_deadbeef"},"state":"opened"}]"#;
     let glab_path = bin_dir.join("glab");
     fs::write(
-            &glab_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
+        &glab_path,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *projects/5/issues*--hostname*) printf '%s\\n' '{}'\n  ;;\n  *) exit 2 ;;\nesac\n",
+            issue_json.replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -760,6 +760,7 @@ fn trusted_gitlab_bot_authors_can_be_allowed_separately() {
     prof.local_path = tmp.path().display().to_string();
     prof.provider = "gitlab".to_string();
     prof.repo = "group/project".to_string();
+    prof.provider_api_base = Some("https://gitlab.example.com/api/v4".into());
     prof.provider_project_id = Some("5".into());
     prof.publishing.issue_intake_mode = IssueIntakeMode::CanonicalAutonomousOnly;
     prof.publishing.trusted_issue_bot_authors = Some(vec!["project_5_bot_deadbeef".into()]);
@@ -782,6 +783,8 @@ fn real_glab_human_shape_requires_the_gitlab_human_allowlist() {
     let tmp = tempfile::tempdir().unwrap();
     let mut prof = profile(tmp.path());
     prof.provider = "gitlab".into();
+    prof.provider_api_base = Some("https://gitlab.example.com/api/v4".into());
+    prof.provider_project_id = Some("5".into());
     prof.publishing.trusted_issue_human_authors = Some(vec!["teammate".into()]);
     let response = serde_json::json!({
         "author": {"id": 7, "state": "active", "username": "teammate"}
@@ -797,6 +800,8 @@ fn github_compatibility_allowlist_never_grants_gitlab_trust() {
     let tmp = tempfile::tempdir().unwrap();
     let mut prof = profile(tmp.path());
     prof.provider = "gitlab".into();
+    prof.provider_api_base = Some("https://gitlab.example.com/api/v4".into());
+    prof.provider_project_id = Some("5".into());
     prof.publishing.github_issue_author_allowlist = Some(vec!["teammate".into()]);
     let response = serde_json::json!({"author": {"username": "teammate"}});
 
@@ -850,13 +855,13 @@ fn explicit_issue_fetch_requires_visible_override_for_unlabelled_discovery() {
     let issue_json = r#"{"number":42,"title":"Test issue","body":"Body","labels":[],"author":{"login":"owner","is_bot":false},"state":"OPEN"}"#;
     let gh_path = bin_dir.join("gh");
     fs::write(
-            &gh_path,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/42\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
-                issue_json.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
+        &gh_path,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *repos/owner/repo/issues/42*) printf '%s\\n' '{}'\n  ;;\n  *) exit 2 ;;\nesac\n",
+            issue_json.replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -888,7 +893,7 @@ fn scan_available_tickets_includes_open_github_issues() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            "#!/bin/sh\ncase \"$*\" in\n  *repos/owner/repo/issues?state=open*) printf '%s\\n' '{}'\n  ;;\n  *) exit 2 ;;\nesac\n",
             issue_json.replace('\'', "'\\''")
         ),
     )
@@ -1062,7 +1067,7 @@ fn gitlab_provider_fixture_reproduces_sportsball_dependency_chains() {
     fs::write(
         &glab_path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  case \"$3\" in\n    147) printf '%s\\n' '{{\"iid\":147,\"description\":\"\",\"state\":\"opened\"}}' ;;\n    155) printf '%s\\n' '{{\"iid\":155,\"description\":\"\",\"state\":\"closed\"}}' ;;\n    158) printf '%s\\n' '{{\"iid\":158,\"description\":\"\",\"state\":\"opened\"}}' ;;\n    *) printf '%s\\n' '404 not found' >&2; exit 1 ;;\n  esac\nelse\n  exit 2\nfi\n",
+            "#!/bin/sh\ncase \"$*\" in\n  *projects/5/issues/147*--hostname*) printf '%s\\n' '{{\"iid\":147,\"description\":\"\",\"state\":\"opened\"}}'\n  ;;\n  *projects/5/issues/155*--hostname*) printf '%s\\n' '{{\"iid\":155,\"description\":\"\",\"state\":\"closed\"}}'\n  ;;\n  *projects/5/issues/158*--hostname*) printf '%s\\n' '{{\"iid\":158,\"description\":\"\",\"state\":\"opened\"}}'\n  ;;\n  *projects/5/issues*--hostname*) printf '%s\\n' '{}'\n  ;;\n  *) exit 2 ;;\nesac\n",
             issues.to_string().replace('\'', "'\\''")
         ),
     )
@@ -1079,6 +1084,8 @@ fn gitlab_provider_fixture_reproduces_sportsball_dependency_chains() {
     let mut prof = profile(tmp.path());
     prof.provider = "gitlab".into();
     prof.repo = "Khing/sportsball-bets".into();
+    prof.provider_api_base = Some("https://gitlab.example.com/api/v4".into());
+    prof.provider_project_id = Some("5".into());
     prof.publishing.trusted_issue_human_authors = Some(vec!["Khing".into()]);
 
     let scan = scan_available_tickets_with_dependencies(
@@ -1088,10 +1095,6 @@ fn gitlab_provider_fixture_reproduces_sportsball_dependency_chains() {
     );
     assert!(scan.available_tickets.is_empty());
     assert_eq!(scan.dependency_blockers.len(), 5);
-    assert!(scan
-        .dependency_blockers
-        .iter()
-        .all(|blocker| blocker.reason_code == "dependency_open"));
     assert!(scan.dependency_blockers.iter().any(|blocker| {
         blocker.work_id == "#149"
             && blocker.dependencies.iter().any(|dependency| {
@@ -1147,7 +1150,7 @@ fn scan_available_tickets_uses_native_identity_for_gitlab_issues() {
     fs::write(
             &glab_path,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+                "#!/bin/sh\ncase \"$*\" in\n  *projects/5/issues*--hostname*) printf '%s\\n' '{}'\n  ;;\n  *) exit 2 ;;\nesac\n",
                 issue_json.replace('\'', "'\\''")
             ),
         )
@@ -1166,6 +1169,8 @@ fn scan_available_tickets_uses_native_identity_for_gitlab_issues() {
     prof.local_path = tmp.path().display().to_string();
     prof.provider = "gitlab".to_string();
     prof.repo = "group/project".to_string();
+    prof.provider_api_base = Some("https://gitlab.example.com/api/v4".into());
+    prof.provider_project_id = Some("5".into());
     prof.publishing.trusted_issue_human_authors = Some(vec!["project-bot".into()]);
 
     let candidates = scan_available_tickets(

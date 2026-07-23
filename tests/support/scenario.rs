@@ -854,7 +854,7 @@ pub struct GithubPrParams {
     pub updated_at: Option<String>,
 }
 
-/// Build a minimal GitLab MR JSON payload suitable for `glab mr list --output json`
+/// Build a minimal GitLab MR JSON payload suitable for `glab api projects/.../merge_requests`
 /// deserialization.
 pub fn gitlab_mr_json(params: GitlabMrParams) -> serde_json::Value {
     let pipeline = match params.pipeline_status {
