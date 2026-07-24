@@ -1439,3 +1439,7 @@ fn backend_failure_reset_time_resolves_in_local_offset_not_utc() {
     assert_eq!(in_local.hour(), 21);
     assert_eq!(in_local.minute(), 1);
 }
+
+#[cfg(test)]
+#[path = "external_env_tests.rs"]
+mod external_env_tests;

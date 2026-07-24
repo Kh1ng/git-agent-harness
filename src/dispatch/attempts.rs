@@ -229,6 +229,24 @@ pub(super) fn apply_backend_instance_env(
     }
 }
 
+pub(super) fn record_external_approval_consumption_for_last_attempt(
+    cfg: &GahConfig,
+    profile_name: &str,
+    profile: &Profile,
+    ledger: &LedgerEntry,
+) {
+    let Some(attempt) = ledger.attempts.last() else {
+        return;
+    };
+    let _ = ledger::record_external_approval_consumption_for_work_item(
+        cfg,
+        profile_name,
+        profile,
+        ledger.work_id.as_deref(),
+        &attempt.usage,
+    );
+}
+
 pub(super) fn apply_execution_identity_env(
     profile: &Profile,
     identity: &crate::execution_identity::ExecutionIdentity,
@@ -264,8 +282,13 @@ pub(super) fn external_env_vars_for_work_item(
         &profile.repo_id,
         work_id,
     );
+    let declared_external_env_vars: std::collections::HashSet<String> = profile
+        .external_credential_scopes
+        .values()
+        .flat_map(|scope| scope.env_vars.iter().cloned())
+        .collect();
     let mut env_vars = env_path.map(runner::load_env_file).unwrap_or_default();
-    env_vars.retain(|(key, _)| allowed.contains(key));
+    env_vars.retain(|(key, _)| !declared_external_env_vars.contains(key) || allowed.contains(key));
     env_vars
 }
 

@@ -6,7 +6,7 @@ mod locking;
 pub use self::approvals::{
     active_external_approval_env_vars_from_entries,
     active_paid_route_approval_destinations_from_entries, external_approval_snapshot_from_entries,
-    ExternalApprovalSnapshot,
+    record_external_approval_consumption_for_work_item, ExternalApprovalSnapshot,
 };
 #[allow(unused_imports)]
 pub use self::entry::{

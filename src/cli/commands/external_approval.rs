@@ -239,3 +239,138 @@ fn inspect(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ExternalCredentialScope;
+    use crate::ledger::test_util::{profile as test_profile, test_config};
+    use std::collections::HashMap;
+
+    fn approval_profile(tmp: &std::path::Path) -> crate::config::Profile {
+        let mut profile = test_profile();
+        profile.artifact_root = tmp.display().to_string();
+        profile.local_path = tmp.display().to_string();
+        profile.external_credential_scopes = HashMap::from([(
+            "odds".to_string(),
+            ExternalCredentialScope {
+                env_vars: vec!["ODDS_API_KEY".to_string()],
+            },
+        )]);
+        profile
+    }
+
+    #[test]
+    fn cli_approval_lifecycle_transitions_and_redacts_scope_metadata() {
+        let (tmp, mut cfg) = test_config();
+        let profile = approval_profile(tmp.path());
+        cfg.profiles.insert("test".to_string(), profile.clone());
+        let config_path = tmp.path().join("gah.toml");
+        config::save(&cfg, Some(config_path.to_str().unwrap())).unwrap();
+
+        run(ExternalApprovalCommands::Request {
+            profile: "test".to_string(),
+            work_id: "ISSUE-42".to_string(),
+            credential_label: "odds".to_string(),
+            operation_kind: "external_api".to_string(),
+            max_requests: Some(2),
+            max_dollars: None,
+            expires_at: None,
+            purpose: Some("test".to_string()),
+            config_path: Some(config_path.to_string_lossy().into_owned()),
+            json: true,
+        })
+        .unwrap();
+
+        run(ExternalApprovalCommands::Grant {
+            profile: "test".to_string(),
+            work_id: "ISSUE-42".to_string(),
+            credential_label: "odds".to_string(),
+            operation_kind: "external_api".to_string(),
+            max_requests: Some(2),
+            max_dollars: None,
+            expires_at: None,
+            purpose: Some("test".to_string()),
+            config_path: Some(config_path.to_string_lossy().into_owned()),
+            json: true,
+        })
+        .unwrap();
+
+        let loaded = config::load(Some(config_path.to_str().unwrap())).unwrap();
+        let entries = ledger::read_entries(&loaded).unwrap();
+        let snapshot = ledger::external_approval_snapshot_from_entries(
+            &entries,
+            "test",
+            &profile.repo_id,
+            "ISSUE-42",
+            "odds",
+            "external_api",
+        )
+        .unwrap();
+        assert_eq!(snapshot.state, "approved");
+        assert!(snapshot.active);
+        assert_eq!(snapshot.allowed_env_vars, vec!["ODDS_API_KEY".to_string()]);
+
+        run(ExternalApprovalCommands::Revoke {
+            profile: "test".to_string(),
+            work_id: "ISSUE-42".to_string(),
+            credential_label: "odds".to_string(),
+            operation_kind: "external_api".to_string(),
+            config_path: Some(config_path.to_string_lossy().into_owned()),
+            json: true,
+        })
+        .unwrap();
+
+        let loaded = config::load(Some(config_path.to_str().unwrap())).unwrap();
+        let entries = ledger::read_entries(&loaded).unwrap();
+        let snapshot = ledger::external_approval_snapshot_from_entries(
+            &entries,
+            "test",
+            &profile.repo_id,
+            "ISSUE-42",
+            "odds",
+            "external_api",
+        )
+        .unwrap();
+        assert_eq!(snapshot.state, "revoked");
+        assert!(!snapshot.active);
+
+        run(ExternalApprovalCommands::Grant {
+            profile: "test".to_string(),
+            work_id: "ISSUE-43".to_string(),
+            credential_label: "odds".to_string(),
+            operation_kind: "external_api".to_string(),
+            max_requests: Some(2),
+            max_dollars: None,
+            expires_at: None,
+            purpose: Some("test".to_string()),
+            config_path: Some(config_path.to_string_lossy().into_owned()),
+            json: true,
+        })
+        .unwrap();
+
+        run(ExternalApprovalCommands::Expire {
+            profile: "test".to_string(),
+            work_id: "ISSUE-43".to_string(),
+            credential_label: "odds".to_string(),
+            operation_kind: "external_api".to_string(),
+            config_path: Some(config_path.to_string_lossy().into_owned()),
+            json: true,
+        })
+        .unwrap();
+
+        let loaded = config::load(Some(config_path.to_str().unwrap())).unwrap();
+        let entries = ledger::read_entries(&loaded).unwrap();
+        let snapshot = ledger::external_approval_snapshot_from_entries(
+            &entries,
+            "test",
+            &profile.repo_id,
+            "ISSUE-43",
+            "odds",
+            "external_api",
+        )
+        .unwrap();
+        assert_eq!(snapshot.state, "expired");
+        assert!(!snapshot.active);
+    }
+}

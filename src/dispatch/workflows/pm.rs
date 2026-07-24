@@ -1,7 +1,8 @@
 use super::super::attempts::{
     apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output_for_identity,
-    preflight_identity, record_route_attempt, reserve_backend_attempt, resolve_llm, route_identity,
-    route_label, run_backend_with_reserved_route,
+    preflight_identity, record_external_approval_consumption_for_last_attempt,
+    record_route_attempt, reserve_backend_attempt, resolve_llm, route_identity, route_label,
+    run_backend_with_reserved_route,
 };
 use super::super::issues::try_discover_open_issues;
 use super::super::prompts::indent_untrusted_text;
@@ -13,6 +14,7 @@ use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
 use crate::models::{PlannerWorkPacket, PmPlan, RecommendedRouting};
 use crate::routing::RouteRequest;
+use crate::runner;
 use crate::sync::fetch_repository_mrs;
 use crate::worktree;
 use anyhow::{Context, Result};
@@ -149,7 +151,7 @@ pub(crate) fn pm(
         fs::create_dir_all(&attempt_dir)?;
         fs::write(attempt_dir.join("task.md"), crate::redact::redact(&task))?;
 
-        let result = run_pm_backend_attempt(
+        let result = match run_pm_backend_attempt(
             profile,
             &plan_route.identity,
             args.route_admission.as_ref(),
@@ -171,13 +173,38 @@ pub(crate) fn pm(
                     Some(remaining.as_secs().max(1)),
                 )
             },
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                if super::super::capacity_deferred_error(&e) {
+                    return Err(e);
+                }
+                eprintln!(
+                    "PM backend error (continuing for budget accounting): {:#}",
+                    e
+                );
+                let log_path = attempt_dir.join("backend-output.log");
+                let _ = std::fs::write(&log_path, format!("Backend error: {:#}", e));
+                runner::RunResult {
+                    exit_code: -1,
+                    duration_secs: 0.0,
+                    log_path: log_path.to_string_lossy().into_owned(),
+                    final_summary: None,
+                    agy_cli_log_delta: None,
+                    internal_log_delta: None,
+                    internal_log_path: None,
+                    transcript_path: None,
+                    agy_version: None,
+                }
+            }
+        };
         println!(
             "PM backend finished: exit={} duration={:.0}s log={}",
             result.exit_code, result.duration_secs, result.log_path
         );
         ledger.backend_exit_code = Some(result.exit_code);
         ledger.validation_result = Some("not_run".into());
+        record_external_approval_consumption_for_last_attempt(cfg, profile_name, profile, ledger);
         let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
         if result.exit_code == 0 {
             break log_text;
