@@ -219,9 +219,7 @@ pub fn run_review_backend_for_identity(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     prepare_process_group(&mut cmd);
-    for (k, v) in env_vars {
-        cmd.env(k, v);
-    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
     if backend == "vibe" {
         if let Some(model) = effective_model {
             cmd.env("VIBE_ACTIVE_MODEL", model);

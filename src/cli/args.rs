@@ -182,6 +182,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: RouteApprovalCommands,
     },
+    /// Request, inspect, grant, revoke, or expire work-item-scoped external
+    /// credential approvals.
+    ExternalApproval {
+        #[command(subcommand)]
+        command: ExternalApprovalCommands,
+    },
     /// Run the controller continuously. Use --once for one bounded
     /// observation/decision/execution cycle.
     Loop {
@@ -732,6 +738,102 @@ pub enum RouteApprovalCommands {
         model: Option<String>,
         #[arg(long, name = "config")]
         config_path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ExternalApprovalCommands {
+    /// Record a requested external operation approval for a specific
+    /// profile/repo/work item and credential label.
+    Request {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        work_id: String,
+        #[arg(long)]
+        credential_label: String,
+        #[arg(long)]
+        operation_kind: String,
+        #[arg(long)]
+        max_requests: Option<u64>,
+        #[arg(long)]
+        max_dollars: Option<f64>,
+        #[arg(long)]
+        expires_at: Option<String>,
+        #[arg(long)]
+        purpose: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Inspect the current external approval state for one exact scope.
+    Inspect {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        work_id: String,
+        #[arg(long)]
+        credential_label: String,
+        #[arg(long)]
+        operation_kind: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Grant the requested external approval scope.
+    Grant {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        work_id: String,
+        #[arg(long)]
+        credential_label: String,
+        #[arg(long)]
+        operation_kind: String,
+        #[arg(long)]
+        max_requests: Option<u64>,
+        #[arg(long)]
+        max_dollars: Option<f64>,
+        #[arg(long)]
+        expires_at: Option<String>,
+        #[arg(long)]
+        purpose: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Revoke an active external approval.
+    Revoke {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        work_id: String,
+        #[arg(long)]
+        credential_label: String,
+        #[arg(long)]
+        operation_kind: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Expire an external approval immediately.
+    Expire {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        work_id: String,
+        #[arg(long)]
+        credential_label: String,
+        #[arg(long)]
+        operation_kind: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 

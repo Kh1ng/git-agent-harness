@@ -92,6 +92,7 @@ fn github_profile() -> Profile {
         validation_timeout_seconds: None,
         notify_command: None,
         routing: RoutingPolicy::default(),
+        external_credential_scopes: std::collections::HashMap::new(),
         pacing: Default::default(),
         publishing: Default::default(),
     }

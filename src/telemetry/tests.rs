@@ -824,6 +824,7 @@ pub(crate) mod telemetry_tests {
             review_idle_timeout_seconds: None,
             review_hard_timeout_seconds: None,
             review_last_progress_secs: None,
+            external_approval: None,
             commit_attempted: true,
             commit_created: true,
             push_attempted: true,

@@ -412,14 +412,18 @@ fn agy_second_backend_runs_with_agy_second_home_override() {
         api_key: String::new(),
         model: "Gemini 3.5 Flash (Medium)".to_string(),
     };
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
 
     run_backend(
+        &cfg,
+        "test",
         "agy-second",
         &prof,
         tmp.path(),
         "do the thing",
         &session_dir,
         &llm,
+        None,
         None,
         None,
         None,
@@ -466,14 +470,18 @@ fn agy_backend_without_second_home_uses_real_home() {
         api_key: String::new(),
         model: "Gemini 3.5 Flash (Medium)".to_string(),
     };
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
 
     run_backend(
+        &cfg,
+        "test",
         "agy",
         &prof,
         tmp.path(),
         "do the thing",
         &session_dir,
         &llm,
+        None,
         None,
         None,
         None,
@@ -523,14 +531,18 @@ fn run_backend_looks_up_agy_print_timeout_by_exact_model_name() {
         api_key: String::new(),
         model: "Gemini 3.5 Flash (Medium)".to_string(),
     };
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
 
     run_backend(
+        &cfg,
+        "test",
         "agy",
         &prof,
         tmp.path(),
         "do the thing",
         &session_dir,
         &llm,
+        None,
         None,
         None,
         None,
@@ -578,14 +590,18 @@ fn run_backend_omits_print_timeout_for_unmapped_model() {
         api_key: String::new(),
         model: "Gemini 3.1 Pro (High)".to_string(), // not in the map
     };
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
 
     run_backend(
+        &cfg,
+        "test",
         "agy",
         &prof,
         tmp.path(),
         "do the thing",
         &session_dir,
         &llm,
+        None,
         None,
         None,
         None,
@@ -638,8 +654,11 @@ fn run_backend_looks_up_opencode_idle_timeout_by_exact_model_name() {
         api_key: String::new(),
         model: "unused-for-opencode".to_string(),
     };
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
 
     let result = run_backend(
+        &cfg,
+        "test",
         "opencode",
         &prof,
         tmp.path(),
@@ -647,6 +666,7 @@ fn run_backend_looks_up_opencode_idle_timeout_by_exact_model_name() {
         &session_dir,
         &llm,
         Some("litellm-lan/qwen3.6:35b-a3b"),
+        None,
         None,
         None,
     )
@@ -697,8 +717,11 @@ fn run_backend_falls_back_to_flat_opencode_idle_timeout_for_unmapped_model() {
         api_key: String::new(),
         model: "unused-for-opencode".to_string(),
     };
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
 
     let result = run_backend(
+        &cfg,
+        "test",
         "opencode",
         &prof,
         tmp.path(),
@@ -706,6 +729,7 @@ fn run_backend_falls_back_to_flat_opencode_idle_timeout_for_unmapped_model() {
         &session_dir,
         &llm,
         Some("litellm-lan/qwen3.6:35b-a3b"), // not in the map
+        None,
         None,
         None,
     )
@@ -764,14 +788,18 @@ fn run_backend_routes_vibe_to_run_vibe_not_the_openhands_fallthrough() {
         api_key: String::new(),
         model: "unused-for-vibe".to_string(),
     };
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
 
     run_backend(
+        &cfg,
+        "test",
         "vibe",
         &prof,
         tmp.path(),
         "do the thing",
         &session_dir,
         &llm,
+        None,
         None,
         None,
         None,
@@ -1411,3 +1439,7 @@ fn backend_failure_reset_time_resolves_in_local_offset_not_utc() {
     assert_eq!(in_local.hour(), 21);
     assert_eq!(in_local.minute(), 1);
 }
+
+#[cfg(test)]
+#[path = "external_env_tests.rs"]
+mod external_env_tests;
