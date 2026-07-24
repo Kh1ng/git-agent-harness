@@ -433,8 +433,8 @@ pub fn active_external_approval_env_vars_from_entries(
     work_id: &str,
 ) -> HashSet<String> {
     scope_states_from_entries(entries, profile_name, repo_id, work_id)
-        .into_iter()
-        .filter_map(|(_, state)| {
+        .into_values()
+        .filter_map(|state| {
             let eval = approval_state(&state.approval, &state.tally);
             if !eval.active {
                 return None;

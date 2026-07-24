@@ -53,8 +53,8 @@ pub(super) fn finish_improve_workflow(
     if !has_changes
         && already_satisfied.reconcile(
             ledger,
-            &backend_summary,
-            &wip_checkpoints,
+            backend_summary,
+            wip_checkpoints,
             !validation_failed,
         )?
     {
@@ -64,12 +64,7 @@ pub(super) fn finish_improve_workflow(
 
     // Reject an explicitly claimed already-satisfied completion that consists
     // only of a coverage-weakening test diff before publishing.
-    if already_satisfied.reconcile(
-        ledger,
-        &backend_summary,
-        &wip_checkpoints,
-        !validation_failed,
-    )? {
+    if already_satisfied.reconcile(ledger, backend_summary, wip_checkpoints, !validation_failed)? {
         return Ok(());
     }
 
@@ -180,7 +175,7 @@ pub(super) fn finish_improve_workflow(
     classify_git_operation_result(
         ledger,
         crate::ledger::FailureStage::Push,
-        worktree::push_branch(wt, &branch, &push_url, &push_pat),
+        worktree::push_branch(wt, branch, &push_url, &push_pat),
     )?;
     ledger.push_succeeded = true;
 
