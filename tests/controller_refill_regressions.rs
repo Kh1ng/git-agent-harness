@@ -317,9 +317,11 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
              \x20\x20release_active_lock\n\
              }}\n\
              trap dec_active EXIT INT TERM\n\
+             acquire_active_lock\n\
              n=$( [ -f \"$call_count_file\" ] && cat \"$call_count_file\" || echo 0 )\n\
              n=$((n + 1))\n\
              echo \"$n\" > \"$call_count_file\"\n\
+             release_active_lock\n\
              inc_active\n\
              printf 'agent edit %s\\n' \"$n\" > \"refill-$n.txt\"\n\
              case \"$n\" in\n\
