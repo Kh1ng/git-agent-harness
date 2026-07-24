@@ -151,10 +151,12 @@ fn approval_state(
         .clone()
         .or_else(|| approval.denial_reason.clone());
 
-    let expired_now = approval
+    let parsed_expiry = approval
         .expires_at
         .as_deref()
-        .and_then(|timestamp| OffsetDateTime::parse(timestamp, &Rfc3339).ok());
+        .map(|timestamp| OffsetDateTime::parse(timestamp, &Rfc3339));
+    let malformed_expiry = parsed_expiry.as_ref().is_some_and(Result::is_err);
+    let expired_now = parsed_expiry.and_then(Result::ok);
 
     if tally.revoked || approval.state.as_deref() == Some("revoked") {
         state = "revoked".to_string();
@@ -166,6 +168,10 @@ fn approval_state(
         state = "expired".to_string();
         active = false;
         denial_reason.get_or_insert_with(|| "expired".to_string());
+    } else if malformed_expiry {
+        state = "denied".to_string();
+        active = false;
+        denial_reason.get_or_insert_with(|| "invalid expiry timestamp".to_string());
     } else if tally.denied_reason.is_some() || approval.state.as_deref() == Some("denied") {
         state = "denied".to_string();
         active = false;
@@ -250,8 +256,8 @@ fn scope_states_from_entries(
     profile_name: &str,
     repo_id: &str,
     work_id: &str,
-) -> HashMap<String, ExternalApprovalScopeState> {
-    let mut active_by_label: HashMap<String, ExternalApprovalScopeState> = HashMap::new();
+) -> HashMap<(String, String), ExternalApprovalScopeState> {
+    let mut active_by_scope: HashMap<(String, String), ExternalApprovalScopeState> = HashMap::new();
     for entry in entries {
         if entry.profile != profile_name
             || entry.repo_id != repo_id
@@ -262,11 +268,14 @@ fn scope_states_from_entries(
         let Some(approval) = entry.external_approval.as_ref() else {
             continue;
         };
-        let label = approval.credential_label.clone().unwrap_or_default();
+        let scope_key = (
+            approval.credential_label.clone().unwrap_or_default(),
+            approval.operation_kind.clone().unwrap_or_default(),
+        );
         match entry.mode.as_str() {
             "external_approval_request" => {
-                active_by_label.insert(
-                    label,
+                active_by_scope.insert(
+                    scope_key,
                     ExternalApprovalScopeState {
                         approval: approval.clone(),
                         tally: ExternalApprovalTally {
@@ -277,8 +286,8 @@ fn scope_states_from_entries(
                 );
             }
             "external_approval_grant" => {
-                active_by_label.insert(
-                    label,
+                active_by_scope.insert(
+                    scope_key,
                     ExternalApprovalScopeState {
                         approval: approval.clone(),
                         tally: ExternalApprovalTally {
@@ -289,7 +298,7 @@ fn scope_states_from_entries(
                 );
             }
             "external_approval_consume" => {
-                if let Some(state) = active_by_label.get_mut(&label) {
+                if let Some(state) = active_by_scope.get_mut(&scope_key) {
                     merge_external_approval_record(&mut state.approval, approval);
                     state.tally.consumed_requests += approval.consumed_requests.unwrap_or(1);
                     match approval.consumed_dollars {
@@ -302,12 +311,12 @@ fn scope_states_from_entries(
                 }
             }
             "external_approval_revoke" => {
-                if let Some(state) = active_by_label.get_mut(&label) {
+                if let Some(state) = active_by_scope.get_mut(&scope_key) {
                     merge_external_approval_record(&mut state.approval, approval);
                     state.tally.revoked = true;
                 } else {
-                    active_by_label.insert(
-                        label,
+                    active_by_scope.insert(
+                        scope_key,
                         ExternalApprovalScopeState {
                             approval: approval.clone(),
                             tally: ExternalApprovalTally::default(),
@@ -316,12 +325,12 @@ fn scope_states_from_entries(
                 }
             }
             "external_approval_expire" => {
-                if let Some(state) = active_by_label.get_mut(&label) {
+                if let Some(state) = active_by_scope.get_mut(&scope_key) {
                     merge_external_approval_record(&mut state.approval, approval);
                     state.tally.expired = true;
                 } else {
-                    active_by_label.insert(
-                        label,
+                    active_by_scope.insert(
+                        scope_key,
                         ExternalApprovalScopeState {
                             approval: approval.clone(),
                             tally: ExternalApprovalTally::default(),
@@ -330,15 +339,15 @@ fn scope_states_from_entries(
                 }
             }
             "external_approval_deny" => {
-                if let Some(state) = active_by_label.get_mut(&label) {
+                if let Some(state) = active_by_scope.get_mut(&scope_key) {
                     merge_external_approval_record(&mut state.approval, approval);
                     state.tally.denied_reason = approval
                         .denial_reason
                         .clone()
                         .or_else(|| Some("denied".to_string()));
                 } else {
-                    active_by_label.insert(
-                        label,
+                    active_by_scope.insert(
+                        scope_key,
                         ExternalApprovalScopeState {
                             approval: approval.clone(),
                             tally: ExternalApprovalTally {
@@ -355,7 +364,7 @@ fn scope_states_from_entries(
             _ => {}
         }
     }
-    active_by_label
+    active_by_scope
 }
 
 pub fn external_approval_snapshot_from_entries(
@@ -432,9 +441,23 @@ pub fn active_external_approval_env_vars_from_entries(
     repo_id: &str,
     work_id: &str,
 ) -> HashSet<String> {
-    scope_states_from_entries(entries, profile_name, repo_id, work_id)
+    let mut by_label: HashMap<String, Vec<ExternalApprovalScopeState>> = HashMap::new();
+    for ((label, _operation_kind), state) in
+        scope_states_from_entries(entries, profile_name, repo_id, work_id)
+    {
+        by_label.entry(label).or_default().push(state);
+    }
+    by_label
         .into_values()
-        .filter_map(|state| {
+        .filter_map(|mut states| {
+            // The backend invocation does not identify which external
+            // operation it will perform. Multiple operation grants for the
+            // same credential are therefore ambiguous and must not be merged
+            // into a broader grant.
+            if states.len() != 1 {
+                return None;
+            }
+            let state = states.pop().expect("one state");
             let eval = approval_state(&state.approval, &state.tally);
             if !eval.active {
                 return None;
@@ -450,7 +473,7 @@ pub fn record_external_approval_consumption_for_work_item(
     profile_name: &str,
     profile: &Profile,
     work_id: Option<&str>,
-    usage: &crate::ledger::LedgerUsage,
+    _usage: &crate::ledger::LedgerUsage,
 ) -> anyhow::Result<usize> {
     let Some(work_id) = work_id else {
         return Ok(0);
@@ -460,10 +483,17 @@ pub fn record_external_approval_consumption_for_work_item(
         Err(_) => return Ok(0),
     };
     let states = scope_states_from_entries(&entries, profile_name, &profile.repo_id, work_id);
-    let consumed_dollars = usage.actual_cost_usd.or(usage.estimated_cost_usd);
     let mut recorded = 0usize;
+    let mut by_label: HashMap<String, Vec<ExternalApprovalScopeState>> = HashMap::new();
+    for ((label, _operation_kind), state) in states {
+        by_label.entry(label).or_default().push(state);
+    }
 
-    for (label, state) in states {
+    for (label, mut scoped_states) in by_label {
+        if scoped_states.len() != 1 {
+            continue;
+        }
+        let state = scoped_states.pop().expect("one state");
         let Some(scope) = profile.external_credential_scope(&label) else {
             continue;
         };
@@ -484,7 +514,10 @@ pub fn record_external_approval_consumption_for_work_item(
             expires_at: state.approval.expires_at.clone(),
             purpose: state.approval.purpose.clone(),
             consumed_requests: Some(1),
-            consumed_dollars,
+            // Backend token cost is not external-service spend. Until a
+            // provider reports the latter explicitly, record it as unknown;
+            // approvals with a dollar cap then fail closed before a retry.
+            consumed_dollars: None,
             denial_reason: None,
         };
         let entry = LedgerEntry::new_external_approval(
@@ -653,6 +686,141 @@ mod tests {
         .unwrap();
         assert_eq!(snapshot.state, "expired");
         assert!(!snapshot.active);
+    }
+
+    #[test]
+    fn malformed_expiry_fails_closed() {
+        let (tmp, cfg) = test_config();
+        let profile = approval_profile(tmp.path());
+        let work_id = "ISSUE-43-BAD-EXPIRY";
+        let grant = LedgerEntry::new_external_approval(
+            "test",
+            &profile,
+            work_id,
+            "external_approval_grant",
+            approval_record(
+                "odds",
+                "external_api",
+                "approved",
+                Some(3),
+                Some("tomorrow-ish".to_string()),
+            ),
+        );
+        crate::ledger::append(&cfg, &grant).unwrap();
+
+        let entries = crate::ledger::read_entries(&cfg).unwrap();
+        assert!(active_external_approval_env_vars_from_entries(
+            &entries,
+            "test",
+            &profile.repo_id,
+            work_id,
+        )
+        .is_empty());
+        let snapshot = external_approval_snapshot_from_entries(
+            &entries,
+            "test",
+            &profile.repo_id,
+            work_id,
+            "odds",
+            "external_api",
+        )
+        .unwrap();
+        assert_eq!(snapshot.state, "denied");
+        assert_eq!(
+            snapshot.denial_reason.as_deref(),
+            Some("invalid expiry timestamp")
+        );
+    }
+
+    #[test]
+    fn same_credential_across_operations_is_not_cross_clobbered_or_injected() {
+        let (tmp, cfg) = test_config();
+        let profile = approval_profile(tmp.path());
+        let work_id = "ISSUE-43-CROSS-OP";
+        for operation in ["historical_backfill", "current_poll"] {
+            let grant = LedgerEntry::new_external_approval(
+                "test",
+                &profile,
+                work_id,
+                "external_approval_grant",
+                approval_record("odds", operation, "approved", Some(3), None),
+            );
+            crate::ledger::append(&cfg, &grant).unwrap();
+        }
+
+        let entries = crate::ledger::read_entries(&cfg).unwrap();
+        let historical = external_approval_snapshot_from_entries(
+            &entries,
+            "test",
+            &profile.repo_id,
+            work_id,
+            "odds",
+            "historical_backfill",
+        )
+        .unwrap();
+        let current = external_approval_snapshot_from_entries(
+            &entries,
+            "test",
+            &profile.repo_id,
+            work_id,
+            "odds",
+            "current_poll",
+        )
+        .unwrap();
+
+        assert_eq!(historical.operation_kind, "historical_backfill");
+        assert_eq!(current.operation_kind, "current_poll");
+        assert!(historical.active);
+        assert!(current.active);
+        assert!(active_external_approval_env_vars_from_entries(
+            &entries,
+            "test",
+            &profile.repo_id,
+            work_id,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn unknown_external_spend_exhausts_a_dollar_capped_scope() {
+        let (tmp, cfg) = test_config();
+        let profile = approval_profile(tmp.path());
+        let work_id = "ISSUE-43-DOLLARS";
+        let mut approval = approval_record("odds", "historical_backfill", "approved", None, None);
+        approval.max_dollars = Some(5.0);
+        crate::ledger::append(
+            &cfg,
+            &LedgerEntry::new_external_approval(
+                "test",
+                &profile,
+                work_id,
+                "external_approval_grant",
+                approval,
+            ),
+        )
+        .unwrap();
+
+        record_external_approval_consumption_for_work_item(
+            &cfg,
+            "test",
+            &profile,
+            Some(work_id),
+            &crate::ledger::LedgerUsage::default(),
+        )
+        .unwrap();
+
+        let entries = crate::ledger::read_entries(&cfg).unwrap();
+        let snapshot = external_approval_snapshot_from_entries(
+            &entries,
+            "test",
+            &profile.repo_id,
+            work_id,
+            "odds",
+            "historical_backfill",
+        )
+        .unwrap();
+        assert!(!snapshot.active);
+        assert_eq!(snapshot.denial_reason.as_deref(), Some("usage unknown"));
     }
 
     #[test]

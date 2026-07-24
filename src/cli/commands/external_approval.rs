@@ -1,4 +1,6 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 use crate::cli::args::ExternalApprovalCommands;
 use crate::config;
@@ -142,6 +144,11 @@ fn write_transition(
     state: &str,
     denial_reason: Option<&str>,
 ) -> Result<()> {
+    if let Some(timestamp) = expires_at.as_deref() {
+        if OffsetDateTime::parse(timestamp, &Rfc3339).is_err() {
+            bail!("--expires-at must be a valid RFC3339 timestamp");
+        }
+    }
     let cfg = config::load(config_path.as_deref())?;
     let prof = config::get_profile(&cfg, profile)?;
     let allowed_env_vars = prof
@@ -372,5 +379,32 @@ mod tests {
         .unwrap();
         assert_eq!(snapshot.state, "expired");
         assert!(!snapshot.active);
+    }
+
+    #[test]
+    fn cli_rejects_malformed_expiry_before_writing_ledger() {
+        let (tmp, mut cfg) = test_config();
+        let profile = approval_profile(tmp.path());
+        cfg.profiles.insert("test".to_string(), profile);
+        let config_path = tmp.path().join("gah.toml");
+        config::save(&cfg, Some(config_path.to_str().unwrap())).unwrap();
+
+        let error = run(ExternalApprovalCommands::Grant {
+            profile: "test".to_string(),
+            work_id: "ISSUE-BAD-EXPIRY".to_string(),
+            credential_label: "odds".to_string(),
+            operation_kind: "external_api".to_string(),
+            max_requests: Some(2),
+            max_dollars: None,
+            expires_at: Some("next tuesday".to_string()),
+            purpose: Some("test".to_string()),
+            config_path: Some(config_path.to_string_lossy().into_owned()),
+            json: true,
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("valid RFC3339"));
+        let loaded = config::load(Some(config_path.to_str().unwrap())).unwrap();
+        assert!(ledger::read_entries(&loaded).unwrap().is_empty());
     }
 }
