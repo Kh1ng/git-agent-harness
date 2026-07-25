@@ -88,6 +88,7 @@ pub(super) fn resolve_llm(
 pub(super) fn reserve_backend_slot(
     profile: &Profile,
     identity: &crate::execution_identity::ExecutionIdentity,
+    wait_for_capacity: bool,
 ) -> Result<routing::ConcurrencyGuard> {
     let concurrency_cap = profile
         .max_concurrent_per_model
@@ -97,11 +98,119 @@ pub(super) fn reserve_backend_slot(
             identity.effective_model.as_deref().unwrap_or("")
         ))
         .copied();
-    routing::ConcurrencyGuard::acquire_shared_for_identity(
-        identity,
-        concurrency_cap,
-        crate::runner::shutdown_requested,
-    )
+    if wait_for_capacity {
+        routing::ConcurrencyGuard::acquire_shared_for_identity(
+            identity,
+            concurrency_cap,
+            crate::runner::shutdown_requested,
+        )
+    } else {
+        routing::ConcurrencyGuard::try_acquire_shared_for_identity(identity, concurrency_cap)?
+            .ok_or_else(|| {
+                crate::routing::RouteError::NoEligibleBackend {
+                    preferred_backend: identity.logical_backend.clone(),
+                    preferred_model: identity.effective_model.clone(),
+                    skipped: vec![crate::routing::SkippedBackend {
+                        backend: identity.logical_backend.clone(),
+                        model: identity.effective_model.clone(),
+                        reason: "max_concurrent_reached".into(),
+                        unavailable_until: None,
+                    }],
+                    earliest_reset: None,
+                }
+                .into()
+            })
+    }
+}
+
+pub(super) struct BackendAdmissionGuard {
+    _route: routing::ConcurrencyGuard,
+    _node: Option<crate::controller::WorkerNodeLease>,
+}
+
+/// A parallel sibling reached routing after another worker reserved the only
+/// available backend/model slot. This is typed capacity contention, not a
+/// failed backend execution.
+pub fn capacity_deferred_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::routing::RouteError>()
+            .is_some_and(crate::routing::RouteError::is_capacity_deferral)
+            || cause
+                .downcast_ref::<crate::controller::NodeAdmissionDeferred>()
+                .is_some()
+            || cause
+                .downcast_ref::<PostAttemptCapacityDeferred>()
+                .is_some()
+    })
+}
+
+pub fn node_capacity_deferred_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::controller::NodeAdmissionDeferred>()
+            .is_some()
+            || cause
+                .downcast_ref::<PostAttemptCapacityDeferred>()
+                .is_some_and(|deferred| deferred.node_capacity)
+    })
+}
+
+#[derive(Debug)]
+struct PostAttemptCapacityDeferred {
+    attempts_completed: usize,
+    node_capacity: bool,
+    detail: String,
+}
+
+impl std::fmt::Display for PostAttemptCapacityDeferred {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "fallback capacity deferred after {} backend attempt(s): {}",
+            self.attempts_completed, self.detail
+        )
+    }
+}
+
+impl std::error::Error for PostAttemptCapacityDeferred {}
+
+pub(crate) fn contextualize_capacity_deferral(
+    error: anyhow::Error,
+    attempts_completed: usize,
+) -> anyhow::Error {
+    if attempts_completed == 0 || !capacity_deferred_error(&error) {
+        return error;
+    }
+    PostAttemptCapacityDeferred {
+        attempts_completed,
+        node_capacity: node_capacity_deferred_error(&error),
+        detail: error.to_string(),
+    }
+    .into()
+}
+
+pub(crate) fn post_attempt_capacity_deferral(error: &anyhow::Error) -> Option<usize> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<PostAttemptCapacityDeferred>()
+            .map(|deferred| deferred.attempts_completed)
+    })
+}
+
+pub(super) fn reserve_backend_attempt(
+    profile: &Profile,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    route_admission: Option<&crate::controller::RouteNodeAdmission>,
+) -> Result<BackendAdmissionGuard> {
+    let route = reserve_backend_slot(profile, identity, route_admission.is_none())?;
+    let node = route_admission
+        .map(crate::controller::RouteNodeAdmission::wait_for_node)
+        .transpose()?;
+    Ok(BackendAdmissionGuard {
+        _route: route,
+        _node: node,
+    })
 }
 
 pub(super) fn apply_backend_instance_env(
@@ -228,7 +337,7 @@ pub(super) fn run_backend_with_reserved_route(
     // exit path (success, error, or panic) -- so routing's
     // `max_concurrent_per_model` check sees an accurate live count.
     let _concurrency_slot = (!route_slot_already_reserved)
-        .then(|| reserve_backend_slot(profile, identity))
+        .then(|| reserve_backend_slot(profile, identity, true))
         .transpose()?;
     let backend = identity.logical_backend.as_str();
     let runner_kind = identity.runner_kind.as_str();

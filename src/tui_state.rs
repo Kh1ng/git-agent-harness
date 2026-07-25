@@ -277,9 +277,22 @@ mod tests {
         AvailableTicket {
             ticket_path: path.into(),
             work_id: work_id.map(str::to_string),
+            normalized_work_identity: crate::work_claim::normalize_work_identity(
+                work_id.unwrap_or(path),
+            ),
+            source: crate::models::CandidateSource::LegacyTicket,
+            execution_policy: crate::models::CandidateExecutionPolicy {
+                intake_mode: "canonical_autonomous_only".into(),
+                explicit_autonomy_required: true,
+                autonomous_metadata_present: true,
+                dispatchable_now: true,
+                exclusion_reason_code: None,
+                exclusion_reason: None,
+            },
             title: None,
             recommended_backend: None,
             recommended_model: None,
+            priority: crate::models::TicketPriority::Unspecified,
             prior_attempt_count,
             genuine_agent_failure_count: 0,
             last_failure_class: None,

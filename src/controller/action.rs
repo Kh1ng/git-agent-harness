@@ -94,6 +94,8 @@ pub enum NextAction {
         reason: String,
     },
     HumanRequired {
+        #[serde(default)]
+        work_id: Option<String>,
         reason: String,
         #[serde(default)]
         reference: Option<String>,
@@ -156,7 +158,8 @@ impl NextAction {
             | Self::ReconcilePmParent { work_id, .. }
             | Self::Retry { work_id, .. }
             | Self::Escalate { work_id, .. } => Some(work_id),
-            Self::WaitUntil { .. } | Self::HumanRequired { .. } | Self::NoOp { .. } => None,
+            Self::HumanRequired { work_id, .. } => work_id.as_deref(),
+            Self::WaitUntil { .. } | Self::NoOp { .. } => None,
         }
     }
 
@@ -165,6 +168,24 @@ impl NextAction {
     pub fn human_required_reason_code(&self) -> Option<&str> {
         match self {
             Self::HumanRequired { reason_code, .. } => reason_code.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Returns the work item the human-required action is about, where one
+    /// was known at decision time.
+    pub fn human_required_work_id(&self) -> Option<&str> {
+        match self {
+            Self::HumanRequired { work_id, .. } => work_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Returns the human-readable reference associated with a
+    /// human-required action, where one exists.
+    pub fn human_required_reference(&self) -> Option<&str> {
+        match self {
+            Self::HumanRequired { reference, .. } => reference.as_deref(),
             _ => None,
         }
     }
@@ -272,17 +293,19 @@ mod tests {
         assert_eq!(wait.work_id(), None);
 
         let human = NextAction::HumanRequired {
+            work_id: Some("TICKET-045".into()),
             reason: "MR ready for human decision".into(),
             reference: Some("https://example/pull/2".into()),
             reason_code: Some("merge_policy".into()),
         };
-        assert_eq!(human.work_id(), None);
+        assert_eq!(human.work_id(), Some("TICKET-045"));
         assert_eq!(human.human_required_reason_code(), Some("merge_policy"));
     }
 
     #[test]
     fn human_required_without_reason_code() {
         let human = NextAction::HumanRequired {
+            work_id: None,
             reason: "MR ready for human decision".into(),
             reference: Some("https://example/pull/2".into()),
             reason_code: None,

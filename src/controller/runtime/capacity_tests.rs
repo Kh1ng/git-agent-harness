@@ -82,8 +82,19 @@ fn available_ticket(work_id: &str) -> AvailableTicket {
     AvailableTicket {
         ticket_path: work_id.trim_start_matches('#').into(),
         work_id: Some(work_id.into()),
+        normalized_work_identity: crate::work_claim::normalize_work_identity(work_id),
+        source: crate::models::CandidateSource::LegacyTicket,
+        execution_policy: crate::models::CandidateExecutionPolicy {
+            intake_mode: "canonical_autonomous_only".into(),
+            explicit_autonomy_required: true,
+            autonomous_metadata_present: true,
+            dispatchable_now: true,
+            exclusion_reason_code: None,
+            exclusion_reason: None,
+        },
         title: Some(format!("Work {work_id}")),
         has_active_mr: false,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 0,
         genuine_agent_failure_count: 0,
         last_failure_class: None,
@@ -143,6 +154,7 @@ fn capacity_event(work_id: &str, details: &str) -> crate::events::ControllerEven
         reason_code: None,
         review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
         details: details.into(),
+        remediation_plan: None,
     }
 }
 

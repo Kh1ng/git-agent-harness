@@ -82,19 +82,9 @@ impl ConcurrencyGuard {
         };
         let cap = cap.max(1);
         let key = concurrency_key(backend, model);
-        let root = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
-            })
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("gah")
-            .join("concurrency");
+        let root = concurrency_root();
         std::fs::create_dir_all(&root)?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        use std::hash::{Hash, Hasher};
-        key.hash(&mut hasher);
-        let stem = format!("{:x}", hasher.finish());
+        let stem = concurrency_stem(&key);
 
         loop {
             if shutdown_requested() {
@@ -131,6 +121,45 @@ impl ConcurrencyGuard {
         }
     }
 
+    /// Attempt one bounded shared-slot scan without waiting. Controller
+    /// workers use this before the node-admission handshake so a saturated
+    /// route cannot occupy a worker thread (or later a node lease)
+    /// indefinitely. Direct CLI dispatches retain the blocking API above.
+    pub fn try_acquire_shared(
+        backend: &str,
+        model: Option<&str>,
+        cap: Option<u32>,
+    ) -> Result<Option<Self>> {
+        let Some(cap) = cap else {
+            return Ok(Some(Self::acquire(backend, model)));
+        };
+        let cap = cap.max(1);
+        let key = concurrency_key(backend, model);
+        let root = concurrency_root();
+        std::fs::create_dir_all(&root)?;
+        let stem = concurrency_stem(&key);
+
+        for slot in 0..cap {
+            let path = root.join(format!("{stem}-{slot}.lock"));
+            let file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(path)?;
+            match file.try_lock_exclusive() {
+                Ok(()) => {
+                    let mut guard = Self::acquire(backend, model);
+                    guard.shared_file = Some(file);
+                    return Ok(Some(guard));
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Ok(None)
+    }
+
     pub fn acquire_shared_for_identity(
         identity: &ExecutionIdentity,
         cap: Option<u32>,
@@ -143,6 +172,33 @@ impl ConcurrencyGuard {
             shutdown_requested,
         )
     }
+
+    pub fn try_acquire_shared_for_identity(
+        identity: &ExecutionIdentity,
+        cap: Option<u32>,
+    ) -> Result<Option<Self>> {
+        Self::try_acquire_shared(
+            &identity.logical_backend,
+            identity.effective_model.as_deref(),
+            cap,
+        )
+    }
+}
+
+fn concurrency_root() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("gah")
+        .join("concurrency")
+}
+
+fn concurrency_stem(key: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    key.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
 }
 
 impl Drop for ConcurrencyGuard {

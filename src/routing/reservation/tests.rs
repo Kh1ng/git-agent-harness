@@ -207,3 +207,26 @@ fn shared_slot_waits_for_normal_contention_then_acquires() {
     drop(next);
     release.join().unwrap();
 }
+
+#[test]
+fn controller_slot_probe_returns_immediately_when_route_is_saturated() {
+    let _lock = CONCURRENCY_TEST_LOCK.lock().unwrap();
+    let backend = format!("probe-test-{}", uuid::Uuid::new_v4());
+    let holder =
+        ConcurrencyGuard::acquire_shared(&backend, Some("model"), Some(1), || false).unwrap();
+
+    let started = Instant::now();
+    let blocked = ConcurrencyGuard::try_acquire_shared(&backend, Some("model"), Some(1)).unwrap();
+    assert!(blocked.is_none());
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "controller route probes must not occupy a worker while waiting"
+    );
+
+    drop(holder);
+    assert!(
+        ConcurrencyGuard::try_acquire_shared(&backend, Some("model"), Some(1))
+            .unwrap()
+            .is_some()
+    );
+}

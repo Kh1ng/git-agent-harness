@@ -210,7 +210,7 @@ default_target_branch = "main"
     let snap = build_snapshot(&cfg, "gah", now).unwrap();
 
     assert_eq!(snap.active_claims.len(), 1);
-    assert_eq!(snap.active_claims[0].work_id, "TICKET-436");
+    assert_eq!(snap.active_claims[0].work_id, "#436");
     assert_eq!(snap.active_claims[0].scope, "gah@gah");
     assert_eq!(snap.available_tickets.len(), 1);
     assert_eq!(

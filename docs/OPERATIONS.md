@@ -156,6 +156,38 @@ The template reads the profile's configured `max_parallel_workers`; do not
 add another supervisor or a second worker count at the service layer. Inspect
 the entire process tree with `systemd-cgls --user` when validating a run.
 
+`max_parallel_workers` is a ceiling, not a promise to launch that many
+processes blindly. Before every launch and refill, the native loop samples
+node-wide available memory, one-minute CPU load, and Linux memory/CPU pressure
+stall information. It also reserves projected headroom for workers that have
+started but have not reached peak usage yet. Implementation and repair work
+reserve more headroom than review or merge work, so a review backlog can keep
+using otherwise-stranded capacity without admitting another compiler-heavy
+worker near the memory floor. Set the ceiling high enough for the node and let
+the pressure gate reduce live concurrency; route capacity and work claims
+remain independent limits.
+
+`MemAvailable` includes memory already materialized by running workers, while
+lease reservations account for workers that have not reached peak use. The
+gate takes the smaller of live available memory and total memory minus active
+reservations before charging the new worker. CPU admission similarly uses the
+larger of live load and committed CPU rather than adding them. This prevents a
+launch burst from repeatedly spending one idle sample without double-counting
+workers already visible in the live metrics. Reservations are released as soon
+as each worker completes. If live pressure or reservation integrity cannot be
+verified, admission fails closed rather than silently falling back to the
+configured ceiling.
+
+The pressure-aware admission code runs inside the `gah` binary. Updating a
+source checkout alone does not change an already-installed loop service.
+After upgrading, rebuild/install and restart the affected user units:
+
+```bash
+gah update --repo /path/to/git-agent-harness
+systemctl --user restart gah-loop@gah gah-loop@sportsball
+journalctl --user -u gah-loop@gah -u gah-loop@sportsball -n 100 --no-pager
+```
+
 Set `max_open_managed_mrs` per profile to bound implementation intake. It
 defaults to `max_parallel_workers`; at the limit GAH keeps reviewing, fixing,
 and merging existing work but does not start another PR-producing dispatch.

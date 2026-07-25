@@ -50,6 +50,8 @@ pub struct ScenarioHarness {
     pub local_repo_dir: PathBuf,
     pub profile_name: String,
     pub provider: String,
+    worktree_base_override: Option<PathBuf>,
+    temp_dir_override: Option<PathBuf>,
     fake_gh: Option<FakeBackend>,
     fake_glab: Option<FakeBackend>,
     fake_workers: HashMap<String, FakeBackend>,
@@ -152,6 +154,8 @@ impl ScenarioHarness {
             local_repo_dir,
             profile_name: "test".to_string(),
             provider: provider.to_string(),
+            worktree_base_override: None,
+            temp_dir_override: None,
             fake_gh: None,
             fake_glab: None,
             fake_workers: HashMap::new(),
@@ -201,6 +205,16 @@ impl ScenarioHarness {
         if !extra_toml.ends_with('\n') {
             self.config_append.push('\n');
         }
+        self
+    }
+
+    pub fn with_worktree_base(mut self, worktree_base: impl Into<PathBuf>) -> Self {
+        self.worktree_base_override = Some(worktree_base.into());
+        self
+    }
+
+    pub fn with_temp_dir(mut self, temp_dir: impl Into<PathBuf>) -> Self {
+        self.temp_dir_override = Some(temp_dir.into());
         self
     }
 
@@ -515,6 +529,10 @@ impl ScenarioHarness {
     pub fn run_dispatch(&mut self, args: &[&str]) -> Result<CommandResult, String> {
         self.setup_env();
         self.install_fakes();
+        let temp_dir = self
+            .temp_dir_override
+            .clone()
+            .unwrap_or_else(std::env::temp_dir);
         let mut cmd = Command::new(&self.gah_bin);
         cmd.args(["dispatch", "--profile", &self.profile_name]);
         cmd.args(args);
@@ -526,6 +544,7 @@ impl ScenarioHarness {
             .env("GAH_CONFIG", self.config_path.to_str().unwrap())
             .env("GAH_LEDGER_PATH", self.ledger_path.to_str().unwrap())
             .env("GAH_EVENTS_PATH", self.events_path.to_str().unwrap())
+            .env("TMPDIR", temp_dir)
             .env(
                 "PATH",
                 format!(
@@ -688,6 +707,12 @@ impl ScenarioHarness {
     }
 
     fn write_config(&self) {
+        let default_worktree_base = self._temp.path().join("worktrees");
+        let worktree_base = self
+            .worktree_base_override
+            .as_deref()
+            .unwrap_or(default_worktree_base.as_path());
+        let _ = std::fs::create_dir_all(worktree_base);
         let toml = format!(
             r#"[defaults]
 artifact_root = "{artifacts}"
@@ -697,14 +722,14 @@ worktree_base = "{worktree}"
 display_name = "Test Repo"
 repo_id = "{name}"
 provider = "{provider}"
-repo = "{repo}"
+            repo = "{repo}"
 local_path = "{local}"
 artifact_root = "{artifacts}"
 default_target_branch = "main"
 {extra}
 "#,
             artifacts = self.artifacts_dir.display(),
-            worktree = self._temp.path().join("worktrees").display(),
+            worktree = worktree_base.display(),
             name = self.profile_name,
             provider = self.provider,
             repo = if self.provider == "github" {

@@ -5,6 +5,7 @@
 
 use super::{HumanRequiredReason, NextAction};
 use crate::status::StatusSnapshot;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -29,6 +30,10 @@ fn is_infra_failure(failure_class: &str) -> bool {
     )
 }
 
+fn ticket_consumes_worker_slot(ticket: &crate::models::AvailableTicket) -> bool {
+    ticket.execution_policy.dispatchable_now
+}
+
 /// Issue #156: produce an RFC3339 timestamp `offset` from "now" for a
 /// `WaitUntil` re-check. Used when a READY_FOR_HUMAN MR's CI is pending so the
 /// controller records a visible, observable deferral instead of a silent no-op.
@@ -41,6 +46,56 @@ fn now_plus(offset: Duration) -> String {
     let dt =
         chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or(chrono::DateTime::UNIX_EPOCH);
     format!("{}", dt.format("%Y-%m-%dT%H:%M:%SZ"))
+}
+
+fn issue_path_identity_key(path: &str) -> IssuePathIdentity {
+    let trimmed = path.trim();
+    if let Some(stripped) = trimmed.strip_prefix('#') {
+        if stripped.bytes().all(|b| b.is_ascii_digit()) {
+            return IssuePathIdentity::Numeric(stripped.parse().unwrap_or(u64::MAX));
+        }
+    }
+    if trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return IssuePathIdentity::Numeric(trimmed.parse().unwrap_or(u64::MAX));
+    }
+    IssuePathIdentity::Lexical(trimmed.to_string())
+}
+
+#[derive(Eq, PartialEq)]
+enum IssuePathIdentity {
+    Numeric(u64),
+    Lexical(String),
+}
+
+impl Ord for IssuePathIdentity {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Numeric(left), Self::Numeric(right)) => left.cmp(right),
+            (Self::Lexical(left), Self::Lexical(right)) => left.cmp(right),
+            (Self::Numeric(_), Self::Lexical(_)) => Ordering::Less,
+            (Self::Lexical(_), Self::Numeric(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for IssuePathIdentity {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn ticket_order_key(ticket: &crate::models::AvailableTicket) -> (u8, IssuePathIdentity) {
+    (
+        ticket.priority.to_sort_rank(),
+        issue_path_identity_key(&ticket.ticket_path),
+    )
+}
+
+fn ticket_order(
+    a: &crate::models::AvailableTicket,
+    b: &crate::models::AvailableTicket,
+) -> Ordering {
+    ticket_order_key(a).cmp(&ticket_order_key(b))
 }
 
 /// TICKET-078: pure, deterministic, no LLM, no I/O -- consumes an
@@ -93,6 +148,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // item in `snapshot.blocked_work_items` and must NOT freeze the
         // whole profile (TICKET-human-required-scoping).
         return NextAction::HumanRequired {
+            work_id: None,
             reason: blocker
                 .message
                 .clone()
@@ -117,6 +173,11 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut merge_candidates: Vec<&crate::sync::SyncMrJson> = Vec::new();
     // Track human-blocked MRs along with their specific reason code
     let mut human_blocked_mrs: Vec<(&crate::sync::SyncMrJson, HumanRequiredReason)> = Vec::new();
+    // Manager review holds are deliberately not human-required gates: an
+    // operator is already handling them and the hold self-expires. Keep them
+    // visible, though, so a held queue at the intake cap cannot collapse into
+    // an indefinite "nothing actionable" / backpressure NoOp loop.
+    let mut review_held_mrs: Vec<&crate::sync::SyncMrJson> = Vec::new();
     // Issue #156: READY_FOR_HUMAN MRs whose CI is non-terminal / unknown
     // (GitLab head_pipeline gap). They wait for CI to resolve and are not
     // silently dropped.
@@ -175,10 +236,12 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 if snapshot.review_held_work_ids.contains(work_id_str) {
                     // A manager session is actively reviewing this MR out of
                     // band (`gah hold set`). Don't auto-merge out from under
-                    // them, but don't freeze the rest of the profile either
-                    // -- just skip this MR for this loop tick. The manager
-                    // clears the hold (`gah hold clear`) when done, or it
-                    // self-expires after REVIEW_HOLD_STALE_AFTER_HOURS.
+                    // them, but don't freeze unrelated actionable work either.
+                    // If the hold is all that remains, surface a timed re-check
+                    // below. The manager clears it (`gah hold clear`) when
+                    // done, or it self-expires after
+                    // REVIEW_HOLD_STALE_AFTER_HOURS.
+                    review_held_mrs.push(mr);
                     continue;
                 }
                 let merge_policy = snapshot.profile.merge_policy;
@@ -243,6 +306,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         let merge_policy = snapshot.profile.merge_policy;
         if merge_policy == crate::config::MergePolicy::StopForHuman {
             return NextAction::HumanRequired {
+                work_id: mr.work_id.clone(),
                 reason: format!(
                     "MR on branch '{}' strong-reviewed with CI passing; merge policy is 'stop_for_human' -- awaiting human merge",
                     mr.branch
@@ -258,6 +322,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         // independent axis from reviewer routing and merge policy.
         if !snapshot.publishing_allow_pr {
             return NextAction::HumanRequired {
+                work_id: mr.work_id.clone(),
                 reason: format!(
                     "MR on branch '{}' approved with CI passing, but profile publishing policy forbids PR/MR creation (human handoff)",
                     mr.branch
@@ -316,28 +381,6 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             ),
         };
     }
-    // Fallback: if no active MR needs review/fix/merge but there are
-    // human-blocked MRs under StopForHuman merge policy, surface the
-    // first one as HumanRequired.  All other blocked MRs (retry-cap
-    // exhausted, CI not yet passed) no-op — they appear in status
-    // reports but don't park the profile.
-    if !human_blocked_mrs.is_empty()
-        && review_candidates.is_empty()
-        && merge_candidates.is_empty()
-        && fix_candidates.is_empty()
-        && snapshot.profile.merge_policy == crate::config::MergePolicy::StopForHuman
-    {
-        let (mr, reason_code) = human_blocked_mrs[0];
-        return NextAction::HumanRequired {
-            reason: format!(
-                "MR on branch '{}' classified {} (human decision required)",
-                mr.branch, mr.classification
-            ),
-            reference: mr.url.clone(),
-            reason_code: Some(reason_code.as_str().to_string()),
-        };
-    }
-
     if let Some(parent) = snapshot
         .pm_parent_states
         .iter()
@@ -417,6 +460,12 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     // refuse every action that could publish another managed MR until the
     // profile falls below its configured limit.
     if snapshot.implementation_intake_paused {
+        if let Some((mr, reason_code)) = human_blocked_mrs.first().copied() {
+            return human_required_for_blocked_mr(snapshot, mr, reason_code);
+        }
+        if let Some(mr) = review_held_mrs.first().copied() {
+            return wait_for_review_hold(mr);
+        }
         return NextAction::NoOp {
             reason: format!(
                 "implementation intake paused: {} open managed MR(s) + {} in-flight implementation(s) reached limit {}; draining review/fix/merge work",
@@ -431,14 +480,19 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut failed_tickets: Vec<_> = snapshot
         .available_tickets
         .iter()
-        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count > 0)
+        .filter(|t| {
+            ticket_consumes_worker_slot(t)
+                && !t.has_active_mr
+                && !t.has_active_claim
+                && t.prior_attempt_count > 0
+        })
         // TICKET-human-required-scoping: a work-item-scoped human_required
         // ticket is blocked at the item level. Skip it so it is neither
         // retried, escalated, nor redispatched -- but unrelated eligible
         // tickets keep flowing.
         .filter(|t| !t.human_required)
         .collect();
-    failed_tickets.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
+    failed_tickets.sort_by(|a, b| ticket_order(a, b));
 
     // Collect tickets that have exhausted the retry cap (issue #95: only
     // genuine agent failures count toward the cap; infra-class failures
@@ -465,7 +519,11 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 .is_some_and(|fc| is_infra_failure(fc) && some_backend_eligible)
     });
     let has_undispatched = snapshot.available_tickets.iter().any(|t| {
-        !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0 && !t.human_required
+        ticket_consumes_worker_slot(t)
+            && !t.has_active_mr
+            && !t.has_active_claim
+            && t.prior_attempt_count == 0
+            && !t.human_required
     });
 
     // Handle exhausted tickets: if there are exhausted tickets and NO other actionable items,
@@ -477,6 +535,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             .find(|t| t.genuine_agent_failure_count >= implementation_failure_cap as usize)
         {
             return NextAction::HumanRequired {
+                work_id: first_exhausted.work_id.clone(),
                 reason: format!(
                     "{} failed {} time(s) (agent failures) with no active MR; stopping automatic retries",
                     first_exhausted
@@ -516,12 +575,17 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     let mut undispatched: Vec<_> = snapshot
         .available_tickets
         .iter()
-        .filter(|t| !t.has_active_mr && !t.has_active_claim && t.prior_attempt_count == 0)
+        .filter(|t| {
+            ticket_consumes_worker_slot(t)
+                && !t.has_active_mr
+                && !t.has_active_claim
+                && t.prior_attempt_count == 0
+        })
         // TICKET-human-required-scoping: skip work-item-scoped
         // human_required tickets; they await human action, not dispatch.
         .filter(|t| !t.human_required)
         .collect();
-    undispatched.sort_by(|a, b| a.ticket_path.cmp(&b.ticket_path));
+    undispatched.sort_by(|a, b| ticket_order(a, b));
     if let Some(ticket) = undispatched.first() {
         return NextAction::DispatchTicket {
             ticket_path: ticket.ticket_path.clone(),
@@ -600,6 +664,7 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             })
     }) {
         return NextAction::HumanRequired {
+            work_id: issue.work_id.clone(),
             reason: format!(
                 "{} exhausted {} bounded PM decomposition attempt(s)",
                 issue.work_id.as_deref().unwrap_or(&issue.ticket_path),
@@ -614,8 +679,58 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
         };
     }
 
+    if let Some((mr, reason_code)) = human_blocked_mrs.first().copied() {
+        return human_required_for_blocked_mr(snapshot, mr, reason_code);
+    }
+    if let Some(mr) = review_held_mrs.first().copied() {
+        return wait_for_review_hold(mr);
+    }
+
     NextAction::NoOp {
         reason: "nothing actionable".into(),
+    }
+}
+
+fn wait_for_review_hold(mr: &crate::sync::SyncMrJson) -> NextAction {
+    NextAction::WaitUntil {
+        until: now_plus(Duration::from_secs(300)),
+        reason: format!(
+            "MR on branch '{}' is under an active manager review hold; waiting to re-check without merging it",
+            mr.branch
+        ),
+    }
+}
+
+fn human_required_for_blocked_mr(
+    snapshot: &StatusSnapshot,
+    mr: &crate::sync::SyncMrJson,
+    reason_code: HumanRequiredReason,
+) -> NextAction {
+    let gate_message = snapshot
+        .blocked_work_items
+        .iter()
+        .find(|blocker| {
+            blocker.kind == "human_required"
+                && blocker
+                    .source_reference
+                    .as_deref()
+                    .is_some_and(|reference| {
+                        mr.work_id.as_deref() == Some(reference) || mr.branch == reference
+                    })
+        })
+        .and_then(|blocker| blocker.message.as_deref());
+    NextAction::HumanRequired {
+        work_id: mr.work_id.clone(),
+        reason: gate_message.map(str::to_string).unwrap_or_else(|| {
+            format!(
+                "MR on branch '{}' classified {} (human decision required: {})",
+                mr.branch,
+                mr.classification,
+                reason_code.as_str()
+            )
+        }),
+        reference: mr.url.clone(),
+        reason_code: Some(reason_code.as_str().to_string()),
     }
 }
 

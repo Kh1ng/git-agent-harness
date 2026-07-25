@@ -1,7 +1,6 @@
 use super::{decide_next_action, NextAction, AUTO_RETRY_CAP};
 use crate::models::AvailableTicket;
 use crate::status::{Blocker, ScopeStatusJson, StatusError, StatusSnapshot};
-use crate::sync::{RecommendedAction, SyncMrJson};
 
 #[path = "tests/backpressure.rs"]
 mod backpressure;
@@ -9,108 +8,13 @@ mod backpressure;
 mod lifecycle_priority;
 #[path = "tests/pm.rs"]
 mod pm;
+#[path = "tests/priority.rs"]
+mod priority;
 #[path = "tests/review_handoff.rs"]
 mod review_handoff;
 #[path = "tests/support.rs"]
 mod support;
-use support::empty_snapshot;
-
-fn mr(branch: &str, classification: &str) -> SyncMrJson {
-    mr_with_ci(branch, classification, false)
-}
-
-fn mr_with_ci(branch: &str, classification: &str, ci_passed: bool) -> SyncMrJson {
-    SyncMrJson {
-        profile: None,
-        branch: branch.into(),
-        work_id: Some(format!("TICKET-{branch}")),
-        id: Some("1".into()),
-        url: Some(format!("https://example/{branch}")),
-        state: Some("OPEN".into()),
-        draft: false,
-        merge_status: None,
-        merged: classification == "MERGED",
-        merged_at: None,
-        ci_passed,
-        ci_pending: false,
-        title: None,
-        effective_backend: None,
-        effective_model: None,
-        review_verdict: None,
-        review_gate_reason: None,
-        source_sha: None,
-        review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
-        review_generation: None,
-        review_generation_status: None,
-        classification: classification.into(),
-        recommended_action: RecommendedAction::from_class(classification),
-    }
-}
-
-/// Issue #156: a `READY_FOR_HUMAN` MR whose CI is non-terminal / unknown
-/// (GitLab `head_pipeline` gap: running/pending/missing). `ci_passed` is
-/// false but `ci_pending` is true, so it must surface as a re-check rather
-/// than silently no-op.
-fn mr_ci_pending(branch: &str, classification: &str) -> SyncMrJson {
-    SyncMrJson {
-        profile: None,
-        branch: branch.into(),
-        work_id: Some(format!("TICKET-{branch}")),
-        id: Some("1".into()),
-        url: Some(format!("https://example/{branch}")),
-        state: Some("OPEN".into()),
-        draft: false,
-        merge_status: None,
-        merged: classification == "MERGED",
-        merged_at: None,
-        ci_passed: false,
-        ci_pending: true,
-        title: None,
-        effective_backend: None,
-        effective_model: None,
-        review_verdict: None,
-        review_gate_reason: None,
-        source_sha: None,
-        review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
-        review_generation: None,
-        review_generation_status: None,
-        classification: classification.into(),
-        recommended_action: RecommendedAction::from_class(classification),
-    }
-}
-
-fn ticket(
-    path: &str,
-    work_id: Option<&str>,
-    prior_attempt_count: usize,
-    last_failure_class: Option<&str>,
-    has_active_mr: bool,
-    human_required: bool,
-) -> AvailableTicket {
-    // For tests: genuine_agent_failure_count equals prior_attempt_count
-    // unless the caller sets it explicitly. Tests that need different
-    // values construct AvailableTicket directly.
-    let genuine_agent_failure_count =
-        if last_failure_class.is_some_and(super::is_genuine_agent_failure) {
-            prior_attempt_count
-        } else {
-            0
-        };
-    AvailableTicket {
-        ticket_path: path.into(),
-        work_id: work_id.map(str::to_string),
-        title: None,
-        recommended_backend: None,
-        recommended_model: None,
-        prior_attempt_count,
-        genuine_agent_failure_count,
-        last_failure_class: last_failure_class.map(str::to_string),
-        has_active_mr,
-        human_required,
-        human_required_reason_code: None,
-        has_active_claim: false,
-    }
-}
+use support::{empty_snapshot, mr, mr_ci_pending, mr_with_ci, ticket};
 
 #[test]
 fn incomplete_observation_stops_safely() {
@@ -159,6 +63,7 @@ fn blocker_forces_human_required() {
         until: None,
         source_reference: Some("gah/real-1".into()),
         reason_code: None,
+        remediation_plan: None,
     });
     let action = decide_next_action(&snapshot);
     assert_eq!(action.kind(), "human_required");
@@ -215,13 +120,15 @@ fn ci_failed_mr_retries_until_cap() {
     snapshot.fix_attempt_counts = fix_attempts;
     snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
     let action = decide_next_action(&snapshot);
-    // TICKET-skip-and-continue: an exhausted MR is a work-item block, not a
-    // profile-wide freeze. With nothing else actionable, the loop no-ops
-    // (supervisor re-checks next cycle); the item stays in blocked_work_items.
-    assert_eq!(action.kind(), "no_op");
-    assert!(
-        action.reason().contains("nothing actionable") || action.reason().contains("fix retry cap")
-    );
+    // With no unrelated work to continue, report the actual gate instead of
+    // emitting a misleading idle/backpressure no-op forever.
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "fix_retry_cap_exceeded"
+    ));
 }
 
 #[test]
@@ -231,10 +138,13 @@ fn ready_for_human_mr_maps_to_human_required() {
         .merge_requests
         .push(mr("gah/real-1", "READY_FOR_HUMAN"));
     let action = decide_next_action(&snapshot);
-    // TICKET-skip-and-continue: a single READY_FOR_HUMAN MR awaiting a
-    // human merge decision is a work-item block, not a profile freeze.
-    // With nothing else actionable, the loop no-ops (re-checks later).
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "merge_policy"
+    ));
 }
 
 #[test]
@@ -276,8 +186,13 @@ fn ready_for_human_mr_ci_passed_but_merge_retry_cap_exceeded_becomes_human_requi
         .merge_attempt_counts
         .insert("gah/real-1".to_string(), 2); // == AUTO_RETRY_CAP
     let action = decide_next_action(&snapshot);
-    // TICKET-skip-and-continue: work-item block, not a profile freeze.
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "merge_retry_cap_exceeded"
+    ));
 }
 
 // Issue #124: default auto policy merges a strong-approved, green MR.
@@ -403,7 +318,8 @@ fn ready_for_human_green_ci_auto_policy_never_human_required() {
 // even though every other input (READY_FOR_HUMAN, green CI, auto
 // policy) would otherwise produce MergeMr. The MR is simply skipped for
 // this tick, not escalated -- with no other actionable work in the
-// snapshot, that means NoOp.
+// snapshot, the controller emits a visible timed re-check rather than an
+// indefinite NoOp.
 #[test]
 fn ready_for_human_review_held_work_id_does_not_auto_merge() {
     let mut snapshot = empty_snapshot();
@@ -417,7 +333,12 @@ fn ready_for_human_review_held_work_id_does_not_auto_merge() {
 
     let action = decide_next_action(&snapshot);
     assert_ne!(action.kind(), "merge_mr");
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::WaitUntil { reason, .. }
+            if reason.contains("active manager review hold")
+                && reason.contains("gah/real-1")
+    ));
 }
 
 // Issue #129 Bug A: the complement -- the only case READY_FOR_HUMAN parks
@@ -587,9 +508,20 @@ fn infra_failures_do_not_exhaust_retry_cap() {
     snapshot.available_tickets.push(AvailableTicket {
         ticket_path: "docs/tickets/TICKET-INFRA-x.md".into(),
         work_id: Some("TICKET-INFRA".into()),
+        normalized_work_identity: crate::work_claim::normalize_work_identity("TICKET-INFRA"),
+        source: crate::models::CandidateSource::LegacyTicket,
+        execution_policy: crate::models::CandidateExecutionPolicy {
+            intake_mode: "legacy".into(),
+            explicit_autonomy_required: false,
+            autonomous_metadata_present: false,
+            dispatchable_now: true,
+            exclusion_reason_code: None,
+            exclusion_reason: None,
+        },
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 3,
         genuine_agent_failure_count: 0, // all were infra failures
         last_failure_class: Some("backend_error".into()),
@@ -686,9 +618,20 @@ fn mixed_failures_only_agent_count_toward_cap() {
     snapshot.available_tickets.push(AvailableTicket {
         ticket_path: "docs/tickets/TICKET-MIXED-x.md".into(),
         work_id: Some("TICKET-MIXED".into()),
+        normalized_work_identity: crate::work_claim::normalize_work_identity("TICKET-MIXED"),
+        source: crate::models::CandidateSource::LegacyTicket,
+        execution_policy: crate::models::CandidateExecutionPolicy {
+            intake_mode: "legacy".into(),
+            explicit_autonomy_required: false,
+            autonomous_metadata_present: false,
+            dispatchable_now: true,
+            exclusion_reason_code: None,
+            exclusion_reason: None,
+        },
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 4,         // 2 agent + 2 infra
         genuine_agent_failure_count: 2, // == AUTO_RETRY_CAP
         last_failure_class: Some("backend_error".into()),
@@ -710,9 +653,20 @@ fn infra_exhausted_ticket_does_not_block_others() {
     snapshot.available_tickets.push(AvailableTicket {
         ticket_path: "docs/tickets/TICKET-INFRA-x.md".into(),
         work_id: Some("TICKET-INFRA".into()),
+        normalized_work_identity: crate::work_claim::normalize_work_identity("TICKET-INFRA"),
+        source: crate::models::CandidateSource::LegacyTicket,
+        execution_policy: crate::models::CandidateExecutionPolicy {
+            intake_mode: "legacy".into(),
+            explicit_autonomy_required: false,
+            autonomous_metadata_present: false,
+            dispatchable_now: true,
+            exclusion_reason_code: None,
+            exclusion_reason: None,
+        },
         title: None,
         recommended_backend: None,
         recommended_model: None,
+        priority: crate::models::TicketPriority::Unspecified,
         prior_attempt_count: 3,
         genuine_agent_failure_count: 0,
         last_failure_class: Some("environment_error".into()),
@@ -801,8 +755,8 @@ fn exhausted_mr_does_not_block_others() {
     }
 }
 
-// A profile with ONLY an exhausted MR (nothing else actionable) no-ops
-// rather than freezing the profile -- the MR stays in blocked_work_items.
+// A profile with ONLY an exhausted MR reports the exact gate instead of
+// pretending the controller is idle.
 #[test]
 fn exhausted_mr_alone_is_human_required() {
     let mut snapshot = empty_snapshot();
@@ -811,7 +765,13 @@ fn exhausted_mr_alone_is_human_required() {
         .insert("gah/stuck-1".into(), AUTO_RETRY_CAP);
     snapshot.merge_requests.push(mr("gah/stuck-1", "NEEDS_FIX"));
     let action = decide_next_action(&snapshot);
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "fix_retry_cap_exceeded"
+    ));
 }
 
 #[test]
@@ -1100,8 +1060,13 @@ fn retry_cap_triggers_after_configured_post_review_repairs() {
         .merge_requests
         .push(needs_fix_mr("branch-A", "TICKET-A"));
     let action = decide_next_action(&snapshot);
-    // TICKET-skip-and-continue: work-item block, not a profile freeze.
-    assert_eq!(action.kind(), "no_op");
+    assert!(matches!(
+        action,
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "fix_retry_cap_exceeded"
+    ));
 }
 
 // One repair used, one more allowed.
@@ -1133,7 +1098,13 @@ fn configured_fix_cap_allows_requested_number_of_repairs() {
     ));
 
     snapshot.fix_attempt_counts.insert("branch-A".into(), 4);
-    assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
+    assert!(matches!(
+        decide_next_action(&snapshot),
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "fix_retry_cap_exceeded"
+    ));
 }
 
 // ===== Bug 2: stuck-loop gate persists to ledger and skips ticket =====
@@ -1222,9 +1193,16 @@ fn stuck_loop_gated_needs_fix_mr_is_not_selected_again() {
         until: None,
         source_reference: Some("TICKET-branch-A".into()),
         reason_code: Some("stuck_loop_gate".into()),
+        remediation_plan: None,
     });
 
-    assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
+    assert!(matches!(
+        decide_next_action(&snapshot),
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "stuck_loop_gate"
+    ));
 }
 
 #[test]
@@ -1242,6 +1220,7 @@ fn stuck_loop_gated_mr_does_not_block_unrelated_mr() {
         until: None,
         source_reference: Some("TICKET-branch-A".into()),
         reason_code: Some("stuck_loop_gate".into()),
+        remediation_plan: None,
     });
 
     match decide_next_action(&snapshot) {
@@ -1278,6 +1257,7 @@ fn retry_cap_projects_into_blocked_work_items() {
                     until: None,
                     source_reference: Some(mr.branch.clone()),
                     reason_code: None,
+                    remediation_plan: None,
                 });
             }
         }
@@ -1367,6 +1347,7 @@ fn every_human_required_constructor_has_a_reason_code() {
         until: None,
         source_reference: None,
         reason_code: None,
+        remediation_plan: None,
     });
     cases.push((HumanRequiredReason::ConfigurationInfra, profile_blocker));
 
@@ -1401,6 +1382,7 @@ fn every_human_required_constructor_has_a_reason_code() {
         until: None,
         source_reference: Some("TICKET-EVIDENCE".into()),
         reason_code: None,
+        remediation_plan: None,
     });
     let mut review_mr = mr("gah/evidence", "NEEDS_REVIEW");
     review_mr.work_id = Some("TICKET-EVIDENCE".into());

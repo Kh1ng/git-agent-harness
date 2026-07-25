@@ -21,6 +21,7 @@ use git_agent_harness::routing::{CandidateIdentity, RouteRequest, RoutingRuntime
 use git_agent_harness::usage_attribution::{classify_usage, provider_for_model};
 use support::fake_ledger::TestLedger;
 use support::scenario::ScenarioHarness;
+use support::test_temp_root;
 
 // ── Test-local compatibility adapter (contract §11) ──────────────────────
 
@@ -385,9 +386,18 @@ fn execution_identity_golden_proxy_alias() {
 /// fold in `dispatch/workflows/improve.rs`, not the test-local adapter.
 #[test]
 fn execution_identity_route_decision_alias_fold_is_byte_for_byte() {
-    let mut harness = ScenarioHarness::new("github").with_config_append(
-        "[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
-    );
+    let worktree_base = test_temp_root().join(format!(
+        "execution_identity_worktrees_{}",
+        std::process::id()
+    ));
+    let tmp_dir = worktree_base.join("tmp");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let mut harness = ScenarioHarness::new("github")
+        .with_worktree_base(&worktree_base)
+        .with_temp_dir(&tmp_dir)
+        .with_config_append(
+            "[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
+        );
     let write_exec = |path: &std::path::Path, body: &str| {
         std::fs::write(path, body).unwrap();
         #[cfg(unix)]

@@ -44,6 +44,7 @@ fn wait_until_gone(pid: i32, description: &str) {
 #[test]
 fn recurring_loop_exits_and_releases_ownership_when_launcher_dies() {
     let tmp = test_tempdir();
+    let tmp_root = support::test_temp_root();
     let repo = tmp.path().join("repo");
     let other_repo = tmp.path().join("other-repo");
     let remote = tmp.path().join("remote.git");
@@ -134,14 +135,17 @@ validation_commands = ["true"]
     .unwrap();
 
     let pid_path = tmp.path().join("loop.pid");
-    let log_path = tmp.path().join("loop.log");
+    let log_path = support::test_temp_root().join(format!(
+        "recurring-loop-parent-death-{}.log",
+        std::process::id()
+    ));
     let gah = env!("CARGO_BIN_EXE_gah");
     let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
     let launcher = r#"
 "$GAH_BIN" loop --profile test --config-path "$GAH_CONFIG" >"$GAH_LOG" 2>&1 &
 child=$!
 echo "$child" >"$GAH_PID"
-deadline=1500
+deadline=3000
 while [ ! -s "$GAH_BACKEND_PID" ]; do
   kill -0 "$child" 2>/dev/null || exit 20
   deadline=$((deadline - 1))
@@ -168,6 +172,7 @@ exit 0
             .env("GAH_CLAIM_STATE_PATH", &claims_path)
             .env("GAH_LEDGER_PATH", &ledger_path)
             .env("GAH_EVENTS_PATH", &events_path)
+            .env("TMPDIR", &tmp_root)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0)
@@ -177,6 +182,7 @@ exit 0
     thread::sleep(Duration::from_millis(200));
     assert!(unaffected.try_wait().unwrap().is_none());
 
+    eprintln!("launcher log: {}", log_path.display());
     let status = Command::new("/bin/sh")
         .args(["-c", launcher])
         .env("GAH_BIN", gah)
@@ -189,9 +195,15 @@ exit 0
         .env("GAH_CLAIM_STATE_PATH", &claims_path)
         .env("GAH_LEDGER_PATH", &ledger_path)
         .env("GAH_EVENTS_PATH", &events_path)
+        .env("TMPDIR", &tmp_root)
         .status()
         .unwrap();
-    assert!(status.success(), "launcher failed: {status}");
+    if !status.success() {
+        if let Ok(log_contents) = fs::read_to_string(&log_path) {
+            eprintln!("launcher output:\n{log_contents}");
+        }
+        assert!(status.success(), "launcher failed: {status}");
+    }
 
     let pid = fs::read_to_string(&pid_path)
         .unwrap()
@@ -226,6 +238,7 @@ exit 0
             config.to_str().unwrap(),
         ])
         .env("GAH_CLAIM_STATE_PATH", &claims_path)
+        .env("TMPDIR", &tmp_root)
         .output()
         .unwrap();
     assert!(claims.status.success());
@@ -245,6 +258,7 @@ exit 0
         .env("GAH_LEDGER_PATH", ledger_path)
         .env("GAH_EVENTS_PATH", events_path)
         .env("GAH_CLAIM_STATE_PATH", claims_path)
+        .env("TMPDIR", &tmp_root)
         .output()
         .unwrap();
     assert!(

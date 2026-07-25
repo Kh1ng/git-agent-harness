@@ -130,7 +130,52 @@ export interface Blocker {
   source_reference?: string | null;
   /** TICKET-505: stable reason code for HumanRequired blockers. */
   reason_code?: string | null;
+  /** Deterministic operator remediation plan for this blocked work item. */
+  remediation_plan?: RemediationPlan;
 }
+
+export type RemediationAuthority =
+  | 'operator'
+  | 'paid_route_approver'
+  | 'human_reviewer'
+  | 'merge_approver'
+  | 'profile_maintainer';
+
+export type RemediationActionKind =
+  | 'command'
+  | 'api_action'
+  | 'manual_review'
+  | 'manual_merge'
+  | 'config_change'
+  | 'inspect';
+
+export interface RemediationAction {
+  kind: RemediationActionKind;
+  summary: string;
+  command?: string | null;
+  api_action?: string | null;
+}
+
+export type RemediationPlan =
+  | {
+      result: 'plan';
+      profile: string;
+      work_id?: string | null;
+      reference?: string | null;
+      reason_code: HumanRequiredReasonCode;
+      required_authority: RemediationAuthority;
+      safe_actions: RemediationAction[];
+    }
+  | {
+      result: 'no_automatic_remediation';
+      profile: string;
+      work_id?: string | null;
+      reference?: string | null;
+      reason_code: HumanRequiredReasonCode;
+      required_authority: RemediationAuthority;
+      safe_actions: RemediationAction[];
+      reason: string;
+    };
 
 export interface StatusError {
   subsystem: string;
@@ -181,6 +226,9 @@ export interface MergeRequest {
 export interface AvailableTicket {
   ticket_path: string;
   work_id: string | null;
+  normalized_work_identity: string;
+  source: CandidateSource;
+  execution_policy: CandidateExecutionPolicy;
   title: string | null;
   recommended_backend: string | null;
   recommended_model: string | null;
@@ -191,6 +239,17 @@ export interface AvailableTicket {
   has_active_claim: boolean;
   human_required: boolean;
   human_required_reason_code?: string | null;
+}
+
+export type CandidateSource = 'legacy_ticket' | 'github_issue' | 'gitlab_issue';
+
+export interface CandidateExecutionPolicy {
+  intake_mode: string;
+  explicit_autonomy_required: boolean;
+  autonomous_metadata_present: boolean;
+  dispatchable_now: boolean;
+  exclusion_reason_code: string | null;
+  exclusion_reason: string | null;
 }
 
 export interface IssueIntakeRejection {
@@ -643,6 +702,7 @@ export interface ControllerEvent {
   run_id?: string | null;
   reason_code?: string | null;
   details: string;
+  remediation_plan?: RemediationPlan | null;
 }
 
 // TICKET-505: HumanRequired reason codes
@@ -650,11 +710,14 @@ export type HumanRequiredReasonCode =
   | 'policy_approval'
   | 'retry_budget_exhausted'
   | 'review_evidence_gate'
+  | 'review_output_invalid_exhausted'
+  | 'review_ceiling_exhausted'
   | 'merge_policy'
   | 'publishing_restriction'
   | 'configuration_infra'
   | 'fix_retry_cap_exceeded'
   | 'merge_retry_cap_exceeded'
+  | 'stuck_loop_gate'
   | 'unknown';
 
 export type ControllerActivityStatus = 'running' | 'finished' | 'failed';

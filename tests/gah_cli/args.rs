@@ -9,9 +9,6 @@ use clap::Parser;
 use git_agent_harness::cli::args::Cli;
 use predicates::prelude::*;
 
-#[path = "config_show.rs"]
-mod config_show;
-
 /// The top-level help text advertises the tool's identity unchanged.
 #[test]
 fn help_works() {

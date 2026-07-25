@@ -1,7 +1,6 @@
 use super::run_dispatch_and_record;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::sync::mpsc::SyncSender;
 
 pub(super) fn pending_plan(
     cfg: &crate::config::GahConfig,
@@ -109,7 +108,7 @@ pub(super) fn execute(
     work_id: &str,
     title: Option<&str>,
     skip_validation_gate: bool,
-    route_ready: Option<SyncSender<()>>,
+    route_admission: Option<super::RouteNodeAdmission>,
 ) -> Result<String> {
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -176,7 +175,7 @@ pub(super) fn execute(
             dispatch_reason: Some("pm_decomposition".to_string()),
             work_id: Some(work_id.to_string()),
             run_id: Some(run_id.clone()),
-            route_ready,
+            route_admission,
         };
         match run_dispatch_and_record(cfg, "pm_plan", Some(work_id), &args) {
             Ok(Some(deferred)) => return Ok(deferred),

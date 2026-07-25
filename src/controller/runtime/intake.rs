@@ -15,9 +15,11 @@ pub(super) fn action_intake_key(action: &NextAction) -> Option<String> {
             work_id,
             ticket_path,
             ..
-        } => Some(work_id.clone().unwrap_or_else(|| ticket_path.clone())),
+        } => Some(crate::work_claim::normalize_work_identity(
+            work_id.as_deref().unwrap_or(ticket_path),
+        )),
         NextAction::Retry { work_id, .. } | NextAction::Escalate { work_id, .. } => {
-            Some(work_id.clone())
+            Some(crate::work_claim::normalize_work_identity(work_id))
         }
         _ => None,
     }
@@ -55,8 +57,11 @@ pub(super) fn retain_unclaimed_work(
     let eligible = |work_id: Option<&str>| {
         work_id
             .map(|id| {
-                !claimed_work_ids.iter().any(|claimed| claimed == id)
-                    && !executed_work_ids.contains(id)
+                let normalized = crate::work_claim::normalize_work_identity(id);
+                !claimed_work_ids
+                    .iter()
+                    .any(|claimed| claimed == &normalized)
+                    && !executed_work_ids.contains(&normalized)
             })
             .unwrap_or(true)
     };

@@ -5,7 +5,6 @@ use crate::usage_attribution::{aggregate_attempt_usage, usage_has_observation};
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
 mod already_satisfied;
@@ -59,26 +58,17 @@ pub(crate) fn validate_pm_source_depth(
     workflows::validate_pm_source_depth(profile, target)
 }
 
-pub use self::attempts::review_preflight;
-pub(crate) use self::attempts::routing_runtime_state_from_entries;
+pub use self::attempts::{capacity_deferred_error, node_capacity_deferred_error, review_preflight};
+pub(crate) use self::attempts::{
+    contextualize_capacity_deferral, post_attempt_capacity_deferral,
+    routing_runtime_state_from_entries,
+};
 
 use self::claims::check_duplicate_work;
 pub(crate) use self::claims::duplicate_work_error;
 pub(crate) use self::claims::scan_available_tickets_with_dependencies;
 pub use self::claims::{merge_branch, MergeExecution};
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
-
-/// A parallel sibling reached routing after another worker reserved the only
-/// available backend/model slot. This is typed capacity contention, not a
-/// failed backend execution; the controller should close the run as deferred
-/// and retry it on a later iteration without alarming the operator.
-pub fn capacity_deferred_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<crate::routing::RouteError>()
-            .is_some_and(crate::routing::RouteError::is_capacity_deferral)
-    })
-}
 
 fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
     review_budget_exhausted_error(error).is_none() && !capacity_deferred_error(error)
@@ -152,10 +142,10 @@ pub struct DispatchArgs {
     /// Controller-assigned identity shared by start/finish events and the
     /// resulting ledger entry. Direct CLI dispatches generate one in `run`.
     pub run_id: Option<String>,
-    /// Parallel-controller rendezvous: sent only after the selected coding
-    /// route has reserved its backend/model slot. This prevents a sibling
-    /// from choosing the same capped route before the first worker starts.
-    pub route_ready: Option<SyncSender<()>>,
+    /// Parallel-controller two-phase admission: after reserving the selected
+    /// route, request node capacity and wait for the controller's decision.
+    /// Direct CLI dispatches leave this unset and retain blocking route waits.
+    pub route_admission: Option<crate::controller::RouteNodeAdmission>,
 }
 
 pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {

@@ -22,6 +22,32 @@ pub struct WorkClaim {
     pub claimed_at: DateTime<Utc>,
 }
 
+/// Normalize a raw work identifier into a provider-neutral key.
+///
+/// Numeric issue references are collapsed to `#<number>` so `#71`,
+/// `71`, and `TICKET-071` all compare equal.
+pub fn normalize_work_identity(work_id: &str) -> String {
+    let trimmed = work_id.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let candidate = trimmed
+        .strip_prefix("TICKET-")
+        .or_else(|| trimmed.strip_prefix('#'))
+        .unwrap_or(trimmed);
+    if candidate.chars().all(|c| c.is_ascii_digit()) {
+        let digits = candidate.trim_start_matches('0');
+        return format!("#{}", if digits.is_empty() { "0" } else { digits });
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        let digits = trimmed.trim_start_matches('0');
+        return format!("#{}", if digits.is_empty() { "0" } else { digits });
+    }
+
+    trimmed.to_string()
+}
+
 /// Work claim state for tracking in-flight work IDs per profile
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct WorkClaimState {
@@ -105,6 +131,7 @@ impl WorkClaimState {
     /// Claim a work_id for a profile
     pub fn claim(&mut self, profile: &str, work_id: &str) {
         self.ensure_v2();
+        let work_id = normalize_work_identity(work_id);
         let claim = WorkClaim {
             work_id: work_id.to_string(),
             pid: std::process::id(),
@@ -120,10 +147,13 @@ impl WorkClaimState {
     /// Release a work_id for a profile
     pub fn release(&mut self, profile: &str, work_id: &str) {
         self.ensure_v2();
+        let work_id = normalize_work_identity(work_id);
         if let Some(claims) = self.claims.get_mut(profile) {
             claims.retain(|entry| match entry {
-                WorkClaimStateEntry::V1(id) => id != work_id,
-                WorkClaimStateEntry::V2(claim) => claim.work_id != work_id,
+                WorkClaimStateEntry::V1(id) => normalize_work_identity(id) != work_id,
+                WorkClaimStateEntry::V2(claim) => {
+                    normalize_work_identity(&claim.work_id) != work_id
+                }
             });
         }
     }
@@ -136,8 +166,8 @@ impl WorkClaimState {
                 entries
                     .iter()
                     .map(|entry| match entry {
-                        WorkClaimStateEntry::V1(id) => id.clone(),
-                        WorkClaimStateEntry::V2(claim) => claim.work_id.clone(),
+                        WorkClaimStateEntry::V1(id) => normalize_work_identity(id),
+                        WorkClaimStateEntry::V2(claim) => normalize_work_identity(&claim.work_id),
                     })
                     .collect()
             })
@@ -146,12 +176,15 @@ impl WorkClaimState {
 
     /// Check if a work_id is claimed for a profile
     pub fn is_claimed(&self, profile: &str, work_id: &str) -> bool {
+        let work_id = normalize_work_identity(work_id);
         self.claims
             .get(profile)
             .map(|entries| {
                 entries.iter().any(|entry| match entry {
-                    WorkClaimStateEntry::V1(id) => id == work_id,
-                    WorkClaimStateEntry::V2(claim) => claim.work_id == work_id,
+                    WorkClaimStateEntry::V1(id) => normalize_work_identity(id) == work_id,
+                    WorkClaimStateEntry::V2(claim) => {
+                        normalize_work_identity(&claim.work_id) == work_id
+                    }
                 })
             })
             .unwrap_or(false)
@@ -159,6 +192,7 @@ impl WorkClaimState {
 
     /// Check if a claim is stale (process dead or too old)
     pub fn is_claim_stale(&self, profile: &str, work_id: &str, max_age_secs: u64) -> bool {
+        let work_id = normalize_work_identity(work_id);
         if let Some(entries) = self.claims.get(profile) {
             for entry in entries {
                 match entry {
@@ -167,7 +201,7 @@ impl WorkClaimState {
                         return true;
                     }
                     WorkClaimStateEntry::V2(claim) => {
-                        if claim.work_id == work_id {
+                        if normalize_work_identity(&claim.work_id) == work_id {
                             // Check if process is still alive
                             if claim.pid == 0 {
                                 return true; // Unknown/migrated claim
@@ -242,7 +276,7 @@ impl WorkClaimState {
                     .iter()
                     .map(|entry| match entry {
                         WorkClaimStateEntry::V1(id) => ClaimDetail {
-                            work_id: id.clone(),
+                            work_id: normalize_work_identity(id),
                             pid: 0,
                             hostname: "unknown".to_string(),
                             claimed_at: Utc::now(),
@@ -251,7 +285,7 @@ impl WorkClaimState {
                         WorkClaimStateEntry::V2(claim) => {
                             let is_stale = claim.pid == 0 || !is_process_alive(claim.pid);
                             ClaimDetail {
-                                work_id: claim.work_id.clone(),
+                                work_id: normalize_work_identity(&claim.work_id),
                                 pid: claim.pid,
                                 hostname: claim.hostname.clone(),
                                 claimed_at: claim.claimed_at,

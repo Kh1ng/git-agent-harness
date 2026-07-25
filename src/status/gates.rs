@@ -231,6 +231,7 @@ pub(super) fn project_effective_mr_gates(
             until: None,
             source_reference: Some(work_id.to_string()),
             reason_code,
+            remediation_plan: None,
         });
     }
 }
@@ -341,6 +342,7 @@ default_target_branch = "main"
             until: None,
             source_reference: Some("#639".into()),
             reason_code: Some("stuck_loop_gate".into()),
+            remediation_plan: None,
         }];
 
         project_effective_mr_gates(

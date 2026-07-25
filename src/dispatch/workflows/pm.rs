@@ -1,7 +1,7 @@
 use super::super::attempts::{
     apply_route_to_ledger, decide_route, mark_backend_unavailable_from_output_for_identity,
-    preflight_identity, record_route_attempt, resolve_llm, route_identity, route_label,
-    run_backend_for_identity,
+    preflight_identity, record_route_attempt, reserve_backend_attempt, resolve_llm, route_identity,
+    route_label, run_backend_with_reserved_route,
 };
 use super::super::issues::try_discover_open_issues;
 use super::super::prompts::indent_untrusted_text;
@@ -148,16 +148,25 @@ pub(crate) fn pm(
         fs::create_dir_all(&attempt_dir)?;
         fs::write(attempt_dir.join("task.md"), crate::redact::redact(&task))?;
 
-        record_route_attempt(ledger, &plan_route)?;
-        let result = run_backend_for_identity(
-            &plan_route.identity,
+        let result = run_pm_backend_attempt(
             profile,
-            repo,
-            &task,
-            &attempt_dir,
-            &llm,
-            None,
-            Some(remaining.as_secs().max(1)),
+            &plan_route.identity,
+            args.route_admission.as_ref(),
+            attempt_index.saturating_sub(1),
+            || {
+                record_route_attempt(ledger, &plan_route)?;
+                run_backend_with_reserved_route(
+                    &plan_route.identity,
+                    profile,
+                    repo,
+                    &task,
+                    &attempt_dir,
+                    &llm,
+                    None,
+                    true,
+                    Some(remaining.as_secs().max(1)),
+                )
+            },
         )?;
         println!(
             "PM backend finished: exit={} duration={:.0}s log={}",
@@ -246,6 +255,30 @@ pub(crate) fn pm(
     );
 
     Ok(())
+}
+
+fn reserve_pm_backend(
+    profile: &Profile,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    route_admission: Option<&crate::controller::RouteNodeAdmission>,
+) -> Result<super::super::attempts::BackendAdmissionGuard> {
+    reserve_backend_attempt(profile, identity, route_admission)
+}
+
+fn run_pm_backend_attempt<T>(
+    profile: &Profile,
+    identity: &crate::execution_identity::ExecutionIdentity,
+    route_admission: Option<&crate::controller::RouteNodeAdmission>,
+    attempts_completed: usize,
+    run_backend: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let admission_guard =
+        reserve_pm_backend(profile, identity, route_admission).map_err(|error| {
+            super::super::contextualize_capacity_deferral(error, attempts_completed)
+        })?;
+    let result = run_backend();
+    drop(admission_guard);
+    result
 }
 
 fn build_pm_plan_task(profile: &Profile, ctx: &PmPreflight, target: &str) -> Result<String> {

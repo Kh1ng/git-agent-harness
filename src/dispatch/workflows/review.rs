@@ -1,7 +1,7 @@
 use super::super::attempts::{
     apply_execution_identity_env, apply_route_to_ledger, decide_route, mark_shutdown_cancelled,
-    record_route_attempt, reserve_backend_slot, review_preflight_for_identity, review_usage,
-    route_after_backend_unavailable, route_identity, route_label,
+    record_route_attempt, reserve_backend_attempt, review_preflight_for_identity, review_usage,
+    route_after_backend_unavailable, route_identity, route_label, BackendAdmissionGuard,
 };
 use super::super::prompts::enforce_context_budget;
 use super::super::publish::{render_review_comment, review_labels};
@@ -22,7 +22,7 @@ use crate::context;
 use crate::controller::HumanRequiredReason;
 use crate::ledger::LedgerEntry;
 use crate::notifications::{notify_event, NotifyEvent};
-use crate::routing::{ConcurrencyGuard, RouteDecision, RouteRequest};
+use crate::routing::{RouteDecision, RouteRequest};
 use crate::usage_attribution::{
     aggregate_attempt_usage, normalize_attempt_usage, UsageAttribution,
 };
@@ -476,15 +476,6 @@ pub(in crate::dispatch) fn review(
         return Err(ReviewBudgetExhausted::new(block.reason).into());
     }
 
-    // Reserve the selected reviewer before the controller lets the next
-    // parallel slot route. Implementation dispatches already use this same
-    // rendezvous; reviews must participate too or sibling reviews can all
-    // observe a zero live count and select a backend/model capped at one.
-    let mut review_slot = Some(reserve_review_route(profile, &route)?);
-    if let Some(route_ready) = &args.route_ready {
-        let _ = route_ready.send(());
-    }
-
     // Bounded retry across review_candidates: an empty/unavailable-backend
     // outcome (e.g. AGY quota exhaustion -- see agy_empty_output_diagnosis)
     // used to fail the whole review outright even though review_candidates
@@ -558,6 +549,13 @@ pub(in crate::dispatch) fn review(
             attempt_index += 1;
             let attempt_session = session_dir.join(format!("review-attempt-{attempt_index}"));
             fs::create_dir_all(&attempt_session)?;
+            let review_slot = reserve_review_route(profile, &route, args.route_admission.as_ref())
+                .map_err(|error| {
+                    super::super::contextualize_capacity_deferral(
+                        error,
+                        attempt_index.saturating_sub(1),
+                    )
+                })?;
             record_route_attempt(ledger, &route)?;
             let attempt_env_vars = review_attempt_environment(profile, &route.identity, &env_vars);
             let attempt = runner::run_review_backend_for_identity(
@@ -571,7 +569,7 @@ pub(in crate::dispatch) fn review(
             // The slot covers the backend invocation itself. Release it before
             // parsing/rerouting so another worker can use the reviewer as soon as
             // capacity is genuinely free.
-            drop(review_slot.take());
+            drop(review_slot);
             if !matches!(
                 &attempt.outcome,
                 runner::ReviewProcessOutcome::ExecutableUnavailable
@@ -700,7 +698,6 @@ pub(in crate::dispatch) fn review(
                 // The invocation slot was released immediately after the
                 // backend exited. Availability parsing and route selection
                 // therefore happen without holding stale capacity.
-                debug_assert!(review_slot.is_none());
                 let failure_output = review_failure_output(
                     &attempt.outcome,
                     &attempt.stdout,
@@ -754,7 +751,6 @@ pub(in crate::dispatch) fn review(
                         MAX_REVIEW_ATTEMPTS
                     );
                 }
-                review_slot = Some(reserve_review_route(profile, &route)?);
                 continue 'attempts;
             }
             if matches!(attempt.outcome, runner::ReviewProcessOutcome::Success) {
@@ -788,8 +784,6 @@ pub(in crate::dispatch) fn review(
                             // The just-finished invocation released its slot.
                             // Reacquire before the same reviewer performs the
                             // bounded format-only repair attempt.
-                            debug_assert!(review_slot.is_none());
-                            review_slot = Some(reserve_review_route(profile, &route)?);
                             // Bounded retry to the same reviewer/route: this
                             // `continue` targets the inner loop only, so it
                             // does not advance `attempt_number` or consume a
@@ -1159,8 +1153,12 @@ fn mark_review_shutdown_cancelled(ledger: &mut LedgerEntry, signal: i32) {
     ledger.human_required_reason_code = None;
 }
 
-fn reserve_review_route(profile: &Profile, route: &RouteDecision) -> Result<ConcurrencyGuard> {
-    reserve_backend_slot(profile, &route.identity)
+fn reserve_review_route(
+    profile: &Profile,
+    route: &RouteDecision,
+    route_admission: Option<&crate::controller::RouteNodeAdmission>,
+) -> Result<BackendAdmissionGuard> {
+    reserve_backend_attempt(profile, &route.identity, route_admission)
 }
 
 fn review_attempt_environment(

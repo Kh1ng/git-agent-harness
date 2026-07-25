@@ -14,7 +14,14 @@ fn final_review_handoff_is_not_re_reviewed_each_loop_tick() {
         until: None,
         source_reference: Some("TICKET-gah/42".into()),
         reason_code: None,
+        remediation_plan: None,
     });
 
-    assert_eq!(decide_next_action(&snapshot).kind(), "no_op");
+    assert!(matches!(
+        decide_next_action(&snapshot),
+        NextAction::HumanRequired {
+            reason_code: Some(ref code),
+            ..
+        } if code == "review_evidence_gate"
+    ));
 }

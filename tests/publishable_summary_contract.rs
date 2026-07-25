@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+mod support;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -28,16 +29,17 @@ fn write_executable(path: &Path, body: &str) {
 
 #[test]
 fn structured_final_summary_is_the_only_backend_text_published() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir_in(support::test_temp_root()).unwrap();
     let root = temp.path();
     let repo = root.join("repo");
     let home = root.join("home");
     let artifacts = root.join("artifacts");
     let worktrees = root.join("worktrees");
     let bin = root.join("bin");
+    let tmp = root.join("tmp");
     let github_root = root.join("github-root");
     let origin = github_root.join("owner/real.git");
-    for directory in [&repo, &home, &artifacts, &worktrees, &bin] {
+    for directory in [&repo, &home, &artifacts, &worktrees, &bin, &tmp] {
         fs::create_dir_all(directory).unwrap();
     }
     fs::create_dir_all(origin.parent().unwrap()).unwrap();
@@ -146,6 +148,7 @@ EOF
         .env("GITHUB_TOKEN", "test-token")
         .env("GAH_LEDGER_PATH", &ledger)
         .env("XDG_STATE_HOME", root.join("xdg-state"))
+        .env("TMPDIR", tmp)
         .assert()
         .success();
 
