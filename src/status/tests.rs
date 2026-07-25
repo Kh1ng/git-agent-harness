@@ -309,6 +309,62 @@ fn model_specific_availability_block_preserves_scope() {
 }
 
 #[test]
+fn quota_pool_specific_block_preserves_pool_distinct_from_sibling_pool() {
+    // agy/agy-second each track quota independently per model family
+    // (agy:external vs agy:google-native) -- a constraint must carry its
+    // quota_pool so two unavailable pools on the same backend never look
+    // identical (see #765/agy-four-pools confusion this test guards against).
+    let tmp = TempDir::new().unwrap();
+    let cfg = make_test_cfg(&tmp);
+    let avail_path = tmp.path().join("avail.json");
+    let _availability_guard = crate::test_support::AvailabilityEnvGuard::set(&avail_path);
+
+    let state = AvailabilityState {
+        version: 1,
+        records: vec![
+            AvailabilityRecord {
+                backend: "agy".into(),
+                backend_instance: None,
+                model: Some("Claude Sonnet 4.6 (Thinking)".into()),
+                quota_pool: Some("agy:external".into()),
+                status: Status::Unavailable,
+                reason: Reason::QuotaExhausted,
+                observed_at: "2026-07-04T00:00:00Z".into(),
+                unavailable_until: Some("2099-01-01T00:00:00Z".into()),
+                source: Source::BackendError,
+                last_error_summary: None,
+            },
+            AvailabilityRecord {
+                backend: "agy".into(),
+                backend_instance: None,
+                model: Some("Gemini 3.5 Flash (Medium)".into()),
+                quota_pool: Some("agy:google-native".into()),
+                status: Status::Unavailable,
+                reason: Reason::QuotaExhausted,
+                observed_at: "2026-07-04T00:00:00Z".into(),
+                unavailable_until: Some("2099-01-01T00:00:00Z".into()),
+                source: Source::BackendError,
+                last_error_summary: None,
+            },
+        ],
+    };
+    fs::write(&avail_path, serde_json::to_string(&state).unwrap()).unwrap();
+
+    let now = OffsetDateTime::now_utc();
+    let snap = build_snapshot(&cfg, "test", now).unwrap();
+
+    assert_eq!(snap.constraints.len(), 2);
+    let pools: Vec<&str> = snap
+        .constraints
+        .iter()
+        .map(|c| c.quota_pool.as_deref().unwrap())
+        .collect();
+    assert!(pools.contains(&"agy:external"));
+    assert!(pools.contains(&"agy:google-native"));
+    assert_ne!(pools[0], pools[1]);
+}
+
+#[test]
 fn expired_availability_record_skipped() {
     let tmp = TempDir::new().unwrap();
     let cfg = make_test_cfg(&tmp);

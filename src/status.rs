@@ -241,6 +241,12 @@ pub struct Blocker {
     pub backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// agy/agy-second each track quota independently per model family
+    /// (`agy:external` vs `agy:google-native`, etc.) -- without this, two
+    /// constraints on the same `backend` print identically and there is no
+    /// way to tell which pool is actually down.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -464,6 +470,7 @@ fn build_snapshot_inner(
                 message: None,
                 backend: Some(avail.backend.clone()),
                 model: avail.model.clone(),
+                quota_pool: avail.quota_pool.clone(),
                 until: avail.unavailable_until.clone(),
                 source_reference: None,
                 reason_code: None,
@@ -522,6 +529,7 @@ fn build_snapshot_inner(
                 )),
                 backend: None,
                 model: None,
+                quota_pool: None,
                 until: None,
                 source_reference: Some(work_id.to_string()),
                 reason_code: Some("retry_budget_exhausted".into()),
@@ -620,6 +628,7 @@ fn build_snapshot_inner(
                 message: Some("Ledger indicates human intervention required".into()),
                 backend: None,
                 model: None,
+                quota_pool: None,
                 until: None,
                 source_reference: ticket.work_id.clone(),
                 reason_code,
@@ -647,6 +656,7 @@ fn build_snapshot_inner(
             message: Some(dependency.reason.clone()),
             backend: None,
             model: None,
+            quota_pool: None,
             until: None,
             source_reference: Some(dependency.work_id.clone()),
             reason_code: Some(dependency.reason_code.clone()),
@@ -672,6 +682,7 @@ fn build_snapshot_inner(
                     )),
                     backend: None,
                     model: None,
+                    quota_pool: None,
                     until: None,
                     source_reference: Some(mr.branch.clone()),
                     reason_code: Some(HumanRequiredReason::FixRetryCapExceeded.as_str().into()),
@@ -702,6 +713,7 @@ fn build_snapshot_inner(
                     )),
                     backend: None,
                     model: None,
+                    quota_pool: None,
                     until: None,
                     source_reference: Some(mr.branch.clone()),
                     reason_code: Some(HumanRequiredReason::MergeRetryCapExceeded.as_str().into()),
@@ -851,10 +863,28 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
         if !snapshot.constraints.is_empty() {
             println!("Constraints:");
             for c in &snapshot.constraints {
+                // A bare backend name is ambiguous: agy/agy-second each track
+                // quota independently per model family (agy:external vs
+                // agy:google-native), so two constraints on the same backend
+                // can refer to entirely different pools. Print pool/model/
+                // reset time explicitly rather than let them look identical.
+                let scope = match (c.model.as_deref(), c.quota_pool.as_deref()) {
+                    (Some(model), Some(pool)) => format!(" ({model}, pool: {pool})"),
+                    (Some(model), None) => format!(" ({model})"),
+                    (None, Some(pool)) => format!(" (pool: {pool})"),
+                    (None, None) => String::new(),
+                };
+                let until = c
+                    .until
+                    .as_deref()
+                    .map(|u| format!(" until {u}"))
+                    .unwrap_or_default();
                 println!(
-                    "  - {}: {}",
+                    "  - {}{}: {}{}",
                     c.backend.as_deref().unwrap_or(""),
-                    c.reason.as_deref().unwrap_or("unknown")
+                    scope,
+                    c.reason.as_deref().unwrap_or("unknown"),
+                    until
                 );
             }
         }

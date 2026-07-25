@@ -10,6 +10,7 @@ fn final_review_handoff_is_not_re_reviewed_each_loop_tick() {
         message: Some("all configured reviewers were tried".into()),
         backend: None,
         model: None,
+        quota_pool: None,
         until: None,
         source_reference: Some("TICKET-gah/42".into()),
         reason_code: None,
