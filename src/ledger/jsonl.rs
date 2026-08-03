@@ -656,7 +656,7 @@ fn effective_human_gate_for_scope(
                 gate = None;
                 continue;
             }
-            "paid_route_approval_grant" => {
+            "paid_route_approval_grant" | "external_approval_grant" => {
                 // Modern policy gates carry exact route diagnostics and must
                 // be released only after status verifies this grant against
                 // that route. Preserve legacy behavior for pre-reason-code
@@ -670,7 +670,15 @@ fn effective_human_gate_for_scope(
                 }
                 continue;
             }
-            "claim" | "paid_route_approval_revoke" | "review_hold" | "review_hold_release" => {
+            "claim"
+            | "paid_route_approval_revoke"
+            | "external_approval_request"
+            | "external_approval_consume"
+            | "external_approval_revoke"
+            | "external_approval_expire"
+            | "external_approval_deny"
+            | "review_hold"
+            | "review_hold_release" => {
                 continue;
             }
             _ if entry.validation_result.as_deref() == Some("deferred_capacity") => continue,

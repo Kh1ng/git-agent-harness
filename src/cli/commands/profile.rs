@@ -151,6 +151,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 validation_timeout_seconds,
                 routing: config::RoutingPolicy::default(),
                 publishing: Default::default(),
+                external_credential_scopes: std::collections::HashMap::new(),
                 pacing: Default::default(),
                 prune_older_than_days: None,
             };

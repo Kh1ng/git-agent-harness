@@ -1,4 +1,5 @@
 use std::fs;
+use std::process::Command;
 
 pub(crate) mod backends;
 pub(crate) mod output;
@@ -57,6 +58,35 @@ pub fn load_env_file(path: &str) -> Vec<(String, String)> {
             ))
         })
         .collect()
+}
+
+/// Replace the inherited child environment with a narrow runtime set.
+///
+/// The parent process may carry profile-loaded secrets for in-process
+/// provider operations. Backends must not inherit those ambient values unless
+/// the dispatch layer explicitly re-injects them.
+pub(crate) fn apply_child_env(cmd: &mut Command, env_vars: &[(String, String)]) {
+    cmd.env_clear();
+    for key in [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITLAB_PAT",
+        "GITLAB_PAT2",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            cmd.env(key, value);
+        }
+    }
+    for (key, value) in env_vars {
+        cmd.env(key, value);
+    }
 }
 
 #[derive(Debug)]

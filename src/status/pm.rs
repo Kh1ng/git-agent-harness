@@ -29,7 +29,16 @@ pub(super) fn project(
         .iter()
         .filter(|entry| entry.profile == profile_name && entry.repo_id == profile.repo_id)
     {
-        if entry.mode == "clear_attempts" {
+        if matches!(
+            entry.mode.as_str(),
+            "clear_attempts"
+                | "external_approval_request"
+                | "external_approval_grant"
+                | "external_approval_consume"
+                | "external_approval_revoke"
+                | "external_approval_expire"
+                | "external_approval_deny"
+        ) {
             if let Some(work_id) = entry.work_id.as_ref() {
                 attempts.remove(work_id);
             }

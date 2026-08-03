@@ -100,14 +100,12 @@ pub fn run_openhands_with_executable(
         "--override-with-envs",
     ])
     .args(extra_args)
-    .env("OPENHANDS_SUPPRESS_BANNER", "1")
-    .env("LLM_BASE_URL", &llm.base_url)
-    .env("LLM_API_KEY", &llm.api_key)
-    .env("LLM_MODEL", &llm.model)
     .current_dir(worktree);
-    for (k, v) in env_vars {
-        cmd.env(k, v);
-    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
+    cmd.env("OPENHANDS_SUPPRESS_BANNER", "1")
+        .env("LLM_BASE_URL", &llm.base_url)
+        .env("LLM_API_KEY", &llm.api_key)
+        .env("LLM_MODEL", &llm.model);
 
     let (exit_code, duration_secs) = spawn_with_idle_watch(
         cmd,

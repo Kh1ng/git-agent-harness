@@ -112,6 +112,7 @@ pub(super) fn profile() -> Profile {
             pm_backend: Some("claude".into()),
             ..RoutingPolicy::default()
         },
+        external_credential_scopes: std::collections::HashMap::new(),
         pacing: Default::default(),
         publishing: Default::default(),
     }

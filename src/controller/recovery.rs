@@ -56,7 +56,14 @@ pub(super) fn recently_capacity_deferred_work_ids(
         }
         if !matches!(
             entry.mode.as_str(),
-            "clear_attempts" | "paid_route_approval_grant"
+            "clear_attempts"
+                | "paid_route_approval_grant"
+                | "external_approval_request"
+                | "external_approval_grant"
+                | "external_approval_consume"
+                | "external_approval_revoke"
+                | "external_approval_expire"
+                | "external_approval_deny"
         ) {
             continue;
         }

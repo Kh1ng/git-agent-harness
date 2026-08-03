@@ -13,6 +13,8 @@ mod delivery;
 pub use delivery::DeliveryMode;
 mod autonomy;
 pub use autonomy::WakeAutonomy;
+mod external_credential_scopes;
+pub use external_credential_scopes::ExternalCredentialScope;
 
 /// TICKET-127/Issue #124: per-repo merge policy controlling what the
 /// controller does once an MR is `READY_FOR_HUMAN` (strong reviewer approved)
@@ -348,14 +350,8 @@ pub struct Profile {
     /// `--older-than` flag overrides this per invocation.
     #[serde(default)]
     pub prune_older_than_days: Option<u64>,
-}
-
-impl Profile {
-    /// Effective worktree/session retention window in days for `gah prune`.
-    /// Falls back to 30 when the profile does not set `prune_older_than_days`.
-    pub fn effective_prune_older_than_days(&self) -> u64 {
-        self.prune_older_than_days.unwrap_or(30)
-    }
+    #[serde(default)]
+    pub external_credential_scopes: HashMap<String, ExternalCredentialScope>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
@@ -1139,6 +1135,7 @@ pub mod tests {
             validation_timeout_seconds: None,
             routing: RoutingPolicy::default(),
             publishing: Default::default(),
+            external_credential_scopes: std::collections::HashMap::new(),
             pacing: Default::default(),
         }
     }
@@ -1196,6 +1193,7 @@ pub mod tests {
             validation_timeout_seconds: None,
             routing: RoutingPolicy::default(),
             publishing: Default::default(),
+            external_credential_scopes: std::collections::HashMap::new(),
             pacing: Default::default(),
         }
     }

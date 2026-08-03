@@ -86,9 +86,7 @@ pub(crate) fn detect_agy_version(
 ) -> Option<String> {
     let mut cmd = Command::new(executable);
     cmd.arg("--version").current_dir(worktree);
-    for (k, v) in env_vars {
-        cmd.env(k, v);
-    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
     let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
@@ -300,9 +298,7 @@ pub fn run_agy_with_executable(
         .unwrap_or(0);
     cmd.arg("--dangerously-skip-permissions")
         .current_dir(worktree);
-    for (k, v) in env_vars {
-        cmd.env(k, v);
-    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
 
     // GAH-side supervision: kill only when the log has genuinely gone quiet
     // for idle_timeout_seconds, not on a flat wall-clock budget. A model

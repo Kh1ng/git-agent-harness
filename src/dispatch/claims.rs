@@ -333,7 +333,14 @@ fn ledger_lookup_for_ticket(
         // Paid-route approvals are operator control records, not execution
         // attempts. Granting one releases the work-item human gate that asked
         // for approval; neither grant nor revoke consumes retry budget.
-        if e.mode == "paid_route_approval_grant" {
+        if e.mode == "paid_route_approval_grant"
+            || e.mode == "external_approval_grant"
+            || e.mode == "external_approval_request"
+            || e.mode == "external_approval_consume"
+            || e.mode == "external_approval_revoke"
+            || e.mode == "external_approval_expire"
+            || e.mode == "external_approval_deny"
+        {
             last_failure_class = Some(
                 crate::ledger::FailureClass::AgentNoProgress
                     .as_str()

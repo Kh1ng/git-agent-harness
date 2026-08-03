@@ -1,22 +1,17 @@
 use super::super::attempts::{
     apply_route_to_ledger, attempt_usage, classify_git_operation_result, classify_worktree_result,
-    clear_wip_checkpoints, decide_route, failure_text_with_internal_log, preflight_identity,
-    record_route_attempt, reserve_backend_attempt, resolve_llm, route_after_backend_unavailable,
-    route_identity, route_label, run_backend_with_reserved_route, wip_checkpoint_branch,
+    decide_route, failure_text_with_internal_log, preflight_identity,
+    record_external_approval_consumption_for_last_attempt, record_route_attempt,
+    reserve_backend_attempt, resolve_llm, route_after_backend_unavailable, route_identity,
+    route_label, run_backend_with_reserved_route, wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
 use super::super::issues::{
     parse_ticket_metadata, parse_ticket_metadata_from_issue, resolve_target_to_issue_or_string,
 };
-use super::super::metrics::apply_diff_stats;
 use super::super::mutation_policy::enforce_policy;
 use super::super::prompts::{build_task, enforce_context_budget};
-use super::super::publish::{
-    build_fix_or_improve_mr_body, build_mr_title, emit_human_handoff,
-    enforce_generated_artifact_policy, ensure_issue_open_for_publish, publishing_allows_publish,
-    MrRenderContext,
-};
 use super::super::repair_context;
 use super::super::text::utf8_safe_prefix;
 use super::super::validation::{
@@ -38,10 +33,11 @@ use std::path::{Path, PathBuf};
 mod bounded_validation;
 pub(crate) use bounded_validation::bounded_validation_failure;
 mod conflict_resolution;
+#[path = "improve/finish.rs"]
+mod finish;
 mod handoff;
-use handoff::maybe_perform_handoff;
 mod publish_mr;
-use publish_mr::publish_or_update_mr;
+use finish::finish_improve_workflow;
 mod repair;
 mod shutdown;
 use shutdown::record_cancelled_attempt;
@@ -405,6 +401,9 @@ pub(crate) fn improve(
             &attempt_session,
             &llm,
             env_path,
+            cfg,
+            &args.profile,
+            ledger.work_id.as_deref(),
             true,
             None,
         );
@@ -436,6 +435,12 @@ pub(crate) fn improve(
                         false,
                     ),
                 });
+                record_external_approval_consumption_for_last_attempt(
+                    cfg,
+                    &args.profile,
+                    profile,
+                    ledger,
+                );
                 worktree::cleanup(&wt, repo);
                 return Err(e);
             }
@@ -538,6 +543,12 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
+            record_external_approval_consumption_for_last_attempt(
+                cfg,
+                &args.profile,
+                profile,
+                ledger,
+            );
             shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
             if stalled {
                 notify_event(
@@ -821,6 +832,12 @@ pub(crate) fn improve(
                     ),
                     cli_version: result.agy_version.clone(),
                 });
+                record_external_approval_consumption_for_last_attempt(
+                    cfg,
+                    &args.profile,
+                    profile,
+                    ledger,
+                );
                 shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                 if attempt + 1 < max_attempts {
                     let current_identity =
@@ -881,6 +898,12 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
+            record_external_approval_consumption_for_last_attempt(
+                cfg,
+                &args.profile,
+                profile,
+                ledger,
+            );
             shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
             if already_satisfied.reconcile(
                 ledger,
@@ -985,6 +1008,12 @@ pub(crate) fn improve(
                     ),
                     cli_version: result.agy_version.clone(),
                 });
+                record_external_approval_consumption_for_last_attempt(
+                    cfg,
+                    &args.profile,
+                    profile,
+                    ledger,
+                );
                 break;
             }
             Err((e, exit_code)) => {
@@ -1011,6 +1040,12 @@ pub(crate) fn improve(
                             Some(&claude_path),
                         ),
                         result.agy_version.clone(),
+                    );
+                    record_external_approval_consumption_for_last_attempt(
+                        cfg,
+                        &args.profile,
+                        profile,
+                        ledger,
                     );
                     worktree::preserve_wip(
                         &wt,
@@ -1128,6 +1163,12 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    record_external_approval_consumption_for_last_attempt(
+                        cfg,
+                        &args.profile,
+                        profile,
+                        ledger,
+                    );
                     shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
@@ -1218,6 +1259,12 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    record_external_approval_consumption_for_last_attempt(
+                        cfg,
+                        &args.profile,
+                        profile,
+                        ledger,
+                    );
                     shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                     worktree::preserve_wip(
                         &wt,
@@ -1261,6 +1308,12 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    record_external_approval_consumption_for_last_attempt(
+                        cfg,
+                        &args.profile,
+                        profile,
+                        ledger,
+                    );
                     shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                     break;
                 } else {
@@ -1289,6 +1342,12 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
+                    record_external_approval_consumption_for_last_attempt(
+                        cfg,
+                        &args.profile,
+                        profile,
+                        ledger,
+                    );
                     shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
                     worktree::preserve_wip(
                         &wt,
@@ -1306,190 +1365,26 @@ pub(crate) fn improve(
         }
     }
 
-    if profile.validation_commands.is_empty() && ledger.validation_result.is_none() {
-        ledger.validation_result = Some("not_run".into());
-    }
-
-    // Retries cold-start a backend with bounded failure context; validation
-    // commands run sequentially and feed bounded output into the next attempt.
-
-    let has_changes = classify_git_operation_result(
-        ledger,
-        crate::ledger::FailureStage::PostValidation,
-        worktree::has_changes(&wt, &profile.default_target_branch),
-    )?;
-    // Reconcile a structured, grounded no-diff completion before the generic
-    // no-progress backstop. This is the primary already-satisfied path.
-    if !has_changes
-        && already_satisfied.reconcile(
-            ledger,
-            &backend_summary,
-            &wip_checkpoints,
-            !validation_failed,
-        )?
-    {
-        return Ok(());
-    }
-    already_satisfied.enforce_post_validation_changes(ledger, has_changes)?;
-
-    // Reject an explicitly claimed already-satisfied completion that consists
-    // only of a coverage-weakening test diff before publishing.
-    if already_satisfied.reconcile(
-        ledger,
-        &backend_summary,
-        &wip_checkpoints,
-        !validation_failed,
-    )? {
-        return Ok(());
-    }
-
-    let commit_title = if validation_failed {
-        format!(
-            "gah: {} changes for {} [validation-failing draft]",
-            args.mode, profile.repo_id
-        )
-    } else {
-        format!("gah: {} changes for {}", args.mode, profile.repo_id)
-    };
-    let mut commit_msg = commit_title;
-    if !backend_summary.is_empty() {
-        commit_msg.push_str("\n\n");
-        commit_msg.push_str(&backend_summary);
-    }
-
-    enforce_generated_artifact_policy(profile, ledger, &wt)?;
-
-    if maybe_perform_handoff(
+    finish_improve_workflow(
         cfg,
         profile,
+        &args.mode,
         ledger,
         &wt,
-        &branch,
-        &commit_msg,
-        ticket_meta.as_ref(),
-        &backend_summary,
         repo,
-        &wip_checkpoints,
-    )? {
-        return Ok(());
-    }
-
-    // TICKET-128: honor the per-profile publishing policy. A restricted profile
-    // forbids PR/MR creation and/or LLM-generated commit messages, so we stop
-    // at a deterministic human handoff after code generation + validation
-    // instead of publishing the work. This is independent of reviewer routing
-    // and merge policy: review still runs, the worktree is still cleaned up,
-    // only the autonomous publish step is suppressed.
-    if !publishing_allows_publish(profile) {
-        // Commit only if the policy still permits agent-authored commit text.
-        if profile.publishing.allow_commit_message_generation {
-            if worktree::has_uncommitted_changes(&wt)? {
-                ledger.commit_attempted = true;
-                worktree::stage_all(&wt)?;
-                worktree::ensure_staged(&wt)?;
-                worktree::commit_msg(&wt, &commit_msg)?;
-                ledger.commit_created = true;
-            } else {
-                ledger.commit_created = true;
-            }
-        }
-        apply_diff_stats(ledger, &wt, &profile.default_target_branch);
-        emit_human_handoff(
-            profile,
-            ledger,
-            &branch,
-            "PR/MR creation or commit-message generation disabled by publishing policy",
-        );
-        clear_wip_checkpoints(repo, &wip_checkpoints);
-        worktree::preserve_wip(
-            &wt,
-            &profile.default_target_branch,
-            &format!("gah: WIP handoff {}", args.mode),
-        )?;
-        worktree::cleanup(&wt, repo);
-        return Ok(());
-    }
-
-    if let Some(issue) = issue_details.as_ref() {
-        if let Err(error) = ensure_issue_open_for_publish(profile, issue) {
-            ledger.set_failure(
-                crate::ledger::FailureClass::HumanBlocked,
-                crate::ledger::FailureStage::Push,
-            );
-            worktree::preserve_wip(
-                &wt,
-                &profile.default_target_branch,
-                &format!("gah: WIP blocked {}", args.mode),
-            )?;
-            worktree::cleanup(&wt, repo);
-            return Err(error);
-        }
-    }
-
-    println!("Changes detected. Committing and pushing...");
-    let push_url = profile.push_url()?;
-    let push_pat = profile.pat();
-    if worktree::has_uncommitted_changes(&wt)? {
-        ledger.commit_attempted = true;
-        worktree::stage_all(&wt)?;
-        worktree::ensure_staged(&wt)?;
-        worktree::commit_msg(&wt, &commit_msg)?;
-        ledger.commit_created = true;
-    } else {
-        // Backend committed its own work already (e.g. vibe) -- nothing left
-        // to stage, just push what's already on HEAD.
-        ledger.commit_created = true;
-    }
-    conflict_session.verify_before_publish(ledger)?;
-    // Must run after the commit above -- diff_stats/changed_files compare
-    // origin/<target> against HEAD, so computing them beforehand (while the
-    // real changes are still uncommitted working-tree modifications) always
-    // reported "0 file(s) changed, +0, -0" in the MR body.
-    apply_diff_stats(ledger, &wt, &profile.default_target_branch);
-    ledger.push_attempted = true;
-    classify_git_operation_result(
-        ledger,
-        crate::ledger::FailureStage::Push,
-        worktree::push_branch(&wt, &branch, &push_url, &push_pat),
-    )?;
-    ledger.push_succeeded = true;
-
-    let mr_title = build_mr_title(
-        &args.mode,
-        &profile.repo_id,
-        validation_failed,
-        ticket_meta.as_ref(),
-    );
-    let mr_ctx = MrRenderContext {
-        backend: &route.effective_backend,
-        model: &llm.model,
-        branch: &branch,
-        target_branch: &profile.default_target_branch,
-        validation_commands: &profile.validation_commands,
-        ledger,
-        backend_summary: &backend_summary,
-    };
-    let mr_body = build_fix_or_improve_mr_body(
-        &args.mode,
-        ticket_meta.as_ref(),
-        &mr_ctx,
-        !validation_failed,
-    );
-    publish_or_update_mr(
-        cfg,
-        profile,
-        ledger,
         &branch,
-        &mr_title,
-        &mr_body,
         manual_fix.existing_branch.is_some(),
+        ticket_meta.as_ref(),
+        issue_details.as_ref(),
+        &conflict_session,
+        &already_satisfied,
+        validation_failed,
+        &backend_summary,
+        &wip_checkpoints,
         &route.effective_backend,
         route.effective_model.as_deref(),
-    )?;
-
-    clear_wip_checkpoints(repo, &wip_checkpoints);
-    worktree::cleanup(&wt, repo);
-    Ok(())
+        &llm.model,
+    )
 }
 
 #[cfg(test)]

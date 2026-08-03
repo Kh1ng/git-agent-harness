@@ -208,9 +208,11 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
 
     let result = match args.mode.as_str() {
         "improve" | "fix" => workflows::run_improve(cfg, profile, args, &session_dir, &mut ledger),
-        "pm" => workflows::run_pm(cfg, profile, args, &session_dir, &mut ledger),
+        "pm" => workflows::run_pm(cfg, &args.profile, profile, args, &session_dir, &mut ledger),
         "review" => workflows::run_review(cfg, profile, args, &session_dir, &mut ledger),
-        "experiment" => workflows::run_experiment(cfg, profile, args, &session_dir, &mut ledger),
+        "experiment" => {
+            workflows::run_experiment(cfg, &args.profile, profile, args, &session_dir, &mut ledger)
+        }
         other => anyhow::bail!("unknown mode: {}", other),
     };
     ledger.duration_seconds = Some(started.elapsed().as_secs_f64());

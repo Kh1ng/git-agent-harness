@@ -10,6 +10,7 @@ pub mod config;
 pub mod controller;
 pub mod dispatch;
 pub mod doctor;
+pub mod external_approval;
 pub mod init;
 pub mod ledger;
 pub mod policy;

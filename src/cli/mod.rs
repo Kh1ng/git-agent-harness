@@ -106,6 +106,8 @@ pub fn run() -> Result<()> {
 
         Commands::RouteApproval { command } => commands::controller::run_route_approval(command)?,
 
+        Commands::ExternalApproval { command } => commands::external_approval::run(command)?,
+
         Commands::Loop {
             profile,
             config_path,

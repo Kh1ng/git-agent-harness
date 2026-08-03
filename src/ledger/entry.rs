@@ -233,6 +233,32 @@ pub struct AttemptRoutingRecord {
     pub routing_diagnostics: Option<RoutingDiagnostics>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
+pub struct ExternalApprovalRecord {
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub operation_kind: Option<String>,
+    #[serde(default)]
+    pub credential_label: Option<String>,
+    #[serde(default)]
+    pub allowed_env_vars: Vec<String>,
+    #[serde(default)]
+    pub max_requests: Option<u64>,
+    #[serde(default)]
+    pub max_dollars: Option<f64>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub purpose: Option<String>,
+    #[serde(default)]
+    pub consumed_requests: Option<u64>,
+    #[serde(default)]
+    pub consumed_dollars: Option<f64>,
+    #[serde(default)]
+    pub denial_reason: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
@@ -605,6 +631,8 @@ pub struct LedgerEntry {
     pub context_estimated_tokens_after: Option<u64>,
     #[serde(default)]
     pub context_compacted: bool,
+    #[serde(default)]
+    pub external_approval: Option<ExternalApprovalRecord>,
     pub usage: LedgerUsage,
 }
 
@@ -728,6 +756,7 @@ impl LedgerEntry {
             context_estimated_tokens_before: None,
             context_estimated_tokens_after: None,
             context_compacted: false,
+            external_approval: None,
             usage: LedgerUsage::default(),
         }
     }
@@ -833,6 +862,7 @@ impl LedgerEntry {
             context_estimated_tokens_before: None,
             context_estimated_tokens_after: None,
             context_compacted: false,
+            external_approval: None,
             usage: LedgerUsage::default(),
         }
     }
@@ -939,6 +969,21 @@ impl LedgerEntry {
             ..Self::new_clear_attempts(profile_name, profile, work_id)
         }
     }
+
+    pub fn new_external_approval(
+        profile_name: &str,
+        profile: &Profile,
+        work_id: &str,
+        mode: &str,
+        approval: ExternalApprovalRecord,
+    ) -> Self {
+        Self {
+            mode: mode.to_string(),
+            work_id: Some(work_id.to_string()),
+            external_approval: Some(approval),
+            ..Self::new_clear_attempts(profile_name, profile, work_id)
+        }
+    }
 }
 
 fn summarize_target(target: &str) -> Option<String> {
@@ -1013,6 +1058,7 @@ mod tests {
             validation_timeout_seconds: None,
             notify_command: None,
             routing: RoutingPolicy::default(),
+            external_credential_scopes: std::collections::HashMap::new(),
             pacing: Default::default(),
             publishing: Default::default(),
         }
