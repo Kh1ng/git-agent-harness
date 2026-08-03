@@ -877,7 +877,15 @@ fn test_check_duplicate_work_cases() {
     assert!(res.is_ok());
 
     // 4. Case B: Active open PR exists -> Should block
-    let pr_json = r#"[{"title":"Fix login","body":null,"head":{"ref":"gah/repo-active","sha":"source-sha"},"html_url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"open","draft":false,"updated_at":"2026-07-17T17:22:35-05:00"}]"#;
+    // `updated_at` is relative to "now" (not hardcoded) so this PR stays
+    // classified as active instead of aging into STALE over time.
+    let pr_updated_at = OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let pr_json = format!(
+        r#"[{{"title":"Fix login","body":null,"head":{{"ref":"gah/repo-active","sha":"source-sha"}},"html_url":"https://github.com/owner/repo/pull/1","labels":[],"number":1,"state":"open","draft":false,"updated_at":"{pr_updated_at}"}}]"#
+    );
+    let pr_json = pr_json.as_str();
     setup_fake_gh(&bin_dir, pr_json);
     let _guard = PathGuard::set(&bin_dir);
 
