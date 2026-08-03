@@ -414,14 +414,19 @@ fn save_state(state: &WorkClaimState) -> Result<()> {
             .with_context(|| format!("Failed to create state dir: {:?}", parent))?;
     }
     let content = serde_json::to_string_pretty(state)?;
+    let temp_path = path.with_extension("json.tmp");
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&path)
-        .with_context(|| format!("Failed to open work claims file for writing: {:?}", path))?;
+        .open(&temp_path)
+        .with_context(|| format!("Failed to open work claims temp file: {:?}", temp_path))?;
     file.write_all(content.as_bytes())
-        .with_context(|| format!("Failed to write work claims file: {:?}", path))?;
+        .with_context(|| format!("Failed to write work claims temp file: {:?}", temp_path))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to sync work claims temp file: {:?}", temp_path))?;
+    fs::rename(&temp_path, &path)
+        .with_context(|| format!("Failed to replace work claims file: {:?}", path))?;
     Ok(())
 }
 
@@ -595,6 +600,18 @@ mod tests {
             canonical_claim_scope("github", "owner/repo"),
             "github@owner/repo"
         );
+    }
+
+    #[test]
+    fn claim_state_write_is_atomic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("work_claims.json");
+        let _guard = crate::test_support::ClaimStateEnvGuard::set(&path);
+
+        release_all_for_profile("test").unwrap();
+
+        serde_json::from_str::<WorkClaimState>(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(!path.with_extension("json.tmp").exists());
     }
 
     #[test]

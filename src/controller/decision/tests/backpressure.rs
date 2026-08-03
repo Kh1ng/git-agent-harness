@@ -75,6 +75,7 @@ fn managed_mr_limit_reports_the_durable_gate_instead_of_blaming_backpressure() {
         message: Some("review selected repeatedly without progress".into()),
         backend: None,
         model: None,
+        quota_pool: None,
         until: None,
         source_reference: Some("TICKET-gah/review".into()),
         reason_code: Some("stuck_loop_gate".into()),
