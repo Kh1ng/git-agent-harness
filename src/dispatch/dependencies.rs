@@ -3,7 +3,7 @@ use crate::config::Profile;
 use crate::models::{DependencyBlocker, DependencyObservation};
 use crate::provider::{gitlab_api, provider_command};
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 enum CachedIssue {
@@ -47,6 +47,8 @@ impl std::fmt::Display for DependencyRelationshipError {
         }
     }
 }
+
+impl std::error::Error for DependencyRelationshipError {}
 
 /// Represents a dependency relationship source with provenance
 #[derive(Debug, Clone)]
@@ -156,8 +158,9 @@ pub(crate) fn fetch_github_sub_issues(
 }
 
 /// Fetch native GitLab issue link relationships (blocks type) for a given issue.
-/// Returns a list of issue numbers that this issue blocks (dependencies).
-/// This reads the native GitLab issue links API with link_type="blocks".
+/// Returns a list of issue numbers that this issue is blocked by.
+/// This reads the native GitLab issue links API and resolves incoming blocker
+/// edges for dependency-style evaluation.
 pub(crate) fn fetch_gitlab_blocks_links(
     profile: &Profile,
     issue_number: &str,
@@ -186,23 +189,34 @@ pub(crate) fn fetch_gitlab_blocks_links(
 
             let mut blocked_numbers = Vec::new();
             for link in links {
-                // GitLab issue links have target_issue_iid for the linked issue
-                // and link_type for the relationship type
-                if link["link_type"].as_str() == Some("blocks") {
-                    if let Some(iid) = link
-                        .pointer("/target_issue/iid")
-                        .and_then(|value| value.as_u64())
-                    {
-                        blocked_numbers.push(iid.to_string());
-                    } else if let Some(iid) = link
-                        .pointer("/target_issue/iid")
-                        .and_then(|value| value.as_str())
-                    {
-                        blocked_numbers.push(iid.to_string());
-                    } else if let Some(iid) = link["target_issue_iid"].as_u64() {
-                        blocked_numbers.push(iid.to_string());
-                    } else if let Some(iid) = link["target_issue_iid"].as_str() {
-                        blocked_numbers.push(iid.to_string());
+                let link_type = link["link_type"].as_str().unwrap_or_default();
+                if link_type != "blocks" && link_type != "is_blocked_by" {
+                    continue;
+                }
+
+                let source_issue = link
+                    .pointer("/source_issue/iid")
+                    .and_then(|value| value.as_u64())
+                    .map(|id| id.to_string())
+                    .or_else(|| link["source_issue_iid"].as_u64().map(|id| id.to_string()))
+                    .or_else(|| link["source_issue_iid"].as_str().map(ToString::to_string));
+
+                let target_issue = link
+                    .pointer("/target_issue/iid")
+                    .and_then(|value| value.as_u64())
+                    .map(|id| id.to_string())
+                    .or_else(|| link["target_issue_iid"].as_u64().map(|id| id.to_string()))
+                    .or_else(|| link["target_issue_iid"].as_str().map(ToString::to_string));
+
+                if let (Some(source), Some(target)) = (source_issue, target_issue) {
+                    match link_type {
+                        "blocks" if target == issue_number => {
+                            blocked_numbers.push(source);
+                        }
+                        "is_blocked_by" if source == issue_number => {
+                            blocked_numbers.push(target);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -245,19 +259,9 @@ pub(crate) fn fetch_native_dependencies(
     issue_number: &str,
 ) -> Result<Vec<DependencySource>, DependencyRelationshipError> {
     match profile.provider.as_str() {
-        "github" => {
-            let sub_issues = fetch_github_sub_issues(profile, issue_number)?;
-            Ok(sub_issues
-                .into_iter()
-                .map(|target| DependencySource {
-                    source_issue: issue_number.to_string(),
-                    target_issue: target,
-                    provenance: "github_sub_issue".to_string(),
-                })
-                .collect())
-        }
+        "github" => Ok(Vec::new()),
         "gitlab" => {
-            // For GitLab, fetch blocks links which indicate what this issue blocks
+            // For GitLab, fetch blocks links which indicate what blocks this issue.
             let blocked = fetch_gitlab_blocks_links(profile, issue_number)?;
             Ok(blocked
                 .into_iter()
@@ -445,101 +449,14 @@ where
         stack: &mut Vec<String>,
         observations: &mut Vec<DependencyObservation>,
     ) -> Result<bool, DependencyFailure> {
-        let mut has_open = false;
-        for number in references {
-            if !is_local_issue_reference(number) {
-                observations.push(DependencyObservation {
-                    identity: dependency_identity(number),
-                    provider: dependency_provider(number, self.provider),
-                    provider_state: None,
-                    normalized_state: "inaccessible".into(),
-                    provenance: None,
-                });
-                return Err(DependencyFailure {
-                    code: "dependency_query_failed",
-                    message: format!("cannot resolve cross-project dependency '{number}'"),
-                });
-            }
-
-            if number == current || stack.contains(number) {
-                let mut cycle = stack.clone();
-                cycle.push(number.clone());
-                return Err(DependencyFailure {
-                    code: "dependency_cycle",
-                    message: format!(
-                        "dependency cycle detected: {}",
-                        cycle
-                            .iter()
-                            .map(|part| dependency_identity(part))
-                            .collect::<Vec<_>>()
-                            .join(" -> ")
-                    ),
-                });
-            }
-
-            let issue = match self.resolve(number) {
-                CachedIssue::Found(issue) => issue,
-                CachedIssue::Error(error) => {
-                    let lower = error.to_ascii_lowercase();
-                    let (code, label) = if lower.contains("not found") || lower.contains("404") {
-                        ("dependency_missing", "missing")
-                    } else {
-                        ("dependency_query_failed", "inaccessible")
-                    };
-                    observations.push(DependencyObservation {
-                        identity: dependency_identity(number),
-                        provider: self.provider.to_string(),
-                        provider_state: None,
-                        normalized_state: label.into(),
-                        provenance: None,
-                    });
-                    return Err(DependencyFailure {
-                        code,
-                        message: format!(
-                            "could not resolve dependency {}: {error}",
-                            dependency_identity(number)
-                        ),
-                    });
-                }
-            };
-
-            let normalized = normalize_state(issue.state.as_deref());
-            if !observations
-                .iter()
-                .any(|seen| seen.identity == dependency_identity(number))
-            {
-                observations.push(DependencyObservation {
-                    identity: format!("#{}", issue.number),
-                    provider: self.provider.to_string(),
-                    provider_state: issue.state.clone(),
-                    normalized_state: normalized.into(),
-                    provenance: None,
-                });
-            }
-            match normalized {
-                "closed" => continue,
-                "unknown" => {
-                    return Err(DependencyFailure {
-                        code: "dependency_unknown_state",
-                        message: format!(
-                            "dependency {} has unknown provider state",
-                            dependency_identity(number)
-                        ),
-                    });
-                }
-                "open" => has_open = true,
-                _ => unreachable!(),
-            }
-
-            let nested = parse_dependency_line(&issue.body)?;
-            if let Some(nested) = nested {
-                stack.push(number.clone());
-                let nested_open = self.walk(number, &nested, stack, observations)?;
-                stack.pop();
-                has_open |= nested_open;
-            }
-        }
-        Ok(has_open)
+        let mut provenance_map = HashMap::new();
+        self.walk_with_provenance(
+            current,
+            references,
+            stack,
+            observations,
+            &mut provenance_map,
+        )
     }
 
     /// Walk the dependency graph with provenance tracking.
@@ -553,6 +470,7 @@ where
         provenance_map: &mut HashMap<String, String>,
     ) -> Result<bool, DependencyFailure> {
         let mut has_open = false;
+        let mut blocked_error = None;
         for number in references {
             if !is_local_issue_reference(number) {
                 let provider = dependency_provider(number, self.provider);
@@ -573,10 +491,13 @@ where
                         provenance: None,
                     });
                 }
-                return Err(DependencyFailure {
-                    code: "dependency_query_failed",
-                    message: format!("cannot resolve cross-project dependency '{number}'"),
-                });
+                if blocked_error.is_none() {
+                    blocked_error = Some(DependencyFailure {
+                        code: "dependency_query_failed",
+                        message: format!("cannot resolve cross-project dependency '{number}'"),
+                    });
+                }
+                continue;
             }
 
             if number == current || stack.contains(number) {
@@ -622,13 +543,16 @@ where
                             provenance: None,
                         });
                     }
-                    return Err(DependencyFailure {
-                        code,
-                        message: format!(
-                            "could not resolve dependency {}: {error}",
-                            dependency_identity(number)
-                        ),
-                    });
+                    if blocked_error.is_none() {
+                        blocked_error = Some(DependencyFailure {
+                            code,
+                            message: format!(
+                                "could not resolve dependency {}: {error}",
+                                dependency_identity(number)
+                            ),
+                        });
+                    }
+                    continue;
                 }
             };
 
@@ -655,13 +579,16 @@ where
             match normalized {
                 "closed" => continue,
                 "unknown" => {
-                    return Err(DependencyFailure {
-                        code: "dependency_unknown_state",
-                        message: format!(
-                            "dependency {} has unknown provider state",
-                            dependency_identity(number)
-                        ),
-                    });
+                    if blocked_error.is_none() {
+                        blocked_error = Some(DependencyFailure {
+                            code: "dependency_unknown_state",
+                            message: format!(
+                                "dependency {} has unknown provider state",
+                                dependency_identity(number)
+                            ),
+                        });
+                    }
+                    continue;
                 }
                 "open" => has_open = true,
                 _ => unreachable!(),
@@ -683,7 +610,11 @@ where
                 has_open |= nested_open;
             }
         }
-        Ok(has_open)
+        if let Some(error) = blocked_error {
+            Err(error)
+        } else {
+            Ok(has_open)
+        }
     }
 }
 
@@ -751,8 +682,8 @@ where
 /// Enhanced dependency evaluation that merges native provider relationships
 /// with body-declared relationships, deduplicating exact matches.
 ///
-/// For GitHub: reads native sub-issue relationships via the sub-issues API
-/// For GitLab: reads native blocks issue links via the issue links API
+/// For GitLab: reads native blocks issue links via the issue links API. GitHub
+/// native sub-issue responses are not interpreted as blocker relationships.
 ///
 /// Both sources are normalized into the same dependency identity/state model
 /// with provenance metadata indicating the source.
@@ -791,16 +722,8 @@ pub(super) fn evaluate_issue_dependencies(
             Ok(deps) => deps,
             Err(error) => {
                 let reason_code = match &error {
-                    DependencyRelationshipError::PermissionDenied { .. } => {
-                        Some("dependency_query_permission_denied")
-                    }
-                    DependencyRelationshipError::PaginationError { .. } => {
-                        Some("dependency_query_pagination")
-                    }
-                    DependencyRelationshipError::MalformedResponse { .. } => {
-                        Some("dependency_query_malformed_response")
-                    }
-                    _ => None,
+                    DependencyRelationshipError::UnsupportedServerVersion { .. } => None,
+                    _ => Some("dependency_query_failed"),
                 };
 
                 if let Some(reason_code) = reason_code {
@@ -833,13 +756,10 @@ pub(super) fn evaluate_issue_dependencies(
 
         // Second pass: prefer native provider relationships over body ones
         let mut final_deps = Vec::new();
-        let mut deduped_map: HashMap<String, DependencySource> = HashMap::new();
+        let mut deduped_map: BTreeMap<String, DependencySource> = BTreeMap::new();
         for dep in unique_deps {
             let key = format!("{}:{}", dep.source_issue, dep.target_issue);
-            let is_native = matches!(
-                dep.provenance.as_str(),
-                "github_sub_issue" | "gitlab_blocks_link"
-            );
+            let is_native = matches!(dep.provenance.as_str(), "gitlab_blocks_link");
             match deduped_map.get(&key) {
                 Some(existing) if existing.provenance == "body" && is_native => {
                     deduped_map.insert(key, dep);
@@ -1147,16 +1067,16 @@ mod tests {
     }
 
     #[test]
-    fn github_native_and_body_dependencies_are_merged_with_native_precedence() {
-        let profile = github_test_profile();
+    fn gitlab_native_and_body_dependencies_are_deduplicated_with_native_precedence() {
+        let profile = gitlab_test_profile();
         let bin_dir = TempDir::new().unwrap();
         let _path = PathGuard::set(bin_dir.path());
         crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
 
         write_fake_bin(
             bin_dir.path(),
-            "gh",
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  if [ \"$4\" = \"repos/owner/repo/issues/1/sub_issues\" ]; then\n    printf '%s\n' '[{\"number\":2}]'\n  else\n    printf '%s\n' '[]'\n  fi\nelse\n  echo \"unexpected gh invocation: $*\" >&2\n  exit 1\nfi\n",
+            "glab",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/1/links\" ]; then\n  printf '%s\n' '[{\"link_type\":\"is_blocked_by\",\"source_issue\":{\"iid\":1},\"target_issue\":{\"iid\":2}}]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/2\" ]; then\n  printf '%s\n' '{\"iid\":2,\"description\":\"\",\"state\":\"open\"}'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/2/links\" ]; then\n  printf '%s\n' '[]'\n  exit 0\nelse\n  echo \"unexpected glab invocation: $*\" >&2\n  exit 1\nfi\n",
         );
 
         let issues = vec![
@@ -1169,33 +1089,12 @@ mod tests {
         assert_eq!(blockers[0].dependencies[0].identity, "#2");
         assert_eq!(
             blockers[0].dependencies[0].provenance.as_deref(),
-            Some("github_sub_issue")
+            Some("gitlab_blocks_link")
         );
     }
 
     #[test]
     fn evaluate_issue_dependencies_fails_closed_when_native_lookup_fails() {
-        let profile = github_test_profile();
-        let bin_dir = TempDir::new().unwrap();
-        let _path = PathGuard::set(bin_dir.path());
-        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
-
-        write_fake_bin(
-            bin_dir.path(),
-            "gh",
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/1/sub_issues\" ]; then\n  echo '403 permission denied' >&2\n  exit 1\nelse\n  echo \"unexpected gh invocation: $*\" >&2\n  exit 1\nfi\n",
-        );
-
-        let blockers = evaluate_issue_dependencies(&profile, &[issue("1", Some("OPEN"), "")]);
-        assert_eq!(blockers.len(), 1);
-        assert_eq!(
-            blockers[0].reason_code,
-            "dependency_query_permission_denied"
-        );
-    }
-
-    #[test]
-    fn fetch_gitlab_blocks_links_uses_nested_target_issue_iid() {
         let profile = gitlab_test_profile();
         let bin_dir = TempDir::new().unwrap();
         let _path = PathGuard::set(bin_dir.path());
@@ -1204,11 +1103,83 @@ mod tests {
         write_fake_bin(
             bin_dir.path(),
             "glab",
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/1/links\" ]; then\n  printf '%s\n' '[{\"link_type\":\"blocks\",\"target_issue\":{\"iid\":10},\"target_project_id\":42},{\"link_type\":\"relates\",\"target_issue\":{\"iid\":99},\"target_project_id\":42}]'\n  exit 0\nelse\n  echo \"unexpected glab invocation: $*\" >&2\n  exit 1\nfi\n",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/1/links\" ]; then\n  echo '403 permission denied' >&2\n  exit 1\nelse\n  echo \"unexpected glab invocation: $*\" >&2\n  exit 1\nfi\n",
+        );
+
+        let blockers = evaluate_issue_dependencies(&profile, &[issue("1", Some("OPEN"), "")]);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].reason_code, "dependency_query_failed");
+    }
+
+    #[test]
+    fn evaluate_issue_dependencies_falls_back_to_body_only_when_native_gitlab_api_unsupported() {
+        let profile = gitlab_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "glab",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/1/links\" ]; then\n  echo 'old API version unsupported' >&2\n  exit 1\nelif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/2/links\" ]; then\n  printf '%s\n' '[]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/2\" ]; then\n  printf '%s\n' '{\"iid\":2,\"description\":\"\",\"state\":\"closed\"}'\n  exit 0\nelse\n  echo \"unexpected glab invocation: $*\" >&2\n  exit 1\nfi\n",
+        );
+
+        let issues = vec![
+            issue("1", Some("OPEN"), "Blocked by: #2"),
+            issue("2", Some("CLOSED"), ""),
+        ];
+        let blockers = evaluate_issue_dependencies(&profile, &issues);
+        assert!(blockers.is_empty());
+    }
+
+    #[test]
+    fn walk_collects_all_references_when_cross_project_dependency_is_present() {
+        let mut calls = Vec::new();
+        let blockers = evaluate_with(
+            "github",
+            &[issue(
+                "1",
+                Some("OPEN"),
+                "Blocked by: #2, github:owner/repo#99, #3",
+            )],
+            |number| {
+                calls.push(number.to_string());
+                Ok(DependencyIssue {
+                    number: number.to_string(),
+                    body: String::new(),
+                    state: Some("CLOSED".into()),
+                })
+            },
+        );
+
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].reason_code, "dependency_query_failed");
+        let identities: Vec<_> = blockers[0]
+            .dependencies
+            .iter()
+            .map(|obs| obs.identity.as_str())
+            .collect();
+        assert!(identities.contains(&"#2"));
+        assert!(identities.contains(&"github:owner/repo#99"));
+        assert!(identities.contains(&"#3"));
+        assert_eq!(calls, vec!["2".to_string(), "3".to_string()]);
+    }
+
+    #[test]
+    fn fetch_gitlab_blocks_links_uses_nested_source_issue_and_rejects_mixed_types() {
+        let profile = gitlab_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "glab",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/1/links\" ]; then\n  printf '%s\n' '[{\"link_type\":\"is_blocked_by\",\"source_issue\":{\"iid\":1},\"target_issue\":{\"iid\":10},\"target_project_id\":42},{\"link_type\":\"blocks\",\"source_issue\":{\"iid\":1},\"target_issue\":{\"iid\":99},\"target_project_id\":42}]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/10/links\" ]; then\n  printf '%s\n' '[]'\n  exit 0\nelse\n  echo \"unexpected glab invocation: $*\" >&2\n  exit 1\nfi\n",
         );
 
         let dependencies = fetch_gitlab_blocks_links(&profile, "1").unwrap();
-        assert_eq!(dependencies, vec!["10".to_string()]);
+        assert_eq!(dependencies, vec!["10".to_string(),]);
     }
 
     #[test]

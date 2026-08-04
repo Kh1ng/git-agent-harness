@@ -18,8 +18,6 @@ fn status_json_v1_additively_surfaces_dependency_blockers() {
         Scenario::success().with_stdout(
             r#"[{"number":653,"title":"Approval notifications","body":"Blocked by: #652","labels":[],"author":{"login":"owner","type":"User","is_bot":false},"state":"OPEN"}]"#,
         ),
-        // Simulate an empty native dependency list for this provider/issue.
-        Scenario::success().with_stdout("[]"),
         // fetch_dependency_issue(#652)
         Scenario::success().with_stdout(r#"{"number":652,"body":"","state":"OPEN"}"#),
     ]);
