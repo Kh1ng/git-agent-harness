@@ -3,7 +3,7 @@
  * Inspired by t3code architecture but adapted for GAH needs
  */
 
-import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary } from './gah.js';
+import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, DependencyBlocker } from './gah.js';
 
 // Provider types
 export type ProviderKind = 
@@ -78,6 +78,8 @@ export type ServerMessage =
       constraints?: Blocker[];
       errors?: StatusError[];
       recentLedger?: RecentLedgerSummary | null;
+      // Native issue prerequisites that block autonomous intake.
+      dependencyBlockers?: DependencyBlocker[];
       // TICKET-157: per-backend "configured for this profile" signal,
       // derived from the Rust harness `configured_backend_path()`.
       // Maps a backend name (e.g. "codex", "opencode") to whether it has

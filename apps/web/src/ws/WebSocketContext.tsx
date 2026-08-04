@@ -14,7 +14,8 @@ import type {
   Blocker,
   StatusError,
   RecentLedgerSummary,
-  ControllerActivity
+  ControllerActivity,
+  DependencyBlocker
 } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 
@@ -45,6 +46,7 @@ type WebSocketContextType = {
   availability: AvailabilityScope[];
   blockers: Blocker[];
   constraints: Blocker[];
+  dependencyBlockers: DependencyBlocker[];
   errors: StatusError[];
   recentLedger: RecentLedgerSummary | null;
   controllerActivity: ControllerActivity[];
@@ -95,6 +97,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [availability, setAvailability] = useState<AvailabilityScope[]>([]);
   const [blockers, setBlockers] = useState<Blocker[]>([]);
   const [constraints, setConstraints] = useState<Blocker[]>([]);
+  const [dependencyBlockers, setDependencyBlockers] = useState<DependencyBlocker[]>([]);
   const [errors, setErrors] = useState<StatusError[]>([]);
   const [recentLedger, setRecentLedger] = useState<RecentLedgerSummary | null>(null);
   const [controllerActivity, setControllerActivity] = useState<ControllerActivity[]>([]);
@@ -186,6 +189,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               if (message.availability) setAvailability(message.availability);
               if (message.blockers) setBlockers(message.blockers);
               if (message.constraints) setConstraints(message.constraints);
+              if (message.dependencyBlockers) setDependencyBlockers(message.dependencyBlockers);
               if (message.errors) setErrors(message.errors);
               if (message.recentLedger !== undefined) setRecentLedger(message.recentLedger);
               if (message.backendConfigured) setBackendConfigured(message.backendConfigured);
@@ -341,6 +345,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     availability,
     blockers,
     constraints,
+    dependencyBlockers,
     errors,
     recentLedger,
     controllerActivity,

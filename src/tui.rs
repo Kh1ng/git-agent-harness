@@ -200,13 +200,18 @@ fn render_dashboard(frame: &mut Frame, state: &AppState) {
         Constraint::Percentage(20),
     ])
     .areas(left);
-    let [ledger_area, events_area] =
-        Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(right);
+    let [ledger_area, blockers_area, events_area] = Layout::vertical([
+        Constraint::Percentage(40),
+        Constraint::Length(7),
+        Constraint::Min(0),
+    ])
+    .areas(right);
 
     render_mr_table(frame, state, mr_area);
     render_ticket_table(frame, state, ticket_area);
     render_availability_table(frame, state, avail_area);
     render_ledger_panel(frame, state, ledger_area);
+    render_blockers_panel(frame, state, blockers_area);
     render_events_tail(frame, state, events_area);
 
     let hotkeys = "r refresh  a confirm+run next action  e events  q quit";
@@ -374,6 +379,51 @@ fn render_events_view(frame: &mut Frame, state: &AppState) {
         .collect();
     frame.render_widget(List::new(items).block(Block::bordered().title(title)), body);
     frame.render_widget(Paragraph::new("[b]ack  [q]uit"), footer);
+}
+
+fn render_blockers_panel(frame: &mut Frame, state: &AppState, area: Rect) {
+    use crate::models::DependencyBlocker;
+
+    let blockers: Vec<&DependencyBlocker> = state
+        .snapshot
+        .iter()
+        .flat_map(|s| s.dependency_blockers.iter())
+        .collect();
+
+    if blockers.is_empty() {
+        return;
+    }
+
+    let rows: Vec<Row> = blockers
+        .iter()
+        .map(|b| {
+            let deps: String = b
+                .dependencies
+                .iter()
+                .map(|d| d.identity.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Row::new(vec![
+                Cell::from(b.work_id.clone()),
+                Cell::from(b.title.clone()),
+                Cell::from(b.reason_code.clone()),
+                Cell::from(deps),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(25),
+        Constraint::Percentage(35),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+    ];
+    frame.render_widget(
+        Table::new(rows, widths)
+            .header(Row::new(vec!["Work ID", "Title", "Reason", "Dependencies"]))
+            .block(Block::bordered().title("Dependency Blockers")),
+        area,
+    );
 }
 
 fn render_confirm_popup(frame: &mut Frame, state: &AppState) {
