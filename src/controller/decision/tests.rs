@@ -447,6 +447,56 @@ fn backend_error_from_no_eligible_backend_retries_once_a_backend_is_eligible() {
     }
 }
 
+// Live incident (2026-08-04, gah profile #243 and 8 siblings): a `fix`
+// attempt whose only remaining candidate backend needs operator approval
+// for a paid route is legitimately classified `human_blocked` at dispatch
+// time, and `human_required` is set true for that attempt. But once the
+// harness re-evaluates and decides the ticket is NOT durably gated anymore
+// (`human_required` back to false -- e.g. a free backend has since become
+// eligible), `last_failure_class` on the ticket is still `human_blocked`
+// from that attempt. Before this fix, `is_infra_failure` excluded
+// `human_blocked`, so the ticket matched none of undispatched (prior
+// attempts > 0), escalate (not a genuine agent failure), or retry (not an
+// infra failure) -- silently orphaning it forever, exactly like the
+// `NoEligibleBackend`/`backend_error` bug above. `human_required: false`
+// on the ticket here is the load-bearing precondition: it is what the
+// harness already decided when it stopped considering this durably gated.
+#[test]
+fn human_blocked_ticket_retries_once_not_durably_gated_and_a_backend_is_eligible() {
+    let mut snapshot = empty_snapshot();
+    snapshot.available_tickets.push(ticket(
+        "docs/tickets/TICKET-approval.md",
+        Some("TICKET-approval"),
+        1,
+        Some("human_blocked"),
+        false,
+        false,
+    ));
+
+    // No eligible backend at all -> must not retry blindly.
+    let action = decide_next_action(&snapshot);
+    assert_eq!(action.kind(), "no_op");
+
+    // Now a backend is eligible -> retry, not orphaned.
+    snapshot.availability.push(ScopeStatusJson {
+        backend_instance: None,
+        backend: "codex".into(),
+        model: None,
+        quota_pool: None,
+        eligible_now: true,
+        reason: None,
+        unavailable_until: None,
+        source: None,
+        last_error_summary: None,
+        observed_at: None,
+        scope: None,
+    });
+    match decide_next_action(&snapshot) {
+        NextAction::Retry { work_id, .. } => assert_eq!(work_id, "TICKET-approval"),
+        other => panic!("expected Retry, got {other:?}"),
+    }
+}
+
 #[test]
 fn infra_failure_retries_only_when_a_backend_is_eligible() {
     let mut snapshot = empty_snapshot();

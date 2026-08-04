@@ -70,6 +70,8 @@ Thumbs.db
 # Playwright (added this pass, apps/web)
 /apps/web/test-results/
 /apps/web/playwright-report/
+/test-results/
+/playwright-report/
 
 # Existing ignores
 OPENHANDS_TASK.md
