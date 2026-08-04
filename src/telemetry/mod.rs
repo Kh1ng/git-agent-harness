@@ -8,6 +8,7 @@
 
 pub mod exporter;
 pub mod extractor;
+pub mod health;
 pub mod records;
 
 // Re-export commonly used types and functions
@@ -998,6 +999,45 @@ fn calculate_totals(
         quota_backed_cost,
         api_cost,
     )
+}
+
+/// Schedule an idempotent telemetry export from the authoritative ledger
+/// after a terminal dispatch/review/fix/PM attempt (success, failure,
+/// timeout, cancellation, or policy refusal). Issue #230.
+///
+/// Never fails the caller: this must run *after* the ledger entry for the
+/// attempt has already been durably appended, so an export error is
+/// classified and retained in the persisted export health state for the
+/// next scheduled export to retry, rather than propagating and rewriting
+/// or losing the authoritative ledger outcome. Concurrent callers (parallel
+/// dispatch workers finishing at the same time) serialize on the export
+/// health lock, so the resulting export stays coherent instead of racing
+/// the same output files.
+pub fn schedule_export_after_terminal_attempt(cfg: &GahConfig) {
+    let repo_path = health::export_repo_path(cfg);
+    let result = health::run_locked_export(&repo_path, || export_once(cfg, &repo_path));
+    if let Err(err) = result {
+        log::warn!("telemetry export health tracking failed: {err:#}");
+    }
+}
+
+/// Re-read the authoritative ledger and export any records not already
+/// present in the telemetry repo (dedup by record id), returning the
+/// number of newly exported records and the latest ledger entry timestamp
+/// observed, for export health bookkeeping.
+fn export_once(cfg: &GahConfig, repo_path: &std::path::Path) -> Result<(usize, Option<String>)> {
+    let entries = read_entries(cfg)?;
+    let watermark = entries.iter().map(|e| e.timestamp.clone()).max();
+
+    let mut exporter = exporter::TelemetryExporter::new(exporter::TelemetryConfig {
+        telemetry_repo_path: repo_path.to_path_buf(),
+        format: exporter::ExportFormat::Jsonl,
+        generate_manifests: true,
+        commit_batch_size: None,
+    })?;
+    exporter.load_exported_ids()?;
+    exporter.export_from_entries(&entries)?;
+    Ok((exporter.records_exported(), watermark))
 }
 
 /// Main telemetry export function that handles the full workflow

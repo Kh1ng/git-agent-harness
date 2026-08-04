@@ -6,12 +6,48 @@ use super::extractor::*;
 use super::records::*;
 use crate::ledger::LedgerEntry;
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+/// Cross-process exclusive lock guarding writes into a telemetry repo, so
+/// concurrent exporters (e.g. an automatic post-attempt export racing a
+/// manual `gah telemetry export`) cannot interleave writes to the same
+/// partition file or corrupt manifests (Issue #230).
+struct ExportWriteLock {
+    file: fs::File,
+}
+
+impl ExportWriteLock {
+    fn acquire(telemetry_repo_path: &Path) -> Result<Self> {
+        fs::create_dir_all(telemetry_repo_path).with_context(|| {
+            format!(
+                "creating telemetry repo directory: {}",
+                telemetry_repo_path.display()
+            )
+        })?;
+        let lock_path = telemetry_repo_path.join(".export.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("opening export lock: {}", lock_path.display()))?;
+        file.lock_exclusive()
+            .with_context(|| format!("locking telemetry export: {}", lock_path.display()))?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for ExportWriteLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
 
 /// Export format options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +258,12 @@ impl TelemetryExporter {
 
     /// Export a batch of telemetry records
     pub fn export_records(&self, records: &[ExportedTelemetryRecord]) -> Result<()> {
+        // Serialize against any other process writing into this same
+        // telemetry repo (automatic post-attempt exports and manual `gah
+        // telemetry export` alike) so concurrent writers cannot corrupt or
+        // interleave the same partition/manifest files.
+        let _lock = ExportWriteLock::acquire(&self.config.telemetry_repo_path)?;
+
         // Group records by type and date partition
         let mut attempt_usage_by_partition: BTreeMap<PartitionKey, Vec<&ExportedTelemetryRecord>> =
             BTreeMap::new();
@@ -505,7 +547,6 @@ impl TelemetryExporter {
     }
 
     /// Get the number of records exported
-    #[allow(dead_code)]
     pub fn records_exported(&self) -> usize {
         self.records_exported
     }
