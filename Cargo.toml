@@ -7,6 +7,10 @@ edition = "2021"
 name = "gah"
 path = "src/main.rs"
 
+[[bin]]
+name = "generate-cli-capabilities"
+path = "src/bin/generate_cli_capabilities.rs"
+
 [dependencies]
 anyhow = "1"
 camino = { version = "1", features = ["serde1"] }

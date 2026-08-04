@@ -14,6 +14,7 @@ use crate::init;
 use crate::{config, controller, dispatch};
 
 pub mod args;
+pub mod capabilities;
 pub mod commands;
 
 pub fn run() -> Result<()> {

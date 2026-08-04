@@ -693,6 +693,8 @@ fn strip_repo_prefix(path: &Path, repo_root: &Path) -> PathBuf {
 ///
 /// Crate roots:
 ///   * `src/main.rs` and `src/lib.rs` (the lib/bin crate)
+///   * every direct `src/bin/*.rs` file (Cargo auto-discovers each as its own
+///     binary crate root, same as an explicit `[[bin]]` entry in Cargo.toml)
 ///   * every direct `tests/*.rs` integration-test root
 ///
 /// A `.rs` file nested under `tests/<subdir>/` is only reachable if some test
@@ -712,6 +714,11 @@ fn compute_reachable(repo_root: &Path, all_files: &[PathBuf]) -> BTreeSet<PathBu
     for f in all_files {
         let s = f.to_string_lossy();
         if let Some(rest) = s.strip_prefix("tests/") {
+            if !rest.contains('/') && rest.ends_with(".rs") {
+                queue.push(repo_root.join(f));
+            }
+        }
+        if let Some(rest) = s.strip_prefix("src/bin/") {
             if !rest.contains('/') && rest.ends_with(".rs") {
                 queue.push(repo_root.join(f));
             }
