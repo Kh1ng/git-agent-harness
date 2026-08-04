@@ -228,22 +228,26 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         ledger.error_summary = Some(error::summarize_error(err));
     }
     let policy_approval_gate = is_policy_approval_gate(&ledger);
-    let mut new_policy_approval_transition = true;
     let append_result = if policy_approval_gate {
-        crate::ledger::append_human_gate_if_transition(cfg, &ledger).map(|appended| {
-            new_policy_approval_transition = appended;
-        })
+        crate::ledger::append_human_gate_if_transition(cfg, &ledger).map(|_| ())
     } else {
         crate::ledger::append(cfg, &ledger).map(|_| ())
     };
     if let Err(err) = append_result {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
     }
+    // A paid-route policy-approval gate has no actionable notify_command flow
+    // today (issue #762: no interactive Telegram approve/deny yet) and, since
+    // `is_infra_failure` treats `human_blocked` as retryable, most of these
+    // resolve on their own the moment a free backend becomes eligible again
+    // -- pinging an operator for a transient, self-recovering, and currently
+    // unactionable condition is pure noise. Still recorded to the ledger
+    // (`gah status`/dashboard stay accurate), just never pushed as an alert.
     if result
         .as_ref()
         .err()
         .is_some_and(should_notify_dispatch_failure)
-        && (!policy_approval_gate || new_policy_approval_transition)
+        && !policy_approval_gate
     {
         notify_terminal_failure(
             cfg,
