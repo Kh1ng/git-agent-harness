@@ -224,6 +224,24 @@ pub(super) fn detect_stuck_loop(
         {
             break;
         }
+        // Live bug (2026-08-04, #531): `defer_if_branch_attached` emits a
+        // `work_deferred` event and re-decides *before* the caller's
+        // `record_action_events` still logs the pre-defer `original_action`
+        // (e.g. `fix_mr` for a branch whose worktree is attached to an
+        // abandoned/unpushable prior attempt) as `action_decided`. That
+        // pre-defer decision was never actually attempted -- no backend ran,
+        // no claim was taken -- it was recognized as blocked and skipped in
+        // the same tick. Counting it toward the consecutive fingerprint
+        // orphaned the ticket in a clear/re-trip cycle: every tick it was
+        // still the top-priority pick, still got deferred, still logged
+        // another `action_decided`, retripping the gate within minutes of
+        // every `clear-attempts`. Same reasoning as the `deferred_capacity`
+        // break above -- a `work_deferred` event for this work_id means the
+        // most recent selection made no real attempt, so it cannot be
+        // evidence of a stuck loop.
+        if event.event_type == "work_deferred" {
+            break;
+        }
         if event.event_type != "action_decided" {
             continue;
         }
@@ -712,6 +730,43 @@ mod tests {
             reason_code: None,
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: "fix_existing: deferred_capacity: claude/sonnet busy".into(),
+            remediation_plan: None,
+        });
+
+        assert_eq!(
+            detect_stuck_loop(&events, "real", &fix_mr_action(), None),
+            None
+        );
+    }
+
+    // Live incident (2026-08-04, gah profile #531): `defer_if_branch_attached`
+    // recognizes the branch's worktree is attached to an abandoned/unpushable
+    // prior attempt and re-decides to a different work item *in the same
+    // tick*, emitting a `work_deferred` event for #531 before the caller
+    // still logs the pre-defer `fix_mr` pick as `action_decided` (for
+    // observability -- "this is what it wanted, here's why it changed").
+    // That pre-defer pick was never actually attempted: no backend ran, no
+    // claim was taken. Before this fix, three such deferred-but-logged picks
+    // in a row satisfied the stuck-loop threshold exactly like three real
+    // failed attempts would, orphaning the ticket in a clear-attempts/re-trip
+    // cycle within minutes, since nothing about the (unresolved) worktree
+    // conflict ever changed between "attempts." Same shape as the
+    // `deferred_capacity` case above: a `work_deferred` event means the most
+    // recent selection made no real attempt, so it must break the streak.
+    #[test]
+    fn branch_attachment_deferral_breaks_the_stuck_loop_streak() {
+        let mut events: Vec<_> = (0..STUCK_LOOP_THRESHOLD)
+            .map(|_| decided_event("real", "TICKET-500", "fix_mr"))
+            .collect();
+        events.push(ControllerEvent {
+            timestamp: "2026-07-05T00:00:01Z".into(),
+            event_type: "work_deferred".into(),
+            profile: Some("real".into()),
+            work_id: Some("TICKET-500".into()),
+            run_id: None,
+            reason_code: None,
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
+            details: "branch 'gah/real-1' already attached to worktree /tmp/gah/real-1 (clean=true); deferring to next eligible item".into(),
             remediation_plan: None,
         });
 
