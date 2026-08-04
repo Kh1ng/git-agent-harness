@@ -175,7 +175,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
               <li key={`dependency-${i}`} className="flex items-start gap-2 text-sm">
                 <StatusBadge tone="warning" label="Dependency blocked" />
                 <span className="text-secondary">
-                  {dep.work_id}{dep.title ? ` — ${dep.title}` : ''}: {dep.reason}
+                  {dep.work_id}{dep.title ? ` — ${dep.title}` : ''}{dep.reason ? `: ${dep.reason}` : ''}
                   {dep.dependencies.length > 0 && (
                     <span className="ml-1 text-xs">
                       ({dep.dependencies.map(d => d.identity).join(', ')})

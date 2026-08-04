@@ -184,15 +184,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
                 setProviders(message.serverProviderCatalog.providers);
               }
 
-              if (message.profile) setProfile(message.profile);
-              if (message.mergeRequests) setMergeRequests(message.mergeRequests);
-              if (message.availability) setAvailability(message.availability);
-              if (message.blockers) setBlockers(message.blockers);
-              if (message.constraints) setConstraints(message.constraints);
-              if (message.dependencyBlockers) setDependencyBlockers(message.dependencyBlockers);
-              if (message.errors) setErrors(message.errors);
+              if (message.profile !== undefined) setProfile(message.profile);
+              if (message.mergeRequests !== undefined) setMergeRequests(message.mergeRequests);
+              if (message.availability !== undefined) setAvailability(message.availability);
+              if (message.blockers !== undefined) setBlockers(message.blockers);
+              if (message.constraints !== undefined) setConstraints(message.constraints);
+              if (message.dependencyBlockers !== undefined) setDependencyBlockers(message.dependencyBlockers);
+              if (message.errors !== undefined) setErrors(message.errors);
               if (message.recentLedger !== undefined) setRecentLedger(message.recentLedger);
-              if (message.backendConfigured) setBackendConfigured(message.backendConfigured);
+              if (message.backendConfigured !== undefined) setBackendConfigured(message.backendConfigured);
               break;
 
             case 'session.started':

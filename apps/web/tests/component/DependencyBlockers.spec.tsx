@@ -1,7 +1,9 @@
-import { test, expect } from '@playwright/test';
-import { mount } from '@playwright/experimental-ct-react';
+import { test, expect } from '@playwright/experimental-ct-react';
 import type { DependencyBlocker, DependencyObservation, StatusSnapshot } from '@git-agent-harness/contracts';
 import { OverviewPage } from '../../src/pages/OverviewPage.js';
+import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
+import { MockStoreProvider } from '../../src/test-utils/MockStoreProvider.js';
+import React from 'react';
 
 // Mock session for OverviewPage props
 const mockSession = {
@@ -65,7 +67,7 @@ function createMockSnapshot(dependencyBlockers: DependencyBlocker[]): StatusSnap
     blockers: [],
     blocked_work_items: [],
     issue_intake_rejections: [],
-    dependency_blockers,
+    dependency_blockers: dependencyBlockers,
     errors: [],
     available_tickets: [],
     active_claims: [],
@@ -85,12 +87,15 @@ function createMockSnapshot(dependencyBlockers: DependencyBlocker[]): StatusSnap
   };
 }
 
+// Mock store provider for testing - needs to be in a separate file for Playwright CT
+// For now, we'll use a simpler approach by setting store state directly
+
 test.describe('Dependency Blockers Component', () => {
   test.beforeEach(async ({ context }) => {
     await context.addInitScript({ content: `window.__GAH_TEST_MODE__ = true` });
   });
 
-  test('renders dependency blockers with open state', async () => {
+  test('renders dependency blockers with open state', async ({ mount }) => {
     const openDeps = createDependencyBlocker(
       '#653',
       'Test issue blocked by open dependency',
@@ -101,27 +106,26 @@ test.describe('Dependency Blockers Component', () => {
     
     const snapshot = createMockSnapshot([openDeps]);
     
-    // Mock the store to return our test data
-    const mockFetchStatus = async () => {
-      return { data: snapshot, loading: false, error: null, fetchedAt: Date.now(), key: '' };
-    };
-
-    await mount(
-      <OverviewPage 
-        sessions={[mockSession]} 
-        onSelectSession={() => {}}
-        onNavigate={() => {}}
-      />
+    const component = await mount(
+      <MockStoreProvider statusData={snapshot}>
+        <WebSocketProvider>
+          <OverviewPage 
+            sessions={[mockSession]} 
+            onSelectSession={() => {}} 
+            onNavigate={() => {}} 
+          />
+        </WebSocketProvider>
+      </MockStoreProvider>
     );
 
     // Check that the dependency blocker is displayed
-    await expect(page.getByText('Dependency blocked')).toBeVisible();
-    await expect(page.getByText('#653')).toBeVisible();
-    await expect(page.getByText('Test issue blocked by open dependency')).toBeVisible();
-    await expect(page.getByText('Blocked by open prerequisite #652')).toBeVisible();
+    await expect(component.getByText('Dependency blocked')).toBeVisible();
+    await expect(component.getByText('#653')).toBeVisible();
+    await expect(component.getByText('Test issue blocked by open dependency')).toBeVisible();
+    await expect(component.getByText('Blocked by open prerequisite #652')).toBeVisible();
   });
 
-  test('renders dependency blockers with cycle state', async () => {
+  test('renders dependency blockers with cycle state', async ({ mount }) => {
     const cycleDeps = createDependencyBlocker(
       '#1',
       'Cyclic dependency issue',
@@ -135,23 +139,27 @@ test.describe('Dependency Blockers Component', () => {
     
     const snapshot = createMockSnapshot([cycleDeps]);
     
-    await mount(
-      <OverviewPage 
-        sessions={[mockSession]} 
-        onSelectSession={() => {}}
-        onNavigate={() => {}}
-      />
+    const component = await mount(
+      <MockStoreProvider statusData={snapshot}>
+        <WebSocketProvider>
+          <OverviewPage 
+            sessions={[mockSession]} 
+            onSelectSession={() => {}} 
+            onNavigate={() => {}} 
+          />
+        </WebSocketProvider>
+      </MockStoreProvider>
     );
 
     // Check that the cycle dependency blocker is displayed
-    await expect(page.getByText('Dependency blocked')).toBeVisible();
-    await expect(page.getByText('#1')).toBeVisible();
-    await expect(page.getByText('Cyclic dependency issue')).toBeVisible();
-    await expect(page.getByText('Dependency cycle detected')).toBeVisible();
-    await expect(page.getByText('#1, #2')).toBeVisible();
+    await expect(component.getByText('Dependency blocked')).toBeVisible();
+    await expect(component.getByText('#1')).toBeVisible();
+    await expect(component.getByText('Cyclic dependency issue')).toBeVisible();
+    await expect(component.getByText('Dependency cycle detected')).toBeVisible();
+    await expect(component.getByText('#1, #2')).toBeVisible();
   });
 
-  test('renders dependency blockers with missing state', async () => {
+  test('renders dependency blockers with missing state', async ({ mount }) => {
     const missingDeps = createDependencyBlocker(
       '#999',
       'Issue with missing dependency',
@@ -162,23 +170,27 @@ test.describe('Dependency Blockers Component', () => {
     
     const snapshot = createMockSnapshot([missingDeps]);
     
-    await mount(
-      <OverviewPage 
-        sessions={[mockSession]} 
-        onSelectSession={() => {}}
-        onNavigate={() => {}}
-      />
+    const component = await mount(
+      <MockStoreProvider statusData={snapshot}>
+        <WebSocketProvider>
+          <OverviewPage 
+            sessions={[mockSession]} 
+            onSelectSession={() => {}} 
+            onNavigate={() => {}} 
+          />
+        </WebSocketProvider>
+      </MockStoreProvider>
     );
 
     // Check that the missing dependency blocker is displayed
-    await expect(page.getByText('Dependency blocked')).toBeVisible();
-    await expect(page.getByText('#999')).toBeVisible();
-    await expect(page.getByText('Issue with missing dependency')).toBeVisible();
-    await expect(page.getByText('Could not resolve dependency #404')).toBeVisible();
-    await expect(page.getByText('#404')).toBeVisible();
+    await expect(component.getByText('Dependency blocked')).toBeVisible();
+    await expect(component.getByText('#999')).toBeVisible();
+    await expect(component.getByText('Issue with missing dependency')).toBeVisible();
+    await expect(component.getByText('Could not resolve dependency #404')).toBeVisible();
+    await expect(component.getByText('#404')).toBeVisible();
   });
 
-  test('renders dependency blockers with inaccessible state', async () => {
+  test('renders dependency blockers with inaccessible state', async ({ mount }) => {
     const inaccessibleDeps = createDependencyBlocker(
       '#777',
       'Issue with inaccessible dependency',
@@ -189,40 +201,79 @@ test.describe('Dependency Blockers Component', () => {
     
     const snapshot = createMockSnapshot([inaccessibleDeps]);
     
-    await mount(
-      <OverviewPage 
-        sessions={[mockSession]} 
-        onSelectSession={() => {}}
-        onNavigate={() => {}}
-      />
+    const component = await mount(
+      <MockStoreProvider statusData={snapshot}>
+        <WebSocketProvider>
+          <OverviewPage 
+            sessions={[mockSession]} 
+            onSelectSession={() => {}} 
+            onNavigate={() => {}} 
+          />
+        </WebSocketProvider>
+      </MockStoreProvider>
     );
 
     // Check that the inaccessible dependency blocker is displayed
-    await expect(page.getByText('Dependency blocked')).toBeVisible();
-    await expect(page.getByText('#777')).toBeVisible();
-    await expect(page.getByText('Issue with inaccessible dependency')).toBeVisible();
-    await expect(page.getByText('Permission denied')).toBeVisible();
-    await expect(page.getByText('#888')).toBeVisible();
+    await expect(component.getByText('Dependency blocked')).toBeVisible();
+    await expect(component.getByText('#777')).toBeVisible();
+    await expect(component.getByText('Issue with inaccessible dependency')).toBeVisible();
+    await expect(component.getByText('Permission denied')).toBeVisible();
+    await expect(component.getByText('#888')).toBeVisible();
   });
 
-  test('renders dependency blockers with closed state (should not block)', async () => {
-    // When dependencies are closed, the issue should NOT appear in dependency_blockers
-    // This tests that the rendering correctly handles the transition
-    const snapshot = createMockSnapshot([]); // Empty - all deps closed
+  test('renders dependency blockers with unknown/error state', async ({ mount }) => {
+    const unknownDeps = createDependencyBlocker(
+      '#555',
+      'Issue with unknown dependency state',
+      'dependency_query_failed',
+      'Unknown error accessing dependency #666',
+      [{ identity: '#666', provider: 'github', provider_state: null, normalized_state: 'unknown' }]
+    );
     
-    await mount(
-      <OverviewPage 
-        sessions={[mockSession]} 
-        onSelectSession={() => {}}
-        onNavigate={() => {}}
-      />
+    const snapshot = createMockSnapshot([unknownDeps]);
+    
+    const component = await mount(
+      <MockStoreProvider statusData={snapshot}>
+        <WebSocketProvider>
+          <OverviewPage 
+            sessions={[mockSession]} 
+            onSelectSession={() => {}} 
+            onNavigate={() => {}} 
+          />
+        </WebSocketProvider>
+      </MockStoreProvider>
     );
 
-    // Check that no dependency blockers are displayed
-    await expect(page.getByText('Dependency blocked')).not.toBeVisible();
+    // Check that the unknown dependency blocker is displayed
+    await expect(component.getByText('Dependency blocked')).toBeVisible();
+    await expect(component.getByText('#555')).toBeVisible();
+    await expect(component.getByText('Issue with unknown dependency state')).toBeVisible();
+    await expect(component.getByText('Unknown error accessing dependency #666')).toBeVisible();
+    await expect(component.getByText('#666')).toBeVisible();
   });
 
-  test('renders multiple dependency blockers', async () => {
+  test('renders dependency blockers with released state (empty blockers list)', async ({ mount }) => {
+    // When dependencies are released/closed, they should NOT appear in dependency_blockers
+    // This tests that the rendering correctly handles the released transition
+    const snapshot = createMockSnapshot([]); // Empty - all deps released
+    
+    const component = await mount(
+      <MockStoreProvider statusData={snapshot}>
+        <WebSocketProvider>
+          <OverviewPage 
+            sessions={[mockSession]} 
+            onSelectSession={() => {}} 
+            onNavigate={() => {}} 
+          />
+        </WebSocketProvider>
+      </MockStoreProvider>
+    );
+
+    // Check that no dependency blockers are displayed when all are released
+    await expect(component.getByText('Dependency blocked')).not.toBeVisible();
+  });
+
+  test('renders multiple dependency blockers', async ({ mount }) => {
     const blocker1 = createDependencyBlocker(
       '#100',
       'First blocked issue',
@@ -241,19 +292,23 @@ test.describe('Dependency Blockers Component', () => {
     
     const snapshot = createMockSnapshot([blocker1, blocker2]);
     
-    await mount(
-      <OverviewPage 
-        sessions={[mockSession]} 
-        onSelectSession={() => {}}
-        onNavigate={() => {}}
-      />
+    const component = await mount(
+      <MockStoreProvider statusData={snapshot}>
+        <WebSocketProvider>
+          <OverviewPage 
+            sessions={[mockSession]} 
+            onSelectSession={() => {}} 
+            onNavigate={() => {}} 
+          />
+        </WebSocketProvider>
+      </MockStoreProvider>
     );
 
     // Check that both dependency blockers are displayed
-    await expect(page.getByText('Dependency blocked')).toBeVisible();
-    await expect(page.getByText('#100')).toBeVisible();
-    await expect(page.getByText('#101')).toBeVisible();
-    await expect(page.getByText('First blocked issue')).toBeVisible();
-    await expect(page.getByText('Second blocked issue')).toBeVisible();
+    await expect(component.getByText('Dependency blocked').first()).toBeVisible();
+    await expect(component.getByText('#100')).toBeVisible();
+    await expect(component.getByText('#101')).toBeVisible();
+    await expect(component.getByText('First blocked issue')).toBeVisible();
+    await expect(component.getByText('Second blocked issue')).toBeVisible();
   });
 });
