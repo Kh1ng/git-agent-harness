@@ -955,7 +955,7 @@ fn github_dependency_chain_excludes_653_while_652_is_open() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  if [ \"$4\" = \"repos/owner/repo/issues?state=open&per_page=100&page=1\" ]; then\n    printf '%s\\n' '{}'\n  elif [ \"$4\" = \"repos/owner/repo/issues/652/sub_issues\" ]; then\n    printf '%s\\n' '[]'\n  elif [ \"$4\" = \"repos/owner/repo/issues/653/sub_issues\" ]; then\n    printf '%s\\n' '[]'\n  else\n    echo \"unexpected gh invocation: $*\" >&2\n    exit 1\n  fi\nfi\n",
             issues.to_string().replace('\'', "'\\''")
         ),
     )

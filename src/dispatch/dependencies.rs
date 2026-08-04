@@ -59,6 +59,25 @@ pub(crate) struct DependencySource {
     pub provenance: String,
 }
 
+fn is_local_issue_reference(reference: &str) -> bool {
+    !reference.is_empty() && reference.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn dependency_identity(reference: &str) -> String {
+    if is_local_issue_reference(reference) {
+        format!("#{reference}")
+    } else {
+        reference.to_string()
+    }
+}
+
+fn dependency_provider(reference: &str, fallback: &str) -> String {
+    reference
+        .split_once(':')
+        .map(|(provider, _)| provider.to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 /// Fetch native GitHub sub-issue relationships for a given issue.
 /// Returns a list of issue numbers that are sub-issues (children) of the parent.
 /// This reads the native GitHub sub-issue API relationship.
@@ -126,7 +145,10 @@ pub(crate) fn fetch_github_sub_issues(
     let mut sub_issue_numbers = Vec::new();
     for issue in issues {
         if let Some(number) = issue["number"].as_u64() {
-            sub_issue_numbers.push(number.to_string());
+            let number = number.to_string();
+            if number != parent_number {
+                sub_issue_numbers.push(number);
+            }
         }
     }
 
@@ -167,7 +189,17 @@ pub(crate) fn fetch_gitlab_blocks_links(
                 // GitLab issue links have target_issue_iid for the linked issue
                 // and link_type for the relationship type
                 if link["link_type"].as_str() == Some("blocks") {
-                    if let Some(iid) = link["target_issue_iid"].as_u64() {
+                    if let Some(iid) = link
+                        .pointer("/target_issue/iid")
+                        .and_then(|value| value.as_u64())
+                    {
+                        blocked_numbers.push(iid.to_string());
+                    } else if let Some(iid) = link
+                        .pointer("/target_issue/iid")
+                        .and_then(|value| value.as_str())
+                    {
+                        blocked_numbers.push(iid.to_string());
+                    } else if let Some(iid) = link["target_issue_iid"].as_u64() {
                         blocked_numbers.push(iid.to_string());
                     } else if let Some(iid) = link["target_issue_iid"].as_str() {
                         blocked_numbers.push(iid.to_string());
@@ -214,14 +246,15 @@ pub(crate) fn fetch_native_dependencies(
 ) -> Result<Vec<DependencySource>, DependencyRelationshipError> {
     match profile.provider.as_str() {
         "github" => {
-            // For GitHub, we look for issues that this issue blocks (parent relationships)
-            // GitHub sub-issues are children, so we need to find parents
-            // For now, we fetch sub-issues of other issues that might reference this one
-            // This is a simplified approach - in practice, GitHub's sub-issue API shows children
-            // So we'd need to scan other issues to find which ones have this issue as a sub-issue
-            // For this implementation, we'll use the body-based approach as primary
-            // and supplement with any available native data
-            Ok(Vec::new())
+            let sub_issues = fetch_github_sub_issues(profile, issue_number)?;
+            Ok(sub_issues
+                .into_iter()
+                .map(|target| DependencySource {
+                    source_issue: issue_number.to_string(),
+                    target_issue: target,
+                    provenance: "github_sub_issue".to_string(),
+                })
+                .collect())
         }
         "gitlab" => {
             // For GitLab, fetch blocks links which indicate what this issue blocks
@@ -304,9 +337,8 @@ fn parse_dependency_line(body: &str) -> Result<Option<Vec<String>>, DependencyFa
         // Check if this is a cross-project dependency reference
         // Format: provider:project_id#number (e.g., github:owner/repo#123, gitlab:12345#678)
         if token.contains(':') && token.contains('#') {
-            // This is a cross-project dependency - for now, we'll handle it by extracting
-            // the issue number and treating it as a same-project reference
-            // A full implementation would properly handle cross-project resolution
+            // This is a cross-project dependency - keep project identity
+            // in the reference so we do not collapse to a local number.
             let parts: Vec<&str> = token.split('#').collect();
             if parts.len() == 2 {
                 let before_hash = parts[0]; // Should be "provider:project_id"
@@ -334,13 +366,13 @@ fn parse_dependency_line(body: &str) -> Result<Option<Vec<String>>, DependencyFa
                         message: format!("invalid cross-project dependency reference '{token}'"),
                     });
                 }
-                if !seen.insert(number.to_string()) {
+                if !seen.insert(format!("{before_hash}#{number}")) {
                     return Err(DependencyFailure {
                         code: "dependency_duplicate",
-                        message: format!("duplicate dependency reference '{number}'"),
+                        message: format!("duplicate dependency reference '{token}'"),
                     });
                 }
-                references.push(number.to_string());
+                references.push(format!("{before_hash}#{number}"));
                 continue;
             }
         }
@@ -415,6 +447,20 @@ where
     ) -> Result<bool, DependencyFailure> {
         let mut has_open = false;
         for number in references {
+            if !is_local_issue_reference(number) {
+                observations.push(DependencyObservation {
+                    identity: dependency_identity(number),
+                    provider: dependency_provider(number, self.provider),
+                    provider_state: None,
+                    normalized_state: "inaccessible".into(),
+                    provenance: None,
+                });
+                return Err(DependencyFailure {
+                    code: "dependency_query_failed",
+                    message: format!("cannot resolve cross-project dependency '{number}'"),
+                });
+            }
+
             if number == current || stack.contains(number) {
                 let mut cycle = stack.clone();
                 cycle.push(number.clone());
@@ -424,7 +470,7 @@ where
                         "dependency cycle detected: {}",
                         cycle
                             .iter()
-                            .map(|part| format!("#{part}"))
+                            .map(|part| dependency_identity(part))
                             .collect::<Vec<_>>()
                             .join(" -> ")
                     ),
@@ -441,7 +487,7 @@ where
                         ("dependency_query_failed", "inaccessible")
                     };
                     observations.push(DependencyObservation {
-                        identity: format!("#{number}"),
+                        identity: dependency_identity(number),
                         provider: self.provider.to_string(),
                         provider_state: None,
                         normalized_state: label.into(),
@@ -449,7 +495,10 @@ where
                     });
                     return Err(DependencyFailure {
                         code,
-                        message: format!("could not resolve dependency #{number}: {error}"),
+                        message: format!(
+                            "could not resolve dependency {}: {error}",
+                            dependency_identity(number)
+                        ),
                     });
                 }
             };
@@ -457,7 +506,7 @@ where
             let normalized = normalize_state(issue.state.as_deref());
             if !observations
                 .iter()
-                .any(|seen| seen.identity == format!("#{number}"))
+                .any(|seen| seen.identity == dependency_identity(number))
             {
                 observations.push(DependencyObservation {
                     identity: format!("#{}", issue.number),
@@ -472,7 +521,10 @@ where
                 "unknown" => {
                     return Err(DependencyFailure {
                         code: "dependency_unknown_state",
-                        message: format!("dependency #{number} has unknown provider state"),
+                        message: format!(
+                            "dependency {} has unknown provider state",
+                            dependency_identity(number)
+                        ),
                     });
                 }
                 "open" => has_open = true,
@@ -502,6 +554,31 @@ where
     ) -> Result<bool, DependencyFailure> {
         let mut has_open = false;
         for number in references {
+            if !is_local_issue_reference(number) {
+                let provider = dependency_provider(number, self.provider);
+                if let Some(provenance) = provenance_map.get(number).cloned() {
+                    observations.push(DependencyObservation {
+                        identity: dependency_identity(number),
+                        provider,
+                        provider_state: None,
+                        normalized_state: "inaccessible".into(),
+                        provenance: Some(provenance),
+                    });
+                } else {
+                    observations.push(DependencyObservation {
+                        identity: dependency_identity(number),
+                        provider,
+                        provider_state: None,
+                        normalized_state: "inaccessible".into(),
+                        provenance: None,
+                    });
+                }
+                return Err(DependencyFailure {
+                    code: "dependency_query_failed",
+                    message: format!("cannot resolve cross-project dependency '{number}'"),
+                });
+            }
+
             if number == current || stack.contains(number) {
                 let mut cycle = stack.clone();
                 cycle.push(number.clone());
@@ -511,7 +588,7 @@ where
                         "dependency cycle detected: {}",
                         cycle
                             .iter()
-                            .map(|part| format!("#{part}"))
+                            .map(|part| dependency_identity(part))
                             .collect::<Vec<_>>()
                             .join(" -> ")
                     ),
@@ -530,7 +607,7 @@ where
                     // Store provenance for this observation if available
                     if let Some(provenance) = provenance_map.get(number).cloned() {
                         observations.push(DependencyObservation {
-                            identity: format!("#{number}"),
+                            identity: dependency_identity(number),
                             provider: self.provider.to_string(),
                             provider_state: None,
                             normalized_state: label.into(),
@@ -538,7 +615,7 @@ where
                         });
                     } else {
                         observations.push(DependencyObservation {
-                            identity: format!("#{number}"),
+                            identity: dependency_identity(number),
                             provider: self.provider.to_string(),
                             provider_state: None,
                             normalized_state: label.into(),
@@ -547,7 +624,10 @@ where
                     }
                     return Err(DependencyFailure {
                         code,
-                        message: format!("could not resolve dependency #{number}: {error}"),
+                        message: format!(
+                            "could not resolve dependency {}: {error}",
+                            dependency_identity(number)
+                        ),
                     });
                 }
             };
@@ -577,7 +657,10 @@ where
                 "unknown" => {
                     return Err(DependencyFailure {
                         code: "dependency_unknown_state",
-                        message: format!("dependency #{number} has unknown provider state"),
+                        message: format!(
+                            "dependency {} has unknown provider state",
+                            dependency_identity(number)
+                        ),
                     });
                 }
                 "open" => has_open = true,
@@ -677,6 +760,8 @@ pub(super) fn evaluate_issue_dependencies(
     profile: &Profile,
     issues: &[IssueDetails],
 ) -> Vec<DependencyBlocker> {
+    let mut blockers = Vec::new();
+
     // Build a set of all known issue numbers for quick lookup
     let _known_issue_numbers: HashSet<String> =
         issues.iter().map(|issue| issue.number.clone()).collect();
@@ -704,26 +789,30 @@ pub(super) fn evaluate_issue_dependencies(
     for issue in issues {
         let native_deps = match fetch_native_dependencies(profile, &issue.number) {
             Ok(deps) => deps,
-            Err(DependencyRelationshipError::PermissionDenied { message: _ }) => {
-                // Permission errors fail closed - treat as blocking
-                // We'll handle this by returning a dependency failure for this issue
-                // For now, we'll skip and let the body parser handle it
-                continue;
-            }
-            Err(DependencyRelationshipError::PaginationError { message: _ }) => {
-                // Pagination errors also fail closed
-                continue;
-            }
-            Err(DependencyRelationshipError::UnsupportedServerVersion { message: _ }) => {
-                // Unsupported version - fall back to body parser
-                continue;
-            }
-            Err(DependencyRelationshipError::MalformedResponse { message: _ }) => {
-                // Malformed response - fall back to body parser
-                continue;
-            }
-            Err(DependencyRelationshipError::ProviderError { message: _ }) => {
-                // Other provider errors - fall back to body parser
+            Err(error) => {
+                let reason_code = match &error {
+                    DependencyRelationshipError::PermissionDenied { .. } => {
+                        Some("dependency_query_permission_denied")
+                    }
+                    DependencyRelationshipError::PaginationError { .. } => {
+                        Some("dependency_query_pagination")
+                    }
+                    DependencyRelationshipError::MalformedResponse { .. } => {
+                        Some("dependency_query_malformed_response")
+                    }
+                    _ => None,
+                };
+
+                if let Some(reason_code) = reason_code {
+                    blockers.push(DependencyBlocker {
+                        ticket_path: issue.number.clone(),
+                        work_id: format!("#{}", issue.number),
+                        title: issue.title.clone(),
+                        reason_code: reason_code.into(),
+                        reason: error.to_string(),
+                        dependencies: Vec::new(),
+                    });
+                }
                 continue;
             }
         };
@@ -740,46 +829,31 @@ pub(super) fn evaluate_issue_dependencies(
     // For duplicates, prefer native provider relationships over body-declared ones
     let mut deduplicated: HashMap<String, Vec<DependencySource>> = HashMap::new();
     for (source, deps) in all_dependencies {
-        let mut seen = HashSet::new();
-        let mut unique_deps = Vec::new();
-
-        // First pass: collect all unique targets
-        for dep in &deps {
-            let key = format!("{}:{}", dep.source_issue, dep.target_issue);
-            if seen.insert(key) {
-                unique_deps.push(dep.clone());
-            }
-        }
+        let unique_deps = deps;
 
         // Second pass: prefer native provider relationships over body ones
         let mut final_deps = Vec::new();
-        let mut added = HashSet::new();
-
-        // Sort by provenance priority: native first, then body
-        unique_deps.sort_by(|a, b| {
-            let a_priority = match a.provenance.as_str() {
-                "github_sub_issue" | "gitlab_blocks_link" => 0,
-                "body" => 1,
-                _ => 2,
-            };
-            let b_priority = match b.provenance.as_str() {
-                "github_sub_issue" | "gitlab_blocks_link" => 0,
-                "body" => 1,
-                _ => 2,
-            };
-            a_priority.cmp(&b_priority)
-        });
-
+        let mut deduped_map: HashMap<String, DependencySource> = HashMap::new();
         for dep in unique_deps {
             let key = format!("{}:{}", dep.source_issue, dep.target_issue);
-            if added.insert(key) {
-                final_deps.push(dep);
+            let is_native = matches!(
+                dep.provenance.as_str(),
+                "github_sub_issue" | "gitlab_blocks_link"
+            );
+            match deduped_map.get(&key) {
+                Some(existing) if existing.provenance == "body" && is_native => {
+                    deduped_map.insert(key, dep);
+                }
+                Some(_) => {}
+                None => {
+                    deduped_map.insert(key, dep);
+                }
             }
         }
+        final_deps.extend(deduped_map.into_values());
 
         deduplicated.insert(source, final_deps);
     }
-
     // 4. Now evaluate the merged dependency graph
     let mut cache = HashMap::new();
     for issue in issues {
@@ -800,7 +874,6 @@ pub(super) fn evaluate_issue_dependencies(
             fetch_dependency_issue(profile, number).map_err(|error| format!("{error:#}"))
         },
     };
-    let mut blockers = Vec::new();
 
     for issue in issues {
         let deps = deduplicated.get(&issue.number).cloned().unwrap_or_default();
@@ -841,19 +914,15 @@ pub(super) fn evaluate_issue_dependencies(
                 }
             });
 
-        // Apply provenance to observations - ensure all observations have provenance
+        // Resolve provenance for nested dependencies where a parent provenance
+        // was available but the child is discovered from body references.
         for obs in &mut observations {
-            // The identity already has the "#" prefix, but provenance_map might use raw numbers
-            // Try both with and without the prefix
             if obs.provenance.is_none() {
                 let raw_identity = obs.identity.trim_start_matches('#').to_string();
-                if let Some(provenance) = provenance_map.get(&raw_identity) {
+                if let Some(provenance) = provenance_map.get(&obs.identity) {
                     obs.provenance = Some(provenance.clone());
-                } else if let Some(provenance) = provenance_map.get(&obs.identity) {
+                } else if let Some(provenance) = provenance_map.get(&raw_identity) {
                     obs.provenance = Some(provenance.clone());
-                } else {
-                    // Default to body provenance if not specified
-                    obs.provenance = Some("body".to_string());
                 }
             }
         }
@@ -876,6 +945,13 @@ pub(super) fn evaluate_issue_dependencies(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    use crate::test_support::PathGuard;
 
     fn issue(number: &str, state: Option<&str>, body: &str) -> IssueDetails {
         IssueDetails {
@@ -885,6 +961,81 @@ mod tests {
             labels: vec![],
             state: state.map(str::to_string),
         }
+    }
+
+    fn write_fake_bin(path: &std::path::Path, name: &str, body: &str) {
+        let path = path.join(name);
+        fs::write(&path, body).unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+    }
+
+    fn github_test_profile() -> Profile {
+        Profile {
+            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
+            delivery_mode: crate::config::DeliveryMode::default(),
+            prune_older_than_days: None,
+            display_name: "Repo".into(),
+            repo_id: "repo".into(),
+            provider: "github".into(),
+            repo: "owner/repo".into(),
+            local_path: "/tmp/repo".into(),
+            artifact_root: "/tmp/artifacts".into(),
+            default_target_branch: "main".into(),
+            provider_api_base: None,
+            provider_project_id: None,
+            oh_profile: None,
+            openhands_args: vec![],
+            codex_args: vec![],
+            codex_path: None,
+            claude_args: vec![],
+            claude_path: None,
+            agy_path: None,
+            vibe_args: vec![],
+            vibe_path: None,
+            opencode_args: vec![],
+            opencode_path: None,
+            agy_second_home: None,
+            agy_print_timeout_seconds: HashMap::new(),
+            agy_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds: None,
+            opencode_idle_timeout_seconds_by_model: HashMap::new(),
+            max_concurrent_per_model: HashMap::new(),
+            openhands_idle_timeout_seconds: None,
+            vibe_idle_timeout_seconds: None,
+            codex_idle_timeout_seconds: None,
+            claude_idle_timeout_seconds: None,
+            max_parallel_workers: None,
+            max_open_managed_mrs: None,
+            notify_command: None,
+            policy_path: None,
+            env_file: None,
+            env_file_prod: None,
+            validation_commands: vec![],
+            auto_fix_commands: vec![],
+            test_file_patterns: vec![],
+            known_baseline_failure_markers: vec![],
+            model_improve: None,
+            model_pm: None,
+            model_review: None,
+            review_timeout_seconds: None,
+            review_hard_timeout_seconds: None,
+            validation_timeout_seconds: None,
+            routing: crate::config::RoutingPolicy::default(),
+            publishing: Default::default(),
+            external_credential_scopes: HashMap::new(),
+            pacing: Default::default(),
+        }
+    }
+
+    fn gitlab_test_profile() -> Profile {
+        let mut profile = github_test_profile();
+        profile.provider = "gitlab".into();
+        profile.repo = "group/repo".into();
+        profile.provider_api_base = Some("https://gitlab.example.com/api/v4".into());
+        profile.provider_project_id = Some("42".into());
+        profile
     }
 
     #[test]
@@ -976,23 +1127,88 @@ mod tests {
         // Format: provider:project_id#number
         assert_eq!(
             parse_dependency_line("Blocked by: github:owner/repo#123").unwrap(),
-            Some(vec!["123".to_string()])
+            Some(vec!["github:owner/repo#123".to_string()])
         );
         assert_eq!(
             parse_dependency_line("Blocked by: gitlab:12345#678").unwrap(),
-            Some(vec!["678".to_string()])
+            Some(vec!["gitlab:12345#678".to_string()])
         );
 
         // Test mixed same-project and cross-project
         assert_eq!(
             parse_dependency_line("Blocked by: #123, github:owner/repo#456").unwrap(),
-            Some(vec!["123".to_string(), "456".to_string()])
+            Some(vec!["123".to_string(), "github:owner/repo#456".to_string()])
         );
 
         // Test malformed cross-project references are rejected
         assert!(parse_dependency_line("Blocked by: github:owner/repo").is_err());
         assert!(parse_dependency_line("Blocked by: github:#123").is_err());
         assert!(parse_dependency_line("Blocked by: :#123").is_err());
+    }
+
+    #[test]
+    fn github_native_and_body_dependencies_are_merged_with_native_precedence() {
+        let profile = github_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "gh",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  if [ \"$4\" = \"repos/owner/repo/issues/1/sub_issues\" ]; then\n    printf '%s\n' '[{\"number\":2}]'\n  else\n    printf '%s\n' '[]'\n  fi\nelse\n  echo \"unexpected gh invocation: $*\" >&2\n  exit 1\nfi\n",
+        );
+
+        let issues = vec![
+            issue("1", Some("OPEN"), "Blocked by: #2"),
+            issue("2", Some("OPEN"), ""),
+        ];
+        let blockers = evaluate_issue_dependencies(&profile, &issues);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].dependencies.len(), 1);
+        assert_eq!(blockers[0].dependencies[0].identity, "#2");
+        assert_eq!(
+            blockers[0].dependencies[0].provenance.as_deref(),
+            Some("github_sub_issue")
+        );
+    }
+
+    #[test]
+    fn evaluate_issue_dependencies_fails_closed_when_native_lookup_fails() {
+        let profile = github_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "gh",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/1/sub_issues\" ]; then\n  echo '403 permission denied' >&2\n  exit 1\nelse\n  echo \"unexpected gh invocation: $*\" >&2\n  exit 1\nfi\n",
+        );
+
+        let blockers = evaluate_issue_dependencies(&profile, &[issue("1", Some("OPEN"), "")]);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(
+            blockers[0].reason_code,
+            "dependency_query_permission_denied"
+        );
+    }
+
+    #[test]
+    fn fetch_gitlab_blocks_links_uses_nested_target_issue_iid() {
+        let profile = gitlab_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "glab",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/1/links\" ]; then\n  printf '%s\n' '[{\"link_type\":\"blocks\",\"target_issue\":{\"iid\":10},\"target_project_id\":42},{\"link_type\":\"relates\",\"target_issue\":{\"iid\":99},\"target_project_id\":42}]'\n  exit 0\nelse\n  echo \"unexpected glab invocation: $*\" >&2\n  exit 1\nfi\n",
+        );
+
+        let dependencies = fetch_gitlab_blocks_links(&profile, "1").unwrap();
+        assert_eq!(dependencies, vec!["10".to_string()]);
     }
 
     #[test]
