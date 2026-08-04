@@ -893,8 +893,17 @@ mod tests {
     #[test]
     fn test_build_series_buckets_by_day() {
         // Two days, two entries each. Day 1: both pass. Day 2: one pass one fail.
-        let d1 = "2026-07-01";
-        let d2 = "2026-07-02";
+        // Computed relative to "now" (not hardcoded) so this stays inside
+        // the "30d" window used below instead of aging out over time.
+        let now = time::OffsetDateTime::now_utc();
+        let fmt = |days_ago: i64| -> String {
+            (now - time::Duration::days(days_ago))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()[..10]
+                .to_string()
+        };
+        let d1 = fmt(2);
+        let d2 = fmt(1);
         let entries = vec![
             entry(
                 "gah",
@@ -954,16 +963,14 @@ mod tests {
 
     #[test]
     fn test_build_series_filters_by_profile() {
+        // Timestamp is relative to "now" (not hardcoded) so this stays
+        // inside the "30d" window used below instead of aging out over time.
+        let ts = (time::OffsetDateTime::now_utc() - time::Duration::days(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
         let entries = vec![
-            entry("gah", "2026-07-01T10:00:00Z", Some("passed"), 100, 1.0, 0.9),
-            entry(
-                "other",
-                "2026-07-01T11:00:00Z",
-                Some("passed"),
-                999,
-                9.0,
-                8.0,
-            ),
+            entry("gah", &ts, Some("passed"), 100, 1.0, 0.9),
+            entry("other", &ts, Some("passed"), 999, 9.0, 8.0),
         ];
 
         let (_tmp, cfg) = config_with_ledger(&entries);

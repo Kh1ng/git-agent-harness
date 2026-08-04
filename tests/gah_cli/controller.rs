@@ -33,10 +33,17 @@ fn loop_reports_nonzero_review_backend_as_failure_not_success() {
         "claude",
         "#!/bin/sh\nprintf 'subscription quota exhausted\\n' >&2\nexit 23\n",
     );
+    // `updated_at` is relative to "now" (not hardcoded) so the fake PR
+    // stays classified as active instead of aging into STALE over time.
+    let pr_updated_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\ncase \"$4\" in */pulls?*) echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"head\":{\"ref\":\"gah/real-review\",\"sha\":\"source-sha\"},\"html_url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"open\",\"draft\":true,\"updated_at\":\"2026-07-18T17:22:35-05:00\"}]'; exit 0;; */check-runs?*) echo '{\"total_count\":1,\"check_runs\":[{\"status\":\"completed\",\"conclusion\":\"success\"}]}'; exit 0;; esac\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"headRefName\":\"gah/real-review\",\"baseRefName\":\"main\",\"headRefOid\":\"source-sha\",\"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}'; exit 0; fi\nexit 0\n",
+        &format!(
+            "#!/bin/sh\ncase \"$4\" in */pulls?*) echo '[{{\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"head\":{{\"ref\":\"gah/real-review\",\"sha\":\"source-sha\"}},\"html_url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"open\",\"draft\":true,\"updated_at\":\"{pr_updated_at}\"}}]'; exit 0;; */check-runs?*) echo '{{\"total_count\":1,\"check_runs\":[{{\"status\":\"completed\",\"conclusion\":\"success\"}}]}}'; exit 0;; */issues?*) echo '[]'; exit 0;; esac\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"MR body\",\"headRefName\":\"gah/real-review\",\"baseRefName\":\"main\",\"headRefOid\":\"source-sha\",\"statusCheckRollup\":[{{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}]}}'; exit 0; fi\nexit 0\n"
+        ),
     );
 
     let events_path = tmp.path().join("events.jsonl");
@@ -893,10 +900,17 @@ fn loop_once_stops_on_stuck_loop_instead_of_repeating_forever() {
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
+    // `updated_at` is relative to "now" (not hardcoded) so the fake PR
+    // stays classified as active instead of aging into STALE over time.
+    let pr_updated_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        "#!/bin/sh\ncase \"$4\" in */pulls?*) echo '[{\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"head\":{\"ref\":\"gah/real-1\",\"sha\":null},\"html_url\":\"https://github.com/owner/real/pull/1\",\"labels\":[],\"number\":1,\"state\":\"open\",\"draft\":false,\"updated_at\":\"2026-07-18T17:22:35-05:00\"}]'; exit 0;; */check-runs?*) echo '{\"total_count\":0,\"check_runs\":[]}'; exit 0;; esac\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{\"number\":1,\"url\":\"https://github.com/owner/real/pull/1\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"headRefName\":\"gah/real-1\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 0\n",
+        &format!(
+            "#!/bin/sh\ncase \"$4\" in */pulls?*) echo '[{{\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"head\":{{\"ref\":\"gah/real-1\",\"sha\":null}},\"html_url\":\"https://github.com/owner/real/pull/1\",\"labels\":[],\"number\":1,\"state\":\"open\",\"draft\":false,\"updated_at\":\"{pr_updated_at}\"}}]'; exit 0;; */check-runs?*) echo '{{\"total_count\":0,\"check_runs\":[]}}'; exit 0;; */issues?*) echo '[]'; exit 0;; esac\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{{\"number\":1,\"url\":\"https://github.com/owner/real/pull/1\",\"title\":\"[GAH] Fix: TICKET-500\",\"body\":\"body\",\"headRefName\":\"gah/real-1\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}}'; exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 0\n"
+        ),
     );
 
     let events_path = tmp.path().join("events.jsonl");
