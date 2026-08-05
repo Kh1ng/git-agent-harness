@@ -1,0 +1,226 @@
+{
+  "$id": "https://github.com/Kh1ng/git-agent-harness/schemas/cli-capabilities/v1.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Idempotency": {
+      "enum": [
+        "idempotent",
+        "non_idempotent",
+        "conditional"
+      ],
+      "type": "string"
+    },
+    "LocalOnlyReason": {
+      "enum": [
+        "filesystem_access_required",
+        "interactive_terminal_required",
+        "security_sensitive",
+        "development_only",
+        "local_backend_execution_required",
+        "legacy",
+        "other"
+      ],
+      "type": "string"
+    },
+    "OperationClass": {
+      "enum": [
+        "read",
+        "mutation",
+        "admin"
+      ],
+      "type": "string"
+    },
+    "OperationDefinition": {
+      "properties": {
+        "class": {
+          "$ref": "#/definitions/OperationClass"
+        },
+        "cli_command_path": {
+          "description": "CLI command path",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "Human-readable display name",
+          "type": "string"
+        },
+        "documentation": {
+          "description": "Additional documentation",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idempotency": {
+          "$ref": "#/definitions/Idempotency"
+        },
+        "is_stable": {
+          "description": "Whether this operation is stable",
+          "type": "boolean"
+        },
+        "local_only_reason": {
+          "$ref": "#/definitions/LocalOnlyReason",
+          "description": "Reason for local-only disposition"
+        },
+        "operation_id": {
+          "description": "Stable operation identifier",
+          "type": "string"
+        },
+        "profile_scope": {
+          "$ref": "#/definitions/ProfileScope"
+        },
+        "remote_disposition": {
+          "$ref": "#/definitions/RemoteDisposition"
+        },
+        "request_schema": {
+          "$ref": "#/definitions/SchemaReference",
+          "description": "Request schema reference"
+        },
+        "response_schema": {
+          "$ref": "#/definitions/SchemaReference",
+          "description": "Response schema reference"
+        },
+        "secret_fields": {
+          "description": "Fields that contain secrets",
+          "items": {
+            "$ref": "#/definitions/SecretFieldSpec"
+          },
+          "type": "array"
+        },
+        "streaming": {
+          "$ref": "#/definitions/StreamingBehavior"
+        }
+      },
+      "required": [
+        "operation_id",
+        "display_name",
+        "class",
+        "profile_scope",
+        "streaming",
+        "idempotency",
+        "remote_disposition",
+        "cli_command_path",
+        "is_stable"
+      ],
+      "type": "object"
+    },
+    "ProfileScope": {
+      "enum": [
+        "global",
+        "profile_required",
+        "profile_optional"
+      ],
+      "type": "string"
+    },
+    "RemoteDisposition": {
+      "enum": [
+        "remote_available",
+        "local_only",
+        "not_implemented"
+      ],
+      "type": "string"
+    },
+    "SchemaReference": {
+      "properties": {
+        "is_primitive": {
+          "description": "Whether this is a built-in primitive type",
+          "type": "boolean"
+        },
+        "rust_type": {
+          "description": "Rust module path to the type",
+          "type": "string"
+        },
+        "ts_type": {
+          "description": "TypeScript type name in contracts",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "rust_type",
+        "is_primitive"
+      ],
+      "type": "object"
+    },
+    "SecretFieldSpec": {
+      "properties": {
+        "field_path": {
+          "description": "Field name path",
+          "type": "string"
+        },
+        "is_secret": {
+          "description": "Whether this field is always considered secret",
+          "type": "boolean"
+        },
+        "may_contain_secrets": {
+          "description": "Whether this field may contain secrets depending on context",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "field_path",
+        "is_secret",
+        "may_contain_secrets"
+      ],
+      "type": "object"
+    },
+    "StreamingBehavior": {
+      "enum": [
+        "none",
+        "sse",
+        "web_socket",
+        "jsonl"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "Schema for GAH CLI capability and remote-disposition manifest (Issue #531)",
+  "properties": {
+    "command_path_to_operation_id": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Map from CLI command paths to operation IDs",
+      "type": "object"
+    },
+    "local_only_operations": {
+      "additionalProperties": {
+        "$ref": "#/definitions/LocalOnlyReason"
+      },
+      "description": "Map of local-only operation IDs to their reasons",
+      "type": "object"
+    },
+    "manifest_version": {
+      "description": "Manifest version identifier",
+      "type": "string"
+    },
+    "operations": {
+      "additionalProperties": {
+        "$ref": "#/definitions/OperationDefinition"
+      },
+      "description": "Map of operation IDs to operation definitions",
+      "type": "object"
+    },
+    "remote_operations": {
+      "description": "List of remotely available operation IDs",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "description": "Schema version of this manifest",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manifest_version",
+    "operations"
+  ],
+  "title": "CLI Capability Manifest Schema",
+  "type": "object",
+  "version": "1.0.0"
+}
