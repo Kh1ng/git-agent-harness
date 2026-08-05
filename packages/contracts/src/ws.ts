@@ -127,6 +127,12 @@ export type ServerMessage =
       type: "error";
       error: string;
       requestId: string;
+    }
+  | {
+      type: "manager.chat.reply";
+      requestId: string;
+      profile: string;
+      reply: string;
     };
 
 export type ClientMessage = 
@@ -181,6 +187,12 @@ export type ClientMessage =
       type: "ping";
       requestId: string;
       timestamp: number;
+    }
+  | {
+      type: "manager.chat.send";
+      requestId: string;
+      profile: string;
+      message: string;
     };
 
 export type ClientCapabilities = {
