@@ -7,7 +7,8 @@ import {
   Radio,
   Settings,
   Menu,
-  X
+  X,
+  MessageSquare
 } from 'lucide-react';
 import type { Page } from '../App.js';
 
@@ -20,6 +21,7 @@ export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
 
 const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'chat', label: 'Manager Chat', icon: MessageSquare },
   { id: 'work', label: 'Work', icon: ListChecks },
   { id: 'telemetry', label: 'Telemetry', icon: BarChart3 },
   { id: 'quota', label: 'Quota', icon: Gauge },

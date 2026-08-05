@@ -12,6 +12,7 @@ import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
+import { sendManagerChatMessage } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -182,6 +183,10 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
       await handleProviderList(ws, message, requestId);
       break;
       
+    case 'manager.chat.send':
+      await handleManagerChatSend(ws, message, requestId);
+      break;
+
     case 'ping':
       // Respond to ping
       ws.send(JSON.stringify({
@@ -247,6 +252,21 @@ async function handleSendCommand(ws: WebSocket, message: Extract<ClientMessage, 
       session: await fleetDispatch.getSession(message.sessionId)
     }));
     
+  } catch (error) {
+    ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
+  }
+}
+
+async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.send' }>, requestId: string) {
+  try {
+    const reply = await sendManagerChatMessage(message.profile, message.message);
+
+    ws.send(JSON.stringify({
+      type: 'manager.chat.reply' as const,
+      requestId,
+      profile: message.profile,
+      reply
+    }));
   } catch (error) {
     ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
   }
