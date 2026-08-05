@@ -5,13 +5,25 @@
 import { ProviderKind, SessionId, ProviderInstanceId } from "@git-agent-harness/contracts";
 
 // crypto.randomUUID() only exists in a secure context (https:// or
-// localhost) -- browsers strip the whole `crypto` global on plain http://
-// LAN access. Fall back to a non-cryptographic UUID v4 so ID generation
-// keeps working over a bare LAN IP; these IDs are never security-sensitive.
+// localhost) -- browsers strip it on plain http:// LAN access. But
+// crypto.getRandomValues() has no such restriction, so prefer it over a
+// predictable Math.random()-based fallback (flagged by CodeQL as
+// js/insecure-randomness when it feeds a session ID -- correctly, since a
+// PRNG-based session ID is a real weakness even if this codebase doesn't
+// currently use these IDs for auth).
 function uuidV4(): string {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return crypto.randomUUID();
   }
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  // Unreachable in any real browser or Node runtime (both have had
+  // getRandomValues for years) -- last-resort only.
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
     const v = c === "x" ? r : (r & 0x3) | 0x8;
