@@ -655,7 +655,18 @@ fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
         thread::sleep(Duration::from_millis(20));
     }
 
-    let refill_deadline = Instant::now() + Duration::from_secs(10);
+    // 20s, not 10s: this polls for the same class of event (the real child
+    // binary admitting and launching a worker after a real subprocess spawn)
+    // as the 20s deadlines above (see e.g. "two initial workers did not
+    // start" / "third slot did not start"). This one was inconsistently set
+    // to half that margin with no stated reason, and flaked under CI load
+    // twice (2026-08-05, issue #824) on unrelated commits while every
+    // sibling wait in this file passed -- the 500ms pressure-flip + 100ms
+    // reprobe interval this test relies on only need ~600ms of slack, but
+    // the fixed 10s ceiling left too little room for the rest of the
+    // pipeline (fake gh/codex spawns, decide_next_action) under real
+    // contention.
+    let refill_deadline = Instant::now() + Duration::from_secs(20);
     while !second_started.exists() {
         assert!(
             child.try_wait().unwrap().is_none(),
