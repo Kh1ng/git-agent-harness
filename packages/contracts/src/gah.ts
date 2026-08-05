@@ -929,3 +929,30 @@ export interface LedgerEntry {
   dispatch_reason?: string | null;
   usage: LedgerUsage;
 }
+
+// ---------------------------------------------------------------------------
+// Manager chat backend selection (apps/server-only preference, separate
+// from ConfigSummary.current_manager -- that field drives the autonomous
+// manager-wake notification path, this drives which backend answers the
+// interactive Manager Chat page).
+// ---------------------------------------------------------------------------
+
+export interface ManagerBackendInfo {
+  id: string;
+  displayName: string;
+  /** False for backends listed but not wired up yet (see #820/#821). */
+  implemented: boolean;
+}
+
+export interface ManagerChatSettingsSummary {
+  defaultBackend: string;
+  profileOverrides: Record<string, string>;
+  availableBackends: ManagerBackendInfo[];
+}
+
+/** Payload for POST /api/manager-chat/settings. Omitted fields are left
+ * unchanged server-side. */
+export interface ManagerChatSettingsUpdate {
+  defaultBackend?: string;
+  profileOverrides?: Record<string, string>;
+}

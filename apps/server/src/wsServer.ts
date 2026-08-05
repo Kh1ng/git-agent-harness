@@ -12,7 +12,7 @@ import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
-import { sendManagerChatMessage } from './managerChat/ManagerChatManager.js';
+import { sendManagerChatMessage, getHistory as getManagerChatHistory } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -187,6 +187,10 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
       await handleManagerChatSend(ws, message, requestId);
       break;
 
+    case 'manager.chat.historyRequest':
+      await handleManagerChatHistoryRequest(ws, message, requestId);
+      break;
+
     case 'ping':
       // Respond to ping
       ws.send(JSON.stringify({
@@ -259,17 +263,29 @@ async function handleSendCommand(ws: WebSocket, message: Extract<ClientMessage, 
 
 async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.send' }>, requestId: string) {
   try {
-    const reply = await sendManagerChatMessage(message.profile, message.message);
+    const result = await sendManagerChatMessage(message.profile, message.message);
 
-    ws.send(JSON.stringify({
-      type: 'manager.chat.reply' as const,
+    const payload: ServerMessage = {
+      type: 'manager.chat.reply',
       requestId,
       profile: message.profile,
-      reply
-    }));
+      reply: result.reply,
+      cleared: result.cleared
+    };
+    ws.send(JSON.stringify(payload));
   } catch (error) {
     ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
   }
+}
+
+async function handleManagerChatHistoryRequest(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.historyRequest' }>, requestId: string) {
+  const payload: ServerMessage = {
+    type: 'manager.chat.history',
+    requestId,
+    profile: message.profile,
+    turns: getManagerChatHistory(message.profile)
+  };
+  ws.send(JSON.stringify(payload));
 }
 
 async function handleProviderRefresh(ws: WebSocket, message: Extract<ClientMessage, { type: 'provider.refresh' }>, requestId: string) {
