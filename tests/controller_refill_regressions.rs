@@ -2,10 +2,26 @@ mod support;
 
 use std::fs;
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::test_tempdir;
 use support::ProcessGroupGuard;
+
+// Every test in this file spawns a real `gah` subprocess and does real
+// timing-sensitive polling against it (worker admission, node-pressure
+// reprobe, shutdown). In isolation each one consistently finishes in a few
+// seconds flat -- confirmed empirically, pinned to 2 CPUs (matching CI's
+// actual ubuntu-latest runner) and repeated -- but Rust's default test
+// harness runs tests within a binary concurrently, and on a CPU-constrained
+// runner two of these real-subprocess tests scheduled at the same time
+// genuinely starve each other, which is what was actually causing
+// parallel_loop_reprobes_node_pressure_with_active_worker_remaining to blow
+// past its deadline (issue #824) -- not the deadline being too tight. Widening
+// it twice (PR #825: 10s->20s) treated the symptom; this treats the cause.
+// Same pattern already used in tests/fake_backend_harness.rs for the same
+// class of problem.
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
     // These tests exercise refill state transitions, not host sizing. The
@@ -87,6 +103,7 @@ fn read_u32_file(path: &std::path::Path) -> u32 {
 #[cfg(unix)]
 #[test]
 fn process_group_guard_drop_reaps_the_entire_test_process_group() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     use std::os::unix::process::CommandExt;
     let mut command = ProcessCommand::new("/bin/sh");
     command
@@ -261,6 +278,7 @@ fn setup_fix_dispatch_repo(
 
 #[test]
 fn parallel_loop_refills_immediately_after_a_fast_completion() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
 
@@ -398,6 +416,7 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
 
 #[test]
 fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -463,6 +482,7 @@ fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
 
 #[test]
 fn parallel_loop_does_not_refill_after_shutdown() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -541,6 +561,7 @@ fn parallel_loop_does_not_refill_after_shutdown() {
 
 #[test]
 fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -693,6 +714,7 @@ fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
 
 #[test]
 fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -830,6 +852,7 @@ fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
 
 #[test]
 fn parallel_loop_waits_to_refill_until_node_pressure_recedes() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -936,6 +959,7 @@ fn parallel_loop_waits_to_refill_until_node_pressure_recedes() {
 
 #[test]
 fn parallel_loop_remains_prompt_on_shutdown_while_node_capacity_is_deferred() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
