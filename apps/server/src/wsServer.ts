@@ -263,14 +263,13 @@ async function handleSendCommand(ws: WebSocket, message: Extract<ClientMessage, 
 
 async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.send' }>, requestId: string) {
   try {
-    const result = await sendManagerChatMessage(message.profile, message.message);
+    const reply = await sendManagerChatMessage(message.profile, message.message);
 
     const payload: ServerMessage = {
       type: 'manager.chat.reply',
       requestId,
       profile: message.profile,
-      reply: result.reply,
-      cleared: result.cleared
+      reply
     };
     ws.send(JSON.stringify(payload));
   } catch (error) {

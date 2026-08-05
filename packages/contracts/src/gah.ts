@@ -956,3 +956,27 @@ export interface ManagerChatSettingsUpdate {
   defaultBackend?: string;
   profileOverrides?: Record<string, string>;
 }
+
+/** A real slash command from the active backend's own command registry
+ * (e.g. Hermes's live ACP available-commands list) -- not something GAH
+ * invents itself. Powers the "/" palette in Manager Chat. */
+export interface ManagerCommandInfo {
+  name: string;
+  description: string;
+  argsHint?: string;
+}
+
+/** A real selectable model from the active backend's own ACP session state
+ * (session/new's `models` field, ACP's session/set_model method) -- not a
+ * list GAH maintains. Not every backend exposes this (Claude's ACP bridge
+ * doesn't today); an empty list means no model picker for that backend. */
+export interface ManagerModelInfo {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface ManagerModelsSummary {
+  models: ManagerModelInfo[];
+  currentModelId: string | null;
+}
