@@ -36,6 +36,7 @@ pub fn generate_json_manifest_file(output_path: &str) -> anyhow::Result<()> {
 
     let mut file = File::create(path)?;
     file.write_all(json.as_bytes())?;
+    file.write_all(b"\n")?;
 
     Ok(())
 }
@@ -240,6 +241,7 @@ pub fn generate_json_schema_file(output_path: &str) -> anyhow::Result<()> {
 
     let mut file = File::create(path)?;
     file.write_all(json.as_bytes())?;
+    file.write_all(b"\n")?;
 
     Ok(())
 }
