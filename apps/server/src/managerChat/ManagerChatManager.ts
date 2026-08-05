@@ -7,7 +7,7 @@
  */
 
 import { recall, capture } from './memoryGatewayClient.js';
-import { resolveAdapter, type ManagerCommandInfo } from './registry.js';
+import { resolveAdapter, type ManagerCommandInfo, type ManagerModelInfo } from './registry.js';
 import { backendForProfile } from './settingsStore.js';
 
 export interface ChatTurn {
@@ -41,6 +41,16 @@ export function getHistory(profile: string): ChatTurn[] {
 export function listCommandsForProfile(profile: string): Promise<ManagerCommandInfo[]> {
   const backendId = backendForProfile(profile);
   return resolveAdapter(backendId).listCommands(profile);
+}
+
+export function listModelsForProfile(profile: string): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }> {
+  const backendId = backendForProfile(profile);
+  return resolveAdapter(backendId).listModels(profile);
+}
+
+export function setModelForProfile(profile: string, modelId: string): Promise<void> {
+  const backendId = backendForProfile(profile);
+  return resolveAdapter(backendId).setModel(profile, modelId);
 }
 
 async function runTurn(profile: string, message: string): Promise<string> {

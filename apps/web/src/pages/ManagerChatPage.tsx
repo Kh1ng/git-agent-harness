@@ -5,7 +5,7 @@ import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { gahApi } from '../api/client.js';
 import { generateRequestId } from '@git-agent-harness/shared';
-import type { ManagerChatTurn, ManagerCommandInfo } from '@git-agent-harness/contracts';
+import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
   role: 'user' | 'assistant' | 'system' | 'error';
@@ -28,6 +28,9 @@ export function ManagerChatPage() {
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [activeBackend, setActiveBackend] = useState<string | null>(null);
   const [commands, setCommands] = useState<ManagerCommandInfo[]>([]);
+  const [models, setModels] = useState<ManagerModelInfo[]>([]);
+  const [currentModelId, setCurrentModelId] = useState<string | null>(null);
+  const [modelChanging, setModelChanging] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const processedRequestIds = useRef(new Set<string>());
@@ -64,7 +67,32 @@ export function ManagerChatPage() {
       .getManagerChatCommands(profile)
       .then(({ commands }) => setCommands(commands))
       .catch(() => setCommands([]));
+    // Real selectable models from the backend's own ACP session state --
+    // empty for backends that don't expose this (e.g. Claude's bridge
+    // today), in which case no picker renders at all.
+    gahApi
+      .getManagerChatModels(profile)
+      .then(({ models, currentModelId }) => {
+        setModels(models);
+        setCurrentModelId(currentModelId);
+      })
+      .catch(() => {
+        setModels([]);
+        setCurrentModelId(null);
+      });
   }, [profile]);
+
+  const handleModelChange = async (modelId: string) => {
+    setModelChanging(true);
+    try {
+      await gahApi.setManagerChatModel(profile, modelId);
+      setCurrentModelId(modelId);
+    } catch (err) {
+      setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch model: ${err instanceof Error ? err.message : String(err)}` }]);
+    } finally {
+      setModelChanging(false);
+    }
+  };
 
   useEffect(() => {
     const last = messages[messages.length - 1];
@@ -127,7 +155,27 @@ export function ManagerChatPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Manager Chat" description={`Talking to ${activeBackend ?? 'the manager'} for profile "${profile}"`} />
+      <PageHeader
+        title="Manager Chat"
+        description={`Talking to ${activeBackend ?? 'the manager'} for profile "${profile}"`}
+        actions={
+          models.length > 0 ? (
+            <select
+              value={currentModelId ?? ''}
+              onChange={(e) => handleModelChange(e.target.value)}
+              disabled={modelChanging}
+              className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[220px]"
+              aria-label="Model"
+            >
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          ) : undefined
+        }
+      />
 
       <div className="card-padded flex flex-col h-[65vh]">
         <div className="flex-1 overflow-y-auto space-y-3 pr-1">
