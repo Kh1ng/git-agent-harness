@@ -25,7 +25,8 @@ import type {
   AvailabilityScope,
   Blocker,
   StatusError,
-  RecentLedgerSummary
+  RecentLedgerSummary,
+  DependencyBlocker
 } from '@git-agent-harness/contracts';
 
 // Session store for tracking active WebSocket connections
@@ -311,6 +312,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
     let blockers: Blocker[] = [];
     let constraints: Blocker[] = [];
     let errors: StatusError[] = [];
+    let dependencyBlockers: DependencyBlocker[] = [];
     // recent_ledger is a single nullable summary, not an array -- it was
     // previously mistyped as unknown[] here (silently accepted at runtime
     // by JS, but wrong; DashboardPage already correctly treats it as an
@@ -328,6 +330,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
       blockers = status.blockers;
       constraints = status.constraints;
       errors = status.errors;
+      dependencyBlockers = status.dependency_blockers ?? [];
       recentLedger = status.recent_ledger;
       backendConfigured = status.backend_configured ?? {};
     } catch (statusError) {
@@ -341,6 +344,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
       blockers?: Blocker[];
       constraints?: Blocker[];
       errors?: StatusError[];
+      dependencyBlockers?: DependencyBlocker[];
       recentLedger?: RecentLedgerSummary | null;
       backendConfigured?: Record<string, boolean>;
     } = {
@@ -355,6 +359,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
       blockers,
       constraints,
       errors,
+      dependencyBlockers,
       recentLedger,
       backendConfigured
     };

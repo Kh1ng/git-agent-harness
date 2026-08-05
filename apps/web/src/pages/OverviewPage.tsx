@@ -13,7 +13,7 @@ import {
   Square
 } from 'lucide-react';
 import type { Page } from '../App.js';
-import type { Session } from '@git-agent-harness/contracts';
+import type { Session, DependencyBlocker } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -103,6 +103,8 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
   const blockers = snapshot?.blockers ?? [];
   const blockedWorkItems = snapshot?.blocked_work_items ?? [];
   const reviewHeldWorkIds = snapshot?.review_held_work_ids ?? [];
+  // Native issue prerequisites that block autonomous intake.
+  const dependencyBlockers = snapshot?.dependency_blockers ?? [];
   const needsReviewMrs = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'NEEDS_REVIEW');
   const recentMerges = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'MERGED').slice(0, 5);
   const unavailableBackends = (quotaSnapshot?.candidates ?? []).filter((c) => !c.eligible_now);
@@ -156,7 +158,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
         <StatTile label="Active work" value={String(activeWorkCount)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
       </div>
 
-      {(blockers.length > 0 || blockedWorkItems.length > 0 || reviewHeldWorkIds.length > 0) && (
+      {(blockers.length > 0 || blockedWorkItems.length > 0 || reviewHeldWorkIds.length > 0 || dependencyBlockers.length > 0) && (
         <div className="card-padded border-warning/30">
           <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
             <ShieldAlert size={16} className="text-warning" aria-hidden="true" />
@@ -167,6 +169,19 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
               <li key={`blocker-${i}`} className="flex items-start gap-2 text-sm">
                 <StatusBadge tone="critical" label={b.kind.replace(/_/g, ' ')} />
                 <span className="text-secondary">{b.message || b.reason || 'Unknown'} — blocks all work</span>
+              </li>
+            ))}
+            {dependencyBlockers.map((dep, i) => (
+              <li key={`dependency-${i}`} className="flex items-start gap-2 text-sm">
+                <StatusBadge tone="warning" label="Dependency blocked" />
+                <span className="text-secondary">
+                  {dep.work_id}{dep.title ? ` — ${dep.title}` : ''}{dep.reason ? `: ${dep.reason}` : ''}
+                  {dep.dependencies.length > 0 && (
+                    <span className="ml-1 text-xs">
+                      ({dep.dependencies.map(d => d.identity).join(', ')})
+                    </span>
+                  )}
+                </span>
               </li>
             ))}
             {blockedWorkItems.map((b, i) => (

@@ -21,7 +21,8 @@ import type {
   ControllerEvent,
   ProfileSummary,
   ConfigProfileSummary,
-  DoctorSnapshot
+  DoctorSnapshot,
+  DependencyBlocker
 } from '@git-agent-harness/contracts';
 import type { ProfileAddData, ProfileUpdateData, ProfileRemoveParams, LoopStatus } from '../api/client.js';
 import type { ConfigSummary, ConfigSetData } from '@git-agent-harness/contracts';
