@@ -26,7 +26,17 @@ pub(crate) fn is_genuine_agent_failure(failure_class: &str) -> bool {
 fn is_infra_failure(failure_class: &str) -> bool {
     matches!(
         failure_class,
-        "harness_error" | "environment_error" | "backend_error" | "unknown"
+        // `human_blocked` covers route-stage blocks like "paid route needs
+        // operator approval, and every other candidate already failed this
+        // attempt round." Every caller here operates on `failed_tickets`,
+        // which is pre-filtered to `!t.human_required` (line ~493) -- so by
+        // the time a ticket reaches this check, the harness has already
+        // decided it is NOT durably human-gated. Excluding this class left
+        // such tickets permanently unreachable (no undispatched/escalate/
+        // retry path matched) even after a backend freed up, mirroring the
+        // `NoEligibleBackend` orphaning bug fixed for `backend_error` (see
+        // `decide_route_classifies_no_eligible_backend_as_backend_error`).
+        "harness_error" | "environment_error" | "backend_error" | "unknown" | "human_blocked"
     )
 }
 

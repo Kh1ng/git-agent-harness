@@ -239,6 +239,14 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     if let Err(err) = append_result {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
     }
+    // Issue #762: a paid-route policy-approval gate IS actionable -- the
+    // operator can approve via `gah route-approval grant` (today reachable
+    // by asking Hermes to run it, since Hermes already has shell access on
+    // this host). What must not happen is re-notifying on every loop tick
+    // for the SAME unresolved gate: `new_policy_approval_transition` is only
+    // true the first time this exact (ticket, candidate) gate is recorded,
+    // so a durably-gated item pings exactly once, not every ~1 minute the
+    // controller re-evaluates it.
     if result
         .as_ref()
         .err()

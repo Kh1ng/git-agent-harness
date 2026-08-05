@@ -181,7 +181,7 @@ fn backend_command_name(name: &str) -> Option<&'static str> {
     }
 }
 
-fn resolve_executable_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_executable_on_path(name: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
     env::split_paths(&path)
         .map(|dir| dir.join(name))
