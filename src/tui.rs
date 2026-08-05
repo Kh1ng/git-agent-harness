@@ -200,9 +200,17 @@ fn render_dashboard(frame: &mut Frame, state: &AppState) {
         Constraint::Percentage(20),
     ])
     .areas(left);
+    // render_blockers_panel renders nothing when there are no dependency
+    // blockers; reserving its fixed 7 rows unconditionally would leave a
+    // permanent blank gap in the dashboard on every profile that currently
+    // has none.
+    let has_blockers = state
+        .snapshot
+        .iter()
+        .any(|s| !s.dependency_blockers.is_empty());
     let [ledger_area, blockers_area, events_area] = Layout::vertical([
         Constraint::Percentage(40),
-        Constraint::Length(7),
+        Constraint::Length(if has_blockers { 7 } else { 0 }),
         Constraint::Min(0),
     ])
     .areas(right);
