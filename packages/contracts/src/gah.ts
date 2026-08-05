@@ -59,6 +59,27 @@ export interface Observations {
   ledger: ObservationStatus;
 }
 
+/** Issue #230: health of the automatic post-attempt telemetry export
+ * pipeline. Distinguishes never-run, healthy, stale (no recent success),
+ * retrying (a recent failure within its own retry budget), and failed
+ * (retries exhausted, needs operator attention). */
+export type ExportHealthStatusKind = 'never_run' | 'healthy' | 'stale' | 'retrying' | 'failed';
+
+export interface ExportHealth {
+  status: ExportHealthStatusKind;
+  schema_version: number;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  last_error_class: string | null;
+  /** Latest ledger entry timestamp reflected in a successful export. */
+  exported_watermark: string | null;
+  /** Cumulative count of telemetry records ever exported. */
+  record_count: number;
+  /** True when the most recent export attempt failed and a retry is owed. */
+  retry_pending: boolean;
+}
+
 export type AvailabilityScopeKind = 'backend_wide' | 'model_specific' | 'quota_pool';
 
 export interface AvailabilityScope {
@@ -362,6 +383,9 @@ export interface StatusSnapshot {
   /** Effective normalized instance identities. Optional while schema-v1
    * clients may still be connected to an older CLI. */
   backend_instances?: BackendInstanceSummary[];
+  /** Issue #230: automatic post-attempt telemetry export health. Optional
+   * while schema-v1 clients may still be connected to an older CLI. */
+  export_health?: ExportHealth;
 }
 
 // ---------------------------------------------------------------------------

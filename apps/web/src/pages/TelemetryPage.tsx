@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { ArrowUpDown, FlaskConical } from 'lucide-react';
-import type { BackendModelComparison, ReportGroupBy } from '@git-agent-harness/contracts';
+import type { BackendModelComparison, ExportHealth, ReportGroupBy } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -8,10 +8,46 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
+import { StatusBadge, type StatusTone } from '../components/ui/StatusBadge.js';
 import { TrendChart } from '../components/TrendChart.js';
-import { formatCost, formatDuration, formatPercent, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
+import { formatCost, formatDuration, formatPercent, formatTokens, formatCount, formatAge, oldestFetchedAt } from '../lib/format.js';
 
 const TELEMETRY_REFRESH_MS = 60 * 1000;
+
+/** Issue #230: operator-visible tone/label for each export health state. */
+const EXPORT_HEALTH_TONE: Record<ExportHealth['status'], { tone: StatusTone; label: string }> = {
+  never_run: { tone: 'unknown', label: 'Never run' },
+  healthy: { tone: 'good', label: 'Healthy' },
+  stale: { tone: 'warning', label: 'Stale' },
+  retrying: { tone: 'serious', label: 'Retrying' },
+  failed: { tone: 'critical', label: 'Failed' }
+};
+
+function ExportHealthCard({ health }: { health: ExportHealth | undefined }) {
+  if (!health) return null;
+  const { tone, label } = EXPORT_HEALTH_TONE[health.status] ?? EXPORT_HEALTH_TONE.never_run;
+  const lastSuccess = formatAge(health.last_success_at);
+  const lastAttempt = formatAge(health.last_attempt_at);
+  return (
+    <section className="card-padded">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <h3 className="text-sm font-semibold text-primary">Telemetry export health</h3>
+          <StatusBadge tone={tone} label={label} />
+        </div>
+        <div className="text-xs text-muted">
+          {formatCount(health.record_count)} records exported
+          {health.exported_watermark ? ` · through ${health.exported_watermark}` : ''}
+        </div>
+      </div>
+      <div className="mt-2 text-xs text-muted space-y-0.5">
+        <div>Last attempt: {lastAttempt ?? 'never'}{lastSuccess ? ` · last success: ${lastSuccess}` : ''}</div>
+        {health.retry_pending && <div className="text-warning">Retry pending{health.last_error_class ? ` (${health.last_error_class})` : ''}</div>}
+        {health.last_error && <div className="truncate" title={health.last_error}>Last error: {health.last_error}</div>}
+      </div>
+    </section>
+  );
+}
 
 type SortKey = keyof Pick<
   BackendModelComparison,
@@ -52,6 +88,8 @@ export function TelemetryPage() {
   const fetchReport = useGahStore((s) => s.fetchReport);
   const reportSeries = useGahStore((s) => s.reportSeries);
   const fetchReportSeries = useGahStore((s) => s.fetchReportSeries);
+  const status = useGahStore((s) => s.status);
+  const fetchStatus = useGahStore((s) => s.fetchStatus);
   const trend = reportSeries.data?.series ?? [];
   const trendOptions = [
     { id: 'tokens', label: 'Input+output tokens', data: trend.map((p) => ({ date: p.date, value: p.total_tokens })), format: formatTokens },
@@ -66,12 +104,14 @@ export function TelemetryPage() {
   useEffect(() => {
     fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true });
     fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true });
+    fetchStatus(profile ?? undefined, { force: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupBy, profile]);
 
   const refreshAll = () => {
     fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true });
     fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true });
+    fetchStatus(profile ?? undefined, { force: true });
   };
   useAutoRefresh(refreshAll, TELEMETRY_REFRESH_MS);
   useWsReconnectRefresh(refreshAll);
@@ -129,6 +169,8 @@ export function TelemetryPage() {
           </div>
         }
       />
+
+      <ExportHealthCard health={status.data?.export_health} />
 
       <section className="card-padded">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">

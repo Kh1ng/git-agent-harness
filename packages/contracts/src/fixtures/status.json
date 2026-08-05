@@ -18,6 +18,17 @@
   "constraints": [],
   "dependency_blockers": [],
   "errors": [],
+  "export_health": {
+    "exported_watermark": null,
+    "last_attempt_at": null,
+    "last_error": null,
+    "last_error_class": null,
+    "last_success_at": null,
+    "record_count": 0,
+    "retry_pending": false,
+    "schema_version": 9,
+    "status": "never_run"
+  },
   "fix_attempt_counts": {},
   "generated_artifact_deny_patterns": [
     "**/node_modules/**",
@@ -34,7 +45,7 @@
     "**/.pytest_cache/**",
     "**/*.tsbuildinfo"
   ],
-  "generated_at": "2026-07-19T10:13:21.833180438Z",
+  "generated_at": "2026-08-04T01:49:24.208690222Z",
   "implementation_intake_paused": true,
   "inflight_implementation_count": 0,
   "issue_intake_rejections": [
@@ -99,7 +110,7 @@
         "owner"
       ]
     },
-    "local_path": "/tmp/.tmpdMnloO/repo",
+    "local_path": "/tmp/.tmpuTbtP3/repo",
     "max_fix_attempts_per_mr": 2,
     "max_implementation_failures_per_ticket": 8,
     "max_open_managed_mrs": 1,

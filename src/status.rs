@@ -145,6 +145,11 @@ pub struct StatusSnapshot {
     /// Effective provider-neutral instance identities. Runtime paths and
     /// credential values are deliberately excluded from this projection.
     pub backend_instances: Vec<crate::config_show::BackendInstanceSummary>,
+    /// Issue #230: health of the automatic post-attempt telemetry export
+    /// pipeline -- distinguishes never-run, healthy, stale, retrying, and
+    /// failed export states without requiring an operator to inspect raw
+    /// export files.
+    pub export_health: crate::telemetry::health::ExportHealthView,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -890,6 +895,9 @@ fn build_snapshot_inner(
         implementation_intake_paused: intake.paused,
         backend_configured,
         backend_instances,
+        export_health: crate::telemetry::health::read_view(
+            &crate::telemetry::health::export_repo_path(cfg),
+        ),
     };
 
     Ok(snapshot)
@@ -908,6 +916,12 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
             snapshot.observations.sync.status,
             snapshot.observations.availability.status,
             snapshot.observations.ledger.status
+        );
+        println!(
+            "Telemetry export: {} (records={}, retry_pending={})",
+            snapshot.export_health.status,
+            snapshot.export_health.record_count,
+            snapshot.export_health.retry_pending
         );
         println!(
             "Implementation intake: {} (open MRs={}, in-flight={}, limit={})",

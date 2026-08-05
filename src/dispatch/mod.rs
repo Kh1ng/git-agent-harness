@@ -239,6 +239,13 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     if let Err(err) = append_result {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
     }
+    // Issue #230: every terminal attempt (success, failure, timeout,
+    // cancellation, or policy refusal) schedules an idempotent telemetry
+    // export from the now-durable ledger. Runs after the append above so a
+    // failed/slow export can never rewrite or lose the authoritative
+    // ledger outcome; export failures are retained in export health state
+    // for bounded retry rather than surfaced here.
+    crate::telemetry::schedule_export_after_terminal_attempt(cfg);
     // Issue #762: a paid-route policy-approval gate IS actionable -- the
     // operator can approve via `gah route-approval grant` (today reachable
     // by asking Hermes to run it, since Hermes already has shell access on
