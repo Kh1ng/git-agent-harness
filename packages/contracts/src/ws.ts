@@ -133,7 +133,21 @@ export type ServerMessage =
       requestId: string;
       profile: string;
       reply: string;
+      /** True for a /clear reply -- the client should wipe its local transcript. */
+      cleared?: boolean;
+    }
+  | {
+      type: "manager.chat.history";
+      requestId: string;
+      profile: string;
+      turns: ManagerChatTurn[];
     };
+
+export type ManagerChatTurn = {
+  role: "user" | "assistant" | "system";
+  text: string;
+  timestamp: number;
+};
 
 export type ClientMessage = 
   | {
@@ -193,6 +207,11 @@ export type ClientMessage =
       requestId: string;
       profile: string;
       message: string;
+    }
+  | {
+      type: "manager.chat.historyRequest";
+      requestId: string;
+      profile: string;
     };
 
 export type ClientCapabilities = {

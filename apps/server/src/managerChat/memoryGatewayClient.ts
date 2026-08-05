@@ -80,3 +80,21 @@ export async function capture(
     return { l0Recorded: 0 };
   }
 }
+
+/** Backs both /clear and /compact: flushes buffered L0 conversation into the
+ * gateway's L1/L2 extraction pipeline immediately (core.handleSessionEnd ->
+ * scheduler.flushSession), instead of waiting for the pipeline's own idle
+ * timeout. Returns whether it actually flushed -- callers surface a warning
+ * on failure rather than silently pretending it worked, since the whole
+ * point of the command is the flush. */
+export async function flushSession(profile: string): Promise<boolean> {
+  try {
+    const result = await postJson<{ flushed: boolean }>('/session/end', {
+      session_key: sessionKeyForProfile(profile)
+    });
+    return result.flushed === true;
+  } catch (error) {
+    console.warn('[managerChat] session flush failed:', error);
+    return false;
+  }
+}

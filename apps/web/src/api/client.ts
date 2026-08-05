@@ -30,7 +30,9 @@ import type {
   ConfigSummary,
   ConfigProfileSummary,
   DoctorSnapshot,
-  ConfigSetData
+  ConfigSetData,
+  ManagerChatSettingsSummary,
+  ManagerChatSettingsUpdate
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -189,6 +191,8 @@ export interface GahDataSource {
   getConfig(): Promise<ConfigSummary>;
   getProfileConfig(profile: string): Promise<ConfigProfileSummary>;
   setConfig(data: ConfigSetData): Promise<{ success: boolean; message: string }>;
+  getManagerChatSettings(): Promise<ManagerChatSettingsSummary>;
+  setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
 }
 
 async function postJson<T, U>(path: string, body: U): Promise<T> {
@@ -339,5 +343,11 @@ export const gahApi: GahDataSource = {
   },
   async setConfig(data) {
     return postJson<{ success: boolean; message: string }, ConfigSetData>('/api/config', data);
+  },
+  getManagerChatSettings() {
+    return getJson<ManagerChatSettingsSummary>('/api/manager-chat/settings');
+  },
+  setManagerChatSettings(data) {
+    return postJson<{ success: boolean }, ManagerChatSettingsUpdate>('/api/manager-chat/settings', data);
   }
 };

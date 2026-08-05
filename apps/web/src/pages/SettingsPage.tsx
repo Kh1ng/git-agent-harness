@@ -11,7 +11,8 @@ import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt } from '../lib/format.js';
-import type { WakeAutonomyValue, ConfigProfileSummary, RoutingCandidateSummary } from '@git-agent-harness/contracts';
+import { gahApi } from '../api/client.js';
+import type { WakeAutonomyValue, ConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary } from '@git-agent-harness/contracts';
 
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
 const SETTINGS_REFRESH_MS = 60 * 1000;
@@ -214,6 +215,8 @@ export function SettingsPage() {
         setConfig={setConfig}
         clearConfigErrors={clearConfigErrors}
       />
+
+      <ManagerChatSettingsSection configuredProfiles={configuredProfiles} />
 
       <ProfileConfigViewerSection
         selectedName={selectedName}
@@ -656,6 +659,151 @@ function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalMa
         {config.loading ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
         {config.loading ? 'Saving…' : 'Save global manager'}
       </button>
+    </section>
+  );
+}
+
+function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles: ProfileSummary[] }) {
+  const [settings, setSettings] = useState<ManagerChatSettingsSummary | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [newOverrideProfile, setNewOverrideProfile] = useState('');
+  const [newOverrideBackend, setNewOverrideBackend] = useState('');
+
+  const load = () => {
+    gahApi
+      .getManagerChatSettings()
+      .then((data) => {
+        setSettings(data);
+        setError(null);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const save = async (update: { defaultBackend?: string; profileOverrides?: Record<string, string> }) => {
+    setLoading(true);
+    try {
+      await gahApi.setManagerChatSettings(update);
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const removeOverride = (profile: string) => {
+    if (!settings) return;
+    const next = { ...settings.profileOverrides };
+    delete next[profile];
+    save({ profileOverrides: next });
+  };
+
+  const addOverride = () => {
+    if (!settings || !newOverrideProfile || !newOverrideBackend) return;
+    save({ profileOverrides: { ...settings.profileOverrides, [newOverrideProfile]: newOverrideBackend } });
+    setNewOverrideProfile('');
+    setNewOverrideBackend('');
+  };
+
+  if (!settings) {
+    return (
+      <section className="card-padded max-w-md">
+        <h3 className="text-sm font-semibold text-primary mb-1">Manager Chat</h3>
+        {error ? <p className="text-xs text-critical">Failed to load: {error}</p> : <p className="text-xs text-muted">Loading…</p>}
+      </section>
+    );
+  }
+
+  const backendOptions = settings.availableBackends;
+  const overrideEntries = Object.entries(settings.profileOverrides);
+  const profilesWithoutOverride = configuredProfiles.filter((p) => !(p.name in settings.profileOverrides));
+
+  return (
+    <section className="card-padded max-w-md">
+      <h3 className="text-sm font-semibold text-primary mb-1">Manager Chat</h3>
+      <p className="text-xs text-muted mb-3">
+        Which backend answers the interactive Manager Chat page. Separate from "Global manager" above --
+        that one drives autonomous wake notifications, not chat.
+      </p>
+
+      <label className="block text-xs font-medium text-secondary mb-1">Default backend</label>
+      <select
+        value={settings.defaultBackend}
+        onChange={(e) => save({ defaultBackend: e.target.value })}
+        disabled={loading}
+        className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary mb-4"
+      >
+        {backendOptions.map((b) => (
+          <option key={b.id} value={b.id} disabled={!b.implemented}>
+            {b.displayName}
+            {!b.implemented ? ' (coming soon)' : ''}
+          </option>
+        ))}
+      </select>
+
+      <p className="text-xs font-medium text-secondary mb-1">Per-profile overrides</p>
+      {overrideEntries.length === 0 ? (
+        <p className="text-xs text-muted mb-2">None -- every profile uses the default backend above.</p>
+      ) : (
+        <ul className="space-y-1.5 mb-2">
+          {overrideEntries.map(([profile, backend]) => (
+            <li key={profile} className="flex items-center justify-between text-xs bg-raised rounded-md px-2 py-1.5">
+              <span>
+                <span className="font-mono text-secondary">{profile}</span>{' '}
+                <span className="text-muted">→</span> {backendOptions.find((b) => b.id === backend)?.displayName ?? backend}
+              </span>
+              <button onClick={() => removeOverride(profile)} disabled={loading} className="text-muted hover:text-critical">
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {profilesWithoutOverride.length > 0 && (
+        <div className="flex items-center gap-2 mt-2">
+          <select
+            value={newOverrideProfile}
+            onChange={(e) => setNewOverrideProfile(e.target.value)}
+            className="flex-1 bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary"
+          >
+            <option value="">Profile…</option>
+            {profilesWithoutOverride.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.display_name}
+              </option>
+            ))}
+          </select>
+          <select
+            value={newOverrideBackend}
+            onChange={(e) => setNewOverrideBackend(e.target.value)}
+            className="flex-1 bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary"
+          >
+            <option value="">Backend…</option>
+            {backendOptions.map((b) => (
+              <option key={b.id} value={b.id} disabled={!b.implemented}>
+                {b.displayName}
+                {!b.implemented ? ' (coming soon)' : ''}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={addOverride}
+            disabled={loading || !newOverrideProfile || !newOverrideBackend}
+            className="btn-secondary !text-xs !px-2 !py-1.5"
+          >
+            Add
+          </button>
+        </div>
+      )}
+
+      {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
     </section>
   );
 }
