@@ -17,11 +17,25 @@ const TARGET_ROOT: &str = "cargo-targets";
 const ACTIVE_LOCK: &str = ".active.lock";
 const LIFECYCLE_LOCK: &str = ".cargo-targets.lifecycle.lock";
 
+/// Every dispatch session gets a fresh, empty `CARGO_TARGET_DIR` (see the
+/// module doc), so `rustc` recompiles the whole workspace from scratch on
+/// every validation cycle even though nothing but the CARGO_TARGET_DIR path
+/// itself changed between sessions. `sccache` caches individual compilation
+/// units by content hash rather than by incremental-build state, so sharing
+/// it across isolated target dirs is safe (unlike sharing `target/` itself)
+/// while turning most of that repeat compilation into cache hits. Only wired
+/// in when the binary is actually on PATH -- environments without it fall
+/// back to the prior always-cold-compile behavior rather than failing.
+fn sccache_wrapper() -> Option<String> {
+    crate::runner::resolve::resolve_executable_on_path("sccache")
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 /// Stable value used in the validation-gate cache key. The concrete target
 /// path is intentionally session-specific, but the isolation policy itself is
 /// stable and should not invalidate a previously-proven gate every run.
 pub fn validation_environment_signature(artifact_root: &str) -> Vec<(String, String)> {
-    vec![(
+    let mut signature = vec![(
         "CARGO_TARGET_DIR".to_string(),
         Path::new(artifact_root)
             .join("build-cache")
@@ -29,7 +43,14 @@ pub fn validation_environment_signature(artifact_root: &str) -> Vec<(String, Str
             .join("<isolated-session>")
             .to_string_lossy()
             .into_owned(),
-    )]
+    )];
+    // Same stability reasoning as the target path above: record that the
+    // wrapper policy is "on" without baking in the concrete resolved path, so
+    // moving the sccache binary doesn't spuriously invalidate a proven gate.
+    if sccache_wrapper().is_some() {
+        signature.push(("RUSTC_WRAPPER".to_string(), "<sccache-if-present>".into()));
+    }
+    signature
 }
 
 fn session_scope(path: &Path) -> &Path {
@@ -154,10 +175,14 @@ impl ScopedCargoTarget {
     }
 
     pub fn environment(&self) -> Vec<(String, String)> {
-        vec![(
+        let mut env = vec![(
             "CARGO_TARGET_DIR".to_string(),
             self.path.to_string_lossy().into_owned(),
-        )]
+        )];
+        if let Some(wrapper) = sccache_wrapper() {
+            env.push(("RUSTC_WRAPPER".to_string(), wrapper));
+        }
+        env
     }
 }
 
@@ -398,5 +423,29 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
+    }
+
+    // Whether `sccache` happens to be on this machine's PATH varies by
+    // environment (present on the dev box, may be absent on a bare CI
+    // runner) -- rather than assume either state, assert the two places that
+    // depend on it never disagree. If the gate-hash signature claims the
+    // wrapper is active but the real environment doesn't set it (or the
+    // reverse), a proven-gate skip would run with different compiler
+    // behavior than what was actually validated.
+    #[test]
+    fn wrapper_presence_agrees_between_signature_and_real_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let guard =
+            ScopedCargoTarget::acquire(tmp.path().to_str().unwrap(), &tmp.path().join("session"))
+                .unwrap();
+        let signature_has_wrapper =
+            super::validation_environment_signature(tmp.path().to_str().unwrap())
+                .iter()
+                .any(|(key, _)| key == "RUSTC_WRAPPER");
+        let real_env_has_wrapper = guard
+            .environment()
+            .iter()
+            .any(|(key, _)| key == "RUSTC_WRAPPER");
+        assert_eq!(signature_has_wrapper, real_env_has_wrapper);
     }
 }
