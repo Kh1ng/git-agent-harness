@@ -38,6 +38,7 @@ import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService } from './registryService.js';
 import { readSettings as readManagerChatSettings, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
 import { listManagerBackends } from './managerChat/registry.js';
+import { listCommandsForProfile as listManagerChatCommands } from './managerChat/ManagerChatManager.js';
 
 const SERVER_VERSION = '0.1.0';
 
@@ -509,6 +510,22 @@ export function createServer(
     } catch (error) {
       res.status(400).json({
         error: 'Failed to update manager chat settings',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Real slash commands for the active backend, sourced live from the
+  // backend's own command registry (e.g. Hermes's ACP available-commands
+  // push) -- not something GAH invents. Powers the "/" palette.
+  app.get('/api/manager-chat/commands', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      const commands = await listManagerChatCommands(profile);
+      res.json({ commands });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load manager chat commands',
         message: error instanceof Error ? error.message : String(error)
       });
     }

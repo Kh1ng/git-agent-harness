@@ -1,13 +1,13 @@
 /**
  * Orchestrates one manager-chat conversation per GAH profile: recall memory
- * context, run a turn against the profile's configured backend (resuming
- * its session if one exists), capture the exchange back to memory. One
- * profile = one ongoing conversation per backend, matching "talk to the
- * manager for this repo" from the UI.
+ * context, run a turn against the profile's configured backend, capture the
+ * exchange back to memory. Slash commands (Hermes's real /reset, /compress,
+ * etc.) are sent through like any other message -- the backend adapter's
+ * own session dispatches them natively, GAH doesn't reinvent them.
  */
 
-import { recall, capture, flushSession } from './memoryGatewayClient.js';
-import { resolveAdapter } from './registry.js';
+import { recall, capture } from './memoryGatewayClient.js';
+import { resolveAdapter, type ManagerCommandInfo } from './registry.js';
 import { backendForProfile } from './settingsStore.js';
 
 export interface ChatTurn {
@@ -16,21 +16,13 @@ export interface ChatTurn {
   timestamp: number;
 }
 
-export interface ChatTurnResult {
-  reply: string;
-  cleared?: boolean;
-}
-
 const MAX_HISTORY_PER_PROFILE = 200;
 
-// Keyed by `${profile}::${backendId}` -- switching a profile's backend must
-// not try to resume a different backend's session id.
-const sessionIdByProfileBackend = new Map<string, string>();
 const historyByProfile = new Map<string, ChatTurn[]>();
 // Serializes turns per profile -- without this, two concurrent messages for
-// the same profile (e.g. two open browser tabs) would both read the same
-// resumeSessionId and race to spawn the backend CLI, corrupting session
-// state. One profile = one conversation, so turns must run one at a time.
+// the same profile (e.g. two open browser tabs) would both prompt the same
+// backend session at once, corrupting turn ordering. One profile = one
+// conversation, so turns must run one at a time.
 const turnQueueByProfile = new Map<string, Promise<unknown>>();
 
 function appendHistory(profile: string, turn: ChatTurn): void {
@@ -46,65 +38,44 @@ export function getHistory(profile: string): ChatTurn[] {
   return historyByProfile.get(profile) ?? [];
 }
 
-async function runClear(profile: string, backendId: string): Promise<ChatTurnResult> {
-  const flushed = await flushSession(profile);
-  sessionIdByProfileBackend.delete(`${profile}::${backendId}`);
-  historyByProfile.set(profile, []);
-  const reply = flushed
-    ? 'Chat cleared. Memory flushed and the conversation session was reset.'
-    : 'Chat cleared and the conversation session was reset, but flushing memory failed -- see server logs.';
-  return { reply, cleared: true };
-}
-
-async function runCompact(profile: string, backendId: string): Promise<ChatTurnResult> {
-  // Flush now (forces the gateway's L0->L1/L2 extraction immediately rather
-  // than waiting for its own idle timeout) then drop the live session id so
-  // the next turn starts a fresh, cheaper backend session. The visible
-  // transcript stays -- only the underlying session resets -- and recall()
-  // re-surfaces the compacted summary on the next turn as needed.
-  const flushed = await flushSession(profile);
-  sessionIdByProfileBackend.delete(`${profile}::${backendId}`);
-  const reply = flushed
-    ? 'Context compacted: memory flushed and the live session reset. Recent history stays visible; older context is now summarized in memory.'
-    : 'Tried to compact, but flushing memory failed -- see server logs. The live session was still reset.';
-  return { reply };
-}
-
-async function runTurn(profile: string, message: string): Promise<ChatTurnResult> {
+export function listCommandsForProfile(profile: string): Promise<ManagerCommandInfo[]> {
   const backendId = backendForProfile(profile);
-  const trimmed = message.trim().toLowerCase();
+  return resolveAdapter(backendId).listCommands(profile);
+}
 
-  if (trimmed === '/clear') {
-    return runClear(profile, backendId);
-  }
-  if (trimmed === '/compact') {
-    return runCompact(profile, backendId);
-  }
-
+async function runTurn(profile: string, message: string): Promise<string> {
+  const backendId = backendForProfile(profile);
   const adapter = resolveAdapter(backendId);
-  const sessionKey = `${profile}::${backendId}`;
 
-  const { context } = await recall(profile, message);
-  const prompt = context ? `Relevant context from prior conversations:\n${context}\n\nUser: ${message}` : message;
+  // Slash commands (Hermes's real /reset, /compress, etc.) must reach the
+  // backend verbatim -- its command parser only recognizes a message that
+  // *starts* with "/". Wrapping it in a "Relevant context..." prefix (as
+  // every other message gets) silently turns a real command into a plain
+  // question the model tries to answer instead of dispatching. Confirmed
+  // empirically: a wrapped "/reset" got interpreted as chat text ("What
+  // would you like me to reset?"); the bare message dispatched correctly
+  // ("Conversation history cleared.").
+  const isSlashCommand = message.trim().startsWith('/');
+  const prompt = isSlashCommand ? message : await (async () => {
+    const { context } = await recall(profile, message);
+    return context ? `Relevant context from prior conversations:\n${context}\n\nUser: ${message}` : message;
+  })();
 
-  const { sessionId, reply } = await adapter.runTurn(prompt, sessionIdByProfileBackend.get(sessionKey));
-  sessionIdByProfileBackend.set(sessionKey, sessionId);
+  const { reply } = await adapter.runTurn(profile, prompt);
 
   await capture(profile, message, reply);
-  return { reply };
+  return reply;
 }
 
-export function sendManagerChatMessage(profile: string, message: string): Promise<ChatTurnResult> {
+export function sendManagerChatMessage(profile: string, message: string): Promise<string> {
   appendHistory(profile, { role: 'user', text: message, timestamp: Date.now() });
 
   const prior = turnQueueByProfile.get(profile) ?? Promise.resolve();
   const turn = prior.catch(() => undefined).then(async () => {
     try {
-      const result = await runTurn(profile, message);
-      if (!result.cleared) {
-        appendHistory(profile, { role: 'assistant', text: result.reply, timestamp: Date.now() });
-      }
-      return result;
+      const reply = await runTurn(profile, message);
+      appendHistory(profile, { role: 'assistant', text: reply, timestamp: Date.now() });
+      return reply;
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       appendHistory(profile, { role: 'system', text: `Error: ${text}`, timestamp: Date.now() });

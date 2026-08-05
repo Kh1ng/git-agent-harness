@@ -1,19 +1,17 @@
 /**
  * Manager backend registry for the manager-chat MVP.
  *
- * Only Hermes has a real adapter today. Codex/Claude get real adapters
- * under #820/#821; this registry exists now so the UI can offer backend
- * selection without waiting on those -- picking an unimplemented backend
- * fails loudly with a clear message instead of the chat silently doing
- * nothing or falling back to a different backend than the one selected.
+ * Only Hermes has a real adapter today (via ACP -- see hermesAcpAdapter.ts).
+ * Codex/Claude get real adapters under #820/#821; this registry exists now
+ * so the UI can offer backend selection without waiting on those -- picking
+ * an unimplemented backend fails loudly with a clear message instead of the
+ * chat silently doing nothing or falling back to a different backend than
+ * the one selected.
  */
 
-import { runHermesTurn } from './hermesAdapter.js';
+import { runHermesTurn, listHermesCommands, type ManagerCommandInfo } from './hermesAcpAdapter.js';
 
-export interface ManagerTurnResult {
-  sessionId: string;
-  reply: string;
-}
+export type { ManagerCommandInfo };
 
 export interface ManagerBackendInfo {
   id: string;
@@ -22,7 +20,8 @@ export interface ManagerBackendInfo {
 }
 
 interface ManagerAdapter extends ManagerBackendInfo {
-  runTurn(message: string, resumeSessionId: string | undefined): Promise<ManagerTurnResult>;
+  runTurn(gahProfile: string, message: string): Promise<{ reply: string }>;
+  listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;
 }
 
 class NotImplementedAdapter implements ManagerAdapter {
@@ -33,10 +32,14 @@ class NotImplementedAdapter implements ManagerAdapter {
     private trackingIssue: string
   ) {}
 
-  async runTurn(): Promise<ManagerTurnResult> {
+  async runTurn(): Promise<{ reply: string }> {
     throw new Error(
       `${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}). Pick a different backend in Settings.`
     );
+  }
+
+  async listCommands(): Promise<ManagerCommandInfo[]> {
+    return [];
   }
 }
 
@@ -45,7 +48,8 @@ const REGISTRY: Record<string, ManagerAdapter> = {
     id: 'hermes',
     displayName: 'Hermes',
     implemented: true,
-    runTurn: runHermesTurn
+    runTurn: runHermesTurn,
+    listCommands: listHermesCommands
   },
   codex: new NotImplementedAdapter('codex', 'Codex', 'issue #820'),
   claude: new NotImplementedAdapter('claude', 'Claude', 'issue #821'),

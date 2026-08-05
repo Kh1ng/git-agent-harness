@@ -956,3 +956,12 @@ export interface ManagerChatSettingsUpdate {
   defaultBackend?: string;
   profileOverrides?: Record<string, string>;
 }
+
+/** A real slash command from the active backend's own command registry
+ * (e.g. Hermes's live ACP available-commands list) -- not something GAH
+ * invents itself. Powers the "/" palette in Manager Chat. */
+export interface ManagerCommandInfo {
+  name: string;
+  description: string;
+  argsHint?: string;
+}

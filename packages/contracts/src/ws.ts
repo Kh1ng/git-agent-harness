@@ -133,8 +133,6 @@ export type ServerMessage =
       requestId: string;
       profile: string;
       reply: string;
-      /** True for a /clear reply -- the client should wipe its local transcript. */
-      cleared?: boolean;
     }
   | {
       type: "manager.chat.history";
