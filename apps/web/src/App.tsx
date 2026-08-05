@@ -6,6 +6,7 @@ import { TelemetryPage } from './pages/TelemetryPage.js';
 import { QuotaPage } from './pages/QuotaPage.js';
 import { EventsPage } from './pages/EventsPage.js';
 import { SettingsPage } from './pages/SettingsPage.js';
+import { ManagerChatPage } from './pages/ManagerChatPage.js';
 import { Navbar } from './components/Navbar.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
@@ -17,7 +18,7 @@ import type { Session } from '@git-agent-harness/contracts';
 // "Reviews" is exposed inside a work item's attempt timeline (a review is
 // just a ledger entry tied to a work_id) rather than its own top-level
 // data-fetch layer. See the final report for the full rationale.
-export type Page = 'overview' | 'work' | 'telemetry' | 'quota' | 'events' | 'settings';
+export type Page = 'overview' | 'work' | 'telemetry' | 'quota' | 'events' | 'settings' | 'chat';
 
 export function App() {
   const [currentPage, setCurrentPage] = useState<Page>('overview');
@@ -36,6 +37,8 @@ export function App() {
         return <EventsPage />;
       case 'settings':
         return <SettingsPage />;
+      case 'chat':
+        return <ManagerChatPage />;
       case 'overview':
       default:
         return (
