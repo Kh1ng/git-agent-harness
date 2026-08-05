@@ -4,13 +4,28 @@
 
 import { ProviderKind, SessionId, ProviderInstanceId } from "@git-agent-harness/contracts";
 
+// crypto.randomUUID() only exists in a secure context (https:// or
+// localhost) -- browsers strip the whole `crypto` global on plain http://
+// LAN access. Fall back to a non-cryptographic UUID v4 so ID generation
+// keeps working over a bare LAN IP; these IDs are never security-sensitive.
+function uuidV4(): string {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 // Generate unique IDs
 export function generateSessionId(): SessionId {
-  return `session_${Date.now()}_${crypto.randomUUID()}`;
+  return `session_${Date.now()}_${uuidV4()}`;
 }
 
 export function generateRequestId(): string {
-  return `req_${Date.now()}_${crypto.randomUUID()}`;
+  return `req_${Date.now()}_${uuidV4()}`;
 }
 
 export function generateProviderInstanceId(kind: ProviderKind, index: number = 0): ProviderInstanceId {
