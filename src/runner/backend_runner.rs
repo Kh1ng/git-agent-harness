@@ -105,6 +105,27 @@ impl BackendRunner for VibeRunner {
     }
 }
 
+pub struct OpencodeRunner;
+
+impl BackendRunner for OpencodeRunner {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Opencode
+    }
+
+    fn run(&self, ctx: &RunContext) -> Result<RunResult> {
+        crate::runner::run_opencode_with_executable(
+            ctx.executable,
+            ctx.worktree,
+            ctx.task,
+            ctx.session_dir,
+            ctx.model,
+            ctx.extra_args,
+            ctx.env_vars,
+            ctx.idle_timeout_seconds,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +244,43 @@ mod tests {
         assert!(argv.contains(&"--custom-flag".to_string()));
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("VIBE_ACTIVE_MODEL=devstral-small"));
+    }
+
+    #[test]
+    fn opencode_runner_reports_opencode_kind() {
+        assert_eq!(OpencodeRunner.kind(), BackendKind::Opencode);
+    }
+
+    #[test]
+    fn opencode_runner_matches_the_free_function_it_wraps() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+        let extra_args = vec!["--custom-flag".to_string()];
+
+        let ctx = RunContext {
+            executable: Path::new("opencode"),
+            worktree: &f.worktree,
+            task: "the opencode task",
+            session_dir: &f.session_dir,
+            model: Some("glm-4.6"),
+            llm: None,
+            extra_args: &extra_args,
+            env_vars: &envs,
+            idle_timeout_seconds: 300,
+            print_timeout_seconds: None,
+        };
+
+        let result = OpencodeRunner.run(&ctx).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "run");
+        assert!(argv.contains(&"--auto".to_string()));
+        assert!(argv.contains(&"the opencode task".to_string()));
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"glm-4.6".to_string()));
+        assert!(argv.contains(&"--custom-flag".to_string()));
     }
 }

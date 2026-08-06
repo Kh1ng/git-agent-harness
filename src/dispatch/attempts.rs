@@ -481,23 +481,27 @@ pub(super) fn run_backend_with_reserved_route(
             idle_timeout_seconds: profile.vibe_idle_timeout_seconds(),
             print_timeout_seconds: None,
         }),
-        crate::backend_kind::BackendKind::Opencode => runner::run_opencode_with_executable(
-            &executable,
-            wt,
-            task,
-            session_dir,
-            effective_model,
-            &profile.opencode_args,
-            &env_vars,
-            effective_model
-                .and_then(|m| {
-                    profile
-                        .opencode_idle_timeout_seconds_by_model
-                        .get(m)
-                        .copied()
-                })
-                .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
-        ),
+        crate::backend_kind::BackendKind::Opencode => {
+            runner::OpencodeRunner.run(&runner::RunContext {
+                executable: &executable,
+                worktree: wt,
+                task,
+                session_dir,
+                model: effective_model,
+                llm: None,
+                extra_args: &profile.opencode_args,
+                env_vars: &env_vars,
+                idle_timeout_seconds: effective_model
+                    .and_then(|m| {
+                        profile
+                            .opencode_idle_timeout_seconds_by_model
+                            .get(m)
+                            .copied()
+                    })
+                    .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
+                print_timeout_seconds: None,
+            })
+        }
         crate::backend_kind::BackendKind::Openhands => runner::run_openhands_with_executable(
             &executable,
             wt,
