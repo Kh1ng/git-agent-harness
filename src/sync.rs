@@ -208,13 +208,16 @@ fn fetch_mrs_for_scope(
     scope: MrFetchScope,
     filter_gah_branches: bool,
 ) -> Result<Vec<SyncMr>> {
-    let mut mrs = match profile.provider.as_str() {
-        "github" if scope == MrFetchScope::Active => {
+    use crate::provider_kind::ProviderKind;
+    let mut mrs = match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Github) if scope == MrFetchScope::Active => {
             repository::fetch_active_github_mrs(profile, filter_gah_branches)
         }
-        "github" => repository::fetch_historical_github_mrs(profile, filter_gah_branches),
-        "gitlab" => gitlab_mrs(profile, scope, filter_gah_branches),
-        other => anyhow::bail!("unsupported provider: {}", other),
+        Ok(ProviderKind::Github) => {
+            repository::fetch_historical_github_mrs(profile, filter_gah_branches)
+        }
+        Ok(ProviderKind::Gitlab) => gitlab_mrs(profile, scope, filter_gah_branches),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }?;
     if scope == MrFetchScope::Active {
         mrs.retain(|mr| {
