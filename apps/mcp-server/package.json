@@ -1,0 +1,32 @@
+{
+  "name": "gah-mcp-server",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/bin.js",
+  "bin": {
+    "gah-mcp-server": "./dist/bin.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx --watch src/bin.ts",
+    "build": "tsc",
+    "test": "tsx --test src/*.test.ts",
+    "start": "node dist/bin.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

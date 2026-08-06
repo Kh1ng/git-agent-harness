@@ -21,6 +21,7 @@
     { "path": "./apps/server" },
     { "path": "./apps/web" },
     { "path": "./apps/desktop" },
+    { "path": "./apps/mcp-server" },
     { "path": "./packages/contracts" },
     { "path": "./packages/shared" }
   ]
