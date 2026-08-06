@@ -509,7 +509,7 @@ export function createServer(
         typeof req.body?.profileOverrides === 'object' && req.body.profileOverrides !== null
           ? req.body.profileOverrides
           : current.profileOverrides;
-      writeManagerChatSettings({ defaultBackend, profileOverrides });
+      writeManagerChatSettings({ defaultBackend, profileOverrides, modelOverrides: current.modelOverrides });
       res.json({ success: true });
     } catch (error) {
       res.status(400).json({

@@ -8,7 +8,7 @@
 
 import { recall, capture, flushSession } from './memoryGatewayClient.js';
 import { resolveAdapter, type ManagerCommandInfo, type ManagerModelInfo } from './registry.js';
-import { backendForProfile } from './settingsStore.js';
+import { backendForProfile, modelOverrideForProfile, setModelOverrideForProfile } from './settingsStore.js';
 
 // Backend-native command names that mean "compact/clear this session"
 // (Hermes: /reset, /compress; Codex/Claude ACP bridges: /compact, /clear).
@@ -55,14 +55,31 @@ export function listCommandsForProfile(profile: string): Promise<ManagerCommandI
   return resolveAdapter(backendId).listCommands(profile);
 }
 
-export function listModelsForProfile(profile: string): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }> {
+// The ACP connection itself only remembers the current model in memory
+// (ProfileConnection.currentModelId) -- if that connection is ever recreated
+// (backend crash, quota error, server restart), a fresh session reverts to
+// the backend's own default and the user's choice is silently lost. Restore
+// a persisted override here, right after fetching whatever the (possibly
+// fresh) connection reports as current, rather than trusting the connection
+// to remember across its own lifetime.
+export async function listModelsForProfile(
+  profile: string
+): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }> {
   const backendId = backendForProfile(profile);
-  return resolveAdapter(backendId).listModels(profile);
+  const adapter = resolveAdapter(backendId);
+  const { models, currentModelId } = await adapter.listModels(profile);
+  const override = modelOverrideForProfile(profile, backendId);
+  if (override && override !== currentModelId && models.some((m) => m.id === override)) {
+    await adapter.setModel(profile, override);
+    return { models, currentModelId: override };
+  }
+  return { models, currentModelId };
 }
 
-export function setModelForProfile(profile: string, modelId: string): Promise<void> {
+export async function setModelForProfile(profile: string, modelId: string): Promise<void> {
   const backendId = backendForProfile(profile);
-  return resolveAdapter(backendId).setModel(profile, modelId);
+  await resolveAdapter(backendId).setModel(profile, modelId);
+  setModelOverrideForProfile(profile, backendId, modelId);
 }
 
 async function runTurn(profile: string, message: string): Promise<string> {
