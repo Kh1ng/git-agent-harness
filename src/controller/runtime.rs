@@ -1360,6 +1360,7 @@ default_target_branch = "main"
             implementation_intake_paused: false,
             backend_configured: std::collections::HashMap::new(),
             backend_instances: vec![],
+            export_health: Default::default(),
         }
     }
 

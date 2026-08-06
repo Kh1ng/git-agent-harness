@@ -332,7 +332,7 @@ fn build_pm_plan_task(profile: &Profile, ctx: &PmPreflight, target: &str) -> Res
          \"difficulty\": \"easy|medium|hard\",\
          \"risk\": \"low|medium|high\",\
          \"execution_disposition\": \"autonomous|supervised|human_required\",\
-         \"recommended_routing\": {{\"capability\": \"edit|plan|review|research\", \"min_tier\": \"standard|strong\"}},\
+         \"recommended_routing\": {{\"capability\": \"edit|plan|review|investigate\", \"min_tier\": \"standard|strong\"}},\
          \"affected_areas\": [string],\
          \"affected_files\": [string],\
          \"acceptance_criteria\": [string],\
@@ -1052,7 +1052,7 @@ fn validate_optional_bounded_list(
 fn validate_routing(routing: &RecommendedRouting, title: &str) -> Result<()> {
     if !matches!(
         routing.capability.as_str(),
-        "edit" | "plan" | "review" | "research"
+        "edit" | "plan" | "review" | "investigate"
     ) {
         anyhow::bail!(
             "work packet '{}' has invalid recommended_routing.capability '{}'",

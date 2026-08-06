@@ -59,6 +59,27 @@ export interface Observations {
   ledger: ObservationStatus;
 }
 
+/** Issue #230: health of the automatic post-attempt telemetry export
+ * pipeline. Distinguishes never-run, healthy, stale (no recent success),
+ * retrying (a recent failure within its own retry budget), and failed
+ * (retries exhausted, needs operator attention). */
+export type ExportHealthStatusKind = 'never_run' | 'healthy' | 'stale' | 'retrying' | 'failed';
+
+export interface ExportHealth {
+  status: ExportHealthStatusKind;
+  schema_version: number;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  last_error_class: string | null;
+  /** Latest ledger entry timestamp reflected in a successful export. */
+  exported_watermark: string | null;
+  /** Cumulative count of telemetry records ever exported. */
+  record_count: number;
+  /** True when the most recent export attempt failed and a retry is owed. */
+  retry_pending: boolean;
+}
+
 export type AvailabilityScopeKind = 'backend_wide' | 'model_specific' | 'quota_pool';
 
 export interface AvailabilityScope {
@@ -362,6 +383,9 @@ export interface StatusSnapshot {
   /** Effective normalized instance identities. Optional while schema-v1
    * clients may still be connected to an older CLI. */
   backend_instances?: BackendInstanceSummary[];
+  /** Issue #230: automatic post-attempt telemetry export health. Optional
+   * while schema-v1 clients may still be connected to an older CLI. */
+  export_health?: ExportHealth;
 }
 
 // ---------------------------------------------------------------------------
@@ -904,4 +928,55 @@ export interface LedgerEntry {
   /** initial | post_review_repair | review | stuck_loop_gate */
   dispatch_reason?: string | null;
   usage: LedgerUsage;
+}
+
+// ---------------------------------------------------------------------------
+// Manager chat backend selection (apps/server-only preference, separate
+// from ConfigSummary.current_manager -- that field drives the autonomous
+// manager-wake notification path, this drives which backend answers the
+// interactive Manager Chat page).
+// ---------------------------------------------------------------------------
+
+export interface ManagerBackendInfo {
+  id: string;
+  displayName: string;
+  /** False for backends listed but not wired up yet (see #820/#821). */
+  implemented: boolean;
+}
+
+export interface ManagerChatSettingsSummary {
+  defaultBackend: string;
+  profileOverrides: Record<string, string>;
+  availableBackends: ManagerBackendInfo[];
+}
+
+/** Payload for POST /api/manager-chat/settings. Omitted fields are left
+ * unchanged server-side. */
+export interface ManagerChatSettingsUpdate {
+  defaultBackend?: string;
+  profileOverrides?: Record<string, string>;
+}
+
+/** A real slash command from the active backend's own command registry
+ * (e.g. Hermes's live ACP available-commands list) -- not something GAH
+ * invents itself. Powers the "/" palette in Manager Chat. */
+export interface ManagerCommandInfo {
+  name: string;
+  description: string;
+  argsHint?: string;
+}
+
+/** A real selectable model from the active backend's own ACP session state
+ * (session/new's `models` field, ACP's session/set_model method) -- not a
+ * list GAH maintains. Not every backend exposes this (Claude's ACP bridge
+ * doesn't today); an empty list means no model picker for that backend. */
+export interface ManagerModelInfo {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface ManagerModelsSummary {
+  models: ManagerModelInfo[];
+  currentModelId: string | null;
 }

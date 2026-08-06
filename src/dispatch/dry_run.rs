@@ -3,6 +3,7 @@ use super::identity::timestamp;
 use super::issues::parse_ticket_metadata;
 use super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
+use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
 use crate::routing::{self, RouteDecision, RouteRequest, TaskRoutingContext};
 use anyhow::Result;
@@ -28,8 +29,8 @@ pub(in crate::dispatch) fn dry_run(
         cfg.defaults.worktree_base,
         branch.replace('/', "-")
     );
-    match args.mode.as_str() {
-        "improve" | "fix" => {
+    match JobKind::parse(&args.mode) {
+        Ok(JobKind::Improve | JobKind::Fix) => {
             let route = dry_run_route(cfg, profile, &args.mode, args);
             if let Some(name) = args.oh_profile.as_deref() {
                 println!(
@@ -88,7 +89,7 @@ pub(in crate::dispatch) fn dry_run(
                 route.as_ref().map(|r| r.effective_backend.as_str()).unwrap_or(args.backend.as_str())
             );
         }
-        "pm" => {
+        Ok(JobKind::Pm) => {
             if args.target.is_empty() {
                 println!("Steps: git log → test count → CI check → write pm-report.md")
             } else {
@@ -108,7 +109,7 @@ pub(in crate::dispatch) fn dry_run(
                 )
             }
         }
-        "review" => {
+        Ok(JobKind::Review) => {
             let route = dry_run_route(cfg, profile, "review", args);
             println!("Backend:      {}", args.backend);
             if let Some(route) = &route {
@@ -130,11 +131,19 @@ pub(in crate::dispatch) fn dry_run(
             }
             println!("Steps: fetch target/source refs → explicit diff → bundle → routed review");
         }
-        "experiment" => println!(
+        Ok(JobKind::Experiment) => println!(
             "Steps: worktree → {} backend (research prompt) → collect artifacts → LLM judge → commit → draft MR",
             args.backend
         ),
-        other => println!("mode '{}': not yet implemented", other),
+        Ok(kind @ (JobKind::Research | JobKind::Audit)) => {
+            println!("Backend:      {}", args.backend);
+            println!(
+                "Steps: {} backend (read-only) → self-reports findings via `gh issue create`, if any",
+                kind
+            );
+            println!("No worktree, no commit, no push, no MR.");
+        }
+        Err(_) => println!("mode '{}': not yet implemented", args.mode),
     }
     println!("\n## Safety\n- No pushes, no MRs, no provider calls (dry run)");
     Ok(())
@@ -146,7 +155,11 @@ fn dry_run_route(
     mode: &str,
     args: &DispatchArgs,
 ) -> Option<RouteDecision> {
-    let ticket_meta = if matches!(mode, "improve" | "fix") && !args.target.is_empty() {
+    let ticket_meta = if matches!(
+        JobKind::parse(mode),
+        Ok(JobKind::Improve) | Ok(JobKind::Fix)
+    ) && !args.target.is_empty()
+    {
         parse_ticket_metadata(Path::new(&args.target))
             .ok()
             .flatten()

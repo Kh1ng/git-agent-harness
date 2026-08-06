@@ -12,6 +12,7 @@ import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
+import { sendManagerChatMessage, getHistory as getManagerChatHistory } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -25,7 +26,8 @@ import type {
   AvailabilityScope,
   Blocker,
   StatusError,
-  RecentLedgerSummary
+  RecentLedgerSummary,
+  DependencyBlocker
 } from '@git-agent-harness/contracts';
 
 // Session store for tracking active WebSocket connections
@@ -181,6 +183,14 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
       await handleProviderList(ws, message, requestId);
       break;
       
+    case 'manager.chat.send':
+      await handleManagerChatSend(ws, message, requestId);
+      break;
+
+    case 'manager.chat.historyRequest':
+      await handleManagerChatHistoryRequest(ws, message, requestId);
+      break;
+
     case 'ping':
       // Respond to ping
       ws.send(JSON.stringify({
@@ -251,6 +261,32 @@ async function handleSendCommand(ws: WebSocket, message: Extract<ClientMessage, 
   }
 }
 
+async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.send' }>, requestId: string) {
+  try {
+    const reply = await sendManagerChatMessage(message.profile, message.message);
+
+    const payload: ServerMessage = {
+      type: 'manager.chat.reply',
+      requestId,
+      profile: message.profile,
+      reply
+    };
+    ws.send(JSON.stringify(payload));
+  } catch (error) {
+    ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
+  }
+}
+
+async function handleManagerChatHistoryRequest(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.historyRequest' }>, requestId: string) {
+  const payload: ServerMessage = {
+    type: 'manager.chat.history',
+    requestId,
+    profile: message.profile,
+    turns: getManagerChatHistory(message.profile)
+  };
+  ws.send(JSON.stringify(payload));
+}
+
 async function handleProviderRefresh(ws: WebSocket, message: Extract<ClientMessage, { type: 'provider.refresh' }>, requestId: string) {
   try {
     const providerRegistry = getProviderRegistry();
@@ -311,6 +347,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
     let blockers: Blocker[] = [];
     let constraints: Blocker[] = [];
     let errors: StatusError[] = [];
+    let dependencyBlockers: DependencyBlocker[] = [];
     // recent_ledger is a single nullable summary, not an array -- it was
     // previously mistyped as unknown[] here (silently accepted at runtime
     // by JS, but wrong; DashboardPage already correctly treats it as an
@@ -328,6 +365,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
       blockers = status.blockers;
       constraints = status.constraints;
       errors = status.errors;
+      dependencyBlockers = status.dependency_blockers ?? [];
       recentLedger = status.recent_ledger;
       backendConfigured = status.backend_configured ?? {};
     } catch (statusError) {
@@ -341,6 +379,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
       blockers?: Blocker[];
       constraints?: Blocker[];
       errors?: StatusError[];
+      dependencyBlockers?: DependencyBlocker[];
       recentLedger?: RecentLedgerSummary | null;
       backendConfigured?: Record<string, boolean>;
     } = {
@@ -355,6 +394,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
       blockers,
       constraints,
       errors,
+      dependencyBlockers,
       recentLedger,
       backendConfigured
     };

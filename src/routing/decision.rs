@@ -15,6 +15,7 @@ use super::types::{
 };
 use crate::availability::{self, AvailabilityDecision, BlockScope};
 use crate::config::{Defaults, Profile, RoutingPolicy};
+use crate::job_kind::{JobFamily, JobKind};
 use crate::ledger::BackendUsageSummary;
 use crate::runner;
 use anyhow::Result;
@@ -25,6 +26,10 @@ use time::OffsetDateTime;
 
 #[cfg(test)]
 mod tests;
+
+fn is_review_mode(mode: &str) -> bool {
+    JobKind::parse(mode).map(|kind| kind.family()) == Ok(JobFamily::Review)
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct RouteEvaluation<'a> {
@@ -422,9 +427,9 @@ where
                 reason,
                 &skipped,
                 selected.backend(),
-                req.mode == "review",
+                is_review_mode(req.mode),
             );
-            if req.mode == "review" {
+            if is_review_mode(req.mode) {
                 confidence_impact = Some("low".into());
                 human_required = true;
             }
@@ -489,7 +494,7 @@ where
             req.session_id,
             summary,
         ) {
-            if req.mode == "review" && review_fallback_allowed {
+            if is_review_mode(req.mode) && review_fallback_allowed {
                 let fallback = review_fallback_backend(defaults, profile, backend_available)
                     .unwrap_or_else(|| backend.clone());
                 if fallback != backend {
@@ -502,7 +507,7 @@ where
                         model = review_fallback_model(&effective_routing).map(str::to_string);
                     }
                 }
-            } else if req.mode != "review" && allow_impl_fallback {
+            } else if !is_review_mode(req.mode) && allow_impl_fallback {
                 let fallback = any_available_backend(req.mode, backend_available)
                     .unwrap_or_else(|| backend.clone());
                 if fallback != backend {
@@ -550,9 +555,13 @@ where
 
     if !same_destination(&selected, &primary) {
         fallback_used = true;
-        reason =
-            append_availability_reason(reason, &skipped, selected.backend(), req.mode == "review");
-        if req.mode == "review" {
+        reason = append_availability_reason(
+            reason,
+            &skipped,
+            selected.backend(),
+            is_review_mode(req.mode),
+        );
+        if is_review_mode(req.mode) {
             confidence_impact.get_or_insert_with(|| "low".into());
             human_required = true;
         }
@@ -608,7 +617,7 @@ where
     let exclude_attempted = is_genuine_agent_failure(req.last_failure_class)
         || !runtime.attempted.is_empty()
         || !runtime.dispatch_attempted.is_empty();
-    let review_fallback = if req.mode == "review" && allow_review_fallback {
+    let review_fallback = if is_review_mode(req.mode) && allow_review_fallback {
         review_fallback_backend(defaults, profile, backend_available)
     } else {
         None
@@ -678,7 +687,7 @@ where
         ));
     }
 
-    let mut routing_reason = if req.mode == "review" {
+    let mut routing_reason = if is_review_mode(req.mode) {
         "explicit CLI override unavailable; review fallback".to_string()
     } else {
         "explicit CLI override unavailable; implementation fallback".to_string()
@@ -687,7 +696,7 @@ where
         routing_reason,
         &skipped,
         selected.backend(),
-        req.mode == "review",
+        is_review_mode(req.mode),
     );
 
     let routing_diagnostics = Some(build_routing_diagnostics(
@@ -703,12 +712,12 @@ where
             .with_request(requested_backend, requested_model),
         routing_reason,
         true,
-        if req.mode == "review" {
+        if is_review_mode(req.mode) {
             Some("low".into())
         } else {
             Some("medium".into())
         },
-        req.mode == "review",
+        is_review_mode(req.mode),
         routing_diagnostics,
     ))
 }

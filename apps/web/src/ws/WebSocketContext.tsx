@@ -14,7 +14,8 @@ import type {
   Blocker,
   StatusError,
   RecentLedgerSummary,
-  ControllerActivity
+  ControllerActivity,
+  DependencyBlocker
 } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 
@@ -45,6 +46,7 @@ type WebSocketContextType = {
   availability: AvailabilityScope[];
   blockers: Blocker[];
   constraints: Blocker[];
+  dependencyBlockers: DependencyBlocker[];
   errors: StatusError[];
   recentLedger: RecentLedgerSummary | null;
   controllerActivity: ControllerActivity[];
@@ -95,6 +97,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [availability, setAvailability] = useState<AvailabilityScope[]>([]);
   const [blockers, setBlockers] = useState<Blocker[]>([]);
   const [constraints, setConstraints] = useState<Blocker[]>([]);
+  const [dependencyBlockers, setDependencyBlockers] = useState<DependencyBlocker[]>([]);
   const [errors, setErrors] = useState<StatusError[]>([]);
   const [recentLedger, setRecentLedger] = useState<RecentLedgerSummary | null>(null);
   const [controllerActivity, setControllerActivity] = useState<ControllerActivity[]>([]);
@@ -181,14 +184,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
                 setProviders(message.serverProviderCatalog.providers);
               }
 
-              if (message.profile) setProfile(message.profile);
-              if (message.mergeRequests) setMergeRequests(message.mergeRequests);
-              if (message.availability) setAvailability(message.availability);
-              if (message.blockers) setBlockers(message.blockers);
-              if (message.constraints) setConstraints(message.constraints);
-              if (message.errors) setErrors(message.errors);
+              if (message.profile !== undefined) setProfile(message.profile);
+              if (message.mergeRequests !== undefined) setMergeRequests(message.mergeRequests);
+              if (message.availability !== undefined) setAvailability(message.availability);
+              if (message.blockers !== undefined) setBlockers(message.blockers);
+              if (message.constraints !== undefined) setConstraints(message.constraints);
+              if (message.dependencyBlockers !== undefined) setDependencyBlockers(message.dependencyBlockers);
+              if (message.errors !== undefined) setErrors(message.errors);
               if (message.recentLedger !== undefined) setRecentLedger(message.recentLedger);
-              if (message.backendConfigured) setBackendConfigured(message.backendConfigured);
+              if (message.backendConfigured !== undefined) setBackendConfigured(message.backendConfigured);
               break;
 
             case 'session.started':
@@ -341,6 +345,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     availability,
     blockers,
     constraints,
+    dependencyBlockers,
     errors,
     recentLedger,
     controllerActivity,

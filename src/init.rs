@@ -110,10 +110,14 @@ default_target_branch = \"{}\"\n",
 }
 
 fn print_secret_hint(provider: &str) {
-    match provider {
-        "gitlab" => println!("Set a token in GITLAB_PAT or GITLAB_PAT2 before dispatch."),
-        "github" => println!("Set a token in GITHUB_TOKEN or GH_TOKEN before dispatch."),
-        _ => println!("Set provider credentials in the environment before dispatch."),
+    match crate::provider_kind::ProviderKind::parse(provider) {
+        Ok(crate::provider_kind::ProviderKind::Gitlab) => {
+            println!("Set a token in GITLAB_PAT or GITLAB_PAT2 before dispatch.")
+        }
+        Ok(crate::provider_kind::ProviderKind::Github) => {
+            println!("Set a token in GITHUB_TOKEN or GH_TOKEN before dispatch.")
+        }
+        Err(_) => println!("Set provider credentials in the environment before dispatch."),
     }
 }
 

@@ -5,6 +5,7 @@ use super::issues::{
 };
 use super::text::utf8_safe_prefix;
 use crate::config::{GahConfig, Profile};
+use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
 use crate::models::Candidate;
 use crate::models::CandidateArtifact;
@@ -111,32 +112,34 @@ pub(super) fn build_task(
         }
     }
 
-    let instruction = match mode {
-        "fix" => {
-            "Fix the specific issue described in the Focus section below.\n\
+    let instruction = match JobKind::parse(mode) {
+        Ok(JobKind::Fix) => "Fix the specific issue described in the Focus section below.\n\
              Run the relevant tests to confirm the fix. All tests in the test suite must pass.\n\
              Do not push or create MRs."
-        }
-        "experiment" => {
+            .to_string(),
+        Ok(JobKind::Experiment) => {
             "This is a research/experiment task. Write scripts, generate Jupyter notebooks, \
              CSV exports, plots, or markdown reports directly in the working directory.\n\
              Do not worry about breaking unrelated tests. Prioritize producing observable \
              output files (*.ipynb, *.html, *.csv, *.png, *.md) over clean commits.\n\
              Do not push or create MRs."
+                .to_string()
         }
+        Ok(JobKind::Research) => research_instruction(),
+        Ok(JobKind::Audit) => audit_instruction(&profile.repo),
         _ if !target.is_empty() => {
             "Implement ONLY the specific ticket described in the Focus section below. \
              Ignore any other backlog items, priorities, or tickets mentioned in background \
              context -- those are not additional work to pick up.\n\
              Run tests if a test command is available and ensure they pass.\n\
              Do not push or create MRs."
+                .to_string()
         }
-        _ => {
-            "Select and implement the highest-priority improvement from the backlog, \
+        _ => "Select and implement the highest-priority improvement from the backlog, \
              recent CI failures, or test gaps.\n\
              Run tests if a test command is available and ensure they pass.\n\
              Do not push or create MRs."
-        }
+            .to_string(),
     };
 
     let mut task = format!(
@@ -156,28 +159,65 @@ pub(super) fn build_task(
     task
 }
 
+/// `research`/`audit` are read-only, investigation-only job kinds (#848):
+/// no worktree mutation, no commit, no PR. Findings are self-reported by the
+/// backend via its own `gh`/`glab` CLI access -- the same way improve/fix
+/// backends self-push branches -- rather than GAH orchestrating issue
+/// creation in Rust.
+fn research_instruction() -> String {
+    "This is a READ-ONLY research/investigation task. Do not modify any files, do not commit, \
+     do not push, and do not create a PR or MR.\n\
+     Investigate the question or topic described in the Focus section below. If you find \
+     something worth reporting (a bug, a risk, a concrete actionable insight), file it \
+     yourself as a new GitHub issue using the `gh issue create` CLI (`glab issue create` on \
+     GitLab) with a clear title and findings summary. If you find nothing actionable, do not \
+     create an issue -- state your conclusion in your final summary instead."
+        .to_string()
+}
+
+/// Dependabot is checked first as a cheap, structured data source before any
+/// LLM-driven code reading. `repo` is interpolated directly (not left for
+/// the backend to infer) since GAH already knows it exactly.
+fn audit_instruction(repo: &str) -> String {
+    format!(
+        "This is a READ-ONLY audit task. Do not modify any files, do not commit, do not push, \
+         and do not create a PR or MR.\n\
+         Investigate the codebase for:\n\
+         1. Known dependency vulnerabilities -- start by running `gh api repos/{repo}/dependabot/alerts` \
+            to pull any GitHub Dependabot findings. Note plainly if Dependabot is not enabled or the \
+            call fails, then continue with the checks below regardless.\n\
+         2. Dead or unused code.\n\
+         3. Unnecessary complexity that could be simplified.\n\n\
+         Document every real finding as a new GitHub issue via `gh issue create` (`glab issue \
+         create` on GitLab) -- one issue per distinct finding, or a single issue grouping closely \
+         related findings; use your judgment. If a category has nothing actionable, say so in \
+         your final summary; do not create an issue for a clean bill of health."
+    )
+}
+
 /// Build task with issue details for the Focus section
 fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &IssueDetails) -> String {
-    let instruction = match mode {
-        "fix" => {
-            "Fix the specific issue described in the Focus section below.\n\
+    let instruction = match JobKind::parse(mode) {
+        Ok(JobKind::Fix) => "Fix the specific issue described in the Focus section below.\n\
              Run the relevant tests to confirm the fix. All tests in the test suite must pass.\n\
              Do not push or create MRs."
-        }
-        "experiment" => {
+            .to_string(),
+        Ok(JobKind::Experiment) => {
             "This is a research/experiment task. Write scripts, generate Jupyter notebooks, \
              CSV exports, plots, or markdown reports directly in the working directory.\n\
              Do not worry about breaking unrelated tests. Prioritize producing observable \
              output files (*.ipynb, *.html, *.csv, *.png, *.md) over clean commits.\n\
              Do not push or create MRs."
+                .to_string()
         }
-        _ => {
-            "Implement ONLY the specific ticket described in the Focus section below. \
+        Ok(JobKind::Research) => research_instruction(),
+        Ok(JobKind::Audit) => audit_instruction(&profile.repo),
+        _ => "Implement ONLY the specific ticket described in the Focus section below. \
              Ignore any other backlog items, priorities, or tickets mentioned in background \
              context -- those are not additional work to pick up.\n\
              Run tests if a test command is available and ensure they pass.\n\
              Do not push or create MRs."
-        }
+            .to_string(),
     };
 
     let mut task = format!(
@@ -556,12 +596,12 @@ pub(super) fn format_candidate_task(
 
     append_project_brief(&mut out, profile);
 
-    let closing = match mode {
-        "fix" => {
+    let closing = match JobKind::parse(mode) {
+        Ok(JobKind::Fix) => {
             "Fix the code to satisfy every acceptance criterion above.\n\
              Run the verification steps to confirm. All tests must pass. Do not push or create MRs.\n"
         }
-        "experiment" => {
+        Ok(JobKind::Experiment) => {
             "This is a research task. Satisfy the acceptance criteria by producing output files \
              (*.ipynb, *.html, *.csv, *.png, *.md). Do not push or create MRs.\n"
         }

@@ -1,5 +1,6 @@
 use super::command::which;
 use super::DispatchArgs;
+use crate::backend_kind::BackendKind;
 use crate::config::{self, GahConfig, Profile};
 use crate::controller::HumanRequiredReason;
 use crate::ledger::{self, LedgerEntry};
@@ -8,6 +9,7 @@ use crate::routing::{
     self, CandidateIdentity, RouteDecision, RouteError, RouteRequest, RoutingRuntimeState,
     TaskRoutingContext,
 };
+use crate::runner::BackendRunner;
 use crate::usage_attribution::{normalize_attempt_usage, UsageAttribution};
 use crate::{runner, usage, worktree};
 use anyhow::{Context, Result};
@@ -68,15 +70,16 @@ pub(super) fn resolve_llm(
         });
     }
     // Check profile-level mode-specific override, then global default
-    let profile_model =
-        config::get_profile(cfg, &args.profile)
-            .ok()
-            .and_then(|p| match args.mode.as_str() {
-                "improve" | "fix" => p.model_improve.clone(),
-                "pm" => p.model_pm.clone(),
-                "review" => p.model_review.clone(),
-                _ => None,
-            });
+    let profile_model = config::get_profile(cfg, &args.profile).ok().and_then(|p| {
+        match crate::job_kind::JobKind::parse(&args.mode) {
+            Ok(crate::job_kind::JobKind::Improve | crate::job_kind::JobKind::Fix) => {
+                p.model_improve.clone()
+            }
+            Ok(crate::job_kind::JobKind::Pm) => p.model_pm.clone(),
+            Ok(crate::job_kind::JobKind::Review) => p.model_review.clone(),
+            _ => None,
+        }
+    });
     let cloud = args.backend == "cloud-coder";
     Ok(runner::LlmConfig {
         base_url: cfg.defaults.llm_base_url(),
@@ -426,59 +429,72 @@ pub(super) fn run_backend_with_reserved_route(
             seconds.to_string(),
         ));
     }
-    let result = match runner_kind {
-        "codex" => runner::run_codex_with_executable(
-            &executable,
-            wt,
+    let backend_kind = match BackendKind::parse(runner_kind) {
+        Ok(kind) => kind,
+        Err(_) => anyhow::bail!("unsupported runner kind '{runner_kind}' for backend '{backend}'"),
+    };
+    let result = match backend_kind {
+        BackendKind::Codex => runner::CodexRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
             task,
             session_dir,
-            effective_model,
-            &profile.codex_args,
-            &env_vars,
-            profile.codex_idle_timeout_seconds(),
-        ),
-        "claude" => runner::run_claude_with_executable(
-            &executable,
-            wt,
+            model: effective_model,
+            llm: None,
+            extra_args: &profile.codex_args,
+            env_vars: &env_vars,
+            idle_timeout_seconds: profile.codex_idle_timeout_seconds(),
+            print_timeout_seconds: None,
+        }),
+        BackendKind::Claude => runner::ClaudeRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
             task,
             session_dir,
-            effective_model,
-            &profile.claude_args,
-            &env_vars,
-            profile.claude_idle_timeout_seconds(),
-        ),
-        "agy" => runner::run_agy_with_executable(
-            &executable,
-            wt,
+            model: effective_model,
+            llm: None,
+            extra_args: &profile.claude_args,
+            env_vars: &env_vars,
+            idle_timeout_seconds: profile.claude_idle_timeout_seconds(),
+            print_timeout_seconds: None,
+        }),
+        BackendKind::Agy => runner::AgyRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
             task,
             session_dir,
-            llm,
-            &env_vars,
-            profile
+            model: None,
+            llm: Some(llm),
+            extra_args: &[],
+            env_vars: &env_vars,
+            idle_timeout_seconds: profile.agy_idle_timeout_seconds(),
+            print_timeout_seconds: profile
                 .agy_print_timeout_seconds
                 .get(llm.model.as_str())
                 .copied(),
-            profile.agy_idle_timeout_seconds(),
-        ),
-        "vibe" => runner::run_vibe_with_executable(
-            &executable,
-            wt,
+        }),
+        BackendKind::Vibe => runner::VibeRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
             task,
             session_dir,
-            effective_model,
-            &profile.vibe_args,
-            &env_vars,
-            profile.vibe_idle_timeout_seconds(),
-        ),
-        "opencode" => runner::run_opencode_with_executable(
-            &executable,
-            wt,
+            model: effective_model,
+            llm: None,
+            extra_args: &profile.vibe_args,
+            env_vars: &env_vars,
+            idle_timeout_seconds: profile.vibe_idle_timeout_seconds(),
+            print_timeout_seconds: None,
+        }),
+        BackendKind::Opencode => runner::OpencodeRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
             task,
             session_dir,
-            effective_model,
-            &profile.opencode_args,
-            &env_vars,
-            effective_model
+            model: effective_model,
+            llm: None,
+            extra_args: &profile.opencode_args,
+            env_vars: &env_vars,
+            idle_timeout_seconds: effective_model
                 .and_then(|m| {
                     profile
                         .opencode_idle_timeout_seconds_by_model
@@ -486,18 +502,23 @@ pub(super) fn run_backend_with_reserved_route(
                         .copied()
                 })
                 .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
-        ),
-        "openhands" => runner::run_openhands_with_executable(
-            &executable,
-            wt,
+            print_timeout_seconds: None,
+        }),
+        BackendKind::Openhands => runner::OpenhandsRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
             task,
             session_dir,
-            llm,
-            &profile.openhands_args,
-            &env_vars,
-            profile.openhands_idle_timeout_seconds(),
-        ),
-        other => anyhow::bail!("unsupported runner kind '{other}' for backend '{backend}'"),
+            model: None,
+            llm: Some(llm),
+            extra_args: &profile.openhands_args,
+            env_vars: &env_vars,
+            idle_timeout_seconds: profile.openhands_idle_timeout_seconds(),
+            print_timeout_seconds: None,
+        }),
+        BackendKind::Hermes => {
+            anyhow::bail!("hermes dispatch is not implemented yet for backend '{backend}'")
+        }
     };
     if let Some(origin_before) = origin_before {
         let origin_after = worktree::git(&["remote", "get-url", "origin"], wt)
@@ -555,10 +576,11 @@ pub(super) fn attempt_usage(
         }
         normalize_attempt_usage(usage, attribution, true)
     };
+    let backend_kind = crate::usage_attribution::backend_kind_of(attribution.backend);
 
     // Claude Code: prefer the structured session transcript for real
     // per-attempt token/cost usage (issue #153). Never scrape stdout text.
-    if attribution.backend == Some("claude") {
+    if backend_kind == Some(BackendKind::Claude) {
         if let Some(transcript) = transcript_path {
             if let Ok(t) = fs::read_to_string(transcript) {
                 let transcript_usage = crate::claude_monitor::parse_claude_transcript_usage(&t);
@@ -608,7 +630,7 @@ pub(super) fn attempt_usage(
 
     // Vibe's structured session metadata is passed through the same artifact
     // slot as Claude's transcript.
-    if attribution.backend == Some("vibe") {
+    if backend_kind == Some(BackendKind::Vibe) {
         if let Some(metadata) = transcript_path {
             if let Ok(metadata_json) = fs::read_to_string(metadata) {
                 let session_usage = usage::parse_vibe_session_metadata(&metadata_json);
@@ -622,7 +644,7 @@ pub(super) fn attempt_usage(
     // OpenCode persists exact per-session model and token counters in its
     // local SQLite store. The runner snapshots only this invocation's row
     // into a JSON artifact, avoiding a racy global "latest session" lookup.
-    if attribution.backend == Some("opencode") {
+    if backend_kind == Some(BackendKind::Opencode) {
         if let Some(metadata) = transcript_path {
             if let Ok(metadata_json) = fs::read_to_string(metadata) {
                 let session_usage = usage::parse_opencode_session_metadata(&metadata_json);
@@ -635,12 +657,12 @@ pub(super) fn attempt_usage(
 
     // Try codex exec --json parser first — handles JSONL output from
     // codex exec --json where the generic regex parser would find nothing.
-    let mut usage = if attribution.backend == Some("codex") {
+    let mut usage = if backend_kind == Some(BackendKind::Codex) {
         usage::parse_codex_exec_json(&text)
     } else {
         crate::ledger::LedgerUsage::default()
     };
-    if attribution.backend == Some("codex") {
+    if backend_kind == Some(BackendKind::Codex) {
         if let Some(transcript) = transcript_path {
             if let Ok(transcript_jsonl) = fs::read_to_string(transcript) {
                 usage = usage::merge_usage(
@@ -650,14 +672,15 @@ pub(super) fn attempt_usage(
             }
         }
     }
-    if attribution.backend == Some("openhands") {
+    if backend_kind == Some(BackendKind::Openhands) {
         let openhands_usage = usage::parse_openhands_usage(&text);
         if openhands_usage.usage_source.is_some() {
             usage = usage::merge_usage(openhands_usage, usage);
         }
     }
     let has_json_lines = text.lines().any(|line| line.trim_start().starts_with('{'));
-    if usage.usage_source.is_none() && (attribution.backend != Some("codex") || !has_json_lines) {
+    if usage.usage_source.is_none() && (backend_kind != Some(BackendKind::Codex) || !has_json_lines)
+    {
         // Fall back to the generic regex-based parser for other backends (or
         // for codex running in non-JSON mode).
         usage = usage::parse_generic_usage(&text, "attempt_output_log");
@@ -1117,11 +1140,12 @@ fn record_recent_attempt_run(
 }
 
 fn is_agent_execution_mode(mode: &str) -> bool {
-    matches!(mode, "improve" | "fix" | "experiment" | "pm" | "review")
+    crate::job_kind::JobKind::parse(mode).is_ok()
 }
 
 fn is_implementation_execution_mode(mode: &str) -> bool {
-    matches!(mode, "improve" | "fix" | "experiment")
+    crate::job_kind::JobKind::parse(mode).map(|kind| kind.family())
+        == Ok(crate::job_kind::JobFamily::ImproveLike)
 }
 
 pub(super) fn record_genuine_failure_routes(state: &mut RoutingRuntimeState, entry: &LedgerEntry) {

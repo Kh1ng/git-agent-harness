@@ -2,6 +2,7 @@
 // This makes the modules accessible to integration tests
 
 pub mod availability;
+pub mod backend_kind;
 pub mod baseline;
 pub mod build_cache;
 pub mod candidates;
@@ -18,6 +19,7 @@ pub mod events;
 pub mod execution_identity;
 pub mod generated_artifacts;
 pub mod init;
+pub mod job_kind;
 pub mod ledger;
 pub mod models;
 pub mod notifications;
@@ -25,6 +27,7 @@ pub mod policy;
 pub mod price_guard;
 pub mod profile_output;
 pub mod provider;
+pub mod provider_kind;
 pub mod prune;
 pub mod quota;
 pub mod quota_parser;

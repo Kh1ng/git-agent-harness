@@ -36,6 +36,13 @@ import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware } from './authMiddleware.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService } from './registryService.js';
+import { readSettings as readManagerChatSettings, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
+import { listManagerBackends } from './managerChat/registry.js';
+import {
+  listCommandsForProfile as listManagerChatCommands,
+  listModelsForProfile as listManagerChatModels,
+  setModelForProfile as setManagerChatModel
+} from './managerChat/ManagerChatManager.js';
 
 const SERVER_VERSION = '0.1.0';
 
@@ -479,6 +486,84 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load effective config',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Manager Chat backend selection: a default backend plus optional
+  // per-profile overrides. Deliberately separate from `current_manager`
+  // above -- that field drives the autonomous manager-wake notification
+  // path (fire-and-forget, no session continuity, free-text with no
+  // validation against a known backend list) and could reasonably diverge
+  // from which backend answers the interactive chat page.
+  app.get('/api/manager-chat/settings', (_req, res) => {
+    res.json({ ...readManagerChatSettings(), availableBackends: listManagerBackends() });
+  });
+
+  app.post('/api/manager-chat/settings', (req, res) => {
+    try {
+      const current = readManagerChatSettings();
+      const defaultBackend = typeof req.body?.defaultBackend === 'string' ? req.body.defaultBackend : current.defaultBackend;
+      const profileOverrides =
+        typeof req.body?.profileOverrides === 'object' && req.body.profileOverrides !== null
+          ? req.body.profileOverrides
+          : current.profileOverrides;
+      writeManagerChatSettings({ defaultBackend, profileOverrides });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(400).json({
+        error: 'Failed to update manager chat settings',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Real slash commands for the active backend, sourced live from the
+  // backend's own command registry (e.g. Hermes's ACP available-commands
+  // push) -- not something GAH invents. Powers the "/" palette.
+  app.get('/api/manager-chat/commands', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      const commands = await listManagerChatCommands(profile);
+      res.json({ commands });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load manager chat commands',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Real selectable models for the active backend, sourced live from its
+  // own ACP session state -- not a list GAH maintains. Empty for backends
+  // that don't expose this (Claude's ACP bridge doesn't today).
+  app.get('/api/manager-chat/models', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      const summary = await listManagerChatModels(profile);
+      res.json(summary);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load manager chat models',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/manager-chat/model', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const modelId = typeof req.body?.modelId === 'string' ? req.body.modelId : undefined;
+    if (!modelId) {
+      res.status(400).json({ error: 'Missing required field: modelId' });
+      return;
+    }
+    try {
+      await setManagerChatModel(profile, modelId);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to set manager chat model',
         message: error instanceof Error ? error.message : String(error)
       });
     }

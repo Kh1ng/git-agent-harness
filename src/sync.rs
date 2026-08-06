@@ -1,4 +1,5 @@
 use crate::config::{self, GahConfig};
+use crate::job_kind::JobKind;
 use crate::provider::gitlab_api;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -208,13 +209,16 @@ fn fetch_mrs_for_scope(
     scope: MrFetchScope,
     filter_gah_branches: bool,
 ) -> Result<Vec<SyncMr>> {
-    let mut mrs = match profile.provider.as_str() {
-        "github" if scope == MrFetchScope::Active => {
+    use crate::provider_kind::ProviderKind;
+    let mut mrs = match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Github) if scope == MrFetchScope::Active => {
             repository::fetch_active_github_mrs(profile, filter_gah_branches)
         }
-        "github" => repository::fetch_historical_github_mrs(profile, filter_gah_branches),
-        "gitlab" => gitlab_mrs(profile, scope, filter_gah_branches),
-        other => anyhow::bail!("unsupported provider: {}", other),
+        Ok(ProviderKind::Github) => {
+            repository::fetch_historical_github_mrs(profile, filter_gah_branches)
+        }
+        Ok(ProviderKind::Gitlab) => gitlab_mrs(profile, scope, filter_gah_branches),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }?;
     if scope == MrFetchScope::Active {
         mrs.retain(|mr| {
@@ -616,7 +620,7 @@ pub fn count_current_fix_attempts_for_mrs(
         .collect();
     count_branch_attempts(entries, Some((profile, repo_id)), |entry| {
         usize::from(
-            entry.mode == "fix"
+            JobKind::parse(&entry.mode) == Ok(JobKind::Fix)
                 && entry.dispatch_reason.as_deref() == Some("post_review_repair")
                 && entry.review_contract_version
                     == Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION)

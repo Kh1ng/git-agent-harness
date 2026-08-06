@@ -2,10 +2,26 @@ mod support;
 
 use std::fs;
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::test_tempdir;
 use support::ProcessGroupGuard;
+
+// Every test in this file spawns a real `gah` subprocess and does real
+// timing-sensitive polling against it (worker admission, node-pressure
+// reprobe, shutdown). In isolation each one consistently finishes in a few
+// seconds flat -- confirmed empirically, pinned to 2 CPUs (matching CI's
+// actual ubuntu-latest runner) and repeated -- but Rust's default test
+// harness runs tests within a binary concurrently, and on a CPU-constrained
+// runner two of these real-subprocess tests scheduled at the same time
+// genuinely starve each other, which is what was actually causing
+// parallel_loop_reprobes_node_pressure_with_active_worker_remaining to blow
+// past its deadline (issue #824) -- not the deadline being too tight. Widening
+// it twice (PR #825: 10s->20s) treated the symptom; this treats the cause.
+// Same pattern already used in tests/fake_backend_harness.rs for the same
+// class of problem.
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
     // These tests exercise refill state transitions, not host sizing. The
@@ -87,6 +103,7 @@ fn read_u32_file(path: &std::path::Path) -> u32 {
 #[cfg(unix)]
 #[test]
 fn process_group_guard_drop_reaps_the_entire_test_process_group() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     use std::os::unix::process::CommandExt;
     let mut command = ProcessCommand::new("/bin/sh");
     command
@@ -261,6 +278,7 @@ fn setup_fix_dispatch_repo(
 
 #[test]
 fn parallel_loop_refills_immediately_after_a_fast_completion() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
 
@@ -398,6 +416,7 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
 
 #[test]
 fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -463,6 +482,7 @@ fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
 
 #[test]
 fn parallel_loop_does_not_refill_after_shutdown() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -541,6 +561,7 @@ fn parallel_loop_does_not_refill_after_shutdown() {
 
 #[test]
 fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -655,7 +676,18 @@ fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
         thread::sleep(Duration::from_millis(20));
     }
 
-    let refill_deadline = Instant::now() + Duration::from_secs(10);
+    // 20s, not 10s: this polls for the same class of event (the real child
+    // binary admitting and launching a worker after a real subprocess spawn)
+    // as the 20s deadlines above (see e.g. "two initial workers did not
+    // start" / "third slot did not start"). This one was inconsistently set
+    // to half that margin with no stated reason, and flaked under CI load
+    // twice (2026-08-05, issue #824) on unrelated commits while every
+    // sibling wait in this file passed -- the 500ms pressure-flip + 100ms
+    // reprobe interval this test relies on only need ~600ms of slack, but
+    // the fixed 10s ceiling left too little room for the rest of the
+    // pipeline (fake gh/codex spawns, decide_next_action) under real
+    // contention.
+    let refill_deadline = Instant::now() + Duration::from_secs(20);
     while !second_started.exists() {
         assert!(
             child.try_wait().unwrap().is_none(),
@@ -682,6 +714,7 @@ fn parallel_loop_reprobes_node_pressure_with_active_worker_remaining() {
 
 #[test]
 fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -724,6 +757,12 @@ fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
     let review_started = tmp.path().join("review-started");
     let implementation_started = tmp.path().join("implementation-started");
     fs::create_dir_all(&fake_bin).unwrap();
+    // `updated_at` is relative to "now" (not hardcoded) so the fake PR stays
+    // classified as active instead of aging into sync::classify's 14-day
+    // STALE cutoff over time (same pattern as #801/#802).
+    let pr_updated_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
@@ -732,7 +771,7 @@ fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
              case \"$4\" in\n\
                */pulls\\?*)\n\
                  n=$(cat '{pulls_count}' 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > '{pulls_count}'\n\
-                 if [ \"$n\" -le 2 ]; then echo '[]'; else echo '[{{\"title\":\"[GAH] Fix: TICKET-701\",\"body\":\"Review fixture\",\"head\":{{\"ref\":\"gah/real-review\",\"sha\":\"source-sha\"}},\"html_url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"open\",\"draft\":true,\"updated_at\":\"2026-07-23T00:00:00Z\"}}]'; fi\n\
+                 if [ \"$n\" -le 2 ]; then echo '[]'; else echo '[{{\"title\":\"[GAH] Fix: TICKET-701\",\"body\":\"Review fixture\",\"head\":{{\"ref\":\"gah/real-review\",\"sha\":\"source-sha\"}},\"html_url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"open\",\"draft\":true,\"updated_at\":\"{pr_updated_at}\"}}]'; fi\n\
                  exit 0 ;;\n\
                */pulls) echo '[{{\"number\":7}}]'; exit 0 ;;\n\
                */check-runs\\?*) echo '{{\"total_count\":1,\"check_runs\":[{{\"status\":\"completed\",\"conclusion\":\"success\"}}]}}'; exit 0 ;;\n\
@@ -819,6 +858,7 @@ fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
 
 #[test]
 fn parallel_loop_waits_to_refill_until_node_pressure_recedes() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();
@@ -925,6 +965,7 @@ fn parallel_loop_waits_to_refill_until_node_pressure_recedes() {
 
 #[test]
 fn parallel_loop_remains_prompt_on_shutdown_while_node_capacity_is_deferred() {
+    let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
     let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
     fs::create_dir_all(repo.join("docs/tickets")).unwrap();

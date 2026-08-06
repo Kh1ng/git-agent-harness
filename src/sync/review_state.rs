@@ -1,4 +1,5 @@
 use super::SyncMr;
+use crate::job_kind::JobKind;
 use crate::ledger::{LedgerEntriesByWorkId, LedgerEntry};
 use sha2::{Digest, Sha256};
 
@@ -149,14 +150,18 @@ pub(super) fn ledger_info_for_mr(
         .iter()
         .rev()
         .find(|entry| {
-            matches!(entry.mode.as_str(), "fix" | "improve")
-                && entry.mr_url.as_deref() == mr.url.as_deref()
+            matches!(
+                JobKind::parse(&entry.mode),
+                Ok(JobKind::Fix) | Ok(JobKind::Improve)
+            ) && entry.mr_url.as_deref() == mr.url.as_deref()
                 && !entry.effective_backend.is_empty()
         })
         .or_else(|| {
             entries.iter().rev().find(|entry| {
-                matches!(entry.mode.as_str(), "fix" | "improve")
-                    && entry.branch.as_deref() == Some(mr.branch.as_str())
+                matches!(
+                    JobKind::parse(&entry.mode),
+                    Ok(JobKind::Fix) | Ok(JobKind::Improve)
+                ) && entry.branch.as_deref() == Some(mr.branch.as_str())
                     && !entry.effective_backend.is_empty()
             })
         });

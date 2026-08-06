@@ -4,6 +4,7 @@ use super::diagnostics::{describe_candidate, DiagnosticCandidate};
 use super::types::{CandidateIdentity, RoutingRuntimeState, TaskRoutingContext};
 use crate::config::{Defaults, Profile, RoutingPolicy, TaskRoutingRule};
 use crate::execution_identity::ExecutionIdentity;
+use crate::job_kind::{JobFamily, JobKind};
 use crate::quota::{self, PaceBand};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -94,7 +95,7 @@ pub(super) fn auto_candidates(
     primary: &RouteCandidate,
 ) -> Vec<RouteCandidate> {
     let mut candidates = vec![primary.clone()];
-    if mode == "review" {
+    if is_review_mode(mode) {
         if let Some(weak_backend) = review_fallback_backend_name(routing) {
             let weak_model = review_fallback_model(routing)
                 .map(str::to_string)
@@ -125,7 +126,7 @@ pub(super) fn explicit_candidates(
     allow_impl_fallback: bool,
 ) -> Vec<RouteCandidate> {
     let mut candidates = vec![primary.clone()];
-    let fallback_allowed = if mode == "review" {
+    let fallback_allowed = if is_review_mode(mode) {
         allow_review_fallback
     } else {
         allow_impl_fallback
@@ -148,7 +149,7 @@ pub(super) fn explicit_candidates(
             }
         }
 
-        if mode == "review" {
+        if is_review_mode(mode) {
             if let Some(weak_backend) = review_fallback_backend {
                 let weak_model = review_fallback_model(routing).map(str::to_string);
                 let quota_pool =
@@ -283,9 +284,14 @@ fn is_strong_candidate(candidate: &RouteCandidate) -> bool {
 /// (src/dispatch.rs) collects `recent_runs` for with balancing in mind.
 /// Applying it to review/pm candidate ordering too would silently reorder
 /// those pools by usage, contradicting the deterministic-order guarantee
-/// review's own escalation chain relies on.
+/// review's own escalation chain relies on. Also reused wherever the same
+/// improve/fix/experiment grouping was independently re-matched.
 fn is_load_balanced_mode(mode: &str) -> bool {
-    matches!(mode, "improve" | "fix" | "experiment")
+    JobKind::parse(mode).map(|kind| kind.family()) == Ok(JobFamily::ImproveLike)
+}
+
+fn is_review_mode(mode: &str) -> bool {
+    JobKind::parse(mode).map(|kind| kind.family()) == Ok(JobFamily::Review)
 }
 
 fn compare_candidates(
@@ -370,8 +376,8 @@ pub(super) fn policy_backend_model<'a>(
     policy: &'a RoutingPolicy,
     mode: &str,
 ) -> (Option<&'a str>, Option<&'a str>) {
-    match mode {
-        "pm" => (
+    match JobKind::parse(mode).map(|kind| kind.family()) {
+        Ok(JobFamily::Pm) => (
             policy
                 .pm_backend
                 .as_deref()
@@ -381,7 +387,7 @@ pub(super) fn policy_backend_model<'a>(
                 .as_deref()
                 .or(policy.default_model.as_deref()),
         ),
-        "review" => (
+        Ok(JobFamily::Review) => (
             policy
                 .strong_review_backend
                 .as_deref()
@@ -393,7 +399,7 @@ pub(super) fn policy_backend_model<'a>(
                 .or(policy.review_model.as_deref())
                 .or(policy.default_model.as_deref()),
         ),
-        "improve" | "fix" | "experiment" => (
+        Ok(JobFamily::ImproveLike) => (
             policy
                 .improve_backend
                 .as_deref()
@@ -411,10 +417,10 @@ pub(super) fn policy_backend_model<'a>(
 }
 
 pub(super) fn policy_candidates(policy: &RoutingPolicy, mode: &str) -> Option<Vec<RouteCandidate>> {
-    let raw = match mode {
-        "pm" => policy.pm_candidates.as_ref(),
-        "review" => policy.review_candidates.as_ref(),
-        "improve" | "fix" | "experiment" => policy.improve_candidates.as_ref(),
+    let raw = match JobKind::parse(mode).map(|kind| kind.family()) {
+        Ok(JobFamily::Pm) => policy.pm_candidates.as_ref(),
+        Ok(JobFamily::Review) => policy.review_candidates.as_ref(),
+        Ok(JobFamily::ImproveLike) => policy.improve_candidates.as_ref(),
         _ => None,
     };
     raw.map(|list| route_candidates(policy, list))
@@ -436,10 +442,10 @@ pub(super) fn configured_route_requires_approval(
         candidate.backend == backend && candidate.model.as_deref() == model
     };
 
-    let mode_candidates_require_approval = match mode {
-        "pm" => routing.pm_candidates.as_ref(),
-        "review" => routing.review_candidates.as_ref(),
-        "improve" | "fix" | "experiment" => routing.improve_candidates.as_ref(),
+    let mode_candidates_require_approval = match JobKind::parse(mode).map(|kind| kind.family()) {
+        Ok(JobFamily::Pm) => routing.pm_candidates.as_ref(),
+        Ok(JobFamily::Review) => routing.review_candidates.as_ref(),
+        Ok(JobFamily::ImproveLike) => routing.improve_candidates.as_ref(),
         _ => None,
     }
     .is_some_and(|candidates| {
@@ -449,12 +455,12 @@ pub(super) fn configured_route_requires_approval(
     });
 
     mode_candidates_require_approval
-        || (mode == "review"
+        || (is_review_mode(mode)
             && routing
                 .escalatory_reviewers
                 .iter()
                 .any(|candidate| matches(candidate) && candidate.requires_approval))
-        || (matches!(mode, "improve" | "fix" | "experiment")
+        || (is_load_balanced_mode(mode)
             && routing.task_routing_rules.iter().any(|rule| {
                 (rule.modes.is_empty()
                     || rule
@@ -473,7 +479,7 @@ pub(super) fn task_rule_candidates(
     mode: &str,
     task: Option<TaskRoutingContext<'_>>,
 ) -> Option<(usize, Vec<RouteCandidate>)> {
-    if !matches!(mode, "improve" | "fix" | "experiment") {
+    if !is_load_balanced_mode(mode) {
         return None;
     }
     let task = task?;
@@ -532,10 +538,10 @@ pub(super) fn configured_route_candidate(
     let matches = |candidate: &&crate::config::CandidateConfig| {
         candidate.backend == backend && candidate.model.as_deref() == model
     };
-    let mode_candidates = match mode {
-        "pm" => routing.pm_candidates.as_deref(),
-        "review" => routing.review_candidates.as_deref(),
-        "improve" | "fix" | "experiment" => routing.improve_candidates.as_deref(),
+    let mode_candidates = match JobKind::parse(mode).map(|kind| kind.family()) {
+        Ok(JobFamily::Pm) => routing.pm_candidates.as_deref(),
+        Ok(JobFamily::Review) => routing.review_candidates.as_deref(),
+        Ok(JobFamily::ImproveLike) => routing.improve_candidates.as_deref(),
         _ => None,
     };
 
@@ -641,8 +647,8 @@ where
 }
 
 fn mode_backend_preference(mode: &str) -> [&'static str; 3] {
-    match mode {
-        "pm" | "review" => ["claude", "codex", "openhands"],
+    match JobKind::parse(mode).map(|kind| kind.family()) {
+        Ok(JobFamily::Pm) | Ok(JobFamily::Review) => ["claude", "codex", "openhands"],
         _ => ["openhands", "codex", "claude"],
     }
 }

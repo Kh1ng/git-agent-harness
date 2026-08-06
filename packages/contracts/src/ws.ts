@@ -3,7 +3,7 @@
  * Inspired by t3code architecture but adapted for GAH needs
  */
 
-import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary } from './gah.js';
+import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, DependencyBlocker } from './gah.js';
 
 // Provider types
 export type ProviderKind = 
@@ -78,6 +78,8 @@ export type ServerMessage =
       constraints?: Blocker[];
       errors?: StatusError[];
       recentLedger?: RecentLedgerSummary | null;
+      // Native issue prerequisites that block autonomous intake.
+      dependencyBlockers?: DependencyBlocker[];
       // TICKET-157: per-backend "configured for this profile" signal,
       // derived from the Rust harness `configured_backend_path()`.
       // Maps a backend name (e.g. "codex", "opencode") to whether it has
@@ -125,7 +127,25 @@ export type ServerMessage =
       type: "error";
       error: string;
       requestId: string;
+    }
+  | {
+      type: "manager.chat.reply";
+      requestId: string;
+      profile: string;
+      reply: string;
+    }
+  | {
+      type: "manager.chat.history";
+      requestId: string;
+      profile: string;
+      turns: ManagerChatTurn[];
     };
+
+export type ManagerChatTurn = {
+  role: "user" | "assistant" | "system";
+  text: string;
+  timestamp: number;
+};
 
 export type ClientMessage = 
   | {
@@ -179,6 +199,17 @@ export type ClientMessage =
       type: "ping";
       requestId: string;
       timestamp: number;
+    }
+  | {
+      type: "manager.chat.send";
+      requestId: string;
+      profile: string;
+      message: string;
+    }
+  | {
+      type: "manager.chat.historyRequest";
+      requestId: string;
+      profile: string;
     };
 
 export type ClientCapabilities = {

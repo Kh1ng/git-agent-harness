@@ -6,6 +6,7 @@ use crate::dispatch::issues::{
 use crate::dispatch::prompts::indent_untrusted_text;
 use crate::dispatch::review::context::ReviewTarget;
 use crate::dispatch::text::utf8_safe_prefix;
+use crate::job_kind::JobKind;
 use crate::ledger;
 use anyhow::{bail, Result};
 use serde_json::json;
@@ -161,9 +162,13 @@ fn resolve_source_issue_identity(
     if let Some(work_id) = work_id.filter(|value| !value.trim().is_empty()) {
         if let Ok(entries) = ledger::entries_for_work_id(_cfg, work_id) {
             if let Some(issue_number) = entries.into_iter().rev().find_map(|entry| {
-                (entry.profile == profile_name && matches!(entry.mode.as_str(), "fix" | "improve"))
-                    .then(|| entry.source_issue_number.clone())
-                    .flatten()
+                (entry.profile == profile_name
+                    && matches!(
+                        JobKind::parse(&entry.mode),
+                        Ok(JobKind::Fix) | Ok(JobKind::Improve)
+                    ))
+                .then(|| entry.source_issue_number.clone())
+                .flatten()
             }) {
                 return Some(SourceIssueIdentity {
                     issue_number,

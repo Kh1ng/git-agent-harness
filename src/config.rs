@@ -1,3 +1,5 @@
+use crate::job_kind::{JobFamily, JobKind};
+use crate::provider_kind::{ProviderKind, UnknownProviderKind};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -567,17 +569,16 @@ impl RoutingPolicy {
     pub fn max_implementation_failures_per_ticket(&self) -> u32 {
         self.max_implementation_failures_per_ticket.unwrap_or(8)
     }
-
     pub fn find_quota_pool(
         &self,
         mode: &str,
         backend: &str,
         model: Option<&str>,
     ) -> Option<String> {
-        let candidates = match mode {
-            "pm" => self.pm_candidates.as_ref(),
-            "review" => self.review_candidates.as_ref(),
-            "improve" | "fix" | "experiment" => self.improve_candidates.as_ref(),
+        let candidates = match JobKind::parse(mode).map(|kind| kind.family()) {
+            Ok(JobFamily::Pm) => self.pm_candidates.as_ref(),
+            Ok(JobFamily::Review) => self.review_candidates.as_ref(),
+            Ok(JobFamily::ImproveLike) => self.improve_candidates.as_ref(),
             _ => None,
         };
         let configured = candidates.and_then(|list| {
@@ -654,66 +655,65 @@ impl Profile {
             .max(1)
     }
 
+    pub fn provider_kind(&self) -> Result<ProviderKind, UnknownProviderKind> {
+        ProviderKind::parse(&self.provider)
+    }
     pub fn pat(&self) -> String {
-        match self.provider.as_str() {
-            "gitlab" => std::env::var("GITLAB_PAT2")
+        match self.provider_kind() {
+            Ok(ProviderKind::Gitlab) => std::env::var("GITLAB_PAT2")
                 .or_else(|_| std::env::var("GITLAB_PAT"))
                 .unwrap_or_default(),
-            "github" => std::env::var("GITHUB_TOKEN")
+            Ok(ProviderKind::Github) => std::env::var("GITHUB_TOKEN")
                 .or_else(|_| std::env::var("GH_TOKEN"))
                 .unwrap_or_default(),
-            _ => String::new(),
+            Err(_) => String::new(),
         }
     }
 
     pub fn pat_env_names(&self) -> &'static [&'static str] {
-        match self.provider.as_str() {
-            "gitlab" => &["GITLAB_PAT2", "GITLAB_PAT"],
-            "github" => &["GITHUB_TOKEN", "GH_TOKEN"],
-            _ => &[],
+        match self.provider_kind() {
+            Ok(ProviderKind::Gitlab) => &["GITLAB_PAT2", "GITLAB_PAT"],
+            Ok(ProviderKind::Github) => &["GITHUB_TOKEN", "GH_TOKEN"],
+            Err(_) => &[],
         }
     }
 
     pub fn provider_cli(&self) -> Option<&'static str> {
-        match self.provider.as_str() {
-            "gitlab" => Some("glab"),
-            "github" => Some("gh"),
-            _ => None,
+        match self.provider_kind() {
+            Ok(ProviderKind::Gitlab) => Some("glab"),
+            Ok(ProviderKind::Github) => Some("gh"),
+            Err(_) => None,
         }
     }
 
-    /// Build push URL without embedding PAT. Authentication is handled
-    /// via GIT_ASKPASS by the caller, so the token never appears in process
-    /// arguments, process lists, or shell history.
+    /// Build push URL without embedding PAT (auth is via GIT_ASKPASS).
     pub fn push_url(&self) -> Result<String> {
-        match self.provider.as_str() {
-            "gitlab" => {
+        match self.provider_kind() {
+            Ok(ProviderKind::Gitlab) => {
                 let base = self.gitlab_push_base()?;
                 Ok(format!("{}/{}", base, normalize_repo_path(&self.repo)))
             }
-            "github" => Ok(format!(
+            Ok(ProviderKind::Github) => Ok(format!(
                 "https://github.com/{}",
                 normalize_repo_path(&self.repo)
             )),
-            _ => Ok(self.repo.clone()),
+            Err(_) => Ok(self.repo.clone()),
         }
     }
 
-    /// Human-facing repo URL (for linking out from the frontend/CLI), as
-    /// opposed to `push_url()` which embeds an oauth2@ placeholder and a
-    /// `.git` suffix meant for git itself, not a browser.
+    /// Human-facing repo URL (unlike `push_url()`, no oauth2@ placeholder).
     pub fn web_url(&self) -> Option<String> {
-        match self.provider.as_str() {
-            "github" => Some(format!(
+        match self.provider_kind() {
+            Ok(ProviderKind::Github) => Some(format!(
                 "https://github.com/{}",
                 self.repo.trim_matches('/')
             )),
-            "gitlab" => {
+            Ok(ProviderKind::Gitlab) => {
                 let base = self.gitlab_push_base().ok()?;
                 let host = base.split_once('@').map(|(_, host)| host).unwrap_or(&base);
                 Some(format!("https://{}/{}", host, self.repo.trim_matches('/')))
             }
-            _ => None,
+            Err(_) => None,
         }
     }
 

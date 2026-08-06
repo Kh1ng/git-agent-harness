@@ -1,4 +1,5 @@
 use crate::dispatch::issues::TicketMetadata;
+use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
 use crate::{config, ledger};
 use anyhow::Context;
@@ -54,8 +55,8 @@ pub(super) fn resolve_manual_fix_work_identity(
                 && entry.repo_id == profile.repo_id
                 && entry.branch.as_deref() == Some(branch)
                 && matches!(
-                    entry.mode.as_str(),
-                    "review" | "fix" | "improve" | "implement"
+                    JobKind::parse(&entry.mode),
+                    Ok(JobKind::Review) | Ok(JobKind::Fix) | Ok(JobKind::Improve)
                 )
                 && entry
                     .work_id
@@ -125,7 +126,7 @@ pub(super) fn resolve_manual_fix_context(
     let mut manual_fix_source_issue: Option<String> = None;
     let mut manual_fix_mr_url: Option<String> = None;
 
-    if mode == "fix" {
+    if JobKind::parse(mode) == Ok(JobKind::Fix) {
         if let Some(mr) = mr {
             let review_target = crate::provider::find_review_target_by_mr(profile, mr)
                 .with_context(|| format!("resolve source branch for MR {mr}"))?;
@@ -180,7 +181,7 @@ pub(super) fn resolve_target(
     if !args.target.is_empty() {
         return Ok(args.target.clone());
     }
-    if args.mode == "fix" && args.mr.is_some() {
+    if JobKind::parse(&args.mode) == Ok(JobKind::Fix) && args.mr.is_some() {
         return manual_fix
             .work_id
             .clone()

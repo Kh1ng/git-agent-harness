@@ -30,12 +30,16 @@ import type {
   ConfigSummary,
   ConfigProfileSummary,
   DoctorSnapshot,
-  ConfigSetData
+  ConfigSetData,
+  ManagerChatSettingsSummary,
+  ManagerCommandInfo,
+  ManagerModelsSummary,
+  ManagerChatSettingsUpdate
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
   (import.meta as unknown as { env: { VITE_SERVER_URL?: string } }).env?.VITE_SERVER_URL ||
-  window.location.origin;
+  (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
 
 export class GahApiError extends Error {
   constructor(
@@ -189,6 +193,11 @@ export interface GahDataSource {
   getConfig(): Promise<ConfigSummary>;
   getProfileConfig(profile: string): Promise<ConfigProfileSummary>;
   setConfig(data: ConfigSetData): Promise<{ success: boolean; message: string }>;
+  getManagerChatSettings(): Promise<ManagerChatSettingsSummary>;
+  setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
+  getManagerChatCommands(profile: string): Promise<{ commands: ManagerCommandInfo[] }>;
+  getManagerChatModels(profile: string): Promise<ManagerModelsSummary>;
+  setManagerChatModel(profile: string, modelId: string): Promise<{ success: boolean }>;
 }
 
 async function postJson<T, U>(path: string, body: U): Promise<T> {
@@ -339,5 +348,20 @@ export const gahApi: GahDataSource = {
   },
   async setConfig(data) {
     return postJson<{ success: boolean; message: string }, ConfigSetData>('/api/config', data);
+  },
+  getManagerChatSettings() {
+    return getJson<ManagerChatSettingsSummary>('/api/manager-chat/settings');
+  },
+  setManagerChatSettings(data) {
+    return postJson<{ success: boolean }, ManagerChatSettingsUpdate>('/api/manager-chat/settings', data);
+  },
+  getManagerChatCommands(profile) {
+    return getJson<{ commands: ManagerCommandInfo[] }>('/api/manager-chat/commands', { profile });
+  },
+  getManagerChatModels(profile) {
+    return getJson<ManagerModelsSummary>('/api/manager-chat/models', { profile });
+  },
+  setManagerChatModel(profile, modelId) {
+    return postJson<{ success: boolean }, { profile: string; modelId: string }>('/api/manager-chat/model', { profile, modelId });
   }
 };
