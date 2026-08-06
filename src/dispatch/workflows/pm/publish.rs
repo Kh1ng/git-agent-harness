@@ -682,8 +682,28 @@ fn render_issue_body(
                 .unwrap_or_else(|| format!("plan-key:{}", key.trim()))
         })
         .collect::<Vec<_>>();
+    // Issue #654: `Dependencies:` above is human-readable only -- nothing in
+    // dependencies.rs::parse_dependency_line reads it, so on GitHub (where
+    // link_provider_dependency is a no-op, unlike GitLab's native `blocks`
+    // link) a PM plan's sibling depends_on edges were silently unenforced.
+    // Every depends_on key is guaranteed present in state.children by the
+    // time this runs -- topological_order already refused to publish
+    // otherwise -- so this can use the sibling's real issue_number rather
+    // than a fallback. Only emitted when non-empty: an empty "Blocked by:"
+    // line is itself malformed input to the strict parser.
+    let blocked_by = ticket
+        .depends_on
+        .iter()
+        .filter_map(|key| state.children.get(key.trim()))
+        .map(|child| format!("#{}", child.issue_number))
+        .collect::<Vec<_>>();
+    let blocked_by_line = if blocked_by.is_empty() {
+        String::new()
+    } else {
+        format!("Blocked by: {}\n", blocked_by.join(", "))
+    };
     format!(
-        "{}\n<!-- gah-pm-depth:v1 depth={} -->\n\nParent: {}\nPlan key: {}\nPlan fingerprint: {}\nSummary: {}\nObjective: {}\nTask class: {}\nDifficulty: {}\nRisk: {}\nExecution disposition: {}\nRecommended routing: capability={} min_tier={}\nDependencies: {}\nDuplicate evidence: {}\nUncovered reason: {}\n\n## Affected areas\n{}\n\n## Affected files\n{}\n\n## Acceptance criteria\n{}\n\n## Verification\n{}\n",
+        "{}\n<!-- gah-pm-depth:v1 depth={} -->\n\nParent: {}\nPlan key: {}\nPlan fingerprint: {}\nSummary: {}\nObjective: {}\nTask class: {}\nDifficulty: {}\nRisk: {}\nExecution disposition: {}\nRecommended routing: capability={} min_tier={}\nDependencies: {}\n{}Duplicate evidence: {}\nUncovered reason: {}\n\n## Affected areas\n{}\n\n## Affected files\n{}\n\n## Acceptance criteria\n{}\n\n## Verification\n{}\n",
         child_marker(fingerprint, &ticket.key),
         child_depth,
         source_issue_url,
@@ -698,6 +718,7 @@ fn render_issue_body(
         ticket.recommended_routing.capability,
         ticket.recommended_routing.min_tier,
         if dependencies.is_empty() { "none".to_string() } else { dependencies.join(", ") },
+        blocked_by_line,
         if ticket.duplicate_evidence.is_empty() { "none".to_string() } else { ticket.duplicate_evidence.join("; ") },
         ticket.uncovered_reason,
         render_list(&ticket.affected_areas),

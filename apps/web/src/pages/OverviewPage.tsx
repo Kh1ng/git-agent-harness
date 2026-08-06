@@ -178,7 +178,10 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                   {dep.work_id}{dep.title ? ` — ${dep.title}` : ''}{dep.reason ? `: ${dep.reason}` : ''}
                   {dep.dependencies.length > 0 && (
                     <span className="ml-1 text-xs">
-                      ({dep.dependencies.map(d => d.identity).join(', ')})
+                      (blocked on: {(dep.dependencies.filter(d => d.normalized_state !== 'closed').length > 0
+                        ? dep.dependencies.filter(d => d.normalized_state !== 'closed')
+                        : dep.dependencies
+                      ).map(d => `${d.identity} [${d.normalized_state}]`).join(', ')})
                     </span>
                   )}
                 </span>
