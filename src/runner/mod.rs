@@ -10,7 +10,9 @@ pub(crate) mod review;
 pub(crate) mod review_usage;
 
 #[allow(unused_imports)]
-pub use crate::runner::backend_runner::{BackendRunner, ClaudeRunner, CodexRunner, RunContext};
+pub use crate::runner::backend_runner::{
+    BackendRunner, ClaudeRunner, CodexRunner, RunContext, VibeRunner,
+};
 #[allow(unused_imports)]
 pub(crate) use crate::runner::backends::agy::log_delta;
 #[allow(unused_imports)]

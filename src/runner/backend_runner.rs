@@ -84,6 +84,27 @@ impl BackendRunner for ClaudeRunner {
     }
 }
 
+pub struct VibeRunner;
+
+impl BackendRunner for VibeRunner {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Vibe
+    }
+
+    fn run(&self, ctx: &RunContext) -> Result<RunResult> {
+        crate::runner::run_vibe_with_executable(
+            ctx.executable,
+            ctx.worktree,
+            ctx.task,
+            ctx.session_dir,
+            ctx.model,
+            ctx.extra_args,
+            ctx.env_vars,
+            ctx.idle_timeout_seconds,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +184,44 @@ mod tests {
         assert!(argv.contains(&"sonnet-5".to_string()));
         assert!(argv.contains(&"--add-dir".to_string()));
         assert!(argv.contains(&"/tmp/extra".to_string()));
+    }
+
+    #[test]
+    fn vibe_runner_reports_vibe_kind() {
+        assert_eq!(VibeRunner.kind(), BackendKind::Vibe);
+    }
+
+    #[test]
+    fn vibe_runner_matches_the_free_function_it_wraps() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+        let extra_args = vec!["--custom-flag".to_string()];
+
+        let ctx = RunContext {
+            executable: Path::new("vibe"),
+            worktree: &f.worktree,
+            task: "the vibe task",
+            session_dir: &f.session_dir,
+            model: Some("devstral-small"),
+            llm: None,
+            extra_args: &extra_args,
+            env_vars: &envs,
+            idle_timeout_seconds: 300,
+            print_timeout_seconds: None,
+        };
+
+        let result = VibeRunner.run(&ctx).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "-p");
+        assert!(argv.contains(&"the vibe task".to_string()));
+        assert!(argv.contains(&"--trust".to_string()));
+        assert!(argv.contains(&"--auto-approve".to_string()));
+        assert!(argv.contains(&"--custom-flag".to_string()));
+        let env = recorded_env(&f.record_dir);
+        assert!(env.contains("VIBE_ACTIVE_MODEL=devstral-small"));
     }
 }
