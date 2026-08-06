@@ -190,10 +190,33 @@ fn prune_worktrees(
                 }
             );
         } else {
-            let _ = crate::worktree::git(
+            let git_result = crate::worktree::git(
                 &["worktree", "remove", "-f", path.to_str().unwrap_or("")],
                 Path::new(&profile.local_path),
             );
+            // `git worktree remove` fails outright ("is not a working tree")
+            // once git's own admin metadata for this worktree is already
+            // gone -- e.g. left behind by a prior interrupted/partial
+            // removal. Previously that failure was silently discarded and
+            // "removed" printed anyway, so the directory (and its disk
+            // usage) never actually went away despite being logged as
+            // pruned on every run. Fall back to a direct removal whenever
+            // the directory is still there, since `worktree_is_clean`
+            // already confirmed above it's safe to delete.
+            if path.exists() {
+                if let Err(err) = fs::remove_dir_all(&path) {
+                    println!(
+                        "  failed to remove worktree {}: {}{}",
+                        path.display(),
+                        err,
+                        git_result
+                            .err()
+                            .map(|e| format!(" (git worktree remove also failed: {e})"))
+                            .unwrap_or_default()
+                    );
+                    continue;
+                }
+            }
             println!(
                 "  removed worktree {}",
                 if is_done {
@@ -228,11 +251,69 @@ fn is_older_than(path: &PathBuf, cutoff: SystemTime) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{done_worktree_names_from_mrs, is_older_than, worktree_name_for_branch};
+    use super::{
+        done_worktree_names_from_mrs, is_older_than, prune_worktrees, worktree_name_for_branch,
+    };
+    use crate::config::{tests::test_profile_for_notifications, Defaults, GahConfig};
     use crate::sync::SyncMr;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
+
+    /// Regression for the "removed worktree" log lying about success: a
+    /// worktree directory whose git admin metadata is already gone (e.g.
+    /// left behind by a prior interrupted removal) makes `git worktree
+    /// remove -f` fail with "is not a working tree" every single run. The
+    /// old code discarded that error and printed "removed" unconditionally,
+    /// so the directory (and its disk usage) never actually went away.
+    #[test]
+    fn prune_worktrees_falls_back_to_direct_removal_when_git_no_longer_tracks_it() {
+        let worktree_base = tempfile::tempdir().unwrap();
+        let repo_id = "repo";
+        let stale = worktree_base.path().join(format!("gah-{repo_id}-orphaned"));
+        fs::create_dir_all(&stale).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&stale)
+            .output()
+            .unwrap();
+        // Old enough to be eligible for pruning, and not registered as a
+        // linked worktree of any repo -- reproducing the real orphaned state.
+        std::process::Command::new("touch")
+            .args(["-t", "202401010000", stale.to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        let local_path = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(local_path.path())
+            .output()
+            .unwrap();
+
+        let cfg = GahConfig {
+            defaults: Defaults {
+                worktree_base: worktree_base.path().to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            profiles: HashMap::new(),
+            context: Default::default(),
+        };
+        let mut profile = test_profile_for_notifications();
+        profile.repo_id = repo_id.to_string();
+        profile.local_path = local_path.path().to_string_lossy().to_string();
+
+        let cutoff = SystemTime::now()
+            .checked_sub(Duration::from_secs(86_400))
+            .unwrap();
+        prune_worktrees(&cfg, &profile, cutoff, false, false).unwrap();
+
+        assert!(
+            !stale.exists(),
+            "orphaned worktree directory should be removed even when `git worktree remove` fails"
+        );
+    }
 
     #[test]
     fn older_than_uses_file_mtime() {
