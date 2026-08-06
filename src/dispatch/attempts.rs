@@ -502,16 +502,20 @@ pub(super) fn run_backend_with_reserved_route(
                 print_timeout_seconds: None,
             })
         }
-        crate::backend_kind::BackendKind::Openhands => runner::run_openhands_with_executable(
-            &executable,
-            wt,
-            task,
-            session_dir,
-            llm,
-            &profile.openhands_args,
-            &env_vars,
-            profile.openhands_idle_timeout_seconds(),
-        ),
+        crate::backend_kind::BackendKind::Openhands => {
+            runner::OpenhandsRunner.run(&runner::RunContext {
+                executable: &executable,
+                worktree: wt,
+                task,
+                session_dir,
+                model: None,
+                llm: Some(llm),
+                extra_args: &profile.openhands_args,
+                env_vars: &env_vars,
+                idle_timeout_seconds: profile.openhands_idle_timeout_seconds(),
+                print_timeout_seconds: None,
+            })
+        }
         crate::backend_kind::BackendKind::Hermes => {
             anyhow::bail!("hermes dispatch is not implemented yet for backend '{backend}'")
         }

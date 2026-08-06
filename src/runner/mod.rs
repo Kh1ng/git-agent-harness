@@ -11,7 +11,8 @@ pub(crate) mod review_usage;
 
 #[allow(unused_imports)]
 pub use crate::runner::backend_runner::{
-    BackendRunner, ClaudeRunner, CodexRunner, OpencodeRunner, RunContext, VibeRunner,
+    BackendRunner, ClaudeRunner, CodexRunner, OpencodeRunner, OpenhandsRunner, RunContext,
+    VibeRunner,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::runner::backends::agy::log_delta;
