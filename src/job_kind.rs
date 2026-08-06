@@ -44,6 +44,24 @@
 //! (`routing/policy.rs`, repeated 7+ times, and `config.rs`'s
 //! `RoutingPolicy::find_quota_pool`, a fully independent copy of the same
 //! logic) -- a real, live duplication-drift risk, not just a string swap.
+//!
+//! `Research`/`Audit` (added after the initial 5) are both read-only,
+//! investigation-only job kinds: no worktree mutation, no commit, no PR --
+//! a backend runs, investigates, and self-reports findings as a GitHub
+//! issue via its own `gh` CLI access (the same way improve/fix backends
+//! self-push branches), rather than GAH orchestrating issue creation in
+//! Rust. `Audit` additionally has the backend pull `gh api .../dependabot/alerts`
+//! as a first, structured data source before its own dead-code/complexity
+//! pass. Both map to `JobFamily::Investigation`, a new family with no
+//! dedicated routing config (falls back to `default_backend`/`default_model`,
+//! same as the pre-existing "no family-specific config" fallback every
+//! `JobFamily` match already had).
+//!
+//! `research` collided with an unrelated existing string: `pm.rs`'s
+//! `RecommendedRouting.capability` (a PM-ticket-decomposition hint, not a
+//! job kind) used to accept `"research"` as one of its four values. Renamed
+//! to `"investigate"` there instead of compromising this kind's name --
+//! see `models.rs::RecommendedRouting` and `dispatch/workflows/pm.rs`.
 
 use std::fmt;
 
@@ -54,16 +72,22 @@ pub enum JobKind {
     Pm,
     Review,
     Experiment,
+    Research,
+    Audit,
 }
 
-/// The 3-way behavioral grouping routing policy actually cares about:
-/// `pm` and `review` are their own thing, `improve`/`fix`/`experiment`
-/// share backend/model policy, candidate pools, and load-balancing.
+/// The behavioral grouping routing policy actually cares about: `pm` and
+/// `review` are their own thing, `improve`/`fix`/`experiment` share backend/
+/// model policy, candidate pools, and load-balancing, and `research`/`audit`
+/// (read-only investigation, no dedicated routing config yet) share the
+/// same "fall back to defaults" treatment every family match already had
+/// for anything outside its three original arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JobFamily {
     Pm,
     Review,
     ImproveLike,
+    Investigation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +109,8 @@ impl JobKind {
             "pm" => Ok(Self::Pm),
             "review" => Ok(Self::Review),
             "experiment" => Ok(Self::Experiment),
+            "research" => Ok(Self::Research),
+            "audit" => Ok(Self::Audit),
             other => Err(UnknownJobKind(other.to_string())),
         }
     }
@@ -96,6 +122,8 @@ impl JobKind {
             Self::Pm => "pm",
             Self::Review => "review",
             Self::Experiment => "experiment",
+            Self::Research => "research",
+            Self::Audit => "audit",
         }
     }
 
@@ -104,16 +132,19 @@ impl JobKind {
             Self::Pm => JobFamily::Pm,
             Self::Review => JobFamily::Review,
             Self::Improve | Self::Fix | Self::Experiment => JobFamily::ImproveLike,
+            Self::Research | Self::Audit => JobFamily::Investigation,
         }
     }
 
-    pub fn all() -> [JobKind; 5] {
+    pub fn all() -> [JobKind; 7] {
         [
             Self::Improve,
             Self::Fix,
             Self::Pm,
             Self::Review,
             Self::Experiment,
+            Self::Research,
+            Self::Audit,
         ]
     }
 }
@@ -164,9 +195,15 @@ mod tests {
     }
 
     #[test]
-    fn all_returns_exactly_five_kinds_with_no_duplicates() {
+    fn family_groups_research_and_audit_together() {
+        assert_eq!(JobKind::Research.family(), JobFamily::Investigation);
+        assert_eq!(JobKind::Audit.family(), JobFamily::Investigation);
+    }
+
+    #[test]
+    fn all_returns_exactly_seven_kinds_with_no_duplicates() {
         let all = JobKind::all();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 7);
         let mut seen = std::collections::HashSet::new();
         for kind in all {
             assert!(seen.insert(kind), "duplicate kind in all(): {kind:?}");

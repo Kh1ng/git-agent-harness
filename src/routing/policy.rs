@@ -409,7 +409,7 @@ pub(super) fn policy_backend_model<'a>(
                 .as_deref()
                 .or(policy.default_model.as_deref()),
         ),
-        Err(_) => (
+        _ => (
             policy.default_backend.as_deref(),
             policy.default_model.as_deref(),
         ),
@@ -421,7 +421,7 @@ pub(super) fn policy_candidates(policy: &RoutingPolicy, mode: &str) -> Option<Ve
         Ok(JobFamily::Pm) => policy.pm_candidates.as_ref(),
         Ok(JobFamily::Review) => policy.review_candidates.as_ref(),
         Ok(JobFamily::ImproveLike) => policy.improve_candidates.as_ref(),
-        Err(_) => None,
+        _ => None,
     };
     raw.map(|list| route_candidates(policy, list))
 }
@@ -446,7 +446,7 @@ pub(super) fn configured_route_requires_approval(
         Ok(JobFamily::Pm) => routing.pm_candidates.as_ref(),
         Ok(JobFamily::Review) => routing.review_candidates.as_ref(),
         Ok(JobFamily::ImproveLike) => routing.improve_candidates.as_ref(),
-        Err(_) => None,
+        _ => None,
     }
     .is_some_and(|candidates| {
         candidates
@@ -542,7 +542,7 @@ pub(super) fn configured_route_candidate(
         Ok(JobFamily::Pm) => routing.pm_candidates.as_deref(),
         Ok(JobFamily::Review) => routing.review_candidates.as_deref(),
         Ok(JobFamily::ImproveLike) => routing.improve_candidates.as_deref(),
-        Err(_) => None,
+        _ => None,
     };
 
     let configured = mode_candidates

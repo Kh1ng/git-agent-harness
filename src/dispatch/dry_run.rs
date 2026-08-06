@@ -135,6 +135,14 @@ pub(in crate::dispatch) fn dry_run(
             "Steps: worktree → {} backend (research prompt) → collect artifacts → LLM judge → commit → draft MR",
             args.backend
         ),
+        Ok(kind @ (JobKind::Research | JobKind::Audit)) => {
+            println!("Backend:      {}", args.backend);
+            println!(
+                "Steps: {} backend (read-only) → self-reports findings via `gh issue create`, if any",
+                kind
+            );
+            println!("No worktree, no commit, no push, no MR.");
+        }
         Err(_) => println!("mode '{}': not yet implemented", args.mode),
     }
     println!("\n## Safety\n- No pushes, no MRs, no provider calls (dry run)");

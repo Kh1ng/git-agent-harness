@@ -499,7 +499,7 @@ pub struct PlannerWorkPacket {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RecommendedRouting {
-    /// Capability the backend must provide: edit | plan | review | research.
+    /// Capability the backend must provide: edit | plan | review | investigate.
     pub capability: String,
     /// Minimum capability tier implied by difficulty/risk: standard | strong.
     #[serde(default = "default_routing_tier")]
