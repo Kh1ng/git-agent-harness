@@ -1,7 +1,18 @@
+use crate::backend_kind::BackendKind;
 use crate::ledger::{AttemptRecord, LedgerUsage};
 use crate::routing::RouteDecision;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+// agy-main/agy-second are legacy instance strings, not kinds (see
+// backend_kind.rs); fold them locally before dispatching on the kind.
+pub(crate) fn backend_kind_of(backend: Option<&str>) -> Option<BackendKind> {
+    match backend {
+        Some("agy-main") | Some("agy-second") => Some(BackendKind::Agy),
+        Some(other) => BackendKind::parse(other).ok(),
+        None => None,
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct UsageAttribution<'a> {
@@ -87,13 +98,15 @@ pub fn provider_for_model(backend: Option<&str>, model: Option<&str>) -> Option<
         } else {
             None
         };
-    inferred.map(str::to_string).or_else(|| match backend {
-        Some("claude") => Some("anthropic".to_string()),
-        Some("codex") => Some("openai".to_string()),
-        Some("vibe") => Some("mistral".to_string()),
-        Some("agy" | "agy-main" | "agy-second") => Some("google".to_string()),
-        _ => None,
-    })
+    inferred
+        .map(str::to_string)
+        .or_else(|| match backend_kind_of(backend) {
+            Some(BackendKind::Claude) => Some("anthropic".to_string()),
+            Some(BackendKind::Codex) => Some("openai".to_string()),
+            Some(BackendKind::Vibe) => Some("mistral".to_string()),
+            Some(BackendKind::Agy) => Some("google".to_string()),
+            _ => None,
+        })
 }
 
 /// Contract: `docs/EXECUTION_IDENTITY_CONTRACT.md` §7 (auth/cost class
@@ -109,18 +122,18 @@ pub fn classify_usage(
     match cost_class {
         Some("included_quota") => Some("quota_backed".to_string()),
         Some("paid") => Some("api_key_backed".to_string()),
-        _ if backend == Some("opencode")
+        _ if backend_kind_of(backend) == Some(BackendKind::Opencode)
             && effective_model
                 .is_some_and(|model| model.contains("ollama") || model.contains("local/")) =>
         {
             Some("local_unmetered".to_string())
         }
-        _ => match backend {
-            Some("claude" | "codex" | "vibe" | "agy" | "agy-main" | "agy-second") => {
-                Some("quota_backed".to_string())
-            }
-            Some(_) => Some("unknown".to_string()),
-            None => None,
+        _ if backend.is_none() => None,
+        _ => match backend_kind_of(backend) {
+            Some(
+                BackendKind::Claude | BackendKind::Codex | BackendKind::Vibe | BackendKind::Agy,
+            ) => Some("quota_backed".to_string()),
+            _ => Some("unknown".to_string()),
         },
     }
 }
@@ -172,7 +185,7 @@ pub(crate) fn normalize_attempt_usage(
 
     // AGY binds this label directly on the invocation and does not expose a
     // more specific model identity in successful CLI logs.
-    if matches!(attribution.backend, Some("agy" | "agy-main" | "agy-second"))
+    if backend_kind_of(attribution.backend) == Some(BackendKind::Agy)
         && usage.actual_model.is_none()
     {
         usage.actual_model = attribution.effective_model.map(str::to_string);
@@ -185,7 +198,7 @@ pub(crate) fn normalize_attempt_usage(
             None => "neither the route nor backend artifact identified a model".to_string(),
         });
     }
-    if matches!(attribution.backend, Some("agy" | "agy-main" | "agy-second")) {
+    if backend_kind_of(attribution.backend) == Some(BackendKind::Agy) {
         if usage.quota_window.is_none() {
             usage.quota_window = Some("AGY individual quota".to_string());
         }
