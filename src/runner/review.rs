@@ -163,8 +163,15 @@ pub fn run_review_backend_for_identity(
 
     let usage_capture = ReviewUsageCapture::begin(backend, &executable, worktree, env_vars);
     let mut cmd = Command::new(&executable);
-    match backend {
-        "claude" => {
+    // agy-main/agy-second are legacy instance strings, not kinds (see
+    // backend_kind.rs); fold them locally before dispatching on the kind.
+    use crate::backend_kind::BackendKind;
+    let backend_kind = match backend {
+        "agy-main" | "agy-second" => Some(BackendKind::Agy),
+        other => BackendKind::parse(other).ok(),
+    };
+    match backend_kind {
+        Some(BackendKind::Claude) => {
             cmd.args(["-p", prompt, "--output-format", "text", "--verbose"])
                 .args(&profile.claude_args);
             if let Some(session_id) = usage_capture.claude_session_id() {
@@ -174,34 +181,34 @@ pub fn run_review_backend_for_identity(
                 cmd.args(["--model", model]);
             }
         }
-        "codex" => {
+        Some(BackendKind::Codex) => {
             cmd.arg("exec")
                 .arg("--json")
                 .arg(prompt)
                 .args(filtered_codex_args(&profile.codex_args))
                 .args(codex_model_args(effective_model));
         }
-        "agy" | "agy-main" | "agy-second" => {
+        Some(BackendKind::Agy) => {
             cmd.arg("--print").arg(prompt);
             if let Some(model) = effective_model {
                 cmd.args(["--model", model]);
             }
             cmd.arg("--dangerously-skip-permissions");
         }
-        "vibe" => {
+        Some(BackendKind::Vibe) => {
             cmd.arg("-p").arg(prompt);
             cmd.arg("--output").arg("text");
             cmd.arg("--trust");
             cmd.arg("--auto-approve");
         }
-        "opencode" => {
+        Some(BackendKind::Opencode) => {
             cmd.arg("run");
             if let Some(model) = effective_model {
                 cmd.args(["--model", model]);
             }
             cmd.arg(prompt);
         }
-        _ => {
+        Some(BackendKind::Openhands) | Some(BackendKind::Hermes) | None => {
             return ReviewRunResult {
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),

@@ -52,13 +52,20 @@ impl ReviewUsageCapture {
         worktree: &Path,
         env_vars: &[(String, String)],
     ) -> Self {
-        match backend {
-            "claude" => Self::Claude {
+        // agy-main/agy-second are legacy instance strings, not kinds (see
+        // backend_kind.rs); fold them locally before dispatching on the kind.
+        use crate::backend_kind::BackendKind;
+        let backend_kind = match backend {
+            "agy-main" | "agy-second" => Some(BackendKind::Agy),
+            other => BackendKind::parse(other).ok(),
+        };
+        match backend_kind {
+            Some(BackendKind::Claude) => Self::Claude {
                 session_id: uuid::Uuid::new_v4().to_string(),
                 home: env_path(env_vars, "HOME").or_else(|| env::var_os("HOME").map(PathBuf::from)),
             },
-            "codex" => Self::Codex,
-            "agy" | "agy-main" | "agy-second" => {
+            Some(BackendKind::Codex) => Self::Codex,
+            Some(BackendKind::Agy) => {
                 let version = agy::detect_agy_version(executable, worktree, env_vars);
                 let log_path = agy::agy_cli_log_path(env_vars, executable, version.as_deref());
                 let pre_offset = log_path
@@ -70,14 +77,14 @@ impl ReviewUsageCapture {
                     pre_offset,
                 }
             }
-            "vibe" => Self::Vibe {
+            Some(BackendKind::Vibe) => Self::Vibe {
                 started_at: SystemTime::now(),
                 sessions_before: vibe::snapshot_vibe_session_metadata_paths(env_vars),
             },
-            "opencode" => Self::OpenCode {
+            Some(BackendKind::Opencode) => Self::OpenCode {
                 started_at: SystemTime::now(),
             },
-            _ => Self::None,
+            Some(BackendKind::Openhands) | Some(BackendKind::Hermes) | None => Self::None,
         }
     }
 
