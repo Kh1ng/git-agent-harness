@@ -231,6 +231,63 @@ fn github_publication_is_native_idempotent_and_holds_owner_work() {
     assert_eq!(fake.create_calls, 2, "rerun must not duplicate children");
 }
 
+// Issue #654: on GitHub, link_provider_dependency (the native path) is a
+// no-op -- provider::link_provider_dependency only writes GitLab's issue-links
+// API -- so the sibling depends_on edge must be enforceable through the
+// strict `Blocked by: #N` body line dependencies.rs::parse_dependency_line
+// actually reads. Before this fix, render_issue_body wrote a `Dependencies:`
+// line (wrong field name) with a full URL (wrong token shape) -- the parser
+// would silently see zero dependencies and the child would dispatch
+// immediately alongside its unfinished prerequisite.
+#[test]
+fn github_child_body_carries_a_parseable_blocked_by_line_for_its_dependency() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut provider_profile = profile(tmp.path());
+    provider_profile.provider = "github".to_string();
+    provider_profile
+        .publishing
+        .pm_difficulty_labels
+        .insert("easy".to_string(), "difficulty:easy".to_string());
+    provider_profile.publishing.pm_execution_labels.insert(
+        "human_required".to_string(),
+        "exec:owner-decision".to_string(),
+    );
+    let artifact = artifact(&provider_profile);
+    let mut state = initial_state(&provider_profile, &artifact);
+    let mut fake = FakePublisher::with_source();
+    fake.labels = vec![
+        "exec:autonomous".to_string(),
+        "difficulty:easy".to_string(),
+        "exec:owner-decision".to_string(),
+    ];
+
+    run_publish(
+        tmp.path(),
+        &provider_profile,
+        &artifact,
+        &mut state,
+        &mut fake,
+        false,
+    )
+    .unwrap();
+
+    // "base" (no depends_on) is created first by topological order and gets
+    // issue number 101; "dependent" (depends_on: ["base"]) is created second
+    // as 102, and its body must reference base's real issue number.
+    assert!(
+        !fake.issues["101"].body.contains("Blocked by:"),
+        "a ticket with no dependencies must not emit an unparseable empty \
+         'Blocked by:' line -- got: {}",
+        fake.issues["101"].body
+    );
+    assert!(
+        fake.issues["102"].body.contains("Blocked by: #101"),
+        "dependent child body must carry a strict 'Blocked by: #N' line \
+         naming its sibling's real issue number -- got: {}",
+        fake.issues["102"].body
+    );
+}
+
 #[test]
 fn gitlab_partial_failure_resumes_without_duplicate_children() {
     let tmp = tempfile::tempdir().unwrap();

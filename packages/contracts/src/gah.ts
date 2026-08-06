@@ -290,6 +290,8 @@ export interface DependencyObservation {
   provider: string;
   provider_state: string | null;
   normalized_state: 'open' | 'closed' | 'unknown' | 'missing' | 'inaccessible';
+  /** "body" (canonical `Blocked by:` line) | "github_sub_issue" | "gitlab_blocks_link" */
+  provenance: string | null;
 }
 
 export interface DependencyBlocker {
