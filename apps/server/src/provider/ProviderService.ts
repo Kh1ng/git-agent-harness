@@ -67,6 +67,7 @@ class ProviderServiceImpl {
       openhands: 'OpenHands',
       agy: 'AGY',
       vibe: 'Vibe',
+      hermes: 'Hermes',
       auto: 'Auto'
     };
     return displayNames[kind] || kind;
@@ -84,6 +85,7 @@ class ProviderServiceImpl {
       openhands: 'OpenHands agent framework',
       agy: 'AGY coding agent',
       vibe: 'Mistral Vibe CLI agent',
+      hermes: 'Hermes AI assistant',
       auto: 'Auto backend selection'
     };
     return descriptions[kind] || `Provider: ${kind}`;

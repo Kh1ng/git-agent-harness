@@ -14,9 +14,10 @@ export type ProviderKind =
   | "cursor" 
   | "opencode" 
   | "grok" 
-  | "openhands" 
-  | "agy" 
+  | "openhands"
+  | "agy"
   | "vibe"
+  | "hermes"
   | "auto";
 
 export type ProviderInstanceId = string;

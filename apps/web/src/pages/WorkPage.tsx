@@ -18,7 +18,7 @@ import { ControllerActivityCard } from '../components/ControllerActivityCard.js'
 const WORK_REFRESH_MS = 30 * 1000;
 
 const DISPATCH_MODES = ['fix', 'improve', 'review', 'pm', 'experiment'] as const;
-const DISPATCH_BACKENDS = ['auto', 'openhands', 'codex', 'claude', 'agy', 'vibe', 'opencode'] as const;
+const DISPATCH_BACKENDS = ['auto', 'openhands', 'codex', 'claude', 'agy', 'vibe', 'opencode', 'hermes'] as const;
 
 /** Minimal "start a new dispatch" form -- the dashboard could only stop/
  * command sessions that already existed, with no way to start one. Sends

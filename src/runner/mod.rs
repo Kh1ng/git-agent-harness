@@ -11,8 +11,8 @@ pub(crate) mod review_usage;
 
 #[allow(unused_imports)]
 pub use crate::runner::backend_runner::{
-    AgyRunner, BackendRunner, ClaudeRunner, CodexRunner, OpencodeRunner, OpenhandsRunner,
-    RunContext, VibeRunner,
+    AgyRunner, BackendRunner, ClaudeRunner, CodexRunner, HermesRunner, OpencodeRunner,
+    OpenhandsRunner, RunContext, VibeRunner,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::runner::backends::agy::log_delta;
@@ -22,6 +22,8 @@ pub use crate::runner::backends::agy::{run_agy, run_agy_with_executable};
 pub use crate::runner::backends::claude::{run_claude, run_claude_with_executable};
 #[allow(unused_imports)]
 pub use crate::runner::backends::codex::{run_codex, run_codex_with_executable};
+#[allow(unused_imports)]
+pub use crate::runner::backends::hermes::{run_hermes, run_hermes_with_executable};
 #[allow(unused_imports)]
 pub use crate::runner::backends::opencode::{run_opencode, run_opencode_with_executable};
 #[allow(unused_imports)]

@@ -80,6 +80,8 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             vibe_path,
             opencode_args,
             opencode_path,
+            hermes_args,
+            hermes_path,
             agy_second_home,
             notify_command,
             policy_path,
@@ -115,6 +117,8 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 vibe_path,
                 opencode_args,
                 opencode_path,
+                hermes_args,
+                hermes_path,
                 agy_second_home,
                 agy_print_timeout_seconds: std::collections::HashMap::new(),
                 agy_idle_timeout_seconds: None,
@@ -125,6 +129,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 vibe_idle_timeout_seconds: None,
                 codex_idle_timeout_seconds: None,
                 claude_idle_timeout_seconds: None,
+                hermes_idle_timeout_seconds: None,
                 max_parallel_workers,
                 max_open_managed_mrs,
                 notify_command,
@@ -181,6 +186,8 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             vibe_path,
             opencode_args,
             opencode_path,
+            hermes_args,
+            hermes_path,
             agy_second_home,
             notify_command,
             policy_path,
@@ -316,6 +323,18 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 existing.opencode_path = Some(v);
             } else if should_clear("opencode_path", &clear) {
                 existing.opencode_path = None;
+            }
+
+            if !hermes_args.is_empty() {
+                existing.hermes_args = hermes_args;
+            } else if should_clear("hermes_args", &clear) {
+                existing.hermes_args.clear();
+            }
+
+            if let Some(v) = hermes_path {
+                existing.hermes_path = Some(v);
+            } else if should_clear("hermes_path", &clear) {
+                existing.hermes_path = None;
             }
 
             if let Some(v) = agy_second_home {
