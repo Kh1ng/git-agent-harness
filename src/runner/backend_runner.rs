@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::backend_kind::BackendKind;
 use crate::runner::{LlmConfig, RunResult};
@@ -119,6 +119,28 @@ impl BackendRunner for OpencodeRunner {
             ctx.task,
             ctx.session_dir,
             ctx.model,
+            ctx.extra_args,
+            ctx.env_vars,
+            ctx.idle_timeout_seconds,
+        )
+    }
+}
+
+pub struct OpenhandsRunner;
+
+impl BackendRunner for OpenhandsRunner {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Openhands
+    }
+
+    fn run(&self, ctx: &RunContext) -> Result<RunResult> {
+        let llm = ctx.llm.context("openhands requires an LlmConfig")?;
+        crate::runner::run_openhands_with_executable(
+            ctx.executable,
+            ctx.worktree,
+            ctx.task,
+            ctx.session_dir,
+            llm,
             ctx.extra_args,
             ctx.env_vars,
             ctx.idle_timeout_seconds,
@@ -282,5 +304,69 @@ mod tests {
         assert!(argv.contains(&"--model".to_string()));
         assert!(argv.contains(&"glm-4.6".to_string()));
         assert!(argv.contains(&"--custom-flag".to_string()));
+    }
+
+    #[test]
+    fn openhands_runner_reports_openhands_kind() {
+        assert_eq!(OpenhandsRunner.kind(), BackendKind::Openhands);
+    }
+
+    #[test]
+    fn openhands_runner_requires_an_llm_config() {
+        let f = fixture();
+        let ctx = RunContext {
+            executable: Path::new("openhands"),
+            worktree: &f.worktree,
+            task: "task",
+            session_dir: &f.session_dir,
+            model: None,
+            llm: None,
+            extra_args: &[],
+            env_vars: &[],
+            idle_timeout_seconds: 300,
+            print_timeout_seconds: None,
+        };
+
+        let err = OpenhandsRunner.run(&ctx).unwrap_err();
+
+        assert!(err.to_string().contains("requires an LlmConfig"));
+    }
+
+    #[test]
+    fn openhands_runner_matches_the_free_function_it_wraps() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "openhands", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+        let extra_args = vec!["--custom-flag".to_string()];
+        let llm = LlmConfig {
+            base_url: "https://llm.example".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "claude-sonnet".to_string(),
+        };
+
+        let ctx = RunContext {
+            executable: Path::new("openhands"),
+            worktree: &f.worktree,
+            task: "the openhands task",
+            session_dir: &f.session_dir,
+            model: None,
+            llm: Some(&llm),
+            extra_args: &extra_args,
+            env_vars: &envs,
+            idle_timeout_seconds: 300,
+            print_timeout_seconds: None,
+        };
+
+        let result = OpenhandsRunner.run(&ctx).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv.contains(&"--headless".to_string()));
+        assert!(argv.contains(&"the openhands task".to_string()));
+        assert!(argv.contains(&"--custom-flag".to_string()));
+        let env = recorded_env(&f.record_dir);
+        assert!(env.contains("LLM_MODEL=claude-sonnet"));
+        assert!(env.contains("LLM_API_KEY=sk-test"));
     }
 }
