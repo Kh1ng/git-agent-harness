@@ -6,9 +6,21 @@
  * own session dispatches them natively, GAH doesn't reinvent them.
  */
 
-import { recall, capture } from './memoryGatewayClient.js';
+import { recall, capture, flushSession } from './memoryGatewayClient.js';
 import { resolveAdapter, type ManagerCommandInfo, type ManagerModelInfo } from './registry.js';
 import { backendForProfile } from './settingsStore.js';
+
+// Backend-native command names that mean "compact/clear this session"
+// (Hermes: /reset, /compress; Codex/Claude ACP bridges: /compact, /clear).
+// GAH doesn't reinvent these commands (see runTurn below), so it can't rely
+// on a single canonical name -- it just recognizes the common synonyms well
+// enough to know when to also flush buffered memory (#849).
+const COMPACTION_COMMAND_NAMES = new Set(['compact', 'compress', 'clear', 'reset']);
+
+export function isCompactionCommand(message: string): boolean {
+  const name = message.trim().slice(1).split(/\s+/)[0]?.toLowerCase();
+  return name !== undefined && COMPACTION_COMMAND_NAMES.has(name);
+}
 
 export interface ChatTurn {
   role: 'user' | 'assistant' | 'system';
@@ -74,6 +86,12 @@ async function runTurn(profile: string, message: string): Promise<string> {
   const { reply } = await adapter.runTurn(profile, prompt);
 
   await capture(profile, message, reply);
+  // Force buffered L0 conversation into the gateway's L1/L2 pipeline right
+  // away on a compact/clear-like command, instead of waiting for the
+  // pipeline's own idle timeout (#849).
+  if (isSlashCommand && isCompactionCommand(message)) {
+    await flushSession(profile);
+  }
   return reply;
 }
 
