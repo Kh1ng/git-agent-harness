@@ -148,6 +148,28 @@ impl BackendRunner for OpenhandsRunner {
     }
 }
 
+pub struct AgyRunner;
+
+impl BackendRunner for AgyRunner {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Agy
+    }
+
+    fn run(&self, ctx: &RunContext) -> Result<RunResult> {
+        let llm = ctx.llm.context("agy requires an LlmConfig")?;
+        crate::runner::run_agy_with_executable(
+            ctx.executable,
+            ctx.worktree,
+            ctx.task,
+            ctx.session_dir,
+            llm,
+            ctx.env_vars,
+            ctx.print_timeout_seconds,
+            ctx.idle_timeout_seconds,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +390,69 @@ mod tests {
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("LLM_MODEL=claude-sonnet"));
         assert!(env.contains("LLM_API_KEY=sk-test"));
+    }
+
+    #[test]
+    fn agy_runner_reports_agy_kind() {
+        assert_eq!(AgyRunner.kind(), BackendKind::Agy);
+    }
+
+    #[test]
+    fn agy_runner_requires_an_llm_config() {
+        let f = fixture();
+        let ctx = RunContext {
+            executable: Path::new("agy"),
+            worktree: &f.worktree,
+            task: "task",
+            session_dir: &f.session_dir,
+            model: None,
+            llm: None,
+            extra_args: &[],
+            env_vars: &[],
+            idle_timeout_seconds: 300,
+            print_timeout_seconds: None,
+        };
+
+        let err = AgyRunner.run(&ctx).unwrap_err();
+
+        assert!(err.to_string().contains("requires an LlmConfig"));
+    }
+
+    #[test]
+    fn agy_runner_matches_the_free_function_it_wraps() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+        let llm = LlmConfig {
+            base_url: "https://llm.example".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "gemini-3-flash".to_string(),
+        };
+
+        let ctx = RunContext {
+            executable: Path::new("agy"),
+            worktree: &f.worktree,
+            task: "the agy task",
+            session_dir: &f.session_dir,
+            model: None,
+            llm: Some(&llm),
+            extra_args: &[],
+            env_vars: &envs,
+            idle_timeout_seconds: 300,
+            print_timeout_seconds: Some(900),
+        };
+
+        let result = AgyRunner.run(&ctx).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "--print");
+        assert!(argv.contains(&"the agy task".to_string()));
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"gemini-3-flash".to_string()));
+        assert!(argv.contains(&"--print-timeout".to_string()));
+        assert!(argv.contains(&"900s".to_string()));
+        assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));
     }
 }

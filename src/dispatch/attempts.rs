@@ -456,19 +456,21 @@ pub(super) fn run_backend_with_reserved_route(
             idle_timeout_seconds: profile.claude_idle_timeout_seconds(),
             print_timeout_seconds: None,
         }),
-        crate::backend_kind::BackendKind::Agy => runner::run_agy_with_executable(
-            &executable,
-            wt,
+        crate::backend_kind::BackendKind::Agy => runner::AgyRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
             task,
             session_dir,
-            llm,
-            &env_vars,
-            profile
+            model: None,
+            llm: Some(llm),
+            extra_args: &[],
+            env_vars: &env_vars,
+            idle_timeout_seconds: profile.agy_idle_timeout_seconds(),
+            print_timeout_seconds: profile
                 .agy_print_timeout_seconds
                 .get(llm.model.as_str())
                 .copied(),
-            profile.agy_idle_timeout_seconds(),
-        ),
+        }),
         crate::backend_kind::BackendKind::Vibe => runner::VibeRunner.run(&runner::RunContext {
             executable: &executable,
             worktree: wt,
