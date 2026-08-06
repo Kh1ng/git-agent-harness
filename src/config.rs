@@ -579,7 +579,7 @@ impl RoutingPolicy {
             Ok(JobFamily::Pm) => self.pm_candidates.as_ref(),
             Ok(JobFamily::Review) => self.review_candidates.as_ref(),
             Ok(JobFamily::ImproveLike) => self.improve_candidates.as_ref(),
-            Err(_) => None,
+            _ => None,
         };
         let configured = candidates.and_then(|list| {
             list.iter()
