@@ -1,4 +1,5 @@
 use crate::config::{self, GahConfig};
+use crate::job_kind::JobKind;
 use crate::provider::gitlab_api;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -619,7 +620,7 @@ pub fn count_current_fix_attempts_for_mrs(
         .collect();
     count_branch_attempts(entries, Some((profile, repo_id)), |entry| {
         usize::from(
-            entry.mode == "fix"
+            JobKind::parse(&entry.mode) == Ok(JobKind::Fix)
                 && entry.dispatch_reason.as_deref() == Some("post_review_repair")
                 && entry.review_contract_version
                     == Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION)

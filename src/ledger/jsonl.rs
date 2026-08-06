@@ -1,4 +1,5 @@
 use crate::config::GahConfig;
+use crate::job_kind::JobKind;
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -192,8 +193,8 @@ pub fn append_human_gate_if_transition(cfg: &GahConfig, entry: &LedgerEntry) -> 
     if let Some(active) =
         effective_human_gate_from_entries(&existing, &entry.profile, &entry.repo_id, work_id)
     {
-        let active_is_review_derived =
-            active.mode == "review" || active.reason_code.as_deref() == Some("stuck_loop_gate");
+        let active_is_review_derived = JobKind::parse(&active.mode) == Ok(JobKind::Review)
+            || active.reason_code.as_deref() == Some("stuck_loop_gate");
         let starts_new_review_generation = entry.review_generation.is_some()
             && active_is_review_derived
             && (active.review_contract_version != entry.review_contract_version
@@ -411,7 +412,11 @@ pub fn backfill_review_verdict(
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            e.branch.as_deref() == Some(branch) && matches!(e.mode.as_str(), "fix" | "improve")
+            e.branch.as_deref() == Some(branch)
+                && matches!(
+                    JobKind::parse(&e.mode),
+                    Ok(JobKind::Fix) | Ok(JobKind::Improve)
+                )
         })
         .max_by_key(|(_, e)| e.timestamp.clone())
         .map(|(idx, _)| idx);
@@ -498,7 +503,7 @@ pub fn review_already_exists(
     Ok(active_entries.iter().any(|entry| {
         entry.profile == profile_name
             && entry.repo_id == repo_id
-            && entry.mode == "review"
+            && JobKind::parse(&entry.mode) == Ok(JobKind::Review)
             && entry.review_contract_version.unwrap_or(0)
                 >= super::entry::CURRENT_REVIEW_CONTRACT_VERSION
             && entry
@@ -555,9 +560,9 @@ pub struct EffectiveHumanGate {
 pub fn is_review_derived_gate(entry: &LedgerEntry) -> bool {
     let reason_code = entry.human_required_reason_code.as_deref();
     let dispatch_reason = entry.dispatch_reason.as_deref();
-    let mode = entry.mode.as_str();
+    let is_review = JobKind::parse(&entry.mode) == Ok(JobKind::Review);
 
-    if mode == "review" {
+    if is_review {
         return true;
     }
 
@@ -593,7 +598,7 @@ pub fn is_review_derived_gate(entry: &LedgerEntry) -> bool {
     }
 
     if reason_code == Some("policy_approval")
-        && (mode == "review" || dispatch_reason == Some("post_review_repair"))
+        && (is_review || dispatch_reason == Some("post_review_repair"))
     {
         return true;
     }

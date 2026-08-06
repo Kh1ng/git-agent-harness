@@ -19,6 +19,7 @@ pub mod events;
 pub mod execution_identity;
 pub mod generated_artifacts;
 pub mod init;
+pub mod job_kind;
 pub mod ledger;
 pub mod models;
 pub mod notifications;

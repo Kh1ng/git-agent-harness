@@ -2,6 +2,7 @@ use super::super::issues::{parse_ticket_metadata, TicketMetadata};
 use super::super::text::normalize_match;
 use super::super::DispatchArgs;
 use crate::config::{GahConfig, Profile};
+use crate::job_kind::JobKind;
 use crate::ledger::{self, LedgerEntry};
 use crate::provider;
 use crate::worktree;
@@ -152,7 +153,10 @@ pub(in crate::dispatch) fn lookup_review_state(
         .rev()
         .find(|entry| {
             entry.profile == profile_name
-                && matches!(entry.mode.as_str(), "fix" | "improve")
+                && matches!(
+                    JobKind::parse(&entry.mode),
+                    Ok(JobKind::Fix) | Ok(JobKind::Improve)
+                )
                 && entry.branch.is_some()
                 && entry.error_summary.is_none()
                 && (entry.target_summary.as_deref() == Some(target)
@@ -199,7 +203,10 @@ pub(in crate::dispatch) fn lookup_review_state_by_branch(
         .rev()
         .find(|entry| {
             entry.profile == profile_name
-                && matches!(entry.mode.as_str(), "fix" | "improve")
+                && matches!(
+                    JobKind::parse(&entry.mode),
+                    Ok(JobKind::Fix) | Ok(JobKind::Improve)
+                )
                 && entry.branch.as_deref() == Some(branch)
         })
         .map(|entry| render_prior_ledger_state(&entry))

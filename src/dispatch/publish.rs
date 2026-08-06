@@ -6,6 +6,7 @@ use super::already_satisfied::{
 };
 use super::issues::{fetch_issue_details, IssueDetails, TicketMetadata};
 use crate::config::Profile;
+use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
 use crate::models::ReviewVerdict;
 use std::path::Path;
@@ -486,12 +487,12 @@ pub(super) fn build_mr_title(
     validation_failed: bool,
     ticket: Option<&TicketMetadata>,
 ) -> String {
-    let mode_label = match mode {
-        "fix" => "Fix",
-        "improve" => "Improve",
-        "review" => "Review",
-        "pm" => "Plan",
-        other => other,
+    let mode_label = match JobKind::parse(mode) {
+        Ok(JobKind::Fix) => "Fix",
+        Ok(JobKind::Improve) => "Improve",
+        Ok(JobKind::Review) => "Review",
+        Ok(JobKind::Pm) => "Plan",
+        _ => mode,
     };
     let prefix = if validation_failed {
         "[GAH][DRAFT-FAIL]"
