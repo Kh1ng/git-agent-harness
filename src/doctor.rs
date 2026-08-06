@@ -287,10 +287,10 @@ pub(crate) enum ProviderAuthResult {
 
 fn check_provider_auth(profile: &Profile) -> bool {
     let vars = profile.pat_env_names();
-    let result = match profile.provider.as_str() {
-        "gitlab" => gitlab_provider_auth(profile),
-        "github" => github_provider_auth(profile),
-        _other => {
+    let result = match profile.provider_kind() {
+        Ok(crate::provider_kind::ProviderKind::Gitlab) => gitlab_provider_auth(profile),
+        Ok(crate::provider_kind::ProviderKind::Github) => github_provider_auth(profile),
+        Err(_) => {
             // Unknown provider: fall back to the original token-convention check.
             if vars.is_empty() {
                 print_check(
@@ -729,7 +729,9 @@ pub(crate) fn check_merge_policy(profile: &Profile) -> bool {
         Some(p) => p,
     };
     let label = policy.as_str();
-    if *policy == config::MergePolicy::GitlabMwps && profile.provider != "gitlab" {
+    if *policy == config::MergePolicy::GitlabMwps
+        && profile.provider_kind() != Ok(crate::provider_kind::ProviderKind::Gitlab)
+    {
         print_check(
             CheckStatus::Fail,
             "merge policy",

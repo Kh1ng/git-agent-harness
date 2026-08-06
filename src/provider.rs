@@ -1,4 +1,5 @@
 use crate::config::Profile;
+use crate::provider_kind::ProviderKind;
 use anyhow::{Context, Result};
 use std::fmt;
 use std::process::{Command, Output};
@@ -200,19 +201,26 @@ pub(crate) struct ProviderIssue {
     pub(crate) labels: Vec<String>,
 }
 
-fn provider_issue_from_value(provider: &str, value: &serde_json::Value) -> Result<ProviderIssue> {
-    let (number, url, body) = match provider {
-        "github" => (
+fn require_provider_kind(profile: &Profile) -> Result<ProviderKind> {
+    ProviderKind::parse(&profile.provider)
+        .map_err(|_| anyhow::anyhow!("unsupported provider: {}", profile.provider))
+}
+
+fn provider_issue_from_value(
+    kind: ProviderKind,
+    value: &serde_json::Value,
+) -> Result<ProviderIssue> {
+    let (number, url, body) = match kind {
+        ProviderKind::Github => (
             value["number"].as_u64().map(|v| v.to_string()),
             value["html_url"].as_str(),
             value["body"].as_str().unwrap_or_default(),
         ),
-        "gitlab" => (
+        ProviderKind::Gitlab => (
             value["iid"].as_u64().map(|v| v.to_string()),
             value["web_url"].as_str(),
             value["description"].as_str().unwrap_or_default(),
         ),
-        other => anyhow::bail!("unsupported provider: {other}"),
     };
     let id = value["id"]
         .as_u64()
@@ -269,14 +277,15 @@ fn github_json_api(
 }
 
 pub(crate) fn get_provider_issue(profile: &Profile, number: &str) -> Result<ProviderIssue> {
-    let value = match profile.provider.as_str() {
-        "github" => github_json_api(
+    let kind = require_provider_kind(profile)?;
+    let value = match kind {
+        ProviderKind::Github => github_json_api(
             profile,
             "GET",
             &format!("repos/{}/issues/{number}", profile.repo),
             &[],
         )?,
-        "gitlab" => {
+        ProviderKind::Gitlab => {
             let project_id = profile
                 .provider_project_id
                 .as_deref()
@@ -288,18 +297,18 @@ pub(crate) fn get_provider_issue(profile: &Profile, number: &str) -> Result<Prov
                 &[],
             )?
         }
-        other => anyhow::bail!("unsupported provider: {other}"),
     };
-    provider_issue_from_value(&profile.provider, &value)
+    provider_issue_from_value(kind, &value)
 }
 
 pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssue>> {
     const PAGE_SIZE: usize = 100;
     const MAX_PAGES: usize = 100;
+    let kind = require_provider_kind(profile)?;
     let mut issues = Vec::new();
     for page in 1..=MAX_PAGES {
-        let value = match profile.provider.as_str() {
-            "github" => github_json_api(
+        let value = match kind {
+            ProviderKind::Github => github_json_api(
                 profile,
                 "GET",
                 &format!(
@@ -308,7 +317,7 @@ pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssu
                 ),
                 &[],
             )?,
-            "gitlab" => {
+            ProviderKind::Gitlab => {
                 let project_id = profile.provider_project_id.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("profile missing provider_project_id for gitlab")
                 })?;
@@ -321,16 +330,15 @@ pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssu
                     &[],
                 )?
             }
-            other => anyhow::bail!("unsupported provider: {other}"),
         };
         let page_values = value
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("provider issue listing was not an array"))?;
         for value in page_values {
-            if profile.provider == "github" && value.get("pull_request").is_some() {
+            if kind == ProviderKind::Github && value.get("pull_request").is_some() {
                 continue;
             }
-            issues.push(provider_issue_from_value(&profile.provider, value)?);
+            issues.push(provider_issue_from_value(kind, value)?);
         }
         if page_values.len() < PAGE_SIZE {
             return Ok(issues);
@@ -345,10 +353,11 @@ pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssu
 pub(crate) fn list_provider_label_names(profile: &Profile) -> Result<Vec<String>> {
     const PAGE_SIZE: usize = 100;
     const MAX_PAGES: usize = 100;
+    let kind = require_provider_kind(profile)?;
     let mut labels = Vec::new();
     for page in 1..=MAX_PAGES {
-        let value = match profile.provider.as_str() {
-            "github" => github_json_api(
+        let value = match kind {
+            ProviderKind::Github => github_json_api(
                 profile,
                 "GET",
                 &format!(
@@ -357,7 +366,7 @@ pub(crate) fn list_provider_label_names(profile: &Profile) -> Result<Vec<String>
                 ),
                 &[],
             )?,
-            "gitlab" => {
+            ProviderKind::Gitlab => {
                 let project_id = profile.provider_project_id.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("profile missing provider_project_id for gitlab")
                 })?;
@@ -368,7 +377,6 @@ pub(crate) fn list_provider_label_names(profile: &Profile) -> Result<Vec<String>
                     &[],
                 )?
             }
-            other => anyhow::bail!("unsupported provider: {other}"),
         };
         let page_values = value
             .as_array()
@@ -396,8 +404,9 @@ pub(crate) fn create_provider_issue(
 ) -> Result<ProviderIssue> {
     let title = crate::redact::redact(title);
     let body = crate::redact::redact(body);
-    let value = match profile.provider.as_str() {
-        "github" => {
+    let kind = require_provider_kind(profile)?;
+    let value = match kind {
+        ProviderKind::Github => {
             let mut fields = vec![("title", title.as_str()), ("body", body.as_str())];
             fields.extend(labels.iter().map(|label| ("labels[]", label.as_str())));
             github_json_api(
@@ -407,7 +416,7 @@ pub(crate) fn create_provider_issue(
                 &fields,
             )?
         }
-        "gitlab" => {
+        ProviderKind::Gitlab => {
             let project_id = profile
                 .provider_project_id
                 .as_deref()
@@ -424,9 +433,8 @@ pub(crate) fn create_provider_issue(
                 &fields,
             )?
         }
-        other => anyhow::bail!("unsupported provider: {other}"),
     };
-    provider_issue_from_value(&profile.provider, &value)
+    provider_issue_from_value(kind, &value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,10 +469,10 @@ pub fn create_draft_mr(
         anyhow::bail!("delivery_mode=handoff: create_draft_mr is disallowed in handoff mode");
     }
     let body = crate::redact::redact(body);
-    match profile.provider.as_str() {
-        "gitlab" => gitlab_mr(profile, branch, title, &body),
-        "github" => github_mr(profile, branch, title, &body),
-        other => anyhow::bail!("unsupported provider: {}", other),
+    match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Gitlab) => gitlab_mr(profile, branch, title, &body),
+        Ok(ProviderKind::Github) => github_mr(profile, branch, title, &body),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }
 }
 
@@ -478,10 +486,10 @@ pub fn post_review_comment(
         anyhow::bail!("delivery_mode=handoff: post_review_comment is disallowed in handoff mode");
     }
     let body = crate::redact::redact(body);
-    match profile.provider.as_str() {
-        "gitlab" => gitlab_post_review_comment(profile, branch, &body, labels),
-        "github" => github_post_review_comment(profile, branch, &body, labels),
-        other => anyhow::bail!("unsupported provider: {}", other),
+    match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Gitlab) => gitlab_post_review_comment(profile, branch, &body, labels),
+        Ok(ProviderKind::Github) => github_post_review_comment(profile, branch, &body, labels),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }
 }
 
@@ -492,9 +500,9 @@ pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> 
         anyhow::bail!("delivery_mode=handoff: post_issue_comment is disallowed in handoff mode");
     }
     let body = crate::redact::redact(body);
-    match profile.provider.as_str() {
-        "github" => github_post_issue_comment(profile, issue_number, &body),
-        "gitlab" => {
+    match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Github) => github_post_issue_comment(profile, issue_number, &body),
+        Ok(ProviderKind::Gitlab) => {
             let project_id = profile
                 .provider_project_id
                 .as_deref()
@@ -511,7 +519,7 @@ pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> 
             gitlab_api(profile, &endpoint, "POST", &[("body", &body)])?;
             Ok(())
         }
-        other => anyhow::bail!("unsupported provider: {other}"),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }
 }
 
@@ -526,24 +534,24 @@ pub fn set_review_state_labels(profile: &Profile, branch: &str, labels: &[&str])
             "delivery_mode=handoff: set_review_state_labels is disallowed in handoff mode"
         );
     }
-    match profile.provider.as_str() {
-        "gitlab" => {
+    match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Gitlab) => {
             let mr = gitlab_find_mr_by_branch(profile, branch)?;
             gitlab_set_review_state_labels(profile, &mr.id, labels)
         }
-        "github" => {
+        Ok(ProviderKind::Github) => {
             let pr_number = github_find_pr_number_by_branch(profile, branch)?;
             github_set_review_state_labels(profile, &pr_number, labels)
         }
-        other => anyhow::bail!("unsupported provider: {}", other),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }
 }
 
 pub fn find_review_target_by_branch(profile: &Profile, branch: &str) -> Result<ReviewTarget> {
-    match profile.provider.as_str() {
-        "gitlab" => gitlab_review_target_by_branch(profile, branch),
-        "github" => github_review_target_by_branch(profile, branch),
-        other => anyhow::bail!("unsupported provider: {}", other),
+    match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Gitlab) => gitlab_review_target_by_branch(profile, branch),
+        Ok(ProviderKind::Github) => github_review_target_by_branch(profile, branch),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }
 }
 
@@ -553,10 +561,10 @@ pub fn find_review_target_by_branch(profile: &Profile, branch: &str) -> Result<R
 /// `gh pr view` accepts both natively, GitLab's IID-keyed API requires
 /// normalizing the URL first (see `parse_gitlab_mr_reference`).
 pub fn find_review_target_by_mr(profile: &Profile, mr: &str) -> Result<ReviewTarget> {
-    match profile.provider.as_str() {
-        "gitlab" => gitlab_review_target_by_iid(profile, mr),
-        "github" => github_review_target_by_number(profile, mr),
-        other => anyhow::bail!("unsupported provider: {}", other),
+    match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Gitlab) => gitlab_review_target_by_iid(profile, mr),
+        Ok(ProviderKind::Github) => github_review_target_by_number(profile, mr),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }
 }
 
@@ -844,15 +852,15 @@ pub fn mark_ready_for_review(profile: &Profile, branch: &str) -> Result<()> {
         anyhow::bail!("delivery_mode=handoff: mark_ready_for_review is disallowed in handoff mode");
     }
     let target = find_review_target_by_branch(profile, branch)?;
-    match profile.provider.as_str() {
-        "gitlab" => {
+    match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Gitlab) => {
             let title = target.title.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("GitLab MR missing title for ready-for-review transition")
             })?;
             gitlab_mark_ready_for_review(profile, &target.id, title)
         }
-        "github" => github_mark_ready_for_review(profile, &target.id),
-        other => anyhow::bail!("unsupported provider: {}", other),
+        Ok(ProviderKind::Github) => github_mark_ready_for_review(profile, &target.id),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }
 }
 
@@ -898,19 +906,19 @@ pub fn merge_mr(
     }
     let target = find_review_target_by_branch(profile, branch)?;
     ensure_review_generation(&target, expected_review_generation)?;
-    match profile.provider.as_str() {
-        "gitlab" => {
+    match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Gitlab) => {
             let title = target.title.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("GitLab MR missing title for ready-for-review transition")
             })?;
             gitlab_mark_ready_for_review(profile, &target.id, title)?;
             gitlab_merge_mr(profile, &target.id, target.source_sha.as_deref())
         }
-        "github" => {
+        Ok(ProviderKind::Github) => {
             github_mark_ready_for_review(profile, &target.id)?;
             github_merge_mr(profile, &target.id, target.source_sha.as_deref())
         }
-        other => anyhow::bail!("unsupported provider: {}", other),
+        Err(_) => anyhow::bail!("unsupported provider: {}", profile.provider),
     }
 }
 
@@ -1100,8 +1108,12 @@ pub fn gitlab_find_mr_by_branch(profile: &Profile, branch: &str) -> Result<MrRes
 /// CLI/API is unavailable). Intended for non-fatal enrichment like
 /// notifications -- callers must not depend on this succeeding.
 pub fn mr_url_for_branch(profile: &Profile, branch: &str) -> Option<String> {
-    match profile.provider.as_str() {
-        "gitlab" => gitlab_find_mr_by_branch(profile, branch)
+    // Best-effort/non-fatal (see doc comment): an unrecognized provider
+    // string falls through to the github path here, same as before this
+    // was converted to ProviderKind -- preserved deliberately, not fixed,
+    // since this function's contract is "never fail loudly."
+    match ProviderKind::parse(&profile.provider) {
+        Ok(ProviderKind::Gitlab) => gitlab_find_mr_by_branch(profile, branch)
             .ok()
             .map(|mr| mr.url),
         _ => github_find_pr_number_by_branch(profile, branch)

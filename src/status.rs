@@ -18,19 +18,23 @@ mod gates;
 mod intake;
 
 fn effective_issue_intake_policy(profile: &Profile) -> crate::models::IssueIntakePolicy {
+    // provider is matched case-insensitively here (unlike every other
+    // provider-identity site in the codebase) -- preserved as-is rather
+    // than silently tightened while converting to ProviderKind.
+    let is_github =
+        crate::provider_kind::ProviderKind::parse(&profile.provider.to_ascii_lowercase())
+            == Ok(crate::provider_kind::ProviderKind::Github);
     let trusted_human_authors = profile
         .publishing
         .trusted_issue_human_authors
         .clone()
         .or_else(|| {
-            profile
-                .provider
-                .eq_ignore_ascii_case("github")
+            is_github
                 .then(|| profile.publishing.github_issue_author_allowlist.clone())
                 .flatten()
         })
         .unwrap_or_else(|| {
-            if profile.provider.eq_ignore_ascii_case("github") {
+            if is_github {
                 profile
                     .repo
                     .split_once('/')
