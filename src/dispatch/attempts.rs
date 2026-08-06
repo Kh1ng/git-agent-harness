@@ -575,10 +575,11 @@ pub(super) fn attempt_usage(
         }
         normalize_attempt_usage(usage, attribution, true)
     };
+    let backend_kind = crate::usage_attribution::backend_kind_of(attribution.backend);
 
     // Claude Code: prefer the structured session transcript for real
     // per-attempt token/cost usage (issue #153). Never scrape stdout text.
-    if attribution.backend == Some("claude") {
+    if backend_kind == Some(BackendKind::Claude) {
         if let Some(transcript) = transcript_path {
             if let Ok(t) = fs::read_to_string(transcript) {
                 let transcript_usage = crate::claude_monitor::parse_claude_transcript_usage(&t);
@@ -628,7 +629,7 @@ pub(super) fn attempt_usage(
 
     // Vibe's structured session metadata is passed through the same artifact
     // slot as Claude's transcript.
-    if attribution.backend == Some("vibe") {
+    if backend_kind == Some(BackendKind::Vibe) {
         if let Some(metadata) = transcript_path {
             if let Ok(metadata_json) = fs::read_to_string(metadata) {
                 let session_usage = usage::parse_vibe_session_metadata(&metadata_json);
@@ -642,7 +643,7 @@ pub(super) fn attempt_usage(
     // OpenCode persists exact per-session model and token counters in its
     // local SQLite store. The runner snapshots only this invocation's row
     // into a JSON artifact, avoiding a racy global "latest session" lookup.
-    if attribution.backend == Some("opencode") {
+    if backend_kind == Some(BackendKind::Opencode) {
         if let Some(metadata) = transcript_path {
             if let Ok(metadata_json) = fs::read_to_string(metadata) {
                 let session_usage = usage::parse_opencode_session_metadata(&metadata_json);
@@ -655,12 +656,12 @@ pub(super) fn attempt_usage(
 
     // Try codex exec --json parser first — handles JSONL output from
     // codex exec --json where the generic regex parser would find nothing.
-    let mut usage = if attribution.backend == Some("codex") {
+    let mut usage = if backend_kind == Some(BackendKind::Codex) {
         usage::parse_codex_exec_json(&text)
     } else {
         crate::ledger::LedgerUsage::default()
     };
-    if attribution.backend == Some("codex") {
+    if backend_kind == Some(BackendKind::Codex) {
         if let Some(transcript) = transcript_path {
             if let Ok(transcript_jsonl) = fs::read_to_string(transcript) {
                 usage = usage::merge_usage(
@@ -670,14 +671,15 @@ pub(super) fn attempt_usage(
             }
         }
     }
-    if attribution.backend == Some("openhands") {
+    if backend_kind == Some(BackendKind::Openhands) {
         let openhands_usage = usage::parse_openhands_usage(&text);
         if openhands_usage.usage_source.is_some() {
             usage = usage::merge_usage(openhands_usage, usage);
         }
     }
     let has_json_lines = text.lines().any(|line| line.trim_start().starts_with('{'));
-    if usage.usage_source.is_none() && (attribution.backend != Some("codex") || !has_json_lines) {
+    if usage.usage_source.is_none() && (backend_kind != Some(BackendKind::Codex) || !has_json_lines)
+    {
         // Fall back to the generic regex-based parser for other backends (or
         // for codex running in non-JSON mode).
         usage = usage::parse_generic_usage(&text, "attempt_output_log");
