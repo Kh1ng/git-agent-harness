@@ -1345,6 +1345,56 @@ fn vibe_invalid_api_key_marks_exact_model_unavailable_without_retry_time() {
     assert_eq!(decision.unavailable_until, None);
 }
 
+// Issue #765: live-observed bug -- both codex and agy were seen marked
+// quota_exhausted with an unavailable_until days past what the situation
+// actually warranted (parsed.retryable is false for quota exhaustion on
+// both backends, but a real ETA IS computed from the error text; that ETA
+// is what must be capped, not skipped just because retryable is false).
+#[test]
+fn agy_quota_exhausted_with_implausibly_long_reset_is_capped_to_the_ceiling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_path = tmp.path().join("availability.json");
+    let now = OffsetDateTime::now_utc();
+
+    let parsed = mark_backend_unavailable_from_output_at(
+        &state_path,
+        "agy",
+        Some("Claude Sonnet 4.6 (Thinking)"),
+        Some("agy:external"),
+        "Individual quota reached. Resets in 144h0m.",
+        "/tmp/backend-output.log",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        parsed.kind,
+        crate::quota_parser::FailureKind::QuotaExhausted
+    );
+    assert!(
+        !parsed.retryable,
+        "quota exhaustion is deliberately not worth an immediate retry -- \
+         that's a different question from whether its ETA should be capped"
+    );
+
+    let state = load_state(&state_path).unwrap();
+    let unavailable_until = OffsetDateTime::parse(
+        state.records[0].unavailable_until.as_deref().unwrap(),
+        &Rfc3339,
+    )
+    .unwrap();
+    assert!(
+        unavailable_until
+            <= now
+                + time::Duration::seconds(crate::availability::UNAVAILABLE_UNTIL_CEILING_SECONDS)
+                + time::Duration::minutes(1), // small slack for wall-clock drift during the test
+        "a 6-day-out reset must be capped to the ceiling, got {unavailable_until}"
+    );
+    assert!(
+        unavailable_until < now + time::Duration::hours(24),
+        "must not still be days out after capping, got {unavailable_until}"
+    );
+}
+
 #[test]
 fn harness_idle_watchdog_marks_backend_outage_not_rate_limit() {
     let tmp = tempfile::tempdir().unwrap();

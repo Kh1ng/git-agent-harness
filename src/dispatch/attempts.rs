@@ -1310,13 +1310,30 @@ fn mark_backend_unavailable_from_output_for_identity_at(
         return Ok(None);
     };
 
-    let unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {
+    let parsed_unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {
         OffsetDateTime::parse(reset_at, &Rfc3339).ok()
     } else {
         parsed
             .retry_after_seconds
             .map(|secs| now + time::Duration::seconds(secs as i64))
     };
+    // Issue #765: never trust a *computed* ETA past this ceiling -- a
+    // mis-parsed or genuinely-wrong ETA observed live spanned multiple days
+    // with zero self-correction (both codex and agy, neither of which are
+    // `parsed.retryable` for their quota-exhausted classification -- that
+    // field means "worth an immediate short-term retry," not "has no ETA",
+    // so it's the wrong thing to gate on here). Only clamps when a real ETA
+    // was actually computed: `None` (no `reset_at`/`retry_after_seconds` at
+    // all, e.g. a bad-credentials auth error) is left untouched -- that
+    // case genuinely needs a human, not a ceiling, and forcing it to
+    // `Some(ceiling)` would just waste a retry against still-bad
+    // credentials every tick. Capping here means every future write is
+    // already safe; `availability::reprobe_stale_unavailable_records` (run
+    // once per loop tick) separately corrects records written before this
+    // existed.
+    let ceiling =
+        now + time::Duration::seconds(crate::availability::UNAVAILABLE_UNTIL_CEILING_SECONDS);
+    let unavailable_until = parsed_unavailable_until.map(|until| until.min(ceiling));
     let reason = match parsed.kind {
         crate::quota_parser::FailureKind::QuotaExhausted => {
             crate::availability::Reason::QuotaExhausted
