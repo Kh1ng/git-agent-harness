@@ -411,4 +411,13 @@ async function sendWelcomeMessage(ws: WebSocket) {
   }
 }
 
+// Exposes the live fleetDispatch coordinator (reassigned by
+// createWebSocketHandler once real deps are available) so HTTP routes
+// (POST /api/dispatch) can submit sessions through the same coordinator
+// that already streams their progress over the WebSocket push bus --
+// no separate dispatch-execution path to keep in sync.
+export function getFleetDispatch() {
+  return fleetDispatch;
+}
+
 export { WebSocketSessionStore, sessionStore };

@@ -9,6 +9,13 @@ import {
   runReport,
   runReportSeries,
   runLedgerWork,
+  runSync,
+  runLedgerSummary,
+  runLedgerClearAttempts,
+  runAvailability,
+  runAvailabilityClear,
+  runHoldSet,
+  runHoldClear,
   runEvents,
   runProfileList,
   runProfileAdd,
@@ -32,6 +39,8 @@ import type {
   ConfigProfileSummary,
   DoctorSnapshot
 } from '@git-agent-harness/contracts';
+import { getFleetDispatch } from './wsServer.js';
+import type { SessionOptions } from './sessions/SessionManager.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware } from './authMiddleware.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
@@ -154,6 +163,15 @@ export function createServer(
         doctor: '/api/doctor',
         report: '/api/report',
         work: '/api/work/:workId',
+        sync: '/api/sync',
+        ledgerSummary: '/api/ledger/summary',
+        ledgerClearAttempts: '/api/ledger/clear-attempts',
+        availability: '/api/availability',
+        availabilityClear: '/api/availability/clear',
+        hold: '/api/hold',
+        holdSet: '/api/hold/set',
+        holdClear: '/api/hold/clear',
+        dispatch: '/api/dispatch',
         events: '/api/events',
         controllerActivity: '/api/controller-activity',
         profiles: '/api/profiles',
@@ -370,6 +388,184 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load work item history',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/sync', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      res.json(await runSync({ profile }));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load gah sync',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/ledger/summary', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const since = typeof req.query.since === 'string' ? req.query.since : undefined;
+    const groupByRaw = typeof req.query.groupBy === 'string' ? req.query.groupBy : undefined;
+    const groupBy = groupByRaw === 'backend' || groupByRaw === 'model' ? groupByRaw : undefined;
+    try {
+      res.json(await runLedgerSummary({ profile, since, groupBy }));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load gah ledger summary',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/ledger/clear-attempts', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const workId = typeof req.body?.workId === 'string' ? req.body.workId : undefined;
+    const dryRun = req.body?.dryRun === true;
+    if (!workId) {
+      res.status(400).json({ error: 'workId is required' });
+      return;
+    }
+    try {
+      await runLedgerClearAttempts({ profile, workId, dryRun });
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to clear ledger attempts',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/availability', async (_req, res) => {
+    try {
+      res.json(await runAvailability());
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load gah availability',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/availability/clear', async (req, res) => {
+    const backend = typeof req.body?.backend === 'string' ? req.body.backend : undefined;
+    const backendInstance = typeof req.body?.backendInstance === 'string' ? req.body.backendInstance : undefined;
+    const model = typeof req.body?.model === 'string' ? req.body.model : undefined;
+    const quotaPool = typeof req.body?.quotaPool === 'string' ? req.body.quotaPool : undefined;
+    if (!backend) {
+      res.status(400).json({ error: 'backend is required' });
+      return;
+    }
+    try {
+      await runAvailabilityClear({ backend, backendInstance, model, quotaPool });
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to clear gah availability',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Manager review-hold state has no standalone `gah hold list` -- it's
+  // surfaced as StatusSnapshot.review_held_work_ids, so this reads status
+  // rather than a dedicated CLI subcommand.
+  app.get('/api/hold', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      const status = await runStatus(profile);
+      res.json({ profile, workIds: status.review_held_work_ids ?? [] });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load gah hold state',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/hold/set', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const workId = typeof req.body?.workId === 'string' ? req.body.workId : undefined;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
+    if (!workId) {
+      res.status(400).json({ error: 'workId is required' });
+      return;
+    }
+    try {
+      await runHoldSet({ profile, workId, reason });
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to set gah hold',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/hold/clear', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const workId = typeof req.body?.workId === 'string' ? req.body.workId : undefined;
+    if (!workId) {
+      res.status(400).json({ error: 'workId is required' });
+      return;
+    }
+    try {
+      await runHoldClear({ profile, workId });
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to clear gah hold',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Submits a dispatch as a fleet Session and returns immediately once it's
+  // created -- progress streams over the existing WebSocket push bus (the
+  // same mechanism the WS session.start path already uses), rather than
+  // this route blocking for the full dispatch run or reimplementing a
+  // second streaming transport.
+  app.post('/api/dispatch', async (req, res) => {
+    const body = req.body ?? {};
+    const profile = typeof body.profile === 'string' ? body.profile : undefined;
+    const providerKind = typeof body.providerKind === 'string' ? body.providerKind : undefined;
+    const instanceId = typeof body.instanceId === 'string' ? body.instanceId : undefined;
+    const repo = typeof body.repo === 'string' ? body.repo : undefined;
+    const mode = typeof body.mode === 'string' ? body.mode : undefined;
+    if (!profile || !providerKind || !instanceId || !repo || !mode) {
+      res.status(400).json({ error: 'profile, providerKind, instanceId, repo, and mode are required' });
+      return;
+    }
+    const options: SessionOptions & { requestId?: string; nodeId?: string; coordinatorNodeId?: string } = {
+      profile,
+      providerKind: providerKind as SessionOptions['providerKind'],
+      instanceId: instanceId as SessionOptions['instanceId'],
+      repo,
+      mode,
+      branch: typeof body.branch === 'string' ? body.branch : undefined,
+      target: typeof body.target === 'string' ? body.target : undefined,
+      backend: typeof body.backend === 'string' ? body.backend : undefined,
+      model: typeof body.model === 'string' ? body.model : undefined,
+      budget: typeof body.budget === 'number' ? body.budget : undefined,
+      dryRun: body.dryRun === true,
+      retries: typeof body.retries === 'number' ? body.retries : undefined,
+      allowDraftFail: body.allowDraftFail === true,
+      prod: body.prod === true,
+      allowUnknownRedBaseline: body.allowUnknownRedBaseline === true,
+      escalate: body.escalate === true,
+      requestId: typeof body.requestId === 'string' ? body.requestId : undefined,
+      nodeId: typeof body.nodeId === 'string' ? body.nodeId : undefined,
+      coordinatorNodeId: typeof body.coordinatorNodeId === 'string' ? body.coordinatorNodeId : undefined
+    };
+    try {
+      const session = await getFleetDispatch().startSession(options);
+      res.status(202).json({ session });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to start dispatch session',
         message: error instanceof Error ? error.message : String(error)
       });
     }

@@ -24,6 +24,9 @@ import type {
   ConfigProfileSummary,
   ProfileSummary,
   DoctorSnapshot,
+  MergeRequest,
+  LedgerSummary,
+  AvailabilityRecord,
 } from '@git-agent-harness/contracts';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -295,6 +298,160 @@ export async function runLedgerWork(workId: string, config?: string): Promise<Le
     args.push('--config-path', config);
   }
   return runJsonCommand<LedgerEntry[]>(args, config);
+}
+
+/**
+ * Run `gah sync --profile <profile> --json` and parse the output: classified
+ * open (and recently resolved) merge requests/pull requests for the profile.
+ */
+export async function runSync(options: { profile: string; config?: string }): Promise<MergeRequest[]> {
+  const args = ['sync', '--profile', options.profile, '--json'];
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runJsonCommand<MergeRequest[]>(args, options.config);
+}
+
+/**
+ * Run `gah ledger summary --json` and parse the output: aggregate counts
+ * (success/fail, by-mode/backend/model, token usage) over a time window.
+ */
+export async function runLedgerSummary(
+  options: { since?: string; profile?: string; groupBy?: 'none' | 'backend' | 'model'; config?: string } = {}
+): Promise<LedgerSummary> {
+  const args = ['ledger', 'summary', '--json'];
+  args.push('--since', options.since ?? '7d');
+  if (options.profile) {
+    args.push('--profile', options.profile);
+  }
+  if (options.groupBy) {
+    args.push('--group-by', options.groupBy);
+  }
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runJsonCommand<LedgerSummary>(args, options.config);
+}
+
+/**
+ * Run `gah ledger clear-attempts --profile <profile> <workId>`: appends a
+ * tombstone ledger entry so the work_id becomes dispatchable again. No JSON
+ * output -- same void/exit-code shape as runProfileRemove below.
+ */
+export async function runLedgerClearAttempts(
+  options: { profile: string; workId: string; dryRun?: boolean; config?: string }
+): Promise<void> {
+  const args = ['ledger', 'clear-attempts', '--profile', options.profile, options.workId];
+  if (options.dryRun) {
+    args.push('--dry-run');
+  }
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runVoidCommand(args, options.config, 'gah ledger clear-attempts');
+}
+
+/**
+ * Run `gah availability --json` and parse the output: durable backend/model
+ * availability state, global (not per-profile).
+ */
+export async function runAvailability(config?: string): Promise<AvailabilityRecord[]> {
+  const args = ['availability', '--json'];
+  if (config) {
+    args.push('--config-path', config);
+  }
+  return runJsonCommand<AvailabilityRecord[]>(args, config);
+}
+
+/**
+ * Run `gah availability clear --backend <backend> ...`: overrides a stale
+ * unavailable record once the backend is confirmed healthy again. No JSON
+ * output.
+ */
+export async function runAvailabilityClear(
+  options: { backend: string; backendInstance?: string; model?: string; quotaPool?: string; config?: string }
+): Promise<void> {
+  const args = ['availability', 'clear', '--backend', options.backend];
+  if (options.backendInstance) {
+    args.push('--backend-instance', options.backendInstance);
+  }
+  if (options.model) {
+    args.push('--model', options.model);
+  }
+  if (options.quotaPool) {
+    args.push('--quota-pool', options.quotaPool);
+  }
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runVoidCommand(args, options.config, 'gah availability clear');
+}
+
+/**
+ * Run `gah hold set --profile <profile> <workId>`: marks a work_id as under
+ * active out-of-band manager review, so gah's own auto-merge loop leaves its
+ * PR alone until cleared or the hold self-expires. No JSON output.
+ */
+export async function runHoldSet(
+  options: { profile: string; workId: string; reason?: string; config?: string }
+): Promise<void> {
+  const args = ['hold', 'set', '--profile', options.profile, options.workId];
+  if (options.reason) {
+    args.push('--reason', options.reason);
+  }
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runVoidCommand(args, options.config, 'gah hold set');
+}
+
+/**
+ * Run `gah hold clear --profile <profile> <workId>`: releases a previously
+ * set review hold. No JSON output.
+ */
+export async function runHoldClear(
+  options: { profile: string; workId: string; config?: string }
+): Promise<void> {
+  const args = ['hold', 'clear', '--profile', options.profile, options.workId];
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runVoidCommand(args, options.config, 'gah hold clear');
+}
+
+/**
+ * Shared plumbing for side-effecting subcommands that print plain text (not
+ * JSON) and signal success purely via exit code -- same shape as
+ * runProfileRemove, factored out for the availability/hold/ledger
+ * clear-attempts wrappers above.
+ */
+function runVoidCommand(args: string[], config: string | undefined, label: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(GAH_BINARY, args, getSpawnOptions(config));
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout?.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`${label} failed with exit code ${code}: ${stderr || stdout}`));
+        return;
+      }
+      resolve(undefined);
+    });
+
+    child.on('error', (error) => {
+      reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
+    });
+  });
 }
 
 /**

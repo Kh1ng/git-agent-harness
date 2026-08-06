@@ -9,10 +9,9 @@ info:
     #NNN (generate-from-route-table tooling) exists, if that's ever worth it.
 
     This is deliberately a snapshot of what apps/server exposes TODAY, not a
-    design document for what it should expose. See the "Known gaps" section
-    at the bottom and the tracking issue for endpoints that don't exist yet
-    (dispatch, sync, ledger summary, availability) even though the
-    underlying `gah` CLI has supported them for a long time.
+    design document for what it should expose. Issue #861 closed the
+    dispatch/sync/ledger-summary/availability/hold gap that used to be
+    documented here.
 
     Response schemas are typed at the field-name/type level for the
     endpoints most likely to be consumed programmatically (status, profiles,
@@ -187,6 +186,199 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { type: object } }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/sync:
+    get:
+      tags: [status]
+      summary: Classified open (and recently resolved) merge requests/pull requests for a profile
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: MergeRequest[]
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/ledger/summary:
+    get:
+      tags: [status]
+      summary: Aggregate ledger counts (success/fail, by mode/backend/model, token usage) over a time window
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string }
+        - name: since
+          in: query
+          schema: { type: string, default: 7d }
+        - name: groupBy
+          in: query
+          schema: { type: string, enum: [backend, model] }
+      responses:
+        "200":
+          description: LedgerSummary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerSummary" }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/ledger/clear-attempts:
+    post:
+      tags: [status]
+      summary: Append a tombstone ledger entry so a work_id becomes dispatchable again
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workId]
+              properties:
+                profile: { type: string }
+                workId: { type: string }
+                dryRun: { type: boolean }
+      responses:
+        "200": { description: "{ ok: true }" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/availability:
+    get:
+      tags: [status]
+      summary: Durable backend/model availability state (global, not per-profile)
+      responses:
+        "200":
+          description: AvailabilityRecord[]
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/AvailabilityRecord" } }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/availability/clear:
+    post:
+      tags: [status]
+      summary: Override a stale unavailable record once the backend is confirmed healthy again
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [backend]
+              properties:
+                backend: { type: string }
+                backendInstance: { type: string }
+                model: { type: string }
+                quotaPool: { type: string }
+      responses:
+        "200": { description: "{ ok: true }" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/hold:
+    get:
+      tags: [status]
+      summary: Work IDs currently under an out-of-band manager review hold for a profile
+      description: >-
+        No standalone `gah hold list` exists -- this reads
+        StatusSnapshot.review_held_work_ids from `gah status --json` rather
+        than a dedicated CLI subcommand.
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: "{ profile: string, workIds: string[] }"
+          content:
+            application/json:
+              schema: { type: object }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/hold/set:
+    post:
+      tags: [status]
+      summary: Mark a work_id as under active out-of-band manager review
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workId]
+              properties:
+                profile: { type: string }
+                workId: { type: string }
+                reason: { type: string }
+      responses:
+        "200": { description: "{ ok: true }" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/hold/clear:
+    post:
+      tags: [status]
+      summary: Release a previously set review hold on a work_id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workId]
+              properties:
+                profile: { type: string }
+                workId: { type: string }
+      responses:
+        "200": { description: "{ ok: true }" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/dispatch:
+    post:
+      tags: [status]
+      summary: Submit a dispatch as a fleet Session; progress streams over the WebSocket push bus
+      description: >-
+        Returns as soon as the Session is created (202), it does not block
+        for the full dispatch run. Reuses the same fleetDispatch coordinator
+        the WS `session.start` message already uses, so this is a second
+        entry point onto one execution/streaming path, not a second
+        implementation of dispatch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile, providerKind, instanceId, repo, mode]
+              properties:
+                profile: { type: string }
+                providerKind: { type: string, enum: [github, gitlab] }
+                instanceId: { type: string }
+                repo: { type: string }
+                mode: { type: string }
+                branch: { type: string }
+                target: { type: string }
+                backend: { type: string }
+                model: { type: string }
+                budget: { type: number }
+                dryRun: { type: boolean }
+                retries: { type: integer }
+                allowDraftFail: { type: boolean }
+                prod: { type: boolean }
+                allowUnknownRedBaseline: { type: boolean }
+                escalate: { type: boolean }
+      responses:
+        "202":
+          description: "{ session: Session }"
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "502": { $ref: "#/components/responses/GahError" }
 
   /api/profiles:
@@ -573,19 +765,45 @@ components:
         max_open_managed_mrs: { type: integer }
         manager_wake_autonomy: { type: string, nullable: true }
         delivery_mode: { type: string, enum: [pr, handoff] }
-
-# Known gaps -- endpoints the `gah` CLI has long supported that apps/server
-# does not expose over HTTP at all today. Everything on this list can only
-# be reached by shelling out to the `gah` binary directly -- including
-# `dispatch`, arguably the single most important operation. See the tracking
-# issue this file was added alongside for the plan (document what exists now,
-# ticket what's missing, then scope an MCP server on top of the documented API
-# rather than raw shell-outs).
-#
-# - POST /api/dispatch          (gah dispatch --profile --mode --target ...)
-# - GET  /api/sync               (gah sync --profile --json)
-# - GET  /api/ledger/summary     (gah ledger summary --since)
-# - GET  /api/availability       (gah availability --json)
-# - POST /api/availability/clear (gah availability-clear)
-# - POST /api/ledger/clear-attempts
-# - GET  /api/hold, POST /api/hold/set, /api/hold/clear (manager review-hold gate)
+    LedgerSummary:
+      type: object
+      description: Mirrors packages/contracts/src/gah.ts LedgerSummary
+      properties:
+        ledger_path: { type: string }
+        entries: { type: integer }
+        success: { type: integer }
+        failed: { type: integer }
+        by_mode: { type: object }
+        by_requested_backend: { type: object }
+        by_backend: { type: object }
+        by_model: { type: object }
+        by_failure_class: { type: object }
+        fallback_count: { type: integer }
+        validation_pass: { type: integer }
+        push_success: { type: integer }
+        mr_count: { type: integer }
+        human_required_count: { type: integer }
+        attempts_started: { type: integer, nullable: true }
+        attempts_completed: { type: integer, nullable: true }
+        average_duration_seconds: { type: number, nullable: true }
+        usage_total_tokens: { type: integer }
+        estimated_cost_usd: { type: number, nullable: true }
+        actual_cost_usd: { type: number, nullable: true }
+        last_run: { type: string, nullable: true }
+    AvailabilityRecord:
+      type: object
+      description: >-
+        Raw `gah availability --json` row. Distinct from StatusSnapshot's
+        richer AvailabilityScope[] (see ProfileSummary's neighbors above) --
+        mirrors packages/contracts/src/gah.ts AvailabilityRecord.
+      properties:
+        backend: { type: string }
+        backend_instance: { type: string }
+        model: { type: string }
+        quota_pool: { type: string }
+        eligible: { type: boolean }
+        reason: { type: string }
+        unavailable_until: { type: string }
+        remaining_cooldown: { type: string }
+        source: { type: string }
+        last_error_summary: { type: string }

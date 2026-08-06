@@ -931,6 +931,61 @@ export interface LedgerEntry {
 }
 
 // ---------------------------------------------------------------------------
+// `gah ledger summary --json` / `gah availability --json` (Issue #861: HTTP
+// endpoints for CLI subcommands that had no route yet). `gah sync --json`
+// reuses MergeRequest above -- same `sync_mr_to_json` producer as
+// StatusSnapshot.merge_requests.
+// ---------------------------------------------------------------------------
+
+export interface LedgerSummary {
+  ledger_path: string;
+  entries: number;
+  success: number;
+  failed: number;
+  by_mode: Record<string, number>;
+  by_requested_backend: Record<string, number>;
+  by_backend: Record<string, number>;
+  by_model: Record<string, number>;
+  by_failure_class: Record<string, number>;
+  fallback_count: number;
+  validation_pass: number;
+  push_success: number;
+  mr_count: number;
+  human_required_count: number;
+  attempts_started: number;
+  attempts_completed: number;
+  attempts_started_unknown: number;
+  attempts_completed_unknown: number;
+  average_duration_seconds: number | null;
+  usage_input_tokens: number;
+  usage_output_tokens: number;
+  usage_reasoning_tokens: number;
+  usage_cache_read_tokens: number;
+  usage_cache_write_tokens: number;
+  usage_total_tokens: number;
+  usage_requests_count: number;
+  estimated_cost_usd: number | null;
+  actual_cost_usd: number | null;
+  last_run: string | null;
+}
+
+/** One row of the raw, unnormalized `gah availability --json` state dump --
+ * distinct from StatusSnapshot's `AvailabilityScope[]`, which is a richer
+ * view built via `availability_for_identity`. */
+export interface AvailabilityRecord {
+  backend: string;
+  backend_instance?: string;
+  model?: string;
+  quota_pool?: string;
+  eligible: boolean;
+  reason?: string;
+  unavailable_until?: string;
+  remaining_cooldown?: string;
+  source?: string;
+  last_error_summary?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Manager chat backend selection (apps/server-only preference, separate
 // from ConfigSummary.current_manager -- that field drives the autonomous
 // manager-wake notification path, this drives which backend answers the
