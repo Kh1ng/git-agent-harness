@@ -53,6 +53,9 @@ fn recurring_status_resolves_github_dependencies_through_rest_only() {
     gh.install_sequence(vec![
         Scenario::success().with_stdout("[]"),
         Scenario::success().with_stdout(issues.to_string()),
+        // fetch_native_dependencies(#2) -> fetch_github_sub_issues(#2): #2 has
+        // no sub-issues of its own, only the body-declared "Blocked by: #1".
+        Scenario::success().with_stdout("[]"),
         Scenario::success().with_stdout(dependency.to_string()),
     ]);
     let mut harness = ScenarioHarness::new("github").github_scenario("empty");
@@ -60,7 +63,7 @@ fn recurring_status_resolves_github_dependencies_through_rest_only() {
 
     harness.run_status_json().expect("status should succeed");
 
-    assert_eq!(gh.call_count(), 3);
+    assert_eq!(gh.call_count(), 4);
     let calls = (1..=gh.call_count())
         .map(|call| gh.argv_for_call(call))
         .collect::<Vec<_>>();

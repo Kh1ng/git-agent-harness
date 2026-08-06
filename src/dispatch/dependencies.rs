@@ -83,7 +83,14 @@ fn dependency_provider(reference: &str, fallback: &str) -> String {
 /// Fetch native GitHub sub-issue relationships for a given issue.
 /// Returns a list of issue numbers that are sub-issues (children) of the parent.
 /// This reads the native GitHub sub-issue API relationship.
-#[allow(dead_code)]
+///
+/// Wired into `fetch_native_dependencies` below as a blocked-by relationship:
+/// per issue #658's acceptance criteria ("native blocked-by/sub-issue/link
+/// relationships"), a parent issue is intentionally treated as blocked until
+/// all of its sub-issues close, mirroring GitLab's native `blocks`/
+/// `is_blocked_by` links and GitHub's own "Tracked by" UI semantics. This is
+/// not an accidental inversion of GitHub's parent/child direction -- it is
+/// the deliberate contract this ticket asks for.
 pub(crate) fn fetch_github_sub_issues(
     profile: &Profile,
     parent_number: &str,
@@ -259,7 +266,17 @@ pub(crate) fn fetch_native_dependencies(
     issue_number: &str,
 ) -> Result<Vec<DependencySource>, DependencyRelationshipError> {
     match profile.provider.as_str() {
-        "github" => Ok(Vec::new()),
+        "github" => {
+            let sub_issues = fetch_github_sub_issues(profile, issue_number)?;
+            Ok(sub_issues
+                .into_iter()
+                .map(|child| DependencySource {
+                    source_issue: issue_number.to_string(),
+                    target_issue: child,
+                    provenance: "github_sub_issue".to_string(),
+                })
+                .collect())
+        }
         "gitlab" => {
             // For GitLab, fetch blocks links which indicate what blocks this issue.
             let blocked = fetch_gitlab_blocks_links(profile, issue_number)?;
@@ -273,27 +290,6 @@ pub(crate) fn fetch_native_dependencies(
                 .collect())
         }
         _ => Ok(Vec::new()),
-    }
-}
-
-/// Represents a cross-project dependency with explicit provider/project identity.
-/// Cross-project dependencies MUST have explicit provider/project identity;
-/// bare numbers are never inferred to be cross-project.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct CrossProjectDependency {
-    pub provider: String,
-    pub project_id: String,
-    pub issue_number: String,
-}
-
-impl std::fmt::Display for CrossProjectDependency {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}/#/{}",
-            self.provider, self.project_id, self.issue_number
-        )
     }
 }
 
@@ -439,24 +435,6 @@ where
         };
         self.cache.insert(number.to_string(), resolved.clone());
         resolved
-    }
-
-    #[allow(dead_code)]
-    fn walk(
-        &mut self,
-        current: &str,
-        references: &[String],
-        stack: &mut Vec<String>,
-        observations: &mut Vec<DependencyObservation>,
-    ) -> Result<bool, DependencyFailure> {
-        let mut provenance_map = HashMap::new();
-        self.walk_with_provenance(
-            current,
-            references,
-            stack,
-            observations,
-            &mut provenance_map,
-        )
     }
 
     /// Walk the dependency graph with provenance tracking.
@@ -618,7 +596,12 @@ where
     }
 }
 
-#[allow(dead_code)]
+/// Test-only harness that exercises the same `walk_with_provenance` graph
+/// walk `evaluate_issue_dependencies` uses in production, but with a plain
+/// closure-based fetch function instead of real provider fixtures -- kept
+/// for algorithm-level tests (cycles, caching, cross-project handling) that
+/// don't need real GitHub/GitLab responses.
+#[cfg(test)]
 fn evaluate_with<F>(provider: &str, issues: &[IssueDetails], mut fetch: F) -> Vec<DependencyBlocker>
 where
     F: FnMut(&str) -> Result<DependencyIssue, String>,
@@ -647,11 +630,12 @@ where
         let outcome = match parsed {
             Ok(None) => continue,
             Ok(Some(references)) => resolver
-                .walk(
+                .walk_with_provenance(
                     &issue.number,
                     &references,
                     &mut vec![issue.number.clone()],
                     &mut observations,
+                    &mut HashMap::new(),
                 )
                 .and_then(|has_open| {
                     if has_open {
@@ -682,8 +666,10 @@ where
 /// Enhanced dependency evaluation that merges native provider relationships
 /// with body-declared relationships, deduplicating exact matches.
 ///
-/// For GitLab: reads native blocks issue links via the issue links API. GitHub
-/// native sub-issue responses are not interpreted as blocker relationships.
+/// For GitLab: reads native blocks issue links via the issue links API. For
+/// GitHub: reads native sub-issues and treats them as blocked-by
+/// relationships (see `fetch_github_sub_issues`'s doc comment for why this
+/// direction is intentional).
 ///
 /// Both sources are normalized into the same dependency identity/state model
 /// with provenance metadata indicating the source.
@@ -759,7 +745,10 @@ pub(super) fn evaluate_issue_dependencies(
         let mut deduped_map: BTreeMap<String, DependencySource> = BTreeMap::new();
         for dep in unique_deps {
             let key = format!("{}:{}", dep.source_issue, dep.target_issue);
-            let is_native = matches!(dep.provenance.as_str(), "gitlab_blocks_link");
+            let is_native = matches!(
+                dep.provenance.as_str(),
+                "gitlab_blocks_link" | "github_sub_issue"
+            );
             match deduped_map.get(&key) {
                 Some(existing) if existing.provenance == "body" && is_native => {
                     deduped_map.insert(key, dep);
@@ -1093,6 +1082,98 @@ mod tests {
         );
     }
 
+    /// Companion to the dedup test above: that test alone can't distinguish
+    /// "body was parsed and correctly deduplicated against native" from "body
+    /// was silently never parsed" -- both produce the exact same single
+    /// native-provenance dependency. Here body declares a dependency (#5)
+    /// that native does *not* also report, so a regression that stops body
+    /// parsing would silently drop #5 and only #2 would survive.
+    #[test]
+    fn gitlab_body_only_dependency_survives_alongside_a_native_one() {
+        let profile = gitlab_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "glab",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/1/links\" ]; then\n  printf '%s\n' '[{\"link_type\":\"is_blocked_by\",\"source_issue\":{\"iid\":1},\"target_issue\":{\"iid\":2}}]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/2/links\" ]; then\n  printf '%s\n' '[]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/2\" ]; then\n  printf '%s\n' '{\"iid\":2,\"description\":\"\",\"state\":\"open\"}'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/5/links\" ]; then\n  printf '%s\n' '[]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/5\" ]; then\n  printf '%s\n' '{\"iid\":5,\"description\":\"\",\"state\":\"open\"}'\n  exit 0\nelse\n  echo \"unexpected glab invocation: $*\" >&2\n  exit 1\nfi\n",
+        );
+
+        let issues = vec![
+            issue("1", Some("OPEN"), "Blocked by: #2, #5"),
+            issue("2", Some("OPEN"), ""),
+            issue("5", Some("OPEN"), ""),
+        ];
+        let blockers = evaluate_issue_dependencies(&profile, &issues);
+        assert_eq!(blockers.len(), 1);
+        let identities: HashSet<_> = blockers[0]
+            .dependencies
+            .iter()
+            .map(|obs| obs.identity.as_str())
+            .collect();
+        assert_eq!(identities, HashSet::from(["#2", "#5"]));
+        let provenance_for = |identity: &str| {
+            blockers[0]
+                .dependencies
+                .iter()
+                .find(|obs| obs.identity == identity)
+                .and_then(|obs| obs.provenance.as_deref())
+        };
+        assert_eq!(provenance_for("#2"), Some("gitlab_blocks_link"));
+        assert_eq!(provenance_for("#5"), Some("body"));
+    }
+
+    /// AC1: GitHub native sub-issues must actually be fetched and treated as
+    /// blocked-by relationships -- previously `fetch_native_dependencies`
+    /// returned `Ok(Vec::new())` unconditionally for github, so this was
+    /// never exercised end to end.
+    #[test]
+    fn github_open_sub_issue_blocks_its_parent() {
+        let profile = github_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "gh",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/1/sub_issues\" ]; then\n  printf '%s\n' '[{\"number\":2}]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/2/sub_issues\" ]; then\n  printf '%s\n' '[]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/2\" ]; then\n  printf '%s\n' '{\"number\":2,\"body\":\"\",\"state\":\"open\"}'\n  exit 0\nelse\n  echo \"unexpected gh invocation: $*\" >&2\n  exit 1\nfi\n",
+        );
+
+        let issues = vec![issue("1", Some("OPEN"), ""), issue("2", Some("OPEN"), "")];
+        let blockers = evaluate_issue_dependencies(&profile, &issues);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].dependencies.len(), 1);
+        assert_eq!(blockers[0].dependencies[0].identity, "#2");
+        assert_eq!(
+            blockers[0].dependencies[0].provenance.as_deref(),
+            Some("github_sub_issue")
+        );
+    }
+
+    /// Companion to the above: once the sub-issue closes, the parent must
+    /// unblock. This is the direction check flagged in review -- a parent
+    /// should not stay permanently blocked by children that have closed.
+    #[test]
+    fn github_parent_unblocks_once_its_sub_issue_closes() {
+        let profile = github_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "gh",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/1/sub_issues\" ]; then\n  printf '%s\n' '[{\"number\":2}]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/2/sub_issues\" ]; then\n  printf '%s\n' '[]'\n  exit 0\nelif [ \"$1\" = \"api\" ] && [ \"$4\" = \"repos/owner/repo/issues/2\" ]; then\n  printf '%s\n' '{\"number\":2,\"body\":\"\",\"state\":\"closed\"}'\n  exit 0\nelse\n  echo \"unexpected gh invocation: $*\" >&2\n  exit 1\nfi\n",
+        );
+
+        let issues = vec![issue("1", Some("OPEN"), ""), issue("2", Some("CLOSED"), "")];
+        let blockers = evaluate_issue_dependencies(&profile, &issues);
+        assert!(blockers.is_empty());
+    }
+
     #[test]
     fn evaluate_issue_dependencies_fails_closed_when_native_lookup_fails() {
         let profile = gitlab_test_profile();
@@ -1180,6 +1261,31 @@ mod tests {
 
         let dependencies = fetch_gitlab_blocks_links(&profile, "1").unwrap();
         assert_eq!(dependencies, vec!["10".to_string(),]);
+    }
+
+    /// Self-hosted GitLab fixture (AC5): older/self-managed GitLab instances
+    /// are known to return issue links with flat `source_issue_iid`/
+    /// `target_issue_iid` fields instead of the nested `source_issue.iid`/
+    /// `target_issue.iid` objects GitLab.com's current API returns -- which
+    /// is exactly why `fetch_gitlab_blocks_links` falls back to those flat
+    /// fields via `.or_else(...)`. Every other test in this file uses the
+    /// nested shape, leaving that fallback path completely unexercised.
+    #[test]
+    fn fetch_gitlab_blocks_links_supports_self_hosted_flat_iid_response_shape() {
+        let mut profile = gitlab_test_profile();
+        profile.provider_api_base = Some("https://gitlab.internal.example.com/api/v4".into());
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "glab",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ] && [ \"$2\" = \"projects/42/issues/1/links\" ]; then\n  printf '%s\n' '[{\"link_type\":\"is_blocked_by\",\"source_issue_iid\":1,\"target_issue_iid\":7}]'\n  exit 0\nelse\n  echo \"unexpected glab invocation: $*\" >&2\n  exit 1\nfi\n",
+        );
+
+        let dependencies = fetch_gitlab_blocks_links(&profile, "1").unwrap();
+        assert_eq!(dependencies, vec!["7".to_string()]);
     }
 
     #[test]

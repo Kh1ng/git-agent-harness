@@ -18,6 +18,9 @@ fn status_json_v1_additively_surfaces_dependency_blockers() {
         Scenario::success().with_stdout(
             r#"[{"number":653,"title":"Approval notifications","body":"Blocked by: #652","labels":[],"author":{"login":"owner","type":"User","is_bot":false},"state":"OPEN"}]"#,
         ),
+        // fetch_native_dependencies(#653) -> fetch_github_sub_issues(#653): #653
+        // has no sub-issues of its own, only the body-declared "Blocked by: #652".
+        Scenario::success().with_stdout("[]"),
         // fetch_dependency_issue(#652)
         Scenario::success().with_stdout(r#"{"number":652,"body":"","state":"OPEN"}"#),
     ]);
