@@ -234,6 +234,16 @@ pub struct DependencyObservation {
     pub provider: String,
     pub provider_state: Option<String>,
     pub normalized_state: String,
+    /// Indicates the source of this dependency relationship.
+    ///
+    /// - "body" for relationships parsed from the issue body (canonical fallback)
+    /// - "github_sub_issue" for GitHub native sub-issue relationships
+    /// - "gitlab_blocks_link" for GitLab native blocks issue links
+    ///
+    /// This allows status/API clients to distinguish relationship sources while
+    /// keeping the normalized identity/state model uniform.
+    #[serde(default)]
+    pub provenance: Option<String>,
 }
 
 /// A native issue excluded from autonomous intake by its declared

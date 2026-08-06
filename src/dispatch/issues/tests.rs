@@ -908,7 +908,7 @@ fn scan_available_tickets_includes_open_github_issues() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\ncase \"$*\" in\n  *repos/owner/repo/issues?state=open*) printf '%s\\n' '{}'\n  ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$*\" in\n  *repos/owner/repo/issues?state=open*) printf '%s\\n' '{}'\n  ;;\n  *sub_issues*) printf '%s\\n' '[]'\n  ;;\n  *) exit 2 ;;\nesac\n",
             issue_json.replace('\'', "'\\''")
         ),
     )
@@ -955,7 +955,7 @@ fn github_dependency_chain_excludes_653_while_652_is_open() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  printf '%s\\n' '{}'\nfi\n",
+            "#!/bin/sh\nif [ \"$1\" = \"api\" ]; then\n  if [ \"$4\" = \"repos/owner/repo/issues?state=open&per_page=100&page=1\" ]; then\n    printf '%s\\n' '{}'\n  elif [ \"$4\" = \"repos/owner/repo/issues/652/sub_issues\" ]; then\n    printf '%s\\n' '[]'\n  elif [ \"$4\" = \"repos/owner/repo/issues/653/sub_issues\" ]; then\n    printf '%s\\n' '[]'\n  else\n    echo \"unexpected gh invocation: $*\" >&2\n    exit 1\n  fi\nfi\n",
             issues.to_string().replace('\'', "'\\''")
         ),
     )
@@ -1014,7 +1014,7 @@ fn github_dependency_query_fixture_releases_653_when_652_closes() {
     fs::write(
         &gh_path,
         format!(
-            "#!/bin/sh\nif [ \"$4\" = \"repos/owner/repo/issues?state=open&per_page=100&page=1\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$4\" = \"repos/owner/repo/issues/652\" ]; then\n  cat '{}'\nelse\n  exit 2\nfi\n",
+            "#!/bin/sh\nif [ \"$4\" = \"repos/owner/repo/issues?state=open&per_page=100&page=1\" ]; then\n  printf '%s\\n' '{}'\nelif [ \"$4\" = \"repos/owner/repo/issues/652\" ]; then\n  cat '{}'\nelif [ \"$4\" = \"repos/owner/repo/issues/652/sub_issues\" ] || [ \"$4\" = \"repos/owner/repo/issues/653/sub_issues\" ]; then\n  printf '%s\\n' '[]'\nelse\n  exit 2\nfi\n",
             issues.to_string().replace('\'', "'\\''"),
             dependency_path.display()
         ),
