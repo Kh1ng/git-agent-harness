@@ -757,6 +757,12 @@ fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
     let review_started = tmp.path().join("review-started");
     let implementation_started = tmp.path().join("implementation-started");
     fs::create_dir_all(&fake_bin).unwrap();
+    // `updated_at` is relative to "now" (not hardcoded) so the fake PR stays
+    // classified as active instead of aging into sync::classify's 14-day
+    // STALE cutoff over time (same pattern as #801/#802).
+    let pr_updated_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
@@ -765,7 +771,7 @@ fn parallel_loop_uses_light_review_after_heavy_node_deferral() {
              case \"$4\" in\n\
                */pulls\\?*)\n\
                  n=$(cat '{pulls_count}' 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > '{pulls_count}'\n\
-                 if [ \"$n\" -le 2 ]; then echo '[]'; else echo '[{{\"title\":\"[GAH] Fix: TICKET-701\",\"body\":\"Review fixture\",\"head\":{{\"ref\":\"gah/real-review\",\"sha\":\"source-sha\"}},\"html_url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"open\",\"draft\":true,\"updated_at\":\"2026-07-23T00:00:00Z\"}}]'; fi\n\
+                 if [ \"$n\" -le 2 ]; then echo '[]'; else echo '[{{\"title\":\"[GAH] Fix: TICKET-701\",\"body\":\"Review fixture\",\"head\":{{\"ref\":\"gah/real-review\",\"sha\":\"source-sha\"}},\"html_url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"open\",\"draft\":true,\"updated_at\":\"{pr_updated_at}\"}}]'; fi\n\
                  exit 0 ;;\n\
                */pulls) echo '[{{\"number\":7}}]'; exit 0 ;;\n\
                */check-runs\\?*) echo '{{\"total_count\":1,\"check_runs\":[{{\"status\":\"completed\",\"conclusion\":\"success\"}}]}}'; exit 0 ;;\n\
