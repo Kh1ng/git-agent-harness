@@ -1,5 +1,6 @@
 use super::command::which;
 use super::DispatchArgs;
+use crate::backend_kind::BackendKind;
 use crate::config::{self, GahConfig, Profile};
 use crate::controller::HumanRequiredReason;
 use crate::ledger::{self, LedgerEntry};
@@ -427,12 +428,12 @@ pub(super) fn run_backend_with_reserved_route(
             seconds.to_string(),
         ));
     }
-    let backend_kind = match crate::backend_kind::BackendKind::parse(runner_kind) {
+    let backend_kind = match BackendKind::parse(runner_kind) {
         Ok(kind) => kind,
         Err(_) => anyhow::bail!("unsupported runner kind '{runner_kind}' for backend '{backend}'"),
     };
     let result = match backend_kind {
-        crate::backend_kind::BackendKind::Codex => runner::CodexRunner.run(&runner::RunContext {
+        BackendKind::Codex => runner::CodexRunner.run(&runner::RunContext {
             executable: &executable,
             worktree: wt,
             task,
@@ -444,7 +445,7 @@ pub(super) fn run_backend_with_reserved_route(
             idle_timeout_seconds: profile.codex_idle_timeout_seconds(),
             print_timeout_seconds: None,
         }),
-        crate::backend_kind::BackendKind::Claude => runner::ClaudeRunner.run(&runner::RunContext {
+        BackendKind::Claude => runner::ClaudeRunner.run(&runner::RunContext {
             executable: &executable,
             worktree: wt,
             task,
@@ -456,7 +457,7 @@ pub(super) fn run_backend_with_reserved_route(
             idle_timeout_seconds: profile.claude_idle_timeout_seconds(),
             print_timeout_seconds: None,
         }),
-        crate::backend_kind::BackendKind::Agy => runner::AgyRunner.run(&runner::RunContext {
+        BackendKind::Agy => runner::AgyRunner.run(&runner::RunContext {
             executable: &executable,
             worktree: wt,
             task,
@@ -471,7 +472,7 @@ pub(super) fn run_backend_with_reserved_route(
                 .get(llm.model.as_str())
                 .copied(),
         }),
-        crate::backend_kind::BackendKind::Vibe => runner::VibeRunner.run(&runner::RunContext {
+        BackendKind::Vibe => runner::VibeRunner.run(&runner::RunContext {
             executable: &executable,
             worktree: wt,
             task,
@@ -483,42 +484,38 @@ pub(super) fn run_backend_with_reserved_route(
             idle_timeout_seconds: profile.vibe_idle_timeout_seconds(),
             print_timeout_seconds: None,
         }),
-        crate::backend_kind::BackendKind::Opencode => {
-            runner::OpencodeRunner.run(&runner::RunContext {
-                executable: &executable,
-                worktree: wt,
-                task,
-                session_dir,
-                model: effective_model,
-                llm: None,
-                extra_args: &profile.opencode_args,
-                env_vars: &env_vars,
-                idle_timeout_seconds: effective_model
-                    .and_then(|m| {
-                        profile
-                            .opencode_idle_timeout_seconds_by_model
-                            .get(m)
-                            .copied()
-                    })
-                    .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
-                print_timeout_seconds: None,
-            })
-        }
-        crate::backend_kind::BackendKind::Openhands => {
-            runner::OpenhandsRunner.run(&runner::RunContext {
-                executable: &executable,
-                worktree: wt,
-                task,
-                session_dir,
-                model: None,
-                llm: Some(llm),
-                extra_args: &profile.openhands_args,
-                env_vars: &env_vars,
-                idle_timeout_seconds: profile.openhands_idle_timeout_seconds(),
-                print_timeout_seconds: None,
-            })
-        }
-        crate::backend_kind::BackendKind::Hermes => {
+        BackendKind::Opencode => runner::OpencodeRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
+            task,
+            session_dir,
+            model: effective_model,
+            llm: None,
+            extra_args: &profile.opencode_args,
+            env_vars: &env_vars,
+            idle_timeout_seconds: effective_model
+                .and_then(|m| {
+                    profile
+                        .opencode_idle_timeout_seconds_by_model
+                        .get(m)
+                        .copied()
+                })
+                .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
+            print_timeout_seconds: None,
+        }),
+        BackendKind::Openhands => runner::OpenhandsRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
+            task,
+            session_dir,
+            model: None,
+            llm: Some(llm),
+            extra_args: &profile.openhands_args,
+            env_vars: &env_vars,
+            idle_timeout_seconds: profile.openhands_idle_timeout_seconds(),
+            print_timeout_seconds: None,
+        }),
+        BackendKind::Hermes => {
             anyhow::bail!("hermes dispatch is not implemented yet for backend '{backend}'")
         }
     };
