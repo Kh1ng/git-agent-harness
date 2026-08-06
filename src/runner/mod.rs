@@ -1,6 +1,7 @@
 use std::fs;
 use std::process::Command;
 
+pub(crate) mod backend_runner;
 pub(crate) mod backends;
 pub(crate) mod output;
 pub(crate) mod process;
@@ -8,6 +9,8 @@ pub(crate) mod resolve;
 pub(crate) mod review;
 pub(crate) mod review_usage;
 
+#[allow(unused_imports)]
+pub use crate::runner::backend_runner::{BackendRunner, CodexRunner, RunContext};
 #[allow(unused_imports)]
 pub(crate) use crate::runner::backends::agy::log_delta;
 #[allow(unused_imports)]

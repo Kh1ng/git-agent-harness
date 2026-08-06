@@ -8,6 +8,7 @@ use crate::routing::{
     self, CandidateIdentity, RouteDecision, RouteError, RouteRequest, RoutingRuntimeState,
     TaskRoutingContext,
 };
+use crate::runner::BackendRunner;
 use crate::usage_attribution::{normalize_attempt_usage, UsageAttribution};
 use crate::{runner, usage, worktree};
 use anyhow::{Context, Result};
@@ -431,16 +432,18 @@ pub(super) fn run_backend_with_reserved_route(
         Err(_) => anyhow::bail!("unsupported runner kind '{runner_kind}' for backend '{backend}'"),
     };
     let result = match backend_kind {
-        crate::backend_kind::BackendKind::Codex => runner::run_codex_with_executable(
-            &executable,
-            wt,
+        crate::backend_kind::BackendKind::Codex => runner::CodexRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
             task,
             session_dir,
-            effective_model,
-            &profile.codex_args,
-            &env_vars,
-            profile.codex_idle_timeout_seconds(),
-        ),
+            model: effective_model,
+            llm: None,
+            extra_args: &profile.codex_args,
+            env_vars: &env_vars,
+            idle_timeout_seconds: profile.codex_idle_timeout_seconds(),
+            print_timeout_seconds: None,
+        }),
         crate::backend_kind::BackendKind::Claude => runner::run_claude_with_executable(
             &executable,
             wt,
