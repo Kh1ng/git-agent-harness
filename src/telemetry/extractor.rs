@@ -3,6 +3,7 @@
 //! Extracts telemetry records from ledger entries.
 
 use super::records::*;
+use crate::job_kind::JobKind;
 use crate::ledger::{AttemptBehaviorMetrics, BehaviorMetric, BehaviorMetricQuality, LedgerEntry};
 
 fn identity_for_attempt(
@@ -440,7 +441,7 @@ pub fn extract_review_outcome_records(
     let mut records = Vec::new();
 
     // Only create review outcome records for review-mode entries with verdicts
-    if entry.mode == "review" && entry.review_verdict.is_some() {
+    if JobKind::parse(&entry.mode) == Ok(JobKind::Review) && entry.review_verdict.is_some() {
         let observed_at = entry.timestamp.clone();
         let review_completed_at = entry.timestamp.clone(); // Use entry timestamp as completion time
 

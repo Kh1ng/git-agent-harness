@@ -1,6 +1,7 @@
 use super::prompts::indent_untrusted_text;
 use super::text::utf8_safe_prefix;
 use crate::config::GahConfig;
+use crate::job_kind::JobKind;
 use crate::ledger::{self, LedgerEntry};
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -114,7 +115,10 @@ fn latest_from_entries_for_generation(
         .filter(|entry| {
             entry.profile == identity.profile_name
                 && entry.repo_id == identity.repo_id
-                && matches!(entry.mode.as_str(), "review" | "fix" | "improve")
+                && matches!(
+                    JobKind::parse(&entry.mode),
+                    Ok(JobKind::Review) | Ok(JobKind::Fix) | Ok(JobKind::Improve)
+                )
                 && entry.review_contract_version == Some(ledger::REVIEW_CONTRACT_VERSION)
                 && entry.review_generation.is_some()
                 && identity

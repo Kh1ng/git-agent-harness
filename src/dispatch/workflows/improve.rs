@@ -21,6 +21,7 @@ use super::super::validation::{
 use super::super::DispatchArgs;
 use super::already_satisfied_reconcile::AlreadySatisfiedRun;
 use crate::config::{self, GahConfig, Profile};
+use crate::job_kind::JobKind;
 use crate::ledger::{self, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::routing::RouteRequest;
@@ -355,7 +356,7 @@ pub(crate) fn improve(
         } else {
             None
         };
-        let fresh_context = if args.mode == "fix" {
+        let fresh_context = if JobKind::parse(&args.mode) == Ok(JobKind::Fix) {
             cfg.context
                 .effective(&args.profile, &route.effective_backend)
                 .fresh_context_on_fix
@@ -372,7 +373,11 @@ pub(crate) fn improve(
             profile,
             &args.profile,
             &route.effective_backend,
-            if args.mode == "fix" { "fix" } else { "coding" },
+            if JobKind::parse(&args.mode) == Ok(JobKind::Fix) {
+                "fix"
+            } else {
+                "coding"
+            },
             fresh_context,
             &task,
             &attempt_session,

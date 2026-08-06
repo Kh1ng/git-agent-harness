@@ -5,6 +5,7 @@ use super::issues::{
 };
 use super::text::utf8_safe_prefix;
 use crate::config::{GahConfig, Profile};
+use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
 use crate::models::Candidate;
 use crate::models::CandidateArtifact;
@@ -111,13 +112,13 @@ pub(super) fn build_task(
         }
     }
 
-    let instruction = match mode {
-        "fix" => {
+    let instruction = match JobKind::parse(mode) {
+        Ok(JobKind::Fix) => {
             "Fix the specific issue described in the Focus section below.\n\
              Run the relevant tests to confirm the fix. All tests in the test suite must pass.\n\
              Do not push or create MRs."
         }
-        "experiment" => {
+        Ok(JobKind::Experiment) => {
             "This is a research/experiment task. Write scripts, generate Jupyter notebooks, \
              CSV exports, plots, or markdown reports directly in the working directory.\n\
              Do not worry about breaking unrelated tests. Prioritize producing observable \
@@ -158,13 +159,13 @@ pub(super) fn build_task(
 
 /// Build task with issue details for the Focus section
 fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &IssueDetails) -> String {
-    let instruction = match mode {
-        "fix" => {
+    let instruction = match JobKind::parse(mode) {
+        Ok(JobKind::Fix) => {
             "Fix the specific issue described in the Focus section below.\n\
              Run the relevant tests to confirm the fix. All tests in the test suite must pass.\n\
              Do not push or create MRs."
         }
-        "experiment" => {
+        Ok(JobKind::Experiment) => {
             "This is a research/experiment task. Write scripts, generate Jupyter notebooks, \
              CSV exports, plots, or markdown reports directly in the working directory.\n\
              Do not worry about breaking unrelated tests. Prioritize producing observable \
@@ -556,12 +557,12 @@ pub(super) fn format_candidate_task(
 
     append_project_brief(&mut out, profile);
 
-    let closing = match mode {
-        "fix" => {
+    let closing = match JobKind::parse(mode) {
+        Ok(JobKind::Fix) => {
             "Fix the code to satisfy every acceptance criterion above.\n\
              Run the verification steps to confirm. All tests must pass. Do not push or create MRs.\n"
         }
-        "experiment" => {
+        Ok(JobKind::Experiment) => {
             "This is a research task. Satisfy the acceptance criteria by producing output files \
              (*.ipynb, *.html, *.csv, *.png, *.md). Do not push or create MRs.\n"
         }

@@ -70,15 +70,16 @@ pub(super) fn resolve_llm(
         });
     }
     // Check profile-level mode-specific override, then global default
-    let profile_model =
-        config::get_profile(cfg, &args.profile)
-            .ok()
-            .and_then(|p| match args.mode.as_str() {
-                "improve" | "fix" => p.model_improve.clone(),
-                "pm" => p.model_pm.clone(),
-                "review" => p.model_review.clone(),
-                _ => None,
-            });
+    let profile_model = config::get_profile(cfg, &args.profile).ok().and_then(|p| {
+        match crate::job_kind::JobKind::parse(&args.mode) {
+            Ok(crate::job_kind::JobKind::Improve | crate::job_kind::JobKind::Fix) => {
+                p.model_improve.clone()
+            }
+            Ok(crate::job_kind::JobKind::Pm) => p.model_pm.clone(),
+            Ok(crate::job_kind::JobKind::Review) => p.model_review.clone(),
+            _ => None,
+        }
+    });
     let cloud = args.backend == "cloud-coder";
     Ok(runner::LlmConfig {
         base_url: cfg.defaults.llm_base_url(),
@@ -1139,11 +1140,12 @@ fn record_recent_attempt_run(
 }
 
 fn is_agent_execution_mode(mode: &str) -> bool {
-    matches!(mode, "improve" | "fix" | "experiment" | "pm" | "review")
+    crate::job_kind::JobKind::parse(mode).is_ok()
 }
 
 fn is_implementation_execution_mode(mode: &str) -> bool {
-    matches!(mode, "improve" | "fix" | "experiment")
+    crate::job_kind::JobKind::parse(mode).map(|kind| kind.family())
+        == Ok(crate::job_kind::JobFamily::ImproveLike)
 }
 
 pub(super) fn record_genuine_failure_routes(state: &mut RoutingRuntimeState, entry: &LedgerEntry) {

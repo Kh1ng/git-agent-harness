@@ -1,3 +1,4 @@
+use crate::job_kind::{JobFamily, JobKind};
 use crate::provider_kind::{ProviderKind, UnknownProviderKind};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -568,18 +569,17 @@ impl RoutingPolicy {
     pub fn max_implementation_failures_per_ticket(&self) -> u32 {
         self.max_implementation_failures_per_ticket.unwrap_or(8)
     }
-
     pub fn find_quota_pool(
         &self,
         mode: &str,
         backend: &str,
         model: Option<&str>,
     ) -> Option<String> {
-        let candidates = match mode {
-            "pm" => self.pm_candidates.as_ref(),
-            "review" => self.review_candidates.as_ref(),
-            "improve" | "fix" | "experiment" => self.improve_candidates.as_ref(),
-            _ => None,
+        let candidates = match JobKind::parse(mode).map(|kind| kind.family()) {
+            Ok(JobFamily::Pm) => self.pm_candidates.as_ref(),
+            Ok(JobFamily::Review) => self.review_candidates.as_ref(),
+            Ok(JobFamily::ImproveLike) => self.improve_candidates.as_ref(),
+            Err(_) => None,
         };
         let configured = candidates.and_then(|list| {
             list.iter()

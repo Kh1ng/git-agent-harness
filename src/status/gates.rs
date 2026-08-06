@@ -1,6 +1,7 @@
 use super::Blocker;
 use crate::config::{GahConfig, Profile};
 use crate::controller::HumanRequiredReason;
+use crate::job_kind::JobKind;
 use crate::ledger::{self, LedgerEntry};
 use crate::sync;
 
@@ -20,18 +21,18 @@ pub(super) fn policy_approval_still_required(
     // contract version. A genuine non-review paid-route hold (a regular
     // fix/improve dispatch still awaiting `gah route-approval grant`) must
     // not be silently released just because it predates the contract bump.
-    let review_derived =
-        gate.mode == "review" || gate.dispatch_reason.as_deref() == Some("post_review_repair");
+    let review_derived = JobKind::parse(&gate.mode) == Ok(JobKind::Review)
+        || gate.dispatch_reason.as_deref() == Some("post_review_repair");
     if review_derived
         && gate.review_contract_version.unwrap_or(0)
             < crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
     {
         return false;
     }
-    let mode = match gate.mode.as_str() {
-        "review" => "review",
-        "pm" => "pm",
-        "experiment" => "experiment",
+    let mode: &'static str = match JobKind::parse(&gate.mode) {
+        Ok(JobKind::Review) => "review",
+        Ok(JobKind::Pm) => "pm",
+        Ok(JobKind::Experiment) => "experiment",
         _ => "fix",
     };
     let mut current = LedgerEntry::new(profile_name, profile, "auto", mode, work_id, None, None);
@@ -131,7 +132,7 @@ fn review_route_was_already_used(
     active.iter().any(|entry| {
         entry.profile == profile_name
             && entry.repo_id == repo_id
-            && entry.mode == "review"
+            && JobKind::parse(&entry.mode) == Ok(JobKind::Review)
             && entry.review_contract_version == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
             && entry.review_generation.as_deref() == review_generation
             && entry
@@ -185,7 +186,7 @@ pub(super) fn project_effective_mr_gates(
         ) else {
             continue;
         };
-        let review_derived = gate.mode == "review"
+        let review_derived = JobKind::parse(&gate.mode) == Ok(JobKind::Review)
             || (gate.reason_code.as_deref() == Some("stuck_loop_gate")
                 && gate.review_generation.is_some());
         if review_derived

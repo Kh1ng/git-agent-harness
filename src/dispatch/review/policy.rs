@@ -2,6 +2,7 @@ use super::super::text::{extract_first_json_object, utf8_safe_prefix};
 use super::context::ReviewDiffBundle;
 use crate::availability;
 use crate::config::{CandidateConfig, GahConfig, Profile};
+use crate::job_kind::JobKind;
 use crate::ledger::{self, LedgerEntry};
 use crate::routing::RouteDecision;
 use anyhow::Result;
@@ -128,7 +129,7 @@ pub(in crate::dispatch) fn check_review_budget(
         .filter(|entry| {
             entry.profile == profile_name
                 && entry.repo_id == profile.repo_id
-                && entry.mode == "review"
+                && JobKind::parse(&entry.mode) == Ok(JobKind::Review)
                 && entry.review_contract_version == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
                 && entry.review_generation.as_deref() == review_generation
                 && !matches!(
@@ -217,7 +218,7 @@ pub(in crate::dispatch) fn review_escalation_reason(
         .rev()
         .filter(|e| {
             e.profile == profile_name
-                && e.mode == "review"
+                && JobKind::parse(&e.mode) == Ok(JobKind::Review)
                 && e.branch.as_deref() == Some(branch)
                 && e.review_contract_version == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
                 && e.review_generation.as_deref() == review_generation
@@ -360,7 +361,7 @@ pub(in crate::dispatch) fn next_review_candidate(
         .iter()
         .filter(|entry| {
             entry.profile == profile_name
-                && entry.mode == "review"
+                && JobKind::parse(&entry.mode) == Ok(JobKind::Review)
                 && entry.branch.as_deref() == Some(branch)
                 && entry.review_contract_version == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
                 && entry.review_generation.as_deref() == review_generation
@@ -412,7 +413,7 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
         .iter()
         .filter(|entry| {
             entry.profile == profile_name
-                && entry.mode == "review"
+                && JobKind::parse(&entry.mode) == Ok(JobKind::Review)
                 && entry.branch.as_deref() == Some(branch)
                 && entry.review_contract_version
                     == Some(ledger::CURRENT_REVIEW_CONTRACT_VERSION)
@@ -467,7 +468,7 @@ fn active_branch_review_entries<'a>(
         .filter(|entry| {
             entry.profile == profile_name
                 && entry.repo_id == profile.repo_id
-                && entry.mode == "review"
+                && JobKind::parse(&entry.mode) == Ok(JobKind::Review)
                 && entry.branch.as_deref() == Some(branch)
         })
         .filter_map(|entry| entry.work_id.as_deref())

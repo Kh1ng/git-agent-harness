@@ -1,4 +1,5 @@
 use crate::config::{self, GahConfig};
+use crate::job_kind::{JobFamily, JobKind};
 use crate::ledger::{self, LedgerEntry};
 use crate::notifications::notify_terminal_failure;
 use crate::usage_attribution::{aggregate_attempt_usage, usage_has_observation};
@@ -171,7 +172,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     // NOT conflated with the dispatched ticket's own outcome.
     self_check_validation_gate(profile, cfg, args.skip_validation_gate)?;
 
-    if args.mode == "improve" || args.mode == "fix" || args.mode == "experiment" {
+    if JobKind::parse(&args.mode).map(|kind| kind.family()) == Ok(JobFamily::ImproveLike) {
         if let Some(work_id) = check_duplicate_work(cfg, profile, args)? {
             // Parallel workers: claim this work_id immediately, before any
             // backend work runs, so a concurrent `gah loop`/`gah dispatch`
@@ -206,14 +207,18 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     fs::create_dir_all(&session_dir)?;
     println!("Session: {}", session_dir.display());
 
-    let result = match args.mode.as_str() {
-        "improve" | "fix" => workflows::run_improve(cfg, profile, args, &session_dir, &mut ledger),
-        "pm" => workflows::run_pm(cfg, &args.profile, profile, args, &session_dir, &mut ledger),
-        "review" => workflows::run_review(cfg, profile, args, &session_dir, &mut ledger),
-        "experiment" => {
+    let result = match JobKind::parse(&args.mode) {
+        Ok(JobKind::Improve | JobKind::Fix) => {
+            workflows::run_improve(cfg, profile, args, &session_dir, &mut ledger)
+        }
+        Ok(JobKind::Pm) => {
+            workflows::run_pm(cfg, &args.profile, profile, args, &session_dir, &mut ledger)
+        }
+        Ok(JobKind::Review) => workflows::run_review(cfg, profile, args, &session_dir, &mut ledger),
+        Ok(JobKind::Experiment) => {
             workflows::run_experiment(cfg, &args.profile, profile, args, &session_dir, &mut ledger)
         }
-        other => anyhow::bail!("unknown mode: {}", other),
+        Err(_) => anyhow::bail!("unknown mode: {}", args.mode),
     };
     ledger.duration_seconds = Some(started.elapsed().as_secs_f64());
     if !usage_has_observation(&ledger.usage) {

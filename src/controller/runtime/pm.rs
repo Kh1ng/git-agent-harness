@@ -1,4 +1,5 @@
 use super::run_dispatch_and_record;
+use crate::job_kind::JobKind;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -13,7 +14,7 @@ pub(super) fn pending_plan(
         (entry.profile == profile_name
             && entry.repo_id == repo_id
             && entry.work_id.as_deref() == Some(work_id)
-            && entry.mode == "pm"
+            && JobKind::parse(&entry.mode) == Ok(JobKind::Pm)
             && entry.failure_class.is_none()
             && entry.validation_result.as_deref() != Some("failed"))
         .then(|| entry.session_dir.map(PathBuf::from))

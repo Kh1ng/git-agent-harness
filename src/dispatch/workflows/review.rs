@@ -21,6 +21,7 @@ use crate::availability;
 use crate::config::{self, GahConfig, Profile};
 use crate::context;
 use crate::controller::HumanRequiredReason;
+use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
 use crate::notifications::{notify_event, NotifyEvent};
 use crate::routing::{RouteDecision, RouteRequest};
@@ -1400,7 +1401,7 @@ fn invalid_review_attempt_chain(
         .filter(|entry| {
             entry.profile == ledger.profile
                 && entry.repo_id == profile.repo_id
-                && entry.mode == "review"
+                && JobKind::parse(&entry.mode) == Ok(JobKind::Review)
                 && entry.branch.as_deref() == Some(branch)
                 && entry.review_contract_version.unwrap_or(0)
                     >= crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION

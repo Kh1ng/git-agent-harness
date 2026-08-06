@@ -6,6 +6,7 @@ use super::issues::{
 };
 use super::{DispatchArgs, MIN_DISPATCH_FREE_BYTES};
 use crate::config::{GahConfig, Profile};
+use crate::job_kind::JobKind;
 use crate::ledger::{self, LedgerEntry};
 use crate::models::CandidateArtifact;
 use crate::models::{
@@ -136,7 +137,10 @@ pub(super) fn check_duplicate_work(
     args: &DispatchArgs,
 ) -> Result<Option<String>> {
     let target = if args.target.is_empty() {
-        if args.mode == "improve" || args.mode == "fix" {
+        if matches!(
+            JobKind::parse(&args.mode),
+            Ok(JobKind::Improve) | Ok(JobKind::Fix)
+        ) {
             let default = PathBuf::from(&profile.artifact_root)
                 .join("candidates")
                 .join("latest.json");
@@ -423,7 +427,7 @@ fn ledger_lookup_for_ticket(
         wid,
     )
     .filter(|gate| {
-        let review_derived = gate.mode == "review"
+        let review_derived = JobKind::parse(&gate.mode) == Ok(JobKind::Review)
             || (gate.reason_code.as_deref() == Some("stuck_loop_gate")
                 && gate.review_generation.is_some());
         if !review_derived {
