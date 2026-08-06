@@ -12,8 +12,10 @@
 //! matching real fixture. No live provider calls are made or required —
 //! this only ever parses text already captured elsewhere.
 //!
-//! Not yet wired into runner/routing (TICKET-067/068) — this module is a
-//! pure function over text, complete and tested on its own.
+//! Wired into the dispatch path via
+//! `dispatch::attempts::mark_backend_unavailable_from_output_for_identity_at`,
+//! which calls `parse()` after a backend run completes and feeds the result
+//! into `availability::record_unavailable_for_identity`.
 #![allow(dead_code)]
 
 use chrono::{DateTime, Duration as ChronoDuration, NaiveTime, TimeZone, Utc};
@@ -380,7 +382,17 @@ fn extract_reset(text: &str, now: OffsetDateTime) -> (Option<String>, Option<Str
 /// must be able to tell "we saw this and don't know what it is" apart from
 /// "we're confident this isn't a quota/rate-limit failure at all".
 pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFailure> {
-    if backend == "codex" {
+    // agy-main/agy-second are legacy instance strings, not kinds (see
+    // backend_kind.rs); fold them locally before dispatching on the kind.
+    // `backend` itself stays untouched below -- ParsedFailure.backend is
+    // built from the original string, not the folded kind.
+    use crate::backend_kind::BackendKind;
+    let kind = match backend {
+        "agy-main" | "agy-second" => Some(BackendKind::Agy),
+        other => BackendKind::parse(other).ok(),
+    };
+
+    if kind == Some(BackendKind::Codex) {
         if let Some(m) = codex_selected_model_capacity_re().find(text) {
             return Some(ParsedFailure {
                 backend: backend.to_string(),
@@ -396,7 +408,7 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
     }
 
     // AGY-specific patterns checked first: auth errors and quota exhaustion.
-    if matches!(backend, "agy" | "agy-main" | "agy-second") {
+    if kind == Some(BackendKind::Agy) {
         if let Some(m) = agy_auth_re().find(text) {
             return Some(ParsedFailure {
                 backend: backend.to_string(),
@@ -430,7 +442,7 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
         }
     }
 
-    if matches!(backend, "claude") {
+    if kind == Some(BackendKind::Claude) {
         if let Some(m) = claude_session_limit_re().find(text) {
             let (reset_at, unresolved_timezone) = extract_reset(text, now);
             return Some(ParsedFailure {
