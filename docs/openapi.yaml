@@ -1,0 +1,591 @@
+openapi: 3.1.0
+info:
+  title: GAH Control Plane API
+  version: "0.1.0"
+  description: |
+    HTTP surface for apps/server, the Node control-plane that wraps the `gah`
+    CLI/Rust binary. Hand-written from apps/server/src/server.ts (the single
+    source of truth) rather than generated -- keep it in sync manually until
+    #NNN (generate-from-route-table tooling) exists, if that's ever worth it.
+
+    This is deliberately a snapshot of what apps/server exposes TODAY, not a
+    design document for what it should expose. See the "Known gaps" section
+    at the bottom and the tracking issue for endpoints that don't exist yet
+    (dispatch, sync, ledger summary, availability) even though the
+    underlying `gah` CLI has supported them for a long time.
+
+    Response schemas are typed at the field-name/type level for the
+    endpoints most likely to be consumed programmatically (status, profiles,
+    config); several less-critical endpoints use a looser `object` schema
+    rather than exhaustively transcribing every nested field from
+    packages/contracts/src/gah.ts -- follow that file for full fidelity.
+  license:
+    name: Same as repository
+servers:
+  - url: http://localhost:3773
+    description: Default local apps/server port
+tags:
+  - name: health
+  - name: status
+  - name: profiles
+  - name: config
+  - name: manager-chat
+  - name: loop
+  - name: events
+  - name: registry
+    description: Multi-node fleet registration (auth-gated via authMiddleware)
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Liveness/readiness check
+      responses:
+        "200":
+          description: Server status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [healthy, starting] }
+                  node_id: { type: string }
+                  display_name: { type: string }
+                  advertised_url: { type: string }
+                  version: { type: string }
+                  schema_digest: { type: string }
+                  timestamp: { type: integer }
+                  checks: { type: object }
+
+  /api/info:
+    get:
+      tags: [health]
+      summary: Server identity, feature flags, and a self-describing endpoint map
+      responses:
+        "200":
+          description: Server info
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/status:
+    get:
+      tags: [status]
+      summary: Aggregated profile status (fans out to registered fleet nodes)
+      description: |
+        Requires authMiddleware (loopback callers are exempt). Wraps
+        `gah status --profile <p> --json`, enriched with this node's identity,
+        local resource pressure, and observations from other registered nodes.
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string, default: gah }
+      responses:
+        "200":
+          description: Status snapshot (StatusSnapshot + node fan-out, see packages/contracts/src/gah.ts)
+          content:
+            application/json:
+              schema: { type: object }
+        "502":
+          description: gah status failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/quota:
+    get:
+      tags: [status]
+      summary: Backend/model quota snapshot
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string, default: gah }
+        - name: since
+          in: query
+          schema: { type: string, default: 7d }
+      responses:
+        "200":
+          description: QuotaSnapshot
+          content:
+            application/json:
+              schema: { type: object }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/doctor:
+    get:
+      tags: [status]
+      summary: Profile health/readiness diagnostics
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string, default: gah }
+      responses:
+        "200":
+          description: DoctorSnapshot
+          content:
+            application/json:
+              schema: { type: object }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/report:
+    get:
+      tags: [status]
+      summary: Usage/cost report, optionally grouped by backend or model
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string }
+        - name: since
+          in: query
+          schema: { type: string }
+        - name: groupBy
+          in: query
+          schema: { type: string, enum: [model, backend] }
+      responses:
+        "200":
+          description: ReportData
+          content:
+            application/json:
+              schema: { type: object }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/report/series:
+    get:
+      tags: [status]
+      summary: Time-bucketed usage/cost series
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string }
+        - name: since
+          in: query
+          schema: { type: string }
+        - name: bucket
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: ReportSeriesData
+          content:
+            application/json:
+              schema: { type: object }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/work/{workId}:
+    get:
+      tags: [status]
+      summary: Full ledger history for one work item (all attempts)
+      parameters:
+        - name: workId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: LedgerEntry[]
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/profiles:
+    get:
+      tags: [profiles]
+      summary: List configured GAH profiles
+      responses:
+        "200":
+          description: ProfileSummary[]
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ProfileSummary" } }
+        "502": { $ref: "#/components/responses/GahError" }
+    post:
+      tags: [profiles]
+      summary: Add a new profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, display_name, repo_id, provider, repo, local_path, artifact_root]
+              properties:
+                name: { type: string }
+                display_name: { type: string }
+                repo_id: { type: string }
+                provider: { type: string, enum: [github, gitlab] }
+                repo: { type: string }
+                local_path: { type: string }
+                artifact_root: { type: string }
+      responses:
+        "201": { description: Created }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/profiles/{name}:
+    patch:
+      tags: [profiles]
+      summary: Update fields on an existing profile
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200": { description: Updated }
+        "502": { $ref: "#/components/responses/GahError" }
+    delete:
+      tags: [profiles]
+      summary: Remove a profile
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+        - name: force
+          in: query
+          schema: { type: string, enum: ["true", "false"] }
+      responses:
+        "200": { description: Removed }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/config:
+    get:
+      tags: [config]
+      summary: Global config defaults (current_manager, etc.)
+      responses:
+        "200":
+          description: ConfigSummary
+          content:
+            application/json:
+              schema: { type: object }
+        "502": { $ref: "#/components/responses/GahError" }
+    post:
+      tags: [config]
+      summary: Update global config defaults
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                current_manager: { type: string, nullable: true }
+                clear: { type: array, items: { type: string } }
+      responses:
+        "200": { description: Updated }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/config/effective:
+    get:
+      tags: [config]
+      summary: Fully-resolved effective config for one profile (routing, publishing, context)
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string, default: gah }
+      responses:
+        "200":
+          description: ConfigProfileSummary
+          content:
+            application/json:
+              schema: { type: object }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/manager-chat/settings:
+    get:
+      tags: [manager-chat]
+      summary: Manager-chat backend selection (default + per-profile overrides)
+      responses:
+        "200":
+          description: ManagerChatSettings + availableBackends
+          content:
+            application/json:
+              schema: { type: object }
+    post:
+      tags: [manager-chat]
+      summary: Update manager-chat backend selection
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                defaultBackend: { type: string }
+                profileOverrides: { type: object, additionalProperties: { type: string } }
+      responses:
+        "200": { description: Updated }
+        "400": { $ref: "#/components/responses/GahError" }
+
+  /api/manager-chat/commands:
+    get:
+      tags: [manager-chat]
+      summary: Live slash-command list from the active backend's own registry
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string, default: gah }
+      responses:
+        "200":
+          description: "{ commands: ManagerCommandInfo[] }"
+          content:
+            application/json:
+              schema: { type: object }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/manager-chat/models:
+    get:
+      tags: [manager-chat]
+      summary: Live selectable-model list from the active backend's ACP session
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string, default: gah }
+      responses:
+        "200":
+          description: "{ models: ManagerModelInfo[]; currentModelId: string | null }"
+          content:
+            application/json:
+              schema: { type: object }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/manager-chat/model:
+    post:
+      tags: [manager-chat]
+      summary: Switch the active model for a profile's manager-chat session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [modelId]
+              properties:
+                profile: { type: string }
+                modelId: { type: string }
+      responses:
+        "200": { description: Switched }
+        "400": { description: Missing modelId }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/loop/status:
+    get:
+      tags: [loop]
+      summary: Status of the `gah loop --profile <p>` systemd user unit
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string, default: gah }
+      responses:
+        "200":
+          description: LoopStatus
+          content:
+            application/json:
+              schema: { type: object }
+
+  /api/loop/start:
+    post:
+      tags: [loop]
+      summary: Start the loop unit for a profile
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { profile: { type: string } }
+      responses:
+        "200": { description: Started }
+        "409": { description: Already running / conflict }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/loop/stop:
+    post:
+      tags: [loop]
+      summary: Stop the loop unit for a profile
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { profile: { type: string } }
+      responses:
+        "200": { description: Stopped }
+        "409": { description: Not running / conflict }
+
+  /api/events:
+    get:
+      tags: [events]
+      summary: Raw controller event stream for a profile
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string, default: gah }
+        - name: since
+          in: query
+          schema: { type: string, default: 7d }
+      responses:
+        "200":
+          description: ControllerEvent[]
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/controller-activity:
+    get:
+      tags: [events]
+      summary: Controller events, derived into a UI-friendly activity feed
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string, default: gah }
+        - name: since
+          in: query
+          schema: { type: string, default: 24h }
+      responses:
+        "200":
+          description: Derived controller activity
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+        "502": { $ref: "#/components/responses/GahError" }
+
+  /api/registry/nodes:
+    get:
+      tags: [registry]
+      summary: List registered fleet nodes
+      security: [{ nodeAuth: [] }]
+      responses:
+        "200": { description: Nodes summary, content: { application/json: { schema: { type: object } } } }
+    post:
+      tags: [registry]
+      summary: Register a new fleet node
+      security: [{ nodeAuth: [] }]
+      requestBody:
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        "201": { description: Registered }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/registry/nodes/{nodeId}:
+    delete:
+      tags: [registry]
+      summary: Revoke a registered node
+      security: [{ nodeAuth: [] }]
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Revoked }
+        "404": { description: Not found }
+
+  /api/registry/nodes/{nodeId}/health:
+    get:
+      tags: [registry]
+      summary: Check one node's health
+      security: [{ nodeAuth: [] }]
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: profile
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: Health result }
+        "404": { description: Not found }
+
+  /api/registry/nodes/{nodeId}/rotate-secret:
+    post:
+      tags: [registry]
+      summary: Rotate a node's shared secret
+      security: [{ nodeAuth: [] }]
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { secret_ref: { type: string } }
+      responses:
+        "200": { description: Rotated }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/registry/fleet:
+    get:
+      tags: [registry]
+      summary: Aggregated observations across the whole registered fleet
+      security: [{ nodeAuth: [] }]
+      parameters:
+        - name: profile
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: Fleet observations }
+        "500": { description: Internal error }
+
+components:
+  securitySchemes:
+    nodeAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Bearer token, enforced by authMiddleware for /api/registry/* only
+  responses:
+    GahError:
+      description: The underlying gah CLI call failed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+    ProfileSummary:
+      type: object
+      description: Mirrors packages/contracts/src/gah.ts ProfileSummary
+      properties:
+        name: { type: string }
+        display_name: { type: string }
+        provider: { type: string }
+        repo: { type: string }
+        local_path: { type: string }
+        web_url: { type: string, nullable: true }
+        max_parallel_workers: { type: integer, nullable: true }
+        max_open_managed_mrs: { type: integer }
+        manager_wake_autonomy: { type: string, nullable: true }
+        delivery_mode: { type: string, enum: [pr, handoff] }
+
+# Known gaps -- endpoints the `gah` CLI has long supported that apps/server
+# does not expose over HTTP at all today. Everything on this list can only
+# be reached by shelling out to the `gah` binary directly -- including
+# `dispatch`, arguably the single most important operation. See the tracking
+# issue this file was added alongside for the plan (document what exists now,
+# ticket what's missing, then scope an MCP server on top of the documented API
+# rather than raw shell-outs).
+#
+# - POST /api/dispatch          (gah dispatch --profile --mode --target ...)
+# - GET  /api/sync               (gah sync --profile --json)
+# - GET  /api/ledger/summary     (gah ledger summary --since)
+# - GET  /api/availability       (gah availability --json)
+# - POST /api/availability/clear (gah availability-clear)
+# - POST /api/ledger/clear-attempts
+# - GET  /api/hold, POST /api/hold/set, /api/hold/clear (manager review-hold gate)
