@@ -84,6 +84,27 @@ impl BackendRunner for ClaudeRunner {
     }
 }
 
+pub struct HermesRunner;
+
+impl BackendRunner for HermesRunner {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Hermes
+    }
+
+    fn run(&self, ctx: &RunContext) -> Result<RunResult> {
+        crate::runner::run_hermes_with_executable(
+            ctx.executable,
+            ctx.worktree,
+            ctx.task,
+            ctx.session_dir,
+            ctx.model,
+            ctx.extra_args,
+            ctx.env_vars,
+            ctx.idle_timeout_seconds,
+        )
+    }
+}
+
 pub struct VibeRunner;
 
 impl BackendRunner for VibeRunner {
@@ -211,6 +232,45 @@ mod tests {
         assert!(argv.contains(&"--trace".to_string()));
         assert!(argv.contains(&"-m".to_string()));
         assert!(argv.contains(&"gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn hermes_runner_reports_hermes_kind() {
+        assert_eq!(HermesRunner.kind(), BackendKind::Hermes);
+    }
+
+    #[test]
+    fn hermes_runner_matches_the_free_function_it_wraps() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "hermes", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+        let extra_args = vec!["--skills".to_string(), "gah-manager".to_string()];
+
+        let ctx = RunContext {
+            executable: Path::new("hermes"),
+            worktree: &f.worktree,
+            task: "the hermes task",
+            session_dir: &f.session_dir,
+            model: Some("nous-portal/deepseek/deepseek-v4-flash"),
+            llm: None,
+            extra_args: &extra_args,
+            env_vars: &envs,
+            idle_timeout_seconds: 300,
+            print_timeout_seconds: None,
+        };
+
+        let result = HermesRunner.run(&ctx).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "-z");
+        assert!(argv.contains(&"the hermes task".to_string()));
+        assert!(argv.contains(&"--yolo".to_string()));
+        assert!(argv.contains(&"--accept-hooks".to_string()));
+        assert!(argv.contains(&"-m".to_string()));
+        assert!(argv.contains(&"nous-portal/deepseek/deepseek-v4-flash".to_string()));
+        assert!(argv.contains(&"--skills".to_string()));
     }
 
     #[test]

@@ -516,9 +516,18 @@ pub(super) fn run_backend_with_reserved_route(
             idle_timeout_seconds: profile.openhands_idle_timeout_seconds(),
             print_timeout_seconds: None,
         }),
-        BackendKind::Hermes => {
-            anyhow::bail!("hermes dispatch is not implemented yet for backend '{backend}'")
-        }
+        BackendKind::Hermes => runner::HermesRunner.run(&runner::RunContext {
+            executable: &executable,
+            worktree: wt,
+            task,
+            session_dir,
+            model: effective_model,
+            llm: None,
+            extra_args: &profile.hermes_args,
+            env_vars: &env_vars,
+            idle_timeout_seconds: profile.hermes_idle_timeout_seconds(),
+            print_timeout_seconds: None,
+        }),
     };
     if let Some(origin_before) = origin_before {
         let origin_after = worktree::git(&["remote", "get-url", "origin"], wt)

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod backend_instances;
 pub use backend_instances::{check_profile_backend_instances, BackendInstanceConfig};
+mod backend_paths;
 mod issue_intake;
 pub use issue_intake::IssueIntakeMode;
 mod publishing;
@@ -198,6 +199,12 @@ pub struct Profile {
     /// Optional absolute/relative path to the OpenCode CLI executable.
     #[serde(default)]
     pub opencode_path: Option<String>,
+    /// Extra CLI args appended to `hermes -z` (e.g. `--skills foo,bar`).
+    #[serde(default)]
+    pub hermes_args: Vec<String>,
+    /// Optional absolute/relative path to the Hermes CLI executable.
+    #[serde(default)]
+    pub hermes_path: Option<String>,
     /// How long OpenCode can go without a durable worktree change before GAH
     /// considers it stalled and kills it, in seconds. OpenCode's narration
     /// and malformed tool-call output deliberately do not reset this window:
@@ -244,6 +251,11 @@ pub struct Profile {
     /// unset.
     #[serde(default)]
     pub claude_idle_timeout_seconds: Option<u64>,
+    /// How long Hermes's own log output can go quiet before GAH considers it
+    /// stalled and kills it, in seconds. Same rationale and mechanism as
+    /// `opencode_idle_timeout_seconds`. Defaults to 300s when unset.
+    #[serde(default)]
+    pub hermes_idle_timeout_seconds: Option<u64>,
     /// How many tickets `gah loop` may execute concurrently for this profile.
     /// The native recurring loop owns this worker pool; the shell supervisor
     /// is only a compatibility launcher. Defaults to 1 when unset.
@@ -593,56 +605,6 @@ impl RoutingPolicy {
 impl Profile {
     pub fn effective_routing(&self, defaults: &Defaults) -> RoutingPolicy {
         self.routing.merged_with_defaults(&defaults.routing)
-    }
-
-    /// An explicit executable path override for `backend`, if this profile
-    /// sets one. `resolve_backend_executable` (in `runner::resolve`) treats a
-    /// `Some` return as a literal file path to check with `is_executable_path`
-    /// -- this must ONLY ever return a real path override, never a marker
-    /// string, or backend launch silently breaks (see `is_backend_configured`
-    /// below for the "is this set up at all" signal, which is a different
-    /// question with a different answer for openhands).
-    pub fn configured_backend_path(&self, backend: &str) -> Option<&str> {
-        match backend {
-            "codex" => self.codex_path.as_deref(),
-            "claude" => self.claude_path.as_deref(),
-            "agy" | "agy-main" | "agy-second" => self.agy_path.as_deref(),
-            "vibe" => self.vibe_path.as_deref(),
-            "opencode" => self.opencode_path.as_deref(),
-            _ => None,
-        }
-    }
-
-    pub fn review_timeout_seconds(&self) -> u64 {
-        self.review_timeout_seconds.unwrap_or(300).max(1)
-    }
-
-    pub fn validation_timeout_seconds(&self) -> u64 {
-        self.validation_timeout_seconds.unwrap_or(300).max(1)
-    }
-
-    pub fn agy_idle_timeout_seconds(&self) -> u64 {
-        self.agy_idle_timeout_seconds.unwrap_or(120).max(1)
-    }
-
-    pub fn opencode_idle_timeout_seconds(&self) -> u64 {
-        self.opencode_idle_timeout_seconds.unwrap_or(300).max(1)
-    }
-
-    pub fn openhands_idle_timeout_seconds(&self) -> u64 {
-        self.openhands_idle_timeout_seconds.unwrap_or(300).max(1)
-    }
-
-    pub fn vibe_idle_timeout_seconds(&self) -> u64 {
-        self.vibe_idle_timeout_seconds.unwrap_or(300).max(1)
-    }
-
-    pub fn codex_idle_timeout_seconds(&self) -> u64 {
-        self.codex_idle_timeout_seconds.unwrap_or(300).max(1)
-    }
-
-    pub fn claude_idle_timeout_seconds(&self) -> u64 {
-        self.claude_idle_timeout_seconds.unwrap_or(300).max(1)
     }
 
     pub fn max_parallel_workers(&self) -> u32 {
@@ -1107,6 +1069,8 @@ pub mod tests {
             vibe_path: None,
             opencode_args: vec![],
             opencode_path: None,
+            hermes_args: vec![],
+            hermes_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
@@ -1117,6 +1081,7 @@ pub mod tests {
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
             claude_idle_timeout_seconds: None,
+            hermes_idle_timeout_seconds: None,
             max_parallel_workers: None,
             max_open_managed_mrs: None,
             notify_command: None,
@@ -1165,6 +1130,8 @@ pub mod tests {
             vibe_path: None,
             opencode_args: vec![],
             opencode_path: None,
+            hermes_args: vec![],
+            hermes_path: None,
             agy_second_home: None,
             agy_print_timeout_seconds: std::collections::HashMap::new(),
             agy_idle_timeout_seconds: None,
@@ -1175,6 +1142,7 @@ pub mod tests {
             vibe_idle_timeout_seconds: None,
             codex_idle_timeout_seconds: None,
             claude_idle_timeout_seconds: None,
+            hermes_idle_timeout_seconds: None,
             max_parallel_workers: None,
             max_open_managed_mrs: None,
             notify_command: None,

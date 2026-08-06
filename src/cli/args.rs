@@ -468,6 +468,12 @@ pub enum ProfileCommands {
         /// Path to opencode executable
         #[arg(long)]
         opencode_path: Option<String>,
+        /// Extra CLI args for hermes
+        #[arg(long, value_delimiter = ',')]
+        hermes_args: Vec<String>,
+        /// Path to hermes executable
+        #[arg(long)]
+        hermes_path: Option<String>,
         /// HOME override for agy-second backend
         #[arg(long)]
         agy_second_home: Option<String>,
@@ -551,6 +557,10 @@ pub enum ProfileCommands {
         opencode_args: Vec<String>,
         #[arg(long)]
         opencode_path: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        hermes_args: Vec<String>,
+        #[arg(long)]
+        hermes_path: Option<String>,
         #[arg(long)]
         agy_second_home: Option<String>,
         #[arg(long)]

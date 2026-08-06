@@ -835,6 +835,7 @@ fn build_snapshot_inner(
         "vibe",
         "opencode",
         "openhands",
+        "hermes",
     ];
     let mut backend_configured: std::collections::HashMap<String, bool> =
         std::collections::HashMap::new();

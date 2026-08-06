@@ -222,6 +222,7 @@ class ProviderRegistryImpl {
       openhands: 'OPENHANDS_API_KEY',
       agy: 'AGY_API_KEY',
       vibe: 'VIBE_API_KEY',
+      hermes: 'HERMES_API_KEY',
       auto: 'AUTO_API_KEY'
     };
     return envVars[kind] || `PROVIDER_${kind.toUpperCase()}_KEY`;

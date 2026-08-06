@@ -118,7 +118,7 @@ pub fn filtered_backend_args(backend: &str, extra_args: &[String]) -> Vec<String
     while i < extra_args.len() {
         let arg = &extra_args[i];
         match backend {
-            "codex" => {
+            "codex" | "hermes" => {
                 if matches!(arg.as_str(), "-m" | "--model") {
                     i += 2;
                     continue;
