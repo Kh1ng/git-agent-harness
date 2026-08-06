@@ -63,6 +63,27 @@ impl BackendRunner for CodexRunner {
     }
 }
 
+pub struct ClaudeRunner;
+
+impl BackendRunner for ClaudeRunner {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Claude
+    }
+
+    fn run(&self, ctx: &RunContext) -> Result<RunResult> {
+        crate::runner::run_claude_with_executable(
+            ctx.executable,
+            ctx.worktree,
+            ctx.task,
+            ctx.session_dir,
+            ctx.model,
+            ctx.extra_args,
+            ctx.env_vars,
+            ctx.idle_timeout_seconds,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +125,43 @@ mod tests {
         assert!(argv.contains(&"--trace".to_string()));
         assert!(argv.contains(&"-m".to_string()));
         assert!(argv.contains(&"gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn claude_runner_reports_claude_kind() {
+        assert_eq!(ClaudeRunner.kind(), BackendKind::Claude);
+    }
+
+    #[test]
+    fn claude_runner_matches_the_free_function_it_wraps() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+        let extra_args = vec!["--add-dir".to_string(), "/tmp/extra".to_string()];
+
+        let ctx = RunContext {
+            executable: Path::new("claude"),
+            worktree: &f.worktree,
+            task: "the claude task",
+            session_dir: &f.session_dir,
+            model: Some("sonnet-5"),
+            llm: None,
+            extra_args: &extra_args,
+            env_vars: &envs,
+            idle_timeout_seconds: 300,
+            print_timeout_seconds: None,
+        };
+
+        let result = ClaudeRunner.run(&ctx).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "-p");
+        assert!(argv.contains(&"the claude task".to_string()));
+        assert!(argv.contains(&"--model".to_string()));
+        assert!(argv.contains(&"sonnet-5".to_string()));
+        assert!(argv.contains(&"--add-dir".to_string()));
+        assert!(argv.contains(&"/tmp/extra".to_string()));
     }
 }
