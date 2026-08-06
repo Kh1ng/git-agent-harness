@@ -179,10 +179,22 @@ pub fn legacy_backend_instance(backend: &str, quota_pool: Option<&str>) -> Strin
 }
 
 pub fn runner_kind_for_backend(backend: &str) -> &str {
-    match backend {
-        "cloud-coder" | "openhands" => "openhands",
-        "agy" | "agy-main" | "agy-second" => "agy",
-        other => other,
+    // agy-main/agy-second are legacy pre-backend_instances candidate
+    // strings naming *instances* of the Agy app, not separate kinds --
+    // BackendKind::parse deliberately doesn't know about them (see
+    // backend_kind.rs). Fold them here, locally, since this function's own
+    // job is exactly "legacy backend string -> compatibility runner kind."
+    // TODO(#TBD): retire once agy-main/agy-second migrate to real
+    // backend_instances entries and this folding is no longer needed.
+    if matches!(backend, "agy-main" | "agy-second") {
+        return "agy";
+    }
+    match crate::backend_kind::BackendKind::parse(backend) {
+        Ok(kind) => kind.as_str(),
+        // Non-canonical or test-only logical backend names (e.g.
+        // "opencode-alt" in tests below) pass through unchanged, matching
+        // this function's original total/permissive behavior.
+        Err(_) => backend,
     }
 }
 

@@ -2,6 +2,7 @@
 // This makes the modules accessible to integration tests
 
 pub mod availability;
+pub mod backend_kind;
 pub mod baseline;
 pub mod build_cache;
 pub mod candidates;

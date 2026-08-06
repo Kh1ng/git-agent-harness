@@ -426,8 +426,12 @@ pub(super) fn run_backend_with_reserved_route(
             seconds.to_string(),
         ));
     }
-    let result = match runner_kind {
-        "codex" => runner::run_codex_with_executable(
+    let backend_kind = match crate::backend_kind::BackendKind::parse(runner_kind) {
+        Ok(kind) => kind,
+        Err(_) => anyhow::bail!("unsupported runner kind '{runner_kind}' for backend '{backend}'"),
+    };
+    let result = match backend_kind {
+        crate::backend_kind::BackendKind::Codex => runner::run_codex_with_executable(
             &executable,
             wt,
             task,
@@ -437,7 +441,7 @@ pub(super) fn run_backend_with_reserved_route(
             &env_vars,
             profile.codex_idle_timeout_seconds(),
         ),
-        "claude" => runner::run_claude_with_executable(
+        crate::backend_kind::BackendKind::Claude => runner::run_claude_with_executable(
             &executable,
             wt,
             task,
@@ -447,7 +451,7 @@ pub(super) fn run_backend_with_reserved_route(
             &env_vars,
             profile.claude_idle_timeout_seconds(),
         ),
-        "agy" => runner::run_agy_with_executable(
+        crate::backend_kind::BackendKind::Agy => runner::run_agy_with_executable(
             &executable,
             wt,
             task,
@@ -460,7 +464,7 @@ pub(super) fn run_backend_with_reserved_route(
                 .copied(),
             profile.agy_idle_timeout_seconds(),
         ),
-        "vibe" => runner::run_vibe_with_executable(
+        crate::backend_kind::BackendKind::Vibe => runner::run_vibe_with_executable(
             &executable,
             wt,
             task,
@@ -470,7 +474,7 @@ pub(super) fn run_backend_with_reserved_route(
             &env_vars,
             profile.vibe_idle_timeout_seconds(),
         ),
-        "opencode" => runner::run_opencode_with_executable(
+        crate::backend_kind::BackendKind::Opencode => runner::run_opencode_with_executable(
             &executable,
             wt,
             task,
@@ -487,7 +491,7 @@ pub(super) fn run_backend_with_reserved_route(
                 })
                 .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
         ),
-        "openhands" => runner::run_openhands_with_executable(
+        crate::backend_kind::BackendKind::Openhands => runner::run_openhands_with_executable(
             &executable,
             wt,
             task,
@@ -497,7 +501,9 @@ pub(super) fn run_backend_with_reserved_route(
             &env_vars,
             profile.openhands_idle_timeout_seconds(),
         ),
-        other => anyhow::bail!("unsupported runner kind '{other}' for backend '{backend}'"),
+        crate::backend_kind::BackendKind::Hermes => {
+            anyhow::bail!("hermes dispatch is not implemented yet for backend '{backend}'")
+        }
     };
     if let Some(origin_before) = origin_before {
         let origin_after = worktree::git(&["remote", "get-url", "origin"], wt)

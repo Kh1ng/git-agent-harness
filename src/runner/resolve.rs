@@ -168,17 +168,17 @@ pub fn extract_model_from_args(args: &[String]) -> Option<String> {
 }
 
 fn backend_command_name(name: &str) -> Option<&'static str> {
+    // agy has three distinct real executables sharing one runner kind;
+    // BackendKind collapses them, so the instance name must be picked
+    // before falling back to the kind's canonical command name.
     match name {
-        "openhands" | "cloud-coder" | "auto" => Some("openhands"),
-        "codex" => Some("codex"),
-        "claude" => Some("claude"),
-        "agy" => Some("agy"),
-        "agy-main" => Some("agy-main"),
-        "agy-second" => Some("agy-second"),
-        "vibe" => Some("vibe"),
-        "opencode" => Some("opencode"),
-        _ => None,
+        "agy-main" => return Some("agy-main"),
+        "agy-second" => return Some("agy-second"),
+        _ => {}
     }
+    crate::backend_kind::BackendKind::parse(name)
+        .ok()
+        .map(|kind| kind.as_str())
 }
 
 pub(crate) fn resolve_executable_on_path(name: &str) -> Option<PathBuf> {

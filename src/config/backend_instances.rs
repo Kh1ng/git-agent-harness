@@ -163,10 +163,12 @@ fn validate_instance(
             }
         }
     }
-    if !matches!(
-        instance.runner_kind.as_str(),
-        "agy" | "claude" | "codex" | "openhands" | "opencode" | "vibe"
-    ) {
+    // Note: BackendKind::parse also accepts "hermes" (not just the six
+    // kinds this validation originally allowed) -- a deliberate, safe
+    // widening, since Hermes is a real coding backend already dispatched
+    // by manager chat even though it has no runner::backends module yet;
+    // this never rejects anything that was previously valid.
+    if crate::backend_kind::BackendKind::parse(instance.runner_kind.as_str()).is_err() {
         errors.push(format!(
             "instance '{name}': unsupported runner kind '{}'",
             instance.runner_kind
