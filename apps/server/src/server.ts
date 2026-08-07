@@ -588,6 +588,28 @@ export function createServer(
 
   // Profile CRUD operations for Issue #148
   app.post('/api/profiles', async (req, res) => {
+    // Issue #635 AC3: a missing required field must fail closed with 4xx
+    // before ever reaching the CLI, not surface as an opaque 502 once
+    // `gah profile add` itself rejects it.
+    const REQUIRED_PROFILE_FIELDS: (keyof ProfileAddOptions)[] = [
+      'name',
+      'display_name',
+      'repo_id',
+      'provider',
+      'repo',
+      'local_path',
+      'artifact_root',
+    ];
+    const missing = REQUIRED_PROFILE_FIELDS.filter(
+      (field) => typeof req.body?.[field] !== 'string' || req.body[field].trim() === ''
+    );
+    if (missing.length > 0) {
+      res.status(400).json({
+        error: 'Invalid profile',
+        message: `Missing required field(s): ${missing.join(', ')}`
+      });
+      return;
+    }
     try {
       const options: ProfileAddOptions = {
         ...req.body,

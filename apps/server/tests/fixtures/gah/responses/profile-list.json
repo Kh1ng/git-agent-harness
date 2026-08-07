@@ -1,0 +1,1 @@
+[{"name":"fixture","display_name":"Fixture","provider":"github","repo":"Kh1ng/git-agent-harness","local_path":"/home/operator/git-agent-harness","web_url":"https://github.com/Kh1ng/git-agent-harness","max_parallel_workers":null,"max_open_managed_mrs":1,"validation_timeout_seconds":300,"manager_wake_autonomy":"off","delivery_mode":"pr"}]
