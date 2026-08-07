@@ -161,3 +161,31 @@ test('renew and release round-trip through the real routes', async () => {
     }
   );
 });
+
+// Issue #882 / CodeQL js/missing-rate-limiting: these routes are
+// authenticated but called frequently by design (renewals), so a generous
+// per-IP limit exists as defense-in-depth against a buggy/compromised node
+// rather than to throttle normal use -- this proves the limiter is
+// actually wired in, not just configured and forgotten.
+test('acquire is rate-limited past the configured per-IP window', async () => {
+  await withClaimsServer(
+    (registry) => registerTestNode(registry, 'node-a', ['gah']),
+    async (url) => {
+      let sawRateLimited = false;
+      for (let i = 0; i < 65; i++) {
+        const res = await fetch(`${url}/api/claims/acquire`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          // Distinct work_id per call -- isolating "rate limited" from
+          // "conflicts with a claim this same loop already acquired".
+          body: JSON.stringify({ node_id: 'node-a', profile: 'gah', work_id: `ticket-${i}` })
+        });
+        if (res.status === 429) {
+          sawRateLimited = true;
+          break;
+        }
+      }
+      assert.ok(sawRateLimited, 'expected a 429 before 65 requests in one window');
+    }
+  );
+});

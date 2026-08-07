@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import os from 'node:os';
 import { statfsSync } from 'node:fs';
 import { getServerReadiness } from './serverReadiness.js';
@@ -125,6 +126,20 @@ export function createServer(
   // that pre-existing contract.
   app.use('/api/registry', authMiddleware);
   app.use('/api/claims', authMiddleware);
+  // Issue #882 (CodeQL: js/missing-rate-limiting) -- these routes are
+  // authenticated but called frequently by design (a renewal every
+  // lease/3, ~5 min, per in-flight dispatch), so the limit is generous for
+  // legitimate traffic and exists as defense-in-depth against a buggy or
+  // compromised node hammering the endpoint, not to throttle normal use.
+  app.use(
+    '/api/claims',
+    rateLimit({
+      windowMs: 60_000,
+      limit: 60,
+      standardHeaders: true,
+      legacyHeaders: false
+    })
+  );
 
   // Health check endpoint
   app.get('/health', (req, res) => {
