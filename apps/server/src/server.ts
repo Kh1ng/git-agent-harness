@@ -49,6 +49,7 @@ import { RegistryService } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
 import { readSettings as readManagerChatSettings, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
 import { gatewayBaseUrl, gatewayApiKey } from './managerChat/memoryGatewayClient.js';
+import { detectTailscaleIPv4 } from './tailscaleDetect.js';
 import { listManagerBackends } from './managerChat/registry.js';
 import {
   listCommandsForProfile as listManagerChatCommands,
@@ -821,12 +822,14 @@ export function createServer(
   // point a second node's `scripts/install.sh GAH_GATEWAY_MODE=remote` at
   // this one. Gated by the /api/settings authMiddleware above, not the
   // app's unauthenticated default.
-  app.get('/api/settings/gateway', (_req, res) => {
+  app.get('/api/settings/gateway', async (_req, res) => {
     const apiKey = gatewayApiKey();
+    const tailscaleIPv4 = await detectTailscaleIPv4();
     res.json({
       url: gatewayBaseUrl(),
       apiKeyConfigured: !!apiKey,
-      apiKey: apiKey ?? null
+      apiKey: apiKey ?? null,
+      tailscaleIPv4
     });
   });
 

@@ -6,7 +6,10 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 # Fresh installs and routine upgrades use the same Rust update implementation.
-cargo run -- update --repo "$repo_root"
+# --bin gah is required: Cargo.toml declares a second [[bin]]
+# (generate-cli-capabilities) with no default-run set, so a bare
+# `cargo run` is ambiguous and errors instead of picking one.
+cargo run --bin gah -- update --repo "$repo_root"
 
 # Persistent server bind-host override (issue #643). Created only on first
 # install; every later run of this script, and every `gah update
