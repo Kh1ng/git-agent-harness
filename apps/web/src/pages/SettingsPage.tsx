@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw } from 'lucide-react';
+import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw, Eye, EyeOff, Copy, Check } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -12,7 +12,7 @@ import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt } from '../lib/format.js';
 import { gahApi } from '../api/client.js';
-import type { WakeAutonomyValue, ConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import type { WakeAutonomyValue, ConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary } from '@git-agent-harness/contracts';
 
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
 const SETTINGS_REFRESH_MS = 60 * 1000;
@@ -217,6 +217,8 @@ export function SettingsPage() {
       />
 
       <ManagerChatSettingsSection configuredProfiles={configuredProfiles} />
+
+      <GatewaySettingsSection />
 
       <ProfileConfigViewerSection
         selectedName={selectedName}
@@ -801,6 +803,86 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
             Add
           </button>
         </div>
+      )}
+
+      {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
+    </section>
+  );
+}
+
+/** Issue #880 follow-up: lets an operator copy this node's memory gateway
+ * URL + API key to configure a second node's `scripts/install.sh
+ * GAH_GATEWAY_MODE=remote` without SSHing in to cat an env file. The key
+ * is masked by default -- click to reveal, matching common secret-field
+ * UX, since this is a real credential rendered in the DOM once shown. */
+function GatewaySettingsSection() {
+  const [settings, setSettings] = useState<GatewaySettingsSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    gahApi
+      .getGatewaySettings()
+      .then((data) => {
+        setSettings(data);
+        setError(null);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  const copyKey = () => {
+    if (!settings?.apiKey) return;
+    navigator.clipboard.writeText(settings.apiKey).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  if (!settings) {
+    return (
+      <section className="card-padded max-w-md">
+        <h3 className="text-sm font-semibold text-primary mb-1">Compaction DB (Memory Gateway)</h3>
+        {error ? <p className="text-xs text-critical">Failed to load: {error}</p> : <p className="text-xs text-muted">Loading…</p>}
+      </section>
+    );
+  }
+
+  return (
+    <section className="card-padded max-w-md">
+      <h3 className="text-sm font-semibold text-primary mb-1">Compaction DB (Memory Gateway)</h3>
+      <p className="text-xs text-muted mb-3">
+        This node's TDAI memory gateway. Copy these into a second node's{' '}
+        <code className="font-mono">GAH_GATEWAY_URL</code>/<code className="font-mono">GAH_GATEWAY_API_KEY</code> to point
+        it at the same compaction db instead of running its own.
+      </p>
+
+      <label className="block text-xs font-medium text-secondary mb-1">Gateway URL</label>
+      <div className="flex items-center gap-2 mb-4">
+        <code className="flex-1 bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary font-mono">
+          {settings.url}
+        </code>
+      </div>
+
+      <label className="block text-xs font-medium text-secondary mb-1">API key</label>
+      {settings.apiKeyConfigured ? (
+        <div className="flex items-center gap-2">
+          <code className="flex-1 bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary font-mono truncate">
+            {revealed ? settings.apiKey : '•'.repeat(24)}
+          </code>
+          <button
+            onClick={() => setRevealed((v) => !v)}
+            className="text-muted hover:text-primary"
+            title={revealed ? 'Hide' : 'Reveal'}
+          >
+            {revealed ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
+          <button onClick={copyKey} className="text-muted hover:text-primary" title="Copy">
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        </div>
+      ) : (
+        <p className="text-xs text-muted">Not configured -- no TDAI_GATEWAY_API_KEY set on this node.</p>
       )}
 
       {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}

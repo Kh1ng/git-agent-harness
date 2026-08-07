@@ -1007,6 +1007,14 @@ export interface ManagerChatSettingsSummary {
   availableBackends: ManagerBackendInfo[];
 }
 
+/** GET /api/settings/gateway (issue #880 follow-up): this node's memory
+ * gateway location, for copying into a second node's remote-mode install. */
+export interface GatewaySettingsSummary {
+  url: string;
+  apiKeyConfigured: boolean;
+  apiKey: string | null;
+}
+
 /** Payload for POST /api/manager-chat/settings. Omitted fields are left
  * unchanged server-side. */
 export interface ManagerChatSettingsUpdate {

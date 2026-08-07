@@ -266,6 +266,24 @@ mode than one caught at install time. On success, `TDAI_GATEWAY_URL`/
 file `GAH_SERVER_HOST` above uses, `EnvironmentFile=-`'d by
 `gah-server.service`).
 
+Two things make this easier to actually do:
+- **Getting the key**: `GET /api/settings/gateway` (gated by the same
+  `authMiddleware` as `/api/registry`/`/api/claims`, not the app's
+  unauthenticated default) reports the central node's gateway URL and API
+  key. The dashboard's Settings page has a "Compaction DB (Memory Gateway)"
+  section with a reveal/copy button for it — no need to SSH in and cat an
+  env file on the central node.
+- **A machine with nothing installed yet**: `scripts/bootstrap.sh` installs
+  missing prerequisites via their own official installers (rustup, nvm),
+  clones this repo, and execs `scripts/install.sh` — same `GAH_GATEWAY_*`
+  env vars, just usable from a one-liner on a brand-new machine:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/Kh1ng/git-agent-harness/main/scripts/bootstrap.sh \
+    | GAH_GATEWAY_MODE=remote GAH_GATEWAY_URL=http://gateway-host:8420 \
+      GAH_GATEWAY_API_KEY=<key> bash
+  ```
+  (Env vars go on the `bash` side of the pipe, not the `curl` side.)
+
 **Co-located** — run the gateway on this same host, scripted instead of
 the hand-deployment this replaces:
 

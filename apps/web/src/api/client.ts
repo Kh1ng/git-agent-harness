@@ -34,7 +34,8 @@ import type {
   ManagerChatSettingsSummary,
   ManagerCommandInfo,
   ManagerModelsSummary,
-  ManagerChatSettingsUpdate
+  ManagerChatSettingsUpdate,
+  GatewaySettingsSummary
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -195,6 +196,7 @@ export interface GahDataSource {
   setConfig(data: ConfigSetData): Promise<{ success: boolean; message: string }>;
   getManagerChatSettings(): Promise<ManagerChatSettingsSummary>;
   setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
+  getGatewaySettings(): Promise<GatewaySettingsSummary>;
   getManagerChatCommands(profile: string): Promise<{ commands: ManagerCommandInfo[] }>;
   getManagerChatModels(profile: string): Promise<ManagerModelsSummary>;
   setManagerChatModel(profile: string, modelId: string): Promise<{ success: boolean }>;
@@ -354,6 +356,9 @@ export const gahApi: GahDataSource = {
   },
   setManagerChatSettings(data) {
     return postJson<{ success: boolean }, ManagerChatSettingsUpdate>('/api/manager-chat/settings', data);
+  },
+  getGatewaySettings() {
+    return getJson<GatewaySettingsSummary>('/api/settings/gateway');
   },
   getManagerChatCommands(profile) {
     return getJson<{ commands: ManagerCommandInfo[] }>('/api/manager-chat/commands', { profile });

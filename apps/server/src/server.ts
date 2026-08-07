@@ -48,6 +48,7 @@ import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
 import { readSettings as readManagerChatSettings, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
+import { gatewayBaseUrl, gatewayApiKey } from './managerChat/memoryGatewayClient.js';
 import { listManagerBackends } from './managerChat/registry.js';
 import {
   listCommandsForProfile as listManagerChatCommands,
@@ -126,6 +127,11 @@ export function createServer(
   // that pre-existing contract.
   app.use('/api/registry', authMiddleware);
   app.use('/api/claims', authMiddleware);
+  // /api/settings/gateway reveals the TDAI gateway's own API key (issue
+  // #880 follow-up: an operator setting up a second node needs to copy it
+  // somewhere), so it gets the same narrow gate as registry/claims rather
+  // than riding the unauthenticated default the rest of the API still has.
+  app.use('/api/settings', authMiddleware);
   // Issue #882 (CodeQL: js/missing-rate-limiting) -- these routes are
   // authenticated but called frequently by design (a renewal every
   // lease/3, ~5 min, per in-flight dispatch), so the limit is generous for
@@ -808,6 +814,20 @@ export function createServer(
         message: error instanceof Error ? error.message : String(error)
       });
     }
+  });
+
+  // Lets an operator copy this node's memory gateway URL + API key out of
+  // the dashboard instead of SSHing in to cat an env file -- needed to
+  // point a second node's `scripts/install.sh GAH_GATEWAY_MODE=remote` at
+  // this one. Gated by the /api/settings authMiddleware above, not the
+  // app's unauthenticated default.
+  app.get('/api/settings/gateway', (_req, res) => {
+    const apiKey = gatewayApiKey();
+    res.json({
+      url: gatewayBaseUrl(),
+      apiKeyConfigured: !!apiKey,
+      apiKey: apiKey ?? null
+    });
   });
 
   // Real slash commands for the active backend, sourced live from the
