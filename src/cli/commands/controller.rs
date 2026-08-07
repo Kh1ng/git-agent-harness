@@ -171,12 +171,18 @@ pub fn run_loop(args: LoopArgs) -> Result<()> {
         // writes ledger entries) so it must coordinate via the same profile
         // lock as the daemon (`gah loop` with no `--once`).
         let _lock = controller_runtime::acquire_profile_lock(&args.profile, &resolved_config_path)?;
+        // Issue #761: a bounded `--once` iteration skips the periodic
+        // availability/quota probes (see controller/runtime/probe.rs) --
+        // finishes long before their intervals would matter anyway, and
+        // several test fixtures spawn `gah loop --once` against a fake
+        // codex/vibe binary that reacts to any invocation.
         controller_runtime::run_once(
             &cfg,
             &args.profile,
             args.json,
             parallel,
             args.skip_validation_gate,
+            false,
         )?;
     } else {
         controller_runtime::run_loop(

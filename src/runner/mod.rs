@@ -34,8 +34,8 @@ pub use crate::runner::backends::openhands::{
 pub use crate::runner::backends::vibe::{run_vibe, run_vibe_with_executable};
 #[allow(unused_imports)]
 pub(crate) use crate::runner::process::{
-    copy_stream_to_file, kill_process_group, prepare_process_group, spawn_with_idle_watch,
-    spawn_with_worktree_progress_watch, write_redacted_task,
+    arm_child_pdeathsig, copy_stream_to_file, kill_process_group, prepare_process_group,
+    spawn_with_idle_watch, spawn_with_worktree_progress_watch, write_redacted_task,
 };
 #[allow(unused_imports)]
 pub use crate::runner::process::{install_shutdown_handler, shutdown_requested};

@@ -48,12 +48,19 @@ pub fn admin_api_key() -> Option<String> {
 /// failed fetch means "no observation this cycle", never a fabricated
 /// reading.
 pub fn fetch_admin_endpoint(path: &str, api_key: &str) -> std::io::Result<Option<String>> {
-    let mut child = Command::new("curl")
-        .args(["-sS", "-K", "-"])
+    // Issue #761: this is now reachable from an unattended background probe
+    // (quota_store::refresh_stale_quota_observations), not just the manual
+    // `gah quota refresh` CLI command a human can Ctrl-C. `--max-time`
+    // bounds curl's own network operation (DNS, connect, transfer) so it
+    // can't hang indefinitely; arm_child_pdeathsig is defense-in-depth so
+    // the kernel kills it directly if this process dies before it returns.
+    let mut cmd = Command::new("curl");
+    cmd.args(["-sS", "--max-time", "15", "-K", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    crate::runner::process::arm_child_pdeathsig(&mut cmd);
+    let mut child = cmd.spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let escaped_key = api_key.replace('\\', "\\\\").replace('"', "\\\"");

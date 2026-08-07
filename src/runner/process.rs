@@ -56,6 +56,39 @@ pub(crate) fn prepare_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 pub(crate) fn prepare_process_group(_cmd: &mut Command) {}
 
+/// Arms `PR_SET_PDEATHSIG` on the child so the kernel kills it directly if
+/// gah's own process dies for any reason (crash, SIGKILL, cascading parent
+/// death) -- independent of whether any of gah's own Rust code is still
+/// alive to explicitly reap it. Every real backend invocation is instead
+/// explicitly tracked and killed via `kill_process_group` from a live
+/// idle-watch loop, which is enough on its own *because* that loop's owning
+/// process (the recurring `gah loop` daemon) is itself the one armed via
+/// `controller::ownership::arm_parent_death_signal` -- it survives long
+/// enough after its own launcher dies to gracefully clean up its tracked
+/// children before exiting. This function is for the opposite shape: a
+/// short-lived, fire-and-forget child (issue #761's background quota
+/// probe) spawned from a detached thread that nothing explicitly joins or
+/// polls for shutdown -- if gah's process exits while that thread is still
+/// waiting on its child, the child would otherwise be silently orphaned
+/// with no supervising code left running to kill it. Same primitive
+/// `arm_parent_death_signal` uses on gah's own process, applied to a child
+/// instead via `pre_exec`, same pattern as `prepare_process_group` above.
+#[cfg(target_os = "linux")]
+pub(crate) fn arm_child_pdeathsig(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn arm_child_pdeathsig(_cmd: &mut Command) {}
+
 pub(crate) fn kill_process_group(child: &mut std::process::Child) -> Option<String> {
     #[cfg(not(target_os = "linux"))]
     let cleanup_error = None;
@@ -76,6 +109,85 @@ pub(crate) fn kill_process_group(child: &mut std::process::Child) -> Option<Stri
     }
     let _ = child.kill();
     cleanup_error
+}
+
+/// Issue #761: `kill_process_group` needs a live `&mut Child` -- fine for
+/// every real backend invocation, which is always driven by a polling loop
+/// that owns the `Child` for its whole lifetime. The background quota
+/// probe (`quota_store::refresh_stale_quota_observations`) doesn't fit
+/// that shape: it runs on a detached thread nothing joins, so by the time
+/// `gah loop`'s shutdown path notices it should clean up, the `Child`
+/// value itself lives on a thread stack that path has no access to. This
+/// PID-only variant is what `SUPERVISED_CHILDREN` (below) lets that
+/// shutdown path use instead -- same underlying tree-walk-and-kill
+/// (`kill_linux_process_tree`), just addressed by PID rather than an owned
+/// handle. Confirmed this tree-walk is load-bearing, not redundant with
+/// `arm_child_pdeathsig`: `PR_SET_PDEATHSIG` only fires for the direct
+/// child, and does not cascade to grandchildren a shell-script-shaped
+/// child spawns of its own (observed live via
+/// `tests/recurring_loop_parent_death.rs`'s fake-binary fixture, which
+/// spawns exactly such a grandchild) -- PDEATHSIG alone left one alive.
+pub(crate) fn kill_process_group_by_pid(pid: u32) {
+    #[cfg(target_os = "linux")]
+    {
+        kill_linux_process_tree(pid);
+    }
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+/// Registry of PIDs a live-but-unjoined background thread is currently
+/// supervising, so `gah loop`'s shutdown path (which owns none of those
+/// threads or their `Child` handles) can still explicitly kill them before
+/// the process exits -- see `kill_process_group_by_pid`'s doc comment for
+/// why this is necessary at all rather than relying on
+/// `arm_child_pdeathsig` alone.
+static SUPERVISED_CHILD_PIDS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn register_supervised_child(pid: u32) {
+    if let Ok(mut pids) = SUPERVISED_CHILD_PIDS.lock() {
+        pids.push(pid);
+    }
+}
+
+pub(crate) fn unregister_supervised_child(pid: u32) {
+    if let Ok(mut pids) = SUPERVISED_CHILD_PIDS.lock() {
+        pids.retain(|&p| p != pid);
+    }
+}
+
+/// Called from `gah loop`'s own shutdown path once it detects
+/// `shutdown_requested()`, before it actually returns/exits -- the last
+/// point at which any of this process's own code is guaranteed to still
+/// be running to do the kill.
+///
+/// Polls for a short bounded window rather than checking once: a probe
+/// thread can be mid-flight between `std::thread::spawn` and its own
+/// `register_supervised_child` call (it hasn't reached `Command::spawn()`
+/// yet) at the exact moment shutdown is detected. A single snapshot-and-kill
+/// would see nothing registered and let that child orphan the instant it's
+/// actually spawned a moment later, with the whole process exiting before
+/// any Rust code -- this function included -- runs again. Bounded short:
+/// this delays every shutdown by up to this long, not just the rare
+/// in-flight-probe case.
+pub(crate) fn kill_all_supervised_children() {
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let pids = SUPERVISED_CHILD_PIDS
+            .lock()
+            .map(|pids| pids.clone())
+            .unwrap_or_default();
+        for &pid in &pids {
+            kill_process_group_by_pid(pid);
+            unregister_supervised_child(pid);
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[cfg(target_os = "linux")]

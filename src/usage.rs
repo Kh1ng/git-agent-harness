@@ -700,24 +700,72 @@ pub fn codex_status_to_quota_observation(
     })
 }
 
+/// How long `codex status --json` gets before it's treated as hung and
+/// killed. Issue #761: this call is now reachable from an unattended
+/// background probe (`quota_store::refresh_stale_quota_observations`), not
+/// just the manual `gah quota refresh` CLI command a human can Ctrl-C --
+/// confirmed live, an isolated-HOME test subprocess made this hang
+/// indefinitely with zero prior supervision. A status check is not real
+/// work; this is generous, not tight.
+const CODEX_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// #166 (within #151): run `codex status --json` as a real subprocess and
 /// parse its stdout into a `GroupQuotaObservation`.
 ///
-/// Returns `Ok(None)` when `codex` is missing, exits non-zero, or emits no
-/// rate-limit data — callers treat that as "no account quota observation",
-/// never as a fabricated zero/percentage.
+/// Returns `Ok(None)` when `codex` is missing, exits non-zero, emits no
+/// rate-limit data, or is killed for running past `CODEX_STATUS_TIMEOUT` --
+/// callers treat all of these as "no account quota observation", never as
+/// a fabricated zero/percentage.
+///
+/// Process-supervised (`prepare_process_group` + `arm_child_pdeathsig`,
+/// same primitives every real backend invocation already uses via
+/// `runner::process::spawn_with_idle_watch`) rather than a bare blocking
+/// `Command::output()`: this now runs unattended from a background thread
+/// nothing joins, so if this process dies while the child is still
+/// running, the kernel -- not any of gah's own Rust code -- is what
+/// guarantees the child doesn't outlive it as an orphan.
 pub fn refresh_codex_quota(
     codex_cmd: &str,
     model: Option<&str>,
 ) -> std::io::Result<Option<GroupQuotaObservation>> {
-    let output = Command::new(codex_cmd)
-        .arg("status")
+    let mut cmd = Command::new(codex_cmd);
+    cmd.arg("status")
         .arg("--json")
-        .output()?;
-    if !output.status.success() {
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    crate::runner::process::prepare_process_group(&mut cmd);
+    crate::runner::process::arm_child_pdeathsig(&mut cmd);
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    // See kill_process_group_by_pid's doc comment: arm_child_pdeathsig
+    // above only covers this direct child, not any grandchild it spawns
+    // of its own, so gah loop's shutdown path also needs an explicit,
+    // PID-addressable way to tree-walk-and-kill this specific child --
+    // registered here, not just relied on implicitly.
+    crate::runner::process::register_supervised_child(pid);
+
+    let deadline = std::time::Instant::now() + CODEX_STATUS_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if crate::runner::process::shutdown_requested() || std::time::Instant::now() >= deadline {
+            crate::runner::process::kill_process_group(&mut child);
+            crate::runner::process::unregister_supervised_child(pid);
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    crate::runner::process::unregister_supervised_child(pid);
+    if !status.success() {
         return Ok(None);
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut stdout = String::new();
+    if let Some(mut handle) = child.stdout.take() {
+        use std::io::Read;
+        let _ = handle.read_to_string(&mut stdout);
+    }
     Ok(codex_status_to_quota_observation(&stdout, "codex", model))
 }
 
