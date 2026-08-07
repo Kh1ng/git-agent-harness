@@ -31,6 +31,18 @@ use time::OffsetDateTime;
 pub const CURRENT_VERSION: u32 = 2;
 const LEGACY_VERSION: u32 = 1;
 
+/// Issue #765: nothing re-verifies a `BackendError` record's `unavailable_until`
+/// once written -- a mis-parsed or genuinely-wrong ETA (observed live: 6 and
+/// 4+ day spans that turned out to be false) permanently starves a healthy
+/// backend until a human runs `gah availability clear`. Rather than adding
+/// active re-probing (a new outbound API call on a schedule -- exactly the
+/// "don't DDoS it" the ceiling is designed to avoid), this caps how long any
+/// single automated observation is trusted before eligibility naturally
+/// reopens and the *next real dispatch attempt* becomes the re-probe. Chosen
+/// to comfortably exceed ordinary rate-limit cooldowns (minutes) while being
+/// far short of the multi-day spans that were actually wrong.
+pub(crate) const UNAVAILABLE_UNTIL_CEILING_SECONDS: i64 = 2 * 60 * 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -70,6 +82,12 @@ pub enum Source {
     BackendError,
     Manual,
     Imported,
+    /// Issue #765: a periodic correction of a `BackendError` record whose
+    /// `unavailable_until` was implausibly far out (or absent) relative to
+    /// `UNAVAILABLE_UNTIL_CEILING_SECONDS`. Distinct from `BackendError` so
+    /// operators/dashboards can tell "the backend actually reported this"
+    /// from "GAH stopped trusting the original ETA and shortened it."
+    Reprobe,
 }
 
 impl Source {
@@ -78,6 +96,7 @@ impl Source {
             Self::BackendError => "backend_error",
             Self::Manual => "manual",
             Self::Imported => "imported",
+            Self::Reprobe => "reprobe",
         }
     }
 }
@@ -710,6 +729,68 @@ pub fn list_scopes(state_path: &Path, now: OffsetDateTime) -> Result<Vec<ScopeSt
         });
     }
     Ok(out)
+}
+
+/// Issue #765: called once per `gah loop` tick (see
+/// `controller::runtime::probe::run`). Corrects any currently-active,
+/// `BackendError`-sourced unavailable scope whose `unavailable_until` is
+/// present but further out than `UNAVAILABLE_UNTIL_CEILING_SECONDS` --
+/// exactly the live-observed failure mode (a parsed ETA days out that
+/// turned out to be wrong) -- by appending a `Reprobe` record with the same
+/// scope/reason but a capped expiry.
+///
+/// Deliberately does NOT touch a scope with no `unavailable_until` at all:
+/// dispatch/attempts.rs's write-time cap (added alongside this) means a
+/// *new* retryable failure never writes `None` anymore, so from here on
+/// `None` only ever means a genuinely non-retryable failure (bad
+/// credentials, insufficient balance) that correctly has no ETA -- auto-
+/// capping that would just waste a retry against credentials that are
+/// still bad. `AvailabilityRecord` doesn't persist `ParsedFailure::retryable`
+/// to disambiguate old `None` records written before this fix existed, so
+/// leaving them alone is the conservative choice rather than guessing.
+///
+/// Never touches `Manual`/`Imported` records -- an operator's explicit
+/// indefinite disable is honored indefinitely, that's correct behavior, not
+/// the bug this fixes. Read-only cheap path (`list_scopes`) with a write
+/// only for scopes that actually need correcting, so a quiet tick with
+/// nothing stale costs nothing beyond the one file read. Returns the number
+/// of records corrected.
+pub fn reprobe_stale_unavailable_records(state_path: &Path, now: OffsetDateTime) -> Result<usize> {
+    let ceiling = now + time::Duration::seconds(UNAVAILABLE_UNTIL_CEILING_SECONDS);
+    let mut corrected = 0;
+    for scope in list_scopes(state_path, now)? {
+        if scope.eligible || scope.source != Some(Source::BackendError) {
+            continue;
+        }
+        let needs_cap = match scope.unavailable_until.as_deref() {
+            None => false,
+            Some(until) => OffsetDateTime::parse(until, &Rfc3339)
+                .map(|until| until > ceiling)
+                .unwrap_or(false),
+        };
+        if !needs_cap {
+            continue;
+        }
+        let record = AvailabilityRecord {
+            backend: scope.backend,
+            backend_instance: scope.backend_instance,
+            model: scope.model,
+            quota_pool: scope.quota_pool,
+            status: Status::Unavailable,
+            reason: scope.reason.unwrap_or(Reason::Unknown),
+            observed_at: now_rfc3339(now),
+            unavailable_until: Some(now_rfc3339(ceiling)),
+            source: Source::Reprobe,
+            last_error_summary: Some(format!(
+                "issue #765: auto-corrected stale unavailable_until (was {}); original observation: {}",
+                scope.unavailable_until.as_deref().unwrap_or("none (never expires)"),
+                scope.last_error_summary.as_deref().unwrap_or("unknown")
+            )),
+        };
+        update_state(state_path, |state| state.records.push(record))?;
+        corrected += 1;
+    }
+    Ok(corrected)
 }
 
 /// Format a remaining duration until an RFC3339 timestamp as e.g. "2h 14m",

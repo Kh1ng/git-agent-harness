@@ -934,3 +934,94 @@ fn instance_clear_does_not_clear_a_sibling_instance() {
             .eligible
     );
 }
+
+// Issue #765: legacy/pre-fix data -- a BackendError record written with an
+// implausibly-long unavailable_until (or one that predates
+// dispatch/attempts.rs's write-time cap) never self-heals on its own; this
+// is the periodic correction pass that fixes it without a human running
+// `gah availability clear`.
+#[test]
+fn reprobe_corrects_a_backend_error_record_with_an_implausibly_long_eta() {
+    let tmp = TempDir::new().unwrap();
+    let p = path(&tmp);
+    let now = OffsetDateTime::now_utc();
+    record_unavailable(
+        &p,
+        "codex",
+        Some("gpt-5.3-codex-spark"),
+        Reason::QuotaExhausted,
+        Source::BackendError,
+        Some(now + time::Duration::days(6)),
+        Some("You've hit your usage limit".into()),
+        now,
+    )
+    .unwrap();
+
+    let corrected = super::reprobe_stale_unavailable_records(&p, now).unwrap();
+    assert_eq!(corrected, 1);
+
+    let decision = availability_for(&p, "codex", Some("gpt-5.3-codex-spark"), now).unwrap();
+    assert!(
+        !decision.eligible,
+        "correction shortens the wait, it doesn't claim to already know it's healthy"
+    );
+    let unavailable_until = decision
+        .unavailable_until
+        .as_deref()
+        .and_then(|v| OffsetDateTime::parse(v, &time::format_description::well_known::Rfc3339).ok())
+        .unwrap();
+    assert!(
+        unavailable_until
+            <= now
+                + time::Duration::seconds(super::UNAVAILABLE_UNTIL_CEILING_SECONDS)
+                + time::Duration::minutes(1),
+        "must be capped to the ceiling, got {unavailable_until}"
+    );
+
+    // Re-running immediately must not append a second correction on top of
+    // the first -- the corrected record is already within the ceiling.
+    let corrected_again = super::reprobe_stale_unavailable_records(&p, now).unwrap();
+    assert_eq!(corrected_again, 0);
+}
+
+#[test]
+fn reprobe_never_touches_a_manual_or_no_expiry_record() {
+    let tmp = TempDir::new().unwrap();
+    let p = path(&tmp);
+    let now = OffsetDateTime::now_utc();
+
+    // An operator's explicit indefinite disable.
+    record_unavailable(
+        &p,
+        "claude",
+        None,
+        Reason::ManualDisable,
+        Source::Manual,
+        None,
+        Some("disabled by operator".into()),
+        now,
+    )
+    .unwrap();
+    // A BackendError record with no computed ETA at all (e.g. a
+    // non-retryable auth failure) -- correctly indefinite, not a bug.
+    record_unavailable(
+        &p,
+        "vibe",
+        Some("mistral-medium-3.5"),
+        Reason::AuthenticationError,
+        Source::BackendError,
+        None,
+        Some("Invalid API key".into()),
+        now,
+    )
+    .unwrap();
+
+    let corrected = super::reprobe_stale_unavailable_records(&p, now).unwrap();
+    assert_eq!(corrected, 0);
+    assert!(!availability_for(&p, "claude", None, now).unwrap().eligible);
+    assert!(
+        !availability_for(&p, "vibe", Some("mistral-medium-3.5"), now)
+            .unwrap()
+            .eligible
+    );
+}
