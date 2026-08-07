@@ -75,6 +75,12 @@ async function main() {
   });
   markReadinessCheck('webSocket', true);
   
+  // Node liveness scheduler (issue #883): polls registered nodes on an
+  // interval instead of only reacting to dashboard/dispatch activity, so a
+  // node with nothing currently dispatching to it still gets flagged if it
+  // goes dark. No-op when no nodes are registered.
+  registryService.startLivenessScheduler();
+
   // Start HTTP server
   server.listen(PORT, HOST, () => {
     console.log(`Git Agent Harness server listening on ${HOST}:${PORT}`);
@@ -89,12 +95,14 @@ async function main() {
   // Handle graceful shutdown
   process.on('SIGINT', () => {
     console.log('Shutting down...');
+    registryService.stopLivenessScheduler();
     server.close();
     process.exit(0);
   });
-  
+
   process.on('SIGTERM', () => {
     console.log('Shutting down...');
+    registryService.stopLivenessScheduler();
     server.close();
     process.exit(0);
   });
