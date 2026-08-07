@@ -444,12 +444,57 @@ impl FakeBackend {
             c = counter_path.display(),
             r = self.record_dir.display(),
         );
-        script.push_str("if [ \"$1\" = \"api\" ]; then\n  case \"$4\" in\n    */pulls?*)\n");
+        // Issue #551: `*/pulls*` (not `*/pulls?*`) so this also matches a
+        // by-branch REST lookup with no query string appended to the
+        // endpoint (fields passed as separate `-f` args instead), not just
+        // the `pulls?state=...` query-string form.
+        script.push_str("if [ \"$1\" = \"api\" ]; then\n  case \"$4\" in\n    */pulls*)\n");
         script.push_str(&Self::render_case_body(&open_pulls));
         script.push_str("    ;;\n    */check-runs?*)\n");
         script.push_str(&Self::render_case_body(&check_runs));
         script.push_str("    ;;\n  esac\nfi\n");
         script.push_str(&Self::render_case_body(&default));
+
+        let path = self.bin_dir.join(&self.name);
+        fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).unwrap();
+        }
+    }
+
+    /// Install a GitLab CLI fixture that distinguishes the merge-requests
+    /// *list* endpoint (by branch, expects a JSON array) from the
+    /// single-MR-by-iid endpoint and its pipelines sub-resource. Mirrors
+    /// `install_github_api` -- needed once a repair preflight reads live MR
+    /// state by branch (issue #551) in addition to the existing by-iid path.
+    pub fn install_gitlab_merge_requests_api(
+        &self,
+        list: Scenario,
+        single: Scenario,
+        pipelines: Scenario,
+    ) {
+        let counter_path = self.record_dir.join("call-count");
+        let _ = fs::remove_file(&counter_path);
+        let mut script = format!(
+            "#!/bin/sh\nn=$( [ -f '{c}' ] && cat '{c}' || echo 0 )\nn=$((n+1))\necho \"$n\" > '{c}'\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{r}/argv-call-'\"$n\"'.txt'\n",
+            c = counter_path.display(),
+            r = self.record_dir.display(),
+        );
+        // $2 is the endpoint: ".../merge_requests" (list), ".../merge_requests/<iid>"
+        // (single), or ".../merge_requests/<iid>/pipelines" (pipelines) -- check
+        // the most specific suffix first since it also matches the broader ones.
+        script.push_str("case \"$2\" in\n  */pipelines)\n");
+        script.push_str(&Self::render_case_body(&pipelines));
+        script.push_str("    ;;\n  */merge_requests)\n");
+        script.push_str(&Self::render_case_body(&list));
+        script.push_str("    ;;\n  */merge_requests/*)\n");
+        script.push_str(&Self::render_case_body(&single));
+        script.push_str("    ;;\n  *)\n");
+        script.push_str(&Self::render_case_body(&single));
+        script.push_str("    ;;\nesac\n");
 
         let path = self.bin_dir.join(&self.name);
         fs::write(&path, script).unwrap();

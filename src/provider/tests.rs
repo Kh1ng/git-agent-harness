@@ -1262,6 +1262,74 @@ esac
     assert_eq!(fs::read_to_string(bin_dir.join("count")).unwrap(), "2");
 }
 
+// Issue #551 / #549: a merged PR must be observable by branch (not
+// indistinguishable from "no PR ever existed"), so a repair preflight can
+// fail closed on it instead of dispatching a repair worker against it.
+#[test]
+fn github_find_pr_number_by_branch_finds_a_merged_pr_not_just_open_ones() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        r#"#!/bin/sh
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":42}]\n' ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let number = super::github_find_pr_number_by_branch(&github_profile(), "gah/merged").unwrap();
+
+    assert_eq!(number, "42");
+}
+
+#[test]
+fn github_find_pr_number_by_branch_prefers_the_highest_number_when_branch_was_reused() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        r#"#!/bin/sh
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/repo/pulls") printf '[{"number":7},{"number":42}]\n' ;;
+  *) echo "unexpected gh invocation: $@" >&2; exit 1 ;;
+esac
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let number = super::github_find_pr_number_by_branch(&github_profile(), "gah/reused").unwrap();
+
+    assert_eq!(number, "42");
+}
+
+#[test]
+fn gitlab_review_target_by_branch_finds_a_merged_mr_not_just_open_ones() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "glab",
+        "#!/bin/sh\nendpoint=\"${2%%\\?*}\"\ncase \"$1 $endpoint\" in\n  \"api projects/42/merge_requests\") printf '[{\"iid\":235,\"web_url\":\"https://gitlab.test/group/repo/-/merge_requests/235\",\"source_branch\":\"gah/235\",\"target_branch\":\"main\",\"sha\":\"merged-sha\",\"state\":\"merged\",\"merged_at\":\"2026-01-01T00:00:00Z\"}]\\n' ;;\n  \"api projects/42/merge_requests/235/pipelines\") printf '[]' ;;\n  *) echo \"unexpected glab invocation: $@\" >&2; exit 1 ;;\nesac\n",
+    );
+    let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
+
+    let target = find_review_target_by_branch(&gitlab_profile(), "gah/235").unwrap();
+
+    assert_eq!(target.state.as_deref(), Some("merged"));
+    assert_eq!(target.merged_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+}
+
 #[test]
 fn github_comment_retry_detects_a_timed_out_post_that_was_already_accepted() {
     let _exec_guard = crate::test_support::ExecGuard::new();

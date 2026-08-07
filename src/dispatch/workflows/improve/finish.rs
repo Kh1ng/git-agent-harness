@@ -8,6 +8,7 @@ use crate::dispatch::publish::{
     enforce_generated_artifact_policy, ensure_issue_open_for_publish, publishing_allows_publish,
     MrRenderContext,
 };
+use crate::dispatch::repair_context;
 use crate::dispatch::workflows::already_satisfied_reconcile::AlreadySatisfiedRun;
 use crate::dispatch::workflows::improve::conflict_resolution::ConflictSession;
 use crate::dispatch::workflows::improve::publish_mr::publish_or_update_mr;
@@ -145,6 +146,22 @@ pub(super) fn finish_improve_workflow(
                 wt,
                 &profile.default_target_branch,
                 &format!("gah: WIP blocked {}", mode),
+            )?;
+            worktree::cleanup(wt, repo);
+            return Err(error);
+        }
+    }
+
+    if existing_branch {
+        if let Err(error) = repair_context::ensure_still_open_before_publish(profile, branch) {
+            ledger.set_failure(
+                crate::ledger::FailureClass::StaleSource,
+                crate::ledger::FailureStage::Push,
+            );
+            worktree::preserve_wip(
+                wt,
+                &profile.default_target_branch,
+                &format!("gah: WIP stale source {}", mode),
             )?;
             worktree::cleanup(wt, repo);
             return Err(error);

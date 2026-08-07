@@ -69,7 +69,15 @@ pub(super) fn load_context(
             Ok(Some(context))
         }
         Err(error) => {
-            ledger.set_failure(FailureClass::HarnessError, FailureStage::Preflight);
+            // Issue #551: a stale remote source (advanced, merged, or
+            // closed) is an expected terminal outcome, not a harness bug --
+            // classify it distinctly so the controller stops cleanly instead
+            // of treating this branch as broken.
+            if repair_context::stale_source_error(&error).is_some() {
+                ledger.set_failure(FailureClass::StaleSource, FailureStage::Preflight);
+            } else {
+                ledger.set_failure(FailureClass::HarnessError, FailureStage::Preflight);
+            }
             worktree::cleanup(request.worktree_path, request.repo);
             Err(error
                 .context("FixMr requires structured findings from the latest applicable review"))

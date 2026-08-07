@@ -196,6 +196,16 @@ pub(crate) fn improve(
         )?;
         (branch, wt)
     };
+    // Issue #537: the repair branch's remote tip at worktree creation, used
+    // by the retry-reset loop below to detect whether the remote source
+    // advanced concurrently instead of blindly resetting to it (or, worse,
+    // to `main`). `wt`'s HEAD is exactly `origin/<branch>` at this point --
+    // `worktree::create_existing` just checked it out.
+    let repair_base_sha: Option<String> = if manual_fix.existing_branch.is_some() {
+        Some(worktree::git(&["rev-parse", "HEAD"], &wt)?)
+    } else {
+        None
+    };
     ledger.branch = Some(branch.clone());
     apply_manual_fix_context_to_ledger(ledger, ticket_meta.as_ref(), &branch, &manual_fix);
     println!("Worktree: {}", wt.display());
@@ -1141,7 +1151,35 @@ pub(crate) fn improve(
                         println!("Preserved failed attempt on local branch {checkpoint}");
                         wip_checkpoints.push(checkpoint.clone());
                     }
-                    worktree::reset_to_target(&wt, &profile.default_target_branch)?;
+                    // Issue #537: a repair (`repair_base_sha` set) must
+                    // retry from its own branch, never the default target --
+                    // resetting to `main` here silently discards the PR
+                    // being repaired. Confirm the remote hasn't advanced
+                    // since the repair began before reusing it as the reset
+                    // base; a concurrent push must fail closed, not be
+                    // silently discarded by the reset.
+                    if let Some(ref base_sha) = repair_base_sha {
+                        let observed = worktree::fetch_remote_branch_sha(repo, &wt, &branch)?;
+                        if &observed != base_sha {
+                            ledger.set_failure(
+                                crate::ledger::FailureClass::StaleSource,
+                                crate::ledger::FailureStage::PostValidation,
+                            );
+                            worktree::cleanup(&wt, repo);
+                            return Err(repair_context::StaleSourceError {
+                                branch: branch.clone(),
+                                reason:
+                                    "remote branch advanced during repair retry (concurrent push)"
+                                        .to_string(),
+                                expected_source_sha: Some(base_sha.clone()),
+                                observed_source_sha: Some(observed),
+                            }
+                            .into());
+                        }
+                        worktree::reset_to_target(&wt, &branch)?;
+                    } else {
+                        worktree::reset_to_target(&wt, &profile.default_target_branch)?;
+                    }
                     println!("Retrying with failure context...");
                     ledger.attempts.push(crate::ledger::AttemptRecord {
                         attempt_number: attempt + 1,
