@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaObservationRecord {
@@ -59,7 +61,15 @@ pub struct MistralAdminObservationRecord {
 
 /// Global, not per-profile (like `availability.rs`): Codex/Claude/AGY
 /// subscription limits are shared across every repo GAH touches.
+/// `GAH_QUOTA_STORE_PATH` is an explicit override, matching the existing
+/// `GAH_AVAILABILITY_PATH`/`GAH_LEDGER_PATH` convention -- lets
+/// `refresh_stale_quota_observations`'s callers (routing, in particular)
+/// call this internally without every caller threading a path parameter
+/// down through several layers just for test isolation.
 pub fn store_path() -> PathBuf {
+    if let Ok(path) = std::env::var("GAH_QUOTA_STORE_PATH") {
+        return PathBuf::from(path);
+    }
     if let Some(dir) = std::env::var_os("XDG_STATE_HOME") {
         Path::new(&dir).join("gah").join("quota_observations.jsonl")
     } else {
@@ -351,6 +361,125 @@ pub fn refresh_codex_and_store_for_identity(
     Ok(Some(record))
 }
 
+/// Issue #761: nothing refreshed this store periodically -- only a human
+/// running `gah quota refresh` by hand did, so account-level quota data
+/// went stale for days even while dispatch itself was active. Called once
+/// per `gah loop` tick (see `controller::runtime::run_once`), throttled to
+/// `QUOTA_REFRESH_INTERVAL_SECONDS` per backend so this can't hammer either
+/// endpoint: codex's own `codex status --json` is a local CLI call, but
+/// vibe's is a real network call against the Mistral Admin API with its own
+/// rate limits. Best-effort: a refresh failure (backend not installed, no
+/// `MISTRAL_ADMIN_API_KEY`) must not fail the loop tick, so errors are
+/// swallowed here, not propagated.
+pub fn refresh_stale_quota_observations(profile: &crate::config::Profile, now: OffsetDateTime) {
+    let path = store_path();
+    let codex_cmd = profile
+        .codex_path
+        .clone()
+        .unwrap_or_else(|| "codex".to_string());
+    let codex_path = path.clone();
+    maybe_refresh_backend(&path, "codex", now, move || {
+        refresh_codex_and_store(&codex_cmd, None, &codex_path)
+    });
+    let vibe_path = path.clone();
+    maybe_refresh_backend(&path, "vibe", now, move || {
+        refresh_vibe_admin_and_store(None, &vibe_path)
+    });
+}
+
+/// How long a stale reading is trusted before another live check is worth
+/// the API/process cost. Conservative on purpose -- see the module-level
+/// doc comment on `refresh_stale_quota_observations`.
+const QUOTA_REFRESH_INTERVAL_SECONDS: i64 = 30 * 60;
+
+/// `refresh_codex_and_store`/`refresh_vibe_admin_and_store` shell out to a
+/// real CLI/HTTP endpoint with zero supervision of their own (unlike every
+/// dispatch-path backend invocation, which goes through
+/// `runner::process::spawn_with_idle_watch` for exactly this reason -- see
+/// #87/#170). That was an acceptable risk for the previous, sole caller (a
+/// human running `gah quota refresh` who can just Ctrl-C a hang); it is
+/// not acceptable on this function's *new* caller, the automatic,
+/// unattended `gah loop` tick -- confirmed live, an isolated-HOME test
+/// subprocess made `codex status --json` hang (this codebase's
+/// idle-watch precedent exists for exactly this failure class). A bounded
+/// `recv_timeout` on the calling thread was tried first and rejected: the
+/// controller tick still has to wait out the full timeout before giving
+/// up, which is just as damaging to tick latency as the hang itself.
+/// Instead this is genuinely fire-and-forget -- the refresh runs on a
+/// detached thread the tick never waits on, and `IN_FLIGHT` below is the
+/// only thing standing between a persistently-hanging backend and an
+/// unbounded pile-up of abandoned threads across ticks (at most one
+/// outstanding attempt per backend per process, however long it takes to
+/// finally return). Fixed here rather than by adding real idle-watch
+/// supervision to `usage.rs`'s refresh functions, since those are shared
+/// with the manual CLI command and changing their blocking behavior there
+/// is a separate, larger question this fix doesn't need to answer.
+static IN_FLIGHT: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+fn maybe_refresh_backend(
+    path: &Path,
+    backend: &str,
+    now: OffsetDateTime,
+    refresh: impl FnOnce() -> Result<Option<QuotaObservationRecord>> + Send + 'static,
+) {
+    let records = load(path).unwrap_or_default();
+    let last_checked = records
+        .iter()
+        .filter(|record| record.backend == backend)
+        .filter_map(|record| record.observed_at.as_deref())
+        .filter_map(|observed_at| OffsetDateTime::parse(observed_at, &Rfc3339).ok())
+        .max();
+    let due = match last_checked {
+        None => true,
+        Some(last) => now - last > time::Duration::seconds(QUOTA_REFRESH_INTERVAL_SECONDS),
+    };
+    if !due {
+        return;
+    }
+    {
+        let mut in_flight = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let set = in_flight.get_or_insert_with(std::collections::HashSet::new);
+        if !set.insert(backend.to_string()) {
+            // A previous tick's refresh for this exact backend hasn't
+            // returned yet -- don't pile on a second attempt on top of it.
+            return;
+        }
+    }
+    let path = path.to_path_buf();
+    let backend = backend.to_string();
+    std::thread::spawn(move || {
+        // `refresh_*_and_store` already appends a real record when it
+        // finds data (Ok(Some(_))); on Ok(None)/Err, append a data-free
+        // marker purely so the next tick's `last_checked` sees a fresh
+        // attempt and stops retrying every tick against a backend that
+        // isn't configured here at all.
+        if !matches!(refresh(), Ok(Some(_))) {
+            let marker = QuotaObservationRecord {
+                backend: backend.clone(),
+                backend_instance: None,
+                model: None,
+                quota_pool: None,
+                quota_window: None,
+                quota_used_percent: None,
+                quota_remaining_percent: None,
+                quota_reset_at: None,
+                observed_at: now.format(&Rfc3339).ok(),
+                usage_source: None,
+                mistral_admin: None,
+            };
+            let _ = append(&path, &marker);
+        }
+        if let Ok(mut in_flight) = IN_FLIGHT.lock() {
+            if let Some(set) = in_flight.as_mut() {
+                set.remove(&backend);
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +488,168 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("quota_observations.jsonl");
         (dir, path)
+    }
+
+    // Issue #761: maybe_refresh_backend is the throttle gate for the new
+    // periodic quota refresh -- these test it directly rather than through
+    // refresh_stale_quota_observations, which needs a real codex/vibe
+    // subprocess to actually observe anything. The refresh itself now runs
+    // on a detached thread (see IN_FLIGHT's doc comment for why), so these
+    // wait on the one externally-observable effect -- a marker record
+    // landing in the store -- instead of asserting immediately. Each test
+    // uses its own synthetic backend name so parallel test threads can't
+    // collide on the process-wide IN_FLIGHT set.
+    fn wait_for_backend_record(path: &Path, backend: &str) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if load(path)
+                .unwrap_or_default()
+                .iter()
+                .any(|record| record.backend == backend)
+            {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn maybe_refresh_backend_calls_the_refresher_when_nothing_is_recorded_yet() {
+        let (_dir, path) = tmp_store();
+        let now = OffsetDateTime::now_utc();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_in_thread = calls.clone();
+
+        maybe_refresh_backend(&path, "test-calls-when-empty", now, move || {
+            calls_in_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        });
+
+        assert!(wait_for_backend_record(&path, "test-calls-when-empty"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn maybe_refresh_backend_skips_a_backend_checked_within_the_interval() {
+        let (_dir, path) = tmp_store();
+        let now = OffsetDateTime::now_utc();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = calls.clone();
+        maybe_refresh_backend(&path, "test-skip-within-interval", now, move || {
+            first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        });
+        assert!(wait_for_backend_record(&path, "test-skip-within-interval"));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "first call must actually refresh"
+        );
+
+        // Ten minutes later, well inside QUOTA_REFRESH_INTERVAL_SECONDS.
+        let second = calls.clone();
+        maybe_refresh_backend(
+            &path,
+            "test-skip-within-interval",
+            now + time::Duration::minutes(10),
+            move || {
+                second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(None)
+            },
+        );
+        // Nothing async to wait for here -- a throttled call never spawns a
+        // thread, so the skip is synchronous. A brief settle is still fair
+        // in case it wrongly did spawn one.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "must not re-refresh before the interval elapses"
+        );
+    }
+
+    #[test]
+    fn maybe_refresh_backend_refreshes_again_once_the_interval_elapses() {
+        let (_dir, path) = tmp_store();
+        let now = OffsetDateTime::now_utc();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = calls.clone();
+        maybe_refresh_backend(&path, "test-refresh-again", now, move || {
+            first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        });
+        assert!(wait_for_backend_record(&path, "test-refresh-again"));
+
+        let second = calls.clone();
+        maybe_refresh_backend(
+            &path,
+            "test-refresh-again",
+            now + time::Duration::seconds(QUOTA_REFRESH_INTERVAL_SECONDS + 60),
+            move || {
+                second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(None)
+            },
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while calls.load(std::sync::atomic::Ordering::SeqCst) < 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn maybe_refresh_backend_throttles_on_a_failed_attempt_too() {
+        // A backend that's simply not installed here (or a network hiccup)
+        // must not be retried every single loop tick forever -- that's a
+        // real "don't DDoS it" failure mode, not just the happy path.
+        let (_dir, path) = tmp_store();
+        let now = OffsetDateTime::now_utc();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first = calls.clone();
+        maybe_refresh_backend(&path, "test-throttle-on-failure", now, move || {
+            first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("vibe not installed")
+        });
+        assert!(wait_for_backend_record(&path, "test-throttle-on-failure"));
+
+        let second = calls.clone();
+        maybe_refresh_backend(
+            &path,
+            "test-throttle-on-failure",
+            now + time::Duration::minutes(5),
+            move || {
+                second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                anyhow::bail!("vibe not installed")
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a failed attempt must still throttle retries"
+        );
+    }
+
+    #[test]
+    fn maybe_refresh_backend_does_not_throttle_a_different_backend() {
+        let (_dir, path) = tmp_store();
+        let now = OffsetDateTime::now_utc();
+
+        maybe_refresh_backend(&path, "test-independent-codex", now, || Ok(None));
+        maybe_refresh_backend(&path, "test-independent-vibe", now, || Ok(None));
+
+        assert!(wait_for_backend_record(&path, "test-independent-codex"));
+        assert!(wait_for_backend_record(&path, "test-independent-vibe"));
     }
 
     #[test]

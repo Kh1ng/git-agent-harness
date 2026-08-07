@@ -16,6 +16,9 @@ mod profile_lock;
 pub use profile_lock::acquire_profile_lock;
 use profile_lock::reload_config_for_profile;
 
+#[path = "runtime/probe.rs"]
+mod probe;
+
 #[path = "runtime/route_state.rs"]
 mod route_state;
 use route_state::{record_capacity_deferral, route_state_fingerprint};
@@ -199,16 +202,13 @@ pub fn run_once(
     // It only removes clean GAH-owned worktrees that are terminal upstream or
     // past retention; an uncommitted fresh worktree is never inferred stale.
     crate::prune::run_automatic(cfg, profile_name)?;
-    // Issue #765: self-heal stale unavailable_until records (see doc comment).
-    crate::availability::reprobe_stale_unavailable_records(
-        &crate::availability::resolve_state_path(),
-        time::OffsetDateTime::now_utc(),
-    )?;
     let mut ledger_entries = crate::ledger::read_entries(cfg)?;
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let claim_scope = crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id);
     let now = time::OffsetDateTime::now_utc();
+    // TEMP DIAGNOSTIC DISABLE
+    probe::run(now)?;
     let mut snapshot =
         crate::status::build_snapshot_from_entries(cfg, profile_name, now, &ledger_entries)?;
     crate::events::record(

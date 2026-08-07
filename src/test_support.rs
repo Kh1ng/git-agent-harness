@@ -21,6 +21,7 @@ use std::sync::{Mutex, MutexGuard};
 static PATH_LOCK: Mutex<()> = Mutex::new(());
 static EXEC_LOCK: Mutex<()> = Mutex::new(());
 static AVAILABILITY_LOCK: Mutex<()> = Mutex::new(());
+static QUOTA_STORE_LOCK: Mutex<()> = Mutex::new(());
 static CLAIM_STATE_LOCK: Mutex<()> = Mutex::new(());
 static MISTRAL_ADMIN_KEY_LOCK: Mutex<()> = Mutex::new(());
 
@@ -122,6 +123,34 @@ impl Drop for AvailabilityEnvGuard {
         match &self.original {
             Some(path) => std::env::set_var("GAH_AVAILABILITY_PATH", path),
             None => std::env::remove_var("GAH_AVAILABILITY_PATH"),
+        }
+    }
+}
+
+pub struct QuotaStoreEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    original: Option<OsString>,
+}
+
+impl QuotaStoreEnvGuard {
+    pub fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
+        let lock = QUOTA_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let original = std::env::var_os("GAH_QUOTA_STORE_PATH");
+        std::env::set_var("GAH_QUOTA_STORE_PATH", path);
+        Self {
+            _lock: lock,
+            original,
+        }
+    }
+}
+
+impl Drop for QuotaStoreEnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(path) => std::env::set_var("GAH_QUOTA_STORE_PATH", path),
+            None => std::env::remove_var("GAH_QUOTA_STORE_PATH"),
         }
     }
 }

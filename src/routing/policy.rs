@@ -507,19 +507,74 @@ fn route_candidates(
     routing: &RoutingPolicy,
     raw: &[crate::config::CandidateConfig],
 ) -> Vec<RouteCandidate> {
+    let now = time::OffsetDateTime::now_utc();
+    // Issue #761: an operator opting a candidate into quota-aware pacing
+    // (included_in_quota: true) previously had no way to get live
+    // quota_usage_percent/quota_days_remaining short of hand-typing static
+    // numbers into config.toml that immediately go stale -- quota_pace()
+    // silently no-ops (PaceBand::Normal) on missing data, so this candidate
+    // never actually got paced. Loaded lazily: only candidates that are
+    // opted in AND missing an explicit config value ever touch the store.
+    let mut quota_observations: Option<Vec<crate::quota_store::QuotaObservationRecord>> = None;
     raw.iter()
         .enumerate()
-        .map(|(idx, c)| RouteCandidate {
-            identity: routing.execution_identity_for_candidate(c),
-            priority: c.priority,
-            included_in_quota: c.included_in_quota,
-            marginal_cost_usd: c.marginal_cost_usd,
-            quota_usage_percent: c.quota_usage_percent,
-            quota_days_remaining: c.quota_days_remaining,
-            requires_approval: c.requires_approval,
-            original_order: idx,
+        .map(|(idx, c)| {
+            let identity = routing.execution_identity_for_candidate(c);
+            let (live_usage_percent, live_days_remaining) = if c.included_in_quota
+                && (c.quota_usage_percent.is_none() || c.quota_days_remaining.is_none())
+            {
+                let observations = quota_observations
+                    .get_or_insert_with(crate::quota_store::load_account_observations);
+                live_quota_pacing_inputs(observations, &identity, now)
+            } else {
+                (None, None)
+            };
+            RouteCandidate {
+                identity,
+                priority: c.priority,
+                included_in_quota: c.included_in_quota,
+                marginal_cost_usd: c.marginal_cost_usd,
+                // An explicit config value is an operator override and
+                // always wins; live data only fills a genuine gap.
+                quota_usage_percent: c.quota_usage_percent.or(live_usage_percent),
+                quota_days_remaining: c.quota_days_remaining.or(live_days_remaining),
+                requires_approval: c.requires_approval,
+                original_order: idx,
+            }
         })
         .collect()
+}
+
+/// Derives quota_pace()'s two inputs from the latest quota_store observation
+/// for this exact identity. `quota_used_percent` is preferred; falls back to
+/// deriving it from `quota_remaining_percent` when only that was recorded
+/// (vibe's Mistral Admin spend-limit reading uses remaining, not used).
+/// `quota_days_remaining` is quota_pace()'s "days until the quota window
+/// resets", derived from `quota_reset_at` relative to `now`; negative (an
+/// already-past reset that just hasn't been re-observed yet) clamps to 0
+/// rather than feeding quota_pace() a value it would reject as invalid.
+fn live_quota_pacing_inputs(
+    observations: &[crate::quota_store::QuotaObservationRecord],
+    identity: &ExecutionIdentity,
+    now: time::OffsetDateTime,
+) -> (Option<f64>, Option<f64>) {
+    let Some(record) = crate::quota_store::latest_for_identity(observations, identity) else {
+        return (None, None);
+    };
+    let usage_percent = record.quota_used_percent.or_else(|| {
+        record
+            .quota_remaining_percent
+            .map(|remaining| (100.0 - remaining).clamp(0.0, 100.0))
+    });
+    let days_remaining = record
+        .quota_reset_at
+        .as_deref()
+        .and_then(|reset_at| {
+            time::OffsetDateTime::parse(reset_at, &time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .map(|reset_at| ((reset_at - now).as_seconds_f64() / 86_400.0).max(0.0));
+    (usage_percent, days_remaining)
 }
 
 /// Recover the billing/quota metadata for an explicitly selected backend/model.
