@@ -131,10 +131,19 @@ impl std::error::Error for ActiveClaimError {}
 /// already spoken for -- by a real open PR/MR (`DuplicateWorkError`) or by
 /// another in-flight worker's claim (`ActiveClaimError`). `Ok(None)` means
 /// no work_id could be resolved (nothing to claim, nothing to block).
+///
+/// `central_claims_active`: issue #882 -- when a central claims API is
+/// configured (`Defaults::registry_central_url`), it becomes the sole
+/// cross-node exclusivity mechanism, replacing the local claim-mode ledger
+/// entry check below (which stays exactly as-is for single-node/unconfigured
+/// operation). The real-open-PR/MR duplicate check further down is a
+/// different concern (a genuinely completed piece of work, not a race) and
+/// always runs regardless.
 pub(super) fn check_duplicate_work(
     cfg: &GahConfig,
     profile: &Profile,
     args: &DispatchArgs,
+    central_claims_active: bool,
 ) -> Result<Option<String>> {
     let target = if args.target.is_empty() {
         if matches!(
@@ -207,8 +216,9 @@ pub(super) fn check_duplicate_work(
 
         // Parallel workers: another concurrent dispatch already claimed
         // this work_id and hasn't finished (or been abandoned long enough
-        // to ignore) yet.
-        if entry.mode == "claim" && !is_claim_stale(&entry) {
+        // to ignore) yet. Skipped when the central claims API is the
+        // authoritative gate instead (see doc comment above).
+        if !central_claims_active && entry.mode == "claim" && !is_claim_stale(&entry) {
             return Err(anyhow::Error::new(ActiveClaimError {
                 work_id: work_id.clone(),
             }));
@@ -261,6 +271,49 @@ pub(super) fn check_duplicate_work(
     }
 
     Ok(Some(work_id))
+}
+
+/// Resolves this dispatch's exclusivity claim -- local ledger entry, or a
+/// central claims API lease when `Defaults::registry_central_url` is
+/// configured (fail closed: an unreachable central node, or the work_id
+/// already held by another node, aborts via `?` before any backend work
+/// starts). Returns the guard to keep alive for the dispatch's duration
+/// (`None` when using the local mechanism, or nothing to claim) -- moved
+/// out of `dispatch::run` to keep that function under the dispatch
+/// facade's line-count cap (issue #882).
+pub(super) fn acquire_claim(
+    cfg: &GahConfig,
+    profile: &Profile,
+    args: &DispatchArgs,
+) -> Result<Option<crate::central_claims::ClaimGuard>> {
+    let central_url = cfg.defaults.registry_central_url.clone();
+    let Some(work_id) = check_duplicate_work(cfg, profile, args, central_url.is_some())? else {
+        return Ok(None);
+    };
+
+    if let Some(central_url) = &central_url {
+        let node_id = crate::central_claims::resolve_node_id()
+            .context("resolving this node's identity for the central claims API")?;
+        let token = std::env::var("COORDINATOR_TOKEN").ok();
+        let guard = crate::central_claims::acquire(
+            central_url,
+            &node_id,
+            &args.profile,
+            &work_id,
+            token.as_deref(),
+        )?;
+        return Ok(Some(guard));
+    }
+
+    // Parallel workers: claim this work_id immediately, before any backend
+    // work runs, so a concurrent `gah loop`/`gah dispatch` process sees it
+    // right away rather than only after this attempt finishes (minutes to
+    // hours later).
+    let claim = LedgerEntry::new_claim(&args.profile, profile, &work_id);
+    if let Err(e) = ledger::append(cfg, &claim) {
+        eprintln!("warning: failed to append claim ledger entry: {e:#}");
+    }
+    Ok(None)
 }
 
 type TicketHistoryLookup = (

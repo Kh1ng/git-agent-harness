@@ -17,6 +17,9 @@ export interface RegisterNodeOptions {
   transportMode: RegisteredNode['transport_mode'];
   secretRef: string;
   labels?: string[];
+  /** Profiles this node will dispatch (issue #882): the central claims API
+   * refuses to grant a lease for a profile the node never declared here. */
+  profiles?: string[];
   token?: string;
 }
 
@@ -51,7 +54,8 @@ export async function registerNode(opts: RegisterNodeOptions): Promise<RegisterN
     schema_digest: identity.schema_digest,
     transport_mode: opts.transportMode,
     secret_ref: opts.secretRef,
-    labels: opts.labels
+    labels: opts.labels,
+    profiles: opts.profiles
   };
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };

@@ -889,7 +889,7 @@ fn test_check_duplicate_work_cases() {
     };
 
     // No ledger exists yet.
-    let res = super::check_duplicate_work(&cfg, &prof, &args);
+    let res = super::check_duplicate_work(&cfg, &prof, &args, false);
     assert!(res.is_ok());
 
     // 4. Case B: Active open PR exists -> Should block
@@ -925,7 +925,7 @@ fn test_check_duplicate_work_cases() {
     let ledger_line = serde_json::to_string(&entry).unwrap();
     fs::write(&ledger_path, format!("{}\n", ledger_line)).unwrap();
 
-    let res = super::check_duplicate_work(&cfg, &prof, &args);
+    let res = super::check_duplicate_work(&cfg, &prof, &args, false);
     assert!(res.is_err());
     let err = res.unwrap_err();
     let err_msg = err.to_string();
@@ -940,13 +940,13 @@ fn test_check_duplicate_work_cases() {
     // 5. Case C: PR is merged -> Should pass
     setup_fake_gh(&bin_dir, "[]");
 
-    let res = super::check_duplicate_work(&cfg, &prof, &args);
+    let res = super::check_duplicate_work(&cfg, &prof, &args, false);
     assert!(res.is_ok());
 
     // 6. Case D: PR is closed unmerged -> Should pass
     setup_fake_gh(&bin_dir, "[]");
 
-    let res = super::check_duplicate_work(&cfg, &prof, &args);
+    let res = super::check_duplicate_work(&cfg, &prof, &args, false);
     assert!(res.is_ok());
 
     // 7. Case E: Ledger entry is stale (> 14 days) -> Should pass
@@ -957,7 +957,7 @@ fn test_check_duplicate_work_cases() {
     let ledger_line_stale = serde_json::to_string(&entry).unwrap();
     fs::write(&ledger_path, format!("{}\n", ledger_line_stale)).unwrap();
 
-    let res = super::check_duplicate_work(&cfg, &prof, &args);
+    let res = super::check_duplicate_work(&cfg, &prof, &args, false);
     assert!(res.is_ok());
 
     // 8. Case F: Active branch may own work -> Warn
@@ -979,7 +979,7 @@ fn test_check_duplicate_work_cases() {
     let ledger_line_active_branch = serde_json::to_string(&entry).unwrap();
     fs::write(&ledger_path, format!("{}\n", ledger_line_active_branch)).unwrap();
 
-    let res = super::check_duplicate_work(&cfg, &prof_with_repo, &args);
+    let res = super::check_duplicate_work(&cfg, &prof_with_repo, &args, false);
     assert!(res.is_ok());
 }
 
@@ -1055,7 +1055,7 @@ fn check_duplicate_work_blocks_on_active_claim() {
     };
 
     // Fresh claim -> blocked.
-    let res = super::check_duplicate_work(&cfg, &prof, &args);
+    let res = super::check_duplicate_work(&cfg, &prof, &args, false);
     assert!(res.is_err());
     let err_msg = res.unwrap_err().to_string();
     assert!(err_msg.contains("claimed by another in-flight dispatch"));
@@ -1070,8 +1070,96 @@ fn check_duplicate_work_blocks_on_active_claim() {
         format!("{}\n", serde_json::to_string(&stale_claim).unwrap()),
     )
     .unwrap();
-    let res = super::check_duplicate_work(&cfg, &prof, &args);
+    let res = super::check_duplicate_work(&cfg, &prof, &args, false);
     assert!(res.is_ok());
+}
+
+/// Issue #882: when a central claims API is configured, it becomes the
+/// sole cross-node exclusivity gate -- an existing local claim-mode ledger
+/// entry (which would block under central_claims_active=false, per the
+/// sibling test above) must NOT block here. `check_duplicate_work` itself
+/// doesn't know about the central claims API at all; this proves the
+/// bypass flag actually disables the local blocking branch.
+#[test]
+fn check_duplicate_work_does_not_block_on_active_claim_when_central_claims_are_active() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    setup_fake_gh(&bin_dir, "[]");
+    let _guard = PathGuard::set(&bin_dir);
+
+    let ticket_dir = tmp.path().join("docs/tickets");
+    fs::create_dir_all(&ticket_dir).unwrap();
+    let ticket_path = ticket_dir.join("TICKET-501-test.md");
+    fs::write(
+        &ticket_path,
+        "# TICKET-501: Test\n\nGoal: test central claims bypass\n",
+    )
+    .unwrap();
+
+    let cfg = crate::config::GahConfig {
+        context: Default::default(),
+        defaults: crate::config::Defaults {
+            current_manager: None,
+            artifact_root: tmp.path().to_string_lossy().into_owned(),
+            worktree_base: tmp.path().to_string_lossy().into_owned(),
+            llm_base_url: String::new(),
+            llm_model_local: String::new(),
+            llm_model_cloud: String::new(),
+            routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
+        },
+        profiles: std::collections::HashMap::new(),
+    };
+    let mut prof = profile(tmp.path());
+    prof.provider = "github".to_string();
+    prof.repo = "owner/repo".to_string();
+
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let claim = LedgerEntry::new_claim("test", &prof, "TICKET-501");
+    fs::write(
+        &ledger_path,
+        format!("{}\n", serde_json::to_string(&claim).unwrap()),
+    )
+    .unwrap();
+
+    let args = super::DispatchArgs {
+        profile: "test".to_string(),
+        mode: "improve".to_string(),
+        backend: "codex".to_string(),
+        target: ticket_path.display().to_string(),
+        branch: None,
+        mr: None,
+        current_branch: false,
+        dry_run: false,
+        oh_profile: None,
+        model: None,
+        retries: 0,
+        allow_draft_fail: false,
+        prod: false,
+        issue_intake_override: false,
+        allow_unknown_red_baseline: false,
+        escalate: false,
+        existing_branch: None,
+        expected_review_generation: None,
+        skip_validation_gate: false,
+        dispatch_reason: None,
+        work_id: None,
+        run_id: None,
+        route_admission: None,
+    };
+
+    // Same fresh, non-stale claim that blocks under central_claims_active
+    // = false (see check_duplicate_work_blocks_on_active_claim) -- must
+    // NOT block here.
+    let res = super::check_duplicate_work(&cfg, &prof, &args, true);
+    assert!(
+        res.is_ok(),
+        "central claims active must bypass the local claim-mode block"
+    );
+    assert_eq!(res.unwrap(), Some("TICKET-501".to_string()));
 }
 
 #[test]

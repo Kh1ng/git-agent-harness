@@ -9,6 +9,10 @@ export interface RegisteredNode {
   labels?: string[];
   transport_mode: 'loopback' | 'authenticated_remote' | 'trusted_lan';
   secret_ref: string; // reference like "env:NODE_TOKEN" or "file:/path/to/token.txt"
+  /** Profiles this node is declared to dispatch (issue #882: the central
+   * claims API checks this before granting a lease -- a node can't claim
+   * work under a profile it never declared). Unset/empty means none. */
+  profiles?: string[];
   last_seen_at?: string | null;
   last_observed_state?: NodeObservationState | null;
   last_observed_at?: string | null;
