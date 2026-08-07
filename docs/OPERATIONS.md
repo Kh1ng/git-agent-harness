@@ -234,6 +234,42 @@ If the loop needs to be paused for a human (e.g. while triaging), stopping the
 unit is the blunt instrument; `gah hold set` (section 3) is the surgical one
 that pauses auto-merge for a single work item without stopping all work.
 
+### Network exposure (issue #879)
+
+`gah network-expose` is the one configuration surface for exposing a
+gah-managed service beyond loopback, replacing hand-run, per-service `ufw`
+sessions with no shared record of intent. Config lives under `[defaults]`:
+
+```toml
+[defaults]
+# "loopback" (safe default -- nothing exposed) | "lan" | "lan_tailscale"
+network_exposure = "lan_tailscale"
+lan_cidrs = ["192.168.1.0/24", "192.168.5.0/24"]
+# tailscale_cidr defaults to "100.64.0.0/10" (every tailnet's fixed CGNAT
+# range) if unset -- only takes effect when network_exposure = "lan_tailscale".
+```
+
+Apply it per port:
+
+```bash
+gah network-expose --port 8420 --label "memory gateway"
+# --level overrides the configured default for one call (the advanced/
+# drill-down case -- a specific port needs a narrower or wider scope):
+gah network-expose --port 9119 --label "debug endpoint" --level loopback
+```
+
+This only applies firewall rules (idempotently -- safe to re-run, never
+removes an existing rule; narrowing exposure is a deliberate separate
+action) and prints a recommended bind host (`0.0.0.0` for `lan`/
+`lan_tailscale`, `127.0.0.1` for `loopback`). It does not rewrite a
+service's own config file -- apply the recommended bind host in whatever
+config that service actually reads (an `Environment=HOST=...` line in a
+systemd unit, a gateway's own YAML, etc.).
+
+Requires passwordless `sudo` for `ufw` (`sudo -n ufw status` must not
+prompt) for unattended use; run interactively once if it isn't configured
+yet -- the command inherits stdio, so a password prompt still works.
+
 ---
 
 ## 2. Required credentials & scopes

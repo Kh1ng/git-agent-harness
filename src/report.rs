@@ -884,6 +884,8 @@ mod tests {
                 llm_model_local: String::new(),
                 llm_model_cloud: String::new(),
                 routing: crate::config::RoutingPolicy::default(),
+
+                ..Default::default()
             },
             profiles: std::collections::HashMap::new(),
         };

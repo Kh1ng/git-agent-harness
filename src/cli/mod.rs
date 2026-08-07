@@ -101,6 +101,18 @@ pub fn run() -> Result<()> {
             dry_run,
         })?,
 
+        Commands::NetworkExpose {
+            port,
+            label,
+            level,
+            config_path,
+        } => commands::network::run(commands::network::Args {
+            port,
+            label,
+            level,
+            config_path,
+        })?,
+
         Commands::WatchdogCheck {
             profile,
             config_path,

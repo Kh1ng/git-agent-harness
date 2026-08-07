@@ -77,6 +77,8 @@ pub(super) fn ticket_cfg(root: &Path) -> GahConfig {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: HashMap::new(),
     }

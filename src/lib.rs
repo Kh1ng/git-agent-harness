@@ -23,6 +23,7 @@ pub mod job_kind;
 pub mod ledger;
 pub mod manager;
 pub mod models;
+pub mod network_exposure;
 pub mod notifications;
 pub mod policy;
 pub mod price_guard;
