@@ -57,7 +57,7 @@ default_target_branch = "main"
     cfg.profiles.insert("test".to_string(), profile);
 
     crate::ledger::reset_read_entries_call_count(&cfg);
-    run_once(&cfg, "test", false, 1, false).unwrap();
+    run_once(&cfg, "test", false, 1, false, false).unwrap();
 
     assert_eq!(crate::ledger::read_entries_call_count(&cfg), 1);
 }

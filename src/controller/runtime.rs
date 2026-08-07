@@ -16,6 +16,9 @@ mod profile_lock;
 pub use profile_lock::acquire_profile_lock;
 use profile_lock::reload_config_for_profile;
 
+#[path = "runtime/probe.rs"]
+mod probe;
+
 #[path = "runtime/route_state.rs"]
 mod route_state;
 use route_state::{record_capacity_deferral, route_state_fingerprint};
@@ -88,18 +91,14 @@ pub fn run_loop(
     super::ownership::arm_parent_death_signal()?;
     let _lock = acquire_profile_lock(profile_name, config_path)?;
 
-    // Dashboard Settings can change max_parallel_workers, manager_wake_autonomy
-    // and current_manager at runtime. Reload from disk on every iteration so those
-    // changes take effect on the next loop iteration without restarting the
-    // daemon. We keep the last successfully-loaded config as a fallback so a
-    // transient read failure (e.g. the config file is mid-write) can't kill
-    // the loop.
+    // Dashboard Settings can change config at runtime; reload every iteration
+    // so changes apply without a restart. Falls back to the last-good config
+    // on a transient read failure (e.g. mid-write) rather than killing the loop.
     let mut last_cfg: Option<crate::config::GahConfig> = Some(initial_cfg.clone());
 
     loop {
         if crate::runner::shutdown_requested() {
-            eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
-            return Ok(());
+            return shutdown_gracefully();
         }
 
         let cfg: &crate::config::GahConfig = match reload_config_for_profile(
@@ -117,12 +116,8 @@ pub fn run_loop(
                 );
                 match last_cfg.as_ref() {
                     Some(c) => c,
-                    None => {
-                        // We never loaded a config successfully; there's no
-                        // safe baseline to continue from, so surface the error
-                        // instead of dispatching against a phantom config.
-                        return Err(error);
-                    }
+                    // No prior successful load to fall back to; surface the error.
+                    None => return Err(error),
                 }
             }
         };
@@ -135,20 +130,18 @@ pub fn run_loop(
             parallel_arg
         };
 
-        // Transient provider/controller failures must not kill the daemon.
-        // A validation-gate failure is different: it proves the safety check
-        // itself is unhealthy, so pause immediately and require an explicit
-        // operator restart after repair. This avoids a retry/restart storm
-        // while preserving fail-closed dispatch behavior.
-        match run_once(cfg, profile_name, json, parallel, skip_validation_gate) {
+        // Transient failures must not kill the daemon; a validation-gate
+        // failure means the safety check itself is unhealthy, so that one
+        // pauses immediately for an explicit operator restart instead.
+        #[rustfmt::skip]
+        let iteration = run_once(cfg, profile_name, json, parallel, skip_validation_gate, true);
+        match iteration {
             Ok(()) if !wait_for_loop_interval(Duration::from_secs(30)) => {
-                eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
-                return Ok(());
+                return shutdown_gracefully();
             }
             Ok(()) => {}
             Err(_) if crate::runner::shutdown_requested() => {
-                eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
-                return Ok(());
+                return shutdown_gracefully();
             }
             Err(error) if is_validation_gate_failure(&error) => {
                 eprintln!(
@@ -158,15 +151,22 @@ pub fn run_loop(
             }
             Err(error) => {
                 eprintln!("gah loop: iteration failed; retrying after backoff: {error:#}");
-                // Keep shutdown responsive even while backing off: a stopped
-                // service must never leave a detached controller running.
+                // Stay shutdown-responsive during backoff too.
                 if !wait_for_loop_interval(Duration::from_secs(300)) {
-                    eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
-                    return Ok(());
+                    return shutdown_gracefully();
                 }
             }
         }
     }
+}
+
+/// Shared by every shutdown-detection branch in `run_loop`: log, kill any
+/// still-running background probe children (see `runner::process::
+/// kill_all_supervised_children`'s doc comment), then exit clean.
+fn shutdown_gracefully() -> Result<()> {
+    eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
+    crate::runner::process::kill_all_supervised_children();
+    Ok(())
 }
 
 fn wait_for_loop_interval(delay: Duration) -> bool {
@@ -194,21 +194,21 @@ pub fn run_once(
     json: bool,
     parallel: usize,
     skip_validation_gate: bool,
+    run_periodic_probes: bool,
 ) -> Result<()> {
     // Housekeeping is part of controller lifecycle, not an operator chore.
     // It only removes clean GAH-owned worktrees that are terminal upstream or
     // past retention; an uncommitted fresh worktree is never inferred stale.
     crate::prune::run_automatic(cfg, profile_name)?;
-    // Issue #765: self-heal stale unavailable_until records (see doc comment).
-    crate::availability::reprobe_stale_unavailable_records(
-        &crate::availability::resolve_state_path(),
-        time::OffsetDateTime::now_utc(),
-    )?;
     let mut ledger_entries = crate::ledger::read_entries(cfg)?;
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let claim_scope = crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id);
     let now = time::OffsetDateTime::now_utc();
+    // Issue #761: recurring daemon only, not --once (see probe.rs).
+    if run_periodic_probes {
+        probe::run(now)?;
+    }
     let mut snapshot =
         crate::status::build_snapshot_from_entries(cfg, profile_name, now, &ledger_entries)?;
     crate::events::record(

@@ -12,6 +12,7 @@ use super::super::{
 use super::is_genuine_agent_failure;
 use crate::availability::{Reason, Source};
 use tempfile::TempDir;
+use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 #[test]
@@ -1466,3 +1467,6 @@ fn live_agy_gemini_pool_block_routes_to_same_accounts_external_pool() {
     );
     assert!(decision.fallback_used);
 }
+
+#[path = "quota_wiring_tests.rs"]
+mod quota_wiring_tests;
