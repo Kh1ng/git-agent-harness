@@ -1,0 +1,50 @@
+#!/usr/bin/env node
+// Fake `gah` binary for apps/server endpoint tests (issue #635). Replays
+// recorded --json output from ./responses/*.json for the subcommands
+// server.ts actually shells out to; never invokes anything real.
+//
+// Success: exits 0, writes the matching recorded response to stdout.
+// Forced failure: set GAH_FIXTURE_FAIL=<name> (one of the names below) to
+// make that one subcommand exit non-zero with a stderr message instead --
+// this is how tests exercise the "CLI failure surfaces as an HTTP error,
+// never healthy-looking empty data" invariant deterministically.
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const responsesDir = path.join(__dirname, 'responses');
+
+function respond(name) {
+  const failing = process.env.GAH_FIXTURE_FAIL;
+  if (failing === name) {
+    const code = Number.parseInt(process.env.GAH_FIXTURE_FAIL_CODE ?? '1', 10);
+    const message = process.env.GAH_FIXTURE_FAIL_MESSAGE ?? `fixture: forced failure for '${name}'`;
+    process.stderr.write(message + '\n');
+    process.exit(code);
+  }
+  const file = path.join(responsesDir, `${name}.json`);
+  process.stdout.write(fs.readFileSync(file, 'utf8'));
+  process.exit(0);
+}
+
+const args = process.argv.slice(2);
+const [command, sub] = args;
+
+if (command === 'status') {
+  respond('status');
+} else if (command === 'quota' && sub === 'snapshot') {
+  respond('quota');
+} else if (command === 'report') {
+  respond('report');
+} else if (command === 'config' && sub === 'show') {
+  respond('config-show');
+} else if (command === 'profile' && sub === 'list') {
+  respond('profile-list');
+} else if (command === '--help') {
+  process.stdout.write('fake-gah fixture\n');
+  process.exit(0);
+} else {
+  process.stderr.write(`fake-gah fixture: unrecognized invocation: ${args.join(' ')}\n`);
+  process.exit(127);
+}

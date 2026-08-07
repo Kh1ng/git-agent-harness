@@ -53,8 +53,16 @@ function executableOnDisk(path: string): boolean {
   }
 }
 
+// Issue #635: GAH_BINARY, when set, is the first candidate tried -- lets
+// tests/deployments deterministically pin a specific binary (a fixture, or
+// a specific installed build) instead of relying on the build-path/PATH
+// search below. An unset, missing, or non-executable override is not an
+// error -- it just isn't used, and resolution falls through to the normal
+// candidates exactly as if it had never been set.
 export function findGahBinary(isExecutable: ExecutableProbe = executableOnDisk): string {
+  const override = process.env.GAH_BINARY;
   const possiblePaths = [
+    ...(override ? [override] : []),
     resolve(__dirname, '../../../target/release/gah'),
     resolve(__dirname, '../../../target/debug/gah'),
     resolve(__dirname, '../../../target/release/git-agent-harness'),
@@ -69,8 +77,6 @@ export function findGahBinary(isExecutable: ExecutableProbe = executableOnDisk):
   // Default to 'gah' which will use system PATH
   return 'gah';
 }
-
-const GAH_BINARY = findGahBinary();
 const STATUS_CACHE_TTL_MS = 30_000;
 const statusCache = new AsyncTtlCache<string, StatusSnapshot>(STATUS_CACHE_TTL_MS);
 
@@ -137,7 +143,7 @@ async function runStatusUncached(profile: string, config?: string): Promise<Stat
   }
 
   return new Promise((resolve, reject) => {
-    const child = spawn(GAH_BINARY, args, getSpawnOptions(config));
+    const child = spawn(findGahBinary(), args, getSpawnOptions(config));
     
     let stdout = '';
     let stderr = '';
@@ -198,7 +204,7 @@ function runJsonCommand<T>(
   acceptStructuredFailure = false
 ): Promise<T> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(GAH_BINARY, args, getSpawnOptions(config));
+    const child = spawn(findGahBinary(), args, getSpawnOptions(config));
 
     let stdout = '';
     let stderr = '';
@@ -427,7 +433,7 @@ export async function runHoldClear(
  */
 function runVoidCommand(args: string[], config: string | undefined, label: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(GAH_BINARY, args, getSpawnOptions(config));
+    const child = spawn(findGahBinary(), args, getSpawnOptions(config));
 
     let stdout = '';
     let stderr = '';
@@ -546,7 +552,7 @@ export async function runDispatch(
   }
 
   return new Promise((resolve) => {
-    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.configPath));
+    const child = spawn(findGahBinary(), args, getSpawnOptions(options.configPath));
     
     let stderr = '';
     
@@ -594,7 +600,7 @@ export async function runEvents(profile: string, sinceIso: string, config?: stri
   }
 
   return new Promise((resolve, reject) => {
-    const child = spawn(GAH_BINARY, args, getSpawnOptions(config));
+    const child = spawn(findGahBinary(), args, getSpawnOptions(config));
     
     let stdout = '';
     let stderr = '';
@@ -768,7 +774,7 @@ export function buildProfileAddArgs(options: ProfileAddOptions): string[] {
 export async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
   const args = buildProfileAddArgs(options);
   return new Promise((resolve, reject) => {
-    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
+    const child = spawn(findGahBinary(), args, getSpawnOptions(options.config));
     
     let stderr = '';
     
@@ -942,7 +948,7 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
 export async function runProfileSet(options: ProfileSetOptions): Promise<void> {
   const args = buildProfileSetArgs(options);
   return new Promise((resolve, reject) => {
-    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
+    const child = spawn(findGahBinary(), args, getSpawnOptions(options.config));
     
     let stderr = '';
     
@@ -982,7 +988,7 @@ export async function runProfileRemove(options: ProfileRemoveOptions): Promise<v
   }
 
   return new Promise((resolve, reject) => {
-    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
+    const child = spawn(findGahBinary(), args, getSpawnOptions(options.config));
     
     let stderr = '';
     
@@ -1038,7 +1044,7 @@ export function buildConfigSetArgs(options: ConfigSetOptions): string[] {
 export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
   const args = buildConfigSetArgs(options);
   return new Promise((resolve, reject) => {
-    const child = spawn(GAH_BINARY, args, getSpawnOptions(options.config));
+    const child = spawn(findGahBinary(), args, getSpawnOptions(options.config));
 
     let stderr = '';
 
@@ -1320,18 +1326,18 @@ export function stopLoop(profile: string): StopLoopResult {
  * Get the path to the GAH binary (for debugging/testing)
  */
 export function getGahBinaryPath(): string {
-  return GAH_BINARY;
+  return findGahBinary();
 }
 
 /**
  * Whether the resolved gah binary actually runs. `findGahBinary()` always
  * returns a path (falling back to the bare `'gah'` string on PATH even if
- * nothing resolves), so checking `GAH_BINARY` alone can't tell availability
- * -- this has to actually try spawning it.
+ * nothing resolves), so checking its return value alone can't tell
+ * availability -- this has to actually try spawning it.
  */
 export function isGahCliAvailable(): Promise<boolean> {
   return new Promise((resolvePromise) => {
-    const child = spawn(GAH_BINARY, ['--help'], { stdio: 'ignore' });
+    const child = spawn(findGahBinary(), ['--help'], { stdio: 'ignore' });
     child.on('error', () => resolvePromise(false));
     child.on('close', (code) => resolvePromise(code === 0));
   });

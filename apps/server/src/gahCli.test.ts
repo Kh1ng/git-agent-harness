@@ -171,3 +171,59 @@ test('gah binary resolution probes candidates in order and falls back to PATH', 
   );
   assert.equal(unavailable.at(-1), 'gah');
 });
+
+// Issue #635: GAH_BINARY lets tests/deployments pin a specific binary
+// (a fixture, or a specific installed build) deterministically.
+test('GAH_BINARY override is tried first, ahead of every build-path/PATH candidate', () => {
+  const original = process.env.GAH_BINARY;
+  process.env.GAH_BINARY = '/fixtures/gah';
+  try {
+    const visited: string[] = [];
+    const selected = findGahBinary((candidate) => {
+      visited.push(candidate);
+      return candidate === '/fixtures/gah';
+    });
+
+    assert.equal(selected, '/fixtures/gah');
+    assert.deepEqual(visited, ['/fixtures/gah']);
+  } finally {
+    if (original === undefined) delete process.env.GAH_BINARY;
+    else process.env.GAH_BINARY = original;
+  }
+});
+
+test('a missing or non-executable GAH_BINARY override falls through to normal resolution, not an error', () => {
+  const original = process.env.GAH_BINARY;
+  process.env.GAH_BINARY = '/fixtures/does-not-exist';
+  try {
+    const visited: string[] = [];
+    const selected = findGahBinary((candidate) => {
+      visited.push(candidate);
+      return candidate.endsWith('/target/debug/gah');
+    });
+
+    assert.equal(visited[0], '/fixtures/does-not-exist');
+    assert.match(selected, /\/target\/debug\/gah$/);
+  } finally {
+    if (original === undefined) delete process.env.GAH_BINARY;
+    else process.env.GAH_BINARY = original;
+  }
+});
+
+test('with no GAH_BINARY set, resolution is unaffected by the override candidate', () => {
+  const original = process.env.GAH_BINARY;
+  delete process.env.GAH_BINARY;
+  try {
+    const visited: string[] = [];
+    const selected = findGahBinary((candidate) => {
+      visited.push(candidate);
+      return false;
+    });
+
+    assert.equal(selected, 'gah');
+    assert.match(visited[0], /\/target\/release\/gah$/);
+  } finally {
+    if (original === undefined) delete process.env.GAH_BINARY;
+    else process.env.GAH_BINARY = original;
+  }
+});
