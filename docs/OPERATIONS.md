@@ -234,6 +234,70 @@ If the loop needs to be paused for a human (e.g. while triaging), stopping the
 unit is the blunt instrument; `gah hold set` (section 3) is the surgical one
 that pauses auto-merge for a single work item without stopping all work.
 
+#### Memory gateway placement (issue #880)
+
+The TDAI memory gateway (manager-chat's compaction db, `apps/server`'s
+`memoryGatewayClient.ts`) has no default install step of its own — a fresh
+`gah-server` install works without one (manager chat is a required
+dependency at *runtime*, not install time), but nothing configures it for
+you. `scripts/install.sh` grows two opt-in modes, selected via
+`GAH_GATEWAY_MODE`; leaving it unset skips this section entirely and
+behaves exactly as before.
+
+**Remote** — point this host at a gateway already running elsewhere (e.g. a
+central node):
+
+```bash
+GAH_GATEWAY_MODE=remote \
+GAH_GATEWAY_URL=http://gateway-host:8420 \
+GAH_GATEWAY_API_KEY=<key> \
+scripts/install.sh
+```
+
+Before writing anything, the script calls `POST /recall` against that URL
+(not `GET /health` — `/health` needs no auth, so it can't catch a wrong
+key; `/recall` is read-only and auth-required on every configured gateway).
+A failure there aborts the whole install with a clear error instead of
+silently completing with an unreachable gateway — `memoryGatewayClient.ts`
+hard-blocks every manager-chat turn on a failed recall/capture, so an
+unreachable gateway found only at first real use is a much worse failure
+mode than one caught at install time. On success, `TDAI_GATEWAY_URL`/
+`TDAI_GATEWAY_API_KEY` are written into `/etc/gah/server.env` (the same
+file `GAH_SERVER_HOST` above uses, `EnvironmentFile=-`'d by
+`gah-server.service`).
+
+**Co-located** — run the gateway on this same host, scripted instead of
+the hand-deployment this replaces:
+
+```bash
+GAH_GATEWAY_MODE=colocated \
+GAH_GATEWAY_MEMORYCORE_PATH=/path/to/TencentDB-Agent-Memory/MemoryCore \
+GAH_GATEWAY_LLM_API_KEY=<openai-compatible-key> \
+scripts/install.sh
+```
+
+This seeds `tdai-gateway.local.yaml` from the checkout's tracked
+`tdai-gateway.standalone.yaml` template if one doesn't already exist
+(OpenAI-compatible LLM, embedding off / BM25-only recall — edit that file
+directly for a different LLM/embedding backend, e.g. a local LiteLLM
+proxy), generates a `TDAI_GATEWAY_API_KEY` if none was given, writes both
+into `~/.config/gah/tdai-gateway.env` (`chmod 600`), installs
+`packaging/systemd/tdai-memory-gateway.service` as a `--user` unit with
+`WorkingDirectory`/`ExecStart` substituted for the checkout path and the
+`node` found on `PATH`, and enables it. The script waits for `GET /health`
+to come up before wiring `TDAI_GATEWAY_URL=http://127.0.0.1:8420` (plus the
+generated API key) into `/etc/gah/server.env`, so a broken gateway config
+fails the install rather than leaving `gah-server` pointed at nothing.
+
+Bound to loopback by default; widen with `gah network-expose` (above) if
+another node needs to reach it, matching the guidance in the checked-in
+unit file.
+
+Re-running `scripts/install.sh` with different `GAH_GATEWAY_*` values
+updates just those keys in `/etc/gah/server.env` (unlike `GAH_SERVER_HOST`,
+which is create-once-then-never-touched) — an operator's own `HOST`
+override is untouched either way.
+
 ### Network exposure (issue #879)
 
 `gah network-expose` is the one configuration surface for exposing a
