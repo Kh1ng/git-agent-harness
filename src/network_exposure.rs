@@ -28,6 +28,10 @@ pub enum NetworkExposureLevel {
     LanTailscale,
 }
 
+pub fn default_tailscale_cidr() -> Option<String> {
+    Some("100.64.0.0/10".to_string())
+}
+
 impl NetworkExposureLevel {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {

@@ -161,6 +161,21 @@ pub fn run_loop(args: LoopArgs) -> Result<()> {
     runner::install_shutdown_handler()?;
     let cfg = config::load(args.config_path.as_deref())?;
     let resolved_config_path = config::resolve_config_path(args.config_path.as_deref());
+
+    // Issue #881: advisory only -- unset registry_central_url skips this
+    // entirely. See crate::fleet_preflight module docs for why it can't
+    // (and doesn't try to) guarantee two nodes never dispatch the same
+    // profile concurrently.
+    if let Some(central_url) = &cfg.defaults.registry_central_url {
+        let token = std::env::var("COORDINATOR_TOKEN").ok();
+        crate::fleet_preflight::check(
+            &crate::fleet_preflight::CurlFleetQuerier,
+            central_url,
+            &args.profile,
+            token.as_deref(),
+            cfg.defaults.registry_preflight_mode,
+        )?;
+    }
     let parallel = controller_runtime::loop_parallel_argument(
         args.once,
         args.parallel,
