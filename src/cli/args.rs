@@ -161,6 +161,14 @@ pub enum Commands {
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },
+    /// Alert-only health check for gah-loop@<profile>.service units.
+    /// Observation only: never starts, restarts, or enables a loop.
+    WatchdogCheck {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
     /// Inspect ledger data
     Ledger {
         #[command(subcommand)]

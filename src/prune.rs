@@ -53,7 +53,10 @@ fn prune_profile(
     Ok(())
 }
 
-fn selected_profiles<'a>(
+/// Resolve either one named profile or every configured profile, sorted.
+/// Shared with anything that needs "operate on this profile, or all of
+/// them" instead of a hardcoded host-local list (e.g. `gah watchdog-check`).
+pub(crate) fn selected_profiles<'a>(
     cfg: &'a GahConfig,
     profile_name: Option<&str>,
 ) -> Result<Vec<(String, &'a Profile)>> {

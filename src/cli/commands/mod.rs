@@ -23,3 +23,4 @@ pub mod server;
 pub mod telemetry;
 pub mod tui;
 pub mod update;
+pub mod watchdog;

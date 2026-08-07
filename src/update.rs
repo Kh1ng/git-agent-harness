@@ -61,6 +61,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
     let loop_unit = install_loop_unit_template(&repo)?;
+    let watchdog_units = install_watchdog_unit_template(&repo)?;
 
     println!("Installed CLI: {}", binary.display());
     println!(
@@ -68,6 +69,13 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         repo.join("apps/server/dist/bin.js").display()
     );
     println!("Installed loop unit: {}", loop_unit.display());
+    for unit in &watchdog_units {
+        println!("Installed watchdog unit: {}", unit.display());
+    }
+    println!(
+        "Watchdog timer is installed but not enabled; opt in explicitly with \
+         `systemctl --user enable --now gah-watchdog.timer` once an alert command is configured."
+    );
 
     if args.restart_server {
         run_command(&repo, "sudo", &["systemctl", "daemon-reload"])?;
@@ -186,37 +194,63 @@ fn ensure_no_running_loop_before_server_restart() -> Result<()> {
 /// control plane. Local operator customization belongs in `systemctl --user
 /// edit gah-loop@<profile>` drop-ins, so replacing this base template on every
 /// deterministic update is safe and prevents source/runtime ownership drift.
-fn install_loop_unit_template(repo: &Path) -> Result<PathBuf> {
-    let source = repo.join("packaging/systemd/gah-loop@.service");
-    if !source.is_file() {
-        bail!(
-            "loop systemd unit template is missing: {}",
-            source.display()
-        );
-    }
-    let config_home = env::var_os("XDG_CONFIG_HOME")
+fn systemd_user_config_home() -> Result<PathBuf> {
+    env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .context("HOME or XDG_CONFIG_HOME is required to install the loop systemd unit")?;
-    let target = config_home.join("systemd/user/gah-loop@.service");
+        .context("HOME or XDG_CONFIG_HOME is required to install a systemd user unit")
+}
+
+fn copy_systemd_unit(repo: &Path, config_home: &Path, unit_file_name: &str) -> Result<PathBuf> {
+    let source = repo.join("packaging/systemd").join(unit_file_name);
+    if !source.is_file() {
+        bail!("systemd unit template is missing: {}", source.display());
+    }
+    let target = config_home.join("systemd/user").join(unit_file_name);
     let parent = target.parent().expect("systemd unit target has a parent");
     create_dir_all(parent)
         .with_context(|| format!("creating systemd user-unit directory {}", parent.display()))?;
     copy(&source, &target).with_context(|| {
         format!(
-            "installing loop systemd unit from {} to {}",
+            "installing systemd unit from {} to {}",
             source.display(),
             target.display()
         )
     })?;
+    Ok(target)
+}
+
+fn reload_user_systemd(reason: &str) -> Result<()> {
     let status = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status()
-        .context("reloading the user systemd manager after installing gah-loop@.service")?;
+        .with_context(|| format!("reloading the user systemd manager after {reason}"))?;
     if !status.success() {
         bail!("systemctl --user daemon-reload exited with {status}");
     }
+    Ok(())
+}
+
+fn install_loop_unit_template(repo: &Path) -> Result<PathBuf> {
+    let config_home = systemd_user_config_home()?;
+    let target = copy_systemd_unit(repo, &config_home, "gah-loop@.service")?;
+    reload_user_systemd("installing gah-loop@.service")?;
     Ok(target)
+}
+
+/// Issue #726: keep the alert-only watchdog unit in lockstep with the
+/// installed CLI, same reasoning as `install_loop_unit_template`. This also
+/// safely replaces an old host-local-script-based `gah-watchdog.service`
+/// left over from before this unit was tracked in-repo (AC7) -- the copy
+/// destination is identical, so a stale version is simply overwritten.
+/// Deliberately does not `enable` or `start` the timer: that stays an
+/// explicit operator opt-in.
+fn install_watchdog_unit_template(repo: &Path) -> Result<[PathBuf; 2]> {
+    let config_home = systemd_user_config_home()?;
+    let service = copy_systemd_unit(repo, &config_home, "gah-watchdog.service")?;
+    let timer = copy_systemd_unit(repo, &config_home, "gah-watchdog.timer")?;
+    reload_user_systemd("installing gah-watchdog.service/.timer")?;
+    Ok([service, timer])
 }
 
 fn ensure_clean(repo: &Path) -> Result<()> {
@@ -273,10 +307,49 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_clean, ensure_default_branch_checkout, installed_binary_path};
+    use super::{
+        ensure_clean, ensure_default_branch_checkout, install_watchdog_unit_template,
+        installed_binary_path,
+    };
+    use crate::test_support::PathGuard;
+    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Scoped override for `XDG_CONFIG_HOME`, mirroring the other process-env
+    /// guards in `crate::test_support` -- must be restored before another
+    /// parallel test can observe process state.
+    struct XdgConfigHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: Option<OsString>,
+    }
+
+    impl XdgConfigHomeGuard {
+        fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
+            let lock = XDG_CONFIG_HOME_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let original = std::env::var_os("XDG_CONFIG_HOME");
+            std::env::set_var("XDG_CONFIG_HOME", path);
+            Self {
+                _lock: lock,
+                original,
+            }
+        }
+    }
+
+    impl Drop for XdgConfigHomeGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
 
     fn git(repo: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -350,5 +423,57 @@ mod tests {
         std::fs::write(repo.join("dirty.txt"), "dirty\n").unwrap();
         let err = ensure_clean(&repo).unwrap_err();
         assert!(err.to_string().contains("dirty.txt"));
+    }
+
+    /// Issue #726 AC1/AC7: `gah update` installs the watchdog unit
+    /// deterministically and reloads the user systemd manager, but never
+    /// enables or starts anything -- only `daemon-reload` may appear in the
+    /// recorded systemctl invocations.
+    #[test]
+    fn watchdog_unit_template_is_installed_without_enabling_or_starting_anything() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config_tmp = TempDir::new().unwrap();
+        let _xdg_guard = XdgConfigHomeGuard::set(config_tmp.path());
+
+        let bin_tmp = TempDir::new().unwrap();
+        let record_path = bin_tmp.path().join("argv.log");
+        let script = format!("#!/bin/sh\necho \"$@\" >> '{}'\n", record_path.display());
+        let script_path = bin_tmp.path().join("systemctl");
+        std::fs::write(&script_path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+        let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
+
+        let [service, timer] = install_watchdog_unit_template(repo).unwrap();
+
+        assert!(service.ends_with("systemd/user/gah-watchdog.service"));
+        assert!(timer.ends_with("systemd/user/gah-watchdog.timer"));
+        assert!(
+            std::fs::read_to_string(&service)
+                .unwrap()
+                .contains("gah watchdog-check"),
+            "installed unit should invoke the packaged watchdog-check command"
+        );
+        assert!(
+            !std::fs::read_to_string(&service)
+                .unwrap()
+                .contains("/home/khing/workspace/agent-lab"),
+            "installed unit must not reference the old host-local script path"
+        );
+
+        let record = std::fs::read_to_string(&record_path).unwrap();
+        assert!(!record.is_empty(), "expected systemctl to be invoked");
+        for forbidden in ["start", "restart", "enable"] {
+            assert!(
+                !record.split_whitespace().any(|arg| arg == forbidden),
+                "systemctl was invoked with forbidden verb '{forbidden}': {record}"
+            );
+        }
+        assert!(record.contains("daemon-reload"), "{record}");
     }
 }

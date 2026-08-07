@@ -84,6 +84,25 @@ The updater never starts or restarts a recurring `gah loop`; with
   pool. `KillMode=control-group` ensures an operator stop or parent failure
   kills every concurrent backend child; do not wrap it in a shell supervisor
   or start a detached `gah loop` by hand.
+- **`gah-watchdog`** (`.service` + `.timer`) — an **alert-only** health check
+  for `gah-loop@<profile>.service` units (issue #726). Every profile
+  configured in `gah`'s config gets checked (`--profile` scopes it to one).
+  `gah watchdog-check` only ever runs `systemctl --user show <unit>
+  --property=... --value` — a read-only query — and prints one line per
+  profile whose loop is stopped or has failed; it never runs `systemctl
+  start`/`restart`/`enable`, `gah loop`, or calls any HTTP endpoint. **Only
+  the operator or the dashboard may start a loop**
+  (`systemctl --user start gah-loop@<profile>`, or the dashboard's equivalent
+  button) — nothing else in GAH's packaging is allowed to. This replaces an
+  earlier host-local, untracked script that silently restarted a stopped loop
+  by calling the dashboard's start endpoint, resuming concurrent work during
+  a blocker repair; that incident is exactly what this contract prevents. The
+  timer is installed by `gah update`/`scripts/install.sh` alongside the loop
+  unit but is never automatically enabled — opt in once you've configured an
+  alert command in `gah-watchdog.service`'s `ExecStart`:
+  ```bash
+  systemctl --user enable --now gah-watchdog.timer
+  ```
 
 Direct `gah loop --once` remains useful for a bounded operator smoke test. On
 Linux, a recurring foreground loop arms a kernel parent-death signal and exits
