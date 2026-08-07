@@ -1,0 +1,51 @@
+# tdai-memory-gateway.service
+#
+# Runs the TDAI (TencentDB Agent Memory) gateway as a user service: the
+# shared memory backend GAH's apps/server manager-chat harness calls
+# directly (POST /recall before each turn, /capture after), so context
+# survives swapping which manager backend (Hermes/Codex/Claude) is running.
+#
+# Co-located installs (issue #880): `scripts/install.sh
+# GAH_GATEWAY_MODE=colocated` installs and enables this unit, substituting
+# WorkingDirectory/TDAI_GATEWAY_CONFIG below for the MemoryCore checkout it
+# was given and the Node binary it found on PATH. Installing by hand
+# instead, e.g. for a non-standard checkout layout: copy this file to
+# ~/.config/systemd/user/, edit the two paths below, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tdai-memory-gateway.service
+#
+# Config: <MemoryCore checkout>/tdai-gateway.local.yaml. A fresh install
+# seeds this from the tracked tdai-gateway.standalone.yaml template
+# (OpenAI-compatible LLM, embedding off / BM25-only) if it doesn't already
+# exist -- edit it directly for a different LLM/embedding backend.
+#
+# Auth: TDAI_GATEWAY_API_KEY and TDAI_LLM_API_KEY live in
+# ~/.config/gah/tdai-gateway.env (chmod 600), loaded via EnvironmentFile.
+# TDAI_GATEWAY_API_KEY is required on every gateway route except GET
+# /health. Bound to 127.0.0.1 by default -- see docs/OPERATIONS.md's
+# network-exposure section (issue #879, `gah network-expose`) before
+# widening that.
+
+[Unit]
+Description=TDAI (TencentDB Agent Memory) Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/agent-lab/repos/github/Kh1ng/TencentDB-Agent-Memory/MemoryCore
+Environment=HOME=%h
+Environment=TDAI_GATEWAY_CONFIG=%h/workspace/agent-lab/repos/github/Kh1ng/TencentDB-Agent-Memory/MemoryCore/tdai-gateway.local.yaml
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=%h/.config/gah/tdai-gateway.env
+ExecStart=npx tsx src/gateway/server.ts
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
