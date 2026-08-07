@@ -92,12 +92,12 @@ pub struct Defaults {
     #[serde(default)]
     pub lan_cidrs: Vec<String>,
     /// See `crate::network_exposure` module docs.
-    #[serde(default = "default_tailscale_cidr")]
+    #[serde(default = "crate::network_exposure::default_tailscale_cidr")]
     pub tailscale_cidr: Option<String>,
-}
-
-fn default_tailscale_cidr() -> Option<String> {
-    Some("100.64.0.0/10".to_string())
+    #[serde(default)]
+    pub registry_central_url: Option<String>,
+    #[serde(default)]
+    pub registry_preflight_mode: crate::fleet_preflight::PreflightMode,
 }
 
 impl Defaults {

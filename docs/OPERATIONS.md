@@ -334,6 +334,59 @@ Requires passwordless `sudo` for `ufw` (`sudo -n ufw status` must not
 prompt) for unattended use; run interactively once if it isn't configured
 yet -- the command inherits stdio, so a password prompt still works.
 
+### Node registration and fleet-collision preflight (issue #881)
+
+Self-service node registration (`POST /api/registry/nodes` on the central
+node's `apps/server`) and fleet aggregation (`GET /api/registry/fleet`)
+already exist. Two things build on top of them here: a repeatable way to
+call registration instead of hand-building a curl call, and an advisory
+safety check before `gah loop` starts.
+
+**Registering a node**, run from the node being registered, pointed at the
+central node's now-reachable URL (`gah network-expose` above covers
+exposing whatever port that traffic needs):
+
+```bash
+npm run register-node --workspace=apps/server -- \
+  --central-url https://central.example.com \
+  --transport-mode authenticated_remote \
+  --secret-ref env:NODE_TOKEN \
+  --labels laptop,dev
+```
+
+Identity (`node_id`/`display_name`/`advertised_url`/`version`/
+`schema_digest`) is read from this node's own `GET /health` rather than
+re-derived -- one identity-generation path (`getCoordinatorIdentity()`),
+not two that could drift. `--transport-mode` and `--secret-ref` are policy
+choices the registering operator makes, matching `registerNode()`'s
+validation (`loopback`/`authenticated_remote`/`trusted_lan`; non-loopback
+endpoints require `authenticated_remote` over TLS). `COORDINATOR_TOKEN` in
+the environment, if set, is sent as the central node's Bearer auth.
+Confirm it worked: `curl <central-url>/api/registry/fleet` should list the
+new node.
+
+**Fleet-collision preflight**: `gah loop` refuses/warns before starting if
+the central registry already shows another node with active claims/work
+for the same profile -- catching the common case of accidentally starting
+the same profile on two nodes. Opt-in via `[defaults]`:
+
+```toml
+[defaults]
+registry_central_url = "https://central.example.com"
+# "warn" (default -- print and proceed) | "refuse" (abort startup)
+registry_preflight_mode = "refuse"
+```
+
+This is advisory, not a guarantee: the registry's node-staleness window is
+30 minutes, and there's an inherent TOCTOU race between the check and
+actually starting work -- it does not make it safe to run the same profile
+from two nodes at once (that needs real claim arbitration, tracked
+separately and not yet implemented). Leaving `registry_central_url` unset
+skips the check entirely; a failed check (network, parse error) never
+blocks startup either, since failing closed on a flaky registry would be
+worse than the problem this exists to catch. See `crate::fleet_preflight`
+for the implementation.
+
 ---
 
 ## 2. Required credentials & scopes
