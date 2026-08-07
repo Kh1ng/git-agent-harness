@@ -1,6 +1,6 @@
 use crate::config::{self, GahConfig};
 use crate::job_kind::{JobFamily, JobKind};
-use crate::ledger::{self, LedgerEntry};
+use crate::ledger::LedgerEntry;
 use crate::notifications::notify_terminal_failure;
 use crate::usage_attribution::{aggregate_attempt_usage, usage_has_observation};
 use anyhow::Result;
@@ -65,7 +65,6 @@ pub(crate) use self::attempts::{
     routing_runtime_state_from_entries,
 };
 
-use self::claims::check_duplicate_work;
 pub(crate) use self::claims::duplicate_work_error;
 pub(crate) use self::claims::scan_available_tickets_with_dependencies;
 pub use self::claims::{merge_branch, MergeExecution};
@@ -172,18 +171,17 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     // NOT conflated with the dispatched ticket's own outcome.
     self_check_validation_gate(profile, cfg, args.skip_validation_gate)?;
 
-    if JobKind::parse(&args.mode).map(|kind| kind.family()) == Ok(JobFamily::ImproveLike) {
-        if let Some(work_id) = check_duplicate_work(cfg, profile, args)? {
-            // Parallel workers: claim this work_id immediately, before any
-            // backend work runs, so a concurrent `gah loop`/`gah dispatch`
-            // process sees it right away rather than only after this
-            // attempt finishes (minutes to hours later).
-            let claim = LedgerEntry::new_claim(&args.profile, profile, &work_id);
-            if let Err(e) = ledger::append(cfg, &claim) {
-                eprintln!("warning: failed to append claim ledger entry: {e:#}");
-            }
-        }
-    }
+    // Issue #882: local claim-mode ledger entry, or a central claims API
+    // lease when configured (fail closed) -- see claims::acquire_claim.
+    // The guard is kept alive for the rest of `run()` via this binding;
+    // its `Drop` releases the claim on every exit path below, including
+    // the many early returns.
+    let _central_claim_guard =
+        if JobKind::parse(&args.mode).map(|kind| kind.family()) == Ok(JobFamily::ImproveLike) {
+            claims::acquire_claim(cfg, profile, args)?
+        } else {
+            None
+        };
 
     let ts = args
         .run_id

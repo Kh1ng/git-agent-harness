@@ -5,10 +5,15 @@
  *     --central-url https://central.example.com \
  *     --transport-mode authenticated_remote \
  *     --secret-ref env:NODE_TOKEN \
- *     [--self-url http://127.0.0.1:3773] [--labels a,b]
+ *     [--self-url http://127.0.0.1:3773] [--labels a,b] [--profiles gah,sportsball]
  *
  * COORDINATOR_TOKEN in the environment, if set, is sent as the central
  * node's Bearer auth (same var authMiddleware.ts checks).
+ *
+ * --profiles (issue #882): profiles this node will dispatch. The central
+ * claims API refuses to grant a lease for a profile not declared here --
+ * omitting it means this node can register but can't claim any work under
+ * registry_central_url mode.
  */
 
 import type { RegisteredNode } from '@git-agent-harness/contracts';
@@ -41,7 +46,7 @@ async function main() {
 
   if (!centralUrl || !transportMode || !secretRef) {
     console.error(
-      'Usage: register-node --central-url <url> --transport-mode <loopback|authenticated_remote|trusted_lan> --secret-ref <env:VAR|file:path> [--self-url <url>] [--labels a,b]'
+      'Usage: register-node --central-url <url> --transport-mode <loopback|authenticated_remote|trusted_lan> --secret-ref <env:VAR|file:path> [--self-url <url>] [--labels a,b] [--profiles a,b]'
     );
     process.exitCode = 1;
     return;
@@ -62,6 +67,12 @@ async function main() {
         ? args['labels']
             .split(',')
             .map((l) => l.trim())
+            .filter(Boolean)
+        : undefined,
+      profiles: args['profiles']
+        ? args['profiles']
+            .split(',')
+            .map((p) => p.trim())
             .filter(Boolean)
         : undefined,
       token: process.env.COORDINATOR_TOKEN

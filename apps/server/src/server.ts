@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import os from 'node:os';
 import { statfsSync } from 'node:fs';
 import { getServerReadiness } from './serverReadiness.js';
@@ -45,6 +46,7 @@ import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware } from './authMiddleware.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService } from './registryService.js';
+import { ClaimsService, ClaimConflictError } from './claimsService.js';
 import { readSettings as readManagerChatSettings, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
 import { listManagerBackends } from './managerChat/registry.js';
 import {
@@ -62,6 +64,7 @@ type ConfigEffectiveDeps = {
 
 type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   registryService?: RegistryService;
+  claimsService?: ClaimsService;
   coordinatorPort?: number;
 };
 
@@ -105,6 +108,7 @@ export function createServer(
   const coordinatorPort = configDeps.coordinatorPort ?? 3773;
 
   const registryService = configDeps.registryService || new RegistryService();
+  const claimsService = configDeps.claimsService || new ClaimsService();
 
   const app = express();
   // Trust X-Forwarded-* only when the immediate hop is loopback (a TLS-terminating
@@ -121,6 +125,21 @@ export function createServer(
   // unauthenticated pending #532; applying this globally would silently change
   // that pre-existing contract.
   app.use('/api/registry', authMiddleware);
+  app.use('/api/claims', authMiddleware);
+  // Issue #882 (CodeQL: js/missing-rate-limiting) -- these routes are
+  // authenticated but called frequently by design (a renewal every
+  // lease/3, ~5 min, per in-flight dispatch), so the limit is generous for
+  // legitimate traffic and exists as defense-in-depth against a buggy or
+  // compromised node hammering the endpoint, not to throttle normal use.
+  app.use(
+    '/api/claims',
+    rateLimit({
+      windowMs: 60_000,
+      limit: 60,
+      standardHeaders: true,
+      legacyHeaders: false
+    })
+  );
 
   // Health check endpoint
   app.get('/health', (req, res) => {
@@ -283,6 +302,60 @@ export function createServer(
         error: 'Bad Request',
         message: error instanceof Error ? error.message : String(error)
       });
+    }
+  });
+
+  // Central claim arbitration (issue #882). All three verify the calling
+  // node is actually registered and has declared the profile it's trying
+  // to claim -- a node can't claim work under a profile it never told the
+  // registry it runs.
+  function authorizeClaimRequest(nodeId: unknown, profile: unknown, workId: unknown): { nodeId: string; profile: string; workId: string } {
+    if (typeof nodeId !== 'string' || !nodeId) throw new Error('Missing or invalid node_id');
+    if (typeof profile !== 'string' || !profile) throw new Error('Missing or invalid profile');
+    if (typeof workId !== 'string' || !workId) throw new Error('Missing or invalid work_id');
+    const node = registryService.getNode(nodeId);
+    if (!node) throw new Error(`Node '${nodeId}' is not registered`);
+    if (!node.profiles?.includes(profile)) {
+      throw new Error(`Node '${nodeId}' has not declared profile '${profile}' at registration`);
+    }
+    return { nodeId, profile, workId };
+  }
+
+  app.post('/api/claims/acquire', (req, res) => {
+    try {
+      const { nodeId, profile, workId } = authorizeClaimRequest(req.body.node_id, req.body.profile, req.body.work_id);
+      const lease = claimsService.acquire(nodeId, profile, workId, req.body.lease_seconds);
+      res.status(200).json(lease);
+    } catch (error) {
+      if (error instanceof ClaimConflictError) {
+        res.status(409).json({ error: 'Conflict', message: error.message, held_by: error.heldBy });
+        return;
+      }
+      res.status(400).json({ error: 'Bad Request', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/claims/renew', (req, res) => {
+    try {
+      const { nodeId, profile, workId } = authorizeClaimRequest(req.body.node_id, req.body.profile, req.body.work_id);
+      const lease = claimsService.renew(nodeId, profile, workId, req.body.lease_seconds);
+      res.status(200).json(lease);
+    } catch (error) {
+      if (error instanceof ClaimConflictError) {
+        res.status(409).json({ error: 'Conflict', message: error.message, held_by: error.heldBy });
+        return;
+      }
+      res.status(400).json({ error: 'Bad Request', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/claims/release', (req, res) => {
+    try {
+      const { nodeId, profile, workId } = authorizeClaimRequest(req.body.node_id, req.body.profile, req.body.work_id);
+      claimsService.release(nodeId, profile, workId);
+      res.status(200).json({ success: true });
+    } catch (error) {
+      res.status(400).json({ error: 'Bad Request', message: error instanceof Error ? error.message : String(error) });
     }
   });
 

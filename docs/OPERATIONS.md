@@ -419,6 +419,74 @@ already-built `client.hello`/`server.welcome` handshake and the
 currently-inert `ping`/`server.ping` message as a real heartbeat) is a
 bigger lift -- tracked separately, not implemented here.
 
+### Central claim arbitration (issue #882)
+
+Two local-only mechanisms have always guarded against dispatching the same
+work_id twice: `src/work_claim.rs`'s per-machine JSON+PID lock (protects
+two `gah loop` processes on the *same* host -- untouched by this, it's a
+different problem) and `src/dispatch/claims.rs`'s claim-mode ledger entry
+(protects against a second *node* picking up the same ticket -- this is
+the one that can't actually work across machines, since each node's
+`ledger.jsonl` is local to its own disk). This adds a real cross-node
+version of the second one.
+
+**Opt-in, reusing #881's config**: set `registry_central_url` (the same
+field the fleet-collision preflight uses) and it becomes the sole
+cross-node exclusivity gate -- the local claim-mode ledger check is
+bypassed (see `check_duplicate_work`'s `central_claims_active` parameter)
+and every dispatch instead acquires a lease from the central node before
+starting any backend work. Unset: identical to before this existed.
+
+```toml
+[defaults]
+registry_central_url = "https://central.example.com"
+```
+
+**Fail closed.** An unreachable central node or a lease already held by
+another node aborts dispatch via `?` before any backend work starts. A
+central-node outage stops dispatch fleet-wide rather than risk a silent
+double-dispatch -- a deliberate tradeoff, not an oversight.
+
+**A node must declare which profiles it runs at registration time**
+(`--profiles` on `register-node`, issue #881) before it can claim work
+under them -- the central node checks this on every acquire/renew, not
+just at registration:
+
+```bash
+npm run register-node --workspace=apps/server -- \
+  --central-url https://central.example.com \
+  --transport-mode authenticated_remote \
+  --secret-ref env:NODE_TOKEN \
+  --profiles gah,sportsball
+```
+
+**Renewal, not a flat TTL.** A lease lasts 15 minutes; a still-running
+dispatch renews it every 5 minutes (`lease/3`, giving two missed renewals
+of margin) via `POST /api/claims/renew` over plain HTTPS -- deliberately
+not a persistent connection. The target end-state architecture is nodes
+dialing *in* to the central node for everything (never the reverse, so a
+worker never needs to expose a network surface of its own), and a
+worker-initiated HTTP call already satisfies that; a future upgrade to a
+long-lived connection (WebSocket with an HTTP fallback) would sit behind
+this same acquire/renew/release shape rather than requiring a redesign.
+If renewal has been failing long enough that the lease would have lapsed
+(3 consecutive failures), a loud warning is logged, but the in-progress
+backend process is **not** killed -- exclusivity degrades to advisory past
+that point rather than the dispatch being forcibly terminated over what
+might be a transient network blip.
+
+**Storage**: `apps/server/src/claimsService.ts` keeps leases in a plain
+JSON file (`config/claims-config.json` by default,
+`GAH_CLAIMS_CONFIG_PATH` to override) plus an in-memory `Map`, not a real
+database -- correctness comes from acquire/renew/release being
+synchronous functions with no `await` between the read-check and the
+write, which Node's single-threaded event loop already makes atomic, the
+same guarantee a `WHERE` clause buys you in SQL.
+
+See `src/central_claims.rs` (Rust client, `gah`'s side) and
+`apps/server/src/claimsService.ts` (server, holds the leases) for the
+implementation.
+
 ---
 
 ## 2. Required credentials & scopes
