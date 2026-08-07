@@ -1130,16 +1130,13 @@ fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<Rev
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
     let endpoint = format!("projects/{project_id}/merge_requests");
-    let resp = gitlab_api(
-        profile,
-        &endpoint,
-        "GET",
-        &[("state", "opened"), ("source_branch", branch)],
-    )?;
+    // Issue #551: no state filter -- must see merged/closed MRs too, not
+    // just "not found". Highest iid wins if the branch name was reused.
+    let resp = gitlab_api(profile, &endpoint, "GET", &[("source_branch", branch)])?;
     let first = resp
         .as_array()
-        .and_then(|items| items.first())
-        .ok_or_else(|| anyhow::anyhow!("no open GitLab MR found for branch '{}'", branch))?;
+        .and_then(|items| items.iter().max_by_key(|item| item["iid"].as_i64()))
+        .ok_or_else(|| anyhow::anyhow!("no GitLab MR found for branch '{}'", branch))?;
     let mut target = gitlab_target_from_value(first)?;
     // Extract the raw iid string directly from the response value; this
     // ensures the pipelines lookup always uses the raw MR iid even if the
@@ -1349,8 +1346,9 @@ fn github_find_pr_number_by_branch(profile: &Profile, branch: &str) -> Result<St
             "--method",
             "GET",
             &endpoint,
+            // Issue #551: no state filter -- must see merged/closed PRs too.
             "-f",
-            "state=open",
+            "state=all",
             "-f",
             &head,
         ]);
@@ -1363,11 +1361,12 @@ fn github_find_pr_number_by_branch(profile: &Profile, branch: &str) -> Result<St
         );
     }
     let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    // Highest number wins if the branch name was reused across PRs.
     let number = resp
         .as_array()
-        .and_then(|items| items.first())
+        .and_then(|items| items.iter().max_by_key(|item| item["number"].as_i64()))
         .and_then(|item| item["number"].as_i64())
-        .ok_or_else(|| anyhow::anyhow!("no open GitHub PR found for branch '{}'", branch))?;
+        .ok_or_else(|| anyhow::anyhow!("no GitHub PR found for branch '{}'", branch))?;
     Ok(number.to_string())
 }
 

@@ -40,6 +40,13 @@ pub enum FailureClass {
     /// change just to close an already-completed task.
     AlreadySatisfied,
     HumanBlocked,
+    /// Issue #551: the remote MR/PR source this attempt was based on is no
+    /// longer valid -- either it advanced to a SHA this attempt didn't see
+    /// (concurrent push), or the MR/PR itself is no longer open (merged or
+    /// closed). Deliberately distinct from `HarnessError`: this is an
+    /// expected, provider-observed state change, not a bug, and should never
+    /// be repaired by force-pushing over it.
+    StaleSource,
     Unknown,
 }
 
@@ -57,6 +64,7 @@ impl FailureClass {
             Self::ValidationGate => "validation_gate",
             Self::AlreadySatisfied => "already_satisfied",
             Self::HumanBlocked => "human_blocked",
+            Self::StaleSource => "stale_source",
             Self::Unknown => "unknown",
         }
     }

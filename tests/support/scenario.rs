@@ -180,7 +180,11 @@ impl ScenarioHarness {
 
     pub fn gitlab_scenario(mut self, name: &str) -> Self {
         let fb = FakeBackend::new(self._temp.path(), "glab");
-        fb.install(load_gitlab_fixture(name));
+        if let Some(mr) = manual_fix_gitlab_fixture(name) {
+            fb.install_gitlab_merge_requests_api(mr.list, mr.single, mr.pipelines);
+        } else {
+            fb.install(load_gitlab_fixture(name));
+        }
         self.fake_glab = Some(fb);
         self
     }
@@ -963,6 +967,29 @@ fn uniform_github_fixture(scenario: Scenario) -> GithubFixture {
     }
 }
 
+/// A manual-fix PR fixture reachable by both lookup shapes a repair
+/// preflight can use: `gh pr view <n>` (a single object, `default`) and
+/// `gh api .../pulls` by branch (a JSON array, `open_pulls`).
+fn manual_fix_github_fixture(number: i64, state: &str, merged_at: Option<&str>) -> GithubFixture {
+    let pr = github_pr_json(GithubPrParams {
+        title: "Draft: TICKET-269 Fix race".into(),
+        branch: "gah/fix-needs-fix".into(),
+        labels: vec!["gah-needs-fix".into()],
+        ci_conclusion: Some("SUCCESS".into()),
+        state: Some(state.into()),
+        url: None,
+        number: Some(number),
+        draft: None,
+        merged_at: merged_at.map(String::from),
+        updated_at: None,
+    });
+    GithubFixture {
+        default: Scenario::success().with_stdout(serde_json::to_string(&pr).unwrap()),
+        open_pulls: Scenario::success().with_stdout(serde_json::to_string(&vec![&pr]).unwrap()),
+        check_runs: Scenario::success().with_stdout(r#"{"total_count":0,"check_runs":[]}"#),
+    }
+}
+
 fn load_github_fixture(name: &str) -> GithubFixture {
     match name {
         "empty" => uniform_github_fixture(Scenario::success().with_stdout("[]")),
@@ -1040,57 +1067,17 @@ fn load_github_fixture(name: &str) -> GithubFixture {
         // Manual `gah dispatch --mode fix --mr <id>` path for provider/manual fixture.
         // The resolved MR is assumed to target this branch, so resolver + repair
         // context can reuse it without passing --existing-branch.
-        "manual_fix_needs_fix" => uniform_github_fixture(
-            Scenario::success().with_stdout(
-                serde_json::to_string(&github_pr_json(GithubPrParams {
-                    title: "Draft: TICKET-269 Fix race".into(),
-                    branch: "gah/fix-needs-fix".into(),
-                    labels: vec!["gah-needs-fix".into()],
-                    ci_conclusion: Some("SUCCESS".into()),
-                    state: Some("OPEN".into()),
-                    url: None,
-                    number: Some(269),
-                    draft: None,
-                    merged_at: None,
-                    updated_at: None,
-                }))
-                .unwrap(),
-            ),
-        ),
-        "manual_fix_needs_fix_closed" => uniform_github_fixture(
-            Scenario::success().with_stdout(
-                serde_json::to_string(&github_pr_json(GithubPrParams {
-                    title: "Draft: TICKET-269 Fix race".into(),
-                    branch: "gah/fix-needs-fix".into(),
-                    labels: vec!["gah-needs-fix".into()],
-                    ci_conclusion: Some("SUCCESS".into()),
-                    state: Some("CLOSED".into()),
-                    url: None,
-                    number: Some(269),
-                    draft: None,
-                    merged_at: None,
-                    updated_at: None,
-                }))
-                .unwrap(),
-            ),
-        ),
-        "manual_fix_needs_fix_merged" => uniform_github_fixture(
-            Scenario::success().with_stdout(
-                serde_json::to_string(&github_pr_json(GithubPrParams {
-                    title: "Draft: TICKET-269 Fix race".into(),
-                    branch: "gah/fix-needs-fix".into(),
-                    labels: vec!["gah-needs-fix".into()],
-                    ci_conclusion: Some("SUCCESS".into()),
-                    state: Some("MERGED".into()),
-                    url: None,
-                    number: Some(269),
-                    draft: None,
-                    merged_at: Some("2026-07-01T00:00:00Z".into()),
-                    updated_at: None,
-                }))
-                .unwrap(),
-            ),
-        ),
+        //
+        // Issue #551: repair preflight now also re-reads live state *by
+        // branch* (not just by MR number), which lists via `gh api .../pulls`
+        // (expects a JSON array) before falling back to `gh pr view <n>`
+        // (expects a JSON object) -- these can no longer share one uniform
+        // response shape.
+        "manual_fix_needs_fix" => manual_fix_github_fixture(269, "OPEN", None),
+        "manual_fix_needs_fix_closed" => manual_fix_github_fixture(269, "CLOSED", None),
+        "manual_fix_needs_fix_merged" => {
+            manual_fix_github_fixture(269, "MERGED", Some("2026-07-01T00:00:00Z"))
+        }
         _ => uniform_github_fixture(
             Scenario::failure(127).with_stderr(format!("unknown github scenario: {name}")),
         ),
@@ -1102,54 +1089,44 @@ fn load_gitlab_fixture(name: &str) -> Scenario {
         "empty" => Scenario::success().with_stdout("[]"),
         "malformed" => Scenario::success().with_stdout("not json"),
         "non_zero_exit" => Scenario::failure(1),
-        // Manual `gah dispatch --mode fix --mr <id>` path for GitLab provider.
-        "manual_fix_needs_fix" => Scenario::success().with_stdout(
-            serde_json::to_string(&gitlab_mr_json(GitlabMrParams {
-                title: "TICKET-269 Fix race".into(),
-                branch: "gah/fix-needs-fix".into(),
-                labels: vec!["gah-needs-fix".into()],
-                pipeline_status: None,
-                url: None,
-                iid: Some(269),
-                state: Some("opened".into()),
-                draft: Some(false),
-                merged_at: None,
-                updated_at: None,
-            }))
-            .unwrap(),
-        ),
-        "manual_fix_needs_fix_closed" => Scenario::success().with_stdout(
-            serde_json::to_string(&gitlab_mr_json(GitlabMrParams {
-                title: "TICKET-269 Fix race".into(),
-                branch: "gah/fix-needs-fix".into(),
-                labels: vec!["gah-needs-fix".into()],
-                pipeline_status: None,
-                url: None,
-                iid: Some(269),
-                state: Some("closed".into()),
-                draft: Some(false),
-                merged_at: None,
-                updated_at: None,
-            }))
-            .unwrap(),
-        ),
-        "manual_fix_needs_fix_merged" => Scenario::success().with_stdout(
-            serde_json::to_string(&gitlab_mr_json(GitlabMrParams {
-                title: "TICKET-269 Fix race".into(),
-                branch: "gah/fix-needs-fix".into(),
-                labels: vec!["gah-needs-fix".into()],
-                pipeline_status: None,
-                url: None,
-                iid: Some(269),
-                state: Some("merged".into()),
-                draft: Some(false),
-                merged_at: Some("2026-07-01T00:00:00Z".into()),
-                updated_at: None,
-            }))
-            .unwrap(),
-        ),
         _ => Scenario::failure(127).with_stderr(format!("unknown gitlab scenario: {name}")),
     }
+}
+
+struct GitlabMrFixture {
+    list: Scenario,
+    single: Scenario,
+    pipelines: Scenario,
+}
+
+/// Manual-fix MR fixtures reachable by both lookup shapes a repair
+/// preflight can use: by iid (a single object) and by branch (issue #551 --
+/// the merge-requests list endpoint, a JSON array). `None` for any other
+/// scenario name, so `gitlab_scenario` falls back to `load_gitlab_fixture`.
+fn manual_fix_gitlab_fixture(name: &str) -> Option<GitlabMrFixture> {
+    let (state, merged_at) = match name {
+        "manual_fix_needs_fix" => ("opened", None),
+        "manual_fix_needs_fix_closed" => ("closed", None),
+        "manual_fix_needs_fix_merged" => ("merged", Some("2026-07-01T00:00:00Z")),
+        _ => return None,
+    };
+    let mr = gitlab_mr_json(GitlabMrParams {
+        title: "TICKET-269 Fix race".into(),
+        branch: "gah/fix-needs-fix".into(),
+        labels: vec!["gah-needs-fix".into()],
+        pipeline_status: None,
+        url: None,
+        iid: Some(269),
+        state: Some(state.into()),
+        draft: Some(false),
+        merged_at: merged_at.map(String::from),
+        updated_at: None,
+    });
+    Some(GitlabMrFixture {
+        list: Scenario::success().with_stdout(serde_json::to_string(&vec![&mr]).unwrap()),
+        single: Scenario::success().with_stdout(serde_json::to_string(&mr).unwrap()),
+        pipelines: Scenario::success().with_stdout("[]"),
+    })
 }
 
 fn load_worker_fixture(name: &str) -> Scenario {

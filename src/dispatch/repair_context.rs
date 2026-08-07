@@ -4,6 +4,7 @@ use crate::config::GahConfig;
 use crate::job_kind::JobKind;
 use crate::ledger::{self, LedgerEntry};
 use anyhow::{Context, Result};
+use std::fmt;
 use std::path::Path;
 use std::process::Command;
 
@@ -42,47 +43,149 @@ pub(super) struct RepairIdentity<'a> {
 /// the durable, provider-neutral source for both GitHub and GitLab repairs.
 /// Structured review verdicts may live on either a dedicated review entry or a
 /// backfilled implementation entry, so both are considered.
+/// Issue #551: the remote MR/PR this repair is based on is no longer a valid
+/// base -- either it advanced past the SHA this attempt observed (a
+/// concurrent push) or it's no longer open (merged or closed). Kept distinct
+/// from a generic provider-fetch error so callers can terminate cleanly
+/// (no worker launch, no force-push) instead of recording an opaque harness
+/// failure. Carries expected/observed source SHAs so ledger diagnostics and
+/// events show exactly what moved.
+#[derive(Debug)]
+pub(in crate::dispatch) struct StaleSourceError {
+    pub(in crate::dispatch) branch: String,
+    pub(in crate::dispatch) reason: String,
+    pub(in crate::dispatch) expected_source_sha: Option<String>,
+    pub(in crate::dispatch) observed_source_sha: Option<String>,
+}
+
+impl fmt::Display for StaleSourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "repair branch '{}' has a stale source: {} (expected source sha {}, observed source sha {}); re-run review before repair",
+            self.branch,
+            self.reason,
+            self.expected_source_sha.as_deref().unwrap_or("unknown"),
+            self.observed_source_sha.as_deref().unwrap_or("unknown"),
+        )
+    }
+}
+
+impl std::error::Error for StaleSourceError {}
+
+pub(in crate::dispatch) fn stale_source_error(err: &anyhow::Error) -> Option<&StaleSourceError> {
+    err.downcast_ref::<StaleSourceError>()
+}
+
 pub(super) fn load(
     cfg: &GahConfig,
     profile: &crate::config::Profile,
     identity: RepairIdentity<'_>,
     worktree: &Path,
 ) -> Result<RepairContext> {
-    if let Some(expected) = identity.expected_review_generation {
-        let live = current_provider_generation(profile, identity.branch)?;
-        if live.as_deref() != Some(expected) {
-            anyhow::bail!(
-                "repair branch '{}' changed after controller observation: expected review generation '{expected}', live provider generation is '{}'; re-run review before repair",
-                identity.branch,
-                live.as_deref().unwrap_or("unknown")
-            );
-        }
-    }
     let entries = ledger::read_entries(cfg).context("reading repair review context from ledger")?;
     let context = latest_from_entries_for_generation(&entries, identity)?;
     ensure_source_is_ancestor(worktree, &context.source_sha)?;
+
+    // Re-read live provider state immediately before dispatch -- the ledger
+    // above only proves gah's own last observation was consistent, not that
+    // nothing has changed since (a human push, a merge, a close).
+    if matches!(profile.provider.as_str(), "github" | "gitlab") {
+        let target = crate::provider::find_review_target_by_branch(profile, identity.branch)
+            .with_context(|| {
+                format!(
+                    "refreshing live review identity for repair branch '{}'",
+                    identity.branch
+                )
+            })?;
+        ensure_review_target_still_actionable(&identity, &target, &context)?;
+    }
+
     Ok(context)
 }
 
-fn current_provider_generation(
+fn ensure_review_target_still_actionable(
+    identity: &RepairIdentity<'_>,
+    target: &crate::provider::ReviewTarget,
+    context: &RepairContext,
+) -> std::result::Result<(), StaleSourceError> {
+    if is_terminal_state(target) {
+        return Err(StaleSourceError {
+            branch: identity.branch.to_string(),
+            reason: format!(
+                "MR/PR is no longer open (state={}, merged_at={})",
+                target.state.as_deref().unwrap_or("unknown"),
+                target.merged_at.as_deref().unwrap_or("none"),
+            ),
+            expected_source_sha: Some(context.source_sha.clone()),
+            observed_source_sha: target.source_sha.clone(),
+        });
+    }
+    if let Some(expected) = identity.expected_review_generation {
+        let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+            target.source_sha.as_deref(),
+            target.title.as_deref(),
+            target.body.as_deref(),
+            target.draft,
+        );
+        let live = crate::ledger::review_generation(
+            target.source_sha.as_deref(),
+            Some(&metadata_fingerprint),
+        );
+        if live.as_deref() != Some(expected) {
+            return Err(StaleSourceError {
+                branch: identity.branch.to_string(),
+                reason: format!(
+                    "changed after controller observation: expected review generation '{expected}', live provider generation is '{}'",
+                    live.as_deref().unwrap_or("unknown")
+                ),
+                expected_source_sha: Some(context.source_sha.clone()),
+                observed_source_sha: target.source_sha.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Issue #551 AC4: re-check immediately before push that a repair's remote
+/// target wasn't merged or closed while the worker ran. Scoped to repairs
+/// (`existing_branch`) and supported providers only -- a fresh dispatch has
+/// no pre-existing MR/PR to go stale.
+pub(super) fn ensure_still_open_before_publish(
     profile: &crate::config::Profile,
     branch: &str,
-) -> Result<Option<String>> {
+) -> Result<()> {
     if !matches!(profile.provider.as_str(), "github" | "gitlab") {
-        return Ok(None);
+        return Ok(());
     }
-    let target = crate::provider::find_review_target_by_branch(profile, branch)
-        .with_context(|| format!("refreshing live review identity for repair branch '{branch}'"))?;
-    let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
-        target.source_sha.as_deref(),
-        target.title.as_deref(),
-        target.body.as_deref(),
-        target.draft,
-    );
-    Ok(crate::ledger::review_generation(
-        target.source_sha.as_deref(),
-        Some(&metadata_fingerprint),
-    ))
+    let target =
+        crate::provider::find_review_target_by_branch(profile, branch).with_context(|| {
+            format!("refreshing live review identity for repair branch '{branch}' before publish")
+        })?;
+    if is_terminal_state(&target) {
+        return Err(StaleSourceError {
+            branch: branch.to_string(),
+            reason: format!(
+                "MR/PR is no longer open (state={}, merged_at={})",
+                target.state.as_deref().unwrap_or("unknown"),
+                target.merged_at.as_deref().unwrap_or("none"),
+            ),
+            expected_source_sha: None,
+            observed_source_sha: target.source_sha.clone(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn is_terminal_state(target: &crate::provider::ReviewTarget) -> bool {
+    if target.merged_at.is_some() {
+        return true;
+    }
+    matches!(
+        target.state.as_deref(),
+        Some("MERGED" | "CLOSED" | "merged" | "closed" | "locked")
+    )
 }
 
 #[cfg(test)]
@@ -295,6 +398,24 @@ mod tests {
     use crate::ledger::LedgerEntry;
     use std::fs;
 
+    /// Thread-local `gh`/`glab` PATH override for this module's tests, mirroring
+    /// `provider::tests::PathOverride`. Drop-guarded so a panic mid-test still
+    /// clears it instead of bleeding into an unrelated test on a reused thread.
+    struct FakeProviderPath;
+
+    impl FakeProviderPath {
+        fn set(path: &str) -> Self {
+            crate::provider::set_test_provider_path(path);
+            FakeProviderPath
+        }
+    }
+
+    impl Drop for FakeProviderPath {
+        fn drop(&mut self) {
+            crate::provider::clear_test_provider_path();
+        }
+    }
+
     fn review_entry(branch: &str, work_id: &str, timestamp: &str) -> LedgerEntry {
         let profile = crate::ledger::test_util::profile();
         let mut entry = LedgerEntry::new("gah", &profile, "agy", "review", branch, None, None);
@@ -468,6 +589,20 @@ mod tests {
         entry.review_evidence = vec!["file:src/lib.rs".to_string()];
         crate::ledger::append(&cfg, &entry).unwrap();
 
+        // Issue #551: `load` now always re-reads live provider state for a
+        // github/gitlab profile (not just when comparing a review
+        // generation), so this profile's default "github" provider needs a
+        // fake `gh` reporting an open PR to keep testing the ledger-backfill
+        // behavior this test is actually about.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let bin_dir = tempfile::tempdir().unwrap();
+        crate::runner::backends::test_util::make_fake_bin(
+            bin_dir.path(),
+            "gh",
+            "#!/bin/sh\ncase \"$1 $2\" in\n  \"api --method\") printf '[{\"number\":493}]\\n' ;;\n  \"pr view\") printf '{\"number\":493,\"url\":\"https://github.com/owner/repo/pull/493\",\"state\":\"OPEN\",\"mergedAt\":null,\"headRefOid\":\"livesha\",\"title\":\"t\",\"body\":\"b\",\"isDraft\":false,\"headRefName\":\"gah/fix\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}\\n' ;;\n  *) echo \"unexpected gh invocation: $@\" >&2; exit 1 ;;\nesac\n",
+        );
+        let _path_guard = FakeProviderPath::set(bin_dir.path().to_str().unwrap());
+
         let context = load(
             &cfg,
             &profile,
@@ -550,5 +685,124 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("is not an ancestor"));
+    }
+
+    fn review_target(
+        state: Option<&str>,
+        merged_at: Option<&str>,
+    ) -> crate::provider::ReviewTarget {
+        crate::provider::ReviewTarget {
+            id: "1".into(),
+            url: "https://example.test/pr/1".into(),
+            source_branch: "gah/549".into(),
+            target_branch: "main".into(),
+            state: state.map(str::to_string),
+            merged_at: merged_at.map(str::to_string),
+            title: None,
+            body: None,
+            draft: false,
+            ci_status: None,
+            merge_status: None,
+            source_sha: Some("live-sha".into()),
+            target_sha: None,
+        }
+    }
+
+    fn repair_context_fixture() -> RepairContext {
+        RepairContext {
+            work_id: "549".into(),
+            verdict: "NEEDS_FIX".into(),
+            reviewer_backend: "claude".into(),
+            reviewer_model: None,
+            reviewer_tier: None,
+            source_sha: "expected-sha".into(),
+            metadata_fingerprint: "fp".into(),
+            review_contract_version: 1,
+            review_generation: "gen".into(),
+            blocking_findings: vec![],
+            non_blocking_findings: vec![],
+            risk_notes: vec![],
+            evidence: vec![],
+            compatibility_evidence: vec![],
+        }
+    }
+
+    // Issue #549: a merged PR/MR must never be picked back up by a repair --
+    // this is the classification `find_review_target_by_branch` now feeds.
+    #[test]
+    fn is_terminal_state_true_for_merged_at_regardless_of_state_string() {
+        assert!(is_terminal_state(&review_target(
+            Some("OPEN"),
+            Some("2026-01-01T00:00:00Z")
+        )));
+    }
+
+    #[test]
+    fn is_terminal_state_true_for_closed_or_merged_state_strings() {
+        for state in ["MERGED", "CLOSED", "merged", "closed", "locked"] {
+            assert!(
+                is_terminal_state(&review_target(Some(state), None)),
+                "expected state={state} to be terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn is_terminal_state_false_for_open() {
+        assert!(!is_terminal_state(&review_target(Some("OPEN"), None)));
+        assert!(!is_terminal_state(&review_target(Some("opened"), None)));
+    }
+
+    #[test]
+    fn ensure_review_target_still_actionable_rejects_merged_pr_before_dispatch() {
+        let identity = RepairIdentity {
+            profile_name: "p",
+            repo_id: "r",
+            branch: "gah/549",
+            work_id: None,
+            expected_review_generation: None,
+        };
+        let target = review_target(Some("MERGED"), Some("2026-01-01T00:00:00Z"));
+        let context = repair_context_fixture();
+        let err = ensure_review_target_still_actionable(&identity, &target, &context).unwrap_err();
+        assert_eq!(err.expected_source_sha.as_deref(), Some("expected-sha"));
+        assert_eq!(err.observed_source_sha.as_deref(), Some("live-sha"));
+
+        // Round-trips through anyhow as a typed error, matching how
+        // `repair::load_context` distinguishes this from a generic
+        // harness error to pick `FailureClass::StaleSource`.
+        let anyhow_err: anyhow::Error = err.into();
+        assert!(stale_source_error(&anyhow_err).is_some());
+    }
+
+    // Issue #537: a live review-generation drift (remote advanced) must also
+    // be reported as a typed stale-source outcome, not a generic error.
+    #[test]
+    fn ensure_review_target_still_actionable_rejects_generation_drift() {
+        let identity = RepairIdentity {
+            profile_name: "p",
+            repo_id: "r",
+            branch: "gah/537",
+            work_id: None,
+            expected_review_generation: Some("expected-generation"),
+        };
+        let target = review_target(Some("OPEN"), None);
+        let context = repair_context_fixture();
+        let err = ensure_review_target_still_actionable(&identity, &target, &context).unwrap_err();
+        assert!(err.reason.contains("changed after controller observation"));
+    }
+
+    #[test]
+    fn ensure_review_target_still_actionable_allows_open_matching_generation() {
+        let identity = RepairIdentity {
+            profile_name: "p",
+            repo_id: "r",
+            branch: "gah/537",
+            work_id: None,
+            expected_review_generation: None,
+        };
+        let target = review_target(Some("OPEN"), None);
+        let context = repair_context_fixture();
+        assert!(ensure_review_target_still_actionable(&identity, &target, &context).is_ok());
     }
 }
