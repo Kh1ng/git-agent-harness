@@ -54,6 +54,7 @@ pub(super) fn defaults() -> Defaults {
             allow_review_fallback: true,
             ..RoutingPolicy::default()
         },
+        ..Default::default()
     }
 }
 

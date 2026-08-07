@@ -51,6 +51,8 @@ default_target_branch = "main"
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: HashMap::new(),
     };

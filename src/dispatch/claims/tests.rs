@@ -65,6 +65,8 @@ fn scan_available_tickets_reports_never_dispatched_ticket() {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };
@@ -108,6 +110,8 @@ fn scan_available_tickets_reports_failed_history_with_no_active_mr() {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };
@@ -157,6 +161,8 @@ fn human_required_is_not_cleared_by_a_later_non_review_entry() {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };
@@ -217,6 +223,8 @@ fn paid_route_grant_clears_handoff_and_resumes_escalation_without_consuming_atte
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };
@@ -279,6 +287,8 @@ fn scan_available_tickets_excludes_ticket_with_active_mr() {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };
@@ -382,6 +392,8 @@ fn scan_available_tickets_excludes_ticket_completed_via_merged_mr() {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };
@@ -458,6 +470,8 @@ fn scan_available_tickets_ignores_ledger_entries_from_a_different_repo() {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };
@@ -832,6 +846,8 @@ fn test_check_duplicate_work_cases() {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };
@@ -995,6 +1011,8 @@ fn check_duplicate_work_blocks_on_active_claim() {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };
@@ -1158,6 +1176,8 @@ fn merge_branch_resolves_terminal_failure_with_merge_run_id() {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing: crate::config::RoutingPolicy::default(),
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     };

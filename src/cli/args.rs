@@ -161,6 +161,21 @@ pub enum Commands {
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },
+    /// Apply firewall rules for one gah-managed port at a configured (or
+    /// overridden) network-exposure level. Idempotent: safe to re-run.
+    NetworkExpose {
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        label: String,
+        /// "loopback" | "lan" | "lan_tailscale". Defaults to the
+        /// configured `[defaults].network_exposure` when omitted --
+        /// exposure is a host-level setting, not per-profile.
+        #[arg(long)]
+        level: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
     /// Alert-only health check for gah-loop@<profile>.service units.
     /// Observation only: never starts, restarts, or enables a loop.
     WatchdogCheck {

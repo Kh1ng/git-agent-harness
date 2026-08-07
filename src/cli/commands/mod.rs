@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod external_approval;
 pub mod init;
 pub mod ledger;
+pub mod network;
 pub mod policy;
 pub mod price_guard;
 pub mod profile;

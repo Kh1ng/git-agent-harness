@@ -78,6 +78,8 @@ pub(super) fn gah_config(routing: RoutingPolicy) -> GahConfig {
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing,
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     }
@@ -96,6 +98,8 @@ pub(super) fn gah_config_with_ledger(tmp: &Path, routing: RoutingPolicy) -> GahC
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
             routing,
+
+            ..Default::default()
         },
         profiles: std::collections::HashMap::new(),
     }
