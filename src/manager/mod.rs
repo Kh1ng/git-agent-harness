@@ -37,6 +37,9 @@ pub mod fake;
 #[cfg(test)]
 mod tests;
 
+// Real provider adapters (issue #817, #816, #818)
+pub mod codex;
+
 /// Stable GAH-owned session identity, independent of any provider's own
 /// conversation-ID scheme -- adapters map this to whatever ID the
 /// underlying CLI/protocol actually uses (ACP's `sessionId`, a Codex

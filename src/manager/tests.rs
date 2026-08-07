@@ -1,3 +1,4 @@
+use super::codex::CodexManagerSession;
 use super::contract::run_contract_suite;
 use super::fake::FakeManagerSession;
 use super::*;
@@ -17,6 +18,36 @@ fn fake_adapter_satisfies_the_contract_suite_with_every_optional_capability_off(
     // Exercises the contract suite's UnsupportedCapability assertions --
     // without this, that branch of contract.rs would never actually run.
     let mut session = FakeManagerSession::new(SessionCapabilities::default());
+    run_contract_suite(&mut session);
+}
+
+#[test]
+fn codex_adapter_satisfies_the_contract_suite_with_every_optional_capability_on() {
+    // Run the contract suite against the real Codex adapter
+    if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
+        return;
+    }
+
+    let mut session = CodexManagerSession::new(
+        None,
+        Some(SessionCapabilities {
+            resume: true,
+            interrupt: true,
+            inspect: true,
+        }),
+    )
+    .unwrap();
+    run_contract_suite(&mut session);
+}
+
+#[test]
+fn codex_adapter_satisfies_the_contract_suite_with_every_optional_capability_off() {
+    // Run the contract suite against the real Codex adapter with capabilities off
+    if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
+        return;
+    }
+
+    let mut session = CodexManagerSession::new(None, Some(SessionCapabilities::default())).unwrap();
     run_contract_suite(&mut session);
 }
 
