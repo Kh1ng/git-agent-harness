@@ -18,8 +18,16 @@ import { spawnSync } from 'node:child_process';
 import { runProfileList } from '../gahCli.js';
 import { AsyncTtlCache } from '../asyncTtlCache.js';
 
-const DEFAULT_BASE_URL = process.env.TDAI_GATEWAY_URL ?? 'http://127.0.0.1:8420';
-const API_KEY = process.env.TDAI_GATEWAY_API_KEY;
+// Read fresh per call, not cached at module-load time: lets tests point
+// different calls at different fake gateways within one process, and
+// (issue #880) will let gateway location become runtime-configurable
+// rather than fixed for the life of the server process.
+function gatewayBaseUrl(): string {
+  return process.env.TDAI_GATEWAY_URL ?? 'http://127.0.0.1:8420';
+}
+function gatewayApiKey(): string | undefined {
+  return process.env.TDAI_GATEWAY_API_KEY;
+}
 
 export interface RecallResult {
   context: string;
@@ -77,10 +85,32 @@ export async function sessionKeyForProfile(profile: string): Promise<string> {
   return `gah:manager:${await resolveProjectKey(profile)}`;
 }
 
+/** Same normalization Rust's `work_claim::normalize_work_identity` applies
+ * (`src/work_claim.rs`), mirrored here so "#71", "71", and "TICKET-071" all
+ * resolve to the same session key regardless of which caller/language names
+ * the ticket -- a repair agent and a review agent must land in the same
+ * memory space for the same ticket. */
+function normalizeTicketId(raw: string): string {
+  const trimmed = raw.trim();
+  const digits = trimmed.replace(/^#/, '').replace(/^TICKET-/i, '');
+  if (/^\d+$/.test(digits)) {
+    return `#${digits.replace(/^0+(?=\d)/, '')}`;
+  }
+  return trimmed;
+}
+
+/** Issue #885: leaf scope for one ticket's dispatch-side memory (repair,
+ * review, ...), namespaced under the same project key `sessionKeyForProfile`
+ * uses so both live in one gateway store without colliding. */
+export async function sessionKeyForTicket(profile: string, ticketId: string): Promise<string> {
+  return `gah:worker:${await resolveProjectKey(profile)}:${normalizeTicketId(ticketId)}`;
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (API_KEY) headers.Authorization = `Bearer ${API_KEY}`;
-  const res = await fetch(`${DEFAULT_BASE_URL}${path}`, {
+  const apiKey = gatewayApiKey();
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const res = await fetch(`${gatewayBaseUrl()}${path}`, {
     method: 'POST',
     headers,
     body: JSON.stringify(body)
@@ -92,10 +122,10 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export async function recall(profile: string, query: string): Promise<RecallResult> {
+async function recallForKey(sessionKey: string, query: string): Promise<RecallResult> {
   const result = await postJson<{ context: string; memory_count: number; code: number; message: string }>(
     '/recall',
-    { query, session_key: await sessionKeyForProfile(profile) }
+    { query, session_key: sessionKey }
   );
   if (result.code !== 0) {
     throw new Error(`memory gateway recall degraded (code=${result.code}): ${result.message}`);
@@ -103,17 +133,50 @@ export async function recall(profile: string, query: string): Promise<RecallResu
   return { context: result.context, memoryCount: result.memory_count };
 }
 
-export async function capture(
-  profile: string,
+async function captureForKey(
+  sessionKey: string,
   userContent: string,
   assistantContent: string
 ): Promise<CaptureResult> {
   const result = await postJson<{ l0_recorded: number; scheduler_notified: boolean }>('/capture', {
     user_content: userContent,
     assistant_content: assistantContent,
-    session_key: await sessionKeyForProfile(profile)
+    session_key: sessionKey
   });
   return { l0Recorded: result.l0_recorded };
+}
+
+export async function recall(profile: string, query: string): Promise<RecallResult> {
+  return recallForKey(await sessionKeyForProfile(profile), query);
+}
+
+export async function capture(
+  profile: string,
+  userContent: string,
+  assistantContent: string
+): Promise<CaptureResult> {
+  return captureForKey(await sessionKeyForProfile(profile), userContent, assistantContent);
+}
+
+/** Ticket-scoped recall for repair/review agents -- callers never see key
+ * construction, gateway URL, or auth (issue #885). Wiring this into real
+ * dispatch attempts is issue #830's scope, gated on #878 (manager-chat's
+ * hard-block-on-failure fix) landing first. */
+export async function recallForTicket(
+  profile: string,
+  ticketId: string,
+  query: string
+): Promise<RecallResult> {
+  return recallForKey(await sessionKeyForTicket(profile, ticketId), query);
+}
+
+export async function captureForTicket(
+  profile: string,
+  ticketId: string,
+  userContent: string,
+  assistantContent: string
+): Promise<CaptureResult> {
+  return captureForKey(await sessionKeyForTicket(profile, ticketId), userContent, assistantContent);
 }
 
 /** Backs both /clear and compaction-like commands (see ManagerChatManager's
