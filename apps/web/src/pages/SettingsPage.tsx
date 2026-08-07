@@ -220,6 +220,8 @@ export function SettingsPage() {
 
       <GatewaySettingsSection />
 
+      <AddNodeSection />
+
       <ProfileConfigViewerSection
         selectedName={selectedName}
         profileConfig={profileConfig}
@@ -885,6 +887,91 @@ function GatewaySettingsSection() {
         <p className="text-xs text-muted">Not configured -- no TDAI_GATEWAY_API_KEY set on this node.</p>
       )}
 
+      {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
+    </section>
+  );
+}
+
+/** Issue #880/#881 follow-up: generates a ready-to-paste command for a
+ * genuinely different machine (macOS or Linux -- bootstrap.sh handles
+ * both identically, no OS branching needed; Windows gets a one-line WSL
+ * note rather than a separate script) to point at this node's compaction
+ * db. Deliberately does NOT also generate a full node-registration
+ * command (issue #881's `register-node`) -- that requires the central
+ * node to be reachable over HTTPS (registerNode() rejects a non-loopback
+ * `authenticated_remote` URL that isn't https/wss), which this host isn't
+ * set up for yet. */
+function AddNodeSection() {
+  const [settings, setSettings] = useState<GatewaySettingsSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    gahApi
+      .getGatewaySettings()
+      .then((data) => {
+        setSettings(data);
+        setError(null);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  if (!settings) {
+    return (
+      <section className="card-padded max-w-2xl">
+        <h3 className="text-sm font-semibold text-primary mb-1">Add a Node</h3>
+        {error ? <p className="text-xs text-critical">Failed to load: {error}</p> : <p className="text-xs text-muted">Loading…</p>}
+      </section>
+    );
+  }
+
+  const gatewayPort = (() => {
+    try {
+      return new URL(settings.url).port || '8420';
+    } catch {
+      return '8420';
+    }
+  })();
+
+  const command =
+    settings.tailscaleIPv4 && settings.apiKeyConfigured
+      ? `curl -fsSL https://raw.githubusercontent.com/Kh1ng/git-agent-harness/main/scripts/bootstrap.sh | GAH_GATEWAY_MODE=remote GAH_GATEWAY_URL=http://${settings.tailscaleIPv4}:${gatewayPort} GAH_GATEWAY_API_KEY=${settings.apiKey} bash`
+      : null;
+
+  const copyCommand = () => {
+    if (!command) return;
+    navigator.clipboard.writeText(command).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <section className="card-padded max-w-2xl">
+      <h3 className="text-sm font-semibold text-primary mb-1">Add a Node</h3>
+      <p className="text-xs text-muted mb-3">
+        Paste on a new machine (macOS or Linux — on Windows, run this inside WSL) to point it at this node's
+        compaction db over Tailscale. Installs Rust/Node if missing, clones the repo, and validates the key
+        against this gateway before completing — it fails loudly instead of silently succeeding with a bad key.
+      </p>
+      {command ? (
+        <div className="flex items-start gap-2">
+          <pre className="flex-1 bg-raised border border-subtle rounded-md px-3 py-2 text-xs text-primary font-mono whitespace-pre-wrap break-all">
+            {command}
+          </pre>
+          <button onClick={copyCommand} className="text-muted hover:text-primary mt-1 shrink-0" title="Copy">
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        </div>
+      ) : !settings.apiKeyConfigured ? (
+        <p className="text-xs text-muted">Configure a gateway API key above first.</p>
+      ) : (
+        <p className="text-xs text-muted">
+          Couldn't detect this host's Tailscale address (is <code className="font-mono">tailscale</code> installed and
+          logged in?). Fill in the host yourself:{' '}
+          <code className="font-mono">GAH_GATEWAY_URL=http://&lt;this-host&gt;:{gatewayPort}</code>.
+        </p>
+      )}
       {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
     </section>
   );
