@@ -22,10 +22,10 @@ import { AsyncTtlCache } from '../asyncTtlCache.js';
 // different calls at different fake gateways within one process, and
 // (issue #880) will let gateway location become runtime-configurable
 // rather than fixed for the life of the server process.
-function gatewayBaseUrl(): string {
+export function gatewayBaseUrl(): string {
   return process.env.TDAI_GATEWAY_URL ?? 'http://127.0.0.1:8420';
 }
-function gatewayApiKey(): string | undefined {
+export function gatewayApiKey(): string | undefined {
   return process.env.TDAI_GATEWAY_API_KEY;
 }
 
