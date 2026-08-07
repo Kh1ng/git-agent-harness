@@ -387,6 +387,38 @@ blocks startup either, since failing closed on a flaky registry would be
 worse than the problem this exists to catch. See `crate::fleet_preflight`
 for the implementation.
 
+### Node liveness scheduler (issue #883)
+
+Before this, nothing polled registered nodes periodically -- `pollNodeObservation`
+only ran on-demand (a dashboard fetch, dispatch routing), so a node with
+nothing currently dispatching to it could go dark and never get flagged.
+`apps/server`'s `bin.ts` now starts `RegistryService.startLivenessScheduler()`
+at boot: every 60 seconds it polls every registered node via the same
+`getNodeObservations()` the dashboard and `/api/registry/fleet` already
+use, and alerts once a node has been `stale`/`unreachable`/`auth_failed`/
+`incompatible` for 3 consecutive checks (~3 minutes) -- once per outage,
+not on every subsequent bad check, and again if it recovers and later goes
+bad a second time.
+
+Alerting reuses the same shell-hook shape as the Rust side's per-profile
+`notify_command` (section 4 below) rather than inventing new plumbing: set
+`GAH_NODE_LIVENESS_NOTIFY_COMMAND` in `apps/server`'s environment (e.g.
+`/etc/gah/server.env`, `EnvironmentFile=-`'d by `gah-server.service`) and
+a one-line message is piped to that command's stdin, shell-executed.
+Unset skips alerting entirely; a failing or missing command is logged to
+stderr and swallowed -- it never crashes the scheduler.
+
+```bash
+# /etc/gah/server.env
+GAH_NODE_LIVENESS_NOTIFY_COMMAND=/home/you/bin/telegram-notify
+```
+
+This is the interim, poll-based liveness model. The eventual model
+(worker nodes dial in and hold a persistent WebSocket, reusing the
+already-built `client.hello`/`server.welcome` handshake and the
+currently-inert `ping`/`server.ping` message as a real heartbeat) is a
+bigger lift -- tracked separately, not implemented here.
+
 ---
 
 ## 2. Required credentials & scopes

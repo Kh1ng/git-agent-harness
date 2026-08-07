@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import type {
   RegisteredNode,
   NodeSummary,
@@ -49,8 +50,38 @@ const NODE_OBSERVATION_TIMEOUT_MS = 5_000;
 const NODE_STALE_AFTER_MS = 30 * 60 * 1000;
 const NODE_POLL_CONCURRENCY = 4;
 
+// Node liveness scheduler (issue #883): nothing drove pollNodeObservation
+// periodically before this -- it only ran on-demand (dashboard fetch,
+// dispatch routing), so a node with nothing currently dispatching to it
+// could go dark and never get flagged. "Bad" states below all mean the
+// node isn't answering health checks correctly; each is worth escalating
+// the same way, so they're treated as one bucket for alerting purposes.
+const LIVENESS_POLL_INTERVAL_MS = 60_000;
+const LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS = 3;
+const LIVENESS_BAD_STATES: NodeObservationState[] = ['stale', 'unreachable', 'auth_failed', 'incompatible'];
+
 function nowIso(ms: number = Date.now()): string {
   return new Date(ms).toISOString();
+}
+
+/** Pipes a single one-line message to a shell command's stdin, matching the
+ * Rust side's per-profile `notify_command` shape (`docs/OPERATIONS.md`
+ * section 4) so an operator configuring both doesn't learn two conventions.
+ * Reads GAH_NODE_LIVENESS_NOTIFY_COMMAND fresh per call (not cached at
+ * module load) so tests can vary it. A failing or missing command is
+ * logged to stderr and swallowed -- it must never crash the scheduler. */
+function sendLivenessAlert(message: string): void {
+  const command = process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND;
+  if (!command) return;
+  try {
+    const child = spawn('sh', ['-c', command], { stdio: ['pipe', 'ignore', 'pipe'] });
+    child.on('error', (err) => console.error(`Node liveness notify command failed to start: ${err.message}`));
+    child.stderr?.on('data', (chunk) => console.error(`Node liveness notify command stderr: ${chunk}`));
+    child.stdin.write(`${message}\n`);
+    child.stdin.end();
+  } catch (err) {
+    console.error(`Node liveness notify command failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function parseIsoMillis(value: string | null | undefined): number | null {
@@ -220,6 +251,9 @@ export function resolveSecret(secretRef: string): string {
 export class RegistryService {
   private configPath: string;
   private nodes: Map<string, RegisteredNode> = new Map();
+  private livenessTimer: ReturnType<typeof setInterval> | null = null;
+  private consecutiveBadChecks: Map<string, number> = new Map();
+  private alreadyAlerted: Set<string> = new Set();
 
   constructor(configPath?: string) {
     this.configPath = configPath || process.env.GAH_REGISTRY_CONFIG_PATH || resolve(process.cwd(), 'config/registry-config.json');
@@ -636,5 +670,50 @@ export class RegistryService {
       throw new Error(`Node ${nodeId} not found`);
     }
     return this.pollNodeObservation(node, profile);
+  }
+
+  /** Starts the periodic liveness poll (issue #883). Idempotent -- calling
+   * this while already running just restarts the interval with the new
+   * value. `unref()` so a bare scheduler doesn't keep the process alive on
+   * its own (the HTTP server's own listeners already do that). */
+  startLivenessScheduler(intervalMs: number = LIVENESS_POLL_INTERVAL_MS): void {
+    this.stopLivenessScheduler();
+    this.livenessTimer = setInterval(() => {
+      this.runLivenessCheck().catch((err) => console.error(`Node liveness check failed: ${err instanceof Error ? err.message : String(err)}`));
+    }, intervalMs);
+    this.livenessTimer.unref?.();
+  }
+
+  stopLivenessScheduler(): void {
+    if (this.livenessTimer) {
+      clearInterval(this.livenessTimer);
+      this.livenessTimer = null;
+    }
+  }
+
+  /** One liveness poll cycle: check every registered node, track
+   * consecutive bad-state counts, and alert once per node the first time
+   * it crosses the threshold (not on every subsequent bad check --
+   * silenced again once it recovers, so a flapping node doesn't spam).
+   * Exposed directly (not just via the interval) so tests can drive a
+   * cycle deterministically instead of racing real timers. */
+  async runLivenessCheck(): Promise<void> {
+    const observations = await this.getNodeObservations();
+    for (const obs of observations) {
+      const isBad = LIVENESS_BAD_STATES.includes(obs.state);
+      if (!isBad) {
+        this.consecutiveBadChecks.delete(obs.node_id);
+        this.alreadyAlerted.delete(obs.node_id);
+        continue;
+      }
+      const count = (this.consecutiveBadChecks.get(obs.node_id) ?? 0) + 1;
+      this.consecutiveBadChecks.set(obs.node_id, count);
+      if (count >= LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS && !this.alreadyAlerted.has(obs.node_id)) {
+        this.alreadyAlerted.add(obs.node_id);
+        sendLivenessAlert(
+          `Node "${obs.display_name}" (${obs.node_id}) has been ${obs.state} for ${count} consecutive checks (last seen: ${obs.last_seen_at ?? 'never'}).`
+        );
+      }
+    }
   }
 }
