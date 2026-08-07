@@ -1,5 +1,9 @@
+# Paired with gah-watchdog.service (issue #726). `gah update`/
+# `scripts/install.sh` install this template but never enable or start it --
+# opt in explicitly:
+#   systemctl --user enable --now gah-watchdog.timer
 [Unit]
-Description=Run the GAH Telegram health check every ten minutes
+Description=Run the GAH loop health check every ten minutes (alert-only)
 
 [Timer]
 OnBootSec=2min

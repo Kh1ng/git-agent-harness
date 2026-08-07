@@ -45,6 +45,7 @@ pub mod tui;
 pub mod update;
 pub mod usage;
 pub mod usage_attribution;
+pub mod watchdog;
 pub mod work_claim;
 pub mod worktree;
 

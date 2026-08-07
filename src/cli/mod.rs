@@ -101,6 +101,14 @@ pub fn run() -> Result<()> {
             dry_run,
         })?,
 
+        Commands::WatchdogCheck {
+            profile,
+            config_path,
+        } => commands::watchdog::run(commands::watchdog::Args {
+            profile,
+            config_path,
+        })?,
+
         Commands::Ledger { command } => commands::ledger::run(command)?,
 
         Commands::Hold { command } => commands::controller::run_hold(command)?,
