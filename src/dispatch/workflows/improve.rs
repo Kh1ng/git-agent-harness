@@ -31,6 +31,7 @@ use crate::{runner, worktree};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+mod attempt_bookkeeping;
 mod bounded_validation;
 pub(crate) use bounded_validation::bounded_validation_failure;
 mod conflict_resolution;
@@ -1368,34 +1369,23 @@ pub(crate) fn improve(
                         BD::Clean | BD::ExpectedRed | BD::UnknownRed => FC::AgentNoProgress,
                     };
                     ledger.set_failure(no_progress_class, FS::PostValidation);
-                    ledger.attempts.push(crate::ledger::AttemptRecord {
-                        attempt_number: attempt + 1,
-                        backend: route.effective_backend.clone(),
-                        effective_model: Some(llm.model.clone()),
-                        exit_code: Some(0),
-                        validation_result: Some("failed".into()),
-                        failure_class: Some(no_progress_class.as_str().into()),
-                        failure_stage: Some(FS::PostValidation.as_str().into()),
-                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
-                        diff_path: None,
-                        checkpoint_branch: None,
-                        checkpoint_sha: None,
-                        usage: attempt_usage(
-                            &result.log_path,
-                            result.agy_cli_log_delta.as_deref(),
-                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
-                            result.transcript_path.as_deref(),
-                            Some(&claude_path),
-                        ),
-                        cli_version: result.agy_version.clone(),
-                    });
-                    record_external_approval_consumption_for_last_attempt(
+                    attempt_bookkeeping::record_failed_validation_attempt(
+                        ledger,
                         cfg,
                         &args.profile,
                         profile,
-                        ledger,
-                    );
-                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
+                        &shutdown_ctx,
+                        shutdown_after_result,
+                        attempt,
+                        &route,
+                        &llm,
+                        &result,
+                        &claude_path,
+                        attempt_start,
+                        "failed",
+                        Some(no_progress_class.as_str().into()),
+                        Some(FS::PostValidation.as_str().into()),
+                    )?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,
@@ -1419,70 +1409,46 @@ pub(crate) fn improve(
                         "Validation still failing; --allow-draft-fail set — pushing as draft."
                     );
                     ledger.validation_result = Some("failed-draft".into());
-                    ledger.attempts.push(crate::ledger::AttemptRecord {
-                        attempt_number: attempt + 1,
-                        backend: route.effective_backend.clone(),
-                        effective_model: Some(llm.model.clone()),
-                        exit_code: Some(0),
-                        validation_result: Some("failed-draft".into()),
-                        failure_class: None,
-                        failure_stage: None,
-                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
-                        diff_path: None,
-                        checkpoint_branch: None,
-                        checkpoint_sha: None,
-                        usage: attempt_usage(
-                            &result.log_path,
-                            result.agy_cli_log_delta.as_deref(),
-                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
-                            result.transcript_path.as_deref(),
-                            Some(&claude_path),
-                        ),
-                        cli_version: result.agy_version.clone(),
-                    });
-                    record_external_approval_consumption_for_last_attempt(
+                    attempt_bookkeeping::record_failed_validation_attempt(
+                        ledger,
                         cfg,
                         &args.profile,
                         profile,
-                        ledger,
-                    );
-                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
+                        &shutdown_ctx,
+                        shutdown_after_result,
+                        attempt,
+                        &route,
+                        &llm,
+                        &result,
+                        &claude_path,
+                        attempt_start,
+                        "failed-draft",
+                        None,
+                        None,
+                    )?;
                     break;
                 } else {
-                    ledger.attempts.push(crate::ledger::AttemptRecord {
-                        attempt_number: attempt + 1,
-                        backend: route.effective_backend.clone(),
-                        effective_model: Some(llm.model.clone()),
-                        exit_code: Some(0),
-                        validation_result: Some("failed".into()),
-                        failure_class: Some(
+                    attempt_bookkeeping::record_failed_validation_attempt(
+                        ledger,
+                        cfg,
+                        &args.profile,
+                        profile,
+                        &shutdown_ctx,
+                        shutdown_after_result,
+                        attempt,
+                        &route,
+                        &llm,
+                        &result,
+                        &claude_path,
+                        attempt_start,
+                        "failed",
+                        Some(
                             crate::ledger::FailureClass::ValidationFailure
                                 .as_str()
                                 .into(),
                         ),
-                        failure_stage: Some(
-                            crate::ledger::FailureStage::PostValidation.as_str().into(),
-                        ),
-                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
-                        diff_path: None,
-                        checkpoint_branch: None,
-                        checkpoint_sha: None,
-                        usage: attempt_usage(
-                            &result.log_path,
-                            result.agy_cli_log_delta.as_deref(),
-                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
-                            result.transcript_path.as_deref(),
-                            Some(&claude_path),
-                        ),
-                        cli_version: result.agy_version.clone(),
-                    });
-                    record_external_approval_consumption_for_last_attempt(
-                        cfg,
-                        &args.profile,
-                        profile,
-                        ledger,
-                    );
-                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
+                        Some(crate::ledger::FailureStage::PostValidation.as_str().into()),
+                    )?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,
