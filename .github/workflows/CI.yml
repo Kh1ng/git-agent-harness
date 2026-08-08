@@ -13,6 +13,43 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Issue: ~1.4GB of accidentally-committed target/ build artifacts sat in
+  # this repo's git history for months before being discovered (.gitignore
+  # already covered target/ by the time this was noticed -- the commits
+  # predated that, or bypassed it via `git add -f`). Rewriting history to
+  # remove it was explicitly ruled out as a fix; this is the actual fix:
+  # catch the next one before it merges, not after.
+  guard-no-build-artifacts:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fail if this PR adds build-artifact-looking paths or oversized files
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          bad=0
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            case "$path" in
+              target/*|*/target/*|node_modules/*|*/node_modules/*|*.rlib)
+                echo "::error file=$path::looks like a build artifact -- should already be gitignored, do not force-add it"
+                bad=1
+                ;;
+            esac
+            size=$(git cat-file -s "$head:$path" 2>/dev/null || echo 0)
+            if [ "$size" -gt 5242880 ]; then
+              mb=$((size / 1048576))
+              echo "::error file=$path::added file is ${mb}MB -- suspiciously large for a source repo, double check this is intentional"
+              bad=1
+            fi
+          done <<< "$(git diff --name-status --diff-filter=A "$base" "$head" | cut -f2)"
+          exit "$bad"
+
   test:
     runs-on: ubuntu-latest
     steps:
