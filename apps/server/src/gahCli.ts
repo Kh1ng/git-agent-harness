@@ -1084,9 +1084,6 @@ export async function runConfigShowFull(
   config?: string
 ): Promise<ConfigShowFull> {
   const args = ['config', 'show', '--json', '--full'];
-  if (config) {
-    args.push('--config-path', config);
-  }
   return runJsonCommand<ConfigShowFull>(args, config);
 }
 
@@ -1411,7 +1408,31 @@ export async function runPmPublish(
 export async function readPmPlanArtifact(planPath: string): Promise<PmPlanArtifact> {
   const { readFile } = await import('node:fs/promises');
   const content = await readFile(planPath, 'utf-8');
-  return JSON.parse(content) as PmPlanArtifact;
+  
+  const parsed = JSON.parse(content);
+  
+  // Basic schema validation for required fields
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Invalid PM plan artifact: expected object');
+  }
+  
+  const artifact = parsed as PmPlanArtifact;
+  
+  // Validate required fields
+  if (typeof artifact.schema_version !== 'number') {
+    throw new Error('Invalid PM plan artifact: missing or invalid schema_version');
+  }
+  if (typeof artifact.profile !== 'string') {
+    throw new Error('Invalid PM plan artifact: missing or invalid profile');
+  }
+  if (typeof artifact.repo !== 'string') {
+    throw new Error('Invalid PM plan artifact: missing or invalid repo');
+  }
+  if (typeof artifact.target !== 'string') {
+    throw new Error('Invalid PM plan artifact: missing or invalid target');
+  }
+  
+  return artifact;
 }
 
 /**
@@ -1425,11 +1446,30 @@ export async function listPmPlans(
   const { join, resolve } = await import('node:path');
   
   // Default session root paths to search for PM plan artifacts
+  // Deduplicate GAH_SESSION_ROOT to avoid scanning the same path multiple times
+  const envSessionRoot = process.env.GAH_SESSION_ROOT;
+  const defaultSessionRoot = resolve(__dirname, '../../../.gah/sessions');
   const sessionRoots = [
     resolve(__dirname, '../../../sessions'),
-    resolve(__dirname, '../../../.gah/sessions'),
-    process.env.GAH_SESSION_ROOT || resolve(__dirname, '../../../.gah/sessions')
-  ];
+    defaultSessionRoot,
+    envSessionRoot || defaultSessionRoot
+  ].filter((root, index, self) => {
+    // Remove duplicates by checking if this is the first occurrence
+    return self.indexOf(root) === index;
+  });
+  
+  // Get profile information to resolve provider
+  let profileProvider = 'unknown';
+  try {
+    const profiles = await runProfileList(options.config);
+    const profileInfo = profiles.find(p => p.name === options.profile);
+    if (profileInfo?.provider) {
+      profileProvider = profileInfo.provider;
+    }
+  } catch {
+    // If we can't get profile info, keep provider as 'unknown'
+    profileProvider = 'unknown';
+  }
   
   const plans: PmDecompositionPlan[] = [];
   
@@ -1464,14 +1504,17 @@ export async function listPmPlans(
             // No publication state found, that's fine
           }
           
+          // Compute fingerprint from artifact content
+          const fingerprint = computePlanFingerprint(artifact);
+          
           plans.push({
             schema_version: 1,
             profile: artifact.profile,
             repo: artifact.repo,
-            provider: 'unknown', // Will be resolved from profile config
+            provider: profileProvider,
             source_work_id: artifact.target,
             source_issue_number: artifact.target.replace(/^#?/, ''),
-            plan_fingerprint: '', // Will be computed from artifact
+            plan_fingerprint: fingerprint,
             plan: artifact.plan,
             publication_state: publicationState,
             failure_reason: null,
@@ -1494,6 +1537,30 @@ export async function listPmPlans(
     plans,
     can_create_plans: true
   };
+}
+
+/**
+ * Compute a simple fingerprint from the plan artifact for deduplication.
+ */
+function computePlanFingerprint(artifact: PmPlanArtifact): string {
+  // Use a simple hash based on the artifact content that affects the plan
+  const fingerprintData = JSON.stringify({
+    profile: artifact.profile,
+    repo: artifact.repo,
+    target: artifact.target,
+    schema_version: artifact.schema_version,
+    // Include ticket count to detect plan changes
+    ticket_count: artifact.ticket_count
+  });
+  
+  // Simple hash function for fingerprinting (not cryptographic, just for deduplication)
+  let hash = 0;
+  for (let i = 0; i < fingerprintData.length; i++) {
+    const char = fingerprintData.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return hash.toString(16);
 }
 
 /**
@@ -1555,25 +1622,111 @@ export async function getPmDecompositionPlan(
 export async function createPmDecompositionPlan(
   options: { profile: string; request: PmDecompositionRequest; config?: string }
 ): Promise<PmDecompositionResponse> {
-  // For now, this is a pass-through that validates the request
-  // In a full implementation, this would trigger PM planning via the CLI
-  
   const normalizedWorkId = options.request.source_work_id.replace(/^#?/, '');
   
+  // Resolve repo and provider from profile
+  let repo = '';
+  let provider = 'unknown';
+  try {
+    const profiles = await runProfileList(options.config);
+    const profileInfo = profiles.find(p => p.name === options.profile);
+    if (profileInfo) {
+      repo = profileInfo.repo;
+      provider = profileInfo.provider;
+    }
+  } catch {
+    // If we can't get profile info, keep defaults
+  }
+  
+  // For dry-run requests, return appropriate response without calling CLI
+  if (options.request.dry_run) {
+    return {
+      schema_version: 1,
+      profile: options.profile,
+      repo: repo,
+      provider: provider,
+      source_work_id: options.request.source_work_id,
+      source_issue_number: normalizedWorkId,
+      plan_fingerprint: null,
+      plan: null,
+      publication_state: null,
+      failure_reason: 'Dry run - no plan created',
+      validation_errors: [],
+      dry_run: true,
+      approved: false,
+      can_approve: true
+    };
+  }
+  
+  // For non-dry-run requests, try to find existing plans first
+  try {
+    const existingPlans = await listPmPlans({ profile: options.profile, config: options.config });
+    const existingPlan = existingPlans.plans.find(p => 
+      p.source_work_id.replace(/^#?/, '') === normalizedWorkId ||
+      p.source_issue_number === normalizedWorkId
+    );
+    
+    if (existingPlan) {
+      // If we found an existing plan, return it with approval status
+      return {
+        schema_version: 1,
+        profile: options.profile,
+        repo: repo || existingPlan.repo,
+        provider: provider || existingPlan.provider,
+        source_work_id: options.request.source_work_id,
+        source_issue_number: normalizedWorkId,
+        plan_fingerprint: existingPlan.plan_fingerprint,
+        plan: existingPlan.plan,
+        publication_state: existingPlan.publication_state,
+        failure_reason: options.request.approve_publication ? null : 'Publication approval required',
+        validation_errors: existingPlan.validation_errors,
+        dry_run: false,
+        approved: options.request.approve_publication,
+        can_approve: true
+      };
+    }
+  } catch {
+    // Ignore errors when looking for existing plans
+  }
+  
+  // If no existing plan found and we have approval, try to trigger PM planning
+  if (options.request.approve_publication) {
+    // For now, this would trigger PM planning via the CLI
+    // Since we don't have the actual CLI command to create a new plan,
+    // we return a response indicating that planning would be triggered
+    return {
+      schema_version: 1,
+      profile: options.profile,
+      repo: repo,
+      provider: provider,
+      source_work_id: options.request.source_work_id,
+      source_issue_number: normalizedWorkId,
+      plan_fingerprint: null,
+      plan: null,
+      publication_state: null,
+      failure_reason: 'PM planning would be triggered for publication',
+      validation_errors: [],
+      dry_run: false,
+      approved: true,
+      can_approve: true
+    };
+  }
+  
+  // Default response for non-dry-run, non-approval requests
   return {
     schema_version: 1,
     profile: options.profile,
-    repo: '', // Would be resolved from profile
-    provider: 'unknown', // Would be resolved from profile
+    repo: repo,
+    provider: provider,
     source_work_id: options.request.source_work_id,
     source_issue_number: normalizedWorkId,
     plan_fingerprint: null,
     plan: null,
     publication_state: null,
-    failure_reason: options.request.dry_run ? 'Dry run - no plan created' : null,
+    failure_reason: 'Publication approval required to create plan',
     validation_errors: [],
-    dry_run: options.request.dry_run,
-    approved: options.request.approve_publication,
+    dry_run: false,
+    approved: false,
     can_approve: true
   };
 }

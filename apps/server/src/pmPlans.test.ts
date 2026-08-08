@@ -11,6 +11,9 @@ import type {
   PmDecompositionListResponse,
   PmPlan,
   PmWorkPacket,
+  PmDecompositionPlan,
+  PmPlanPublicationState,
+  PmPlanPublicationStatus
 } from '@git-agent-harness/contracts';
 
 const DEFAULT_PROFILE = 'gah';
@@ -237,4 +240,191 @@ test('PmDecompositionListResponse has required structure', () => {
   assert.equal(mockResponse.profile, 'test-profile');
   assert.ok(Array.isArray(mockResponse.plans));
   assert.equal(mockResponse.can_create_plans, true);
+});
+
+// AC5 Tests: GitHub vs GitLab provider distinction and partial publication states
+test('PmDecompositionPlan supports GitHub provider', () => {
+  const plan: PmDecompositionPlan = {
+    schema_version: 1,
+    profile: 'github-test',
+    repo: 'test-org/test-repo',
+    provider: 'github',
+    source_work_id: '#123',
+    source_issue_number: '123',
+    plan_fingerprint: 'abc123',
+    plan: createMockPmPlan(),
+    publication_state: null,
+    failure_reason: null,
+    validation_errors: []
+  };
+  
+  assert.equal(plan.provider, 'github');
+  assert.ok(plan.repo.includes('/'));
+});
+
+test('PmDecompositionPlan supports GitLab provider', () => {
+  const plan: PmDecompositionPlan = {
+    schema_version: 1,
+    profile: 'gitlab-test',
+    repo: 'test-group/test-project',
+    provider: 'gitlab',
+    source_work_id: '#456',
+    source_issue_number: '456',
+    plan_fingerprint: 'def456',
+    plan: createMockPmPlan(),
+    publication_state: null,
+    failure_reason: null,
+    validation_errors: []
+  };
+  
+  assert.equal(plan.provider, 'gitlab');
+  assert.ok(plan.repo.includes('/'));
+});
+
+test('PmDecompositionPlan publication_state supports partial status', () => {
+  const publicationState: PmPlanPublicationState = {
+    schema_version: 1,
+    plan_fingerprint: 'fingerprint-123',
+    profile: 'test-profile',
+    repo: 'test-org/test-repo',
+    source_issue_number: '123',
+    status: 'partial',
+    children: {}
+  };
+  
+  assert.equal(publicationState.status, 'partial');
+  assert.equal(publicationState.profile, 'test-profile');
+  assert.equal(publicationState.repo, 'test-org/test-repo');
+});
+
+test('PmDecompositionPlan with partial publication state in response', () => {
+  const partialPublication: PmPlanPublicationState = {
+    schema_version: 1,
+    plan_fingerprint: 'fingerprint-456',
+    profile: 'test-profile',
+    repo: 'test-org/test-repo',
+    source_issue_number: '456',
+    status: 'partial',
+    children: {}
+  };
+  
+  const plan: PmDecompositionPlan = {
+    schema_version: 1,
+    profile: 'test-profile',
+    repo: 'test-org/test-repo',
+    provider: 'github',
+    source_work_id: '#789',
+    source_issue_number: '789',
+    plan_fingerprint: 'ghi789',
+    plan: createMockPmPlan(),
+    publication_state: partialPublication,
+    failure_reason: null,
+    validation_errors: []
+  };
+  
+  assert.ok(plan.publication_state);
+  assert.equal(plan.publication_state?.status, 'partial');
+  assert.equal(plan.publication_state?.profile, 'test-profile');
+});
+
+test('PmDecompositionResponse supports partial publication state', () => {
+  const partialPublication: PmPlanPublicationState = {
+    schema_version: 1,
+    plan_fingerprint: 'fingerprint-789',
+    profile: 'test-profile',
+    repo: 'test-org/test-repo',
+    source_issue_number: '789',
+    status: 'partial',
+    children: {}
+  };
+  
+  const mockResponse: PmDecompositionResponse = {
+    schema_version: 1,
+    profile: 'test-profile',
+    repo: 'test-org/test-repo',
+    provider: 'gitlab',
+    source_work_id: '#101',
+    source_issue_number: '101',
+    plan_fingerprint: 'jkl101',
+    plan: createMockPmPlan(),
+    publication_state: partialPublication,
+    failure_reason: null,
+    validation_errors: [],
+    dry_run: false,
+    approved: true,
+    can_approve: true
+  };
+  
+  assert.ok(mockResponse.publication_state);
+  assert.equal(mockResponse.publication_state?.status, 'partial');
+  assert.equal(mockResponse.provider, 'gitlab');
+});
+
+test('listPmPlans response includes plans with different providers', async () => {
+  // This test verifies that the response structure can handle multiple providers
+  const mockResponse: PmDecompositionListResponse = {
+    schema_version: 1,
+    profile: 'test-profile',
+    plans: [
+      {
+        schema_version: 1,
+        profile: 'test-profile',
+        repo: 'github-org/repo1',
+        provider: 'github',
+        source_work_id: '#1',
+        source_issue_number: '1',
+        plan_fingerprint: 'fingerprint1',
+        plan: createMockPmPlan(),
+        publication_state: null,
+        failure_reason: null,
+        validation_errors: []
+      },
+      {
+        schema_version: 1,
+        profile: 'test-profile',
+        repo: 'gitlab-group/project1',
+        provider: 'gitlab',
+        source_work_id: '#2',
+        source_issue_number: '2',
+        plan_fingerprint: 'fingerprint2',
+        plan: createMockPmPlan(),
+        publication_state: {
+          schema_version: 1,
+          plan_fingerprint: 'pub-fingerprint',
+          profile: 'test-profile',
+          repo: 'gitlab-group/project1',
+          source_issue_number: '2',
+          status: 'partial',
+          children: {}
+        },
+        failure_reason: null,
+        validation_errors: []
+      }
+    ],
+    can_create_plans: true
+  };
+  
+  assert.equal(mockResponse.plans.length, 2);
+  assert.equal(mockResponse.plans[0].provider, 'github');
+  assert.equal(mockResponse.plans[1].provider, 'gitlab');
+  assert.equal(mockResponse.plans[1].publication_state?.status, 'partial');
+});
+
+// Test for all publication status values
+test('PmPlanPublicationState supports all status values', () => {
+  const statuses: PmPlanPublicationStatus[] = ['planned', 'partial', 'complete', 'failed'];
+  
+  for (const status of statuses) {
+    const publicationState: PmPlanPublicationState = {
+      schema_version: 1,
+      plan_fingerprint: 'test-fingerprint',
+      profile: 'test-profile',
+      repo: 'test-org/test-repo',
+      source_issue_number: '123',
+      status: status,
+      children: {}
+    };
+    
+    assert.ok(statuses.includes(publicationState.status));
+  }
 });

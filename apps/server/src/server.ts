@@ -935,19 +935,6 @@ export function createServer(
   // These endpoints expose PM plan artifacts, source work identity, child graph,
   // publish status, and failure reasons through the control-plane API.
   
-  app.get('/api/pm/plans', async (req, res) => {
-    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
-    try {
-      const response = await listPmPlans({ profile });
-      res.json(response);
-    } catch (error) {
-      res.status(502).json({
-        error: 'Failed to list PM plans',
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  });
-
   app.get('/api/pm/plans/:sourceWorkId', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const sourceWorkId = req.params.sourceWorkId;
@@ -1024,6 +1011,40 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to create PM plan',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/pm/plans', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    
+    // Validate that the profile is configured
+    try {
+      const configFull = await runConfigShowFull();
+      const profiles = configFull.profiles || {};
+      // Check if the profile exists and is valid
+      if (!profiles[profile]) {
+        res.status(400).json({
+          error: 'Invalid profile',
+          message: `Profile '${profile}' is not configured`
+        });
+        return;
+      }
+    } catch (error) {
+      res.status(400).json({
+        error: 'Invalid profile',
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+
+    try {
+      const response = await listPmPlans({ profile });
+      res.json(response);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to list PM plans',
         message: error instanceof Error ? error.message : String(error)
       });
     }
