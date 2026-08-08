@@ -546,6 +546,16 @@ pub(crate) fn write_fake_codex(dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // PATH is process-global; cargo test runs tests in parallel threads by
+    // default, so mutating it without serializing against other tests that
+    // read it (any test that spawns a subprocess relying on PATH lookup)
+    // is a real race -- same class of flake central_claims.rs's
+    // ENV_VAR_TEST_LOCK exists to prevent. Only discovery_finds_codex_on_path
+    // below touches PATH, but the lock is here at module scope in case that
+    // changes.
+    static ENV_VAR_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// `dir` must outlive the returned session -- discovery only runs once
     /// during `new()`, but keeping the tempdir alive for the test's whole
@@ -559,6 +569,7 @@ mod tests {
 
     #[test]
     fn discovery_finds_codex_on_path() {
+        let _lock = ENV_VAR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         write_fake_codex(dir.path());
         let path_with_fake = format!(
