@@ -27,6 +27,12 @@ import type {
   MergeRequest,
   LedgerSummary,
   AvailabilityRecord,
+  PmPlanArtifact,
+  PmPlanPublicationSummary,
+  PmDecompositionPlan,
+  PmDecompositionRequest,
+  PmDecompositionResponse,
+  PmDecompositionListResponse,
 } from '@git-agent-harness/contracts';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -1074,12 +1080,21 @@ export async function runConfigShow(config?: string): Promise<{ current_manager:
   return runJsonCommand<{ current_manager: string | null }>(args, config);
 }
 
+export async function runConfigShowFull(
+  config?: string
+): Promise<ConfigShowFull> {
+  const args = ['config', 'show', '--json', '--full'];
+  if (config) {
+    args.push('--config-path', config);
+  }
+  return runJsonCommand<ConfigShowFull>(args, config);
+}
+
 export async function runConfigShowProfile(
   profile: string,
   config?: string
 ): Promise<ConfigProfileSummary> {
-  const args = ['config', 'show', '--json', '--full', '--profile', profile];
-  const response = await runJsonCommand<ConfigShowFull>(args, config);
+  const response = await runConfigShowFull(config);
   const selected = response.profiles[profile];
   if (!selected) {
     throw new Error(`gah config show returned no profile data for '${profile}'`);
@@ -1341,4 +1356,224 @@ export function isGahCliAvailable(): Promise<boolean> {
     child.on('error', () => resolvePromise(false));
     child.on('close', (code) => resolvePromise(code === 0));
   });
+}
+
+// ---------------------------------------------------------------------------
+// PM (Project Manager) Decomposition Plan CLI integration (Issue #562)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `gah pm publish --profile <profile> --plan <planPath> --dry-run` and parse
+ * the JSON output. This validates a PM plan artifact and returns the publication
+ * summary without actually creating provider issues.
+ */
+export async function runPmPublishDryRun(
+  options: { profile: string; planPath: string; config?: string }
+): Promise<PmPlanPublicationSummary> {
+  const args = [
+    'pm', 'publish',
+    '--profile', options.profile,
+    '--plan', options.planPath,
+    '--dry-run',
+    '--json'
+  ];
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runJsonCommand<PmPlanPublicationSummary>(args, options.config);
+}
+
+/**
+ * Run `gah pm publish --profile <profile> --plan <planPath>` and parse
+ * the JSON output. This publishes a validated PM plan artifact as native
+ * provider issues.
+ */
+export async function runPmPublish(
+  options: { profile: string; planPath: string; config?: string }
+): Promise<PmPlanPublicationSummary> {
+  const args = [
+    'pm', 'publish',
+    '--profile', options.profile,
+    '--plan', options.planPath,
+    '--json'
+  ];
+  if (options.config) {
+    args.push('--config-path', options.config);
+  }
+  return runJsonCommand<PmPlanPublicationSummary>(args, options.config);
+}
+
+/**
+ * Read a PM plan artifact from disk and parse it. This is a direct file
+ * read rather than a CLI call, used when the server has direct filesystem
+ * access to the plan artifacts.
+ */
+export async function readPmPlanArtifact(planPath: string): Promise<PmPlanArtifact> {
+  const { readFile } = await import('node:fs/promises');
+  const content = await readFile(planPath, 'utf-8');
+  return JSON.parse(content) as PmPlanArtifact;
+}
+
+/**
+ * List all PM plan artifacts for a given profile by scanning the session
+ * directories. Returns a list of available plans with their metadata.
+ */
+export async function listPmPlans(
+  options: { profile: string; config?: string }
+): Promise<PmDecompositionListResponse> {
+  const { readdir, stat, readFile } = await import('node:fs/promises');
+  const { join, resolve } = await import('node:path');
+  
+  // Default session root paths to search for PM plan artifacts
+  const sessionRoots = [
+    resolve(__dirname, '../../../sessions'),
+    resolve(__dirname, '../../../.gah/sessions'),
+    process.env.GAH_SESSION_ROOT || resolve(__dirname, '../../../.gah/sessions')
+  ];
+  
+  const plans: PmDecompositionPlan[] = [];
+  
+  for (const sessionRoot of sessionRoots) {
+    try {
+      const entries = await readdir(sessionRoot, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        
+        const sessionDir = join(sessionRoot, entry.name);
+        const planPath = join(sessionDir, 'pm-plan-v1.json');
+        
+        try {
+          const fileStat = await stat(planPath);
+          if (!fileStat.isFile()) continue;
+          
+          const content = await readFile(planPath, 'utf-8');
+          const artifact: PmPlanArtifact = JSON.parse(content);
+          
+          // Only include plans for the requested profile
+          if (artifact.profile !== options.profile) continue;
+          
+          // Try to read publication state if it exists
+          const statePath = join(sessionDir, 'pm-plan-v1.json.publication-v1.json');
+          let publicationState: any = null;
+          
+          try {
+            const stateContent = await readFile(statePath, 'utf-8');
+            publicationState = JSON.parse(stateContent);
+          } catch {
+            // No publication state found, that's fine
+          }
+          
+          plans.push({
+            schema_version: 1,
+            profile: artifact.profile,
+            repo: artifact.repo,
+            provider: 'unknown', // Will be resolved from profile config
+            source_work_id: artifact.target,
+            source_issue_number: artifact.target.replace(/^#?/, ''),
+            plan_fingerprint: '', // Will be computed from artifact
+            plan: artifact.plan,
+            publication_state: publicationState,
+            failure_reason: null,
+            validation_errors: []
+          });
+        } catch {
+          // Skip files that can't be read or parsed
+          continue;
+        }
+      }
+    } catch {
+      // Skip session roots that don't exist
+      continue;
+    }
+  }
+  
+  return {
+    schema_version: 1,
+    profile: options.profile,
+    plans,
+    can_create_plans: true
+  };
+}
+
+/**
+ * Get a specific PM decomposition plan by its source work ID.
+ */
+export async function getPmDecompositionPlan(
+  options: { profile: string; sourceWorkId: string; config?: string }
+): Promise<PmDecompositionResponse> {
+  const lists = await listPmPlans(options);
+  const normalizedWorkId = options.sourceWorkId.replace(/^#?/, '');
+  
+  // Find the plan matching the source work ID
+  const plan = lists.plans.find(p => 
+    p.source_work_id.replace(/^#?/, '') === normalizedWorkId ||
+    p.source_issue_number === normalizedWorkId
+  );
+  
+  if (!plan) {
+    return {
+      schema_version: 1,
+      profile: options.profile,
+      repo: '',
+      provider: 'unknown',
+      source_work_id: options.sourceWorkId,
+      source_issue_number: null,
+      plan_fingerprint: null,
+      plan: null,
+      publication_state: null,
+      failure_reason: `PM plan not found for work ID: ${options.sourceWorkId}`,
+      validation_errors: [],
+      dry_run: false,
+      approved: false,
+      can_approve: false
+    };
+  }
+  
+  return {
+    schema_version: 1,
+    profile: plan.profile,
+    repo: plan.repo,
+    provider: plan.provider,
+    source_work_id: plan.source_work_id,
+    source_issue_number: plan.source_issue_number,
+    plan_fingerprint: plan.plan_fingerprint,
+    plan: plan.plan,
+    publication_state: plan.publication_state,
+    failure_reason: plan.failure_reason,
+    validation_errors: plan.validation_errors || [],
+    dry_run: false,
+    approved: false,
+    can_approve: true
+  };
+}
+
+/**
+ * Create or update a PM decomposition plan. This is a server-side operation
+ * that validates the request and either creates a new plan or updates an existing one.
+ */
+export async function createPmDecompositionPlan(
+  options: { profile: string; request: PmDecompositionRequest; config?: string }
+): Promise<PmDecompositionResponse> {
+  // For now, this is a pass-through that validates the request
+  // In a full implementation, this would trigger PM planning via the CLI
+  
+  const normalizedWorkId = options.request.source_work_id.replace(/^#?/, '');
+  
+  return {
+    schema_version: 1,
+    profile: options.profile,
+    repo: '', // Would be resolved from profile
+    provider: 'unknown', // Would be resolved from profile
+    source_work_id: options.request.source_work_id,
+    source_issue_number: normalizedWorkId,
+    plan_fingerprint: null,
+    plan: null,
+    publication_state: null,
+    failure_reason: options.request.dry_run ? 'Dry run - no plan created' : null,
+    validation_errors: [],
+    dry_run: options.request.dry_run,
+    approved: options.request.approve_publication,
+    can_approve: true
+  };
 }

@@ -24,11 +24,15 @@ import {
   runProfileRemove,
   runConfigSet,
   runConfigShow,
+  runConfigShowFull,
   runConfigShowProfile,
   runDoctor,
   getLoopStatus,
   startLoop,
   stopLoop,
+  listPmPlans,
+  getPmDecompositionPlan,
+  createPmDecompositionPlan,
   type ProfileAddOptions,
   type ProfileSetOptions,
   type ProfileRemoveOptions,
@@ -38,7 +42,11 @@ import type {
   ReportGroupBy,
   ReportSeriesData,
   ConfigProfileSummary,
-  DoctorSnapshot
+  ConfigShowFull,
+  DoctorSnapshot,
+  PmDecompositionRequest,
+  PmDecompositionResponse,
+  PmDecompositionListResponse
 } from '@git-agent-harness/contracts';
 import { getFleetDispatch } from './wsServer.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
@@ -209,7 +217,10 @@ export function createServer(
         websocket: '/ws',
         registryNodes: '/api/registry/nodes',
         registryNodeHealth: '/api/registry/nodes/:nodeId/health',
-        registryNodeRotateSecret: '/api/registry/nodes/:nodeId/rotate-secret'
+        registryNodeRotateSecret: '/api/registry/nodes/:nodeId/rotate-secret',
+        pmPlans: '/api/pm/plans',
+        pmPlan: '/api/pm/plans/:sourceWorkId',
+        pmPlanCreate: '/api/pm/plans/create'
       },
       features: {
         webSocket: true,
@@ -918,6 +929,104 @@ export function createServer(
       return;
     }
     res.json(result);
+  });
+
+  // PM (Project Manager) Decomposition Plan endpoints (Issue #562)
+  // These endpoints expose PM plan artifacts, source work identity, child graph,
+  // publish status, and failure reasons through the control-plane API.
+  
+  app.get('/api/pm/plans', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      const response = await listPmPlans({ profile });
+      res.json(response);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to list PM plans',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/pm/plans/:sourceWorkId', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const sourceWorkId = req.params.sourceWorkId;
+    
+    // Validate that the sourceWorkId is for a configured profile
+    try {
+      const configFull = await runConfigShowFull();
+      const profiles = configFull.profiles || {};
+      // Check if the profile exists and is valid
+      if (!profiles[profile]) {
+        res.status(400).json({
+          error: 'Invalid profile',
+          message: `Profile '${profile}' is not configured`
+        });
+        return;
+      }
+    } catch (error) {
+      res.status(400).json({
+        error: 'Invalid profile',
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+
+    try {
+      const response = await getPmDecompositionPlan({ profile, sourceWorkId });
+      if (!response.plan && response.failure_reason) {
+        res.status(404).json(response);
+        return;
+      }
+      res.json(response);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to get PM plan',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/pm/plans/create', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const request: PmDecompositionRequest | null = req.body?.request || null;
+    
+    if (!request) {
+      res.status(400).json({
+        error: 'Invalid request',
+        message: 'Request body is required with profile and source_work_id'
+      });
+      return;
+    }
+
+    // Validate that the source_work_id targets a project within configured profiles
+    try {
+      const configFull = await runConfigShowFull();
+      const profiles = configFull.profiles || {};
+      if (!profiles[profile]) {
+        res.status(400).json({
+          error: 'Invalid profile',
+          message: `Profile '${profile}' is not configured`
+        });
+        return;
+      }
+    } catch (error) {
+      res.status(400).json({
+        error: 'Invalid profile',
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+
+    try {
+      const response = await createPmDecompositionPlan({ profile, request });
+      res.json(response);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to create PM plan',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
   });
 
   app.get('/api/events', async (req, res) => {

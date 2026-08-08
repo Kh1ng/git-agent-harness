@@ -322,6 +322,135 @@ export interface PmParentStatus {
   reconciled: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// PM (Project Manager) Decomposition Plan contracts (Issue #562)
+// ---------------------------------------------------------------------------
+
+export type PmPlanTaskClass = 'fix' | 'feature' | 'refactor' | 'docs' | 'test' | 'chore';
+export type PmPlanDifficulty = 'easy' | 'medium' | 'hard';
+export type PmPlanRisk = 'low' | 'medium' | 'high';
+export type PmPlanExecutionDisposition = 'autonomous' | 'supervised' | 'human_required';
+export type PmPlanCapability = 'edit' | 'plan' | 'review' | 'investigate';
+export type PmPlanTier = 'standard' | 'strong';
+
+export interface PmRecommendedRouting {
+  capability: PmPlanCapability;
+  min_tier: PmPlanTier;
+}
+
+export interface PmWorkPacket {
+  key: string;
+  title: string;
+  summary: string;
+  objective: string;
+  task_class: PmPlanTaskClass;
+  difficulty: PmPlanDifficulty;
+  risk: PmPlanRisk;
+  execution_disposition: PmPlanExecutionDisposition;
+  recommended_routing: PmRecommendedRouting;
+  affected_areas: string[];
+  affected_files: string[];
+  acceptance_criteria: string[];
+  verification_commands: string[];
+  depends_on: string[];
+  duplicate_evidence: string[];
+  uncovered_reason: string;
+}
+
+export interface PmPlan {
+  title: string;
+  summary: string;
+  tickets: PmWorkPacket[];
+}
+
+export interface PmPlanArtifact {
+  schema_version: number;
+  profile: string;
+  repo: string;
+  target: string;
+  open_issue_count: number;
+  open_mr_count: number;
+  merged_mr_count: number;
+  ticket_count: number;
+  plan: PmPlan;
+}
+
+export type PmPlanPublicationStatus = 'planned' | 'partial' | 'complete' | 'failed';
+
+export interface PmPlanPublicationState {
+  schema_version: number;
+  plan_fingerprint: string;
+  profile: string;
+  repo: string;
+  source_issue_number: string;
+  status: PmPlanPublicationStatus;
+  children: Record<string, PmPlanPublishedChild>;
+}
+
+export interface PmPlanPublishedChild {
+  key: string;
+  issue_id: string;
+  issue_number: string;
+  url: string;
+  parent_linked: boolean;
+  linked_dependencies: string[];
+}
+
+export interface PmPlanPublicationSummary {
+  plan_fingerprint: string;
+  state_path: string;
+  source_issue_number: string;
+  child_issue_numbers: string[];
+  child_depth: number;
+  already_published: boolean;
+  status: PmPlanPublicationStatus;
+}
+
+export interface PmDecompositionPlan {
+  schema_version: number;
+  profile: string;
+  repo: string;
+  provider: string;
+  source_work_id: string;
+  source_issue_number: string;
+  plan_fingerprint: string;
+  plan: PmPlan;
+  publication_state: PmPlanPublicationState | null;
+  failure_reason: string | null;
+  validation_errors: string[];
+}
+
+export interface PmDecompositionRequest {
+  profile: string;
+  source_work_id: string;
+  dry_run: boolean;
+  approve_publication: boolean;
+}
+
+export interface PmDecompositionResponse {
+  schema_version: number;
+  profile: string;
+  repo: string;
+  provider: string;
+  source_work_id: string;
+  source_issue_number: string | null;
+  plan_fingerprint: string | null;
+  plan: PmPlan | null;
+  publication_state: PmPlanPublicationState | null;
+  failure_reason: string | null;
+  validation_errors: string[];
+  dry_run: boolean;
+  approved: boolean;
+  can_approve: boolean;
+}
+
+export interface PmDecompositionListResponse {
+  schema_version: number;
+  profile: string;
+  plans: PmDecompositionPlan[];
+  can_create_plans: boolean;
+}
+
 export interface StatusSnapshot {
   schema_version: number;
   review_contract_version: number;
