@@ -24,6 +24,7 @@ pub mod init;
 pub mod job_kind;
 pub mod ledger;
 pub mod manager;
+pub mod memory_gateway;
 pub mod models;
 pub mod network_exposure;
 pub mod notifications;
