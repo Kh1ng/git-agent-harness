@@ -682,22 +682,35 @@ pub(crate) fn improve(
                             wip_checkpoints.push(checkpoint);
                         }
                         prior_phase_context = Some(task.clone());
-                        task = format!(
-                            "{}\n\n## Previous backend became unavailable (attempt {}/{})\n\nThe existing checkpointed repository changes remain in this worktree. Inspect them, preserve useful progress, and complete or repair the ticket with the next backend.",
-                            base_task,
-                            attempt + 1,
-                            max_attempts,
-                        );
+                        let is_context_limit_exceeded =
+                            parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded;
+                        let message = if is_context_limit_exceeded {
+                            format!(
+                                "## Context limit exceeded (attempt {}/{})\n\nThe existing checkpointed repository changes remain in this worktree. Inspect them, preserve useful progress, and complete or repair the ticket with a larger-context model.",
+                                attempt + 1,
+                                max_attempts
+                            )
+                        } else {
+                            format!(
+                                "## Previous backend became unavailable (attempt {}/{})\n\nThe existing checkpointed repository changes remain in this worktree. Inspect them, preserve useful progress, and complete or repair the ticket with the next backend.",
+                                attempt + 1,
+                                max_attempts
+                            )
+                        };
+                        task = format!("{}\n\n{}", base_task, message,);
+                        let log_message = if is_context_limit_exceeded {
+                            "Context limit exceeded; retrying next attempt with larger-context model"
+                        } else {
+                            "Backend unavailable; retrying next attempt"
+                        };
                         println!(
-                            "Backend unavailable; retrying next attempt with {} instead of {} ({:?})",
+                            "{} with {} instead of {} ({:?})",
+                            log_message,
                             route_label(
                                 &rerouted.effective_backend,
                                 rerouted.effective_model.as_deref(),
                             ),
-                            route_label(
-                                &route.effective_backend,
-                                route.effective_model.as_deref(),
-                            ),
+                            route_label(&route.effective_backend, route.effective_model.as_deref(),),
                             parsed.kind
                         );
                         route = rerouted;
@@ -824,17 +837,27 @@ pub(crate) fn improve(
                 &route,
                 (&failure_text, failure_log_path),
             )? {
-                ledger.set_failure(
-                    crate::ledger::FailureClass::BackendError,
-                    crate::ledger::FailureStage::AgentRun,
-                );
+                // Issue #437: classify context exhaustion as ContextLimitExceeded, not BackendError
+                let is_context_limit_exceeded =
+                    parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded;
+                let failure_class = if is_context_limit_exceeded {
+                    crate::ledger::FailureClass::ContextLimitExceeded
+                } else {
+                    crate::ledger::FailureClass::BackendError
+                };
+                ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
+                let validation_result = if is_context_limit_exceeded {
+                    "not_run_context_limit_exceeded"
+                } else {
+                    "not_run_backend_unavailable"
+                };
                 ledger.attempts.push(crate::ledger::AttemptRecord {
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
                     effective_model: Some(llm.model.clone()),
                     exit_code: Some(0),
-                    validation_result: Some("not_run_backend_unavailable".into()),
-                    failure_class: Some(crate::ledger::FailureClass::BackendError.as_str().into()),
+                    validation_result: Some(validation_result.into()),
+                    failure_class: Some(failure_class.as_str().into()),
                     failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
@@ -862,16 +885,21 @@ pub(crate) fn improve(
                         rerouted.effective_model.as_deref(),
                     );
                     if rerouted_identity != current_identity {
+                        let is_context_limit_exceeded =
+                            parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded;
+                        let message = if is_context_limit_exceeded {
+                            "Context limit exceeded; retrying next attempt with larger-context model"
+                        } else {
+                            "Backend unavailable after no-progress result; retrying next attempt"
+                        };
                         println!(
-                            "Backend unavailable after no-progress result; retrying next attempt with {} instead of {} ({:?})",
+                            "{} with {} instead of {} ({:?})",
+                            message,
                             route_label(
                                 &rerouted.effective_backend,
                                 rerouted.effective_model.as_deref(),
                             ),
-                            route_label(
-                                &route.effective_backend,
-                                route.effective_model.as_deref(),
-                            ),
+                            route_label(&route.effective_backend, route.effective_model.as_deref(),),
                             parsed.kind
                         );
                         route = rerouted;

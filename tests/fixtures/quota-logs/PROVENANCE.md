@@ -10,6 +10,7 @@ Captured into this repo: 2026-07-04.
 
 | Fixture | Source | Notes |
 |---|---|---|
+| `codex_context_window_exhausted.txt` | Issue #437, run/session `96a198de-538d-4933-a07c-3369266e25b1`, attempt 1, Codex `gpt-5.3-codex-spark` | Exact terminal message: "Codex ran out of room in the model's context window..." |
 | `codex_usage_exhausted_full_reset.txt` | github.com/openai/codex issue #12299 | Full date + time, no timezone. |
 | `codex_usage_exhausted_admin_variant.txt` | github.com/openai/codex issue #16906 | Business/admin wording variant, full date + time, no timezone. |
 | `codex_usage_exhausted_time_only.txt` | github.com/openai/codex issue #16847 | Time-only reset, no date, no timezone. |
