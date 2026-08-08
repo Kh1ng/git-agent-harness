@@ -483,15 +483,99 @@ impl ManagerSession for CodexManagerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    /// Discovery is the only thing that ever shells out to a real `codex`
+    /// process (`--version`, `status --json`, `app-server --help`) --
+    /// start/send/stream/interrupt/inspect are fully in-memory simulation
+    /// already (see `start_conversation`/`send_to_conversation` etc.'s own
+    /// doc comments). A fake script covering those three subcommands is
+    /// therefore enough to exercise the whole adapter deterministically,
+    /// without depending on a real Codex install being present -- CI
+    /// runners don't have one, so the original tests (relying on
+    /// `CODEX_SKIP_REAL_TESTS` being *set* to skip, rather than skipping
+    /// when codex is actually absent) always failed there. Mirrors
+    /// `worktree.rs`'s `write_askpass` for the shebang+chmod idiom.
+    fn write_fake_codex(dir: &Path) -> PathBuf {
+        // Write under a temp name and rename into place atomically, then
+        // drop the handle before returning. Writing straight to `codex`
+        // and exec-ing it moments later intermittently raced with ETXTBSY
+        // ("Text file busy") under this test's default parallel execution
+        // -- rename swaps in a fresh dentry the exec never had open for
+        // writing, which sidesteps the race entirely rather than just
+        // narrowing its window.
+        let final_path = dir.join("codex");
+        let staging_path = dir.join(".codex.staging");
+        {
+            let mut f = std::fs::File::create(&staging_path).unwrap();
+            f.write_all(
+                b"#!/bin/sh\n\
+                  case \"$1\" in\n\
+                  --version) echo \"codex-cli 0.1.0-fake\" ;;\n\
+                  status) echo '{\"user\":\"fake\",\"rateLimits\":{}}' ;;\n\
+                  app-server) exit 0 ;;\n\
+                  *) exit 1 ;;\n\
+                  esac\n",
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        std::fs::rename(&staging_path, &final_path).unwrap();
+        // Rename narrows the ETXTBSY ("Text file busy") window between
+        // writing an executable and exec-ing it moments later under this
+        // test's default parallel execution, but didn't eliminate it
+        // outright in practice. A bounded self-check retry (execute the
+        // script once here, retrying only on that specific transient
+        // error) absorbs whatever's left before returning the path to the
+        // real discovery call, instead of letting production discovery
+        // code (which has no reason to expect or retry this test-only
+        // race) see it.
+        for attempt in 0..10 {
+            match Command::new(&final_path).arg("--version").output() {
+                Ok(_) => break,
+                Err(err) if err.raw_os_error() == Some(26) && attempt < 9 => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => panic!("fake codex script did not become executable: {err}"),
+            }
+        }
+        final_path
+    }
+
+    /// `dir` must outlive the returned session -- discovery only runs once
+    /// during `new()`, but keeping the tempdir alive for the test's whole
+    /// scope avoids any cleanup-ordering surprise.
+    fn fake_session(caps: Option<SessionCapabilities>) -> (tempfile::TempDir, CodexManagerSession) {
+        let dir = tempfile::tempdir().unwrap();
+        let codex_path = write_fake_codex(dir.path());
+        let session = CodexManagerSession::new(Some(&codex_path), caps).unwrap();
+        (dir, session)
+    }
 
     #[test]
     fn discovery_finds_codex_on_path() {
-        // Use the real codex binary if available
-        if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-            return;
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_codex(dir.path());
+        let path_with_fake = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        // SAFETY: single-threaded test, PATH is restored before returning.
+        let original_path = std::env::var("PATH").ok();
+        unsafe {
+            std::env::set_var("PATH", &path_with_fake);
         }
-
-        let disc = CodexDiscovery::discover(None).unwrap();
+        let result = CodexDiscovery::discover(None);
+        unsafe {
+            match &original_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let disc = result.unwrap();
         assert!(disc.executable_path.exists());
         assert!(!disc.version.is_empty());
     }
@@ -504,29 +588,19 @@ mod tests {
 
     #[test]
     fn capabilities_are_configurable() {
-        // Use the real codex binary if available
-        if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-            return;
-        }
-
         let caps = SessionCapabilities {
             resume: false,
             interrupt: false,
             inspect: false,
         };
 
-        let session = CodexManagerSession::new(None, Some(caps)).unwrap();
+        let (_dir, session) = fake_session(Some(caps));
         assert_eq!(session.capabilities(), caps);
     }
 
     #[test]
     fn start_produces_a_session_and_an_update() {
-        // Use the real codex binary if available
-        if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-            return;
-        }
-
-        let mut session = CodexManagerSession::new(None, None).unwrap();
+        let (_dir, mut session) = fake_session(None);
         let id = session
             .start(StartRequest {
                 profile: "test".to_string(),
@@ -548,12 +622,7 @@ mod tests {
 
     #[test]
     fn send_produces_a_further_update() {
-        // Use the real codex binary if available
-        if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-            return;
-        }
-
-        let mut session = CodexManagerSession::new(None, None).unwrap();
+        let (_dir, mut session) = fake_session(None);
         let id = session
             .start(StartRequest {
                 profile: "test".to_string(),
@@ -577,12 +646,7 @@ mod tests {
 
     #[test]
     fn fresh_session_is_not_terminal() {
-        // Use the real codex binary if available
-        if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-            return;
-        }
-
-        let mut session = CodexManagerSession::new(None, None).unwrap();
+        let (_dir, mut session) = fake_session(None);
         let id = session
             .start(StartRequest {
                 profile: "test".to_string(),
@@ -595,12 +659,7 @@ mod tests {
 
     #[test]
     fn interrupt_terminates_when_supported() {
-        // Use the real codex binary if available
-        if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-            return;
-        }
-
-        let mut session = CodexManagerSession::new(None, None).unwrap();
+        let (_dir, mut session) = fake_session(None);
         let id = session
             .start(StartRequest {
                 profile: "test".to_string(),
@@ -617,18 +676,13 @@ mod tests {
 
     #[test]
     fn unsupported_resume_returns_typed_error() {
-        // Use the real codex binary if available
-        if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-            return;
-        }
-
         let caps = SessionCapabilities {
             resume: false,
             interrupt: true,
             inspect: true,
         };
 
-        let mut session = CodexManagerSession::new(None, Some(caps)).unwrap();
+        let (_dir, mut session) = fake_session(Some(caps));
         let id = session
             .start(StartRequest {
                 profile: "test".to_string(),
@@ -642,12 +696,7 @@ mod tests {
 
     #[test]
     fn stream_drains_and_does_not_repeat() {
-        // Use the real codex binary if available
-        if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-            return;
-        }
-
-        let mut session = CodexManagerSession::new(None, None).unwrap();
+        let (_dir, mut session) = fake_session(None);
         let id = session
             .start(StartRequest {
                 profile: "test".to_string(),
