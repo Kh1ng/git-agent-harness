@@ -210,18 +210,6 @@ pub(crate) fn pm(
             break log_text;
         }
 
-        ledger.set_failure(
-            crate::ledger::FailureClass::BackendError,
-            crate::ledger::FailureStage::AgentRun,
-        );
-        if log_text.contains("hard wall-clock timeout") {
-            ledger.validation_result = Some("not_run_hard_timeout".into());
-            anyhow::bail!(
-                "PM backend {} exceeded the configured {}s total wall-clock budget",
-                plan_route.effective_backend,
-                profile.publishing.pm_timeout_seconds()
-            );
-        }
         let route_key = route_identity(
             &plan_route.effective_backend,
             plan_route.effective_model.as_deref(),
@@ -240,17 +228,30 @@ pub(crate) fn pm(
             );
         };
 
+        // Issue #437: classify context exhaustion as ContextLimitExceeded, not BackendError
+        let failure_class = if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded
+        {
+            crate::ledger::FailureClass::ContextLimitExceeded
+        } else {
+            crate::ledger::FailureClass::BackendError
+        };
+        ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
+
         let rerouted = decide_route(cfg, profile, route_req.clone(), None, ledger)?;
         let rerouted_key = route_identity(
             &rerouted.effective_backend,
             rerouted.effective_model.as_deref(),
         );
         if attempted_routes.contains(&rerouted_key) {
-            anyhow::bail!(
-                "PM backend {} became unavailable ({:?}) and no new eligible backend remained",
-                plan_route.effective_backend,
-                parsed.kind
-            );
+            let message = if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded {
+                format!("PM backend {} context limit exceeded ({:?}) and no new eligible backend remained", plan_route.effective_backend, parsed.kind)
+            } else {
+                format!(
+                    "PM backend {} became unavailable ({:?}) and no new eligible backend remained",
+                    plan_route.effective_backend, parsed.kind
+                )
+            };
+            anyhow::bail!(message);
         }
         println!(
             "PM rerouting: {} -> {} ({:?})",

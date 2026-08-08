@@ -36,6 +36,10 @@ pub enum FailureKind {
     RateLimited,
     /// Authentication failure (invalid token, not logged in, etc).
     AuthenticationError,
+    /// Explicit model context window / context length exhaustion. This is
+    /// a routing signal: the same backend may succeed with a larger-context
+    /// model, and the whole backend/account should not be disabled.
+    ContextLimitExceeded,
     /// GAH observed a genuinely idle backend process. This is a harness
     /// watchdog classification, never provider quota/rate-limit evidence.
     BackendStalled,
@@ -196,6 +200,16 @@ fn agy_auth_re() -> &'static Regex {
 fn claude_session_limit_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)\byour session limit\b.*\bresets\b").unwrap())
+}
+
+fn context_window_exhausted_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(ran out of room in the model['\s]s context window|ran out of (?:room in |the )?model['\s]s? context (?:window|length)|context (?:window|length) (?:is )?(?:full|exceeded|at capacity|limit reached)|maximum context (?:length|window) reached|context limit exceeded|out of context(?: window)?)",
+        )
+        .unwrap()
+    })
 }
 
 fn to_zoned_reset_at(
@@ -392,6 +406,22 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
         other => BackendKind::parse(other).ok(),
     };
 
+    // Context window exhaustion is checked early and applies to any backend.
+    // This is a routing signal: the same backend may succeed with a larger-context
+    // model, so it should be retryable and not disable the whole backend/account.
+    if let Some(m) = context_window_exhausted_re().find(text) {
+        return Some(ParsedFailure {
+            backend: backend.to_string(),
+            kind: FailureKind::ContextLimitExceeded,
+            retryable: true,
+            reset_at: None,
+            retry_after_seconds: None,
+            confidence: Confidence::High,
+            matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+            unresolved_timezone: None,
+        });
+    }
+
     if kind == Some(BackendKind::Codex) {
         if let Some(m) = codex_selected_model_capacity_re().find(text) {
             return Some(ParsedFailure {
@@ -578,6 +608,8 @@ mod tests {
         include_str!("../tests/fixtures/quota-logs/codex_usage_exhausted_time_only.txt");
     const CODEX_SELECTED_MODEL_CAPACITY: &str =
         include_str!("../tests/fixtures/quota-logs/codex_selected_model_at_capacity.jsonl");
+    const CODEX_CONTEXT_WINDOW_EXHAUSTED: &str =
+        include_str!("../tests/fixtures/quota-logs/codex_context_window_exhausted.txt");
     const CLAUDE_TZ_RESET: &str =
         include_str!("../tests/fixtures/quota-logs/claude_usage_exhausted_tz_reset.txt");
     const CLAUDE_SESSION_LIMIT_TZ_RESET: &str =
@@ -934,5 +966,92 @@ mod tests {
         let now = utc(2026, Month::January, 1, 0, 0);
         assert!(parse("agy-main", "", now).is_none());
         assert!(parse("agy-second", "process exited with no output", now).is_none());
+    }
+
+    // ── Context window exhaustion (Issue #437) ─────────────────────────────────
+
+    #[test]
+    fn codex_context_window_exhausted_from_real_fixture() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let parsed = parse("codex", CODEX_CONTEXT_WINDOW_EXHAUSTED, now).unwrap();
+        assert_eq!(parsed.kind, FailureKind::ContextLimitExceeded);
+        assert!(
+            parsed.retryable,
+            "context exhaustion should be retryable with larger context model"
+        );
+        assert_eq!(parsed.confidence, Confidence::High);
+        assert!(parsed.matched_evidence.contains("ran out of room"));
+        assert_eq!(parsed.reset_at, None);
+        assert_eq!(parsed.retry_after_seconds, None);
+    }
+
+    #[test]
+    fn context_window_exhausted_variants_are_also_detected() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let variants = [
+            ("Context window is full", "Context window"),
+            ("Context length exceeded", "Context length"),
+            ("Maximum context window reached", "Maximum context"),
+            ("Context limit exceeded", "Context limit"),
+            ("Out of context", "Out of context"),
+        ];
+        for (text, expected_content) in variants {
+            let parsed = parse("test", text, now);
+            match parsed {
+                Some(ref p) => {
+                    assert_eq!(
+                        p.kind,
+                        FailureKind::ContextLimitExceeded,
+                        "failed for: {}",
+                        text
+                    );
+                    assert!(p.retryable);
+                    assert_eq!(p.confidence, Confidence::High);
+                    assert!(
+                        p.matched_evidence.contains(expected_content),
+                        "expected evidence to contain '{}' for text '{}', got '{}'",
+                        expected_content,
+                        text,
+                        p.matched_evidence
+                    );
+                }
+                None => panic!("parse returned None for text: {}", text),
+            }
+        }
+    }
+
+    #[test]
+    fn context_exhaustion_works_for_multiple_providers() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        let text = "ran out of room in the model's context window";
+        for backend in ["codex", "claude", "vibe", "opencode", "agy"] {
+            let parsed = parse(backend, text, now).unwrap();
+            assert_eq!(
+                parsed.kind,
+                FailureKind::ContextLimitExceeded,
+                "failed for backend: {}",
+                backend
+            );
+            assert!(parsed.retryable);
+        }
+    }
+
+    #[test]
+    fn unrelated_context_text_does_not_false_positive() {
+        let now = utc(2026, Month::January, 1, 0, 0);
+        // These should NOT match context exhaustion patterns
+        let non_matches = [
+            "The context of the conversation was saved",
+            "In the context of this problem",
+            "Contextual understanding is important",
+            "This is a context-free grammar",
+        ];
+        for text in non_matches {
+            assert!(
+                parse("test", text, now).is_none(),
+                "false positive for: {}",
+                text
+            );
+        }
     }
 }

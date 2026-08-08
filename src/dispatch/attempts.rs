@@ -1310,6 +1310,13 @@ fn mark_backend_unavailable_from_output_for_identity_at(
         return Ok(None);
     };
 
+    // Issue #437: ContextLimitExceeded is a routing signal, not a backend
+    // availability problem. The same backend may succeed with a larger-context
+    // model, so we must NOT mark it as unavailable.
+    if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded {
+        return Ok(Some(parsed));
+    }
+
     let parsed_unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {
         OffsetDateTime::parse(reset_at, &Rfc3339).ok()
     } else {
@@ -1341,6 +1348,9 @@ fn mark_backend_unavailable_from_output_for_identity_at(
         crate::quota_parser::FailureKind::RateLimited => crate::availability::Reason::RateLimited,
         crate::quota_parser::FailureKind::AuthenticationError => {
             crate::availability::Reason::AuthenticationError
+        }
+        crate::quota_parser::FailureKind::ContextLimitExceeded => {
+            crate::availability::Reason::ContextLimitExceeded
         }
         crate::quota_parser::FailureKind::BackendStalled => {
             crate::availability::Reason::BackendOutage
