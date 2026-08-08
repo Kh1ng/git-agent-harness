@@ -5,11 +5,23 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Host role (issue seen 2026-08-08: installing on a remote/worker machine
+# unconditionally built and started the full control-plane server, and
+# unconditionally tried to reload systemd -- which doesn't exist on macOS).
+# "central" (default) preserves prior behavior exactly. "worker" installs
+# just the CLI + dispatch-loop unit: no apps/server build, no
+# gah-server.service.
+role="${GAH_NODE_ROLE:-central}"
+case "$role" in
+  central|worker) ;;
+  *) echo "ERROR: unknown GAH_NODE_ROLE='$role' (expected 'central' or 'worker')" >&2; exit 1 ;;
+esac
+
 # Fresh installs and routine upgrades use the same Rust update implementation.
 # --bin gah is required: Cargo.toml declares a second [[bin]]
 # (generate-cli-capabilities) with no default-run set, so a bare
 # `cargo run` is ambiguous and errors instead of picking one.
-cargo run --bin gah -- update --repo "$repo_root"
+cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
 # Persistent server bind-host override (issue #643). Created only on first
 # install; every later run of this script, and every `gah update
@@ -143,9 +155,31 @@ case "${GAH_GATEWAY_MODE:-}" in
     ;;
 esac
 
-sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now gah-server.service
-sudo systemctl is-active --quiet gah-server.service
+if [ "$role" = "central" ]; then
+  sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now gah-server.service
+  sudo systemctl is-active --quiet gah-server.service
+else
+  echo "Role is 'worker': skipping gah-server.service (this host doesn't serve the control plane)."
+fi
 
-echo "GAH installed. Update with: gah update --repo $repo_root --restart-server"
+# Existing-project context import (opt-in, issue seen 2026-08-08). Reuses
+# whatever gateway this host is now wired to (colocated above, remote above,
+# or an inherited $TDAI_GATEWAY_URL). Set GAH_IMPORT_REPO to seed a project's
+# handoff/memory docs into the gateway at install time; unset skips this
+# entirely, same convention as GAH_GATEWAY_MODE.
+if [ -n "${GAH_IMPORT_REPO:-}" ]; then
+  : "${GAH_IMPORT_SESSION_KEY:?GAH_IMPORT_REPO requires GAH_IMPORT_SESSION_KEY (e.g. gah:manager:github.com/org/repo)}"
+  echo "Importing project context from $GAH_IMPORT_REPO under $GAH_IMPORT_SESSION_KEY..."
+  python3 "$repo_root/scripts/backfill_project_docs.py" \
+    --repo "$GAH_IMPORT_REPO" \
+    --session-key "$GAH_IMPORT_SESSION_KEY" \
+    ${GAH_IMPORT_DOCS:+--docs "$GAH_IMPORT_DOCS"}
+fi
+
+if [ "$role" = "central" ]; then
+  echo "GAH installed. Update with: gah update --repo $repo_root --role central --restart-server"
+else
+  echo "GAH installed. Update with: gah update --repo $repo_root --role worker"
+fi

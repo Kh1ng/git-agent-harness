@@ -51,10 +51,12 @@ pub fn run() -> Result<()> {
 
         Commands::Update {
             repo,
+            role,
             restart_server,
             server_service,
         } => commands::update::run(commands::update::Args {
             repo,
+            role,
             restart_server,
             server_service,
         })?,
