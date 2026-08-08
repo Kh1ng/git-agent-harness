@@ -375,6 +375,8 @@ pub(crate) mod telemetry_tests {
             failure_stage: None,
             duration_seconds: Some(50.0),
             diff_path: None,
+            checkpoint_branch: None,
+            checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
                 usage_source: Some("attempt".to_string()),
@@ -423,6 +425,8 @@ pub(crate) mod telemetry_tests {
             failure_stage: None,
             duration_seconds: Some(50.0),
             diff_path: None,
+            checkpoint_branch: None,
+            checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
                 usage_source: Some("attempt".to_string()),
@@ -848,6 +852,8 @@ pub(crate) mod telemetry_tests {
             failure_stage: None,
             attempts_started: Some(1),
             attempts_completed: Some(1),
+            resumable_checkpoint_branch: None,
+            resumable_checkpoint_sha: None,
             attempts: vec![],
             attempt_routing: vec![],
             routing_runtime: Default::default(),
@@ -1067,6 +1073,8 @@ default_target_branch = "main"
             failure_stage: Some("agent_run".to_string()),
             duration_seconds: Some(50.0),
             diff_path: None,
+            checkpoint_branch: None,
+            checkpoint_sha: None,
             cli_version: None,
             usage: crate::ledger::LedgerUsage {
                 usage_source: Some("test".to_string()),
@@ -1095,6 +1103,8 @@ default_target_branch = "main"
             failure_stage: Some("agent_run".to_string()),
             duration_seconds: Some(60.0),
             diff_path: None,
+            checkpoint_branch: None,
+            checkpoint_sha: None,
             cli_version: None,
             usage: crate::ledger::LedgerUsage {
                 usage_source: Some("test".to_string()),
@@ -1123,6 +1133,8 @@ default_target_branch = "main"
             failure_stage: None,
             duration_seconds: Some(40.0),
             diff_path: None,
+            checkpoint_branch: None,
+            checkpoint_sha: None,
             cli_version: None,
             usage: crate::ledger::LedgerUsage {
                 usage_source: Some("test".to_string()),

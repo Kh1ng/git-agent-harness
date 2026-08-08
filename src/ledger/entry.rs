@@ -136,6 +136,15 @@ pub struct AttemptRecord {
     /// deserializing.
     #[serde(default)]
     pub cli_version: Option<String>,
+    /// Issue #362: set when this specific attempt was checkpointed by
+    /// graceful shutdown and is a candidate for resumption. Typed
+    /// alongside `resumable_checkpoint_branch`/`_sha` on the entry, rather
+    /// than appended into `validation_result` as a string suffix.
+    /// `#[serde(default)]` for pre-existing lines.
+    #[serde(default)]
+    pub checkpoint_branch: Option<String>,
+    #[serde(default)]
+    pub checkpoint_sha: Option<String>,
     /// TICKET-101: provider-reported usage for exactly this attempt, not
     /// the whole dispatch. Same "unknown stays unknown, never zero"
     /// discipline as `LedgerEntry.usage` -- an empty `LedgerUsage` (all
@@ -614,6 +623,18 @@ pub struct LedgerEntry {
     pub attempts_started: Option<u32>,
     #[serde(default)]
     pub attempts_completed: Option<u32>,
+    /// Issue #362: typed resumable-checkpoint identity, set when graceful
+    /// shutdown checkpointed dirty work. `None` means no resumable
+    /// checkpoint exists for this entry (the common case) -- distinct from
+    /// an explicit non-resumable reason, which callers record via
+    /// `error_summary`/`failure_class` as usual. Replaces an earlier draft
+    /// that stuffed this into `error_summary`/`AttemptRecord.validation_result`
+    /// as ad hoc JSON/string suffixes, corrupting those fields' real
+    /// meaning. `#[serde(default)]` for pre-existing lines.
+    #[serde(default)]
+    pub resumable_checkpoint_branch: Option<String>,
+    #[serde(default)]
+    pub resumable_checkpoint_sha: Option<String>,
     #[serde(default)]
     pub attempts: Vec<AttemptRecord>,
     #[serde(default)]
@@ -756,6 +777,8 @@ impl LedgerEntry {
             failure_stage: None,
             attempts_started: Some(0),
             attempts_completed: Some(0),
+            resumable_checkpoint_branch: None,
+            resumable_checkpoint_sha: None,
             attempts: Vec::new(),
             attempt_routing: Vec::new(),
             routing_runtime: RoutingRuntimeState::default(),
@@ -862,6 +885,8 @@ impl LedgerEntry {
             failure_stage: None,
             attempts_started: Some(0),
             attempts_completed: Some(0),
+            resumable_checkpoint_branch: None,
+            resumable_checkpoint_sha: None,
             attempts: Vec::new(),
             attempt_routing: Vec::new(),
             routing_runtime: RoutingRuntimeState::default(),

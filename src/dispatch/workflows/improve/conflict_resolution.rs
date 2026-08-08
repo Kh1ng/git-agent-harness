@@ -335,6 +335,8 @@ fn after_attempt(
         failure_stage: Some(FailureStage::AgentRun.as_str().into()),
         duration_seconds: Some(elapsed_seconds),
         diff_path: None,
+        checkpoint_branch: None,
+        checkpoint_sha: None,
         usage: attempt_usage(
             &result.log_path,
             result.agy_cli_log_delta.as_deref(),

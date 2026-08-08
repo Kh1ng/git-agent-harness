@@ -13,11 +13,13 @@ use super::super::DispatchArgs;
 use crate::config::{self, GahConfig, Profile};
 use crate::ledger::LedgerEntry;
 use crate::models::{PlannerWorkPacket, PmPlan, RecommendedRouting};
+use crate::notifications::{notify_event, NotifyEvent};
 use crate::routing::RouteRequest;
 use crate::runner;
 use crate::sync::fetch_repository_mrs;
 use crate::worktree;
 use anyhow::{Context, Result};
+use chrono;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -210,11 +212,12 @@ pub(crate) fn pm(
             break log_text;
         }
 
-        ledger.set_failure(
-            crate::ledger::FailureClass::BackendError,
-            crate::ledger::FailureStage::AgentRun,
-        );
+        // Restore hard wall-clock timeout guard that was deleted in the previous attempt
         if log_text.contains("hard wall-clock timeout") {
+            ledger.set_failure(
+                crate::ledger::FailureClass::BackendError,
+                crate::ledger::FailureStage::AgentRun,
+            );
             ledger.validation_result = Some("not_run_hard_timeout".into());
             anyhow::bail!(
                 "PM backend {} exceeded the configured {}s total wall-clock budget",
@@ -222,6 +225,7 @@ pub(crate) fn pm(
                 profile.publishing.pm_timeout_seconds()
             );
         }
+
         let route_key = route_identity(
             &plan_route.effective_backend,
             plan_route.effective_model.as_deref(),
@@ -240,17 +244,51 @@ pub(crate) fn pm(
             );
         };
 
+        // Issue #437: classify context exhaustion as ContextLimitExceeded, not BackendError
+        let failure_class = if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded
+        {
+            crate::ledger::FailureClass::ContextLimitExceeded
+        } else {
+            crate::ledger::FailureClass::BackendError
+        };
+        ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
+
         let rerouted = decide_route(cfg, profile, route_req.clone(), None, ledger)?;
         let rerouted_key = route_identity(
             &rerouted.effective_backend,
             rerouted.effective_model.as_deref(),
         );
         if attempted_routes.contains(&rerouted_key) {
-            anyhow::bail!(
-                "PM backend {} became unavailable ({:?}) and no new eligible backend remained",
-                plan_route.effective_backend,
-                parsed.kind
+            let message = if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded {
+                format!("PM backend {} context limit exceeded ({:?}) and no new eligible backend remained", plan_route.effective_backend, parsed.kind)
+            } else {
+                format!(
+                    "PM backend {} became unavailable ({:?}) and no new eligible backend remained",
+                    plan_route.effective_backend, parsed.kind
+                )
+            };
+            // Update ledger with the specific failure class for the terminal path
+            ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
+            ledger.error_summary = Some(message.clone());
+
+            // Emit notification for terminal failure
+            notify_event(
+                cfg,
+                profile,
+                NotifyEvent::DispatchFailed {
+                    timestamp: &chrono::Utc::now().to_rfc3339(),
+                    profile: profile_name,
+                    failure_class: failure_class.as_str(),
+                    failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str()),
+                    run_id: ledger.session_id.as_deref().unwrap_or("unknown"),
+                    work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
+                    attempt_count: Some(attempted_routes.len() as u32 + 1),
+                    error_summary: Some(&message),
+                    mr_url: None,
+                },
             );
+
+            anyhow::bail!(message);
         }
         println!(
             "PM rerouting: {} -> {} ({:?})",

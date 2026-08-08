@@ -38,6 +38,8 @@ mod behavior_metrics_tests {
             failure_stage: None,
             duration_seconds: Some(1.0),
             diff_path: None,
+            checkpoint_branch: None,
+            checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
                 behavior_metrics: Some(metrics),
@@ -57,6 +59,8 @@ mod behavior_metrics_tests {
             failure_stage: None,
             duration_seconds: Some(1.0),
             diff_path: None,
+            checkpoint_branch: None,
+            checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
                 // No behavior_metrics field at all (the production state

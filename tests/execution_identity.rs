@@ -503,6 +503,8 @@ fn execution_identity_golden_fallback_substitution_attempt_attribution() {
         failure_stage: None,
         duration_seconds: Some(2.0),
         diff_path: None,
+        checkpoint_branch: None,
+        checkpoint_sha: None,
         cli_version: None,
         usage: LedgerUsage::default(),
     };
@@ -516,6 +518,8 @@ fn execution_identity_golden_fallback_substitution_attempt_attribution() {
         failure_stage: None,
         duration_seconds: Some(3.5),
         diff_path: None,
+        checkpoint_branch: None,
+        checkpoint_sha: None,
         cli_version: None,
         usage: LedgerUsage::default(),
     };

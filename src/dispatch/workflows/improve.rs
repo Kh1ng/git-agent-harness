@@ -31,6 +31,7 @@ use crate::{runner, worktree};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+mod attempt_bookkeeping;
 mod bounded_validation;
 pub(crate) use bounded_validation::bounded_validation_failure;
 mod conflict_resolution;
@@ -169,6 +170,17 @@ pub(crate) fn improve(
     let repo = Path::new(&profile.local_path);
     ensure_dispatch_capacity(profile, &worktree_base)?;
 
+    // Track WIP checkpoints for cleanup/tombstoning after successful completion
+    let mut wip_checkpoints = Vec::new();
+
+    // Issue #362: Check for existing resumable checkpoints first
+    let sessions_base = Path::new(&profile.artifact_root).join("sessions");
+    let checkpoint_result = crate::dispatch::checkpoints::find_latest_resumable_checkpoint(
+        &sessions_base,
+        &branch,
+        ledger.work_id.as_deref(),
+    )?;
+
     // TICKET-118: Handle existing branch for FixMr action
     let (branch, wt) = if let Some(ref existing_branch) = manual_fix.existing_branch {
         println!(
@@ -180,6 +192,37 @@ pub(crate) fn improve(
             worktree::create_existing(repo, existing_branch, &worktree_base),
         )?;
         (existing_branch.clone(), wt)
+    } else if let Some((checkpoint_branch, checkpoint_sha, _)) = checkpoint_result {
+        // Issue #362: Resume from existing checkpoint
+        println!("Resuming from checkpoint {checkpoint_branch} (sha: {checkpoint_sha}) ...");
+
+        if let Some(wt) = crate::dispatch::checkpoints::resume_checkpoint_into_worktree(
+            ledger,
+            repo,
+            &checkpoint_branch,
+            &branch,
+            &worktree_base,
+        )? {
+            wip_checkpoints.push(checkpoint_branch.clone()); // for tombstoning after success
+            println!("Successfully resumed from checkpoint: {checkpoint_branch} (as {branch})");
+            (branch.clone(), wt)
+        } else {
+            // Checkpoint is no longer valid, fall back to normal creation
+            println!(
+                "Checkpoint {} is no longer valid, creating fresh worktree from {}...",
+                checkpoint_branch, profile.default_target_branch
+            );
+            let wt = classify_worktree_result(
+                ledger,
+                worktree::create(
+                    repo,
+                    &profile.default_target_branch,
+                    &branch,
+                    &worktree_base,
+                ),
+            )?;
+            (branch, wt)
+        }
     } else {
         println!(
             "Creating worktree from {}...",
@@ -333,7 +376,6 @@ pub(crate) fn improve(
     // Retry checkpoints are temporary recovery refs. They are deliberately
     // retained on any terminal failure, then removed only after a successful
     // publish so real partial work is never silently discarded.
-    let mut wip_checkpoints = Vec::new();
     for attempt in 0..max_attempts {
         println!(
             "\nAttempt {}/{}: running {} backend...",
@@ -443,6 +485,8 @@ pub(crate) fn improve(
                     failure_stage: Some(crate::ledger::FailureStage::BackendLaunch.as_str().into()),
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    checkpoint_branch: None,
+                    checkpoint_sha: None,
                     cli_version: None,
                     usage: normalize_attempt_usage(
                         crate::ledger::LedgerUsage::default(),
@@ -549,6 +593,8 @@ pub(crate) fn improve(
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                checkpoint_branch: None,
+                checkpoint_sha: None,
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
@@ -564,7 +610,7 @@ pub(crate) fn improve(
                 profile,
                 ledger,
             );
-            shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+            shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
             if stalled {
                 notify_event(
                     cfg,
@@ -682,22 +728,35 @@ pub(crate) fn improve(
                             wip_checkpoints.push(checkpoint);
                         }
                         prior_phase_context = Some(task.clone());
-                        task = format!(
-                            "{}\n\n## Previous backend became unavailable (attempt {}/{})\n\nThe existing checkpointed repository changes remain in this worktree. Inspect them, preserve useful progress, and complete or repair the ticket with the next backend.",
-                            base_task,
-                            attempt + 1,
-                            max_attempts,
-                        );
+                        let is_context_limit_exceeded =
+                            parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded;
+                        let message = if is_context_limit_exceeded {
+                            format!(
+                                "## Context limit exceeded (attempt {}/{})\n\nThe existing checkpointed repository changes remain in this worktree. Inspect them, preserve useful progress, and complete or repair the ticket with a larger-context model.",
+                                attempt + 1,
+                                max_attempts
+                            )
+                        } else {
+                            format!(
+                                "## Previous backend became unavailable (attempt {}/{})\n\nThe existing checkpointed repository changes remain in this worktree. Inspect them, preserve useful progress, and complete or repair the ticket with the next backend.",
+                                attempt + 1,
+                                max_attempts
+                            )
+                        };
+                        task = format!("{}\n\n{}", base_task, message,);
+                        let log_message = if is_context_limit_exceeded {
+                            "Context limit exceeded; retrying next attempt with larger-context model"
+                        } else {
+                            "Backend unavailable; retrying next attempt"
+                        };
                         println!(
-                            "Backend unavailable; retrying next attempt with {} instead of {} ({:?})",
+                            "{} with {} instead of {} ({:?})",
+                            log_message,
                             route_label(
                                 &rerouted.effective_backend,
                                 rerouted.effective_model.as_deref(),
                             ),
-                            route_label(
-                                &route.effective_backend,
-                                route.effective_model.as_deref(),
-                            ),
+                            route_label(&route.effective_backend, route.effective_model.as_deref(),),
                             parsed.kind
                         );
                         route = rerouted;
@@ -824,20 +883,32 @@ pub(crate) fn improve(
                 &route,
                 (&failure_text, failure_log_path),
             )? {
-                ledger.set_failure(
-                    crate::ledger::FailureClass::BackendError,
-                    crate::ledger::FailureStage::AgentRun,
-                );
+                // Issue #437: classify context exhaustion as ContextLimitExceeded, not BackendError
+                let is_context_limit_exceeded =
+                    parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded;
+                let failure_class = if is_context_limit_exceeded {
+                    crate::ledger::FailureClass::ContextLimitExceeded
+                } else {
+                    crate::ledger::FailureClass::BackendError
+                };
+                ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
+                let validation_result = if is_context_limit_exceeded {
+                    "not_run_context_limit_exceeded"
+                } else {
+                    "not_run_backend_unavailable"
+                };
                 ledger.attempts.push(crate::ledger::AttemptRecord {
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
                     effective_model: Some(llm.model.clone()),
                     exit_code: Some(0),
-                    validation_result: Some("not_run_backend_unavailable".into()),
-                    failure_class: Some(crate::ledger::FailureClass::BackendError.as_str().into()),
+                    validation_result: Some(validation_result.into()),
+                    failure_class: Some(failure_class.as_str().into()),
                     failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    checkpoint_branch: None,
+                    checkpoint_sha: None,
                     usage: attempt_usage(
                         &result.log_path,
                         result.agy_cli_log_delta.as_deref(),
@@ -853,7 +924,7 @@ pub(crate) fn improve(
                     profile,
                     ledger,
                 );
-                shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
                 if attempt + 1 < max_attempts {
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
@@ -862,16 +933,21 @@ pub(crate) fn improve(
                         rerouted.effective_model.as_deref(),
                     );
                     if rerouted_identity != current_identity {
+                        let is_context_limit_exceeded =
+                            parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded;
+                        let message = if is_context_limit_exceeded {
+                            "Context limit exceeded; retrying next attempt with larger-context model"
+                        } else {
+                            "Backend unavailable after no-progress result; retrying next attempt"
+                        };
                         println!(
-                            "Backend unavailable after no-progress result; retrying next attempt with {} instead of {} ({:?})",
+                            "{} with {} instead of {} ({:?})",
+                            message,
                             route_label(
                                 &rerouted.effective_backend,
                                 rerouted.effective_model.as_deref(),
                             ),
-                            route_label(
-                                &route.effective_backend,
-                                route.effective_model.as_deref(),
-                            ),
+                            route_label(&route.effective_backend, route.effective_model.as_deref(),),
                             parsed.kind
                         );
                         route = rerouted;
@@ -904,6 +980,8 @@ pub(crate) fn improve(
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                checkpoint_branch: None,
+                checkpoint_sha: None,
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
@@ -919,7 +997,7 @@ pub(crate) fn improve(
                 profile,
                 ledger,
             );
-            shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+            shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
             if already_satisfied.reconcile(
                 ledger,
                 &backend_summary,
@@ -975,6 +1053,8 @@ pub(crate) fn improve(
                 failure_stage: None,
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                checkpoint_branch: None,
+                checkpoint_sha: None,
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
@@ -984,7 +1064,7 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
-            shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+            shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
             break;
         }
 
@@ -1014,6 +1094,8 @@ pub(crate) fn improve(
                     failure_stage: None,
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    checkpoint_branch: None,
+                    checkpoint_sha: None,
                     usage: attempt_usage(
                         &result.log_path,
                         result.agy_cli_log_delta.as_deref(),
@@ -1090,6 +1172,8 @@ pub(crate) fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        checkpoint_branch: None,
+                        checkpoint_sha: None,
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -1099,7 +1183,7 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!("validation timed out (harness error). {}", failure_output);
                 }
@@ -1197,6 +1281,8 @@ pub(crate) fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path,
+                        checkpoint_branch: None,
+                        checkpoint_sha: None,
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -1212,7 +1298,7 @@ pub(crate) fn improve(
                         profile,
                         ledger,
                     );
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
                     task = format!(
@@ -1283,32 +1369,23 @@ pub(crate) fn improve(
                         BD::Clean | BD::ExpectedRed | BD::UnknownRed => FC::AgentNoProgress,
                     };
                     ledger.set_failure(no_progress_class, FS::PostValidation);
-                    ledger.attempts.push(crate::ledger::AttemptRecord {
-                        attempt_number: attempt + 1,
-                        backend: route.effective_backend.clone(),
-                        effective_model: Some(llm.model.clone()),
-                        exit_code: Some(0),
-                        validation_result: Some("failed".into()),
-                        failure_class: Some(no_progress_class.as_str().into()),
-                        failure_stage: Some(FS::PostValidation.as_str().into()),
-                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
-                        diff_path: None,
-                        usage: attempt_usage(
-                            &result.log_path,
-                            result.agy_cli_log_delta.as_deref(),
-                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
-                            result.transcript_path.as_deref(),
-                            Some(&claude_path),
-                        ),
-                        cli_version: result.agy_version.clone(),
-                    });
-                    record_external_approval_consumption_for_last_attempt(
+                    attempt_bookkeeping::record_failed_validation_attempt(
+                        ledger,
                         cfg,
                         &args.profile,
                         profile,
-                        ledger,
-                    );
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                        &shutdown_ctx,
+                        shutdown_after_result,
+                        attempt,
+                        &route,
+                        &llm,
+                        &result,
+                        &claude_path,
+                        attempt_start,
+                        "failed",
+                        Some(no_progress_class.as_str().into()),
+                        Some(FS::PostValidation.as_str().into()),
+                    )?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,
@@ -1332,66 +1409,46 @@ pub(crate) fn improve(
                         "Validation still failing; --allow-draft-fail set — pushing as draft."
                     );
                     ledger.validation_result = Some("failed-draft".into());
-                    ledger.attempts.push(crate::ledger::AttemptRecord {
-                        attempt_number: attempt + 1,
-                        backend: route.effective_backend.clone(),
-                        effective_model: Some(llm.model.clone()),
-                        exit_code: Some(0),
-                        validation_result: Some("failed-draft".into()),
-                        failure_class: None,
-                        failure_stage: None,
-                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
-                        diff_path: None,
-                        usage: attempt_usage(
-                            &result.log_path,
-                            result.agy_cli_log_delta.as_deref(),
-                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
-                            result.transcript_path.as_deref(),
-                            Some(&claude_path),
-                        ),
-                        cli_version: result.agy_version.clone(),
-                    });
-                    record_external_approval_consumption_for_last_attempt(
+                    attempt_bookkeeping::record_failed_validation_attempt(
+                        ledger,
                         cfg,
                         &args.profile,
                         profile,
-                        ledger,
-                    );
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                        &shutdown_ctx,
+                        shutdown_after_result,
+                        attempt,
+                        &route,
+                        &llm,
+                        &result,
+                        &claude_path,
+                        attempt_start,
+                        "failed-draft",
+                        None,
+                        None,
+                    )?;
                     break;
                 } else {
-                    ledger.attempts.push(crate::ledger::AttemptRecord {
-                        attempt_number: attempt + 1,
-                        backend: route.effective_backend.clone(),
-                        effective_model: Some(llm.model.clone()),
-                        exit_code: Some(0),
-                        validation_result: Some("failed".into()),
-                        failure_class: Some(
+                    attempt_bookkeeping::record_failed_validation_attempt(
+                        ledger,
+                        cfg,
+                        &args.profile,
+                        profile,
+                        &shutdown_ctx,
+                        shutdown_after_result,
+                        attempt,
+                        &route,
+                        &llm,
+                        &result,
+                        &claude_path,
+                        attempt_start,
+                        "failed",
+                        Some(
                             crate::ledger::FailureClass::ValidationFailure
                                 .as_str()
                                 .into(),
                         ),
-                        failure_stage: Some(
-                            crate::ledger::FailureStage::PostValidation.as_str().into(),
-                        ),
-                        duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
-                        diff_path: None,
-                        usage: attempt_usage(
-                            &result.log_path,
-                            result.agy_cli_log_delta.as_deref(),
-                            UsageAttribution::from_route(&route).with_fallback_model(&llm.model),
-                            result.transcript_path.as_deref(),
-                            Some(&claude_path),
-                        ),
-                        cli_version: result.agy_version.clone(),
-                    });
-                    record_external_approval_consumption_for_last_attempt(
-                        cfg,
-                        &args.profile,
-                        profile,
-                        ledger,
-                    );
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                        Some(crate::ledger::FailureStage::PostValidation.as_str().into()),
+                    )?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,

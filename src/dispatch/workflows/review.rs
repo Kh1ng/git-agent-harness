@@ -699,6 +699,8 @@ pub(in crate::dispatch) fn review(
                 failure_stage,
                 duration_seconds: Some(attempt.duration_secs),
                 diff_path: None,
+                checkpoint_branch: None,
+                checkpoint_sha: None,
                 cli_version: None,
                 usage,
             });
@@ -739,8 +741,16 @@ pub(in crate::dispatch) fn review(
                         rerouted.effective_model.as_deref(),
                     );
                     if rerouted_identity != current_identity {
+                        let message = if parsed.kind
+                            == crate::quota_parser::FailureKind::ContextLimitExceeded
+                        {
+                            "Context limit exceeded; retrying review with larger-context model"
+                        } else {
+                            "Backend unavailable; retrying review"
+                        };
                         println!(
-                            "Backend unavailable; retrying review with {} instead of {} ({:?})",
+                            "{} with {} instead of {} ({:?})",
+                            message,
                             route_label(
                                 &rerouted.effective_backend,
                                 rerouted.effective_model.as_deref(),

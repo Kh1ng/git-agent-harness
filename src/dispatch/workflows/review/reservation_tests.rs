@@ -24,6 +24,8 @@ fn attempt_record(
         failure_stage: Some(crate::ledger::FailureStage::Review.as_str().into()),
         duration_seconds: Some(1.0),
         diff_path: None,
+        checkpoint_branch: None,
+        checkpoint_sha: None,
         cli_version: None,
         usage: LedgerUsage::default(),
     }
