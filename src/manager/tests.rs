@@ -21,15 +21,18 @@ fn fake_adapter_satisfies_the_contract_suite_with_every_optional_capability_off(
     run_contract_suite(&mut session);
 }
 
+// Run the contract suite against the real CodexManagerSession adapter code
+// (not FakeManagerSession), but backed by a fake `codex` executable rather
+// than a real install -- see codex.rs's write_fake_codex doc comment for
+// why that's still a real exercise of the adapter (discovery is the only
+// part that touches a process at all).
+
 #[test]
 fn codex_adapter_satisfies_the_contract_suite_with_every_optional_capability_on() {
-    // Run the contract suite against the real Codex adapter
-    if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-        return;
-    }
-
+    let dir = tempfile::tempdir().unwrap();
+    let codex_path = super::codex::write_fake_codex(dir.path());
     let mut session = CodexManagerSession::new(
-        None,
+        Some(&codex_path),
         Some(SessionCapabilities {
             resume: true,
             interrupt: true,
@@ -42,12 +45,10 @@ fn codex_adapter_satisfies_the_contract_suite_with_every_optional_capability_on(
 
 #[test]
 fn codex_adapter_satisfies_the_contract_suite_with_every_optional_capability_off() {
-    // Run the contract suite against the real Codex adapter with capabilities off
-    if std::env::var("CODEX_SKIP_REAL_TESTS").is_ok() {
-        return;
-    }
-
-    let mut session = CodexManagerSession::new(None, Some(SessionCapabilities::default())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let codex_path = super::codex::write_fake_codex(dir.path());
+    let mut session =
+        CodexManagerSession::new(Some(&codex_path), Some(SessionCapabilities::default())).unwrap();
     run_contract_suite(&mut session);
 }
 
