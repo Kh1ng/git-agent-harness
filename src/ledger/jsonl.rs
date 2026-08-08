@@ -165,6 +165,7 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
         append_locked(&path, entry)?;
     }
     sync_mirror(cfg);
+    super::dispatch_notify::notify_if_genuine_failure(cfg, entry); // see its module doc
     Ok(path)
 }
 
