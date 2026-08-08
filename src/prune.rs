@@ -50,7 +50,57 @@ fn prune_profile(
     prune_sessions(profile, cutoff, dry_run)?;
     crate::build_cache::prune_inactive(&profile.artifact_root, dry_run)?;
     prune_worktrees(cfg, profile, cutoff, dry_run, announce)?;
+    // Same GraphQL-cost boundary as prune_worktrees's own terminal-state
+    // check above: only the explicit/scheduled `gah prune` path (announce
+    // == include_terminal_provider_state == true), never the recurring
+    // per-observation automatic maintenance.
+    if announce {
+        prune_remote_gah_branches(profile, dry_run)?;
+    }
     Ok(())
+}
+
+/// Deletes the remote branch for any MERGED/CLOSED_UNMERGED PR/MR whose
+/// branch matches gah's own dispatch naming convention (`gah/...` --
+/// `format!("gah/{}-{}", profile.repo_id, ts)` in dispatch/workflows).
+/// Scoped to that prefix deliberately: this must never touch a
+/// human-authored branch just because its PR happened to merge. GitHub/
+/// GitLab's own "delete branch on merge" doesn't always fire (e.g. `gh pr
+/// merge --admin` merges outside the normal UI flow), which is how ~280
+/// stale branches accumulated on this repo before this existed.
+fn prune_remote_gah_branches(profile: &Profile, dry_run: bool) -> Result<()> {
+    let mrs = match sync::fetch_mrs(profile) {
+        Ok(mrs) => mrs,
+        Err(_) => return Ok(()), // best-effort, matches done_worktree_names
+    };
+    let push_url = profile.push_url()?;
+    let pat = profile.pat();
+    let repo_path = Path::new(&profile.local_path);
+    for (branch, class) in remote_gah_branches_to_delete(&mrs) {
+        if dry_run {
+            println!("  would delete remote branch {branch} ({class})");
+            continue;
+        }
+        match crate::worktree::delete_remote_branch(repo_path, branch, &push_url, &pat) {
+            Ok(()) => println!("  deleted remote branch {branch} ({class})"),
+            Err(err) => println!("  failed to delete remote branch {branch}: {err}"),
+        }
+    }
+    Ok(())
+}
+
+/// Pure subset of `prune_remote_gah_branches`: which branches are safe to
+/// delete on the remote, and why. Scoped to gah's own dispatch naming
+/// convention (`gah/...`) deliberately -- this must never touch a
+/// human-authored branch just because its PR happened to merge.
+pub(crate) fn remote_gah_branches_to_delete(mrs: &[SyncMr]) -> Vec<(&str, &'static str)> {
+    mrs.iter()
+        .filter(|mr| mr.branch.starts_with("gah/"))
+        .filter_map(|mr| match sync::classify(mr) {
+            class @ ("MERGED" | "CLOSED_UNMERGED") => Some((mr.branch.as_str(), class)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Resolve either one named profile or every configured profile, sorted.
@@ -255,7 +305,8 @@ fn is_older_than(path: &PathBuf, cutoff: SystemTime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        done_worktree_names_from_mrs, is_older_than, prune_worktrees, worktree_name_for_branch,
+        done_worktree_names_from_mrs, is_older_than, prune_worktrees,
+        remote_gah_branches_to_delete, worktree_name_for_branch,
     };
     use crate::config::{tests::test_profile_for_notifications, Defaults, GahConfig};
     use crate::sync::SyncMr;
@@ -376,5 +427,41 @@ mod tests {
         assert!(done.contains("gah-real-2"));
         assert!(!done.contains("gah-real-3"));
         assert!(!done.contains("gah-real-4"));
+    }
+
+    #[test]
+    fn remote_delete_covers_merged_and_closed_unmerged_gah_branches_only() {
+        let mrs = vec![
+            mr("gah/real-1", true, None),            // MERGED, gah/ -> delete
+            mr("gah/real-2", false, Some("closed")), // CLOSED_UNMERGED, gah/ -> delete
+            mr("gah/real-3", false, Some("open")),   // open, gah/ -> not terminal
+            mr("gah/real-4", false, None),           // open, gah/ -> not terminal
+        ];
+        let to_delete = remote_gah_branches_to_delete(&mrs);
+        assert_eq!(
+            to_delete,
+            vec![("gah/real-1", "MERGED"), ("gah/real-2", "CLOSED_UNMERGED")]
+        );
+    }
+
+    #[test]
+    fn remote_delete_never_touches_a_human_authored_branch_even_when_merged() {
+        // A human's own merged PR must never be auto-deleted just because
+        // it shares a repo with gah's dispatch branches -- only the exact
+        // `gah/` naming convention is eligible.
+        let mrs = vec![
+            mr("feat/my-manual-work", true, None),
+            mr("chore/cleanup", false, Some("closed")),
+            mr("fix/something", true, None),
+        ];
+        assert!(remote_gah_branches_to_delete(&mrs).is_empty());
+    }
+
+    #[test]
+    fn remote_delete_prefix_check_is_exact_not_substring() {
+        // "not-gah/foo" contains "gah/" as a substring but does not START
+        // with it -- must not match.
+        let mrs = vec![mr("not-gah/foo", true, None)];
+        assert!(remote_gah_branches_to_delete(&mrs).is_empty());
     }
 }

@@ -58,7 +58,14 @@ if [ -d "$install_dir/.git" ]; then
   git -C "$install_dir" pull --ff-only
 else
   echo "Cloning git-agent-harness into $install_dir..."
-  git clone https://github.com/Kh1ng/git-agent-harness.git "$install_dir"
+  # --depth 1: this is an install, not a dev checkout -- nobody bootstrapping
+  # a new node needs full history on day one, and a shallow clone sidesteps
+  # the repo's git history entirely (some early commits carry ~1.4GB of
+  # accidentally-committed build artifacts that predate today's .gitignore
+  # coverage -- rewriting that history is explicitly off the table, so this
+  # is the size fix instead: 1.7MB shallow vs. ~350MB full clone).
+  # `git fetch --unshallow` later recovers full history if ever wanted.
+  git clone --depth 1 https://github.com/Kh1ng/git-agent-harness.git "$install_dir"
 fi
 
 cd "$install_dir"
