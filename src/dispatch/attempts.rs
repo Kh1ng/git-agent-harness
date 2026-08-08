@@ -1349,12 +1349,11 @@ fn mark_backend_unavailable_from_output_for_identity_at(
         crate::quota_parser::FailureKind::AuthenticationError => {
             crate::availability::Reason::AuthenticationError
         }
-        crate::quota_parser::FailureKind::ContextLimitExceeded => {
-            crate::availability::Reason::ContextLimitExceeded
-        }
         crate::quota_parser::FailureKind::BackendStalled => {
             crate::availability::Reason::BackendOutage
         }
+        // ContextLimitExceeded is handled by early return at line 1316, so it never reaches here
+        crate::quota_parser::FailureKind::ContextLimitExceeded => unreachable!(),
     };
     let summary = format!(
         "{}; confidence={:?}; log={}",

@@ -682,9 +682,9 @@ pub(crate) fn improve(
                             wip_checkpoints.push(checkpoint);
                         }
                         prior_phase_context = Some(task.clone());
-                        let message = if parsed.kind
-                            == crate::quota_parser::FailureKind::ContextLimitExceeded
-                        {
+                        let is_context_limit_exceeded =
+                            parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded;
+                        let message = if is_context_limit_exceeded {
                             format!(
                                 "## Context limit exceeded (attempt {}/{})\n\nThe existing checkpointed repository changes remain in this worktree. Inspect them, preserve useful progress, and complete or repair the ticket with a larger-context model.",
                                 attempt + 1,
@@ -698,9 +698,7 @@ pub(crate) fn improve(
                             )
                         };
                         task = format!("{}\n\n{}", base_task, message,);
-                        let log_message = if parsed.kind
-                            == crate::quota_parser::FailureKind::ContextLimitExceeded
-                        {
+                        let log_message = if is_context_limit_exceeded {
                             "Context limit exceeded; retrying next attempt with larger-context model"
                         } else {
                             "Backend unavailable; retrying next attempt"
@@ -840,19 +838,19 @@ pub(crate) fn improve(
                 (&failure_text, failure_log_path),
             )? {
                 // Issue #437: classify context exhaustion as ContextLimitExceeded, not BackendError
-                let failure_class =
-                    if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded {
-                        crate::ledger::FailureClass::ContextLimitExceeded
-                    } else {
-                        crate::ledger::FailureClass::BackendError
-                    };
+                let is_context_limit_exceeded =
+                    parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded;
+                let failure_class = if is_context_limit_exceeded {
+                    crate::ledger::FailureClass::ContextLimitExceeded
+                } else {
+                    crate::ledger::FailureClass::BackendError
+                };
                 ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
-                let validation_result =
-                    if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded {
-                        "not_run_context_limit_exceeded"
-                    } else {
-                        "not_run_backend_unavailable"
-                    };
+                let validation_result = if is_context_limit_exceeded {
+                    "not_run_context_limit_exceeded"
+                } else {
+                    "not_run_backend_unavailable"
+                };
                 ledger.attempts.push(crate::ledger::AttemptRecord {
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
@@ -887,9 +885,9 @@ pub(crate) fn improve(
                         rerouted.effective_model.as_deref(),
                     );
                     if rerouted_identity != current_identity {
-                        let message = if parsed.kind
-                            == crate::quota_parser::FailureKind::ContextLimitExceeded
-                        {
+                        let is_context_limit_exceeded =
+                            parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded;
+                        let message = if is_context_limit_exceeded {
                             "Context limit exceeded; retrying next attempt with larger-context model"
                         } else {
                             "Backend unavailable after no-progress result; retrying next attempt"

@@ -406,22 +406,6 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
         other => BackendKind::parse(other).ok(),
     };
 
-    // Context window exhaustion is checked early and applies to any backend.
-    // This is a routing signal: the same backend may succeed with a larger-context
-    // model, so it should be retryable and not disable the whole backend/account.
-    if let Some(m) = context_window_exhausted_re().find(text) {
-        return Some(ParsedFailure {
-            backend: backend.to_string(),
-            kind: FailureKind::ContextLimitExceeded,
-            retryable: true,
-            reset_at: None,
-            retry_after_seconds: None,
-            confidence: Confidence::High,
-            matched_evidence: extract_evidence_line(text, m.start(), m.end()),
-            unresolved_timezone: None,
-        });
-    }
-
     if kind == Some(BackendKind::Codex) {
         if let Some(m) = codex_selected_model_capacity_re().find(text) {
             return Some(ParsedFailure {
@@ -557,6 +541,23 @@ pub fn parse(backend: &str, text: &str, now: OffsetDateTime) -> Option<ParsedFai
             reset_at: None,
             retry_after_seconds: Some(CONSERVATIVE_RATE_LIMIT_COOLDOWN_SECONDS),
             confidence: Confidence::Low,
+            matched_evidence: extract_evidence_line(text, m.start(), m.end()),
+            unresolved_timezone: None,
+        });
+    }
+
+    // Context window exhaustion is checked after backend-specific patterns to avoid
+    // shadowing existing backend-specific classifications. This is a routing signal:
+    // the same backend may succeed with a larger-context model, so it should be
+    // retryable and not disable the whole backend/account.
+    if let Some(m) = context_window_exhausted_re().find(text) {
+        return Some(ParsedFailure {
+            backend: backend.to_string(),
+            kind: FailureKind::ContextLimitExceeded,
+            retryable: true,
+            reset_at: None,
+            retry_after_seconds: None,
+            confidence: Confidence::High,
             matched_evidence: extract_evidence_line(text, m.start(), m.end()),
             unresolved_timezone: None,
         });
