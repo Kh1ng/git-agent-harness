@@ -1,4 +1,5 @@
 mod approvals;
+mod dispatch_notify;
 mod entry;
 mod jsonl;
 mod locking;
