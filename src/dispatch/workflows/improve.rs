@@ -169,6 +169,17 @@ pub(crate) fn improve(
     let repo = Path::new(&profile.local_path);
     ensure_dispatch_capacity(profile, &worktree_base)?;
 
+    // Track WIP checkpoints for cleanup/tombstoning after successful completion
+    let mut wip_checkpoints = Vec::new();
+
+    // Issue #362: Check for existing resumable checkpoints first
+    let sessions_base = Path::new(&profile.artifact_root).join("sessions");
+    let checkpoint_result = crate::dispatch::checkpoints::find_latest_resumable_checkpoint(
+        &sessions_base,
+        &branch,
+        ledger.work_id.as_deref(),
+    )?;
+
     // TICKET-118: Handle existing branch for FixMr action
     let (branch, wt) = if let Some(ref existing_branch) = manual_fix.existing_branch {
         println!(
@@ -180,6 +191,48 @@ pub(crate) fn improve(
             worktree::create_existing(repo, existing_branch, &worktree_base),
         )?;
         (existing_branch.clone(), wt)
+    } else if let Some((checkpoint_branch, checkpoint_sha, _)) = checkpoint_result {
+        // Issue #362: Resume from existing checkpoint
+        println!(
+            "Resuming from checkpoint {} (sha: {}) ...",
+            checkpoint_branch, checkpoint_sha
+        );
+
+        // Verify the checkpoint is still valid
+        if crate::dispatch::checkpoints::is_valid_checkpoint(repo, &checkpoint_branch)? {
+            let wt = classify_worktree_result(
+                ledger,
+                crate::dispatch::checkpoints::create_worktree_from_checkpoint(
+                    repo,
+                    &checkpoint_branch,
+                    &worktree_base,
+                ),
+            )?;
+
+            // Issue #362: Add resumed checkpoint to wip_checkpoints for tombstoning after success
+            wip_checkpoints.push(checkpoint_branch.clone());
+            println!(
+                "Successfully resumed from checkpoint: {}",
+                checkpoint_branch
+            );
+            (checkpoint_branch, wt)
+        } else {
+            // Checkpoint is no longer valid, fall back to normal creation
+            println!(
+                "Checkpoint {} is no longer valid, creating fresh worktree from {}...",
+                checkpoint_branch, profile.default_target_branch
+            );
+            let wt = classify_worktree_result(
+                ledger,
+                worktree::create(
+                    repo,
+                    &profile.default_target_branch,
+                    &branch,
+                    &worktree_base,
+                ),
+            )?;
+            (branch, wt)
+        }
     } else {
         println!(
             "Creating worktree from {}...",
@@ -333,7 +386,6 @@ pub(crate) fn improve(
     // Retry checkpoints are temporary recovery refs. They are deliberately
     // retained on any terminal failure, then removed only after a successful
     // publish so real partial work is never silently discarded.
-    let mut wip_checkpoints = Vec::new();
     for attempt in 0..max_attempts {
         println!(
             "\nAttempt {}/{}: running {} backend...",

@@ -191,13 +191,26 @@ pub(super) fn checkpoint_and_cleanup_after_shutdown(
             dispatch_branch, attempt_number
         ),
     )?;
+    let checkpoint_sha = if checkpointed {
+        worktree::git(&["rev-parse", "HEAD"], worktree_path).ok()
+    } else {
+        None
+    };
+
+    // Issue #362: Enhanced recovery artifact with checkpoint SHA for resumption
     let recovery_artifact = serde_json::json!({
         "run_id": run_id.unwrap_or("unknown"),
         "attempt_number": attempt_number,
         "source_work_id": work_id.unwrap_or("unknown"),
         "dispatch_branch": dispatch_branch,
-        "recovery_branch": recovery_branch,
+        "recovery_branch": recovery_branch.clone(),
         "checkpointed": checkpointed,
+        "checkpoint_sha": checkpoint_sha,
+        "is_resumable": checkpointed,
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     });
     fs::write(
         attempt_session.join("shutdown-recovery.json"),
