@@ -230,6 +230,7 @@ fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &Issue
     );
 
     append_project_brief(&mut task, profile);
+    append_related_memory(&mut task, profile, issue);
     append_live_task_pack(&mut task, issue);
 
     task.push_str(&format!(
@@ -253,6 +254,32 @@ fn append_project_brief(task: &mut String, profile: &Profile) {
     };
     task.push_str("\n## Project Brief\n\n");
     append_bounded_text(task, &brief, PROJECT_BRIEF_MAX_BYTES, "Project brief");
+}
+
+/// Issue #830: ticket-scoped recall from the TDAI memory gateway, same
+/// session key (`gah:worker:{project}:{ticket}`) manager chat's
+/// `gah:manager:{project}` and #885's `sessionKeyForTicket` share. Uses
+/// `profile.repo_id` as the gateway's profile identity, matching the
+/// config convention every profile in this repo's config.toml follows
+/// (profile map key == repo_id) -- `memory_gateway::resolve_project_key`
+/// only falls back to that string when the git remote lookup itself
+/// fails, so this only diverges from the TS side's cache key in that rare
+/// edge case. Fail-open by design (see memory_gateway module doc): no env
+/// config, an unreachable gateway, or an empty result all silently produce
+/// no section at all, exactly like a missing PROJECT_BRIEF.md above.
+fn append_related_memory(task: &mut String, profile: &Profile, issue: &IssueDetails) {
+    let query = format!("issue #{}: {}", issue.number, issue.title);
+    let work_id = format!("#{}", issue.number);
+    let Some(context) = crate::memory_gateway::recall_for_ticket(
+        &profile.repo_id,
+        &profile.local_path,
+        &work_id,
+        &query,
+    ) else {
+        return;
+    };
+    task.push_str("\n## Related Memory\n\n");
+    append_bounded_text(task, &context, PROJECT_BRIEF_MAX_BYTES, "Related memory");
 }
 
 /// Build a bounded, task-specific packet from structured issue metadata.
