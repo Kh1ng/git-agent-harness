@@ -271,6 +271,30 @@ pub fn create_worktree_from_checkpoint(
     worktree::create_existing(repo, checkpoint_branch, worktree_base)
 }
 
+/// Issue #362: validate + resume a checkpoint into a worktree, then
+/// re-branch onto `new_branch` (the normal fresh dispatch branch name) so
+/// the resumed content doesn't inherit the WIP checkpoint branch's
+/// identity -- avoids a name collision if the same checkpoint is ever
+/// resumed twice. Returns `Ok(None)` if the checkpoint is no longer valid;
+/// the caller falls back to a fresh worktree from the target branch.
+pub fn resume_checkpoint_into_worktree(
+    ledger: &mut LedgerEntry,
+    repo: &Path,
+    checkpoint_branch: &str,
+    new_branch: &str,
+    worktree_base: &Path,
+) -> Result<Option<PathBuf>> {
+    if !is_valid_checkpoint(repo, checkpoint_branch)? {
+        return Ok(None);
+    }
+    let wt = crate::dispatch::attempts::classify_worktree_result(
+        ledger,
+        create_worktree_from_checkpoint(repo, checkpoint_branch, worktree_base),
+    )?;
+    worktree::git(&["checkout", "-b", new_branch], &wt)?;
+    Ok(Some(wt))
+}
+
 /// Issue #362: Check if a checkpoint exists and is valid for resumption
 pub fn is_valid_checkpoint(repo: &Path, checkpoint_branch: &str) -> Result<bool> {
     // Check if branch exists
@@ -284,50 +308,35 @@ pub fn is_valid_checkpoint(repo: &Path, checkpoint_branch: &str) -> Result<bool>
     Ok(sha_result.is_ok())
 }
 
-/// Issue #362: Record checkpoint information in ledger entry
+/// Issue #362: Record checkpoint information in the ledger entry's typed
+/// `resumable_checkpoint_branch`/`resumable_checkpoint_sha` fields. Only
+/// sets them when `is_resumable` -- a clean/no-change shutdown must not
+/// leave a stale checkpoint identity on the entry.
 pub fn record_checkpoint_in_ledger(
     ledger: &mut LedgerEntry,
     checkpoint_branch: &str,
     checkpoint_sha: Option<String>,
     is_resumable: bool,
 ) {
-    // For now, store checkpoint info in error_summary as JSON
-    // TODO: Add proper fields to LedgerEntry struct
-    let checkpoint_info = serde_json::json!({
-        "checkpoint_branch": checkpoint_branch,
-        "checkpoint_sha": checkpoint_sha,
-        "is_resumable": is_resumable,
-        "timestamp": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    });
-
-    ledger.error_summary = Some(format!("checkpoint_info: {}", checkpoint_info));
+    if is_resumable {
+        ledger.resumable_checkpoint_branch = Some(checkpoint_branch.to_string());
+        ledger.resumable_checkpoint_sha = checkpoint_sha;
+    }
 }
 
-/// Issue #362: Mark an attempt as having a resumable checkpoint
+/// Issue #362: Mark an attempt as having a resumable checkpoint, via the
+/// typed `AttemptRecord.checkpoint_branch`/`checkpoint_sha` fields rather
+/// than appending prose onto `validation_result`.
 pub fn mark_attempt_as_resumable(
     ledger: &mut LedgerEntry,
     attempt_number: u32,
     checkpoint_branch: &str,
     checkpoint_sha: Option<String>,
 ) {
-    // Find the attempt and mark it as resumable
-    // For now, store in error_summary since we can't modify AttemptRecord
-    // TODO: Add proper fields to AttemptRecord struct
     if let Some(last_attempt) = ledger.attempts.last_mut() {
         if last_attempt.attempt_number == attempt_number {
-            // Store checkpoint info in validation_result as fallback
-            last_attempt.validation_result = Some(format!(
-                "{} (checkpoint: {}, sha: {})",
-                last_attempt
-                    .validation_result
-                    .as_deref()
-                    .unwrap_or("cancelled_shutdown"),
-                checkpoint_branch,
-                checkpoint_sha.as_deref().unwrap_or("unknown")
-            ));
+            last_attempt.checkpoint_branch = Some(checkpoint_branch.to_string());
+            last_attempt.checkpoint_sha = checkpoint_sha;
         }
     }
 }
@@ -376,14 +385,24 @@ pub fn prune_checkpoints(
                             {
                                 let age = now.saturating_sub(timestamp);
                                 if age > retention_seconds {
-                                    // Check if this checkpoint is still referenced in the registry
+                                    // Issue #362 review finding: this previously checked
+                                    // whether ANY checkpoint anywhere in the registry was
+                                    // valid, not whether THIS session's own checkpoint
+                                    // branch was -- as long as one unrelated checkpoint
+                                    // was still valid, no expired session was ever
+                                    // cleaned up, making retention inoperable. Must
+                                    // check this specific session's recovery_branch.
+                                    let session_branch = recovery_data
+                                        .get("recovery_branch")
+                                        .and_then(|v| v.as_str());
                                     let is_referenced =
-                                        registry.checkpoints_by_work_id.values().any(
-                                            |checkpoints| checkpoints.iter().any(|cp| cp.is_valid),
-                                        ) || registry
-                                            .latest_by_dispatch_branch
-                                            .values()
-                                            .any(|cp| cp.is_valid);
+                                        session_branch.is_some_and(|branch| {
+                                            registry.checkpoints_by_work_id.values().flatten().any(
+                                                |cp| cp.checkpoint_branch == branch && cp.is_valid,
+                                            ) || registry.latest_by_dispatch_branch.values().any(
+                                                |cp| cp.checkpoint_branch == branch && cp.is_valid,
+                                            )
+                                        });
 
                                     if !is_referenced {
                                         // Safe to clean up this session
@@ -629,6 +648,53 @@ mod tests {
             assert_eq!(branch, "gah-wip/gah-test-123-attempt-2");
             assert_eq!(sha, "def456");
         }
+        Ok(())
+    }
+
+    /// Issue #362 review finding: `prune_checkpoints`'s session cleanup
+    /// previously checked whether ANY checkpoint anywhere in the registry
+    /// was valid, not whether THIS session's own checkpoint branch was --
+    /// meaning an unrelated still-valid checkpoint protected every expired
+    /// session from cleanup, making retention effectively inoperable.
+    #[test]
+    fn prune_checkpoints_removes_expired_session_even_when_an_unrelated_checkpoint_is_valid(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let sessions_dir = tempdir().unwrap();
+        let state_dir = tempdir().unwrap();
+
+        // An expired session whose own checkpoint branch is nowhere in the
+        // registry at all (the common real case: it was already consumed/
+        // tombstoned, so the registry has no entry for it).
+        let expired_session = sessions_dir.path().join("gah-expired-20260101");
+        fs::create_dir_all(&expired_session).unwrap();
+        fs::write(
+            expired_session.join("shutdown-recovery.json"),
+            serde_json::to_string(&serde_json::json!({
+                "recovery_branch": "gah-wip/expired-attempt-1",
+                "checkpoint_sha": "expired123",
+                "timestamp": 1000,
+            }))?,
+        )
+        .unwrap();
+
+        // An unrelated, still-valid checkpoint for a completely different
+        // dispatch -- this must not protect the expired session above.
+        let mut registry = CheckpointRegistry::default();
+        registry.register_checkpoint(
+            Some("other-work".to_string()),
+            "gah/other-123",
+            "gah-wip/other-attempt-1",
+            Some("other456".to_string()),
+            1,
+        );
+        registry.save(state_dir.path())?;
+
+        prune_checkpoints(sessions_dir.path(), state_dir.path(), Some(2000))?;
+
+        assert!(
+            !expired_session.exists(),
+            "expired session must be cleaned up even though an unrelated checkpoint is still valid"
+        );
         Ok(())
     }
 }
