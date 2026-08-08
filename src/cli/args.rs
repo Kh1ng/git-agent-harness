@@ -115,6 +115,11 @@ pub enum Commands {
         /// Repository checkout to update (defaults to the current checkout).
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// "central" (builds/serves the control plane, default) or "worker"
+        /// (CLI + dispatch loop only -- never builds apps/server or touches
+        /// gah-server.service).
+        #[arg(long, default_value = "central")]
+        role: String,
         /// Restart the system-wide control-plane service after a successful build.
         #[arg(long, default_value_t = false)]
         restart_server: bool,

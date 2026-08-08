@@ -11,13 +11,38 @@ use std::fs::{copy, create_dir_all, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Whether this host runs the control plane (`apps/server`, `gah-server.service`)
+/// or is just a worker that dispatches jobs. A worker never needs the Node
+/// server built or started -- only the CLI and (when systemd is present) the
+/// dispatch-loop unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostRole {
+    Central,
+    Worker,
+}
+
+impl HostRole {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "central" => Ok(HostRole::Central),
+            "worker" => Ok(HostRole::Worker),
+            other => bail!("invalid --role '{other}' (expected 'central' or 'worker')"),
+        }
+    }
+}
+
 pub struct UpdateArgs {
     pub repo: Option<PathBuf>,
+    pub role: HostRole,
     pub restart_server: bool,
     pub server_service: String,
 }
 
 pub fn run(args: UpdateArgs) -> Result<()> {
+    if args.role == HostRole::Worker && args.restart_server {
+        bail!("--restart-server requires --role central; a worker never runs gah-server.service");
+    }
+
     let repo = resolve_repo(args.repo.as_deref())?;
     let _update_lock = acquire_update_lock(&repo)?;
     ensure_default_branch_checkout(&repo)?;
@@ -33,21 +58,6 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
     run_command(&repo, "cargo", &["install", "--path", ".", "--force"])?;
-    // The control-plane server is part of the MVP; web/desktop/mobile clients
-    // intentionally have independent release workflows.
-    run_command(
-        &repo,
-        "npm",
-        &[
-            "ci",
-            "--include=dev",
-            "--legacy-peer-deps",
-            "--prefer-offline",
-            "--no-audit",
-            "--no-fund",
-        ],
-    )?;
-    run_command(&repo, "npm", &["run", "build:server"])?;
 
     let binary = installed_binary_path()?;
     if !binary.is_file() {
@@ -56,26 +66,57 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             binary.display()
         );
     }
-    if !repo.join("apps/server/dist/bin.js").is_file() {
-        bail!("server build did not produce apps/server/dist/bin.js");
-    }
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
-    let loop_unit = install_loop_unit_template(&repo)?;
-    let watchdog_units = install_watchdog_unit_template(&repo)?;
-
     println!("Installed CLI: {}", binary.display());
-    println!(
-        "Built server:  {}",
-        repo.join("apps/server/dist/bin.js").display()
-    );
-    println!("Installed loop unit: {}", loop_unit.display());
-    for unit in &watchdog_units {
-        println!("Installed watchdog unit: {}", unit.display());
+
+    if args.role == HostRole::Central {
+        // The control-plane server is part of the MVP; web/desktop/mobile
+        // clients intentionally have independent release workflows. A
+        // worker node dispatches jobs only and never serves this.
+        run_command(
+            &repo,
+            "npm",
+            &[
+                "ci",
+                "--include=dev",
+                "--legacy-peer-deps",
+                "--prefer-offline",
+                "--no-audit",
+                "--no-fund",
+            ],
+        )?;
+        run_command(&repo, "npm", &["run", "build:server"])?;
+        if !repo.join("apps/server/dist/bin.js").is_file() {
+            bail!("server build did not produce apps/server/dist/bin.js");
+        }
+        println!(
+            "Built server:  {}",
+            repo.join("apps/server/dist/bin.js").display()
+        );
+    } else {
+        println!("Role is 'worker': skipping control-plane server build.");
     }
-    println!(
-        "Watchdog timer is installed but not enabled; opt in explicitly with \
-         `systemctl --user enable --now gah-watchdog.timer` once an alert command is configured."
-    );
+
+    match install_loop_unit_template(&repo)? {
+        Some(loop_unit) => println!("Installed loop unit: {}", loop_unit.display()),
+        None => println!(
+            "systemd not available on this host: skipping gah-loop@.service install. \
+             Run `gah loop --profile <p>` directly, or wire it into whatever this host \
+             uses for supervised long-running processes (e.g. launchd on macOS)."
+        ),
+    }
+    match install_watchdog_unit_template(&repo)? {
+        Some(watchdog_units) => {
+            for unit in &watchdog_units {
+                println!("Installed watchdog unit: {}", unit.display());
+            }
+            println!(
+                "Watchdog timer is installed but not enabled; opt in explicitly with \
+                 `systemctl --user enable --now gah-watchdog.timer` once an alert command is configured."
+            );
+        }
+        None => println!("systemd not available on this host: skipping watchdog unit install."),
+    }
 
     if args.restart_server {
         run_command(&repo, "sudo", &["systemctl", "daemon-reload"])?;
@@ -90,12 +131,23 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             &["is-active", "--quiet", &args.server_service],
         )?;
         println!("Restarted service: {}", args.server_service);
-    } else {
+    } else if args.role == HostRole::Central {
         println!(
             "Server not restarted; pass --restart-server when this host serves the control plane."
         );
     }
     Ok(())
+}
+
+/// Best-effort probe, not a hard dependency check: a missing `systemctl`
+/// (e.g. macOS, containers without systemd) means unit installation is
+/// skipped rather than failing the whole update.
+fn systemd_available() -> bool {
+    Command::new("systemctl")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn resolve_repo(repo: Option<&Path>) -> Result<PathBuf> {
@@ -231,11 +283,14 @@ fn reload_user_systemd(reason: &str) -> Result<()> {
     Ok(())
 }
 
-fn install_loop_unit_template(repo: &Path) -> Result<PathBuf> {
+fn install_loop_unit_template(repo: &Path) -> Result<Option<PathBuf>> {
+    if !systemd_available() {
+        return Ok(None);
+    }
     let config_home = systemd_user_config_home()?;
     let target = copy_systemd_unit(repo, &config_home, "gah-loop@.service")?;
     reload_user_systemd("installing gah-loop@.service")?;
-    Ok(target)
+    Ok(Some(target))
 }
 
 /// Issue #726: keep the alert-only watchdog unit in lockstep with the
@@ -245,12 +300,15 @@ fn install_loop_unit_template(repo: &Path) -> Result<PathBuf> {
 /// destination is identical, so a stale version is simply overwritten.
 /// Deliberately does not `enable` or `start` the timer: that stays an
 /// explicit operator opt-in.
-fn install_watchdog_unit_template(repo: &Path) -> Result<[PathBuf; 2]> {
+fn install_watchdog_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2]>> {
+    if !systemd_available() {
+        return Ok(None);
+    }
     let config_home = systemd_user_config_home()?;
     let service = copy_systemd_unit(repo, &config_home, "gah-watchdog.service")?;
     let timer = copy_systemd_unit(repo, &config_home, "gah-watchdog.timer")?;
     reload_user_systemd("installing gah-watchdog.service/.timer")?;
-    Ok([service, timer])
+    Ok(Some([service, timer]))
 }
 
 fn ensure_clean(repo: &Path) -> Result<()> {
@@ -309,7 +367,7 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 mod tests {
     use super::{
         ensure_clean, ensure_default_branch_checkout, install_watchdog_unit_template,
-        installed_binary_path,
+        installed_binary_path, run, HostRole, UpdateArgs,
     };
     use crate::test_support::PathGuard;
     use std::ffi::OsString;
@@ -449,7 +507,7 @@ mod tests {
         }
         let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
 
-        let [service, timer] = install_watchdog_unit_template(repo).unwrap();
+        let [service, timer] = install_watchdog_unit_template(repo).unwrap().unwrap();
 
         assert!(service.ends_with("systemd/user/gah-watchdog.service"));
         assert!(timer.ends_with("systemd/user/gah-watchdog.timer"));
@@ -475,5 +533,27 @@ mod tests {
             );
         }
         assert!(record.contains("daemon-reload"), "{record}");
+    }
+
+    #[test]
+    fn host_role_parses_only_known_values() {
+        assert_eq!(HostRole::parse("central").unwrap(), HostRole::Central);
+        assert_eq!(HostRole::parse("worker").unwrap(), HostRole::Worker);
+        assert!(HostRole::parse("bogus").is_err());
+    }
+
+    /// A worker node never runs `gah-server.service` -- `--restart-server`
+    /// on `--role worker` is a contradiction, not something to silently
+    /// ignore or default away.
+    #[test]
+    fn worker_role_rejects_restart_server_flag() {
+        let err = run(UpdateArgs {
+            repo: None,
+            role: HostRole::Worker,
+            restart_server: true,
+            server_service: "gah-server.service".into(),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("--role central"));
     }
 }
