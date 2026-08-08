@@ -169,6 +169,17 @@ pub(crate) fn improve(
     let repo = Path::new(&profile.local_path);
     ensure_dispatch_capacity(profile, &worktree_base)?;
 
+    // Track WIP checkpoints for cleanup/tombstoning after successful completion
+    let mut wip_checkpoints = Vec::new();
+
+    // Issue #362: Check for existing resumable checkpoints first
+    let sessions_base = Path::new(&profile.artifact_root).join("sessions");
+    let checkpoint_result = crate::dispatch::checkpoints::find_latest_resumable_checkpoint(
+        &sessions_base,
+        &branch,
+        ledger.work_id.as_deref(),
+    )?;
+
     // TICKET-118: Handle existing branch for FixMr action
     let (branch, wt) = if let Some(ref existing_branch) = manual_fix.existing_branch {
         println!(
@@ -180,6 +191,37 @@ pub(crate) fn improve(
             worktree::create_existing(repo, existing_branch, &worktree_base),
         )?;
         (existing_branch.clone(), wt)
+    } else if let Some((checkpoint_branch, checkpoint_sha, _)) = checkpoint_result {
+        // Issue #362: Resume from existing checkpoint
+        println!("Resuming from checkpoint {checkpoint_branch} (sha: {checkpoint_sha}) ...");
+
+        if let Some(wt) = crate::dispatch::checkpoints::resume_checkpoint_into_worktree(
+            ledger,
+            repo,
+            &checkpoint_branch,
+            &branch,
+            &worktree_base,
+        )? {
+            wip_checkpoints.push(checkpoint_branch.clone()); // for tombstoning after success
+            println!("Successfully resumed from checkpoint: {checkpoint_branch} (as {branch})");
+            (branch.clone(), wt)
+        } else {
+            // Checkpoint is no longer valid, fall back to normal creation
+            println!(
+                "Checkpoint {} is no longer valid, creating fresh worktree from {}...",
+                checkpoint_branch, profile.default_target_branch
+            );
+            let wt = classify_worktree_result(
+                ledger,
+                worktree::create(
+                    repo,
+                    &profile.default_target_branch,
+                    &branch,
+                    &worktree_base,
+                ),
+            )?;
+            (branch, wt)
+        }
     } else {
         println!(
             "Creating worktree from {}...",
@@ -333,7 +375,6 @@ pub(crate) fn improve(
     // Retry checkpoints are temporary recovery refs. They are deliberately
     // retained on any terminal failure, then removed only after a successful
     // publish so real partial work is never silently discarded.
-    let mut wip_checkpoints = Vec::new();
     for attempt in 0..max_attempts {
         println!(
             "\nAttempt {}/{}: running {} backend...",
@@ -443,6 +484,8 @@ pub(crate) fn improve(
                     failure_stage: Some(crate::ledger::FailureStage::BackendLaunch.as_str().into()),
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    checkpoint_branch: None,
+                    checkpoint_sha: None,
                     cli_version: None,
                     usage: normalize_attempt_usage(
                         crate::ledger::LedgerUsage::default(),
@@ -549,6 +592,8 @@ pub(crate) fn improve(
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                checkpoint_branch: None,
+                checkpoint_sha: None,
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
@@ -564,7 +609,7 @@ pub(crate) fn improve(
                 profile,
                 ledger,
             );
-            shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+            shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
             if stalled {
                 notify_event(
                     cfg,
@@ -861,6 +906,8 @@ pub(crate) fn improve(
                     failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    checkpoint_branch: None,
+                    checkpoint_sha: None,
                     usage: attempt_usage(
                         &result.log_path,
                         result.agy_cli_log_delta.as_deref(),
@@ -876,7 +923,7 @@ pub(crate) fn improve(
                     profile,
                     ledger,
                 );
-                shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
                 if attempt + 1 < max_attempts {
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
@@ -932,6 +979,8 @@ pub(crate) fn improve(
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                checkpoint_branch: None,
+                checkpoint_sha: None,
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
@@ -947,7 +996,7 @@ pub(crate) fn improve(
                 profile,
                 ledger,
             );
-            shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+            shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
             if already_satisfied.reconcile(
                 ledger,
                 &backend_summary,
@@ -1003,6 +1052,8 @@ pub(crate) fn improve(
                 failure_stage: None,
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
+                checkpoint_branch: None,
+                checkpoint_sha: None,
                 usage: attempt_usage(
                     &result.log_path,
                     result.agy_cli_log_delta.as_deref(),
@@ -1012,7 +1063,7 @@ pub(crate) fn improve(
                 ),
                 cli_version: result.agy_version.clone(),
             });
-            shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+            shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
             break;
         }
 
@@ -1042,6 +1093,8 @@ pub(crate) fn improve(
                     failure_stage: None,
                     duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                     diff_path: None,
+                    checkpoint_branch: None,
+                    checkpoint_sha: None,
                     usage: attempt_usage(
                         &result.log_path,
                         result.agy_cli_log_delta.as_deref(),
@@ -1118,6 +1171,8 @@ pub(crate) fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        checkpoint_branch: None,
+                        checkpoint_sha: None,
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -1127,7 +1182,7 @@ pub(crate) fn improve(
                         ),
                         cli_version: result.agy_version.clone(),
                     });
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
                     worktree::cleanup(&wt, repo);
                     anyhow::bail!("validation timed out (harness error). {}", failure_output);
                 }
@@ -1225,6 +1280,8 @@ pub(crate) fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path,
+                        checkpoint_branch: None,
+                        checkpoint_sha: None,
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -1240,7 +1297,7 @@ pub(crate) fn improve(
                         profile,
                         ledger,
                     );
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
                     // Rebuild from the base task with only the latest failure —
                     // accumulating retry blocks confuses smaller models.
                     task = format!(
@@ -1321,6 +1378,8 @@ pub(crate) fn improve(
                         failure_stage: Some(FS::PostValidation.as_str().into()),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        checkpoint_branch: None,
+                        checkpoint_sha: None,
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -1336,7 +1395,7 @@ pub(crate) fn improve(
                         profile,
                         ledger,
                     );
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,
@@ -1370,6 +1429,8 @@ pub(crate) fn improve(
                         failure_stage: None,
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        checkpoint_branch: None,
+                        checkpoint_sha: None,
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -1385,7 +1446,7 @@ pub(crate) fn improve(
                         profile,
                         ledger,
                     );
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
                     break;
                 } else {
                     ledger.attempts.push(crate::ledger::AttemptRecord {
@@ -1404,6 +1465,8 @@ pub(crate) fn improve(
                         ),
                         duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                         diff_path: None,
+                        checkpoint_branch: None,
+                        checkpoint_sha: None,
                         usage: attempt_usage(
                             &result.log_path,
                             result.agy_cli_log_delta.as_deref(),
@@ -1419,7 +1482,7 @@ pub(crate) fn improve(
                         profile,
                         ledger,
                     );
-                    shutdown_ctx.checkpoint_after_result(shutdown_after_result)?;
+                    shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
                     worktree::preserve_wip(
                         &wt,
                         &profile.default_target_branch,

@@ -848,6 +848,8 @@ mod tests {
             failure_stage: None,
             duration_seconds: None,
             diff_path: None,
+            checkpoint_branch: None,
+            checkpoint_sha: None,
             cli_version: None,
             usage: crate::ledger::LedgerUsage {
                 total_tokens: Some(total_tokens),

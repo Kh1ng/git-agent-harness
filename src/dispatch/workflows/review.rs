@@ -699,6 +699,8 @@ pub(in crate::dispatch) fn review(
                 failure_stage,
                 duration_seconds: Some(attempt.duration_secs),
                 diff_path: None,
+                checkpoint_branch: None,
+                checkpoint_sha: None,
                 cli_version: None,
                 usage,
             });

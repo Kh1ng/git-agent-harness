@@ -8,6 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+pub mod checkpoints;
+
 mod already_satisfied;
 mod attempts;
 mod claims;

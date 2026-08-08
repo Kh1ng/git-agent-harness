@@ -64,8 +64,13 @@ impl<'a> ShutdownContext<'a> {
         }
     }
 
-    pub(super) fn checkpoint_after_result(&self, shutdown_after_result: bool) -> Result<()> {
+    pub(super) fn checkpoint_after_result(
+        &self,
+        ledger: &mut LedgerEntry,
+        shutdown_after_result: bool,
+    ) -> Result<()> {
         maybe_checkpoint_after_backend_result(
+            ledger,
             shutdown_after_result,
             self.worktree_path,
             self.repo,
@@ -163,6 +168,8 @@ pub(super) fn record_cancelled_attempt(
         failure_stage: Some(stage.as_str().into()),
         duration_seconds: Some(duration_seconds),
         diff_path: None,
+        checkpoint_branch: None,
+        checkpoint_sha: None,
         usage,
         cli_version,
     });
@@ -170,6 +177,7 @@ pub(super) fn record_cancelled_attempt(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn checkpoint_and_cleanup_after_shutdown(
+    ledger: &mut LedgerEntry,
     worktree_path: &Path,
     repo: &Path,
     target_branch: &str,
@@ -191,13 +199,45 @@ pub(super) fn checkpoint_and_cleanup_after_shutdown(
             dispatch_branch, attempt_number
         ),
     )?;
+    let checkpoint_sha = if checkpointed {
+        worktree::git(&["rev-parse", "HEAD"], worktree_path).ok()
+    } else {
+        None
+    };
+
+    // Issue #362: typed identity on the ledger entry (AC2), in addition to
+    // the on-disk recovery artifact below that find_latest_resumable_checkpoint
+    // actually reads for the resume decision -- this is for ledger
+    // queryability, not the resume mechanism itself.
+    super::super::super::checkpoints::record_checkpoint_in_ledger(
+        ledger,
+        &recovery_branch,
+        checkpoint_sha.clone(),
+        checkpointed,
+    );
+    if checkpointed {
+        super::super::super::checkpoints::mark_attempt_as_resumable(
+            ledger,
+            attempt_number,
+            &recovery_branch,
+            checkpoint_sha.clone(),
+        );
+    }
+
+    // Issue #362: Enhanced recovery artifact with checkpoint SHA for resumption
     let recovery_artifact = serde_json::json!({
         "run_id": run_id.unwrap_or("unknown"),
         "attempt_number": attempt_number,
         "source_work_id": work_id.unwrap_or("unknown"),
         "dispatch_branch": dispatch_branch,
-        "recovery_branch": recovery_branch,
+        "recovery_branch": recovery_branch.clone(),
         "checkpointed": checkpointed,
+        "checkpoint_sha": checkpoint_sha,
+        "is_resumable": checkpointed,
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     });
     fs::write(
         attempt_session.join("shutdown-recovery.json"),
@@ -209,6 +249,7 @@ pub(super) fn checkpoint_and_cleanup_after_shutdown(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn maybe_checkpoint_after_backend_result(
+    ledger: &mut LedgerEntry,
     shutdown_after_result: bool,
     worktree_path: &Path,
     repo: &Path,
@@ -221,6 +262,7 @@ pub(super) fn maybe_checkpoint_after_backend_result(
 ) -> Result<()> {
     if shutdown_after_result {
         checkpoint_and_cleanup_after_shutdown(
+            ledger,
             worktree_path,
             repo,
             target_branch,
@@ -265,10 +307,13 @@ pub(super) fn record_cancelled_attempt_and_cleanup(
         failure_stage: Some(stage.as_str().into()),
         duration_seconds: Some(duration_seconds),
         diff_path: None,
+        checkpoint_branch: None,
+        checkpoint_sha: None,
         usage,
         cli_version,
     });
     checkpoint_and_cleanup_after_shutdown(
+        ledger,
         worktree_path,
         repo,
         target_branch,
