@@ -412,7 +412,7 @@ export interface PmDecompositionPlan {
   repo: string;
   provider: string;
   source_work_id: string;
-  source_issue_number: string;
+  source_issue_number: string | null;
   plan_fingerprint: string;
   plan: PmPlan;
   publication_state: PmPlanPublicationState | null;

@@ -974,6 +974,14 @@ export function createServer(
     }
   });
 
+  // Block GET /api/pm/plans/create to prevent shadowing POST endpoint
+  app.get('/api/pm/plans/create', (req, res) => {
+    res.status(405).json({
+      error: 'Method Not Allowed',
+      message: 'Use POST /api/pm/plans/create to create PM plans'
+    });
+  });
+
   app.post('/api/pm/plans/create', async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     const request: PmDecompositionRequest | null = req.body?.request || null;

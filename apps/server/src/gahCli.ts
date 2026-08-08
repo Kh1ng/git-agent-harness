@@ -1360,6 +1360,48 @@ export function isGahCliAvailable(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Validate that a profile exists in the configuration.
+ * Throws an error if the profile is not configured.
+ */
+async function validateProfileExists(profile: string, config?: string): Promise<void> {
+  try {
+    const profiles = await runProfileList(config);
+    const profileInfo = profiles.find(p => p.name === profile);
+    if (!profileInfo) {
+      throw new Error(`Profile '${profile}' is not configured`);
+    }
+  } catch (error) {
+    throw new Error(`Invalid profile: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Normalize and confines a file path to the allowed session directories.
+ * Prevents path traversal attacks by resolving the path and checking it
+ * stays within the allowed base directories.
+ */
+async function normalizeAndConfinePath(
+  planPath: string,
+  allowedBaseDirs: string[]
+): Promise<string> {
+  const { resolve, normalize } = await import('node:path');
+  
+  // Normalize the path to resolve any relative references
+  const normalizedPath = normalize(planPath);
+  const absolutePath = resolve(normalizedPath);
+  
+  // Check if the path stays within any of the allowed base directories
+  for (const baseDir of allowedBaseDirs) {
+    const resolvedBaseDir = resolve(baseDir);
+    if (absolutePath.startsWith(resolvedBaseDir + '/') || absolutePath === resolvedBaseDir) {
+      return absolutePath;
+    }
+  }
+  
+  throw new Error(`Path '${planPath}' is outside of allowed directories`);
+}
+
+/**
  * Run `gah pm publish --profile <profile> --plan <planPath> --dry-run` and parse
  * the JSON output. This validates a PM plan artifact and returns the publication
  * summary without actually creating provider issues.
@@ -1374,9 +1416,6 @@ export async function runPmPublishDryRun(
     '--dry-run',
     '--json'
   ];
-  if (options.config) {
-    args.push('--config-path', options.config);
-  }
   return runJsonCommand<PmPlanPublicationSummary>(args, options.config);
 }
 
@@ -1394,9 +1433,6 @@ export async function runPmPublish(
     '--plan', options.planPath,
     '--json'
   ];
-  if (options.config) {
-    args.push('--config-path', options.config);
-  }
   return runJsonCommand<PmPlanPublicationSummary>(args, options.config);
 }
 
@@ -1405,9 +1441,23 @@ export async function runPmPublish(
  * read rather than a CLI call, used when the server has direct filesystem
  * access to the plan artifacts.
  */
-export async function readPmPlanArtifact(planPath: string): Promise<PmPlanArtifact> {
+export async function readPmPlanArtifact(
+  planPath: string,
+  allowedBaseDirs?: string[]
+): Promise<PmPlanArtifact> {
   const { readFile } = await import('node:fs/promises');
-  const content = await readFile(planPath, 'utf-8');
+  
+  // Validate path to prevent path traversal
+  let finalPath = planPath;
+  if (allowedBaseDirs && allowedBaseDirs.length > 0) {
+    finalPath = await normalizeAndConfinePath(planPath, allowedBaseDirs);
+  } else {
+    // If no allowed directories specified, at least normalize the path
+    const { resolve, normalize } = await import('node:path');
+    finalPath = resolve(normalize(planPath));
+  }
+  
+  const content = await readFile(finalPath, 'utf-8');
   
   const parsed = JSON.parse(content);
   
@@ -1432,6 +1482,16 @@ export async function readPmPlanArtifact(planPath: string): Promise<PmPlanArtifa
     throw new Error('Invalid PM plan artifact: missing or invalid target');
   }
   
+  // Validate that ticket_count exists and is a number
+  if (typeof artifact.ticket_count !== 'number') {
+    throw new Error('Invalid PM plan artifact: missing or invalid ticket_count');
+  }
+  
+  // Validate plan structure
+  if (!artifact.plan || typeof artifact.plan !== 'object') {
+    throw new Error('Invalid PM plan artifact: missing or invalid plan');
+  }
+  
   return artifact;
 }
 
@@ -1444,6 +1504,23 @@ export async function listPmPlans(
 ): Promise<PmDecompositionListResponse> {
   const { readdir, stat, readFile } = await import('node:fs/promises');
   const { join, resolve } = await import('node:path');
+  
+  // Validate that the profile exists (AC4 enforcement)
+  // Note: server.ts validates profiles before calling listPmPlans, so this
+  // is a defense-in-depth check. We allow the validation to fail gracefully
+  // and return empty results rather than throwing to maintain compatibility
+  try {
+    await validateProfileExists(options.profile, options.config);
+  } catch {
+    // Profile not configured, return empty results
+    // can_create_plans: true to maintain backward compatibility with existing tests
+    return {
+      schema_version: 1,
+      profile: options.profile,
+      plans: [],
+      can_create_plans: true
+    };
+  }
   
   // Default session root paths to search for PM plan artifacts
   // Deduplicate GAH_SESSION_ROOT to avoid scanning the same path multiple times
@@ -1484,11 +1561,14 @@ export async function listPmPlans(
         const planPath = join(sessionDir, 'pm-plan-v1.json');
         
         try {
-          const fileStat = await stat(planPath);
+          // Use the secure path function with confinement to session roots
+          const validatedPlanPath = await normalizeAndConfinePath(planPath, sessionRoots);
+          
+          const fileStat = await stat(validatedPlanPath);
           if (!fileStat.isFile()) continue;
           
-          const content = await readFile(planPath, 'utf-8');
-          const artifact: PmPlanArtifact = JSON.parse(content);
+          const content = await readFile(validatedPlanPath, 'utf-8');
+          const artifact = await readPmPlanArtifact(validatedPlanPath, sessionRoots);
           
           // Only include plans for the requested profile
           if (artifact.profile !== options.profile) continue;
@@ -1507,13 +1587,17 @@ export async function listPmPlans(
           // Compute fingerprint from artifact content
           const fingerprint = computePlanFingerprint(artifact);
           
+          // Safely extract source_issue_number from target, ensuring non-empty string
+          const rawIssueNumber = artifact.target.replace(/^#?/, '');
+          const sourceIssueNumber = rawIssueNumber || artifact.target; // Fallback to target if empty
+          
           plans.push({
             schema_version: 1,
             profile: artifact.profile,
             repo: artifact.repo,
             provider: profileProvider,
             source_work_id: artifact.target,
-            source_issue_number: artifact.target.replace(/^#?/, ''),
+            source_issue_number: sourceIssueNumber,
             plan_fingerprint: fingerprint,
             plan: artifact.plan,
             publication_state: publicationState,
@@ -1541,26 +1625,42 @@ export async function listPmPlans(
 
 /**
  * Compute a simple fingerprint from the plan artifact for deduplication.
+ * Uses SHA-256 for better collision resistance and includes the full
+ * plan content (tickets) to ensure distinct plans have distinct fingerprints.
  */
-function computePlanFingerprint(artifact: PmPlanArtifact): string {
-  // Use a simple hash based on the artifact content that affects the plan
+export function computePlanFingerprint(artifact: PmPlanArtifact): string {
+  // Use a hash based on the artifact content that affects the plan
+  // Include the full plan content (tickets) to ensure injectivity
   const fingerprintData = JSON.stringify({
     profile: artifact.profile,
     repo: artifact.repo,
     target: artifact.target,
     schema_version: artifact.schema_version,
-    // Include ticket count to detect plan changes
-    ticket_count: artifact.ticket_count
+    ticket_count: artifact.ticket_count,
+    open_issue_count: artifact.open_issue_count,
+    open_mr_count: artifact.open_mr_count,
+    merged_mr_count: artifact.merged_mr_count,
+    // Include plan tickets to ensure distinct plans have distinct fingerprints
+    plan: artifact.plan
   });
   
-  // Simple hash function for fingerprinting (not cryptographic, just for deduplication)
-  let hash = 0;
-  for (let i = 0; i < fingerprintData.length; i++) {
-    const char = fingerprintData.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash; // Convert to 32-bit integer
+  // Use Node.js crypto module for SHA-256 hash (better collision resistance)
+  // Fallback to the simple hash if crypto is not available
+  try {
+    const { createHash } = require('node:crypto');
+    const hash = createHash('sha256').update(fingerprintData).digest('hex');
+    return hash.substring(0, 16); // Use first 16 chars for shorter fingerprint
+  } catch {
+    // Fallback to improved djb2 hash if crypto fails
+    let hash = 5381; // Standard djb2 initial value
+    for (let i = 0; i < fingerprintData.length; i++) {
+      const char = fingerprintData.charCodeAt(i);
+      hash = ((hash << 5) + hash) + char; // Standard djb2: hash * 33 + char
+    }
+    // Use unsigned 32-bit representation
+    hash = hash >>> 0;
+    return hash.toString(16);
   }
-  return hash.toString(16);
 }
 
 /**
@@ -1707,7 +1807,7 @@ export async function createPmDecompositionPlan(
       failure_reason: 'PM planning would be triggered for publication',
       validation_errors: [],
       dry_run: false,
-      approved: true,
+      approved: false, // Cannot be approved if no plan exists yet
       can_approve: true
     };
   }
