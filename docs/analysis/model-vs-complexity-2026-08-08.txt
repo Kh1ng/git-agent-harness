@@ -1,0 +1,30 @@
+backend      difficulty attempts  val_pass no_progress  needs_fix  success%    input_tok  output_tok
+----------------------------------------------------------------------------------------------------
+auto         unlabeled       400         0           0          0      0.0%            0           0
+codex        unlabeled       125        60           0         41     48.0%  476,709,053   3,212,160
+opencode     unlabeled        62        13          19         14     21.0%   13,617,359     450,062
+claude       unlabeled        37        13           5         15     35.1%   92,200,793   2,224,400
+vibe         unlabeled        36        12           1          6     33.3%  186,876,580     631,637
+codex        easy             29        22           0          5     75.9%  202,911,770   1,605,010
+agy          unlabeled        28        15           0         20     53.6%       69,850      38,636
+opencode     medium           22         5          10          2     22.7%  123,568,759     642,445
+opencode     hard             18         1           5          2      5.6%   32,917,895     350,373
+opencode     easy             17         4           5          1     23.5%   12,345,328     109,930
+codex        medium           16         6           0          1     37.5%  180,702,582     793,758
+codex        hard             16         8           0          3     50.0%  257,677,229   1,115,442
+vibe         hard             16         2           0          2     12.5%  154,414,333     438,464
+vibe         medium           15         3           0          2     20.0%   81,689,369     282,509
+claude       medium           14         2           7          2     14.3%    9,389,573   1,645,882
+claude       hard              8         3           0          3     37.5%   26,201,659     644,445
+vibe         easy              6         4           0          1     66.7%   66,219,900     258,234
+claude       easy              5         1           0          0     20.0%          360      68,495
+agy-second   unlabeled         4         2           0          2     50.0%            0           0
+claude       easy-medium        3         1           1          0     33.3%        4,278     294,675
+openhands    unlabeled         2         0           2          0      0.0%    4,741,837      86,298
+opencode     easy-medium        2         0           2          0      0.0%            0           0
+agy          medium            2         0           0          0      0.0%            0           0
+agy          hard              2         2           0          2    100.0%            0           0
+codex        easy-medium        1         1           0          1    100.0%    4,164,191      20,937
+agy          easy-medium        1         0           0          0      0.0%            0           0
+
+Total improve/fix dispatch entries analyzed: 887
