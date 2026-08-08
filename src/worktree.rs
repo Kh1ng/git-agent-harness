@@ -797,6 +797,54 @@ fn push_branch_with_executable(
     result
 }
 
+/// Deletes a remote branch (`git push <url> --delete <branch>`), used by
+/// `gah prune` to clean up merged/closed PR/MR branches the provider
+/// doesn't always auto-delete on its own. `worktree` only needs to be some
+/// git working directory to run the command from -- `branch` doesn't need
+/// to be checked out anywhere.
+pub fn delete_remote_branch(
+    worktree: &Path,
+    branch: &str,
+    push_url: &str,
+    pat: &str,
+) -> Result<()> {
+    delete_remote_branch_with_executable(Path::new("git"), worktree, branch, push_url, pat)
+}
+
+fn delete_remote_branch_with_executable(
+    executable: &Path,
+    worktree: &Path,
+    branch: &str,
+    push_url: &str,
+    pat: &str,
+) -> Result<()> {
+    let askpass = write_askpass(pat)?;
+    let result = retry_transient_git_network("push --delete", || {
+        let child = Command::new(executable)
+            .args(["push", "-q", push_url, "--delete", branch])
+            .env("GIT_ASKPASS", &askpass)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .current_dir(worktree)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("git push --delete")?;
+        let out = wait_with_timeout(child, "git push --delete")?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // Already gone (deleted manually, or by a prior prune run) is
+            // not a failure worth surfacing.
+            if stderr.contains("remote ref does not exist") {
+                return Ok(());
+            }
+            anyhow::bail!("delete failed: {}", stderr.trim());
+        }
+        Ok(())
+    });
+    let _ = std::fs::remove_file(&askpass);
+    result
+}
+
 #[allow(dead_code)]
 pub fn commit_and_push_msg(
     worktree: &Path,
