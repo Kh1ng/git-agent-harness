@@ -1105,6 +1105,18 @@ pub(crate) fn improve(
                     ),
                     cli_version: result.agy_version.clone(),
                 });
+                // Issue #915: best-effort capture of a successful attempt; failures
+                // are swallowed inside memory_gateway and never affect dispatch.
+                if let Some(work_id) = ledger.work_id.clone() {
+                    crate::memory_gateway::capture_attempt_and_update_ledger(
+                        &args.profile,
+                        &profile.local_path,
+                        &work_id,
+                        &format!("Dispatch attempt {} for {}", attempt + 1, work_id),
+                        &format!("Attempt {} passed validation", attempt + 1),
+                        ledger,
+                    );
+                }
                 record_external_approval_consumption_for_last_attempt(
                     cfg,
                     &args.profile,

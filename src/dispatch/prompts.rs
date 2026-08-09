@@ -276,17 +276,15 @@ fn append_related_memory(
 ) -> Option<u64> {
     let query = format!("issue #{}: {}", issue.number, issue.title);
     let work_id = format!("#{}", issue.number);
-    let Some(context) = crate::memory_gateway::recall_for_ticket(
+    let context = crate::memory_gateway::recall_for_ticket(
         &profile.repo_id,
         &profile.local_path,
         &work_id,
         &query,
-    ) else {
-        return None;
-    };
+    )?;
     task.push_str("\n## Related Memory\n\n");
     append_bounded_text(task, &context, PROJECT_BRIEF_MAX_BYTES, "Related memory");
-    Some(context.as_bytes().len() as u64)
+    Some(context.len() as u64)
 }
 
 /// Build a bounded, task-specific packet from structured issue metadata.
