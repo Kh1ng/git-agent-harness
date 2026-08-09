@@ -240,9 +240,16 @@ The TDAI memory gateway (manager-chat's compaction db, `apps/server`'s
 `memoryGatewayClient.ts`) has no default install step of its own — a fresh
 `gah-server` install works without one (manager chat is a required
 dependency at *runtime*, not install time), but nothing configures it for
-you. `scripts/install.sh` grows two opt-in modes, selected via
-`GAH_GATEWAY_MODE`; leaving it unset skips this section entirely and
-behaves exactly as before.
+you. `scripts/install.sh` (and its per-OS `install-linux.sh`/`install-macos.sh`
+implementations) grow two opt-in modes, selected via `GAH_GATEWAY_MODE`;
+leaving it unset skips this section entirely and behaves exactly as before.
+`colocated` needs the systemd unit in `packaging/systemd/` and is Linux-only;
+`remote` works on both. On a Rust `gah loop`/dispatch worker (any `--role
+worker` install, either OS), the gateway env vars land in
+`~/.config/gah/gah-loop.env` instead of `/etc/gah/server.env` — that's the
+file `gah-loop@.service` actually reads on Linux, and on macOS (no systemd
+at all) nothing auto-loads it, so `source` it into the shell before running
+`gah` (the installer prints the exact command).
 
 **Remote** — point this host at a gateway already running elsewhere (e.g. a
 central node):

@@ -25,6 +25,14 @@ mkdir -p ~/.config/gah
 cp config/gah-config.example.toml ~/.config/gah/config.toml
 ```
 
+`scripts/install.sh` detects the OS and runs `scripts/install-linux.sh` (full
+central-node install: systemd units, the control-plane server) or
+`scripts/install-macos.sh` (CLI + worker only -- macOS has no systemd, so
+there's no control-plane server or supervised loop unit on that platform
+yet). Run the OS-specific script directly if you already know which one you
+want. `GAH_NODE_ROLE=worker scripts/install-linux.sh` gets a Linux worker
+node without the control-plane server too.
+
 The control-plane server binds `0.0.0.0:3773` by default. To bind a single
 interface instead (recommended, since the server's mutation routes have no
 authentication yet — see issue #532), set `GAH_SERVER_HOST` before first
