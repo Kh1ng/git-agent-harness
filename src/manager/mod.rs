@@ -34,6 +34,7 @@ use std::fmt;
 #[cfg(test)]
 mod contract;
 pub mod fake;
+pub mod hermes;
 #[cfg(test)]
 mod tests;
 
