@@ -639,6 +639,13 @@ pub struct LedgerEntry {
     pub attempts: Vec<AttemptRecord>,
     #[serde(default)]
     pub attempt_routing: Vec<AttemptRoutingRecord>,
+    /// Issue #915: memory gateway context tracking
+    #[serde(default)]
+    pub memory_gateway_recall_hit: bool,
+    #[serde(default)]
+    pub memory_gateway_context_byte_size: Option<u64>,
+    #[serde(default)]
+    pub memory_gateway_capture_l0_recorded: Option<u64>,
     /// Live routing state for the current dispatch only.
     #[serde(skip, default)]
     pub routing_runtime: RoutingRuntimeState,
@@ -782,6 +789,9 @@ impl LedgerEntry {
             attempts: Vec::new(),
             attempt_routing: Vec::new(),
             routing_runtime: RoutingRuntimeState::default(),
+            memory_gateway_recall_hit: false,
+            memory_gateway_context_byte_size: None,
+            memory_gateway_capture_l0_recorded: None,
             dispatch_reason: None,
             context_phase: None,
             context_estimated_tokens_before: None,
@@ -890,6 +900,9 @@ impl LedgerEntry {
             attempts: Vec::new(),
             attempt_routing: Vec::new(),
             routing_runtime: RoutingRuntimeState::default(),
+            memory_gateway_recall_hit: false,
+            memory_gateway_context_byte_size: None,
+            memory_gateway_capture_l0_recorded: None,
             dispatch_reason: None,
             context_phase: None,
             context_estimated_tokens_before: None,

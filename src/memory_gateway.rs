@@ -117,6 +117,14 @@ struct RecallResponse {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CaptureResponse {
+    l0_recorded: u64,
+    code: i64,
+    #[serde(default)]
+    message: String,
+}
+
 fn gateway_url() -> String {
     std::env::var("TDAI_GATEWAY_URL").unwrap_or_else(|_| DEFAULT_GATEWAY_URL.to_string())
 }
@@ -270,6 +278,103 @@ fn recall_for_ticket_with_transport(
     }
 }
 
+/// Best-effort capture for one ticket's dispatch attempt. Returns `Some(l0_recorded)`
+/// when successful, `None` when the gateway is unset/unreachable, non-2xx, malformed
+/// response, or degraded. Caller logs the result; nothing downstream treats its
+/// absence as a failure.
+pub fn capture_for_ticket(
+    profile_name: &str,
+    local_path: &str,
+    work_id: &str,
+    user_content: &str,
+    assistant_content: &str,
+) -> Option<u64> {
+    capture_for_ticket_with_transport(
+        &CurlMemoryGatewayTransport,
+        profile_name,
+        local_path,
+        work_id,
+        user_content,
+        assistant_content,
+    )
+}
+
+fn capture_for_ticket_with_transport(
+    transport: &dyn MemoryGatewayTransport,
+    profile_name: &str,
+    local_path: &str,
+    work_id: &str,
+    user_content: &str,
+    assistant_content: &str,
+) -> Option<u64> {
+    let session_key = session_key_for_ticket(profile_name, local_path, work_id);
+    let url = format!("{}/capture", gateway_url());
+    let body = serde_json::json!({
+        "user_content": user_content,
+        "assistant_content": assistant_content,
+        "session_key": session_key
+    })
+    .to_string();
+    let token = gateway_api_key();
+
+    let (status, response_body) =
+        match transport.post(&url, &body, token.as_deref(), RECALL_TIMEOUT_SECONDS) {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!(
+                    "[gah] memory gateway capture failed (swallowed, dispatch continues): {err:#}"
+                );
+                return None;
+            }
+        };
+    if status != 200 {
+        eprintln!(
+            "[gah] memory gateway capture returned status {status} (swallowed): {}",
+            String::from_utf8_lossy(&response_body)
+        );
+        return None;
+    }
+    let parsed: CaptureResponse = match serde_json::from_slice(&response_body) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            eprintln!(
+                "[gah] memory gateway capture returned unparseable JSON (swallowed): {err:#}"
+            );
+            return None;
+        }
+    };
+    if parsed.code != 0 {
+        eprintln!(
+            "[gah] memory gateway capture degraded (code={}, swallowed): {}",
+            parsed.code, parsed.message
+        );
+        return None;
+    }
+    Some(parsed.l0_recorded)
+}
+
+/// Issue #915: Convenience function to capture attempt results and update ledger
+pub fn capture_attempt_and_update_ledger(
+    profile_name: &str,
+    local_path: &str,
+    work_id: &str,
+    user_content: &str,
+    assistant_content: &str,
+    ledger: &mut crate::ledger::LedgerEntry,
+) -> Option<u64> {
+    let l0_recorded = capture_for_ticket(
+        profile_name,
+        local_path,
+        work_id,
+        user_content,
+        assistant_content,
+    );
+    if let Some(count) = l0_recorded {
+        ledger.memory_gateway_capture_l0_recorded = Some(count);
+    }
+    l0_recorded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +498,73 @@ mod tests {
         )]);
         let result =
             recall_for_ticket_with_transport(&t, "gah", "/tmp", "#362", "checkpoint resume");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn capture_returns_l0_recorded_on_success() {
+        let t = FakeTransport::queue(vec![(
+            200,
+            r#"{"l0_recorded":2,"scheduler_notified":true,"code":0,"message":""}"#,
+        )]);
+        let result = capture_for_ticket_with_transport(
+            &t,
+            "gah",
+            "/tmp",
+            "#362",
+            "user prompt",
+            "assistant response",
+        );
+        assert_eq!(result, Some(2));
+        assert_eq!(t.calls.borrow().len(), 1);
+        assert!(t.calls.borrow()[0].0.ends_with("/capture"));
+    }
+
+    #[test]
+    fn capture_returns_none_on_transport_failure_without_erroring() {
+        let t = FakeTransport {
+            responses: RefCell::new(vec![Err("connection refused".to_string())].into()),
+            calls: RefCell::new(Vec::new()),
+        };
+        let result = capture_for_ticket_with_transport(
+            &t,
+            "gah",
+            "/tmp",
+            "#362",
+            "user prompt",
+            "assistant response",
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn capture_returns_none_on_non_200_status() {
+        let t = FakeTransport::queue(vec![(401, r#"{"error":"unauthorized"}"#)]);
+        let result = capture_for_ticket_with_transport(
+            &t,
+            "gah",
+            "/tmp",
+            "#362",
+            "user prompt",
+            "assistant response",
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn capture_returns_none_on_degraded_code() {
+        let t = FakeTransport::queue(vec![(
+            200,
+            r#"{"l0_recorded":0,"scheduler_notified":false,"code":1,"message":"degraded"}"#,
+        )]);
+        let result = capture_for_ticket_with_transport(
+            &t,
+            "gah",
+            "/tmp",
+            "#362",
+            "user prompt",
+            "assistant response",
+        );
         assert_eq!(result, None);
     }
 }

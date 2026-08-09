@@ -33,6 +33,16 @@ pub(super) fn record_failed_validation_attempt(
     failure_class: Option<String>,
     failure_stage: Option<String>,
 ) -> Result<()> {
+    // Issue #915: capture the outcome before `failure_class`/`failure_stage`
+    // move into the AttemptRecord below. Best-effort -- capture failures are
+    // swallowed inside memory_gateway and never affect dispatch.
+    let capture_summary = format!(
+        "Attempt {} failed validation: {} (class={}, stage={})",
+        attempt + 1,
+        validation_result,
+        failure_class.as_deref().unwrap_or("unknown"),
+        failure_stage.as_deref().unwrap_or("unknown"),
+    );
     ledger.attempts.push(AttemptRecord {
         attempt_number: attempt + 1,
         backend: route.effective_backend.clone(),
@@ -54,6 +64,37 @@ pub(super) fn record_failed_validation_attempt(
         ),
         cli_version: result.agy_version.clone(),
     });
+    if let Some(work_id) = ledger.work_id.clone() {
+        crate::memory_gateway::capture_attempt_and_update_ledger(
+            profile_name,
+            &profile.local_path,
+            &work_id,
+            &format!("Dispatch attempt {} for {}", attempt + 1, work_id),
+            &capture_summary,
+            ledger,
+        );
+    }
     record_external_approval_consumption_for_last_attempt(cfg, profile_name, profile, ledger);
     shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)
+}
+
+/// Issue #915: best-effort capture of a successful attempt; failures are
+/// swallowed inside memory_gateway and never affect dispatch.
+pub(super) fn capture_successful_attempt(
+    profile_name: &str,
+    local_path: &str,
+    attempt: u32,
+    ledger: &mut LedgerEntry,
+) {
+    let Some(work_id) = ledger.work_id.clone() else {
+        return;
+    };
+    crate::memory_gateway::capture_attempt_and_update_ledger(
+        profile_name,
+        local_path,
+        &work_id,
+        &format!("Dispatch attempt {} for {}", attempt + 1, work_id),
+        &format!("Attempt {} passed validation", attempt + 1),
+        ledger,
+    );
 }
