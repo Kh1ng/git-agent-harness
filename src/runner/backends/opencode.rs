@@ -8,6 +8,50 @@ use crate::runner::process::{spawn_with_worktree_progress_watch, write_redacted_
 use crate::runner::resolve::filtered_backend_args;
 use crate::runner::{log_delta, RunResult};
 
+const REVIEW_AGENT: &str = "gah-reviewer";
+const IMPROVE_AGENT: &str = "gah-implementer";
+
+pub(crate) fn review_opencode_args(extra_args: &[String]) -> Vec<String> {
+    opencode_args_with_agent(REVIEW_AGENT, extra_args)
+}
+
+pub(crate) fn improve_opencode_args(extra_args: &[String]) -> Vec<String> {
+    opencode_args_with_agent(IMPROVE_AGENT, extra_args)
+}
+
+fn opencode_args_with_agent(agent: &str, extra_args: &[String]) -> Vec<String> {
+    let mut args = vec!["--agent".to_string(), agent.to_string()];
+    args.extend(filtered_opencode_args(extra_args));
+    args
+}
+
+fn filtered_opencode_args(extra_args: &[String]) -> Vec<String> {
+    let mut filtered = Vec::with_capacity(extra_args.len());
+    let mut i = 0;
+    while i < extra_args.len() {
+        let arg = &extra_args[i];
+        if arg == "--model" {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with("--model=") {
+            i += 1;
+            continue;
+        }
+        if arg == "--agent" {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with("--agent=") {
+            i += 1;
+            continue;
+        }
+        filtered.push(arg.clone());
+        i += 1;
+    }
+    filtered
+}
+
 /// Run OpenCode CLI non-interactively via `opencode run --model <model> --dir <path> --auto `<prompt>`.
 /// Worker/fix backend and review backend support.
 /// extra_args come from profile.opencode_args (e.g. `--format json`).
@@ -587,6 +631,39 @@ mod tests {
             fs::read_to_string(f.worktree.join("progress.txt")).unwrap(),
             "second\n"
         );
+    }
+
+    #[test]
+    fn run_opencode_uses_the_implementer_agent_and_strips_profile_override() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+        let extra_args = improve_opencode_args(&[
+            "--agent".to_string(),
+            "gah-reviewer".to_string(),
+            "--custom-flag".to_string(),
+        ]);
+
+        let result = run_opencode_with_executable(
+            &f.bin_dir.join("opencode"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            Some("opencode/hy3-free"),
+            &extra_args,
+            &envs,
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "run");
+        assert!(argv.contains(&"--agent".to_string()));
+        assert!(argv.contains(&"gah-implementer".to_string()));
+        assert!(argv.contains(&"--custom-flag".to_string()));
+        assert!(!argv.contains(&"gah-reviewer".to_string()));
     }
 
     #[test]

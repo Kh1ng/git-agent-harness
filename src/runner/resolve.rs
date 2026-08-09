@@ -359,9 +359,12 @@ mod tests {
         assert_eq!(filtered, vec!["--format".to_string(), "json".to_string()]);
 
         let args = vec![
+            "--agent".to_string(),
+            "gah-reviewer".to_string(),
             "-m".to_string(),
             "stale-model".to_string(),
             "--model=another-stale".to_string(),
+            "--agent=gah-reviewer".to_string(),
             "--format".to_string(),
             "json".to_string(),
         ];
@@ -369,8 +372,11 @@ mod tests {
         assert_eq!(
             filtered,
             vec![
+                "--agent".to_string(),
+                "gah-reviewer".to_string(),
                 "-m".to_string(),
                 "stale-model".to_string(),
+                "--agent=gah-reviewer".to_string(),
                 "--format".to_string(),
                 "json".to_string()
             ]

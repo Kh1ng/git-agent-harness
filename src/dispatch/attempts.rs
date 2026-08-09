@@ -9,6 +9,7 @@ use crate::routing::{
     self, CandidateIdentity, RouteDecision, RouteError, RouteRequest, RoutingRuntimeState,
     TaskRoutingContext,
 };
+use crate::runner::backends::opencode::improve_opencode_args;
 use crate::runner::BackendRunner;
 use crate::usage_attribution::{normalize_attempt_usage, UsageAttribution};
 use crate::{runner, usage, worktree};
@@ -433,6 +434,7 @@ pub(super) fn run_backend_with_reserved_route(
         Ok(kind) => kind,
         Err(_) => anyhow::bail!("unsupported runner kind '{runner_kind}' for backend '{backend}'"),
     };
+    let opencode_args = improve_opencode_args(&profile.opencode_args);
     let result = match backend_kind {
         BackendKind::Codex => runner::CodexRunner.run(&runner::RunContext {
             executable: &executable,
@@ -492,7 +494,7 @@ pub(super) fn run_backend_with_reserved_route(
             session_dir,
             model: effective_model,
             llm: None,
-            extra_args: &profile.opencode_args,
+            extra_args: &opencode_args,
             env_vars: &env_vars,
             idle_timeout_seconds: effective_model
                 .and_then(|m| {

@@ -1,5 +1,6 @@
 use crate::config::Profile;
 use crate::runner::backends::agy::agy_empty_output_diagnosis;
+use crate::runner::backends::opencode::review_opencode_args;
 use crate::runner::process::{
     copy_stream_to_file, kill_process_group, prepare_process_group,
     process_group_activity_advanced, process_group_activity_snapshot, shutdown_requested,
@@ -207,6 +208,8 @@ pub fn run_review_backend_for_identity(
             if let Some(model) = effective_model {
                 cmd.args(["--model", model]);
             }
+            let opencode_args = review_opencode_args(&profile.opencode_args);
+            cmd.args(opencode_args);
             cmd.arg(prompt);
         }
         Some(BackendKind::Openhands) | Some(BackendKind::Hermes) | None => {
@@ -732,5 +735,37 @@ mod tests {
         assert!(argv.contains(&"--auto-approve".to_string()));
         assert!(!argv.contains(&"review".to_string()));
         assert!(!argv.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn run_review_backend_uses_the_reviewer_agent_and_strips_profile_override() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
+        let mut profile = test_profile();
+        profile.opencode_args = vec![
+            "--agent".to_string(),
+            "gah-implementer".to_string(),
+            "--custom-flag".to_string(),
+        ];
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let result = run_review_backend(
+            &profile,
+            "opencode",
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            Some("opencode/hy3-free"),
+            &[],
+        );
+
+        assert_eq!(result.outcome, ReviewProcessOutcome::Success);
+        let argv = recorded_argv(&f.record_dir);
+        assert_eq!(argv[0], "run");
+        assert!(argv.contains(&"--agent".to_string()));
+        assert!(argv.contains(&"gah-reviewer".to_string()));
+        assert!(argv.contains(&"--custom-flag".to_string()));
+        assert!(!argv.contains(&"gah-implementer".to_string()));
     }
 }
