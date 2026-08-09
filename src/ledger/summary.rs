@@ -8,6 +8,8 @@ pub enum GroupBy {
     None,
     Backend,
     Model,
+    Difficulty,
+    BackendDifficulty,
 }
 
 impl std::str::FromStr for GroupBy {
@@ -18,8 +20,10 @@ impl std::str::FromStr for GroupBy {
             "none" => Ok(GroupBy::None),
             "backend" => Ok(GroupBy::Backend),
             "model" => Ok(GroupBy::Model),
+            "difficulty" => Ok(GroupBy::Difficulty),
+            "backend-difficulty" | "backenddifficulty" => Ok(GroupBy::BackendDifficulty),
             _ => Err(format!(
-                "Invalid group-by value: '{}'. Expected 'none', 'backend' or 'model'",
+                "Invalid group-by value: '{}'. Expected 'none', 'backend', 'model', 'difficulty', or 'backend-difficulty'",
                 s
             )),
         }
@@ -108,6 +112,7 @@ pub struct SummaryData {
     pub fallback_count: usize,
     pub validation_pass: usize,
     pub push_success: usize,
+    pub auto_backend_routing_failures: usize,
     pub mr_count: usize,
     pub human_required_count: usize,
     /// Issue #240: attempt counters are `Option<u32>` on `LedgerEntry`, so
@@ -133,6 +138,10 @@ pub struct SummaryData {
     pub grouped_by_backend: Option<Vec<GroupSummary>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grouped_by_model: Option<Vec<GroupSummary>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grouped_by_difficulty: Option<Vec<GroupSummary>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grouped_by_backend_difficulty: Option<Vec<GroupSummary>>,
 }
 
 pub fn run_with_json(
@@ -352,6 +361,32 @@ pub fn run_with_json(
 /// from a real (if oddly-named) model called "".
 pub const UNKNOWN_MODEL_LABEL: &str = "(unknown model)";
 
+/// Label for entries/observations with no known difficulty in
+/// `--group-by difficulty` and `--group-by backend-difficulty` views.
+pub const UNKNOWN_DIFFICULTY_LABEL: &str = "(unlabeled)";
+
+fn canonical_difficulty_label(difficulty: Option<&str>) -> String {
+    difficulty
+        .map(str::trim)
+        .filter(|difficulty| !difficulty.is_empty())
+        .map(|difficulty| difficulty.to_lowercase())
+        .unwrap_or_else(|| UNKNOWN_DIFFICULTY_LABEL.to_string())
+}
+
+fn build_backend_difficulty_group_key(backend: &str, difficulty: Option<&str>) -> String {
+    format!("{} :: {}", backend, canonical_difficulty_label(difficulty))
+}
+
+fn is_auto_routing_failure(entry: &LedgerEntry) -> bool {
+    crate::config::canonical_backend_name(&entry.effective_backend) == "auto"
+        && entry.attempts.is_empty()
+        && entry.attempts_started.unwrap_or(0) == 0
+        && entry.attempts_completed.unwrap_or(0) == 0
+        && entry
+            .duration_seconds
+            .is_some_and(|duration| duration <= 1.0)
+}
+
 fn is_capacity_deferral(entry: &LedgerEntry) -> bool {
     entry.validation_result.as_deref() == Some("deferred_capacity")
 }
@@ -396,6 +431,7 @@ pub fn build_summary(
     let mut requests_count = 0u64;
     let mut estimated_cost = 0.0f64;
     let mut actual_cost = 0.0f64;
+    let mut auto_routing_failure_count = 0usize;
     // Issue #240: attempt counters may be unknown (pre-tracking). Sum known
     // values and count unknowns separately rather than coercing to 0.
     let mut attempts_started_sum = 0u32;
@@ -428,7 +464,9 @@ pub fn build_summary(
         if let Some(class) = &entry.failure_class {
             *by_failure_class.entry(class.clone()).or_default() += 1;
         }
-        if entry.error_summary.is_some() {
+        if is_auto_routing_failure(entry) {
+            auto_routing_failure_count += 1;
+        } else if entry.error_summary.is_some() {
             failed += 1;
         } else {
             success += 1;
@@ -523,7 +561,9 @@ pub fn build_summary(
             &entries,
             |entry| crate::config::canonical_backend_name(&entry.effective_backend).to_string(),
             |observed| crate::config::canonical_backend_name(observed.backend).to_string(),
-            |backend, _model| crate::config::canonical_backend_name(backend).to_string(),
+            |backend, _model, _difficulty| {
+                crate::config::canonical_backend_name(backend).to_string()
+            },
             true,
         )
     } else {
@@ -545,10 +585,49 @@ pub fn build_summary(
                     .map(str::to_string)
                     .unwrap_or_else(|| UNKNOWN_MODEL_LABEL.to_string())
             },
-            |_backend, model| {
+            |_backend, model, _difficulty| {
                 model
                     .map(str::to_string)
                     .unwrap_or_else(|| UNKNOWN_MODEL_LABEL.to_string())
+            },
+            false,
+        )
+    } else {
+        None
+    };
+
+    let grouped_by_difficulty = if group_by == GroupBy::Difficulty {
+        build_grouped_summary(
+            &entries,
+            |entry| canonical_difficulty_label(entry.difficulty.as_deref()),
+            |observed| canonical_difficulty_label(observed.difficulty),
+            |_backend, _model, difficulty| canonical_difficulty_label(difficulty),
+            false,
+        )
+    } else {
+        None
+    };
+
+    let grouped_by_backend_difficulty = if group_by == GroupBy::BackendDifficulty {
+        build_grouped_summary(
+            &entries,
+            |entry| {
+                build_backend_difficulty_group_key(
+                    crate::config::canonical_backend_name(&entry.effective_backend),
+                    entry.difficulty.as_deref(),
+                )
+            },
+            |observed| {
+                build_backend_difficulty_group_key(
+                    crate::config::canonical_backend_name(observed.backend),
+                    observed.difficulty,
+                )
+            },
+            |backend, _model, difficulty| {
+                build_backend_difficulty_group_key(
+                    crate::config::canonical_backend_name(backend),
+                    difficulty,
+                )
             },
             false,
         )
@@ -561,6 +640,7 @@ pub fn build_summary(
         entries: entries.len(),
         success,
         failed,
+        auto_backend_routing_failures: auto_routing_failure_count,
         by_mode,
         by_requested_backend,
         by_backend,
@@ -589,6 +669,8 @@ pub fn build_summary(
         last_run,
         grouped_by_backend,
         grouped_by_model,
+        grouped_by_difficulty,
+        grouped_by_backend_difficulty,
     })
 }
 
@@ -603,7 +685,7 @@ pub fn build_grouped_summary<F, U, A>(
 where
     F: Fn(&super::LedgerEntry) -> String,
     U: Fn(UsageObservation<'_>) -> String,
-    A: Fn(&str, Option<&str>) -> String,
+    A: Fn(&str, Option<&str>, Option<&str>) -> String,
 {
     build_grouped_summary_with_account_quota(
         entries,
@@ -630,7 +712,7 @@ pub fn build_grouped_summary_with_account_quota<F, U, A>(
 where
     F: Fn(&super::LedgerEntry) -> String,
     U: Fn(UsageObservation<'_>) -> String,
-    A: Fn(&str, Option<&str>) -> String,
+    A: Fn(&str, Option<&str>, Option<&str>) -> String,
 {
     if entries.is_empty() {
         return None;
@@ -648,9 +730,14 @@ where
                 .or_default()
                 .push(observed);
         }
+        let difficulty = entry.difficulty.as_deref();
         for (backend, model) in execution_identities(entry) {
             *attempt_counts
-                .entry(attempt_group_key_fn(backend.as_str(), model.as_deref()))
+                .entry(attempt_group_key_fn(
+                    backend.as_str(),
+                    model.as_deref(),
+                    difficulty,
+                ))
                 .or_default() += 1;
         }
     }
@@ -708,8 +795,15 @@ where
             (String, Option<String>, Option<String>),
             GroupQuotaObservation,
         > = BTreeMap::new();
+        let mut entries_for_success_rate = 0usize;
 
         for entry in &group_entries {
+            if is_auto_routing_failure(entry) {
+                continue;
+            }
+
+            entries_for_success_rate += 1;
+
             // Count validation passes
             if matches!(
                 entry.validation_result.as_deref(),
@@ -894,8 +988,8 @@ where
         } else {
             None
         };
-        let success_rate =
-            (group_entry_count > 0).then_some(validation_pass as f64 / group_entry_count as f64);
+        let success_rate = (entries_for_success_rate > 0)
+            .then_some(validation_pass as f64 / entries_for_success_rate as f64);
         let tokens_per_success = if validation_pass > 0 && total_tokens_seen {
             Some(total_tokens as f64 / validation_pass as f64)
         } else {
@@ -944,6 +1038,7 @@ where
 pub struct UsageObservation<'a> {
     pub backend: &'a str,
     pub model: Option<&'a str>,
+    pub difficulty: Option<&'a str>,
     pub usage: &'a LedgerUsage,
 }
 
@@ -993,6 +1088,7 @@ fn canonical_usage_observations(entry: &LedgerEntry) -> Vec<UsageObservation<'_>
         .map(|attempt| UsageObservation {
             backend: attempt.backend.as_str(),
             model: attempt.effective_model.as_deref(),
+            difficulty: entry.difficulty.as_deref(),
             usage: &attempt.usage,
         })
         .collect();
@@ -1003,6 +1099,7 @@ fn canonical_usage_observations(entry: &LedgerEntry) -> Vec<UsageObservation<'_>
         return vec![UsageObservation {
             backend: entry.effective_backend.as_str(),
             model: entry.effective_model.as_deref(),
+            difficulty: entry.difficulty.as_deref(),
             usage: &entry.usage,
         }];
     }
