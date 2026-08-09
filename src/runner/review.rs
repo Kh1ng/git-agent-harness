@@ -190,6 +190,7 @@ pub fn run_review_backend_for_identity(
         }
         Some(BackendKind::Agy) => {
             cmd.arg("--print").arg(prompt);
+            cmd.args(["--output-format", "stream-json"]);
             if let Some(model) = effective_model {
                 cmd.args(["--model", model]);
             }
@@ -569,7 +570,17 @@ mod tests {
     fn run_review_backend_supports_agy_with_model_and_env() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
-        make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
+        let json_line = r#"{"event":"result","result":{"response":"structured review","usage":{"input_tokens":10,"output_tokens":5,"thinking_tokens":2,"cache_read_tokens":1,"cache_write_tokens":3,"total_tokens":21,"num_turns":1}}}"#;
+        make_fake_bin(
+            &f.bin_dir,
+            "agy",
+            &format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{argv}'\n/usr/bin/env | /usr/bin/sort > '{env}'\nprintf '%s\\n' '{json_line}'\nprintf 'stderr-marker-agy\\n' >&2\n",
+                argv = f.record_dir.join("argv.txt").display(),
+                env = f.record_dir.join("env.txt").display(),
+                json_line = json_line,
+            ),
+        );
         let profile = test_profile();
         let _guard = PathGuard::set(f.bin_dir.display().to_string());
 
@@ -584,12 +595,14 @@ mod tests {
         );
 
         assert_eq!(result.outcome, ReviewProcessOutcome::Success);
-        assert!(result.stdout.contains("stdout-marker-agy"));
+        assert_eq!(result.stdout, "structured review");
         assert!(result.stderr.contains("stderr-marker-agy"));
 
         let argv = recorded_argv(&f.record_dir);
         assert_eq!(argv[0], "--print");
         assert!(argv.contains(&"task".to_string()));
+        assert!(argv.contains(&"--output-format".to_string()));
+        assert!(argv.contains(&"stream-json".to_string()));
         assert!(argv.contains(&"--model".to_string()));
         assert!(argv.contains(&"Claude Sonnet 4.6 (Thinking)".to_string()));
         assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));

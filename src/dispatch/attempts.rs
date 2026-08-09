@@ -668,6 +668,8 @@ pub(super) fn attempt_usage(
     // codex exec --json where the generic regex parser would find nothing.
     let mut usage = if backend_kind == Some(BackendKind::Codex) {
         usage::parse_codex_exec_json(&text)
+    } else if backend_kind == Some(BackendKind::Agy) {
+        usage::parse_agy_output_json(&text)
     } else {
         crate::ledger::LedgerUsage::default()
     };

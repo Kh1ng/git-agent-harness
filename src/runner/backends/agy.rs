@@ -278,6 +278,7 @@ pub fn run_agy_with_executable(
 
     let mut cmd = Command::new(executable);
     cmd.arg("--print");
+    cmd.args(["--output-format", "stream-json"]);
     cmd.arg(task);
     cmd.args(["--model", llm.model.as_str()]);
     if let Some(secs) = print_timeout_seconds {
@@ -364,10 +365,7 @@ pub fn run_agy_with_executable(
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
-        // AGY --print currently mixes stdout and stderr in the diagnostic
-        // log and exposes no run-scoped structured conversation artifact.
-        // Fail closed until its adapter can identify one authoritatively.
-        final_summary: None,
+        final_summary: crate::runner::output::extract_agy_json_summary(&output),
         agy_cli_log_delta: log_delta(&agy_cli_log, agy_cli_log_pre_offset),
         internal_log_delta: None,
         internal_log_path: None,
@@ -593,10 +591,47 @@ mod tests {
 
         let argv = recorded_argv(&f.record_dir);
         assert_eq!(argv[0], "--print");
+        assert_eq!(argv[1], "--output-format");
+        assert_eq!(argv[2], "stream-json");
         assert!(argv.contains(&"--model".to_string()));
         assert!(argv.contains(&"gpt-5.4".to_string()));
         assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(argv.contains(&"the agy task".to_string()));
+    }
+
+    #[test]
+    fn run_agy_with_executable_extracts_stream_json_summary() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "agy",
+            "#!/bin/sh\nprintf '%s\\n' \"{\\\"event\\\":\\\"result\\\",\\\"result\\\":{\\\"response\\\":\\\"Implemented the fix.\\\",\\\"usage\\\":{\\\"input_tokens\\\":10,\\\"output_tokens\\\":5,\\\"thinking_tokens\\\":2,\\\"cache_read_tokens\\\":1,\\\"cache_write_tokens\\\":3,\\\"total_tokens\\\":21,\\\"num_turns\\\":1}}}\"\n",
+        );
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        let result = run_agy(
+            &f.worktree,
+            "the agy task",
+            &f.session_dir,
+            &LlmConfig {
+                base_url: "http://llm.test".into(),
+                api_key: "test-key".into(),
+                model: "gpt-5.4".into(),
+            },
+            &envs,
+            "agy",
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.final_summary.as_deref(),
+            Some("Implemented the fix.")
+        );
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("\"event\":\"result\""));
+        assert!(log.contains("\"cache_read_tokens\":1"));
     }
 
     #[test]
