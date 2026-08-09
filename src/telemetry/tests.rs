@@ -863,6 +863,9 @@ pub(crate) mod telemetry_tests {
             context_estimated_tokens_after: None,
             context_compacted: false,
             usage: crate::ledger::LedgerUsage::default(),
+            memory_gateway_recall_hit: false,
+            memory_gateway_context_byte_size: None,
+            memory_gateway_capture_l0_recorded: None,
         }
     }
 

@@ -197,6 +197,7 @@ fn audit_instruction(repo: &str) -> String {
 
 /// Build task with issue details for the Focus section
 fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &IssueDetails) -> String {
+    // Issue #915: Memory gateway recall is happening in append_related_memory below
     let instruction = match JobKind::parse(mode) {
         Ok(JobKind::Fix) => "Fix the specific issue described in the Focus section below.\n\
              Run the relevant tests to confirm the fix. All tests in the test suite must pass.\n\
@@ -230,7 +231,7 @@ fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &Issue
     );
 
     append_project_brief(&mut task, profile);
-    append_related_memory(&mut task, profile, issue);
+    let _memory_context_size = append_related_memory(&mut task, profile, issue); // Issue #915: recall is happening here
     append_live_task_pack(&mut task, issue);
 
     task.push_str(&format!(
@@ -267,7 +268,12 @@ fn append_project_brief(task: &mut String, profile: &Profile) {
 /// edge case. Fail-open by design (see memory_gateway module doc): no env
 /// config, an unreachable gateway, or an empty result all silently produce
 /// no section at all, exactly like a missing PROJECT_BRIEF.md above.
-fn append_related_memory(task: &mut String, profile: &Profile, issue: &IssueDetails) {
+/// Issue #915: Returns the context byte size for tracking, or None if no recall hit
+fn append_related_memory(
+    task: &mut String,
+    profile: &Profile,
+    issue: &IssueDetails,
+) -> Option<u64> {
     let query = format!("issue #{}: {}", issue.number, issue.title);
     let work_id = format!("#{}", issue.number);
     let Some(context) = crate::memory_gateway::recall_for_ticket(
@@ -276,10 +282,11 @@ fn append_related_memory(task: &mut String, profile: &Profile, issue: &IssueDeta
         &work_id,
         &query,
     ) else {
-        return;
+        return None;
     };
     task.push_str("\n## Related Memory\n\n");
     append_bounded_text(task, &context, PROJECT_BRIEF_MAX_BYTES, "Related memory");
+    Some(context.as_bytes().len() as u64)
 }
 
 /// Build a bounded, task-specific packet from structured issue metadata.
