@@ -12,6 +12,7 @@
       "estimated_cost_usd": null,
       "input_tokens": 100,
       "is_model": false,
+      "memory_gateway_capture_l0_recorded": null,
       "output_tokens": 40,
       "quota_observations": [
         {
@@ -41,7 +42,7 @@
     }
   ],
   "group_by": "Backend",
-  "ledger_path": "/tmp/.tmp59opkf/artifacts/ledger.jsonl",
+  "ledger_path": "/tmp/.tmpb9qnR4/artifacts/ledger.jsonl",
   "profile": null,
   "since": "365d",
   "total_entries": 1,

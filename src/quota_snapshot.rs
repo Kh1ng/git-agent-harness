@@ -733,6 +733,7 @@ mod tests {
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: None,
+            memory_gateway_capture_l0_recorded: None,
             requests_count: None,
             tokens_per_success: None,
             requests_per_success: None,

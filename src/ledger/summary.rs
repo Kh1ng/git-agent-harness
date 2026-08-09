@@ -72,6 +72,7 @@ pub struct GroupSummary {
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    pub memory_gateway_capture_l0_recorded: Option<u64>,
     pub requests_count: Option<u64>,
     pub tokens_per_success: Option<f64>,
     pub requests_per_success: Option<f64>,
@@ -784,6 +785,8 @@ where
         let mut cache_write_tokens = 0u64;
         let mut total_tokens = 0u64;
         let mut requests_count = 0u64;
+        let mut memory_gateway_capture_l0_recorded = 0u64;
+        let mut memory_gateway_capture_l0_recorded_seen = false;
         let mut input_tokens_seen = false;
         let mut output_tokens_seen = false;
         let mut reasoning_tokens_seen = false;
@@ -849,6 +852,11 @@ where
                     attempts_completed_seen = true;
                 }
                 None => attempts_completed_unknown += 1,
+            }
+
+            if let Some(captured) = entry.memory_gateway_capture_l0_recorded {
+                memory_gateway_capture_l0_recorded += captured;
+                memory_gateway_capture_l0_recorded_seen = true;
             }
         }
 
@@ -1024,6 +1032,8 @@ where
             cache_read_tokens: cache_read_tokens_seen.then_some(cache_read_tokens),
             cache_write_tokens: cache_write_tokens_seen.then_some(cache_write_tokens),
             total_tokens: total_tokens_seen.then_some(total_tokens),
+            memory_gateway_capture_l0_recorded: memory_gateway_capture_l0_recorded_seen
+                .then_some(memory_gateway_capture_l0_recorded),
             requests_count: requests_count_seen.then_some(requests_count),
             tokens_per_success,
             requests_per_success,

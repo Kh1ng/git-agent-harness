@@ -489,6 +489,7 @@ export interface BackendModelComparison {
   cache_read_tokens: number | null;
   cache_write_tokens: number | null;
   total_tokens: number | null;
+  memory_gateway_capture_l0_recorded: number | null;
   requests_count: number | null;
   tokens_per_success: number | null;
   requests_per_success: number | null;
