@@ -371,6 +371,18 @@ fn group_by_enum_parsing() {
     assert_eq!("backend".parse::<GroupBy>().unwrap(), GroupBy::Backend);
     assert_eq!("model".parse::<GroupBy>().unwrap(), GroupBy::Model);
     assert_eq!("none".parse::<GroupBy>().unwrap(), GroupBy::None);
+    assert_eq!(
+        "difficulty".parse::<GroupBy>().unwrap(),
+        GroupBy::Difficulty
+    );
+    assert_eq!(
+        "backend-difficulty".parse::<GroupBy>().unwrap(),
+        GroupBy::BackendDifficulty
+    );
+    assert_eq!(
+        "backenddifficulty".parse::<GroupBy>().unwrap(),
+        GroupBy::BackendDifficulty
+    );
     assert_eq!("BACKEND".parse::<GroupBy>().unwrap(), GroupBy::Backend);
     assert_eq!("MODEL".parse::<GroupBy>().unwrap(), GroupBy::Model);
     assert!("invalid".parse::<GroupBy>().is_err());
@@ -404,7 +416,7 @@ fn build_grouped_summary_by_backend() {
         &entries,
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
-        |backend, _model| backend.to_string(),
+        |backend, _model, _difficulty| backend.to_string(),
         true,
     );
 
@@ -465,7 +477,7 @@ fn model_grouping_labels_missing_model_instead_of_collapsing_to_empty_string() {
                 .map(str::to_string)
                 .unwrap_or_else(|| super::UNKNOWN_MODEL_LABEL.to_string())
         },
-        |_backend, model| {
+        |_backend, model, _difficulty| {
             model
                 .map(str::to_string)
                 .unwrap_or_else(|| super::UNKNOWN_MODEL_LABEL.to_string())
@@ -510,7 +522,7 @@ fn build_grouped_summary_by_model() {
         &entries,
         |entry| entry.effective_model.clone().unwrap_or_default(),
         |observed| observed.model.unwrap_or_default().to_string(),
-        |_backend, model| model.unwrap_or_default().to_string(),
+        |_backend, model, _difficulty| model.unwrap_or_default().to_string(),
         false,
     );
 
@@ -542,6 +554,105 @@ fn build_grouped_summary_by_model() {
         Some(&1)
     );
     assert!((mistral_group.total_cost_usd.unwrap() - 0.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn build_grouped_summary_by_difficulty() {
+    let (_tmp, _cfg) = test_config();
+    let mut easy_pass =
+        LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
+    easy_pass.effective_backend = "codex".to_string();
+    easy_pass.effective_model = Some("codex-model".to_string());
+    easy_pass.difficulty = Some("Easy".to_string());
+    easy_pass.validation_result = Some("passed".to_string());
+    easy_pass.usage.actual_cost_usd = Some(1.0);
+
+    let mut hard_fail =
+        LedgerEntry::new("test", &profile(), "vibe", "improve", "test2", None, None);
+    hard_fail.effective_backend = "vibe".to_string();
+    hard_fail.effective_model = Some("vibe-model".to_string());
+    hard_fail.difficulty = Some("hard".to_string());
+    hard_fail.validation_result = Some("failed".to_string());
+    hard_fail.usage.actual_cost_usd = Some(2.0);
+
+    let grouped = super::build_grouped_summary(
+        &[easy_pass, hard_fail],
+        |entry| super::canonical_difficulty_label(entry.difficulty.as_deref()),
+        |observed| super::canonical_difficulty_label(observed.difficulty),
+        |_backend, _model, difficulty| super::canonical_difficulty_label(difficulty),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(grouped.len(), 2);
+    let easy = grouped.iter().find(|g| g.group_key == "easy").unwrap();
+    let hard = grouped.iter().find(|g| g.group_key == "hard").unwrap();
+    assert_eq!(easy.entries, 1);
+    assert_eq!(hard.entries, 1);
+    assert_eq!(easy.validation_pass, 1);
+    assert_eq!(hard.validation_pass, 0);
+}
+
+#[test]
+fn build_grouped_summary_by_backend_difficulty() {
+    let (_tmp, _cfg) = test_config();
+    let mut entry = LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
+    entry.effective_backend = "codex".to_string();
+    entry.effective_model = Some("gpt-4".to_string());
+    entry.difficulty = Some("medium".to_string());
+    entry.validation_result = Some("passed".to_string());
+    entry.usage.actual_cost_usd = Some(1.0);
+
+    let grouped = super::build_grouped_summary(
+        &[entry],
+        |entry| {
+            super::build_backend_difficulty_group_key(
+                &entry.effective_backend,
+                entry.difficulty.as_deref(),
+            )
+        },
+        |observed| super::build_backend_difficulty_group_key(observed.backend, observed.difficulty),
+        |backend, _model, difficulty| {
+            super::build_backend_difficulty_group_key(
+                crate::config::canonical_backend_name(backend),
+                difficulty,
+            )
+        },
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(grouped.len(), 1);
+    assert!(grouped.iter().any(|g| g.group_key == "codex :: medium"));
+}
+
+#[test]
+fn build_grouped_summary_difficulty_success_rate_excludes_auto_routing_failure_noise() {
+    let (_tmp, _cfg) = test_config();
+    let mut passing = LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
+    passing.effective_backend = "codex".to_string();
+    passing.difficulty = Some("easy".to_string());
+    passing.validation_result = Some("passed".to_string());
+
+    let mut auto_noise =
+        LedgerEntry::new("test", &profile(), "auto", "improve", "test2", None, None);
+    auto_noise.effective_backend = "auto".to_string();
+    auto_noise.difficulty = Some("easy".to_string());
+    auto_noise.duration_seconds = Some(0.4);
+
+    let grouped = super::build_grouped_summary(
+        &[passing, auto_noise],
+        |entry| super::canonical_difficulty_label(entry.difficulty.as_deref()),
+        |observed| super::canonical_difficulty_label(observed.difficulty),
+        |_backend, _model, difficulty| super::canonical_difficulty_label(difficulty),
+        false,
+    )
+    .unwrap();
+
+    let group = grouped.iter().find(|g| g.group_key == "easy").unwrap();
+    assert_eq!(group.entries, 2);
+    assert_eq!(group.validation_pass, 1);
+    assert_eq!(group.success_rate, Some(1.0));
 }
 
 #[test]
@@ -581,7 +692,7 @@ fn cost_per_approve_strong_keys_on_reviewer_tier_not_verdict_text() {
         &entries,
         |entry| entry.effective_model.clone().unwrap_or_default(),
         |observed| observed.model.unwrap_or_default().to_string(),
-        |_backend, model| model.unwrap_or_default().to_string(),
+        |_backend, model, _difficulty| model.unwrap_or_default().to_string(),
         false,
     )
     .unwrap();
@@ -628,7 +739,7 @@ fn account_quota_merges_into_backend_group_only() {
         &entries,
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
-        |backend, _model| backend.to_string(),
+        |backend, _model, _difficulty| backend.to_string(),
         true,
         &observations,
     )
@@ -651,7 +762,7 @@ fn account_quota_merges_into_backend_group_only() {
         &entries,
         |entry| entry.effective_model.clone().unwrap_or_default(),
         |observed| observed.model.unwrap_or_default().to_string(),
-        |_backend, model| model.unwrap_or_default().to_string(),
+        |_backend, model, _difficulty| model.unwrap_or_default().to_string(),
         false,
         &observations,
     )
@@ -676,7 +787,7 @@ fn build_grouped_summary_empty_entries() {
         &entries,
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
-        |backend, _model| backend.to_string(),
+        |backend, _model, _difficulty| backend.to_string(),
         true,
     );
     assert!(grouped.is_none());
@@ -734,7 +845,7 @@ fn legacy_fixture_grouped_summary_separates_unknown() {
         &[legacy, known],
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
-        |backend, _model| backend.to_string(),
+        |backend, _model, _difficulty| backend.to_string(),
         true,
     )
     .unwrap();
