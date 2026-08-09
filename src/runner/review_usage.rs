@@ -134,6 +134,7 @@ impl ReviewUsageCapture {
                 log_path,
                 pre_offset,
             } => ReviewUsageArtifacts {
+                review_text: crate::runner::output::extract_agy_json_summary(raw_stdout),
                 agy_cli_log_delta: agy::log_delta(&log_path, pre_offset),
                 agy_cli_log_path: log_path,
                 ..ReviewUsageArtifacts::default()
