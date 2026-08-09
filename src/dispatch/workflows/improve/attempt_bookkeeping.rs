@@ -77,3 +77,24 @@ pub(super) fn record_failed_validation_attempt(
     record_external_approval_consumption_for_last_attempt(cfg, profile_name, profile, ledger);
     shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)
 }
+
+/// Issue #915: best-effort capture of a successful attempt; failures are
+/// swallowed inside memory_gateway and never affect dispatch.
+pub(super) fn capture_successful_attempt(
+    profile_name: &str,
+    local_path: &str,
+    attempt: u32,
+    ledger: &mut LedgerEntry,
+) {
+    let Some(work_id) = ledger.work_id.clone() else {
+        return;
+    };
+    crate::memory_gateway::capture_attempt_and_update_ledger(
+        profile_name,
+        local_path,
+        &work_id,
+        &format!("Dispatch attempt {} for {}", attempt + 1, work_id),
+        &format!("Attempt {} passed validation", attempt + 1),
+        ledger,
+    );
+}
