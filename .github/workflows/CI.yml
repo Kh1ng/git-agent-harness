@@ -59,6 +59,65 @@ jobs:
           # baseline increase cannot disguise source growth.
           fetch-depth: 0
 
+      - name: Compute changed files and Rust scope
+        id: rust-test-scope
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+
+          if [ -z "${base}" ] || [ "${base}" = "0000000000000000000000000000000000000000" ]; then
+            base="$head~1"
+          fi
+
+          changed_files="$(git diff --name-only "$base" "$head")"
+
+          has_rust_changes=false
+          has_desktop_changes=false
+          rust_test_scope="scoped"
+          declare -A scoped_targets
+
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            case "$path" in
+              src/*.rs)
+                has_rust_changes=true
+                rust_test_scope="full"
+                ;;
+              src/*/*)
+                has_rust_changes=true
+                module="${path#src/}"
+                module="${module%%/*}"
+                scoped_targets["$module"]=1
+                ;;
+              apps/desktop/*|apps/desktop/*/*)
+                has_desktop_changes=true
+                has_rust_changes=true
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          if [ "$rust_test_scope" = "scoped" ]; then
+            readarray -t sorted_targets < <(printf '%s\n' "${!scoped_targets[@]}" | sort -u)
+            if [ "${#sorted_targets[@]}" -eq 0 ]; then
+              rust_test_scope="full"
+            else
+              rust_test_filters="$(printf '%s ' "${sorted_targets[@]}")"
+              rust_test_filters="${rust_test_filters% }"
+            fi
+          fi
+
+          echo "has_rust_changes=${has_rust_changes}" >> "$GITHUB_OUTPUT"
+          echo "has_desktop_changes=${has_desktop_changes}" >> "$GITHUB_OUTPUT"
+          echo "rust_test_scope=${rust_test_scope}" >> "$GITHUB_OUTPUT"
+          echo "rust_test_filters=${rust_test_filters:-}" >> "$GITHUB_OUTPUT"
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -72,6 +131,7 @@ jobs:
         run: npm run build:web
 
       - name: Install Tauri Linux dependencies
+        if: steps.rust-test-scope.outputs.has_desktop_changes == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -87,20 +147,34 @@ jobs:
             patchelf
 
       - name: Install Rust
+        if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Rust build artifacts
+        if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
+        uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt --check
+        if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
         run: cargo fmt --check
 
       - name: cargo test
-        run: cargo test
+        if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
+        run: |
+          if [ "${{ steps.rust-test-scope.outputs.rust_test_scope }}" = "full" ]; then
+            cargo test
+          else
+            for scope in ${{ steps.rust-test-scope.outputs.rust_test_filters }}; do
+              cargo test "$scope"
+            done
+          fi
 
       - name: cargo clippy
+        if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Check desktop application
+        if: steps.rust-test-scope.outputs.has_desktop_changes == 'true'
         run: cargo check --manifest-path apps/desktop/Cargo.toml
