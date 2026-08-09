@@ -290,14 +290,17 @@ fn transform_to_report_format(
     since: &str,
     profile: Option<&str>,
 ) -> Result<ReportData> {
-    let grouped_data = if group_by == LedgerGroupBy::Backend {
-        &data.grouped_by_backend
-    } else {
-        &data.grouped_by_model
+    let (grouped_data, is_model, group_label) = match group_by {
+        LedgerGroupBy::Backend => (&data.grouped_by_backend, false, "Backend"),
+        LedgerGroupBy::Model => (&data.grouped_by_model, true, "Model"),
+        LedgerGroupBy::Difficulty => (&data.grouped_by_difficulty, false, "Difficulty"),
+        LedgerGroupBy::BackendDifficulty => (
+            &data.grouped_by_backend_difficulty,
+            false,
+            "Backend x Difficulty",
+        ),
+        LedgerGroupBy::None => (&data.grouped_by_backend, false, "Backend"),
     };
-
-    let is_model = group_by == LedgerGroupBy::Model;
-    let group_label = if is_model { "Model" } else { "Backend" };
 
     let mut comparisons = Vec::new();
 
@@ -432,10 +435,14 @@ fn display_report(
     since: &str,
     profile: Option<&str>,
 ) -> Result<()> {
-    let group_label = if group_by == LedgerGroupBy::Backend {
-        "Backend"
-    } else {
-        "Model"
+    let (group_label, grouped_data) = match group_by {
+        LedgerGroupBy::Backend => ("Backend", &data.grouped_by_backend),
+        LedgerGroupBy::Model => ("Model", &data.grouped_by_model),
+        LedgerGroupBy::Difficulty => ("Difficulty", &data.grouped_by_difficulty),
+        LedgerGroupBy::BackendDifficulty => {
+            ("Backend x Difficulty", &data.grouped_by_backend_difficulty)
+        }
+        LedgerGroupBy::None => ("Backend", &data.grouped_by_backend),
     };
 
     println!("Total entries: {}", data.entries);
@@ -444,12 +451,6 @@ fn display_report(
         println!("Profile: {}", profile);
     }
     println!();
-
-    let grouped_data = if group_by == LedgerGroupBy::Backend {
-        &data.grouped_by_backend
-    } else {
-        &data.grouped_by_model
-    };
 
     println!("{} Comparison Report:", group_label);
     println!("{}", "=".repeat(50));
@@ -460,11 +461,7 @@ fn display_report(
         sorted_groups.sort_by_key(|b| Reverse(b.entries));
 
         for group in sorted_groups {
-            let success_rate = if group.entries > 0 {
-                (group.validation_pass as f64 / group.entries as f64) * 100.0
-            } else {
-                0.0
-            };
+            let success_rate = group.success_rate.unwrap_or(0.0) * 100.0;
 
             println!("\n{}:", group.group_key);
             println!("  Entries: {} ({} attempts)", group.entries, group.attempts);
@@ -665,6 +662,9 @@ mod tests {
             actual_cost_usd: Some(3.50),
             last_run: Some("2026-07-07 10:00:00 UTC agy improve".to_string()),
             grouped_by_backend: Some(grouped_by_backend),
+            auto_backend_routing_failures: 0,
+            grouped_by_difficulty: None,
+            grouped_by_backend_difficulty: None,
             grouped_by_model: None,
         }
     }
@@ -718,6 +718,33 @@ mod tests {
         // All should be marked as models
         assert!(report_data.comparisons[0].is_model);
         assert!(report_data.comparisons[1].is_model);
+    }
+
+    #[test]
+    fn test_transform_to_report_format_difficulty() {
+        let mut data = mock_summary_data();
+        data.grouped_by_difficulty = data.grouped_by_backend.take();
+
+        let report_data =
+            transform_to_report_format(None, &data, GroupBy::Difficulty, "7d", None).unwrap();
+
+        assert_eq!(report_data.group_by, "Difficulty");
+        assert_eq!(report_data.comparisons.len(), 2);
+        assert!(!report_data.comparisons[0].is_model);
+    }
+
+    #[test]
+    fn test_transform_to_report_format_backend_difficulty() {
+        let mut data = mock_summary_data();
+        data.grouped_by_backend_difficulty = data.grouped_by_backend.take();
+
+        let report_data =
+            transform_to_report_format(None, &data, GroupBy::BackendDifficulty, "7d", None)
+                .unwrap();
+
+        assert_eq!(report_data.group_by, "Backend x Difficulty");
+        assert_eq!(report_data.comparisons.len(), 2);
+        assert!(!report_data.comparisons[0].is_model);
     }
 
     #[test]

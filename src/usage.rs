@@ -307,6 +307,198 @@ pub fn parse_agy_cli_log_delta(delta: &str, source_hint: &str) -> LedgerUsage {
     usage
 }
 
+/// Parse AGY's structured `--output-format json` / `stream-json` result.
+///
+/// The CLI emits either a single JSON object or NDJSON stream events whose
+/// terminal `event == "result"` line contains the same `result` payload. We
+/// keep only the final result record, map `thinking_tokens` onto the harness'
+/// `reasoning_tokens`, and preserve unknown fields as unknown.
+pub fn parse_agy_output_json(output: &str) -> LedgerUsage {
+    parse_agy_output_json_parts(output).usage
+}
+
+pub(crate) fn extract_agy_output_summary(output: &str) -> Option<String> {
+    parse_agy_output_json_parts(output).response
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AgyOutputParts {
+    pub(crate) usage: LedgerUsage,
+    pub(crate) response: Option<String>,
+}
+
+fn parse_agy_output_json_parts(output: &str) -> AgyOutputParts {
+    let mut response = None;
+    let mut usage = LedgerUsage::default();
+    let mut saw_result = false;
+
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(result) = agy_result_payload(&value) else {
+            continue;
+        };
+        saw_result = true;
+        response = agy_response_text(result);
+        usage = agy_usage_from_result(result);
+    }
+
+    if saw_result {
+        AgyOutputParts { usage, response }
+    } else {
+        AgyOutputParts::default()
+    }
+}
+
+fn agy_result_payload(value: &Value) -> Option<&Value> {
+    if value.get("event").and_then(Value::as_str) == Some("result") {
+        return value.get("result").or(Some(value));
+    }
+    if value.get("response").is_some() || value.get("usage").is_some() {
+        return Some(value);
+    }
+    None
+}
+
+fn agy_response_text(value: &Value) -> Option<String> {
+    fn from_content(value: &Value) -> Option<String> {
+        let content = value.get("content")?;
+        match content {
+            Value::String(text) => Some(text.trim().to_string()).filter(|text| !text.is_empty()),
+            Value::Array(parts) => {
+                let text = parts
+                    .iter()
+                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .filter(|text| !text.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!text.trim().is_empty()).then_some(text)
+            }
+            _ => None,
+        }
+    }
+
+    value
+        .get("response")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            value
+                .pointer("/message/text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            value
+                .pointer("/message/content")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| from_content(value))
+}
+
+fn agy_usage_from_result(value: &Value) -> LedgerUsage {
+    let usage_obj = value.get("usage").unwrap_or(value);
+
+    let input_tokens = usage_obj.get("input_tokens").and_then(Value::as_u64);
+    let output_tokens = usage_obj.get("output_tokens").and_then(Value::as_u64);
+    let reasoning_tokens = usage_obj
+        .get("reasoning_tokens")
+        .or_else(|| usage_obj.get("thinking_tokens"))
+        .and_then(Value::as_u64);
+    let cache_read_tokens = usage_obj
+        .get("cache_read_tokens")
+        .or_else(|| usage_obj.get("cached_input_tokens"))
+        .and_then(Value::as_u64);
+    let cache_write_tokens = usage_obj.get("cache_write_tokens").and_then(Value::as_u64);
+    let total_tokens = usage_obj
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            [
+                input_tokens,
+                output_tokens,
+                reasoning_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            ]
+            .into_iter()
+            .flatten()
+            .reduce(u64::saturating_add)
+        });
+    let requests_count = usage_obj
+        .get("num_turns")
+        .or_else(|| usage_obj.get("requests_count"))
+        .and_then(Value::as_u64);
+    let estimated_cost_usd = usage_obj
+        .get("estimated_cost_usd")
+        .or_else(|| usage_obj.get("cost_usd"))
+        .and_then(Value::as_f64);
+    let actual_cost_usd = usage_obj.get("actual_cost_usd").and_then(Value::as_f64);
+
+    let mut usage = LedgerUsage {
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        total_tokens,
+        requests_count,
+        estimated_cost_usd,
+        actual_cost_usd,
+        ..LedgerUsage::default()
+    };
+
+    if usage.total_tokens.is_none() {
+        usage.total_tokens = [
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.reasoning_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(u64::saturating_add);
+    }
+    if usage.requests_count.is_none()
+        && (usage.input_tokens.is_some()
+            || usage.output_tokens.is_some()
+            || usage.reasoning_tokens.is_some()
+            || usage.total_tokens.is_some())
+    {
+        usage.requests_count = Some(1);
+    }
+    if value.get("usage").is_some()
+        || usage.input_tokens.is_some()
+        || usage.output_tokens.is_some()
+        || usage.reasoning_tokens.is_some()
+        || usage.cache_read_tokens.is_some()
+        || usage.cache_write_tokens.is_some()
+        || usage.total_tokens.is_some()
+        || usage.requests_count.is_some()
+        || usage.estimated_cost_usd.is_some()
+        || usage.actual_cost_usd.is_some()
+    {
+        usage.usage_source = Some("agy_output_json".to_string());
+    }
+    usage
+}
+
 /// Like `find_string_after`, but tolerant of AGY's separator-less style
 /// ("Resets in 16m44s" / "quota resets at 2026-...") where the value follows
 /// the keyword with only optional whitespace (an optional `:`/`=` is allowed).
@@ -772,7 +964,9 @@ pub fn refresh_codex_quota(
 #[cfg(test)]
 mod tests {
     use super::codex_status_to_quota_observation;
+    use super::extract_agy_output_summary;
     use super::parse_agy_cli_log_delta;
+    use super::parse_agy_output_json;
     use super::parse_codex_exec_json;
     use super::parse_codex_status_json;
     use super::parse_codex_transcript_attribution;
@@ -1022,6 +1216,35 @@ mod tests {
         assert_eq!(usage.quota_used_percent, None);
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.usage_source, None);
+    }
+
+    #[test]
+    fn agy_output_json_extracts_tokens_and_thinking_alias() {
+        let output = concat!(
+            "{\"event\":\"command_result\",\"command\":{\"name\":\"print\"}}\n",
+            "{\"event\":\"result\",\"result\":{\"response\":\"Implemented the fix.\",\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"thinking_tokens\":3,\"cache_read_tokens\":5,\"cache_write_tokens\":2,\"total_tokens\":28,\"num_turns\":1}}}\n",
+        );
+        let usage = parse_agy_output_json(output);
+        assert_eq!(usage.usage_source.as_deref(), Some("agy_output_json"));
+        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.output_tokens, Some(7));
+        assert_eq!(usage.reasoning_tokens, Some(3));
+        assert_eq!(usage.cache_read_tokens, Some(5));
+        assert_eq!(usage.cache_write_tokens, Some(2));
+        assert_eq!(usage.total_tokens, Some(28));
+        assert_eq!(usage.requests_count, Some(1));
+    }
+
+    #[test]
+    fn agy_output_json_extracts_the_terminal_response() {
+        let output = concat!(
+            "{\"event\":\"command_result\",\"command\":{\"name\":\"print\"}}\n",
+            "{\"event\":\"result\",\"result\":{\"response\":\"Implemented the fix.\",\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"thinking_tokens\":3,\"cache_read_tokens\":5,\"cache_write_tokens\":2,\"total_tokens\":28,\"num_turns\":1}}}\n",
+        );
+        assert_eq!(
+            extract_agy_output_summary(output).as_deref(),
+            Some("Implemented the fix.")
+        );
     }
 
     #[test]

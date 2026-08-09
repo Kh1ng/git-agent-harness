@@ -201,7 +201,7 @@ pub fn build_snapshot(
         &entries,
         |entry| config::canonical_backend_name(&entry.effective_backend).to_string(),
         |observed| config::canonical_backend_name(observed.backend).to_string(),
-        |backend, _model| config::canonical_backend_name(backend).to_string(),
+        |backend, _model, _difficulty| config::canonical_backend_name(backend).to_string(),
         true,
         &account_quota,
     )
@@ -220,7 +220,9 @@ pub fn build_snapshot(
                 observed.model,
             )
         },
-        |backend, model| candidate_usage_key(config::canonical_backend_name(backend), model),
+        |backend, model, _difficulty| {
+            candidate_usage_key(config::canonical_backend_name(backend), model)
+        },
         false,
         &account_quota,
     )

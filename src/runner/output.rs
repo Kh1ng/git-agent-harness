@@ -258,6 +258,13 @@ pub(crate) fn extract_openhands_jsonl_summary(text: &str) -> Option<String> {
     summary
 }
 
+/// AGY's structured `json` and `stream-json` outputs both carry the final
+/// assistant response in the terminal result payload. Prefer that over the
+/// raw NDJSON stream so publishable summaries stay plain text.
+pub(crate) fn extract_agy_json_summary(text: &str) -> Option<String> {
+    crate::usage::extract_agy_output_summary(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +333,18 @@ mod tests {
         assert_eq!(
             extract_openhands_jsonl_summary(log).as_deref(),
             Some("Completed the change.")
+        );
+    }
+
+    #[test]
+    fn agy_stream_json_uses_the_terminal_result_response() {
+        let log = concat!(
+            "{\"event\":\"command_result\",\"command\":{\"name\":\"print\"}}\n",
+            "{\"event\":\"result\",\"result\":{\"response\":\"Implemented the fix.\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"thinking_tokens\":2,\"cache_read_tokens\":1,\"total_tokens\":18,\"num_turns\":1}}}\n",
+        );
+        assert_eq!(
+            extract_agy_json_summary(log).as_deref(),
+            Some("Implemented the fix.")
         );
     }
 

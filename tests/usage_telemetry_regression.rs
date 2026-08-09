@@ -384,7 +384,7 @@ fn successful_agy_execution_captures_quota_telemetry() {
     );
     write_exec(
         &harness.bin_dir.join("agy"),
-        "#!/bin/sh\necho 'some output'\nprintf 'agent edit\\n' >> README.md\nexit 0\n",
+        "#!/bin/sh\nprintf '%s\\n' '{\"event\":\"result\",\"result\":{\"response\":\"some output\",\"usage\":{\"input_tokens\":500,\"output_tokens\":120,\"thinking_tokens\":17,\"cache_read_tokens\":11,\"cache_write_tokens\":3,\"total_tokens\":651,\"num_turns\":1}}}'\nprintf 'agent edit\\n' >> README.md\nexit 0\n",
     );
     write_exec(
         &harness.bin_dir.join("gh"),
@@ -411,7 +411,13 @@ fn successful_agy_execution_captures_quota_telemetry() {
     assert_eq!(attempt_usage["usage_classification"], "quota_backed");
     assert_eq!(attempt_usage["requests_count"], 1);
     assert_eq!(attempt_usage["quota_window"], "AGY individual quota");
-    assert_eq!(attempt_usage["usage_source"], "execution_observed");
+    assert_eq!(attempt_usage["input_tokens"], 500);
+    assert_eq!(attempt_usage["output_tokens"], 120);
+    assert_eq!(attempt_usage["reasoning_tokens"], 17);
+    assert_eq!(attempt_usage["cache_read_tokens"], 11);
+    assert_eq!(attempt_usage["cache_write_tokens"], 3);
+    assert_eq!(attempt_usage["total_tokens"], 651);
+    assert_eq!(attempt_usage["usage_source"], "agy_output_json");
 
     // Verify top-level usage
     let top_usage = &entry["usage"];
@@ -420,4 +426,10 @@ fn successful_agy_execution_captures_quota_telemetry() {
     assert_eq!(top_usage["provider"], "google");
     assert_eq!(top_usage["requests_count"], 1);
     assert_eq!(top_usage["quota_window"], "AGY individual quota");
+    assert_eq!(top_usage["input_tokens"], 500);
+    assert_eq!(top_usage["output_tokens"], 120);
+    assert_eq!(top_usage["reasoning_tokens"], 17);
+    assert_eq!(top_usage["cache_read_tokens"], 11);
+    assert_eq!(top_usage["cache_write_tokens"], 3);
+    assert_eq!(top_usage["total_tokens"], 651);
 }
