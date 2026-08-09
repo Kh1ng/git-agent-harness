@@ -86,6 +86,13 @@ jobs:
           while IFS= read -r path; do
             [ -z "$path" ] && continue
             case "$path" in
+              Cargo.toml|Cargo.lock|tests/*)
+                # A dependency bump or a shared integration-test change can
+                # affect any module -- module-scoped filtering can't safely
+                # narrow these, so force a full run.
+                has_rust_changes=true
+                rust_test_scope="full"
+                ;;
               src/*.rs)
                 has_rust_changes=true
                 rust_test_scope="full"
@@ -169,6 +176,12 @@ jobs:
             for scope in ${{ steps.rust-test-scope.outputs.rust_test_filters }}; do
               cargo test "$scope"
             done
+            # The module-name substring filter above only ever matches unit
+            # tests (whose fully-qualified names embed the module path). The
+            # root-level tests/*.rs integration suite exercises modules
+            # without a matching name, so a scoped run would otherwise skip
+            # it entirely -- run it unfiltered every time, scoped or not.
+            cargo test --tests
           fi
 
       - name: cargo clippy
