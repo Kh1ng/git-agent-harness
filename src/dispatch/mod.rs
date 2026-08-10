@@ -18,6 +18,7 @@ mod dependencies;
 mod dry_run;
 mod environment;
 mod error;
+mod estimation;
 mod identity;
 mod issues;
 mod metrics;
@@ -70,6 +71,10 @@ pub(crate) use self::attempts::{
 pub(crate) use self::claims::duplicate_work_error;
 pub(crate) use self::claims::scan_available_tickets_with_dependencies;
 pub use self::claims::{merge_branch, MergeExecution};
+pub(crate) use self::estimation::{
+    apply_estimate_to_ledger, estimate_ticket_complexity_from_metadata,
+    estimate_ticket_complexity_from_plan,
+};
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
 
 fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {

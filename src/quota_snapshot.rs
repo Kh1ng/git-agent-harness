@@ -706,9 +706,7 @@ mod tests {
 
     /// A `GroupSummary` with every field zeroed/empty, so individual tests
     /// only spell out the fields they actually care about via struct-update
-    /// syntax (`GroupSummary { entries: 3, ..empty_group() }`). No `Default`
-    /// impl exists on the production type (see `ledger/mod.rs`), so this mirrors
-    /// that module's own fixture convention.
+    /// syntax (`GroupSummary { entries: 3, ..empty_group() }`).
     fn empty_group() -> ledger::summary::GroupSummary {
         ledger::summary::GroupSummary {
             group_key: "g".to_string(),
@@ -726,6 +724,12 @@ mod tests {
             estimated_cost_usd: None,
             average_cost_usd: None,
             average_duration_seconds: None,
+            average_predicted_cost_usd: None,
+            average_predicted_duration_seconds: None,
+            predicted_difficulty_matches: 0,
+            predicted_difficulty_comparable: 0,
+            predicted_difficulty_accuracy: None,
+            predicted_difficulty_distribution: Default::default(),
             cost_per_approve_strong: None,
             input_tokens: None,
             output_tokens: None,

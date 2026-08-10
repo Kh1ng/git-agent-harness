@@ -490,6 +490,19 @@ pub struct LedgerEntry {
     /// JSONL ledger lines.
     #[serde(default)]
     pub difficulty: Option<String>,
+    /// Issue #916: ticket-complexity estimate produced before dispatch.
+    /// This is distinct from the author-supplied or PM-published difficulty
+    /// label above so routing can compare the original prediction with the
+    /// eventual outcome.
+    #[serde(default)]
+    pub predicted_difficulty: Option<String>,
+    /// Issue #916: predicted cost for this ticket, recorded independently of
+    /// the backend's own usage/cost telemetry.
+    #[serde(default)]
+    pub predicted_cost_usd: Option<f64>,
+    /// Issue #916: predicted duration for this ticket, in seconds.
+    #[serde(default)]
+    pub predicted_duration_seconds: Option<f64>,
     pub session_dir: Option<String>,
     pub duration_seconds: Option<f64>,
     pub backend_exit_code: Option<i32>,
@@ -735,6 +748,9 @@ impl LedgerEntry {
             work_title: None,
             task_class: None,
             difficulty: None,
+            predicted_difficulty: None,
+            predicted_cost_usd: None,
+            predicted_duration_seconds: None,
             branch: None,
             session_dir: session_dir.map(|p| p.display().to_string()),
             duration_seconds: None,
@@ -846,6 +862,9 @@ impl LedgerEntry {
             work_title: None,
             task_class: None,
             difficulty: None,
+            predicted_difficulty: None,
+            predicted_cost_usd: None,
+            predicted_duration_seconds: None,
             branch: None,
             session_dir: None,
             duration_seconds: None,

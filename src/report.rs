@@ -65,6 +65,12 @@ struct BackendModelComparison {
     estimated_cost_usd: Option<f64>,
     average_cost_usd: Option<f64>,
     average_duration_seconds: Option<f64>,
+    average_predicted_cost_usd: Option<f64>,
+    average_predicted_duration_seconds: Option<f64>,
+    predicted_difficulty_matches: usize,
+    predicted_difficulty_comparable: usize,
+    predicted_difficulty_accuracy: Option<f64>,
+    predicted_difficulty_distribution: Vec<(String, usize)>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     reasoning_tokens: Option<u64>,
@@ -326,6 +332,16 @@ fn transform_to_report_format(
                 estimated_cost_usd: group.estimated_cost_usd,
                 average_cost_usd: group.average_cost_usd,
                 average_duration_seconds: group.average_duration_seconds,
+                average_predicted_cost_usd: group.average_predicted_cost_usd,
+                average_predicted_duration_seconds: group.average_predicted_duration_seconds,
+                predicted_difficulty_matches: group.predicted_difficulty_matches,
+                predicted_difficulty_comparable: group.predicted_difficulty_comparable,
+                predicted_difficulty_accuracy: group.predicted_difficulty_accuracy,
+                predicted_difficulty_distribution: group
+                    .predicted_difficulty_distribution
+                    .iter()
+                    .map(|(label, count)| (label.clone(), *count))
+                    .collect(),
                 input_tokens: group.input_tokens,
                 output_tokens: group.output_tokens,
                 reasoning_tokens: group.reasoning_tokens,
@@ -492,6 +508,26 @@ fn display_report(
             if let Some(avg_duration) = group.average_duration_seconds {
                 println!("  Avg duration: {:.1}s", avg_duration);
             }
+            if let Some(predicted_cost) = group.average_predicted_cost_usd {
+                println!("  Predicted avg cost: ${:.4}", predicted_cost);
+            }
+            if let Some(predicted_duration) = group.average_predicted_duration_seconds {
+                println!("  Predicted avg duration: {:.1}s", predicted_duration);
+            }
+            if let Some(accuracy) = group.predicted_difficulty_accuracy {
+                println!(
+                    "  Predicted difficulty accuracy: {}/{} ({:.1}%)",
+                    group.predicted_difficulty_matches,
+                    group.predicted_difficulty_comparable,
+                    accuracy * 100.0
+                );
+            }
+            if !group.predicted_difficulty_distribution.is_empty() {
+                println!("  Predicted difficulty distribution:");
+                for (difficulty, count) in &group.predicted_difficulty_distribution {
+                    println!("    {}: {}", difficulty, count);
+                }
+            }
             println!(
                 "  Usage: input={} output={} reasoning={} cache_read={} cache_write={} total={} requests={}",
                 group
@@ -590,6 +626,15 @@ mod tests {
             estimated_cost_usd: None,
             average_cost_usd: Some(0.15),
             average_duration_seconds: Some(120.5),
+            average_predicted_cost_usd: Some(0.20),
+            average_predicted_duration_seconds: Some(150.0),
+            predicted_difficulty_matches: 8,
+            predicted_difficulty_comparable: 10,
+            predicted_difficulty_accuracy: Some(0.8),
+            predicted_difficulty_distribution: BTreeMap::from([
+                ("easy".to_string(), 6),
+                ("medium".to_string(), 4),
+            ]),
             cost_per_approve_strong: Some(0.75),
             input_tokens: Some(700),
             output_tokens: Some(300),
@@ -618,6 +663,15 @@ mod tests {
             estimated_cost_usd: None,
             average_cost_usd: Some(0.40),
             average_duration_seconds: Some(180.0),
+            average_predicted_cost_usd: Some(0.55),
+            average_predicted_duration_seconds: Some(210.0),
+            predicted_difficulty_matches: 4,
+            predicted_difficulty_comparable: 5,
+            predicted_difficulty_accuracy: Some(0.8),
+            predicted_difficulty_distribution: BTreeMap::from([
+                ("medium".to_string(), 3),
+                ("hard".to_string(), 2),
+            ]),
             cost_per_approve_strong: None,
             input_tokens: Some(300),
             output_tokens: Some(200),
@@ -689,6 +743,14 @@ mod tests {
         assert_eq!(
             report_data.comparisons[0].average_duration_seconds,
             Some(120.5)
+        );
+        assert_eq!(
+            report_data.comparisons[0].average_predicted_cost_usd,
+            Some(0.20)
+        );
+        assert_eq!(
+            report_data.comparisons[0].predicted_difficulty_accuracy,
+            Some(0.8)
         );
         assert!(!report_data.comparisons[0].is_model);
 
@@ -787,6 +849,7 @@ mod tests {
             tokens_per_success: None,
             requests_per_success: None,
             quota_observations: vec![],
+            ..Default::default()
         }];
 
         let mut data = mock_summary_data();
@@ -827,6 +890,7 @@ mod tests {
             tokens_per_success: None,
             requests_per_success: None,
             quota_observations: vec![],
+            ..Default::default()
         }];
 
         let mut data = mock_summary_data();

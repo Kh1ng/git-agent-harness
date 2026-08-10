@@ -627,6 +627,61 @@ fn build_grouped_summary_by_backend_difficulty() {
 }
 
 #[test]
+fn build_grouped_summary_tracks_predicted_vs_actual_difficulty_and_costs() {
+    let (_tmp, _cfg) = test_config();
+
+    let mut match_entry =
+        LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
+    match_entry.effective_backend = "codex".to_string();
+    match_entry.difficulty = Some("easy".to_string());
+    match_entry.predicted_difficulty = Some("easy".to_string());
+    match_entry.predicted_cost_usd = Some(0.25);
+    match_entry.predicted_duration_seconds = Some(1_800.0);
+    match_entry.validation_result = Some("passed".to_string());
+    match_entry.usage.actual_cost_usd = Some(0.30);
+    match_entry.duration_seconds = Some(2_000.0);
+
+    let mut mismatch_entry =
+        LedgerEntry::new("test", &profile(), "codex", "improve", "test2", None, None);
+    mismatch_entry.effective_backend = "codex".to_string();
+    mismatch_entry.difficulty = Some("hard".to_string());
+    mismatch_entry.predicted_difficulty = Some("medium".to_string());
+    mismatch_entry.predicted_cost_usd = Some(0.75);
+    mismatch_entry.predicted_duration_seconds = Some(7_200.0);
+    mismatch_entry.validation_result = Some("passed".to_string());
+    mismatch_entry.usage.actual_cost_usd = Some(1.10);
+    mismatch_entry.duration_seconds = Some(9_000.0);
+
+    let grouped = super::build_grouped_summary(
+        &[match_entry, mismatch_entry],
+        |entry| super::canonical_difficulty_label(entry.difficulty.as_deref()),
+        |observed| super::canonical_difficulty_label(observed.difficulty),
+        |_backend, _model, difficulty| super::canonical_difficulty_label(difficulty),
+        false,
+    )
+    .unwrap();
+
+    let easy = grouped.iter().find(|g| g.group_key == "easy").unwrap();
+    assert_eq!(easy.predicted_difficulty_matches, 1);
+    assert_eq!(easy.predicted_difficulty_comparable, 1);
+    assert_eq!(easy.predicted_difficulty_accuracy, Some(1.0));
+    assert_eq!(easy.predicted_difficulty_distribution.get("easy"), Some(&1));
+    assert!((easy.average_predicted_cost_usd.unwrap() - 0.25).abs() < f64::EPSILON);
+    assert!((easy.average_predicted_duration_seconds.unwrap() - 1_800.0).abs() < f64::EPSILON);
+
+    let hard = grouped.iter().find(|g| g.group_key == "hard").unwrap();
+    assert_eq!(hard.predicted_difficulty_matches, 0);
+    assert_eq!(hard.predicted_difficulty_comparable, 1);
+    assert_eq!(hard.predicted_difficulty_accuracy, Some(0.0));
+    assert_eq!(
+        hard.predicted_difficulty_distribution.get("medium"),
+        Some(&1)
+    );
+    assert!((hard.average_predicted_cost_usd.unwrap() - 0.75).abs() < f64::EPSILON);
+    assert!((hard.average_predicted_duration_seconds.unwrap() - 7_200.0).abs() < f64::EPSILON);
+}
+
+#[test]
 fn build_grouped_summary_difficulty_success_rate_excludes_auto_routing_failure_noise() {
     let (_tmp, _cfg) = test_config();
     let mut passing = LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);

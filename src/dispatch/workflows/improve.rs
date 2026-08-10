@@ -100,6 +100,7 @@ pub(crate) fn improve(
     } else {
         parse_ticket_metadata(Path::new(&target)).ok().flatten()
     };
+    work_identity::apply_ticket_complexity_estimate(ledger, ticket_meta.as_ref());
     let usage_summary = ledger::usage_summary_for_backend(
         cfg,
         args.backend.as_str(),

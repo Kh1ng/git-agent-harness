@@ -5,6 +5,8 @@
       "attempts": 1,
       "average_cost_usd": null,
       "average_duration_seconds": 12.5,
+      "average_predicted_cost_usd": null,
+      "average_predicted_duration_seconds": null,
       "backend_or_model": "openhands",
       "cache_read_tokens": 20,
       "cache_write_tokens": 5,
@@ -13,6 +15,10 @@
       "input_tokens": 100,
       "is_model": false,
       "output_tokens": 40,
+      "predicted_difficulty_accuracy": null,
+      "predicted_difficulty_comparable": 0,
+      "predicted_difficulty_distribution": [],
+      "predicted_difficulty_matches": 0,
       "quota_observations": [
         {
           "backend": "openhands",
@@ -41,7 +47,7 @@
     }
   ],
   "group_by": "Backend",
-  "ledger_path": "/tmp/.tmp59opkf/artifacts/ledger.jsonl",
+  "ledger_path": "/tmp/.tmpSqabgo/artifacts/ledger.jsonl",
   "profile": null,
   "since": "365d",
   "total_entries": 1,

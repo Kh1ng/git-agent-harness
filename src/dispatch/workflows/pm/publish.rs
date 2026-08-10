@@ -1,5 +1,7 @@
 use super::{validate_plan, PmPlanArtifact};
 use crate::config::{GahConfig, Profile};
+use crate::dispatch::apply_estimate_to_ledger;
+use crate::dispatch::estimate_ticket_complexity_from_plan;
 use crate::ledger::{self, FailureClass, FailureStage, LedgerEntry};
 use crate::models::PlannerWorkPacket;
 use crate::provider::{self, ProviderIssue};
@@ -844,6 +846,7 @@ fn append_mutation_ledger(
     entry.work_title = Some(ticket.title.clone());
     entry.task_class = Some(ticket.task_class.clone());
     entry.difficulty = Some(ticket.difficulty.clone());
+    apply_estimate_to_ledger(&mut entry, estimate_ticket_complexity_from_plan(ticket));
     entry.validation_result = Some(status.to_string());
     entry.provider_mutation_kind = Some(kind.to_string());
     entry.provider_mutation_status = Some(status.to_string());

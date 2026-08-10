@@ -42,7 +42,7 @@ use time::{Duration, OffsetDateTime};
 /// drift apart -- no speculative economics logic, just the counts the
 /// human view already computed.
 /// TICKET-125: Grouped summary data for a specific backend or model
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct GroupSummary {
     pub group_key: String,
     pub entries: usize,
@@ -65,6 +65,12 @@ pub struct GroupSummary {
     pub estimated_cost_usd: Option<f64>,
     pub average_cost_usd: Option<f64>,
     pub average_duration_seconds: Option<f64>,
+    pub average_predicted_cost_usd: Option<f64>,
+    pub average_predicted_duration_seconds: Option<f64>,
+    pub predicted_difficulty_matches: usize,
+    pub predicted_difficulty_comparable: usize,
+    pub predicted_difficulty_accuracy: Option<f64>,
+    pub predicted_difficulty_distribution: BTreeMap<String, usize>,
     pub cost_per_approve_strong: Option<f64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -98,7 +104,7 @@ pub struct GroupQuotaObservation {
     pub usage_source: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct SummaryData {
     pub ledger_path: String,
     pub entries: usize,
@@ -774,6 +780,14 @@ where
         let mut estimated_cost_total = 0.0f64;
         let mut actual_cost_seen = false;
         let mut estimated_cost_seen = false;
+        let mut predicted_cost_total = 0.0f64;
+        let mut predicted_cost_count = 0usize;
+        let mut predicted_duration_total = 0.0f64;
+        let mut predicted_duration_count = 0usize;
+        let mut predicted_difficulty_matches = 0usize;
+        let mut predicted_difficulty_comparable = 0usize;
+        let mut predicted_difficulty_accuracy_seen = false;
+        let mut predicted_difficulty_distribution: BTreeMap<String, usize> = BTreeMap::new();
         let mut strong_approve_count = 0usize;
         let mut total_duration = 0.0f64;
         let mut duration_count = 0usize;
@@ -849,6 +863,29 @@ where
                     attempts_completed_seen = true;
                 }
                 None => attempts_completed_unknown += 1,
+            }
+
+            if let Some(cost) = entry.predicted_cost_usd {
+                predicted_cost_total += cost;
+                predicted_cost_count += 1;
+            }
+            if let Some(duration) = entry.predicted_duration_seconds {
+                predicted_duration_total += duration;
+                predicted_duration_count += 1;
+            }
+            if let Some(predicted) = entry.predicted_difficulty.as_deref() {
+                let predicted = canonical_difficulty_label(Some(predicted));
+                *predicted_difficulty_distribution
+                    .entry(predicted.clone())
+                    .or_default() += 1;
+                let actual = canonical_difficulty_label(entry.difficulty.as_deref());
+                if actual != UNKNOWN_DIFFICULTY_LABEL {
+                    predicted_difficulty_comparable += 1;
+                    predicted_difficulty_accuracy_seen = true;
+                    if predicted == actual {
+                        predicted_difficulty_matches += 1;
+                    }
+                }
             }
         }
 
@@ -988,6 +1025,22 @@ where
         } else {
             None
         };
+        let average_predicted_cost_usd = if predicted_cost_count > 0 {
+            Some(predicted_cost_total / predicted_cost_count as f64)
+        } else {
+            None
+        };
+        let average_predicted_duration_seconds = if predicted_duration_count > 0 {
+            Some(predicted_duration_total / predicted_duration_count as f64)
+        } else {
+            None
+        };
+        let predicted_difficulty_accuracy =
+            if predicted_difficulty_accuracy_seen && predicted_difficulty_comparable > 0 {
+                Some(predicted_difficulty_matches as f64 / predicted_difficulty_comparable as f64)
+            } else {
+                None
+            };
         let success_rate = (entries_for_success_rate > 0)
             .then_some(validation_pass as f64 / entries_for_success_rate as f64);
         let tokens_per_success = if validation_pass > 0 && total_tokens_seen {
@@ -1017,6 +1070,12 @@ where
             estimated_cost_usd: estimated_cost_seen.then_some(estimated_cost_total),
             average_cost_usd,
             average_duration_seconds,
+            average_predicted_cost_usd,
+            average_predicted_duration_seconds,
+            predicted_difficulty_matches,
+            predicted_difficulty_comparable,
+            predicted_difficulty_accuracy,
+            predicted_difficulty_distribution,
             cost_per_approve_strong,
             input_tokens: input_tokens_seen.then_some(input_tokens),
             output_tokens: output_tokens_seen.then_some(output_tokens),

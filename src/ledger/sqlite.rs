@@ -32,6 +32,9 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             failure_class TEXT,
             total_tokens INTEGER,
             human_required_reason_code TEXT,
+            predicted_difficulty TEXT,
+            predicted_cost_usd REAL,
+            predicted_duration_seconds REAL,
             actual_cost_usd REAL,
             estimated_cost_usd REAL,
             runner_kind TEXT,
@@ -100,6 +103,18 @@ fn ensure_review_generation_columns(conn: &Connection) -> Result<()> {
             "ALTER TABLE ledger_entries ADD COLUMN review_generation TEXT",
             [],
         )?;
+    }
+    for (column, sql_type) in [
+        ("predicted_difficulty", "TEXT"),
+        ("predicted_cost_usd", "REAL"),
+        ("predicted_duration_seconds", "REAL"),
+    ] {
+        if !has_column(conn, "ledger_entries", column)? {
+            conn.execute(
+                &format!("ALTER TABLE ledger_entries ADD COLUMN {column} {sql_type}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }
@@ -258,11 +273,12 @@ fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
             effective_model, requested_model, validation_result, review_verdict,
             review_contract_version, review_generation, human_required,
             duration_seconds, failure_class, total_tokens,
-            human_required_reason_code, actual_cost_usd, estimated_cost_usd,
+            human_required_reason_code, predicted_difficulty, predicted_cost_usd,
+            predicted_duration_seconds, actual_cost_usd, estimated_cost_usd,
             runner_kind, backend_instance, account_label, auth_source_label,
             model_provider, provider_attribution_source, auth_class, quota_pool,
             actual_model, raw_json
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)",
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)",
         params![
             entry.timestamp,
             entry.profile,
@@ -282,6 +298,9 @@ fn insert_entry(tx: &rusqlite::Transaction, entry: &LedgerEntry) -> Result<()> {
             entry.failure_class,
             entry.usage.total_tokens.map(|v| v as i64),
             entry.human_required_reason_code,
+            entry.predicted_difficulty,
+            entry.predicted_cost_usd,
+            entry.predicted_duration_seconds,
             entry.usage.actual_cost_usd,
             entry.usage.estimated_cost_usd,
             final_identity.map(|identity| identity.runner_kind.as_str()),
@@ -346,6 +365,9 @@ mod tests {
         assert!(has_column(&conn, "ledger_entries", "review_contract_version").unwrap());
         assert!(has_column(&conn, "ledger_entries", "review_generation").unwrap());
         assert!(has_column(&conn, "ledger_entries", "human_required_reason_code").unwrap());
+        assert!(has_column(&conn, "ledger_entries", "predicted_difficulty").unwrap());
+        assert!(has_column(&conn, "ledger_entries", "predicted_cost_usd").unwrap());
+        assert!(has_column(&conn, "ledger_entries", "predicted_duration_seconds").unwrap());
         for column in [
             "repo_id",
             "runner_kind",

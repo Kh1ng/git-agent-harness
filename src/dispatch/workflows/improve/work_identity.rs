@@ -1,4 +1,5 @@
 use crate::dispatch::issues::TicketMetadata;
+use crate::dispatch::{apply_estimate_to_ledger, estimate_ticket_complexity_from_metadata};
 use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
 use crate::{config, ledger};
@@ -219,6 +220,18 @@ pub(super) fn apply_manual_fix_context_to_ledger(
     }
     if let Some(mr_url) = manual_fix_context.mr_url.as_deref() {
         ledger.mr_url = Some(mr_url.to_string());
+    }
+}
+
+pub(super) fn apply_ticket_complexity_estimate(
+    ledger: &mut LedgerEntry,
+    ticket_meta: Option<&TicketMetadata>,
+) {
+    if let Some(ticket_meta) = ticket_meta {
+        apply_estimate_to_ledger(
+            ledger,
+            estimate_ticket_complexity_from_metadata(ticket_meta),
+        );
     }
 }
 

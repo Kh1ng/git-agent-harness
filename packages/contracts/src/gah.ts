@@ -483,6 +483,12 @@ export interface BackendModelComparison {
   estimated_cost_usd: number | null;
   average_cost_usd: number | null;
   average_duration_seconds: number | null;
+  average_predicted_cost_usd: number | null;
+  average_predicted_duration_seconds: number | null;
+  predicted_difficulty_matches: number;
+  predicted_difficulty_comparable: number;
+  predicted_difficulty_accuracy: number | null;
+  predicted_difficulty_distribution: [string, number][];
   input_tokens: number | null;
   output_tokens: number | null;
   reasoning_tokens?: number | null;
@@ -497,7 +503,7 @@ export interface BackendModelComparison {
   review_verdict_distribution: [string, number][];
 }
 
-export type ReportGroupBy = 'backend' | 'model';
+export type ReportGroupBy = 'backend' | 'model' | 'difficulty' | 'backend-difficulty';
 
 export interface ReportData {
   ledger_path: string;
@@ -907,6 +913,9 @@ export interface LedgerEntry {
   review_idle_timeout_seconds?: number | null;
   review_hard_timeout_seconds?: number | null;
   review_last_progress_secs?: number | null;
+  predicted_difficulty?: string | null;
+  predicted_cost_usd?: number | null;
+  predicted_duration_seconds?: number | null;
   commit_attempted: boolean;
   commit_created: boolean;
   push_attempted: boolean;
