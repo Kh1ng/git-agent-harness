@@ -75,9 +75,28 @@ pub(super) fn load_context(
             // of treating this branch as broken.
             if repair_context::stale_source_error(&error).is_some() {
                 ledger.set_failure(FailureClass::StaleSource, FailureStage::Preflight);
-            } else {
-                ledger.set_failure(FailureClass::HarnessError, FailureStage::Preflight);
+                worktree::cleanup(request.worktree_path, request.repo);
+                return Err(error.context(
+                    "FixMr requires structured findings from the latest applicable review",
+                ));
             }
+            // Issue #931: a CI_FAILED-classified repair (decision.rs rule 6)
+            // goes straight to FixMr without ever routing through ReviewMr,
+            // so "no review has ever run at this generation" is an expected
+            // outcome for that path, not a harness bug -- treating it as a
+            // hard failure wedged the controller into retrying `fix_mr`
+            // against a generation that could never be satisfied, forever
+            // (confirmed: #818 retried identically for 2+ hours before the
+            // stuck-loop gate finally caught it). Proceed without repair
+            // context instead; the worker still has the branch's actual
+            // state and CI/validation output to work from.
+            if repair_context::no_review_found_error(&error).is_some() {
+                println!(
+                    "No structured review found for this repair generation (expected for a CI_FAILED-triggered fix that never went through review) -- proceeding without review findings."
+                );
+                return Ok(None);
+            }
+            ledger.set_failure(FailureClass::HarnessError, FailureStage::Preflight);
             worktree::cleanup(request.worktree_path, request.repo);
             Err(error
                 .context("FixMr requires structured findings from the latest applicable review"))
