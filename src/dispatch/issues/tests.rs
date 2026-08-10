@@ -3,12 +3,29 @@ use crate::config::IssueIntakeMode;
 use crate::dispatch::claims::scan_available_tickets;
 use crate::dispatch::scan_available_tickets_with_dependencies;
 use crate::ledger;
+use crate::provider;
 use crate::test_support::{ExecGuard, PathGuard};
 use std::fs;
+use std::path::Path;
 
 #[path = "tests/support.rs"]
 mod support;
 use support::{profile, ticket_cfg};
+
+struct ProviderPathGuard;
+
+impl ProviderPathGuard {
+    fn set(path: &Path) -> Self {
+        provider::set_test_provider_path(path.to_str().unwrap());
+        Self
+    }
+}
+
+impl Drop for ProviderPathGuard {
+    fn drop(&mut self) {
+        provider::clear_test_provider_path();
+    }
+}
 
 #[test]
 fn parses_ticket_metadata_for_routing() {
@@ -659,7 +676,7 @@ fn canonical_autonomous_mode_rejects_unlabelled_github_issues() {
         perms.set_mode(0o755);
         fs::set_permissions(&gh_path, perms).unwrap();
     }
-    let _guard = PathGuard::set(&bin_dir);
+    let _guard = ProviderPathGuard::set(&bin_dir);
 
     let cfg = ticket_cfg(tmp.path());
     let mut prof = profile(tmp.path());
