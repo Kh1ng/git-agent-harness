@@ -461,14 +461,23 @@ fn display_report(
         sorted_groups.sort_by_key(|b| Reverse(b.entries));
 
         for group in sorted_groups {
-            let success_rate = group.success_rate.unwrap_or(0.0) * 100.0;
-
             println!("\n{}:", group.group_key);
             println!("  Entries: {} ({} attempts)", group.entries, group.attempts);
-            println!(
-                "  Success rate: {:.1}% (validation pass: {}/{})",
-                success_rate, group.validation_pass, group.entries
-            );
+            // `None` means every entry in this group was a review verdict or
+            // a routing failure that never reached a real backend -- there's
+            // nothing to score. Collapsing that to "0.0%" (as if `entries`
+            // real attempts had all failed) previously made e.g. the `auto`
+            // pseudo-backend's routing-failure noise look like 159 genuine
+            // implementation failures.
+            match group.success_rate {
+                Some(rate) => println!(
+                    "  Success rate: {:.1}% (validation pass: {}/{})",
+                    rate * 100.0,
+                    group.validation_pass,
+                    group.entries
+                ),
+                None => println!("  Success rate: N/A (no scoreable attempts in this group)"),
+            }
 
             // Show cost info
             if let Some(total_cost) = group.total_cost_usd {
