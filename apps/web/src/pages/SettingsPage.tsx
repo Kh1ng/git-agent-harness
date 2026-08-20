@@ -812,33 +812,46 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
   );
 }
 
-/** Issue #880 follow-up: lets an operator copy this node's memory gateway
- * URL + API key to configure a second node's `scripts/install.sh
- * GAH_GATEWAY_MODE=remote` without SSHing in to cat an env file. The key
- * is masked by default -- click to reveal, matching common secret-field
- * UX, since this is a real credential rendered in the DOM once shown. */
 function GatewaySettingsSection() {
   const [settings, setSettings] = useState<GatewaySettingsSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [revealed, setRevealed] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [urlDraft, setUrlDraft] = useState('');
+  const [keyDraft, setKeyDraft] = useState('');
+  const [enabledDraft, setEnabledDraft] = useState(true);
+  const [revealKey, setRevealKey] = useState(false);
 
-  useEffect(() => {
+  const load = () =>
     gahApi
       .getGatewaySettings()
       .then((data) => {
         setSettings(data);
+        setUrlDraft(data.url);
+        setKeyDraft(data.apiKey ?? '');
+        setEnabledDraft(data.enabled);
         setError(null);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
 
-  const copyKey = () => {
-    if (!settings?.apiKey) return;
-    navigator.clipboard.writeText(settings.apiKey).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const updated = await gahApi.updateGatewaySettings({
+        url: urlDraft || null,
+        apiKey: keyDraft || null,
+        enabled: enabledDraft
+      });
+      setSettings(updated);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (!settings) {
@@ -851,43 +864,59 @@ function GatewaySettingsSection() {
   }
 
   return (
-    <section className="card-padded max-w-md">
-      <h3 className="text-sm font-semibold text-primary mb-1">Compaction DB (Memory Gateway)</h3>
-      <p className="text-xs text-muted mb-3">
-        This node's TDAI memory gateway. Copy these into a second node's{' '}
-        <code className="font-mono">GAH_GATEWAY_URL</code>/<code className="font-mono">GAH_GATEWAY_API_KEY</code> to point
-        it at the same compaction db instead of running its own.
-      </p>
-
-      <label className="block text-xs font-medium text-secondary mb-1">Gateway URL</label>
-      <div className="flex items-center gap-2 mb-4">
-        <code className="flex-1 bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary font-mono">
-          {settings.url}
-        </code>
+    <section className="card-padded max-w-md space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-primary">Compaction DB (Memory Gateway)</h3>
+        <label className="flex items-center gap-2 text-xs text-secondary cursor-pointer">
+          <input
+            type="checkbox"
+            checked={enabledDraft}
+            onChange={(e) => setEnabledDraft(e.target.checked)}
+            className="accent-accent"
+          />
+          Enabled
+        </label>
       </div>
 
-      <label className="block text-xs font-medium text-secondary mb-1">API key</label>
-      {settings.apiKeyConfigured ? (
+      <div>
+        <label className="block text-xs font-medium text-secondary mb-1">Gateway URL</label>
+        <input
+          type="text"
+          value={urlDraft}
+          onChange={(e) => setUrlDraft(e.target.value)}
+          placeholder="http://127.0.0.1:8420"
+          className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+        />
+        <p className="text-xs text-muted mt-1">Leave blank to use <code className="font-mono">TDAI_GATEWAY_URL</code> env var.</p>
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-secondary mb-1">API Key</label>
         <div className="flex items-center gap-2">
-          <code className="flex-1 bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary font-mono truncate">
-            {revealed ? settings.apiKey : '•'.repeat(24)}
-          </code>
-          <button
-            onClick={() => setRevealed((v) => !v)}
-            className="text-muted hover:text-primary"
-            title={revealed ? 'Hide' : 'Reveal'}
-          >
-            {revealed ? <EyeOff size={14} /> : <Eye size={14} />}
-          </button>
-          <button onClick={copyKey} className="text-muted hover:text-primary" title="Copy">
-            {copied ? <Check size={14} /> : <Copy size={14} />}
+          <input
+            type={revealKey ? 'text' : 'password'}
+            value={keyDraft}
+            onChange={(e) => setKeyDraft(e.target.value)}
+            placeholder="Leave blank to use env var"
+            className="flex-1 bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
+          />
+          <button onClick={() => setRevealKey((v) => !v)} className="text-muted hover:text-primary" title={revealKey ? 'Hide' : 'Reveal'}>
+            {revealKey ? <EyeOff size={14} /> : <Eye size={14} />}
           </button>
         </div>
-      ) : (
-        <p className="text-xs text-muted">Not configured -- no TDAI_GATEWAY_API_KEY set on this node.</p>
-      )}
+        <p className="text-xs text-muted mt-1">Leave blank to use <code className="font-mono">TDAI_GATEWAY_API_KEY</code> env var.</p>
+      </div>
 
-      {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
+      <div className="flex items-center gap-3">
+        <button
+          onClick={save}
+          disabled={saving}
+          className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : saved ? 'Saved' : 'Save'}
+        </button>
+        {error && <p className="text-xs text-critical">{error}</p>}
+      </div>
     </section>
   );
 }

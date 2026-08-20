@@ -5,7 +5,7 @@ import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { gahApi } from '../api/client.js';
 import { generateRequestId } from '@git-agent-harness/shared';
-import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo } from '@git-agent-harness/contracts';
+import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
   role: 'user' | 'assistant' | 'system' | 'error';
@@ -20,7 +20,10 @@ export function ManagerChatPage() {
   const { sendMessage, messages, isConnected, reconnectSeq } = useWebSocket();
   const wsProfile = useWebSocket().profile;
   const profileOverride = useUiStore((s) => s.profileOverride);
+  const setProfileOverride = useUiStore((s) => s.setProfileOverride);
   const profile = profileOverride ?? wsProfile ?? 'gah';
+  const [availableProfiles, setAvailableProfiles] = useState<ProfileSummary[]>([]);
+  const currentProfileInfo = availableProfiles.find((p) => p.name === profile);
 
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [draft, setDraft] = useState('');
@@ -37,6 +40,10 @@ export function ManagerChatPage() {
   const historyRequestId = useRef<string | null>(null);
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    gahApi.getProfiles().then(setAvailableProfiles).catch(() => {});
+  }, []);
 
   // Restore history on mount, on profile change, and after a reconnect --
   // otherwise leaving the page (or a dropped connection) silently loses the
@@ -156,24 +163,40 @@ export function ManagerChatPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Manager Chat"
-        description={`Talking to ${activeBackend ?? 'the manager'} for profile "${profile}"`}
+        title={currentProfileInfo?.repo ? currentProfileInfo.repo.split('/').pop() ?? 'Manager Chat' : 'Manager Chat'}
+        description={`${currentProfileInfo?.repo ?? profile} · ${activeBackend ?? 'manager'}`}
         actions={
-          models.length > 0 ? (
-            <select
-              value={currentModelId ?? ''}
-              onChange={(e) => handleModelChange(e.target.value)}
-              disabled={modelChanging}
-              className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[220px]"
-              aria-label="Model"
-            >
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-          ) : undefined
+          <div className="flex items-center gap-2">
+            {availableProfiles.length > 1 && (
+              <select
+                value={profileOverride ?? wsProfile ?? ''}
+                onChange={(e) => setProfileOverride(e.target.value || null)}
+                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[180px]"
+                aria-label="Node / profile"
+              >
+                {availableProfiles.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.display_name || p.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            {models.length > 0 && (
+              <select
+                value={currentModelId ?? ''}
+                onChange={(e) => handleModelChange(e.target.value)}
+                disabled={modelChanging}
+                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[220px]"
+                aria-label="Model"
+              >
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
         }
       />
 
@@ -188,7 +211,8 @@ export function ManagerChatPage() {
           {historyLoaded && turns.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-center text-muted gap-2">
               <MessageSquare size={24} className="opacity-50" aria-hidden="true" />
-              <p className="text-sm">Ask the manager about this profile's status, blockers, or next actions. Type "/" for commands.</p>
+              <p className="text-sm">Ask the manager about this project's status, blockers, or next actions. Type "/" for commands.</p>
+              <p className="text-xs text-muted">Context is shared across backends — switching models keeps this session's memory.</p>
             </div>
           )}
           {turns.map((turn, i) => (

@@ -35,7 +35,8 @@ import type {
   ManagerCommandInfo,
   ManagerModelsSummary,
   ManagerChatSettingsUpdate,
-  GatewaySettingsSummary
+  GatewaySettingsSummary,
+  GatewaySettingsUpdate
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -197,6 +198,13 @@ export interface GahDataSource {
   getManagerChatSettings(): Promise<ManagerChatSettingsSummary>;
   setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
+  updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
+  recallContext(profile: string, query: string): Promise<{ context: string; memoryCount: number }>;
+  getGitStatus(profile: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string }>;
+  getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
+  getGitLog(profile: string, limit?: number): Promise<{ commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }>;
+  getGitPrs(profile: string): Promise<{ prs: Record<string, unknown>[]; warning?: string }>;
+  createGitPr(profile: string, data: { title: string; body?: string; base?: string; draft?: boolean }): Promise<{ url: string }>;
   getManagerChatCommands(profile: string): Promise<{ commands: ManagerCommandInfo[] }>;
   getManagerChatModels(profile: string): Promise<ManagerModelsSummary>;
   setManagerChatModel(profile: string, modelId: string): Promise<{ success: boolean }>;
@@ -237,6 +245,24 @@ async function patchJson<T, U>(path: string, body: U): Promise<T> {
     } catch {
       // response body wasn't JSON -- fall back to the status text above
     }
+    throw new GahApiError(message, res.status, path);
+  }
+  return (await res.json()) as T;
+}
+
+async function putJson<T, U>(path: string, body: U): Promise<T> {
+  const url = new URL(path, SERVER_URL);
+  const res = await fetch(url.toString(), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const b = await res.json();
+      if (typeof b?.message === 'string') message = b.message;
+    } catch { /* fall back to status text */ }
     throw new GahApiError(message, res.status, path);
   }
   return (await res.json()) as T;
@@ -359,6 +385,30 @@ export const gahApi: GahDataSource = {
   },
   getGatewaySettings() {
     return getJson<GatewaySettingsSummary>('/api/settings/gateway');
+  },
+  updateGatewaySettings(data) {
+    return putJson<GatewaySettingsSummary, GatewaySettingsUpdate>('/api/settings/gateway', data);
+  },
+  recallContext(profile, query) {
+    return postJson<{ context: string; memoryCount: number }, { profile: string; query: string }>(
+      '/api/context/recall',
+      { profile, query }
+    );
+  },
+  getGitStatus(profile) {
+    return getJson('/api/git/status', { profile });
+  },
+  getGitBranches(profile) {
+    return getJson('/api/git/branches', { profile });
+  },
+  getGitLog(profile, limit) {
+    return getJson('/api/git/log', { profile, limit: limit?.toString() });
+  },
+  getGitPrs(profile) {
+    return getJson('/api/git/prs', { profile });
+  },
+  createGitPr(profile, data) {
+    return postJson(`/api/git/pr?profile=${encodeURIComponent(profile)}`, data);
   },
   getManagerChatCommands(profile) {
     return getJson<{ commands: ManagerCommandInfo[] }>('/api/manager-chat/commands', { profile });
