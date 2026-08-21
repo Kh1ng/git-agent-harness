@@ -80,6 +80,40 @@ function SortHeader({ label, active, onClick }: { label: string; active: boolean
   );
 }
 
+function UsageSummary({ rows }: { rows: BackendModelComparison[] }) {
+  const totalCost = rows.reduce((sum, r) => sum + (r.actual_cost_usd ?? r.estimated_cost_usd ?? 0), 0);
+  const totalTokens = rows.reduce((sum, r) => sum + (r.total_tokens ?? 0), 0);
+  const maxCost = Math.max(...rows.map((r) => r.actual_cost_usd ?? r.estimated_cost_usd ?? 0), 0.0001);
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="card-padded md:col-span-1 space-y-1">
+        <p className="text-xs text-muted uppercase tracking-wide">Total spend (7d)</p>
+        <p className="text-2xl font-bold text-primary">{formatCost(totalCost)}</p>
+        <p className="text-xs text-muted">{formatTokens(totalTokens)} tokens</p>
+      </div>
+      <div className="card-padded md:col-span-2">
+        <p className="text-xs text-muted uppercase tracking-wide mb-3">By provider</p>
+        <div className="space-y-2">
+          {rows.map((r) => {
+            const cost = r.actual_cost_usd ?? r.estimated_cost_usd ?? 0;
+            const pct = maxCost > 0 ? (cost / maxCost) * 100 : 0;
+            return (
+              <div key={r.backend_or_model} className="flex items-center gap-3">
+                <span className="text-xs text-secondary w-28 truncate shrink-0">{r.backend_or_model}</span>
+                <div className="flex-1 h-1.5 bg-raised rounded-full overflow-hidden">
+                  <div className="h-full bg-accent rounded-full" style={{ width: `${pct}%` }} />
+                </div>
+                <span className="text-xs text-primary font-mono w-16 text-right shrink-0">{formatCost(cost)}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function TelemetryPage() {
   const wsProfile = useWebSocket().profile;
   const profileOverride = useUiStore((s) => s.profileOverride);
@@ -171,6 +205,8 @@ export function TelemetryPage() {
       />
 
       <ExportHealthCard health={status.data?.export_health} />
+
+      {sorted.length > 0 && <UsageSummary rows={sorted} />}
 
       <section className="card-padded">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">

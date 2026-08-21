@@ -13,9 +13,12 @@ export function isLocalAddress(ip: string): boolean {
 }
 
 function isLoopbackRequest(req: Request): boolean {
+  // Trust the TCP socket address only, not req.ip (which with trust proxy:loopback
+  // reflects X-Forwarded-For, making Caddy-proxied LAN requests look non-local).
+  // The socket source is tamper-proof; X-Forwarded-For spoofing is already blocked
+  // by Express only honoring it when the socket itself comes from loopback.
   const socketAddress = req.socket.remoteAddress || '';
-  const clientIp = req.ip || socketAddress;
-  return isLocalAddress(socketAddress) && isLocalAddress(clientIp);
+  return isLocalAddress(socketAddress);
 }
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {

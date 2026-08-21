@@ -1,4 +1,5 @@
 use crate::config::GahConfig;
+use crate::job_kind::JobKind;
 use time::format_description::well_known::Rfc3339;
 
 /// TICKET-125: GroupBy option for ledger summary
@@ -801,18 +802,26 @@ where
         let mut entries_for_success_rate = 0usize;
 
         for entry in &group_entries {
-            if is_auto_routing_failure(entry) {
-                continue;
-            }
+            // A review-mode entry's job is to produce a verdict, not to
+            // pass validation -- a reviewer correctly flagging NEEDS_FIX is
+            // doing its job right, not failing. Folding review entries into
+            // this implementer-success metric previously made e.g. a
+            // review-only-routed backend's "success rate" mean nothing (100
+            // correct NEEDS_FIX verdicts counted as 100 failures). Keep
+            // review entries, and routing entries that never reached a real
+            // backend, out of the success-rate denominator; review entries
+            // still feed `review_verdict_distribution` below.
+            let is_review_entry = matches!(JobKind::parse(&entry.mode), Ok(JobKind::Review));
+            if !is_review_entry && !is_auto_routing_failure(entry) {
+                entries_for_success_rate += 1;
 
-            entries_for_success_rate += 1;
-
-            // Count validation passes
-            if matches!(
-                entry.validation_result.as_deref(),
-                Some("passed") | Some("APPROVE")
-            ) {
-                validation_pass += 1;
+                // Count validation passes
+                if matches!(
+                    entry.validation_result.as_deref(),
+                    Some("passed") | Some("APPROVE")
+                ) {
+                    validation_pass += 1;
+                }
             }
 
             // Count review verdict distribution

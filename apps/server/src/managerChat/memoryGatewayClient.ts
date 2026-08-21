@@ -17,16 +17,15 @@
 import { spawnSync } from 'node:child_process';
 import { runProfileList } from '../gahCli.js';
 import { AsyncTtlCache } from '../asyncTtlCache.js';
+import { effectiveGatewayUrl, effectiveGatewayApiKey } from '../gatewaySettingsStore.js';
 
-// Read fresh per call, not cached at module-load time: lets tests point
-// different calls at different fake gateways within one process, and
-// (issue #880) will let gateway location become runtime-configurable
-// rather than fixed for the life of the server process.
+// Read fresh per call: lets tests substitute, and lets runtime config changes
+// (PUT /api/settings/gateway) take effect without a server restart.
 export function gatewayBaseUrl(): string {
-  return process.env.TDAI_GATEWAY_URL ?? 'http://127.0.0.1:8420';
+  return effectiveGatewayUrl();
 }
 export function gatewayApiKey(): string | undefined {
-  return process.env.TDAI_GATEWAY_API_KEY;
+  return effectiveGatewayApiKey();
 }
 
 export interface RecallResult {

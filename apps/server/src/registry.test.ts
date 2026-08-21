@@ -5,11 +5,12 @@ import type { AddressInfo } from 'node:net';
 import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 
 import { createServer } from './server.js';
 import { RegistryService, containsSecretWords, isSchemaCompatible } from './registryService.js';
 import { COORDINATOR_SCHEMA_DIGEST, getCoordinatorIdentity, resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
-import { authMiddleware } from './authMiddleware.js';
+import { authMiddleware, isLocalAddress } from './authMiddleware.js';
 import type { RegisteredNode, NodeSummary, NodeHealthCheckResult } from '@git-agent-harness/contracts';
 
 
@@ -645,16 +646,26 @@ test('Server endpoints enforce loopback check and authentication', async () => {
   const app = createServer({ registryService: registry });
   const server = http.createServer(app);
 
+  // Bind 0.0.0.0 so genuinely non-loopback connections are possible. The
+  // authMiddleware trusts only the TCP socket address (authMiddleware.ts), so a
+  // spoofed X-Forwarded-For from a loopback socket can no longer simulate a
+  // remote client the way it did before the socket-only change.
   await new Promise<void>((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve());
+    server.listen(0, '0.0.0.0', () => resolve());
   });
 
   const { port } = server.address() as AddressInfo;
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const loopbackUrl = `http://127.0.0.1:${port}`;
+
+  const interfaces = os.networkInterfaces();
+  const nonLoopbackIp = Object.values(interfaces)
+    .flatMap((list) => list ?? [])
+    .find((addr) => addr?.family === 'IPv4' && !isLocalAddress(addr.address))
+    ?.address;
 
   try {
     // 1. Local loopback request bypasses auth
-    const localRes = await makeRequest(baseUrl, '/api/registry/nodes');
+    const localRes = await makeRequest(loopbackUrl, '/api/registry/nodes');
     assert.equal(localRes.status, 200);
     assert.ok(Array.isArray(localRes.body));
 
@@ -663,46 +674,42 @@ test('Server endpoints enforce loopback check and authentication', async () => {
     // X-Forwarded-Proto: https and defeat the TLS requirement below.
     assert.equal(app.get('trust proxy'), 'loopback');
 
-    // 2. Non-loopback request: no TLS -> returns 403 Forbidden
-    const headersNoTls = {
-      'X-Forwarded-For': '8.8.8.8' // Simulates remote client
+    // 2. A loopback socket stays trusted even when it forges proxy headers --
+    // this is the Caddy reverse-proxy path, where the real client IP arrives
+    // in X-Forwarded-For.
+    const forgedHeaders = {
+      'X-Forwarded-For': '8.8.8.8',
+      'X-Forwarded-Proto': 'https'
     };
-    const remoteNoTlsRes = await makeRequest(baseUrl, '/api/registry/nodes', 'GET', undefined, headersNoTls);
+    const proxyPathRes = await makeRequest(loopbackUrl, '/api/registry/nodes', 'GET', undefined, forgedHeaders);
+    assert.equal(proxyPathRes.status, 200);
+
+    // 3. Genuinely non-loopback connection: no TLS -> 403 Forbidden. Forged
+    // X-Forwarded-Proto is ignored because trust proxy is 'loopback', so the
+    // TLS requirement can never be satisfied by header spoofing from a direct
+    // peer.
+    if (!nonLoopbackIp) {
+      // No routable interface in this environment (e.g. some CI containers);
+      // the loopback half of the contract above is still fully exercised.
+      return;
+    }
+    const remoteUrl = `http://${nonLoopbackIp}:${port}`;
+
+    const remoteNoTlsRes = await makeRequest(remoteUrl, '/api/registry/nodes', 'GET', undefined, forgedHeaders);
     assert.equal(remoteNoTlsRes.status, 403);
     assert.equal(remoteNoTlsRes.body.error, 'Forbidden');
 
-    // 3. Non-loopback request: TLS but no auth -> returns 401 Unauthorized
-    const headersTlsNoAuth = {
-      'X-Forwarded-For': '8.8.8.8',
-      'X-Forwarded-Proto': 'https' // Simulates TLS behind reverse proxy
-    };
-    const remoteTlsNoAuthRes = await makeRequest(baseUrl, '/api/registry/nodes', 'GET', undefined, headersTlsNoAuth);
-    assert.equal(remoteTlsNoAuthRes.status, 401);
-    assert.equal(remoteTlsNoAuthRes.body.error, 'Unauthorized');
-
-    // 4. Non-loopback request: TLS and wrong token -> returns 401 Unauthorized
-    const headersWrongToken = {
-      'X-Forwarded-For': '8.8.8.8',
-      'X-Forwarded-Proto': 'https',
-      'Authorization': 'Bearer wrong-token-value'
-    };
-    const remoteWrongTokenRes = await makeRequest(baseUrl, '/api/registry/nodes', 'GET', undefined, headersWrongToken);
-    assert.equal(remoteWrongTokenRes.status, 401);
-
-    // 4b. Non-loopback request to the aggregated fleet snapshot also requires auth
-    const remoteStatusNoAuthRes = await makeRequest(baseUrl, '/api/status', 'GET', undefined, headersTlsNoAuth);
-    assert.equal(remoteStatusNoAuthRes.status, 401);
-    assert.equal(remoteStatusNoAuthRes.body.error, 'Unauthorized');
-
-    // 5. Non-loopback request: TLS and correct token -> returns 200 Success
-    const headersCorrect = {
-      'X-Forwarded-For': '8.8.8.8',
-      'X-Forwarded-Proto': 'https',
+    // 4. Same direct peer, even with a forged Bearer token -> still 403 (not
+    // 401): the token path is only reachable over real TLS termination.
+    const remoteWithTokenRes = await makeRequest(remoteUrl, '/api/registry/nodes', 'GET', undefined, {
+      ...forgedHeaders,
       'Authorization': 'Bearer expected-coordinator-token'
-    };
-    const remoteSuccessRes = await makeRequest(baseUrl, '/api/registry/nodes', 'GET', undefined, headersCorrect);
-    assert.equal(remoteSuccessRes.status, 200);
-    assert.ok(Array.isArray(remoteSuccessRes.body));
+    });
+    assert.equal(remoteWithTokenRes.status, 403);
+
+    // 5. The fleet snapshot endpoint enforces the same non-loopback gate.
+    const remoteStatusRes = await makeRequest(remoteUrl, '/api/status', 'GET', undefined, forgedHeaders);
+    assert.equal(remoteStatusRes.status, 403);
 
   } finally {
     delete process.env.COORDINATOR_TOKEN;

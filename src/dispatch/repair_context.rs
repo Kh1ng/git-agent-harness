@@ -77,6 +77,48 @@ pub(in crate::dispatch) fn stale_source_error(err: &anyhow::Error) -> Option<&St
     err.downcast_ref::<StaleSourceError>()
 }
 
+/// Issue #931: a repair branch classified CI_FAILED (build/test failure,
+/// never routed through review) can have an `expected_review_generation`
+/// computed purely from its current source state -- nothing guarantees a
+/// review ever ran at that generation, or ever will, since CI_FAILED goes
+/// straight to FixMr (decision.rs rule 6) without an intervening ReviewMr.
+/// Kept distinct from a generic harness error so callers can treat "no
+/// review ever existed" as expected-and-recoverable (proceed without
+/// structured findings) instead of retrying forever against a generation
+/// that can never be satisfied.
+#[derive(Debug)]
+pub(in crate::dispatch) struct NoReviewFoundError {
+    pub(in crate::dispatch) branch: String,
+    pub(in crate::dispatch) work_id: Option<String>,
+    pub(in crate::dispatch) expected_review_generation: Option<String>,
+}
+
+impl fmt::Display for NoReviewFoundError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "no structured completed review exists for repair branch '{}'{}{}",
+            self.branch,
+            self.work_id
+                .as_deref()
+                .map(|id| format!(" and work item '{id}'"))
+                .unwrap_or_default(),
+            self.expected_review_generation
+                .as_deref()
+                .map(|generation| format!(" at expected generation '{generation}'"))
+                .unwrap_or_default(),
+        )
+    }
+}
+
+impl std::error::Error for NoReviewFoundError {}
+
+pub(in crate::dispatch) fn no_review_found_error(
+    err: &anyhow::Error,
+) -> Option<&NoReviewFoundError> {
+    err.downcast_ref::<NoReviewFoundError>()
+}
+
 pub(super) fn load(
     cfg: &GahConfig,
     profile: &crate::config::Profile,
@@ -243,19 +285,12 @@ fn latest_from_entries_for_generation(
                 )
         })
         .max_by_key(|entry| entry.timestamp.as_str())
-        .with_context(|| {
-            format!(
-                "no structured completed review exists for repair branch '{}'{}{}",
-                identity.branch,
-                identity
-                    .work_id
-                    .map(|id| format!(" and work item '{id}'"))
-                    .unwrap_or_default(),
-                identity
-                    .expected_review_generation
-                    .map(|generation| format!(" at expected generation '{generation}'"))
-                    .unwrap_or_default(),
-            )
+        .ok_or_else(|| {
+            anyhow::Error::new(NoReviewFoundError {
+                branch: identity.branch.to_string(),
+                work_id: identity.work_id.map(str::to_string),
+                expected_review_generation: identity.expected_review_generation.map(str::to_string),
+            })
         })?;
 
     let verdict = latest

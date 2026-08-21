@@ -1014,6 +1014,8 @@ export interface GatewaySettingsSummary {
   url: string;
   apiKeyConfigured: boolean;
   apiKey: string | null;
+  enabled: boolean;
+  disabledProfiles: string[];
   /** This host's own Tailscale IPv4, best-effort detected -- null if the
    * `tailscale` binary is missing, not logged in, or detection otherwise
    * failed. Used to build an "Add a Node" command a genuinely different
@@ -1021,6 +1023,13 @@ export interface GatewaySettingsSummary {
    * loopback-optimized for this server's own calls, not reachable by
    * anyone else. */
   tailscaleIPv4: string | null;
+}
+
+export interface GatewaySettingsUpdate {
+  url?: string | null;
+  apiKey?: string | null;
+  enabled?: boolean;
+  disabledProfiles?: string[];
 }
 
 /** Payload for POST /api/manager-chat/settings. Omitted fields are left
