@@ -5,6 +5,13 @@ llm_base_url = "http://localhost:4000"
 llm_model_local = "your/local-model"
 llm_model_cloud = "your/cloud-model"
 
+# Fleet mode (issue #944): point this node at a central node's control-plane
+# server so it becomes claim-eligible under central claims arbitration.
+# registry_central_url = "https://central.example.com"
+# registry_preflight_mode = "warn"   # "warn" | "refuse"
+# registry_transport_mode = "trusted_lan"  # loopback | authenticated_remote | trusted_lan
+# registry_secret_ref = "env:COORDINATOR_TOKEN"
+
 [context]
 enabled = true
 soft_limit_tokens = 80000

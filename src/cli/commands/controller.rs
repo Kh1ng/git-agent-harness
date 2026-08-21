@@ -175,6 +175,23 @@ pub fn run_loop(args: LoopArgs) -> Result<()> {
             token.as_deref(),
             cfg.defaults.registry_preflight_mode,
         )?;
+        // Issue #944: make sure this node is registered (and thus
+        // claim-eligible) before starting work. Advisory only -- a failed
+        // registration warns loudly but never blocks startup.
+        let transport_mode = match &cfg.defaults.registry_transport_mode {
+            Some(mode) => mode.as_str(),
+            None => "trusted_lan",
+        };
+        let secret_ref = match &cfg.defaults.registry_secret_ref {
+            Some(reference) => reference.as_str(),
+            None => "env:COORDINATOR_TOKEN",
+        };
+        crate::node_register::register_advisory(
+            central_url,
+            transport_mode,
+            secret_ref,
+            token.as_deref(),
+        );
     }
     let parallel = controller_runtime::loop_parallel_argument(
         args.once,

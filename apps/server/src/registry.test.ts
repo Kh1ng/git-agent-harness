@@ -311,16 +311,77 @@ test('RegistryService validates non-loopback endpoints and TLS modes', () => {
     });
     assert.equal(resRemoteTls.warnings.length, 0);
 
-    // Non-loopback URL + trusted_lan -> Reject
-    assert.throws(() => {
-      registry.registerNode({
+    // Non-loopback URL + trusted_lan -> Fail closed by default (issue #944)
+    const prevAllow = process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+    delete process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+    try {
+      assert.throws(() => {
+        registry.registerNode({
+          ...baseNode,
+          node_id: 'node-lan',
+          advertised_url: 'http://node.lan.com',
+          transport_mode: 'trusted_lan'
+        });
+      }, /GAH_REGISTRY_ALLOW_INSECURE_LAN=1/);
+    } finally {
+      if (prevAllow === undefined) {
+        delete process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+      } else {
+        process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN = prevAllow;
+      }
+    }
+
+    // Non-loopback URL + trusted_lan + explicit opt-in -> Success (with warning)
+    process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN = '1';
+    try {
+      const resLan = registry.registerNode({
         ...baseNode,
-        node_id: 'node-lan',
+        node_id: 'node-lan-opted',
         advertised_url: 'http://node.lan.com',
         transport_mode: 'trusted_lan'
       });
-    }, /cannot use trusted_lan transport mode/);
+      assert.equal(resLan.warnings.length, 1);
+    } finally {
+      delete process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+    }
 
+  } finally {
+    if (existsSync(tempPath)) {
+      unlinkSync(tempPath);
+    }
+  }
+});
+
+test('RegistryService rejects a node advertising the central node\'s own endpoint (self-poll guard, issue #944)', () => {
+  const tempPath = createTempRegistryFile();
+  const registry = new RegistryService(tempPath, 'http://localhost:3773');
+
+  try {
+    const baseNode: Omit<RegisteredNode, 'advertised_url' | 'transport_mode'> = {
+      node_id: 'self-poll-node',
+      display_name: 'Bad Node',
+      version: '0.1.0',
+      schema_digest: COORDINATOR_SCHEMA_DIGEST,
+      secret_ref: 'env:NODE_SECRET'
+    };
+
+    // Advertises the central's own loopback endpoint -> rejected
+    assert.throws(() => {
+      registry.registerNode({
+        ...baseNode,
+        advertised_url: 'http://127.0.0.1:3773',
+        transport_mode: 'loopback'
+      });
+    }, /central node's own endpoint/);
+
+    // Different host:port that is NOT the central -> accepted
+    const ok = registry.registerNode({
+      ...baseNode,
+      node_id: 'legit-node',
+      advertised_url: 'http://127.0.0.1:9999',
+      transport_mode: 'loopback'
+    });
+    assert.equal(ok.warnings.length, 0);
   } finally {
     if (existsSync(tempPath)) {
       unlinkSync(tempPath);

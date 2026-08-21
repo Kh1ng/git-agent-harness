@@ -98,6 +98,18 @@ pub struct Defaults {
     pub registry_central_url: Option<String>,
     #[serde(default)]
     pub registry_preflight_mode: crate::fleet_preflight::PreflightMode,
+    /// Transport mode used when this node self-registers against the central
+    /// registry (issue #944): "loopback" | "authenticated_remote" |
+    /// "trusted_lan". Defaults to "trusted_lan" when unset, matching the
+    /// self-hosted tailnet default. The central must opt in to accept a
+    /// non-loopback trusted_lan endpoint over plain HTTP
+    /// (`GAH_REGISTRY_ALLOW_INSECURE_LAN=1`).
+    #[serde(default)]
+    pub registry_transport_mode: Option<String>,
+    /// Secret reference (`env:VAR` or `file:path`) the central uses to reach
+    /// this node back, sent at registration. Defaults to `env:COORDINATOR_TOKEN`.
+    #[serde(default)]
+    pub registry_secret_ref: Option<String>,
 }
 
 impl Defaults {

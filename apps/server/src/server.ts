@@ -111,7 +111,9 @@ export function createServer(
   };
   const coordinatorPort = configDeps.coordinatorPort ?? 3773;
 
-  const registryService = configDeps.registryService || new RegistryService();
+  const registryService =
+    configDeps.registryService ||
+    new RegistryService(undefined, getCoordinatorIdentity(undefined, coordinatorPort).advertised_url);
   const claimsService = configDeps.claimsService || new ClaimsService();
 
   const app = express();

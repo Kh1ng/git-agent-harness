@@ -31,10 +31,21 @@ export function getEndpoint(urlStr: string): string {
   try {
     const url = new URL(urlStr);
     const port = url.port || (url.protocol === 'https:' || url.protocol === 'wss:' ? '443' : '80');
-    return `${url.hostname}:${port}`;
+    return `${normalizeLoopbackHost(url.hostname)}:${port}`;
   } catch {
     return urlStr;
   }
+}
+
+/** Normalizes every loopback spelling to one canonical host so endpoint
+ * collision/self-poll comparisons don't treat `localhost:3773` and
+ * `127.0.0.1:3773` as different endpoints (they resolve to the same node). */
+function normalizeLoopbackHost(host: string): string {
+  const lower = host.toLowerCase().replace(/^\[|\]$/g, '');
+  if (lower === 'localhost' || lower === '::1' || lower.startsWith('127.')) {
+    return '127.0.0.1';
+  }
+  return lower;
 }
 
 export function containsSecretWords(text: string): boolean {
@@ -254,9 +265,15 @@ export class RegistryService {
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private consecutiveBadChecks: Map<string, number> = new Map();
   private alreadyAlerted: Set<string> = new Set();
+  /** Normalized endpoint of the central node itself (issue #944): a worker
+   * must never register a node whose advertised_url is the central node's
+   * own endpoint -- the liveness scheduler would poll the central's own
+   * /api/status and recurse (observed live: every fleet/status call 502s). */
+  private selfEndpoint: string | null;
 
-  constructor(configPath?: string) {
+  constructor(configPath?: string, selfEndpoint?: string) {
     this.configPath = configPath || process.env.GAH_REGISTRY_CONFIG_PATH || resolve(process.cwd(), 'config/registry-config.json');
+    this.selfEndpoint = selfEndpoint ? getEndpoint(selfEndpoint) : null;
     this.load();
   }
 
@@ -586,6 +603,18 @@ export class RegistryService {
       throw new Error(`Duplicate node ID: ${node.node_id} is already registered`);
     }
 
+    // 2.5 Reject the central node registering itself (issue #944). The
+    // liveness scheduler polls every registered node's advertised_url/api/status;
+    // a node advertising the central's own endpoint makes the central poll
+    // itself and recurse until timeout (observed live: /api/status and
+    // /api/registry/fleet both 502). Loopback spellings are normalized so
+    // "localhost:3773" and "127.0.0.1:3773" both trip this.
+    if (this.selfEndpoint && getEndpoint(node.advertised_url) === this.selfEndpoint) {
+      throw new Error(
+        `Refusing to register: advertised_url '${node.advertised_url}' is this central node's own endpoint (would make the central poll itself). A worker must advertise its own reachable URL.`
+      );
+    }
+
     // 3. Reject endpoint collisions
     const newEndpoint = getEndpoint(node.advertised_url);
     for (const existingNode of this.nodes.values()) {
@@ -628,7 +657,16 @@ export class RegistryService {
           throw new Error('Non-loopback authenticated remote endpoints must use TLS (https:// or wss://)');
         }
       } else if (node.transport_mode === 'trusted_lan') {
-        throw new Error('Non-loopback advertised URL cannot use trusted_lan transport mode; use authenticated_remote with TLS');
+        // Issue #944: self-hosted tailnet/LAN workers legitimately advertise
+        // a plain-HTTP URL (e.g. http://100.118.97.79). Mirror the Rust side's
+        // GAH_COORDINATOR_INSECURE_TLS=1 opt-in: allow it only when the central
+        // operator explicitly opts in, so the fail-closed default is unchanged.
+        if (process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN !== '1') {
+          throw new Error(
+            'Non-loopback trusted_lan endpoints require GAH_REGISTRY_ALLOW_INSECURE_LAN=1 on the central node (fail-closed default; use authenticated_remote over TLS otherwise)'
+          );
+        }
+        warnings.push('Non-loopback trusted_lan endpoint accepted over plain HTTP (GAH_REGISTRY_ALLOW_INSECURE_LAN=1)');
       }
     } else {
       if (node.transport_mode === 'authenticated_remote') {
