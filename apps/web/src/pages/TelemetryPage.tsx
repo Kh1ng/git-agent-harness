@@ -51,7 +51,7 @@ function ExportHealthCard({ health }: { health: ExportHealth | undefined }) {
 
 type SortKey = keyof Pick<
   BackendModelComparison,
-  'entries' | 'success_rate' | 'average_duration_seconds' | 'total_tokens' | 'actual_cost_usd' | 'estimated_cost_usd'
+  'entries' | 'success_rate' | 'average_duration_seconds' | 'total_tokens' | 'memory_gateway_capture_l0_recorded' | 'actual_cost_usd' | 'estimated_cost_usd'
 >;
 
 /** The most recently observed quota_used_percent for a comparison row, or
@@ -268,6 +268,7 @@ export function TelemetryPage() {
                   <SortHeader label="Success rate" active={sortKey === 'success_rate'} onClick={() => toggleSort('success_rate')} />
                   <SortHeader label="Avg duration" active={sortKey === 'average_duration_seconds'} onClick={() => toggleSort('average_duration_seconds')} />
                   <SortHeader label="Total tokens" active={sortKey === 'total_tokens'} onClick={() => toggleSort('total_tokens')} />
+                  <SortHeader label="Memory records captured" active={sortKey === 'memory_gateway_capture_l0_recorded'} onClick={() => toggleSort('memory_gateway_capture_l0_recorded')} />
                   <th>Cache read tokens</th>
                   <th>Cache write tokens</th>
                   <th>Cache-hit ratio</th>
@@ -294,6 +295,7 @@ export function TelemetryPage() {
                       <td>{formatPercent(row.success_rate)}</td>
                       <td>{formatDuration(row.average_duration_seconds)}</td>
                       <td>{formatTokens(row.total_tokens)}</td>
+                      <td>{formatCount(row.memory_gateway_capture_l0_recorded)}</td>
                       <td>{formatTokens(row.cache_read_tokens)}</td>
                       <td>{formatTokens(row.cache_write_tokens)}</td>
                       <td>{formatPercent(cacheHitRatio(row))}</td>

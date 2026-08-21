@@ -446,6 +446,40 @@ fn build_grouped_summary_by_backend() {
 }
 
 #[test]
+fn build_grouped_summary_aggregates_memory_gateway_capture_l0_recorded() {
+    let (_tmp, _cfg) = test_config();
+    let mut entry1 = LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
+    entry1.effective_backend = "codex".to_string();
+    entry1.validation_result = Some("passed".to_string());
+    entry1.memory_gateway_capture_l0_recorded = Some(128);
+
+    let mut entry2 = LedgerEntry::new("test", &profile(), "codex", "improve", "test2", None, None);
+    entry2.effective_backend = "codex".to_string();
+    entry2.validation_result = Some("failed".to_string());
+
+    let mut entry3 = LedgerEntry::new("test", &profile(), "vibe", "improve", "test3", None, None);
+    entry3.effective_backend = "vibe".to_string();
+    entry3.validation_result = Some("passed".to_string());
+    entry3.memory_gateway_capture_l0_recorded = Some(64);
+
+    let grouped = super::build_grouped_summary(
+        &[entry1, entry2, entry3],
+        |entry| entry.effective_backend.clone(),
+        |observed| observed.backend.to_string(),
+        |backend, _model, _difficulty| backend.to_string(),
+        true,
+    )
+    .unwrap();
+
+    let codex_group = grouped.iter().find(|g| g.group_key == "codex").unwrap();
+    let vibe_group = grouped.iter().find(|g| g.group_key == "vibe").unwrap();
+    assert_eq!(codex_group.entries, 2);
+    assert_eq!(codex_group.memory_gateway_capture_l0_recorded, Some(128));
+    assert_eq!(vibe_group.entries, 1);
+    assert_eq!(vibe_group.memory_gateway_capture_l0_recorded, Some(64));
+}
+
+#[test]
 fn model_grouping_labels_missing_model_instead_of_collapsing_to_empty_string() {
     // Regression: build_summary's grouped_by_model closures used to be
     // `unwrap_or_default()`, so every entry with no effective_model

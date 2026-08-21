@@ -71,6 +71,7 @@ struct BackendModelComparison {
     cache_read_tokens: Option<u64>,
     cache_write_tokens: Option<u64>,
     total_tokens: Option<u64>,
+    memory_gateway_capture_l0_recorded: Option<u64>,
     requests_count: Option<u64>,
     tokens_per_success: Option<f64>,
     requests_per_success: Option<f64>,
@@ -332,6 +333,7 @@ fn transform_to_report_format(
                 cache_read_tokens: group.cache_read_tokens,
                 cache_write_tokens: group.cache_write_tokens,
                 total_tokens: group.total_tokens,
+                memory_gateway_capture_l0_recorded: group.memory_gateway_capture_l0_recorded,
                 requests_count: group.requests_count,
                 tokens_per_success: group.tokens_per_success,
                 requests_per_success: group.requests_per_success,
@@ -606,6 +608,7 @@ mod tests {
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: Some(1000),
+            memory_gateway_capture_l0_recorded: Some(111),
             requests_count: Some(10),
             tokens_per_success: Some(125.0),
             requests_per_success: Some(1.25),
@@ -634,6 +637,7 @@ mod tests {
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: Some(500),
+            memory_gateway_capture_l0_recorded: Some(222),
             requests_count: Some(10),
             tokens_per_success: Some(125.0),
             requests_per_success: Some(2.5),
@@ -699,12 +703,20 @@ mod tests {
             report_data.comparisons[0].average_duration_seconds,
             Some(120.5)
         );
+        assert_eq!(
+            report_data.comparisons[0].memory_gateway_capture_l0_recorded,
+            Some(111)
+        );
         assert!(!report_data.comparisons[0].is_model);
 
         // Check second backend (codex)
         assert_eq!(report_data.comparisons[1].backend_or_model, "codex");
         assert_eq!(report_data.comparisons[1].entries, 5);
         assert!((report_data.comparisons[1].success_rate - 0.8).abs() < 0.001);
+        assert_eq!(
+            report_data.comparisons[1].memory_gateway_capture_l0_recorded,
+            Some(222)
+        );
         assert!(!report_data.comparisons[1].is_model);
     }
 
@@ -792,6 +804,7 @@ mod tests {
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: None,
+            memory_gateway_capture_l0_recorded: None,
             requests_count: None,
             tokens_per_success: None,
             requests_per_success: None,
@@ -832,6 +845,7 @@ mod tests {
             cache_read_tokens: None,
             cache_write_tokens: None,
             total_tokens: None,
+            memory_gateway_capture_l0_recorded: None,
             requests_count: None,
             tokens_per_success: None,
             requests_per_success: None,
