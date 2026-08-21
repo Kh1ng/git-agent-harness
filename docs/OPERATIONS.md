@@ -429,7 +429,9 @@ gah node register \
 ```
 
 `--transport-mode` defaults to `trusted_lan` (the self-hosted tailnet
-default). For a non-loopback `trusted_lan` endpoint over **plain HTTP**
+default); the loop-start self-registration reads `GAH_REGISTRY_TRANSPORT_MODE`
+and `GAH_REGISTRY_SECRET_REF` env vars (defaults `trusted_lan` /
+`env:COORDINATOR_TOKEN`). For a non-loopback `trusted_lan` endpoint over **plain HTTP**
 (e.g. `http://100.118.97.79` on a tailnet), the central must opt in with
 `GAH_REGISTRY_ALLOW_INSECURE_LAN=1` in its environment -- mirroring the
 Rust side's `GAH_COORDINATOR_INSECURE_TLS=1` -- otherwise registration is
