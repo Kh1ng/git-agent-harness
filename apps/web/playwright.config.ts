@@ -17,13 +17,15 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './tests/e2e',
-  // Cap workers: the e2e suite shares one fixture-backed apps/server and one
-  // vite dev server, and 6 parallel browsers (fullyParallel's default on a
-  // 2-core CI runner) saturates them -- Settings serial-fetches
-  // profiles/config/doctor and intermittently fails its heading assertion
-  // under that load. 4 workers is stable across repeated full-suite runs.
+  // Cap workers + disable intra-file parallelism: the e2e suite shares one
+  // fixture-backed apps/server and one vite dev server, and 6 parallel
+  // browsers running all tests in a file simultaneously (fullyParallel)
+  // saturates them on a 2-core CI runner -- the Settings page's serial
+  // fetch chain intermittently failed to render its heading under that load.
+  // Tests within a file now run sequentially; different files still
+  // parallelize up to the worker cap.
   workers: process.env.CI ? 4 : undefined,
-  fullyParallel: true,
+  fullyParallel: false,
   reporter: 'list',
   use: {
     baseURL: 'http://localhost:3000',
