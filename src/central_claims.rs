@@ -121,10 +121,17 @@ impl ClaimsTransport for CurlClaimsTransport {
             let mut config = format!(
                 "silent\nurl = \"{escaped_url}\"\nheader = \"Content-Type: application/json\"\ndata = \"{escaped_body}\"\n"
             );
-            if let Some(ca) = std::env::var("GAH_COORDINATOR_CA_CERT").ok().filter(|s| !s.is_empty()) {
+            if let Some(ca) = std::env::var("GAH_COORDINATOR_CA_CERT")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
                 let escaped_ca = ca.replace('\\', "\\\\").replace('"', "\\\"");
                 config.push_str(&format!("cacert = \"{escaped_ca}\"\n"));
-            } else if std::env::var("GAH_COORDINATOR_INSECURE_TLS").ok().as_deref() == Some("1") {
+            } else if std::env::var("GAH_COORDINATOR_INSECURE_TLS")
+                .ok()
+                .as_deref()
+                == Some("1")
+            {
                 config.push_str("insecure\n");
             }
             if let Some(t) = token {
