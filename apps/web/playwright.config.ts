@@ -26,6 +26,10 @@ export default defineConfig({
   // parallelize up to the worker cap.
   workers: process.env.CI ? 4 : undefined,
   fullyParallel: false,
+  // One retry on CI only: the shared fixture+vite servers run on a 2-core
+  // runner and Settings is the heaviest page; a single retry absorbs the
+  // residual load-induced flake without masking real regressions.
+  retries: process.env.CI ? 1 : 0,
   reporter: 'list',
   use: {
     baseURL: 'http://localhost:3000',

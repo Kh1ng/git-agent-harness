@@ -90,6 +90,13 @@ test.describe('last-updated indicator', () => {
   test.beforeEach(async ({ page }) => {
     resetCounts();
     await mockRestApi(page);
+    // Mock the WS welcome so these REST-timing tests never depend on the
+    // real fixture server's WebSocket handler (slow under CI parallel
+    // load; a blip triggers useWsReconnectRefresh which refires the whole
+    // Settings fetch chain).
+    await page.routeWebSocket('**/ws**', (ws) => {
+      ws.send(JSON.stringify(WELCOME_MESSAGE));
+    });
   });
 
   for (const route of [
