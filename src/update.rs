@@ -347,14 +347,14 @@ fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
     if root.trim().is_empty() {
         return Ok(None);
     }
-    run_command(&repo, "npm", &["run", "build:web"])?;
+    run_command(repo, "npm", &["run", "build:web"])?;
     let dist = repo.join("apps/web/dist");
     if !dist.join("index.html").is_file() {
         bail!("web build did not produce apps/web/dist/index.html");
     }
     let root_path = PathBuf::from(&root);
     run_command(
-        &repo,
+        repo,
         "sudo",
         &[
             "install", "-d", "-o", "root", "-g", "root", "-m", "0755", &root,
@@ -365,7 +365,7 @@ fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
     // BSD/Linux cp, so use an explicit glob-style loop via cp -r of the
     // directory contents.
     run_command(
-        &repo,
+        repo,
         "sudo",
         &[
             "sh",
