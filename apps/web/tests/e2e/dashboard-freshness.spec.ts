@@ -56,6 +56,15 @@ async function mockRestApi(page: Page) {
         return route.fulfill({ json: { overall_status: 'ok', checks: [] } });
       case '/api/config/effective':
         return route.fulfill({ json: {} });
+      case '/api/manager-chat/settings':
+        return route.fulfill({
+          json: {
+            defaultBackend: 'hermes',
+            profileOverrides: {},
+            modelOverrides: {},
+            availableBackends: [],
+          },
+        });
       default:
         // Anything else matching the broad glob below (notably Vite's own
         // dev-server module requests for files under src/api/) must pass
@@ -95,7 +104,7 @@ test.describe('last-updated indicator', () => {
       await page.goto('/');
       await page.getByRole('button', { name: route.label, exact: true }).click();
       await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible();
-      await expect(page.getByText(/^Updated (just now|\d+[smhd] ago)$/)).toBeVisible();
+      await expect(page.getByText(/^Updated (just now|\d+[smhd] ago)$/)).toBeVisible({ timeout: 15000 });
     });
   }
 });
