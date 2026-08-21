@@ -232,7 +232,7 @@ export function TelemetryPage() {
                   <SortHeader label="Success rate" active={sortKey === 'success_rate'} onClick={() => toggleSort('success_rate')} />
                   <SortHeader label="Avg duration" active={sortKey === 'average_duration_seconds'} onClick={() => toggleSort('average_duration_seconds')} />
                   <SortHeader label="Total tokens" active={sortKey === 'total_tokens'} onClick={() => toggleSort('total_tokens')} />
-                  <SortHeader label="Context supplied" active={sortKey === 'memory_gateway_capture_l0_recorded'} onClick={() => toggleSort('memory_gateway_capture_l0_recorded')} />
+                  <SortHeader label="Memory records captured" active={sortKey === 'memory_gateway_capture_l0_recorded'} onClick={() => toggleSort('memory_gateway_capture_l0_recorded')} />
                   <th>Cache read tokens</th>
                   <th>Cache write tokens</th>
                   <th>Cache-hit ratio</th>
