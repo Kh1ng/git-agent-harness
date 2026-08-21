@@ -154,7 +154,6 @@ jobs:
             patchelf
 
       - name: Install Rust
-        if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -164,7 +163,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt --check
-        if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
         run: cargo fmt --check
 
       - name: cargo test
