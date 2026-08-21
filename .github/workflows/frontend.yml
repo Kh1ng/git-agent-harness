@@ -39,3 +39,35 @@ jobs:
           name: gah-web-dist
           path: apps/web/dist
           if-no-files-found: error
+
+  # Hermetic Playwright e2e + component tests (issue #636). The webServer in
+  # playwright.config.ts starts a fixture-backed apps/server (GAH_BINARY ->
+  # tests/fixtures/gah) plus the vite dev server, so this runs on a runner
+  # with no gah binary and no gah config. Uses the same Node 20 toolchain as
+  # the build job; Playwright downloads its own chromium.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npm run build:contracts && npm run build:shared
+
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: apps/web
+
+      - name: Run e2e tests
+        run: npm run e2e --workspace=apps/web
+
+      - name: Run component tests
+        run: npm run test:component --workspace=apps/web

@@ -94,7 +94,10 @@ test('Settings exposes validation timeout and sends it to profile update API', a
     .getByText('Validation command timeout (seconds)')
     .locator('..')
     .locator('input');
-  const profileSelect = page.getByRole('combobox');
+  const profileSelect = page
+    .locator('section')
+    .filter({ hasText: 'Which configured GAH repo' })
+    .getByRole('combobox');
   await profileSelect.selectOption('test-repo');
   await expect(page.getByText(/Per-profile loop behavior for/)).toBeVisible();
 

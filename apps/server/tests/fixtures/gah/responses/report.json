@@ -1,9 +1,71 @@
 {
   "ledger_path": "/home/operator/.config/gah/ledger.jsonl",
-  "total_entries": 0,
+  "total_entries": 42,
   "since": "7d",
   "profile": null,
   "group_by": "Backend",
-  "comparisons": [],
+  "comparisons": [
+    {
+      "backend_or_model": "codex",
+      "is_model": false,
+      "entries": 22,
+      "attempts": 30,
+      "validation_pass": 16,
+      "success_rate": 0.5333,
+      "total_cost_usd": 0,
+      "actual_cost_usd": 0,
+      "estimated_cost_usd": 0,
+      "average_cost_usd": 0,
+      "average_duration_seconds": 245.5,
+      "input_tokens": 710000,
+      "output_tokens": 390000,
+      "reasoning_tokens": 120000,
+      "cache_read_tokens": 340000,
+      "cache_write_tokens": 90000,
+      "total_tokens": 1100000,
+      "memory_gateway_capture_l0_recorded": 18,
+      "requests_count": 29,
+      "tokens_per_success": 68750,
+      "requests_per_success": 1.8125,
+      "quota_observations": [
+        {
+          "backend": "codex",
+          "model": "codex-mini",
+          "quota_window": "weekly",
+          "quota_used_percent": 34.2,
+          "quota_remaining_percent": 65.8,
+          "quota_reset_at": "2026-08-09T00:00:00Z",
+          "observed_at": "2026-08-07T15:18:10.130973215Z",
+          "usage_source": "subscription"
+        }
+      ],
+      "review_verdict_distribution": [["APPROVE_STRONG", 3], ["REQUEST_CHANGES", 1]]
+    },
+    {
+      "backend_or_model": "claude",
+      "is_model": false,
+      "entries": 20,
+      "attempts": 30,
+      "validation_pass": 15,
+      "success_rate": 0.5,
+      "total_cost_usd": 3.14,
+      "actual_cost_usd": 3.14,
+      "estimated_cost_usd": 3.25,
+      "average_cost_usd": 0.157,
+      "average_duration_seconds": 310.8,
+      "input_tokens": 490000,
+      "output_tokens": 250000,
+      "reasoning_tokens": null,
+      "cache_read_tokens": 200000,
+      "cache_write_tokens": 60000,
+      "total_tokens": 740000,
+      "memory_gateway_capture_l0_recorded": 14,
+      "requests_count": 29,
+      "tokens_per_success": 49333,
+      "requests_per_success": 1.9333,
+      "quota_observations": [],
+      "review_verdict_distribution": [["APPROVE_STRONG", 2], ["NEUTRAL", 1]]
+    }
+  ],
   "trend": []
 }
