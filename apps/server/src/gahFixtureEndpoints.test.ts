@@ -40,8 +40,9 @@ test('GET /api/report returns 200 with a parseable typed payload', async () => {
     const body = (await response.json()) as ReportData;
 
     assert.equal(response.status, 200);
-    assert.equal(body.total_entries, 0);
+    assert.equal(body.total_entries, 42);
     assert.equal(body.group_by, 'Backend');
+    assert.ok(body.comparisons.length >= 2, 'fixture report should carry backend comparison rows');
   });
 });
 

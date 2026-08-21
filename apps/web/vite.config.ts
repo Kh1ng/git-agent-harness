@@ -30,10 +30,12 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:3773',
+        // Hermetic e2e (#636) points this at the fixture-backed server's
+        // port; default is the real control plane on 3773.
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:3773',
       },
       '/ws': {
-        target: 'ws://localhost:3773',
+        target: process.env.VITE_WS_PROXY_TARGET || 'ws://localhost:3773',
         ws: true,
       },
     },

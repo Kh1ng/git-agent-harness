@@ -93,6 +93,28 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             "Built server:  {}",
             repo.join("apps/server/dist/bin.js").display()
         );
+
+        // Issue #894: keep the system-level control-plane unit in lockstep
+        // with the installed server, exactly like the user units below. The
+        // gah-server.service is a system unit (not user), so it needs sudo.
+        // Operator customization belongs in `systemctl edit gah-server.service`
+        // drop-ins; replacing the base template on every update is what
+        // prevents the stale-unit drift this fix exists for.
+        match install_server_unit_template(&repo, &args.server_service)? {
+            Some(target) => println!("Installed server unit: {}", target.display()),
+            None => {
+                println!("systemd not available on this host: skipping gah-server.service install.")
+            }
+        }
+
+        // Issue #896: build the web dashboard and deploy it to wherever the
+        // host's web server (Caddy, by default) serves it from. The deploy
+        // root is configurable via GAH_WEB_DEPLOY_ROOT; unset (the default)
+        // deploys to /var/www/gah, an explicitly empty value skips deploy.
+        match deploy_web_ui(&repo)? {
+            Some(root) => println!("Deployed web UI to {}", root.display()),
+            None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
+        }
     } else {
         println!("Role is 'worker': skipping control-plane server build.");
     }
@@ -272,6 +294,88 @@ fn copy_systemd_unit(repo: &Path, config_home: &Path, unit_file_name: &str) -> R
     Ok(target)
 }
 
+/// Issue #894: keep the system-level control-plane unit in lockstep with the
+/// installed server, same reasoning as `install_loop_unit_template`. Unlike
+/// the user units, gah-server.service is a system unit owned by root, so
+/// install needs `sudo`; operator customization belongs in `systemctl edit
+/// gah-server.service` drop-ins, so replacing the base template on every
+/// deterministic update is safe. `--server-service` names the installed unit
+/// (default `gah-server.service`), so the copy target matches what the
+/// restart step below restarts.
+fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Option<PathBuf>> {
+    if !systemd_available() {
+        return Ok(None);
+    }
+    let source = repo.join("packaging/systemd/gah-server.service");
+    if !source.is_file() {
+        bail!("systemd unit template is missing: {}", source.display());
+    }
+    let target = PathBuf::from("/etc/systemd/system").join(server_service);
+    run_command(
+        repo,
+        "sudo",
+        &[
+            "install",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0644",
+            source.to_str().unwrap_or_default(),
+            target.to_str().unwrap_or_default(),
+        ],
+    )?;
+    run_command(repo, "sudo", &["systemctl", "daemon-reload"])?;
+    Ok(Some(target))
+}
+
+/// Issue #896: build `apps/web` and deploy its `dist` to wherever the host's
+/// web server serves the dashboard from. The deploy root is configurable via
+/// `GAH_WEB_DEPLOY_ROOT`:
+///
+/// - unset -> `/var/www/gah` (the Caddy root the repo documents/ships)
+/// - set to a non-empty path -> that path
+/// - set to empty -> skip deployment entirely
+///
+/// The web root is typically root-owned (Caddy's static site), so copying
+/// needs `sudo`. Deployment is a replace-in-place of the dist contents, not
+/// a delete of the whole root -- operator-provided files (favicon overrides,
+/// robots.txt, a Caddyfile) survive the update.
+fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
+    let root = env::var("GAH_WEB_DEPLOY_ROOT").unwrap_or_else(|_| "/var/www/gah".to_string());
+    if root.trim().is_empty() {
+        return Ok(None);
+    }
+    run_command(&repo, "npm", &["run", "build:web"])?;
+    let dist = repo.join("apps/web/dist");
+    if !dist.join("index.html").is_file() {
+        bail!("web build did not produce apps/web/dist/index.html");
+    }
+    let root_path = PathBuf::from(&root);
+    run_command(
+        &repo,
+        "sudo",
+        &[
+            "install", "-d", "-o", "root", "-g", "root", "-m", "0755", &root,
+        ],
+    )?;
+    // Copy the dist contents into the root. `dist/` itself is not copied as
+    // a nested directory; trailing separator semantics are fiddly across
+    // BSD/Linux cp, so use an explicit glob-style loop via cp -r of the
+    // directory contents.
+    run_command(
+        &repo,
+        "sudo",
+        &[
+            "sh",
+            "-c",
+            &format!("cp -r '{}'/. '{}'", dist.display(), root),
+        ],
+    )?;
+    Ok(Some(root_path))
+}
+
 fn reload_user_systemd(reason: &str) -> Result<()> {
     let status = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
@@ -366,8 +470,8 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_clean, ensure_default_branch_checkout, install_watchdog_unit_template,
-        installed_binary_path, run, HostRole, UpdateArgs,
+        deploy_web_ui, ensure_clean, ensure_default_branch_checkout, install_server_unit_template,
+        install_watchdog_unit_template, installed_binary_path, run, HostRole, UpdateArgs,
     };
     use crate::test_support::PathGuard;
     use std::ffi::OsString;
@@ -555,5 +659,74 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("--role central"));
+    }
+
+    /// Issue #894: `gah update` (central role) reinstalls the system-level
+    /// `gah-server.service` unit from the tracked template on every run, so
+    /// the installed unit can never drift from `packaging/systemd/`. The fake
+    /// `sudo` shim records the invocation; the assertion checks the template
+    /// was copied to /etc/systemd/system and daemon-reload ran.
+    #[test]
+    fn server_unit_template_is_installed_on_every_update() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bin_tmp = TempDir::new().unwrap();
+        let record_path = bin_tmp.path().join("sudo-argv.log");
+        // Fake `sudo` that just logs its args and forwards to the real
+        // `install`/`systemctl` is too fragile; instead log and succeed so
+        // the test asserts the *plan* of the update, not the root-owned copy.
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"install\" ]; then exit 0; fi\nif [ \"$1\" = \"systemctl\" ] && [ \"$2\" = \"daemon-reload\" ]; then exit 0; fi\nexit 0\n",
+            record_path.display()
+        );
+        let script_path = bin_tmp.path().join("sudo");
+        std::fs::write(&script_path, script).unwrap();
+        // systemd_available() runs `systemctl --version`; without a fake
+        // systemctl on PATH the unit install is skipped entirely (returns
+        // None) and this test can't assert anything.
+        let systemctl_path = bin_tmp.path().join("systemctl");
+        std::fs::write(
+            &systemctl_path,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'systemd 255'; exit 0; fi\nif [ \"$1\" = \"daemon-reload\" ]; then exit 0; fi\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&script_path, &systemctl_path] {
+                let mut perms = std::fs::metadata(path).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(path, perms).unwrap();
+            }
+        }
+        let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
+
+        let target = install_server_unit_template(repo, "gah-server.service")
+            .unwrap()
+            .unwrap();
+        assert!(target.ends_with("/etc/systemd/system/gah-server.service"));
+        let record = std::fs::read_to_string(&record_path).unwrap();
+        assert!(
+            record.contains("install"),
+            "expected sudo install: {record}"
+        );
+        assert!(record.contains("gah-server.service"), "{record}");
+        assert!(record.contains("/etc/systemd/system"), "{record}");
+        assert!(record.contains("daemon-reload"), "{record}");
+    }
+
+    /// Issue #896: an explicitly-empty GAH_WEB_DEPLOY_ROOT skips deployment
+    /// (returns None) without touching npm or the filesystem -- the operator
+    /// opted out of web deploy for this host.
+    #[test]
+    fn empty_web_deploy_root_skips_deployment() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let previous = std::env::var_os("GAH_WEB_DEPLOY_ROOT");
+        std::env::set_var("GAH_WEB_DEPLOY_ROOT", "");
+        let result = deploy_web_ui(repo).unwrap();
+        match previous {
+            Some(value) => std::env::set_var("GAH_WEB_DEPLOY_ROOT", value),
+            None => std::env::remove_var("GAH_WEB_DEPLOY_ROOT"),
+        }
+        assert!(result.is_none());
     }
 }

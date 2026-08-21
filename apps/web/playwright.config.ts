@@ -1,11 +1,19 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * Minimal Playwright setup -- none existed before this pass. Assumes the
- * server (apps/server, port 3773) is already running and pointed at a real
- * `gah` config; this only drives the web frontend (port 3000). See
- * tests/e2e/smoke.spec.ts for what it checks: the five required viewport
- * classes, no horizontal overflow, and real content on each core page.
+ * Hermetic Playwright setup (issue #636). Two webServers:
+ *
+ * 1. A fixture-backed apps/server on :3774 -- `GAH_BINARY` points at the
+ *    fake `gah` fixture (apps/server/tests/fixtures/gah), so every REST/WS
+ *    call the web app makes is answered with deterministic recorded output
+ *    instead of a real gah binary + operator config. Runs against committed
+ *    fixture identity/registry files so it never writes into the repo.
+ *    Port 3774 (not 3773) so a real control plane / t3 server on 3773 never
+ *    leaks into the test.
+ * 2. The vite dev server on :3000, whose /api + /ws proxies target :3774.
+ *
+ * This is what makes `npm run e2e --workspace=apps/web` pass on a machine
+ * with no gah binary and no gah config.
  */
 export default defineConfig({
   testDir: './tests/e2e',
@@ -15,12 +23,25 @@ export default defineConfig({
     baseURL: 'http://localhost:3000',
     screenshot: 'only-on-failure'
   },
-  webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:3000',
-    reuseExistingServer: true,
-    timeout: 30_000
-  },
+  webServer: [
+    {
+      command:
+        'GAH_BINARY=./tests/fixtures/gah/gah ' +
+        'GAH_COORDINATOR_IDENTITY_PATH=./tests/fixtures/e2e/identity.json ' +
+        'GAH_REGISTRY_CONFIG_PATH=./tests/fixtures/e2e/registry.json ' +
+        'HOST=127.0.0.1 PORT=3774 npx tsx src/bin.ts',
+      cwd: '../server',
+      url: 'http://127.0.0.1:3774/health',
+      reuseExistingServer: false,
+      timeout: 60_000
+    },
+    {
+      command: 'VITE_PROXY_TARGET=http://localhost:3774 VITE_WS_PROXY_TARGET=ws://localhost:3774 npm run dev',
+      url: 'http://localhost:3000',
+      reuseExistingServer: false,
+      timeout: 30_000
+    }
+  ],
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } }
   ]
