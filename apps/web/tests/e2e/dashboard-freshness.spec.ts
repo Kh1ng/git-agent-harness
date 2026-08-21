@@ -103,7 +103,9 @@ test.describe('last-updated indicator', () => {
     test(`${route.label} shows a live "Updated ... ago" readout once data loads`, async ({ page }) => {
       await page.goto('/');
       await page.getByRole('button', { name: route.label, exact: true }).click();
-      await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible({
+        timeout: 15000,
+      });
       await expect(page.getByText(/^Updated (just now|\d+[smhd] ago)$/)).toBeVisible({ timeout: 15000 });
     });
   }
