@@ -447,6 +447,29 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "cli_command_path": "gah loop",
       "is_stable": true
     },
+
+    "node.register": {
+      "operation_id": "node.register",
+      "display_name": "Register Worker Node",
+      "class": "mutation",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [
+        {
+          "field_path": "secret_ref",
+          "is_secret": true,
+          "may_contain_secrets": true
+        }
+      ],
+      "remote_disposition": "local_only",
+      "local_only_reason": "security_sensitive",
+      "documentation": "Register this host as a worker node against the central registry (issue #944)",
+      "cli_command_path": "gah node register",
+      "is_stable": true
+    },
     "events.list": {
       "operation_id": "events.list",
       "display_name": "List Controller Events",
@@ -940,6 +963,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "gah config set": "config.set",
     "gah policy-check": "policy.check",
     "gah loop": "loop.run",
+    "gah node register": "node.register",
     "gah status": "status.get",
     "gah dispatch": "dispatch.run",
     "gah tui": "tui.run",
@@ -1006,6 +1030,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "candidates.convert": "filesystem_access_required",
     "server.start": "local_backend_execution_required",
     "loop.run": "local_backend_execution_required",
+    "node.register": "security_sensitive",
     "update.cli": "local_backend_execution_required",
     "init.create": "filesystem_access_required",
     "telemetry.export": "filesystem_access_required",

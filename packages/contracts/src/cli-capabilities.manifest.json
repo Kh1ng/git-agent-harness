@@ -357,6 +357,28 @@
       "cli_command_path": "gah loop",
       "is_stable": true
     },
+    "node.register": {
+      "operation_id": "node.register",
+      "display_name": "Register Worker Node",
+      "class": "mutation",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [
+        {
+          "field_path": "secret_ref",
+          "is_secret": true,
+          "may_contain_secrets": true
+        }
+      ],
+      "remote_disposition": "local_only",
+      "local_only_reason": "security_sensitive",
+      "documentation": "Register this host as a worker node against the central registry (issue #944)",
+      "cli_command_path": "gah node register",
+      "is_stable": true
+    },
     "external_approval.expire": {
       "operation_id": "external_approval.expire",
       "display_name": "Expire External Approval",
@@ -891,6 +913,7 @@
     "gah pm publish": "pm.publish",
     "gah ledger work": "ledger.work",
     "gah doctor": "doctor.validate",
+    "gah node register": "node.register",
     "gah config show": "config.show",
     "gah external-approval revoke": "external_approval.revoke"
   },
@@ -943,6 +966,7 @@
     "loop.run": "local_backend_execution_required",
     "server.start": "local_backend_execution_required",
     "telemetry.export": "filesystem_access_required",
-    "tui.run": "interactive_terminal_required"
+    "tui.run": "interactive_terminal_required",
+    "node.register": "security_sensitive"
   }
 }

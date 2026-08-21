@@ -393,6 +393,47 @@ pub enum Commands {
         #[command(subcommand)]
         command: ClaimsCommands,
     },
+    /// Register this host as a worker node against the central registry
+    /// (issue #944). Reads node identity from coordinator-identity.json and
+    /// POSTs it to the central node's /api/registry/nodes so the node becomes
+    /// claim-eligible under central claims arbitration (#882).
+    Node {
+        #[command(subcommand)]
+        command: NodeCommands,
+    },
+}
+
+/// Sub-actions of `gah node` (issue #944).
+#[derive(Subcommand)]
+pub enum NodeCommands {
+    /// Register this node with the central node's registry. Idempotent:
+    /// re-running against an already-registered node is a no-op success.
+    Register {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        /// Central node's base URL (e.g. https://hermesagent or
+        /// http://100.118.97.79). Defaults to `[defaults].registry_central_url`.
+        #[arg(long)]
+        central_url: Option<String>,
+        /// Override the advertised_url sent to the central (defaults to the
+        /// value in coordinator-identity.json).
+        #[arg(long)]
+        advertised_url: Option<String>,
+        /// "loopback" | "authenticated_remote" | "trusted_lan". Defaults to
+        /// "trusted_lan" (matches the self-hosted tailnet default; the central
+        /// must opt in with GAH_REGISTRY_ALLOW_INSECURE_LAN=1 to accept a
+        /// non-loopback trusted_lan endpoint over plain HTTP).
+        #[arg(long, default_value = "trusted_lan")]
+        transport_mode: String,
+        /// Secret reference the central uses to reach this node back
+        /// (env:VAR or file:path), if transport_mode requires it.
+        #[arg(long, default_value = "env:COORDINATOR_TOKEN")]
+        secret_ref: String,
+        /// Comma-separated profiles this node declares it dispatches.
+        /// Defaults to every configured profile.
+        #[arg(long)]
+        profiles: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

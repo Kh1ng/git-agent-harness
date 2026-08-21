@@ -412,6 +412,35 @@ blocks startup either, since failing closed on a flaky registry would be
 worse than the problem this exists to catch. See `crate::fleet_preflight`
 for the implementation.
 
+**Self-registration (issue #944)**: a node must be registered with the
+central before it can claim work -- `authorizeClaimRequest` refuses leases
+for unregistered nodes. `gah loop` now self-registers best-effort at
+startup (advisory: a failure warns loudly but never blocks the loop), and
+`gah node register` does it on demand. Both read the node's identity from
+`coordinator-identity.json` (the same file `apps/server` reads/writes) and
+POST it to the central's `/api/registry/nodes`:
+
+```bash
+gah node register \
+  --central-url https://central.example.com \
+  --transport-mode trusted_lan \
+  --secret-ref env:COORDINATOR_TOKEN \
+  --profiles gah,sportsball
+```
+
+`--transport-mode` defaults to `trusted_lan` (the self-hosted tailnet
+default); the loop-start self-registration reads `GAH_REGISTRY_TRANSPORT_MODE`
+and `GAH_REGISTRY_SECRET_REF` env vars (defaults `trusted_lan` /
+`env:COORDINATOR_TOKEN`). For a non-loopback `trusted_lan` endpoint over **plain HTTP**
+(e.g. `http://100.118.97.79` on a tailnet), the central must opt in with
+`GAH_REGISTRY_ALLOW_INSECURE_LAN=1` in its environment -- mirroring the
+Rust side's `GAH_COORDINATOR_INSECURE_TLS=1` -- otherwise registration is
+rejected (fail-closed default). The central also rejects any node that
+advertises the central node's own endpoint, which would make its liveness
+poller poll itself and recurse. Re-running registration against an
+already-registered node is an idempotent no-op (the central returns 409
+"Duplicate node ID", treated as success).
+
 ### Node liveness scheduler (issue #883)
 
 Before this, nothing polled registered nodes periodically -- `pollNodeObservation`
