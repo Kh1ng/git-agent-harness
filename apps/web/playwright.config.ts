@@ -17,6 +17,12 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './tests/e2e',
+  // Cap workers: the e2e suite shares one fixture-backed apps/server and one
+  // vite dev server, and 6 parallel browsers (fullyParallel's default on a
+  // 2-core CI runner) saturates them -- Settings serial-fetches
+  // profiles/config/doctor and intermittently fails its heading assertion
+  // under that load. 4 workers is stable across repeated full-suite runs.
+  workers: process.env.CI ? 4 : undefined,
   fullyParallel: true,
   reporter: 'list',
   use: {
