@@ -34,6 +34,7 @@ use std::fmt;
 #[cfg(test)]
 mod contract;
 pub mod fake;
+pub mod hermes;
 #[cfg(test)]
 mod tests;
 
@@ -52,6 +53,10 @@ pub struct GahSessionId(String);
 impl GahSessionId {
     pub fn new(profile: &str) -> Self {
         Self(format!("gah:manager:{profile}:{}", uuid::Uuid::new_v4()))
+    }
+
+    pub(crate) fn from_provider_session(profile: &str, provider_session_id: &str) -> Self {
+        Self(format!("gah:manager:{profile}:{provider_session_id}"))
     }
 
     pub fn as_str(&self) -> &str {
