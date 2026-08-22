@@ -8,7 +8,7 @@ import { spawn, spawnSync, SpawnOptions } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accessSync, constants, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { AsyncTtlCache } from './asyncTtlCache.js';
 import type {
   StatusSnapshot,
@@ -1131,11 +1131,11 @@ function appendClearArgs(
 /** A durable acknowledgement that the operator intentionally stopped this
  * profile through the control plane. The watchdog reads the same marker so it
  * does not turn a dashboard Stop into an immediate, invisible restart. */
-function loopManualStopFile(profile: string): string {
+export function loopManualStopFile(profile: string): string {
   return resolve(loopStateDir(), `loop-${profile.replace(/\//g, '_')}.manual-stop.json`);
 }
 
-function clearManualStop(profile: string): void {
+export function clearManualStop(profile: string): void {
   try {
     unlinkSync(loopManualStopFile(profile));
   } catch (error) {
@@ -1271,8 +1271,26 @@ export async function startLoop(profile: string): Promise<StartLoopResult> {
     };
   }
 
+  // An explicit dashboard Start is the operator saying "run this loop again",
+  // so it must clear the manual-stop marker BEFORE the unit starts -- the
+  // loop checks the marker at startup (it refuses to auto-resume after a
+  // reboot while the marker is present). Clearing before `systemctl start`
+  // avoids a race where the freshly-started loop sees the still-present
+  // marker and immediately refuses.
+  const hadManualStop = existsSync(loopManualStopFile(profile));
+  clearManualStop(profile);
+
   const result = runSystemctlUser('start', profile);
-  if (!result.ok) return { started: false, error: result.error };
+  if (!result.ok) {
+    // A failed start must leave the stop intent intact: restore the marker
+    // so a subsequent reboot does not auto-start a loop the operator had
+    // deliberately stopped.
+    if (hadManualStop) {
+      mkdirSync(loopStateDir(), { recursive: true });
+      writeFileSync(loopManualStopFile(profile), JSON.stringify({ stoppedAt: new Date().toISOString() }));
+    }
+    return { started: false, error: result.error };
+  }
 
   const status = getLoopStatus(profile);
   if (!status.running || status.owner !== 'systemd') {
@@ -1281,9 +1299,6 @@ export async function startLoop(profile: string): Promise<StartLoopResult> {
       error: `${loopServiceName(profile)} accepted the start request but is not active; inspect it with systemctl --user status ${loopServiceName(profile)}.`
     };
   }
-  // Only a confirmed systemd start clears the marker. A failed request must
-  // leave an intentional stop intentional rather than inviting watchdog churn.
-  clearManualStop(profile);
   return { started: true, pid: status.pid };
 }
 

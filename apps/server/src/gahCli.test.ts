@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 import {
   buildConfigSetArgs,
   buildProfileAddArgs,
   buildProfileSetArgs,
+  clearManualStop,
   findGahBinary,
+  loopManualStopFile,
   loopStateDir,
 } from './gahCli.js';
 
@@ -149,6 +153,57 @@ test('loop state fallback order is XDG_STATE_HOME then HOME then tmp', () => {
     join('/home/operator', '.local/state/gah'),
   );
   assert.equal(loopStateDir(null, {}), join('/tmp', 'gah'));
+});
+
+test('manual-stop marker is written under the resolved loop state dir and cleared by clearManualStop', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-manual-stop-'));
+  const originalConfig = process.env.GAH_CONFIG_PATH;
+  const originalState = process.env.XDG_STATE_HOME;
+  try {
+    // No config path resolves -> fallback to XDG_STATE_HOME/gah.
+    process.env.GAH_CONFIG_PATH = join(dir, 'nonexistent', 'config.toml');
+    process.env.XDG_STATE_HOME = dir;
+    delete process.env.GAH_CONFIG;
+
+    const marker = loopManualStopFile('gah');
+    assert.equal(marker, join(dir, 'gah', 'loop-gah.manual-stop.json'));
+
+    mkdirSync(join(dir, 'gah'), { recursive: true });
+    writeFileSync(marker, JSON.stringify({ stoppedAt: new Date().toISOString() }));
+    assert.ok(existsSync(marker), 'marker should exist after a dashboard Stop');
+
+    clearManualStop('gah');
+    assert.ok(!existsSync(marker), 'Start must clear the marker so the loop resumes');
+  } finally {
+    if (originalConfig === undefined) delete process.env.GAH_CONFIG_PATH;
+    else process.env.GAH_CONFIG_PATH = originalConfig;
+    if (originalState === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = originalState;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('manual-stop marker is profile-scoped', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-manual-stop-'));
+  const originalState = process.env.XDG_STATE_HOME;
+  try {
+    process.env.XDG_STATE_HOME = dir;
+    mkdirSync(join(dir, 'gah'), { recursive: true });
+    writeFileSync(
+      join(dir, 'gah', 'loop-sportsball.manual-stop.json'),
+      JSON.stringify({ stoppedAt: new Date().toISOString() }),
+    );
+    // A different profile's marker must not be cleared.
+    clearManualStop('gah');
+    assert.ok(
+      existsSync(join(dir, 'gah', 'loop-sportsball.manual-stop.json')),
+      'clearing one profile must not clear another profile marker',
+    );
+  } finally {
+    if (originalState === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = originalState;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('gah binary resolution probes candidates in order and falls back to PATH', () => {
