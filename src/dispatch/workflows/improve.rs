@@ -21,6 +21,7 @@ use super::super::validation::{
 use super::super::DispatchArgs;
 use super::already_satisfied_reconcile::AlreadySatisfiedRun;
 use crate::config::{self, GahConfig, Profile};
+use crate::controller::HumanRequiredReason;
 use crate::job_kind::JobKind;
 use crate::ledger::{self, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};
@@ -84,11 +85,7 @@ pub(crate) fn improve(
 
     let target = resolve_target(args, profile, &manual_fix)?;
 
-    // Try to resolve target as an issue number. Propagate a real fetch
-    // error (bad issue number, auth, rate limit) instead of silently
-    // swallowing it and dispatching an agent against garbage content --
-    // `resolve_target_to_issue_or_string` already returns `Ok(None)`
-    // cleanly for a target that isn't an issue reference at all.
+    // Resolve target as an issue number, propagating real fetch errors.
     let issue_details =
         resolve_target_to_issue_or_string(profile, &target, args.issue_intake_override)?;
     if issue_details.is_some() && args.issue_intake_override {
@@ -147,7 +144,6 @@ pub(crate) fn improve(
         route.effective_model.as_deref(),
     )?;
 
-    // Resolve env_file: use env_file_prod if --prod, otherwise env_file (dev)
     let resolved_env = if args.prod {
         profile.env_file_prod.as_deref().unwrap_or("")
     } else {
@@ -634,6 +630,13 @@ pub(crate) fn improve(
                     ),
                 )?;
                 worktree::cleanup(&wt, repo);
+                // Terminal refusal: gate to stop re-dispatch after reboot.
+                ledger.human_required = true;
+                ledger.human_required_reason_code = Some(
+                    HumanRequiredReason::TerminalHarnessFailure
+                        .as_str()
+                        .to_string(),
+                );
                 anyhow::bail!("backend descendant cleanup failed; refusing to retry");
             }
             if stalled_before_changes {

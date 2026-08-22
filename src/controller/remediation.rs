@@ -400,6 +400,15 @@ pub fn plan_remediation(context: RemediationContext<'_>) -> RemediationPlan {
             "The same lifecycle action repeated without an observable state transition; inspect and correct the work item before explicitly releasing its gate",
             inspect_actions(profile_name, work_id, reference),
         ),
+        HumanRequiredReason::TerminalHarnessFailure => no_auto(
+            profile_name,
+            work_id,
+            reference,
+            reason_code,
+            RemediationAuthority::Operator,
+            "The dispatch reached a terminal harness refusal and declined to retry (e.g. descendant cleanup failed); inspect the work item and the backend/harness state before explicitly releasing its gate",
+            inspect_actions(profile_name, work_id, reference),
+        ),
         HumanRequiredReason::Unknown => no_auto(
             profile_name,
             work_id,
