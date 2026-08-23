@@ -21,6 +21,7 @@ const VIEWPORTS = [
 
 const ROUTES: { label: string; heading: string }[] = [
   { label: 'Overview', heading: 'Overview' },
+  { label: 'Manager Chat', heading: 'Manager Chat' },
   { label: 'Work', heading: 'Work' },
   { label: 'Telemetry', heading: 'Telemetry' },
   { label: 'Quota', heading: 'Quota' },
@@ -65,12 +66,58 @@ for (const viewport of VIEWPORTS) {
 test.describe('desktop content', () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test('sidebar navigation is present with all six sections', async ({ page }) => {
+  test('sidebar navigation is present with every primary section', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: 'Primary' });
     for (const route of ROUTES) {
       await expect(nav.getByRole('button', { name: route.label, exact: true })).toBeVisible();
     }
+  });
+
+  test('manager chat switches backend in place and shows project node context', async ({ page }) => {
+    let backend = 'hermes';
+    await page.route('**/api/profiles', (route) => route.fulfill({
+      json: [{
+        name: 'gah',
+        display_name: 'Git Agent Harness',
+        provider: 'github',
+        repo: 'Kh1ng/git-agent-harness',
+        local_path: '/workspace/git-agent-harness'
+      }]
+    }));
+    await page.route('**/api/manager-chat/settings', async (route) => {
+      if (route.request().method() === 'POST') {
+        const body = route.request().postDataJSON() as { profileOverrides?: Record<string, string> };
+        backend = body.profileOverrides?.gah ?? backend;
+        await route.fulfill({ json: { success: true } });
+        return;
+      }
+      await route.fulfill({
+        json: {
+          defaultBackend: 'hermes',
+          profileOverrides: backend === 'hermes' ? {} : { gah: backend },
+          availableBackends: [
+            { id: 'hermes', displayName: 'Hermes', implemented: true },
+            { id: 'codex', displayName: 'Codex', implemented: true }
+          ]
+        }
+      });
+    });
+    await page.route('**/api/manager-chat/commands**', (route) => route.fulfill({ json: { commands: [] } }));
+    await page.route('**/api/manager-chat/models**', (route) => route.fulfill({ json: { models: [], currentModelId: null } }));
+    await page.route('**/api/registry/fleet**', (route) => route.fulfill({
+      json: [{ node_id: 'node-1', display_name: 'Build Mac', state: 'healthy' }]
+    }));
+
+    await page.goto('/');
+    await navigateTo(page, 'Manager Chat', false);
+    await expect(page.getByText('Shared project context')).toBeVisible();
+    await expect(page.getByText('Build Mac')).toBeVisible();
+    const backendPicker = page.getByLabel('Backend');
+    await expect(backendPicker).toHaveValue('hermes');
+    await backendPicker.selectOption('codex');
+    await expect(backendPicker).toHaveValue('codex');
+    await expect(page.getByRole('heading', { name: 'Manager Chat' })).toBeVisible();
   });
 
   test('theme toggle switches data-theme attribute', async ({ page }) => {
