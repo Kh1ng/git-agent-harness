@@ -21,6 +21,7 @@ export type ChatSessionEvent =
   | ChatAssistantChunk
   | ChatAssistantMessage
   | ChatToolResult
+  | ChatHarnessError
   | ChatHumanCommand
   | ChatCompactionStart
   | ChatCompactionSummary
@@ -94,12 +95,21 @@ export interface ChatUsage {
   duration_seconds: number | null;
 }
 
-/** A backend/harness tool result surfaced in chat (e.g. /command output). */
+/** A backend tool result surfaced in chat (e.g. /command output). */
 export interface ChatToolResult {
   type: 'tool/result';
   seq: number;
   turn: number;
   name: string;
+  text: string;
+  timestamp: number;
+}
+
+/** An infrastructure failure shown in chat but never replayed to a model. */
+export interface ChatHarnessError {
+  type: 'harness/error';
+  seq: number;
+  turn: number;
   text: string;
   timestamp: number;
 }

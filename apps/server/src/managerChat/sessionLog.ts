@@ -165,7 +165,7 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
   }
 
   const history: ChatTranscriptTurn[] = [];
-  for (const event of events) {
+  for (const [index, event] of events.entries()) {
     if (event.type === 'user/message' && event.source === 'prompt') {
       const prompt = prompts.get(event.turn) ?? event;
       history.push({ role: 'user', text: prompt.text, timestamp: prompt.timestamp });
@@ -178,13 +178,21 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
         model: event.model,
         usage: event.usage
       });
-    } else if (event.type === 'tool/result') {
+    } else if (event.type === 'tool/result' && !isLegacyHarnessError(events, index)) {
       history.push({ role: 'system', text: `[${event.name}] ${event.text}`, timestamp: event.timestamp });
     } else if (event.type === 'compaction/summary') {
       history.push({ role: 'system', text: event.summary, timestamp: event.timestamp });
     }
   }
   return history;
+}
+
+function isLegacyHarnessError(events: ChatSessionEvent[], index: number): boolean {
+  const event = events[index];
+  const end = events[index + 1];
+  return event.type === 'tool/result' && event.name === 'error' &&
+    end?.type === 'turn/end' && end.turn === event.turn &&
+    end.reason.kind === 'error' && end.reason.message === event.text;
 }
 
 function completedCompactionBoundary(events: ChatSessionEvent[]): number {
@@ -262,6 +270,9 @@ export function foldSession(
         break;
       case 'tool/result':
         turns.push({ role: 'system', text: `[${e.name}] ${e.text}`, timestamp: e.timestamp });
+        break;
+      case 'harness/error':
+        turns.push({ role: 'system', text: `[error] ${e.text}`, timestamp: e.timestamp });
         break;
       case 'human/command':
         if (turns.at(-1)?.role !== 'assistant' || turns.at(-1)?.text !== e.result) {

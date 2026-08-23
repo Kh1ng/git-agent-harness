@@ -15,6 +15,8 @@ test('profile changes reject stale chat replies and control data', async ({ page
   let releaseAlpha!: () => void;
   const alphaGate = new Promise<void>((resolve) => { releaseAlpha = resolve; });
   let settingsCalls = 0;
+  let holdAlphaHistory = false;
+  let heldAlphaHistory = '';
 
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url());
@@ -56,14 +58,16 @@ test('profile changes reject stale chat replies and control data', async ({ page
     ws.onMessage((raw) => {
       const message = JSON.parse(String(raw));
       if (message.type === 'manager.chat.historyRequest') {
-        ws.send(JSON.stringify({
+        const response = JSON.stringify({
           type: 'manager.chat.history',
           requestId: message.requestId,
           profile: message.profile,
           turns: [],
           cursor: 0,
           streaming: null
-        }));
+        });
+        if (holdAlphaHistory && message.profile === 'alpha') heldAlphaHistory = response;
+        else ws.send(response);
       } else if (message.type === 'manager.chat.send') {
         alphaRequestId = message.requestId;
       }
@@ -79,6 +83,12 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await expect.poll(() => alphaRequestId).not.toBe('');
   socket!.send(JSON.stringify({ type: 'manager.chat.updated', profile: 'alpha', requestId: 'another-tab' }));
   await expect(page.getByText('Thinking…')).toBeVisible();
+  holdAlphaHistory = true;
+  socket!.send(JSON.stringify({ type: 'manager.chat.updated', profile: 'alpha', requestId: alphaRequestId }));
+  await expect.poll(() => heldAlphaHistory).not.toBe('');
+  await page.getByPlaceholder(/Message the manager/).fill('second question');
+  await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
+  socket!.send(heldAlphaHistory);
 
   await page.getByLabel('Node / profile').selectOption('beta');
   await expect(page.getByRole('heading', { name: 'beta', exact: true })).toBeVisible();

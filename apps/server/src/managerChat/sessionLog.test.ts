@@ -97,6 +97,30 @@ test('tool and slash-command results survive the event log', () => {
   }
 });
 
+test('synthetic harness errors do not become model context', () => {
+  const legacyEvents: ChatSessionEvent[] = [
+    turnStart(1, 1),
+    userMsg(1, 2, 'question'),
+    { type: 'tool/result', seq: 3, turn: 1, name: 'error', text: 'provider failed', timestamp: 3 },
+    { type: 'turn/end', seq: 4, turn: 1, reason: { kind: 'error', message: 'provider failed' }, timestamp: 4 }
+  ];
+  const events: ChatSessionEvent[] = [
+    turnStart(1, 1),
+    userMsg(1, 2, 'question'),
+    { type: 'harness/error', seq: 3, turn: 1, text: 'provider failed', timestamp: 3 },
+    { type: 'turn/end', seq: 4, turn: 1, reason: { kind: 'error', message: 'provider failed' }, timestamp: 4 }
+  ];
+  const realErrorTool: ChatSessionEvent[] = [
+    turnStart(1, 1), userMsg(1, 2, 'question'),
+    { type: 'tool/result', seq: 3, turn: 1, name: 'error', text: 'model-visible', timestamp: 3 },
+    assistantMsg(1, 4, 'answer'), turnEnd(1, 5)
+  ];
+
+  assert.deepEqual(deriveModelHistory(legacyEvents).map((turn) => turn.text), ['question']);
+  assert.deepEqual(deriveModelHistory(events).map((turn) => turn.text), ['question']);
+  assert.deepEqual(deriveModelHistory(realErrorTool).map((turn) => turn.text), ['question', '[error] model-visible', 'answer']);
+});
+
 test('a completed compaction makes its turn the new history boundary', () => {
   const events: ChatSessionEvent[] = [
     turnStart(1, 1), userMsg(1, 2, 'old'), assistantMsg(1, 3, 'old answer'), turnEnd(1, 4),

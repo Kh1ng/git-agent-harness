@@ -41,7 +41,7 @@ export function ManagerChatPage() {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [draft, setDraft] = useState('');
   const [pendingRequest, setPendingRequest] = useState<PendingRequest | null>(null);
-  const [restoredStreaming, setRestoredStreaming] = useState(false);
+  const [remoteTurnBusy, setRemoteTurnBusy] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [activeBackend, setActiveBackend] = useState<string | null>(null);
   const [commands, setCommands] = useState<ManagerCommandInfo[]>([]);
@@ -68,7 +68,7 @@ export function ManagerChatPage() {
     setHistoryLoaded(false);
     setTurns([]);
     setPendingRequest(null);
-    setRestoredStreaming(false);
+    setRemoteTurnBusy(false);
     if (!isConnected) return;
     const requestId = generateRequestId();
     historyRequestId.current = requestId;
@@ -145,13 +145,14 @@ export function ManagerChatPage() {
       }
       setTurns(restored);
       setHistoryLoaded(true);
-      setRestoredStreaming(Boolean(last.streaming));
+      setPendingRequest(null);
+      setRemoteTurnBusy(Boolean(last.streaming));
       return;
     }
 
     if (last.type === 'manager.chat.updated' && last.profile === profile) {
       if (pendingRequest && last.requestId !== pendingRequest.id) return;
-      setPendingRequest(null);
+      setRemoteTurnBusy(true);
       const requestId = generateRequestId();
       historyRequestId.current = requestId;
       sendMessage({ type: 'manager.chat.historyRequest', requestId, profile });
@@ -173,10 +174,9 @@ export function ManagerChatPage() {
     } else if (last.type === 'error') {
       setTurns((prev) => [...prev, { role: 'error', text: last.error }]);
     }
-    setPendingRequest(null);
   }, [messages, pendingRequest, profile]);
 
-  const isBusy = pendingRequest !== null || restoredStreaming;
+  const isBusy = pendingRequest !== null || remoteTurnBusy;
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth' });

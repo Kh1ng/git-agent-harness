@@ -191,7 +191,7 @@ export function sendManagerChatMessage(profile: string, message: string): Promis
       await chunkWriter?.close().catch(() => undefined);
       const text = error instanceof Error ? error.message : String(error);
       const done: ChatSessionEvent[] = [
-        { type: 'tool/result', seq: ++seq, turn: turnNo, name: 'error', text, timestamp: Date.now() },
+        { type: 'harness/error', seq: ++seq, turn: turnNo, text, timestamp: Date.now() },
         { type: 'turn/end', seq: ++seq, turn: turnNo, reason: { kind: 'error', message: text }, timestamp: Date.now() }
       ];
       appendEvents(profile, done, logOptions);
