@@ -92,30 +92,6 @@ impl HumanRequiredReason {
         }
     }
 
-    /// Return a human-readable description of this reason code.
-    #[allow(dead_code)]
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::PolicyApproval => "Policy or approval requires human judgment",
-            Self::RetryBudgetExhausted => "Retry budget exhausted",
-            Self::ReviewEvidenceGate => "Review evidence gate requires human judgment",
-            Self::ReviewOutputInvalidExhausted => {
-                "All configured reviewers returned invalid repair evidence"
-            }
-            Self::ReviewCeilingExhausted => "Review hard-ceiling exhausted",
-            Self::MergePolicy => "Merge policy forbids auto-merge",
-            Self::PublishingRestriction => "Publishing policy forbids PR/MR creation",
-            Self::ConfigurationInfra => "Configuration or infrastructure failure",
-            Self::FixRetryCapExceeded => "Fix retry cap exceeded for MR",
-            Self::MergeRetryCapExceeded => "Merge retry cap exceeded for MR",
-            Self::StuckLoopGate => "Repeated lifecycle action made no observable progress",
-            Self::TerminalHarnessFailure => {
-                "Dispatch reached a terminal harness refusal and declined to retry"
-            }
-            Self::Unknown => "Unknown reason",
-        }
-    }
-
     /// Parse a reason code from its wire-format string.
     /// Returns `Unknown` for unrecognized strings to ensure historical records
     /// without a code deserialize as unknown.
@@ -138,7 +114,7 @@ impl HumanRequiredReason {
     }
 
     /// Returns all known reason codes for table-driven testing.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn all() -> &'static [Self] {
         &[
             Self::PolicyApproval,
