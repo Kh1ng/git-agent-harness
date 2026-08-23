@@ -84,16 +84,11 @@ The updater never starts or restarts a recurring `gah loop`; with
   pool. `KillMode=control-group` ensures an operator stop or parent failure
   kills every concurrent backend child; do not wrap it in a shell supervisor
   or start a detached `gah loop` by hand.
-  The unit is enabled at `default.target`, so it starts at login/boot. A
-  dashboard **Stop** writes a durable *manual-stop marker*
-  (`loopStateDir()/loop-<profile>-<config-file>.manual-stop.json`, next to the profile lock
-  under `.gah-locks`, or `$XDG_STATE_HOME/gah` when the server can't resolve a
-  config path). `gah loop` honors that marker at startup and refuses to begin
-  dispatching while it is present — so a deliberately-stopped loop does not
-  come back to life after a reboot and start re-dispatching jobs. An explicit
-  dashboard **Start** clears the marker before it starts the unit; a failed
-  start restores it so the stop intent survives. Starting the unit directly
-  does not clear the marker; use the dashboard Start action to resume it.
+  The dashboard owns boot policy through systemd itself. **Stop** runs
+  `systemctl --user disable --now gah-loop@<profile>` so the loop stops and
+  stays stopped after reboot. **Start** runs `enable --now`, so it starts now
+  and at the next login. A direct `systemctl --user start` also starts a
+  disabled unit for the current login without changing its next-boot policy.
 - **`gah-watchdog`** (`.service` + `.timer`) — an **alert-only** health check
   for `gah-loop@<profile>.service` units (issue #726). Every profile
   configured in `gah`'s config gets checked (`--profile` scopes it to one).
