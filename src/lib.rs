@@ -14,6 +14,7 @@ pub mod config;
 pub mod config_show;
 pub mod context;
 pub mod controller;
+mod curl_http;
 pub mod dispatch;
 pub mod doctor;
 pub mod events;

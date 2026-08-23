@@ -1,4 +1,8 @@
 import type { ActiveClaim, AvailabilityScope, BackendInstanceSummary, RecentLedgerSummary } from './gah.js';
+import coordinatorProtocol from './coordinator-protocol.json';
+
+export const COORDINATOR_VERSION = coordinatorProtocol.version;
+export const COORDINATOR_SCHEMA_SEED = coordinatorProtocol.schema_seed;
 
 export interface RegisteredNode {
   node_id: string;

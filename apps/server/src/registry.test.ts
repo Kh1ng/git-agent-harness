@@ -391,6 +391,27 @@ test('RegistryService rejects a node advertising the central node\'s own endpoin
   }
 });
 
+test('RegistryService rejects a loopback alias when the central advertises a tailnet address', () => {
+  const tempPath = createTempRegistryFile();
+  const registry = new RegistryService(tempPath, 'http://100.118.97.79:3773');
+
+  try {
+    assert.throws(() => {
+      registry.registerNode({
+        node_id: 'self-poll-alias',
+        display_name: 'Bad Node',
+        advertised_url: 'http://127.0.0.1:3773',
+        version: '0.1.0',
+        schema_digest: COORDINATOR_SCHEMA_DIGEST,
+        transport_mode: 'loopback',
+        secret_ref: 'env:NODE_SECRET'
+      });
+    }, /central node's own endpoint/);
+  } finally {
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+  }
+});
+
 test('RegistryService rejects an unrecognized transport_mode instead of silently skipping TLS enforcement', () => {
   const tempPath = createTempRegistryFile();
   const registry = new RegistryService(tempPath);

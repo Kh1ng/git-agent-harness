@@ -37,6 +37,18 @@ export function getEndpoint(urlStr: string): string {
   }
 }
 
+function isCentralEndpoint(candidateUrl: string, advertisedCentralUrl: string): boolean {
+  if (getEndpoint(candidateUrl) === getEndpoint(advertisedCentralUrl)) return true;
+  try {
+    const candidate = new URL(candidateUrl);
+    const central = new URL(advertisedCentralUrl);
+    const port = (url: URL) => url.port || (url.protocol === 'https:' || url.protocol === 'wss:' ? '443' : '80');
+    return isLoopback(candidateUrl) && port(candidate) === port(central);
+  } catch {
+    return false;
+  }
+}
+
 /** Normalizes every loopback spelling to one canonical host so endpoint
  * collision/self-poll comparisons don't treat `localhost:3773` and
  * `127.0.0.1:3773` as different endpoints (they resolve to the same node). */
@@ -269,11 +281,11 @@ export class RegistryService {
    * must never register a node whose advertised_url is the central node's
    * own endpoint -- the liveness scheduler would poll the central's own
    * /api/status and recurse (observed live: every fleet/status call 502s). */
-  private selfEndpoint: string | null;
+  private selfUrl: string | null;
 
   constructor(configPath?: string, selfEndpoint?: string) {
     this.configPath = configPath || process.env.GAH_REGISTRY_CONFIG_PATH || resolve(process.cwd(), 'config/registry-config.json');
-    this.selfEndpoint = selfEndpoint ? getEndpoint(selfEndpoint) : null;
+    this.selfUrl = selfEndpoint ?? null;
     this.load();
   }
 
@@ -608,7 +620,7 @@ export class RegistryService {
     // itself and recurse until timeout (observed live: /api/status and
     // /api/registry/fleet both 502). Loopback spellings are normalized so
     // "localhost:3773" and "127.0.0.1:3773" both trip this.
-    if (this.selfEndpoint && getEndpoint(node.advertised_url) === this.selfEndpoint) {
+    if (this.selfUrl && isCentralEndpoint(node.advertised_url, this.selfUrl)) {
       throw new Error(
         `Refusing to register: advertised_url '${node.advertised_url}' is this central node's own endpoint (would make the central poll itself). A worker must advertise its own reachable URL.`
       );

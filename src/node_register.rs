@@ -20,10 +20,10 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use url::Url;
 
 /// The identity file `apps/server` reads/writes, in priority order.
@@ -34,15 +34,25 @@ pub fn resolve_identity_path() -> PathBuf {
     PathBuf::from("config/coordinator-identity.json")
 }
 
-const COORDINATOR_SCHEMA_DIGEST: &str =
-    "5e1cb8d202da8fc4d1b7ab0345c37eaf34d8a67d38e2c9ed72e9bdf033768806";
+#[derive(Deserialize)]
+struct CoordinatorProtocol {
+    version: String,
+    schema_seed: String,
+}
+
+fn coordinator_protocol() -> CoordinatorProtocol {
+    serde_json::from_str(include_str!(
+        "../packages/contracts/src/coordinator-protocol.json"
+    ))
+    .expect("coordinator protocol manifest must be valid JSON")
+}
 
 fn default_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    coordinator_protocol().version
 }
 
 fn default_schema_digest() -> String {
-    COORDINATOR_SCHEMA_DIGEST.to_string()
+    format!("{:x}", Sha256::digest(coordinator_protocol().schema_seed))
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -138,68 +148,8 @@ pub struct CurlRegisterTransport;
 
 impl RegisterTransport for CurlRegisterTransport {
     fn post(&self, url: &str, body: &str, token: Option<&str>) -> Result<(u16, Vec<u8>)> {
-        // Config-from-stdin (`-K -`) keeps the body and Bearer token out of
-        // argv/ps, matching src/central_claims.rs and src/fleet_preflight.rs.
-        let status_marker = "__GAH_REGISTER_STATUS__:";
-        let mut cmd = Command::new("curl");
-        cmd.args([
-            "-sS",
-            "--max-time",
-            "15",
-            "-K",
-            "-",
-            "-w",
-            &format!("\n{status_marker}%{{http_code}}\n"),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-        crate::runner::process::arm_child_pdeathsig(&mut cmd);
-        let mut child = cmd.spawn().context("spawning curl for node registration")?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let escaped_url = url.replace('\\', "\\\\").replace('"', "\\\"");
-            let escaped_body = body.replace('\\', "\\\\").replace('"', "\\\"");
-            let mut config = format!(
-                "silent\nurl = \"{escaped_url}\"\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\ndata = \"{escaped_body}\"\n"
-            );
-            if let Some(ca) = std::env::var("GAH_COORDINATOR_CA_CERT")
-                .ok()
-                .filter(|s| !s.is_empty())
-            {
-                let escaped_ca = ca.replace('\\', "\\\\").replace('"', "\\\"");
-                config.push_str(&format!("cacert = \"{escaped_ca}\"\n"));
-            } else if std::env::var("GAH_COORDINATOR_INSECURE_TLS")
-                .ok()
-                .as_deref()
-                == Some("1")
-            {
-                config.push_str("insecure\n");
-            }
-            if let Some(t) = token {
-                let escaped = t.replace('\\', "\\\\").replace('"', "\\\"");
-                config.push_str(&format!("header = \"Authorization: Bearer {escaped}\"\n"));
-            }
-            stdin.write_all(config.as_bytes())?;
-        }
-        let output = child.wait_with_output().context("waiting for curl")?;
-        if !output.status.success() {
-            bail!(
-                "node registration request failed (curl exit {:?}): {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let marker_idx = stdout.rfind(status_marker).ok_or_else(|| {
-            anyhow::anyhow!("node registration output missing status marker (malformed response?)")
-        })?;
-        let status: u16 = stdout[marker_idx + status_marker.len()..]
-            .trim()
-            .parse()
-            .context("parsing HTTP status from node registration output")?;
-        let response_body = stdout[..marker_idx].trim_end().as_bytes().to_vec();
-        Ok((status, response_body))
+        let response = crate::curl_http::request("POST", url, Some(body), token, 15)?;
+        Ok((response.status, response.body))
     }
 }
 
@@ -439,7 +389,7 @@ mod tests {
         .unwrap();
         let identity = read_identity(&path).unwrap();
         assert_eq!(identity.version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(identity.schema_digest, COORDINATOR_SCHEMA_DIGEST);
+        assert_eq!(identity.schema_digest, default_schema_digest());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import crypto from 'node:crypto';
+import { COORDINATOR_SCHEMA_SEED, COORDINATOR_VERSION } from '@git-agent-harness/contracts';
 
 export interface CoordinatorIdentity {
   node_id: string;
@@ -12,7 +13,7 @@ export interface CoordinatorIdentity {
 
 export const COORDINATOR_SCHEMA_DIGEST = crypto
   .createHash('sha256')
-  .update('gah-coordinator-v1')
+  .update(COORDINATOR_SCHEMA_SEED)
   .digest('hex');
 
 let cachedIdentity: { cacheKey: string; identity: CoordinatorIdentity } | null = null;
@@ -28,7 +29,7 @@ export function getCoordinatorIdentity(
   let node_id: string;
   let display_name = 'GAH Coordinator';
   let advertised_url = `http://localhost:${port}`;
-  const version = '0.1.0';
+  const version = COORDINATOR_VERSION;
   const schema_digest = COORDINATOR_SCHEMA_DIGEST;
 
   if (existsSync(identityPath)) {
