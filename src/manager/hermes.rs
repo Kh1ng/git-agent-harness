@@ -137,6 +137,8 @@ struct HermesTransport {
     next_id: u64,
     supports_load_session: bool,
     supports_resume: bool,
+    #[cfg(test)]
+    fail_request: Option<&'static str>,
 }
 
 impl HermesTransport {
@@ -169,6 +171,8 @@ impl HermesTransport {
             next_id: 1,
             supports_load_session: false,
             supports_resume: false,
+            #[cfg(test)]
+            fail_request: None,
         })
     }
 
@@ -197,6 +201,11 @@ impl HermesTransport {
     }
 
     fn send_request(&mut self, method: &str, params: Value) -> Result<u64> {
+        #[cfg(test)]
+        if self.fail_request == Some(method) {
+            self.fail_request = None;
+            return Err(anyhow!("injected {method} enqueue failure"));
+        }
         let id = self.next_id;
         self.next_id += 1;
         self.write_json(&json!({
@@ -514,6 +523,12 @@ impl HermesManagerSession {
         );
     }
 
+    fn discard_started_session(&mut self, session: &GahSessionId, provider_session_id: &str) {
+        let _ = self.transport.cancel(provider_session_id);
+        self.sessions.remove(session);
+        self.prompt_requests.retain(|_, id| id != session);
+    }
+
     fn handle_message(&mut self, message: Value) -> Result<()> {
         if self.transport.respond_to_server_request(&message)? {
             return Ok(());
@@ -628,16 +643,14 @@ impl ManagerSession for HermesManagerSession {
             SessionStatus::Idle,
         );
         if let Err(error) = self.prompt(&gah_session_id, &request.instruction) {
-            self.sessions.remove(&gah_session_id);
+            self.discard_started_session(&gah_session_id, &provider_session_id);
             return Err(error)
                 .with_context(|| format!("prompting Hermes session {provider_session_id}"));
         }
         if let Err(error) =
             persist_mapping(&self.session_dir, &gah_session_id, &provider_session_id)
         {
-            let _ = self.transport.cancel(&provider_session_id);
-            self.sessions.remove(&gah_session_id);
-            self.prompt_requests.retain(|_, id| id != &gah_session_id);
+            self.discard_started_session(&gah_session_id, &provider_session_id);
             return Err(error);
         }
         Ok(gah_session_id)
@@ -1080,6 +1093,30 @@ exec python3 -u "$tmp" "$@"
             .is_err());
         assert!(session.sessions.is_empty());
         assert!(session.prompt_requests.is_empty());
+    }
+
+    #[test]
+    fn failed_initial_prompt_cancels_the_provider_session() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_json_rpc_hermes(&f.bin_dir, &f.record_dir);
+        let mut session = HermesManagerSession::new_with_session_dir(
+            f.bin_dir.join("hermes"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        session.transport.fail_request = Some("session/prompt");
+
+        assert!(session
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "hello".into(),
+            })
+            .is_err());
+        assert!(session.sessions.is_empty());
+        assert!(session.prompt_requests.is_empty());
+        let requests = fs::read_to_string(f.record_dir.join("requests.jsonl")).unwrap();
+        assert!(requests.contains("session/cancel"));
     }
 
     #[test]
