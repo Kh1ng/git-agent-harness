@@ -620,8 +620,7 @@ pub(crate) fn improve(
                 );
             }
             if cleanup_failed {
-                // Set the durable gate before cleanup operations that can fail;
-                // the outer dispatch boundary persists this ledger on every exit.
+                // Set the durable gate before fallible cleanup; the outer boundary persists it.
                 ledger.human_required = true;
                 ledger.human_required_reason_code = Some(
                     HumanRequiredReason::TerminalHarnessFailure
