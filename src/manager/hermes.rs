@@ -911,6 +911,7 @@ exec python3 -u "$tmp" "$@"
 
     #[test]
     fn discover_reports_version_and_redacted_auth_state() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_fake_bin(
             &f.bin_dir,
@@ -925,6 +926,7 @@ exec python3 -u "$tmp" "$@"
 
     #[test]
     fn discovery_does_not_retain_failed_status_output() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_fake_bin(
             &f.bin_dir,
