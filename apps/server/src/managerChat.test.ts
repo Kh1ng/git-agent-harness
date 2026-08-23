@@ -3,10 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { isCompactionCommand } from './managerChat/ManagerChatManager.js';
+import { compactionSummary, isCompactionCommand } from './managerChat/ManagerChatManager.js';
 import { normalizeRemoteUrl } from './managerChat/memoryGatewayClient.js';
 import { modelOverrideForProfile, setModelOverrideForProfile } from './managerChat/settingsStore.js';
-import { historyDelta, resumePrompt } from './managerChat/acpAdapter.js';
+import { historyDelta, readModelConfig, resumePrompt, toChatUsage } from './managerChat/acpAdapter.js';
 
 test('isCompactionCommand recognizes known compact/clear synonyms across backends', () => {
   assert.equal(isCompactionCommand('/compact'), true);
@@ -25,6 +25,12 @@ test('isCompactionCommand ignores unrelated slash commands and plain text', () =
   assert.equal(isCompactionCommand('/'), false);
 });
 
+test('compaction always leaves a durable replacement summary', () => {
+  assert.equal(compactionSummary('/reset', 'Reset complete.'), 'Conversation cleared.');
+  assert.equal(compactionSummary('/compact', 'Earlier decisions and context.'), 'Earlier decisions and context.');
+  assert.equal(compactionSummary('/compact', ''), 'Context compacted.');
+});
+
 test('resumePrompt restores prior roles only for a fresh conversation', () => {
   assert.equal(resumePrompt('next', []), 'next');
   assert.match(resumePrompt('next', [
@@ -38,6 +44,42 @@ test('historyDelta catches up a backend without replaying turns it already knows
   const second = { role: 'assistant' as const, text: 'second', timestamp: 2 };
   assert.deepEqual(historyDelta([first], [first, second]), [second]);
   assert.equal(historyDelta([second], [first, second]), null);
+});
+
+test('ACP usage is attributed to the turn with a session-cost delta', () => {
+  assert.deepEqual(toChatUsage(
+    { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    { used: 12, size: 100, cost: { amount: 0.5, currency: 'USD' } },
+    0.25,
+    2500
+  ), {
+    input_tokens: 10,
+    output_tokens: 5,
+    total_tokens: 15,
+    estimated_cost_usd: 0.25,
+    duration_seconds: 2.5
+  });
+});
+
+test('ACP model config drives the existing model picker', () => {
+  assert.deepEqual(readModelConfig([{
+    id: 'model',
+    name: 'Model',
+    category: 'model',
+    type: 'select',
+    currentValue: 'fast',
+    options: [
+      { value: 'fast', name: 'Fast' },
+      { value: 'deep', name: 'Deep', description: 'More reasoning' }
+    ]
+  }]), {
+    models: [
+      { id: 'fast', name: 'Fast', description: undefined },
+      { id: 'deep', name: 'Deep', description: 'More reasoning' }
+    ],
+    currentModelId: 'fast',
+    configId: 'model'
+  });
 });
 
 test('normalizeRemoteUrl collapses https/ssh/scp variants of the same remote', () => {

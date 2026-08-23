@@ -16,7 +16,8 @@ import {
   mkdirSync,
   readFileSync,
   appendFileSync,
-  existsSync
+  existsSync,
+  createWriteStream
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type {
@@ -86,6 +87,31 @@ export function appendEvents(profile: string, events: ChatSessionEvent[], opts: 
   appendFileSync(path, payload, 'utf8');
 }
 
+/** Stream high-frequency events without blocking Node's event loop per chunk. */
+export function createEventWriter(profile: string, opts: SessionLogOptions = {}) {
+  const path = chatLogPath(profile, opts);
+  mkdirSync(dirname(path), { recursive: true });
+  const stream = createWriteStream(path, { flags: 'a', encoding: 'utf8' });
+  let failure: Error | undefined;
+  let closePromise: Promise<void> | undefined;
+  stream.on('error', (error) => { failure = error; });
+
+  return {
+    append(event: ChatSessionEvent): void {
+      if (failure) throw failure;
+      stream.write(`${JSON.stringify(event)}\n`);
+    },
+    close(): Promise<void> {
+      if (failure) return Promise.reject(failure);
+      closePromise ??= new Promise<void>((resolve, reject) => {
+        stream.once('error', reject);
+        stream.end(() => failure ? reject(failure) : resolve());
+      });
+      return closePromise;
+    }
+  };
+}
+
 /**
  * Load + repair: read the log, and for any turn left open by a crash append a
  * synthetic turn/end { kind: 'interrupted' }. Returns the durable event list.
@@ -130,7 +156,7 @@ export function loadLog(
 
 /** Derive the exact user and assistant messages used to resume a model. */
 export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTurn[] {
-  events = events.slice(completedCompactionStart(events));
+  events = events.slice(completedCompactionBoundary(events));
   const prompts = new Map<number, ChatUserMessage>();
   for (const event of events) {
     if (event.type === 'user/message' && (event.source === 'inject' || !prompts.has(event.turn))) {
@@ -159,7 +185,7 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
   return history;
 }
 
-function completedCompactionStart(events: ChatSessionEvent[]): number {
+function completedCompactionBoundary(events: ChatSessionEvent[]): number {
   let end = -1;
   for (let index = events.length - 1; index >= 0; index--) {
     if (events[index].type === 'compaction/end') {
@@ -169,6 +195,11 @@ function completedCompactionStart(events: ChatSessionEvent[]): number {
   }
   if (end < 0) return 0;
   const turn = events[end].turn;
+  for (let index = end; index >= 0; index--) {
+    const event = events[index];
+    if (event.type === 'compaction/summary' && event.turn === turn) return index;
+  }
+  // Old logs predate required summaries. Preserve their former boundary.
   for (let index = end; index >= 0; index--) {
     const event = events[index];
     if (event.type === 'compaction/start' && event.turn === turn) return index;
@@ -193,7 +224,7 @@ export function foldSession(
   let partialText = '';
   let openTurn: number | null = null;
 
-  for (const e of events.slice(completedCompactionStart(events))) {
+  for (const e of events.slice(completedCompactionBoundary(events))) {
     switch (e.type) {
       case 'turn/start':
         openTurn = e.turn;

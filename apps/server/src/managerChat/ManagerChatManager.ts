@@ -13,12 +13,12 @@
 
 import { recall, capture, flushSession } from './memoryGatewayClient.js';
 import { resolveAdapter, type ManagerCommandInfo, type ManagerModelInfo } from './registry.js';
-import { isCompactionCommand } from './acpAdapter.js';
+import { compactionSummary, isCompactionCommand } from './acpAdapter.js';
 import { backendForProfile, modelOverrideForProfile, setModelOverrideForProfile } from './settingsStore.js';
-import { appendEvents, deriveModelHistory, foldSession, loadLog, type SessionLogOptions } from './sessionLog.js';
-import type { ChatSessionEvent, ChatTranscriptTurn } from '@git-agent-harness/contracts';
+import { appendEvents, createEventWriter, deriveModelHistory, foldSession, loadLog, type SessionLogOptions } from './sessionLog.js';
+import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 
-export { isCompactionCommand } from './acpAdapter.js';
+export { compactionSummary, isCompactionCommand } from './acpAdapter.js';
 
 /** The derived transcript turn -- the on-wire shape of a folded log. */
 export type ChatTurn = ChatTranscriptTurn;
@@ -85,7 +85,7 @@ async function runTurn(
   prompt: string,
   history: ChatTranscriptTurn[],
   onChunk: (text: string) => void
-): Promise<{ reply: string; backend: string; model: string | null }> {
+): Promise<{ reply: string; backend: string; model: string | null; usage: ChatUsage | null }> {
   const backendId = backendForProfile(profile);
   const adapter = resolveAdapter(backendId);
   const isSlashCommand = message.trim().startsWith('/');
@@ -98,7 +98,7 @@ async function runTurn(
   if (isSlashCommand && isCompactionCommand(message)) {
     await flushSession(profile);
   }
-  return { reply: result.reply, backend: backendId, model: result.model };
+  return { reply: result.reply, backend: backendId, model: result.model, usage: result.usage };
 }
 
 export function sendManagerChatMessage(profile: string, message: string): Promise<ChatTranscriptTurn> {
@@ -110,6 +110,7 @@ export function sendManagerChatMessage(profile: string, message: string): Promis
     const turnNo = existing.reduce((highest, event) => Math.max(highest, event.turn), 0) + 1;
     const now = Date.now();
     const compaction = isCompactionCommand(message);
+    let chunkWriter: ReturnType<typeof createEventWriter> | undefined;
     activeProfiles.add(profile);
     appendEvents(profile, [
       ...(compaction ? [{ type: 'compaction/start' as const, seq: ++seq, turn: turnNo, timestamp: now }] : []),
@@ -133,21 +134,23 @@ export function sendManagerChatMessage(profile: string, message: string): Promis
           timestamp: Date.now()
         }], logOptions);
       }
-      const { reply, backend, model } = await runTurn(profile, message, prompt, history, (text) => {
-        appendEvents(profile, [{
+      chunkWriter = createEventWriter(profile, logOptions);
+      const { reply, backend, model, usage } = await runTurn(profile, message, prompt, history, (text) => {
+        chunkWriter?.append({
           type: 'assistant/chunk',
           seq: ++seq,
           turn: turnNo,
           text,
           timestamp: Date.now()
-        }], logOptions);
+        });
       });
+      await chunkWriter.close();
       const assistant: ChatTranscriptTurn = {
         role: 'assistant',
         text: reply,
         backend,
         model,
-        usage: null,
+        usage,
         timestamp: Date.now()
       };
       const done: ChatSessionEvent[] = [
@@ -158,15 +161,23 @@ export function sendManagerChatMessage(profile: string, message: string): Promis
           text: reply,
           backend,
           model,
-          usage: null,
+          usage,
           timestamp: assistant.timestamp
         },
         { type: 'turn/end', seq: ++seq, turn: turnNo, reason: { kind: 'complete' }, timestamp: Date.now() },
+        ...(compaction ? [{
+          type: 'compaction/summary' as const,
+          seq: ++seq,
+          turn: turnNo,
+          summary: compactionSummary(message, reply),
+          timestamp: Date.now()
+        }] : []),
         ...(compaction ? [{ type: 'compaction/end' as const, seq: ++seq, turn: turnNo, timestamp: Date.now() }] : [])
       ];
       appendEvents(profile, done, logOptions);
       return assistant;
     } catch (error) {
+      await chunkWriter?.close().catch(() => undefined);
       const text = error instanceof Error ? error.message : String(error);
       const done: ChatSessionEvent[] = [
         { type: 'tool/result', seq: ++seq, turn: turnNo, name: 'error', text, timestamp: Date.now() },

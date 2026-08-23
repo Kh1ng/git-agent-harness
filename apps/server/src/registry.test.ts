@@ -523,8 +523,7 @@ test('getNodeObservations preserves stale, auth-failed, incompatible, and dedupl
     version: '0.1.0',
     schema_digest: COORDINATOR_SCHEMA_DIGEST,
     transport_mode: 'loopback',
-    secret_ref: 'env:HEALTHY_NODE_TOKEN',
-    profiles: ['gah']
+    secret_ref: 'env:HEALTHY_NODE_TOKEN'
   };
   const staleNodeObj: RegisteredNode = {
     node_id: 'stale-node',
@@ -533,8 +532,7 @@ test('getNodeObservations preserves stale, auth-failed, incompatible, and dedupl
     version: '0.1.0',
     schema_digest: COORDINATOR_SCHEMA_DIGEST,
     transport_mode: 'loopback',
-    secret_ref: 'env:STALE_NODE_TOKEN',
-    profiles: ['gah']
+    secret_ref: 'env:STALE_NODE_TOKEN'
   };
   const incompatibleNodeObj: RegisteredNode = {
     node_id: 'incompatible-node',
@@ -543,8 +541,7 @@ test('getNodeObservations preserves stale, auth-failed, incompatible, and dedupl
     version: '0.1.0',
     schema_digest: COORDINATOR_SCHEMA_DIGEST,
     transport_mode: 'loopback',
-    secret_ref: 'env:INCOMPATIBLE_NODE_TOKEN',
-    profiles: ['gah']
+    secret_ref: 'env:INCOMPATIBLE_NODE_TOKEN'
   };
   const authFailedNodeObj: RegisteredNode = {
     node_id: 'auth-failed-node',
@@ -553,25 +550,13 @@ test('getNodeObservations preserves stale, auth-failed, incompatible, and dedupl
     version: '0.1.0',
     schema_digest: COORDINATOR_SCHEMA_DIGEST,
     transport_mode: 'authenticated_remote',
-    secret_ref: 'env:DOES_NOT_EXIST',
-    profiles: ['gah']
-  };
-  const otherProfileNodeObj: RegisteredNode = {
-    node_id: 'other-profile-node',
-    display_name: 'Other Profile Node',
-    advertised_url: 'http://127.0.0.1:8',
-    version: '0.1.0',
-    schema_digest: COORDINATOR_SCHEMA_DIGEST,
-    transport_mode: 'loopback',
-    secret_ref: 'env:OTHER_PROFILE_NODE_TOKEN',
-    profiles: ['other']
+    secret_ref: 'env:DOES_NOT_EXIST'
   };
 
   registry.registerNode(healthyNodeObj);
   registry.registerNode(staleNodeObj);
   registry.registerNode(incompatibleNodeObj);
   registry.registerNode(authFailedNodeObj);
-  registry.registerNode(otherProfileNodeObj);
 
   healthyNode.behavior = (_req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -631,7 +616,6 @@ test('getNodeObservations preserves stale, auth-failed, incompatible, and dedupl
     assert.equal(byNode.get('incompatible-node')?.state, 'incompatible');
     assert.equal(byNode.get('auth-failed-node')?.state, 'auth_failed');
     assert.equal(byNode.get('auth-failed-node')?.last_seen_at, null);
-    assert.equal(byNode.has('other-profile-node'), false);
 
     const listRes = registry.getNodesSummary();
     const authSummary = listRes.find((node) => node.node_id === 'auth-failed-node');

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { appendEvents, chatLogPath, deriveModelHistory, foldSession, loadLog } from './sessionLog.js';
+import { appendEvents, chatLogPath, createEventWriter, deriveModelHistory, foldSession, loadLog, readLog } from './sessionLog.js';
 import type { ChatSessionEvent } from '@git-agent-harness/contracts';
 
 function tempStateDir(): string {
@@ -78,10 +78,27 @@ test('a completed compaction makes its turn the new history boundary', () => {
     turnStart(1, 1), userMsg(1, 2, 'old'), assistantMsg(1, 3, 'old answer'), turnEnd(1, 4),
     { type: 'compaction/start', seq: 5, turn: 2, timestamp: 5000 },
     turnStart(2, 6), userMsg(2, 7, '/reset'), assistantMsg(2, 8, 'reset'), turnEnd(2, 9),
-    { type: 'compaction/end', seq: 10, turn: 2, timestamp: 6000 }
+    { type: 'compaction/summary', seq: 10, turn: 2, summary: 'Conversation reset.', timestamp: 5500 },
+    { type: 'compaction/end', seq: 11, turn: 2, timestamp: 6000 }
   ];
 
-  assert.deepEqual(deriveModelHistory(events).map((turn) => turn.text), ['/reset', 'reset']);
+  assert.deepEqual(deriveModelHistory(events).map((turn) => turn.text), ['Conversation reset.']);
+});
+
+test('streamed events are durably appended in order', async () => {
+  const dir = tempStateDir();
+  try {
+    const writer = createEventWriter('gah', { stateDir: dir });
+    for (let seq = 1; seq <= 100; seq++) {
+      writer.append({ type: 'assistant/chunk', seq, turn: 1, text: String(seq), timestamp: seq });
+    }
+    await writer.close();
+
+    assert.deepEqual(readLog('gah', { stateDir: dir }).map((event) => event.seq),
+      Array.from({ length: 100 }, (_, index) => index + 1));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('an interrupted turn is repaired with a synthetic turn/end, not truncated', () => {

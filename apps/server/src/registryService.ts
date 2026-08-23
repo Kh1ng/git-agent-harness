@@ -304,7 +304,7 @@ export class RegistryService {
   }
 
   async getNodeObservations(profile?: string): Promise<NodeObservationSnapshot[]> {
-    const nodes = this.getNodes().filter((node) => !profile || node.profiles?.includes(profile));
+    const nodes = this.getNodes();
     return mapWithConcurrency(nodes, NODE_POLL_CONCURRENCY, async (node) => {
       const result = await this.pollNodeObservation(node, profile);
       return result.snapshot ?? emptyNodeObservation(node, nowIso(result.timestamp), result.state, result.last_seen_at ?? null, result.error ?? null);

@@ -10,7 +10,7 @@
  */
 
 import { createAcpBackend, hermesSpawnSpec, codexSpawnSpec, claudeSpawnSpec, type ManagerCommandInfo, type ManagerModelInfo } from './acpAdapter.js';
-import type { ChatTranscriptTurn } from '@git-agent-harness/contracts';
+import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 
 export type { ManagerCommandInfo, ManagerModelInfo };
 
@@ -24,7 +24,7 @@ interface ManagerAdapter extends ManagerBackendInfo {
   runTurn(
     gahProfile: string,
     input: { prompt: string; history: ChatTranscriptTurn[]; onChunk: (text: string) => void }
-  ): Promise<{ reply: string; model: string | null }>;
+  ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }>;
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;
   listModels(gahProfile: string): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }>;
   setModel(gahProfile: string, modelId: string): Promise<void>;
@@ -38,7 +38,7 @@ class NotImplementedAdapter implements ManagerAdapter {
     private trackingIssue: string
   ) {}
 
-  async runTurn(): Promise<{ reply: string; model: string | null }> {
+  async runTurn(): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }> {
     throw new Error(
       `${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}). Pick a different backend in Settings.`
     );
