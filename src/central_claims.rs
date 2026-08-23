@@ -51,9 +51,7 @@ const STATUS_MARKER: &str = "__GAH_CLAIMS_STATUS__:";
 /// fails loudly rather than guessing a node_id -- consistent with this
 /// module's fail-closed posture.
 pub fn resolve_node_id() -> Result<String> {
-    let path = std::env::var("GAH_COORDINATOR_IDENTITY_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("config/coordinator-identity.json"));
+    let path = crate::node_register::resolve_identity_path();
     let text = std::fs::read_to_string(&path).with_context(|| {
         format!(
             "reading coordinator identity from {} (set GAH_COORDINATOR_IDENTITY_PATH if apps/server uses a different path)",

@@ -168,13 +168,6 @@ pub fn run_loop(args: LoopArgs) -> Result<()> {
     // profile concurrently.
     if let Some(central_url) = &cfg.defaults.registry_central_url {
         let token = std::env::var("COORDINATOR_TOKEN").ok();
-        crate::fleet_preflight::check(
-            &crate::fleet_preflight::CurlFleetQuerier,
-            central_url,
-            &args.profile,
-            token.as_deref(),
-            cfg.defaults.registry_preflight_mode,
-        )?;
         // Issue #944: make sure this node is registered (and thus
         // claim-eligible) before starting work. Advisory only -- a failed
         // registration warns loudly but never blocks startup. Transport mode
@@ -189,7 +182,15 @@ pub fn run_loop(args: LoopArgs) -> Result<()> {
             &transport_mode,
             &secret_ref,
             token.as_deref(),
+            args.config_path.as_deref(),
         );
+        crate::fleet_preflight::check(
+            &crate::fleet_preflight::CurlFleetQuerier,
+            central_url,
+            &args.profile,
+            token.as_deref(),
+            cfg.defaults.registry_preflight_mode,
+        )?;
     }
     let parallel = controller_runtime::loop_parallel_argument(
         args.once,

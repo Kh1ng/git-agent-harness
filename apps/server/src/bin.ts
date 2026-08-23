@@ -32,8 +32,8 @@ async function main() {
 
   console.log('Starting Git Agent Harness server...');
 
-  const registryService = new RegistryService();
   const coordinatorIdentity = getCoordinatorIdentity(undefined, PORT);
+  const registryService = new RegistryService(undefined, coordinatorIdentity.advertised_url);
 
   // Create Express app
   const app = createExpressServer({

@@ -406,8 +406,8 @@ pub enum Commands {
 /// Sub-actions of `gah node` (issue #944).
 #[derive(Subcommand)]
 pub enum NodeCommands {
-    /// Register this node with the central node's registry. Idempotent:
-    /// re-running against an already-registered node is a no-op success.
+    /// Register this node with the central node's registry. Re-running updates
+    /// the existing node's endpoint, transport, secret, and profiles.
     Register {
         #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,

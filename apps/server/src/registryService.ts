@@ -358,7 +358,10 @@ export class RegistryService {
       'User-Agent': 'GAH-Coordinator/0.1.0'
     };
 
-    if (node.transport_mode === 'authenticated_remote') {
+    if (
+      node.transport_mode === 'authenticated_remote' ||
+      (node.transport_mode === 'trusted_lan' && !isLoopback(node.advertised_url))
+    ) {
       let token = '';
       try {
         token = resolveSecret(node.secret_ref);
@@ -566,8 +569,9 @@ export class RegistryService {
     };
   }
 
-  registerNode(node: RegisteredNode): { warnings: string[] } {
+  registerNode(node: RegisteredNode): { warnings: string[]; created: boolean } {
     const warnings: string[] = [];
+    const existing = this.nodes.get(node.node_id);
 
     // 1. Basic validation
     if (!node.node_id || typeof node.node_id !== 'string') {
@@ -598,12 +602,7 @@ export class RegistryService {
       );
     }
 
-    // 2. Reject duplicate IDs
-    if (this.nodes.has(node.node_id)) {
-      throw new Error(`Duplicate node ID: ${node.node_id} is already registered`);
-    }
-
-    // 2.5 Reject the central node registering itself (issue #944). The
+    // 2. Reject the central node registering itself (issue #944). The
     // liveness scheduler polls every registered node's advertised_url/api/status;
     // a node advertising the central's own endpoint makes the central poll
     // itself and recurse until timeout (observed live: /api/status and
@@ -618,6 +617,7 @@ export class RegistryService {
     // 3. Reject endpoint collisions
     const newEndpoint = getEndpoint(node.advertised_url);
     for (const existingNode of this.nodes.values()) {
+      if (existingNode.node_id === node.node_id) continue;
       if (getEndpoint(existingNode.advertised_url) === newEndpoint) {
         throw new Error(`Endpoint collision: ${node.advertised_url} collides with registered node ${existingNode.node_id}`);
       }
@@ -677,9 +677,9 @@ export class RegistryService {
       }
     }
 
-    this.nodes.set(node.node_id, node);
+    this.nodes.set(node.node_id, { ...existing, ...node });
     this.save();
-    return { warnings };
+    return { warnings, created: !existing };
   }
 
   revokeNode(nodeId: string): boolean {

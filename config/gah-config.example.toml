@@ -12,7 +12,8 @@ llm_model_cloud = "your/cloud-model"
 #
 # Registration transport mode + secret ref default to trusted_lan /
 # env:COORDINATOR_TOKEN; override with GAH_REGISTRY_TRANSPORT_MODE and
-# GAH_REGISTRY_SECRET_REF environment variables.
+# GAH_REGISTRY_SECRET_REF environment variables. On a fresh worker, set
+# GAH_NODE_ADVERTISED_URL once so `gah loop` can create its stable identity.
 
 [context]
 enabled = true

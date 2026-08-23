@@ -239,10 +239,10 @@ export function createServer(
 
   app.post('/api/registry/nodes', (req, res) => {
     try {
-      const { warnings } = registryService.registerNode(req.body);
-      res.status(201).json({
+      const { warnings, created } = registryService.registerNode(req.body);
+      res.status(created ? 201 : 200).json({
         success: true,
-        message: 'Node registered successfully',
+        message: created ? 'Node registered successfully' : 'Node registration updated',
         warnings
       });
     } catch (error) {

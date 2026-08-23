@@ -11,6 +11,7 @@ import { createServer } from './server.js';
 import { RegistryService, containsSecretWords, isSchemaCompatible } from './registryService.js';
 import { COORDINATOR_SCHEMA_DIGEST, getCoordinatorIdentity, resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import { authMiddleware, isLocalAddress } from './authMiddleware.js';
+import { ClaimsService } from './claimsService.js';
 import type { RegisteredNode, NodeSummary, NodeHealthCheckResult } from '@git-agent-harness/contracts';
 
 
@@ -191,7 +192,7 @@ test('getCoordinatorIdentity returns stable identity', () => {
 // Registry Service Validation tests
 // ---------------------------------------------------------------------------
 
-test('RegistryService rejects duplicate IDs and malformed inputs', () => {
+test('RegistryService updates duplicate IDs and rejects malformed inputs', () => {
   const tempPath = createTempRegistryFile();
   const registry = new RegistryService(tempPath);
 
@@ -208,19 +209,20 @@ test('RegistryService rejects duplicate IDs and malformed inputs', () => {
 
     registry.registerNode(validNode);
 
-    // Duplicate node_id
-    assert.throws(() => {
-      registry.registerNode({
-        ...validNode,
-        advertised_url: 'http://localhost:8081'
-      });
-    }, /Duplicate node ID/);
+    const update = registry.registerNode({
+      ...validNode,
+      advertised_url: 'http://localhost:8081',
+      profiles: ['gah']
+    });
+    assert.equal(update.created, false);
+    assert.deepEqual(registry.getNode(validNode.node_id)?.profiles, ['gah']);
 
     // Collision
     assert.throws(() => {
       registry.registerNode({
         ...validNode,
-        node_id: 'node-2'
+        node_id: 'node-2',
+        advertised_url: 'http://localhost:8081'
       });
     }, /Endpoint collision/);
 
@@ -787,9 +789,10 @@ test('Server endpoints enforce loopback check and authentication', async () => {
 
 test('Server endpoints handle Node CRUD, Secret Rotation and Revocation', async () => {
   const tempPath = createTempRegistryFile();
+  const claimsPath = resolve(process.cwd(), `config-test-claims-${crypto.randomBytes(6).toString('hex')}.json`);
   const registry = new RegistryService(tempPath);
   
-  const app = createServer({ registryService: registry });
+  const app = createServer({ registryService: registry, claimsService: new ClaimsService(claimsPath) });
   const server = http.createServer(app);
 
   await new Promise<void>((resolve) => {
@@ -814,6 +817,20 @@ test('Server endpoints handle Node CRUD, Secret Rotation and Revocation', async 
     const registerRes = await makeRequest(baseUrl, '/api/registry/nodes', 'POST', nodeObj);
     assert.equal(registerRes.status, 201);
     assert.equal(registerRes.body.success, true);
+
+    const duplicateRes = await makeRequest(baseUrl, '/api/registry/nodes', 'POST', {
+      ...nodeObj,
+      profiles: ['gah']
+    });
+    assert.equal(duplicateRes.status, 200);
+    assert.deepEqual(registry.getNode(nodeObj.node_id)?.profiles, ['gah']);
+
+    const claimRes = await makeRequest(baseUrl, '/api/claims/acquire', 'POST', {
+      node_id: nodeObj.node_id,
+      profile: 'gah',
+      work_id: 'upserted-profile-check'
+    });
+    assert.equal(claimRes.status, 200);
 
     // 2. Verify registered node exists (GET /api/registry/nodes)
     const listRes = await makeRequest(baseUrl, '/api/registry/nodes');
@@ -848,6 +865,9 @@ test('Server endpoints handle Node CRUD, Secret Rotation and Revocation', async 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (existsSync(tempPath)) {
       unlinkSync(tempPath);
+    }
+    if (existsSync(claimsPath)) {
+      unlinkSync(claimsPath);
     }
   }
 });
@@ -895,7 +915,10 @@ test('authMiddleware rejects non-loopback requests with spoofed X-Forwarded-Prot
   assert.equal(nextCalled, false);
   assert.equal(statusCalledWith, 403);
   assert.equal(jsonCalledWith?.error, 'Forbidden');
-  assert.equal(jsonCalledWith?.message, 'Non-loopback endpoints require TLS');
+  assert.equal(
+    jsonCalledWith?.message,
+    'Non-loopback endpoints require TLS unless GAH_REGISTRY_ALLOW_INSECURE_LAN=1'
+  );
   
   delete process.env.COORDINATOR_TOKEN;
 });
@@ -939,6 +962,35 @@ test('authMiddleware accepts non-loopback requests when req.secure is true and t
   assert.equal(statusCalledWith, null);
   
   delete process.env.COORDINATOR_TOKEN;
+});
+
+test('authMiddleware accepts opted-in non-loopback HTTP with a valid token', () => {
+  const previousAllow = process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+  const previousToken = process.env.COORDINATOR_TOKEN;
+  process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN = '1';
+  process.env.COORDINATOR_TOKEN = 'expected-token';
+  const req = {
+    socket: { remoteAddress: '100.64.0.2' },
+    secure: false,
+    headers: { authorization: 'Bearer expected-token' }
+  } as any;
+  let status: number | undefined;
+  const res = {
+    status(code: number) { status = code; return this; },
+    json() { return this; }
+  } as any;
+  let called = false;
+
+  try {
+    authMiddleware(req, res, () => { called = true; });
+    assert.equal(called, true);
+    assert.equal(status, undefined);
+  } finally {
+    if (previousAllow === undefined) delete process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+    else process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN = previousAllow;
+    if (previousToken === undefined) delete process.env.COORDINATOR_TOKEN;
+    else process.env.COORDINATOR_TOKEN = previousToken;
+  }
 });
 
 test('authMiddleware does not treat spoofed loopback headers as local on a remote socket', () => {

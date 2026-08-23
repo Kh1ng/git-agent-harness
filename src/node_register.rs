@@ -12,16 +12,17 @@
 //! identity-generation path rather than two that could drift -- the same
 //! contract `resolve_node_id` in `crate::central_claims` already follows.
 //!
-//! Registration is idempotent from the caller's point of view: a 201 Created
-//! and a 409 Conflict ("already registered") are both treated as success.
-//! Any 4xx/5xx beyond 409 fails loudly -- the operator needs to know why the
+//! Registration is idempotent from the caller's point of view: the central
+//! returns 201 on create and 200 after reconciling an existing registration.
+//! Any 4xx/5xx fails loudly -- the operator needs to know why the
 //! central rejected the node rather than it silently not appearing in the
 //! fleet.
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use url::Url;
 
@@ -30,24 +31,32 @@ pub fn resolve_identity_path() -> PathBuf {
     if let Ok(path) = std::env::var("GAH_COORDINATOR_IDENTITY_PATH") {
         return PathBuf::from(path);
     }
-    let config_dir = crate::config::default_config_dir().join("coordinator-identity.json");
-    if config_dir.exists() {
-        return config_dir;
-    }
     PathBuf::from("config/coordinator-identity.json")
 }
 
-#[derive(Debug, Deserialize)]
+const COORDINATOR_SCHEMA_DIGEST: &str =
+    "5e1cb8d202da8fc4d1b7ab0345c37eaf34d8a67d38e2c9ed72e9bdf033768806";
+
+fn default_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn default_schema_digest() -> String {
+    COORDINATOR_SCHEMA_DIGEST.to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct NodeIdentity {
     node_id: String,
     display_name: String,
     advertised_url: String,
+    #[serde(default = "default_version")]
     version: String,
+    #[serde(default = "default_schema_digest")]
     schema_digest: String,
 }
 
-fn read_identity() -> Result<NodeIdentity> {
-    let path = resolve_identity_path();
+fn read_identity(path: &Path) -> Result<NodeIdentity> {
     let text = std::fs::read_to_string(&path).with_context(|| {
         format!(
             "reading node identity from {} (set GAH_COORDINATOR_IDENTITY_PATH if it lives elsewhere)",
@@ -56,6 +65,48 @@ fn read_identity() -> Result<NodeIdentity> {
     })?;
     serde_json::from_str(&text)
         .with_context(|| format!("parsing node identity JSON from {}", path.display()))
+}
+
+fn read_or_create_identity(path: &Path, advertised_url: Option<&str>) -> Result<NodeIdentity> {
+    if path.exists() {
+        return read_identity(path);
+    }
+    let advertised_url = advertised_url.ok_or_else(|| {
+        anyhow::anyhow!(
+            "node identity does not exist at {}; pass --advertised-url or set GAH_NODE_ADVERTISED_URL so it can be created",
+            path.display()
+        )
+    })?;
+    let display_name = hostname::get()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let identity = NodeIdentity {
+        node_id: uuid::Uuid::new_v4().to_string(),
+        display_name: if display_name.is_empty() {
+            "GAH Worker".to_string()
+        } else {
+            display_name
+        },
+        advertised_url: advertised_url.to_string(),
+        version: default_version(),
+        schema_digest: default_schema_digest(),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating identity directory {}", parent.display()))?;
+    }
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            serde_json::to_writer_pretty(&mut file, &identity)?;
+            file.write_all(b"\n")?;
+            Ok(identity)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => read_identity(path),
+        Err(error) => {
+            Err(error).with_context(|| format!("creating node identity at {}", path.display()))
+        }
+    }
 }
 
 pub struct RegisterOptions {
@@ -71,6 +122,7 @@ pub struct RegisterOptions {
     pub profiles: Option<Vec<String>>,
     pub token: Option<String>,
     pub config_path: Option<String>,
+    pub identity_path: Option<PathBuf>,
 }
 
 /// Transport abstraction so tests can substitute the curl subprocess with a
@@ -160,7 +212,11 @@ pub fn register(opts: &RegisterOptions) -> Result<()> {
 }
 
 fn register_with(transport: &dyn RegisterTransport, opts: &RegisterOptions) -> Result<()> {
-    let identity = read_identity()?;
+    let identity_path = opts
+        .identity_path
+        .clone()
+        .unwrap_or_else(resolve_identity_path);
+    let identity = read_or_create_identity(&identity_path, opts.advertised_url.as_deref())?;
 
     let profiles = match &opts.profiles {
         Some(p) => p.clone(),
@@ -198,16 +254,9 @@ fn register_with(transport: &dyn RegisterTransport, opts: &RegisterOptions) -> R
     let body = String::from_utf8_lossy(&response_body);
 
     match status {
-        // The server returns 201 on create and 409 on duplicate-ID. The 409
-        // case means "already registered" -- idempotent success, not an error.
-        201 => Ok(()),
-        409 => {
-            eprintln!(
-                "gah node register: node already registered against {} (idempotent success)",
-                opts.central_url
-            );
-            Ok(())
-        }
+        // Existing registrations are reconciled on every loop start so profile
+        // and endpoint changes cannot leave a node silently claim-ineligible.
+        200 | 201 => Ok(()),
         other => bail!("central rejected node registration (HTTP {other}): {body}"),
     }
 }
@@ -223,15 +272,17 @@ pub fn register_advisory(
     transport_mode: &str,
     secret_ref: &str,
     token: Option<&str>,
+    config_path: Option<&str>,
 ) {
     match register(&RegisterOptions {
         central_url: central_url.to_string(),
-        advertised_url: None,
+        advertised_url: std::env::var("GAH_NODE_ADVERTISED_URL").ok(),
         transport_mode: transport_mode.to_string(),
         secret_ref: secret_ref.to_string(),
         profiles: None,
         token: token.map(String::from),
-        config_path: None,
+        config_path: config_path.map(String::from),
+        identity_path: None,
     }) {
         Ok(()) => {}
         Err(e) => eprintln!(
@@ -308,13 +359,12 @@ mod tests {
             profiles,
             token: Some("tok".to_string()),
             config_path: None,
+            identity_path: Some(identity_path()),
         }
     }
 
     #[test]
     fn register_builds_payload_and_hits_registry_path() {
-        let path = identity_path();
-        std::env::set_var("GAH_COORDINATOR_IDENTITY_PATH", &path);
         let transport = FakeTransport::with_statuses(vec![201]);
         let opts = options_with(
             Some("http://10.0.0.5:3773".to_string()),
@@ -332,13 +382,10 @@ mod tests {
         assert_eq!(parsed["transport_mode"], "trusted_lan");
         assert_eq!(parsed["secret_ref"], "env:COORDINATOR_TOKEN");
         assert_eq!(parsed["profiles"][0], "gah");
-        std::env::remove_var("GAH_COORDINATOR_IDENTITY_PATH");
     }
 
     #[test]
     fn register_advertised_url_override_wins_over_identity() {
-        let path = identity_path();
-        std::env::set_var("GAH_COORDINATOR_IDENTITY_PATH", &path);
         let transport = FakeTransport::with_statuses(vec![201]);
         let opts = options_with(
             Some("http://100.64.0.9:3773".to_string()),
@@ -348,39 +395,30 @@ mod tests {
         let body = transport.last_body.borrow().clone().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["advertised_url"], "http://100.64.0.9:3773");
-        std::env::remove_var("GAH_COORDINATOR_IDENTITY_PATH");
     }
 
     #[test]
     fn register_201_is_success() {
-        let path = identity_path();
-        std::env::set_var("GAH_COORDINATOR_IDENTITY_PATH", &path);
         let transport = FakeTransport::with_statuses(vec![201]);
         register_with(
             &transport,
             &options_with(None, Some(vec!["gah".to_string()])),
         )
         .unwrap();
-        std::env::remove_var("GAH_COORDINATOR_IDENTITY_PATH");
     }
 
     #[test]
-    fn register_409_is_idempotent_success() {
-        let path = identity_path();
-        std::env::set_var("GAH_COORDINATOR_IDENTITY_PATH", &path);
-        let transport = FakeTransport::with_statuses(vec![409]);
+    fn register_200_update_is_success() {
+        let transport = FakeTransport::with_statuses(vec![200]);
         register_with(
             &transport,
             &options_with(None, Some(vec!["gah".to_string()])),
         )
         .unwrap();
-        std::env::remove_var("GAH_COORDINATOR_IDENTITY_PATH");
     }
 
     #[test]
     fn register_400_fails_loudly() {
-        let path = identity_path();
-        std::env::set_var("GAH_COORDINATOR_IDENTITY_PATH", &path);
         let transport = FakeTransport::with_statuses(vec![400]);
         let err = register_with(
             &transport,
@@ -388,6 +426,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("HTTP 400"), "{err}");
-        std::env::remove_var("GAH_COORDINATOR_IDENTITY_PATH");
+    }
+
+    #[test]
+    fn identity_written_by_server_gets_derived_contract_fields() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("coordinator-identity.json");
+        std::fs::write(
+            &path,
+            r#"{"node_id":"node-abc","display_name":"Worker","advertised_url":"http://10.0.0.5:3773"}"#,
+        )
+        .unwrap();
+        let identity = read_identity(&path).unwrap();
+        assert_eq!(identity.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(identity.schema_digest, COORDINATOR_SCHEMA_DIGEST);
+    }
+
+    #[test]
+    fn missing_identity_is_created_when_advertised_url_is_configured() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("coordinator-identity.json");
+        let identity = read_or_create_identity(&path, Some("http://10.0.0.5:3773")).unwrap();
+        assert_eq!(identity.advertised_url, "http://10.0.0.5:3773");
+        assert_eq!(read_identity(&path).unwrap().node_id, identity.node_id);
     }
 }

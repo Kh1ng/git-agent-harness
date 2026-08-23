@@ -32,10 +32,10 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   // Rely on Express's req.secure, which only trusts proxy headers if 'trust proxy' is configured.
   const isTls = req.secure;
 
-  if (!isTls) {
+  if (!isTls && process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN !== '1') {
     return res.status(403).json({
       error: 'Forbidden',
-      message: 'Non-loopback endpoints require TLS'
+      message: 'Non-loopback endpoints require TLS unless GAH_REGISTRY_ALLOW_INSECURE_LAN=1'
     });
   }
 

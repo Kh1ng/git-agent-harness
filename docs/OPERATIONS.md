@@ -431,15 +431,16 @@ gah node register \
 `--transport-mode` defaults to `trusted_lan` (the self-hosted tailnet
 default); the loop-start self-registration reads `GAH_REGISTRY_TRANSPORT_MODE`
 and `GAH_REGISTRY_SECRET_REF` env vars (defaults `trusted_lan` /
-`env:COORDINATOR_TOKEN`). For a non-loopback `trusted_lan` endpoint over **plain HTTP**
+`env:COORDINATOR_TOKEN`). A fresh worker can set `GAH_NODE_ADVERTISED_URL`
+to create its stable identity on the first loop start. For a non-loopback
+`trusted_lan` endpoint over **plain HTTP**
 (e.g. `http://100.118.97.79` on a tailnet), the central must opt in with
-`GAH_REGISTRY_ALLOW_INSECURE_LAN=1` in its environment -- mirroring the
-Rust side's `GAH_COORDINATOR_INSECURE_TLS=1` -- otherwise registration is
-rejected (fail-closed default). The central also rejects any node that
+`GAH_REGISTRY_ALLOW_INSECURE_LAN=1`; the worker needs the same opt-in for
+plain-HTTP status polling. Requests still require `COORDINATOR_TOKEN`.
+Without the opt-in, access is rejected. The central also rejects any node that
 advertises the central node's own endpoint, which would make its liveness
-poller poll itself and recurse. Re-running registration against an
-already-registered node is an idempotent no-op (the central returns 409
-"Duplicate node ID", treated as success).
+poller poll itself and recurse. Re-running registration updates the existing
+node's validated endpoint, transport, secret reference, and profile declarations.
 
 ### Node liveness scheduler (issue #883)
 

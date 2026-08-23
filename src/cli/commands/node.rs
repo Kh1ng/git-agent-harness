@@ -41,6 +41,7 @@ pub fn run(command: NodeCommands) -> Result<()> {
                 profiles: profile_list,
                 token: std::env::var("COORDINATOR_TOKEN").ok(),
                 config_path,
+                identity_path: None,
             })?;
             println!("Registered node against {central}");
             Ok(())
