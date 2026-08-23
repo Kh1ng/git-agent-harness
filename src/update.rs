@@ -380,7 +380,7 @@ fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
         repo,
         "sudo",
         &[
-            "install", "-d", "-o", "root", "-g", "root", "-m", "0755", &root,
+            "install", "-d", "-o", "root", "-g", "root", "-m", "0755", root,
         ],
     )?;
     // Copy the dist contents into the root without crossing a shell boundary.
