@@ -4,7 +4,7 @@
  */
 
 import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, DependencyBlocker } from './gah.js';
-import type { ChatUsage } from './chat-session.js';
+import type { ChatTranscriptTurn } from './chat-session.js';
 
 // Provider types
 export type ProviderKind = 
@@ -135,6 +135,9 @@ export type ServerMessage =
       requestId: string;
       profile: string;
       reply: string;
+      backend: string;
+      model: string | null;
+      usage: ChatTranscriptTurn['usage'];
     }
   | {
       type: "manager.chat.history";
@@ -145,15 +148,7 @@ export type ServerMessage =
       cursor: number;
     };
 
-export type ManagerChatTurn = {
-  role: "user" | "assistant" | "system";
-  text: string;
-  timestamp: number;
-  /** Present on assistant turns: which backend + model produced this reply. */
-  backend?: string;
-  model?: string | null;
-  usage?: ChatUsage | null;
-};
+export type ManagerChatTurn = ChatTranscriptTurn;
 
 export type ClientMessage = 
   | {

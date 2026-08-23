@@ -22,7 +22,9 @@ export type ChatSessionEvent =
   | ChatAssistantMessage
   | ChatToolResult
   | ChatHumanCommand
-  | ChatCompactionSummary;
+  | ChatCompactionStart
+  | ChatCompactionSummary
+  | ChatCompactionEnd;
 
 /** One model exchange (or a zero-step turn that spent no model call). */
 export interface ChatTurnStart {
@@ -112,12 +114,27 @@ export interface ChatHumanCommand {
   timestamp: number;
 }
 
+/** Delimits one backend context-compaction operation. */
+export interface ChatCompactionStart {
+  type: 'compaction/start';
+  seq: number;
+  turn: number;
+  timestamp: number;
+}
+
 /** Recorded when context is compacted; the transcript carries the summary. */
 export interface ChatCompactionSummary {
   type: 'compaction/summary';
   seq: number;
   turn: number;
   summary: string;
+  timestamp: number;
+}
+
+export interface ChatCompactionEnd {
+  type: 'compaction/end';
+  seq: number;
+  turn: number;
   timestamp: number;
 }
 
@@ -156,5 +173,7 @@ export const CHAT_SESSION_EVENT_TYPES = [
   'assistant/message',
   'tool/result',
   'human/command',
-  'compaction/summary'
+  'compaction/start',
+  'compaction/summary',
+  'compaction/end'
 ] as const;

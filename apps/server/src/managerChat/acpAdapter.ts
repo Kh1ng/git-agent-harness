@@ -19,6 +19,7 @@ import path from 'node:path';
 import { Writable, Readable } from 'node:stream';
 import * as acp from '@zed-industries/agent-client-protocol';
 import type { Writable as NodeWritable, Readable as NodeReadable } from 'node:stream';
+import type { ChatTranscriptTurn } from '@git-agent-harness/contracts';
 
 export interface ManagerCommandInfo {
   name: string;
@@ -37,9 +38,17 @@ export interface SpawnSpec {
   args: string[];
 }
 
+const COMPACTION_COMMAND_NAMES = new Set(['compact', 'compress', 'clear', 'reset']);
+
+export function isCompactionCommand(message: string): boolean {
+  const name = message.trim().slice(1).split(/\s+/)[0]?.toLowerCase();
+  return name !== undefined && COMPACTION_COMMAND_NAMES.has(name);
+}
+
 class AcpClient implements acp.Client {
   availableCommands: ManagerCommandInfo[] = [];
   replyChunks: string[] = [];
+  onReplyChunk?: (text: string) => void;
 
   constructor(private readonly label: string) {}
 
@@ -60,6 +69,7 @@ class AcpClient implements acp.Client {
     const update = params.update;
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
       this.replyChunks.push(update.content.text);
+      this.onReplyChunk?.(update.content.text);
     } else if (update.sessionUpdate === 'available_commands_update') {
       this.availableCommands = update.availableCommands.map((cmd) => ({
         name: cmd.name,
@@ -91,7 +101,25 @@ interface ProfileConnection {
   // work around it for whichever backend needs it, without affecting
   // backends that don't have `modes` (the field is naturally omitted).
   currentModeId: string | null;
+  knownHistory: ChatTranscriptTurn[];
   ready: Promise<void>;
+}
+
+/** Rehydrate a fresh ACP session from the durable transcript. */
+export function resumePrompt(prompt: string, history: ChatTranscriptTurn[]): string {
+  if (history.length === 0) return prompt;
+  const transcript = history.map((turn) => `${turn.role}: ${turn.text}`).join('\n');
+  return `Resume this conversation and answer only the final user message.\n\n${transcript}\n\nuser: ${prompt}`;
+}
+
+export function historyDelta(
+  known: ChatTranscriptTurn[],
+  current: ChatTranscriptTurn[]
+): ChatTranscriptTurn[] | null {
+  const matches = known.every(
+    (turn, index) => turn.role === current[index]?.role && turn.text === current[index]?.text
+  );
+  return matches ? current.slice(known.length) : null;
 }
 
 /** Resolves an npm package's `bin` script to an absolute path -- these
@@ -146,6 +174,32 @@ export function claudeSpawnSpec(): SpawnSpec {
 export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
   const connections = new Map<string, ProfileConnection>();
 
+  async function selectModel(state: ProfileConnection, modelId: string): Promise<void> {
+    await state.connection.setSessionModel({
+      sessionId: state.sessionId,
+      modelId,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- deliberate Hermes off-spec field
+      ...(state.currentModeId ? { modeId: state.currentModeId } : {})
+    } as any);
+    state.currentModelId = modelId;
+  }
+
+  async function startSession(state: ProfileConnection, preserveModel = false): Promise<void> {
+    const previousModel = preserveModel ? state.currentModelId : null;
+    const session = await state.connection.newSession({ cwd: process.cwd(), mcpServers: [] });
+    state.sessionId = session.sessionId;
+    state.models = session.models?.availableModels.map((model) => ({
+      id: model.modelId,
+      name: model.name,
+      description: model.description ?? undefined
+    })) ?? [];
+    state.currentModelId = session.models?.currentModelId ?? null;
+    state.currentModeId = session.modes?.currentModeId ?? null;
+    if (previousModel && previousModel !== state.currentModelId && state.models.some((model) => model.id === previousModel)) {
+      await selectModel(state, previousModel);
+    }
+  }
+
   async function connect(gahProfile: string): Promise<ProfileConnection> {
     const existing = connections.get(gahProfile);
     if (existing) {
@@ -171,6 +225,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
       models: [],
       currentModelId: null,
       currentModeId: null,
+      knownHistory: [],
       ready: Promise.resolve()
     };
     state.ready = (async () => {
@@ -178,18 +233,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } }
       });
-      const session = await connection.newSession({ cwd: process.cwd(), mcpServers: [] });
-      state.sessionId = session.sessionId;
-      // **UNSTABLE** per the ACP spec -- not every agent returns this (Claude's
-      // bridge doesn't today). Absence just means no model picker for that
-      // backend, not an error.
-      if (session.models) {
-        state.models = session.models.availableModels.map((m) => ({ id: m.modelId, name: m.name, description: m.description ?? undefined }));
-        state.currentModelId = session.models.currentModelId;
-      }
-      if (session.modes) {
-        state.currentModeId = session.modes.currentModeId;
-      }
+      await startSession(state);
     })();
 
     child.on('exit', () => {
@@ -205,23 +249,53 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
 
   async function runTurn(
     gahProfile: string,
-    message: string
+    input: { prompt: string; history: ChatTranscriptTurn[]; onChunk: (text: string) => void }
   ): Promise<{ reply: string; model: string | null }> {
     const state = await connect(gahProfile);
     state.client.replyChunks = [];
+    let missingHistory = historyDelta(state.knownHistory, input.history);
+    if (missingHistory === null) {
+      await startSession(state, true);
+      state.knownHistory = [];
+      missingHistory = input.history;
+    }
+    const slashCommand = input.prompt.trimStart().startsWith('/');
+    const command = input.prompt.trim().slice(1).split(/\s+/)[0]?.toLowerCase();
+    // ponytail: ACP cannot inject roleful history ahead of a native command;
+    // use loadSession when adapters persist their native session ids.
+    if ((command === 'compact' || command === 'compress') && missingHistory.length > 0) {
+      throw new Error('Send one normal message to restore this backend before compacting its context.');
+    }
+    const prompt = slashCommand ? input.prompt : resumePrompt(input.prompt, missingHistory);
+    state.client.onReplyChunk = input.onChunk;
     let result;
     try {
       result = await state.connection.prompt({
         sessionId: state.sessionId,
-        prompt: [{ type: 'text', text: message }]
+        prompt: [{ type: 'text', text: prompt }]
       });
     } catch (error) {
       throw unwrapAcpError(error);
+    } finally {
+      state.client.onReplyChunk = undefined;
     }
     if (result.stopReason !== 'end_turn') {
       console.warn(`[managerChat] ${label} turn ended with stopReason=${result.stopReason} for profile ${gahProfile}`);
     }
-    return { reply: state.client.replyChunks.join(''), model: state.currentModelId };
+    const reply = state.client.replyChunks.join('');
+    if (isCompactionCommand(input.prompt)) {
+      state.knownHistory = [
+        { role: 'user', text: input.prompt, timestamp: Date.now() },
+        { role: 'assistant', text: reply, timestamp: Date.now() }
+      ];
+    } else if (!slashCommand) {
+      state.knownHistory = [
+        ...input.history,
+        { role: 'user', text: input.prompt, timestamp: Date.now() },
+        { role: 'assistant', text: reply, timestamp: Date.now() }
+      ];
+    }
+    return { reply, model: state.currentModelId };
   }
 
   /** Backs the "/" command palette. Lazily connects (the same session
@@ -241,17 +315,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     if (!state.models.some((m) => m.id === modelId)) {
       throw new Error(`Unknown model "${modelId}" for ${label}`);
     }
-    // modeId isn't part of the standard SetSessionModelRequest -- it's the
-    // Hermes-server-bug workaround (see the ProfileConnection.currentModeId
-    // comment above). Safe no-op for backends without modes: currentModeId
-    // is null there, and JSON.stringify drops undefined keys entirely.
-    await state.connection.setSessionModel({
-      sessionId: state.sessionId,
-      modelId,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see comment above, this is a deliberate off-spec field
-      ...(state.currentModeId ? { modeId: state.currentModeId } : {})
-    } as any);
-    state.currentModelId = modelId;
+    await selectModel(state, modelId);
   }
 
   return { runTurn, listCommands, listModels, setModel };

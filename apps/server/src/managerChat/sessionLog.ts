@@ -3,7 +3,7 @@
  *
  * A project chat is an append-only log of typed session events; the transcript
  * the UI renders is DERIVED from the log (a fold), never stored separately.
- * The store appends events to a per-profile JSONL file, reloads it on request,
+ * The store appends events to a JSONL file per project and session, reloads it on request,
  * and repairs an interrupted turn (turn/start with no matching turn/end) with
  * a synthetic turn/end { kind: 'interrupted' } rather than truncating.
  *
@@ -16,29 +16,25 @@ import {
   mkdirSync,
   readFileSync,
   appendFileSync,
-  existsSync,
-  writeFileSync
+  existsSync
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type {
   ChatSessionEvent,
   ChatSessionView,
   ChatTranscriptTurn,
-  ChatTurnEnd
+  ChatTurnEnd,
+  ChatUserMessage
 } from '@git-agent-harness/contracts';
 
 export interface SessionLogOptions {
   /** Override the state directory (tests). Default: $XDG_STATE_HOME/gah/chat, else ~/.local/state/gah/chat. */
   stateDir?: string;
+  /** Stable session identity within the project. */
+  sessionId?: string;
 }
 
-/** A parsed event with its file line number, for exact truncation. */
-interface LoggedEvent {
-  line: number;
-  event: ChatSessionEvent;
-}
-
-/** Where the per-profile session log lives. */
+/** Where one project session log lives. The profile is the current project key. */
 export function chatLogPath(profile: string, opts: SessionLogOptions = {}): string {
   const base =
     opts.stateDir ??
@@ -48,10 +44,15 @@ export function chatLogPath(profile: string, opts: SessionLogOptions = {}): stri
       : (process.env.HOME
           ? resolve(process.env.HOME, '.local', 'state', 'gah', 'chat')
           : resolve(process.cwd(), 'config', 'chat')));
-  return resolve(base, `${profile.replace(/[^a-zA-Z0-9_-]/g, '_')}.jsonl`);
+  return resolve(
+    base,
+    `project-${encodeURIComponent(profile)}`,
+    `session-${encodeURIComponent(opts.sessionId ?? 'default')}`,
+    'session.jsonl'
+  );
 }
 
-function parseEventLine(line: string, lineNo: number): ChatSessionEvent | null {
+function parseEventLine(line: string): ChatSessionEvent | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
   try {
@@ -64,17 +65,16 @@ function parseEventLine(line: string, lineNo: number): ChatSessionEvent | null {
 }
 
 /** Read the full log, skipping malformed lines. Returns events in order. */
-export function readLog(profile: string, opts: SessionLogOptions = {}): LoggedEvent[] {
+export function readLog(profile: string, opts: SessionLogOptions = {}): ChatSessionEvent[] {
   const path = chatLogPath(profile, opts);
   if (!existsSync(path)) return [];
   const text = readFileSync(path, 'utf8');
-  const out: LoggedEvent[] = [];
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const event = parseEventLine(lines[i], i + 1);
-    if (event) out.push({ line: i + 1, event });
+  const events: ChatSessionEvent[] = [];
+  for (const line of text.split('\n')) {
+    const event = parseEventLine(line);
+    if (event) events.push(event);
   }
-  return out;
+  return events;
 }
 
 /** Append a batch of events to the log. */
@@ -86,19 +86,18 @@ export function appendEvents(profile: string, events: ChatSessionEvent[], opts: 
   appendFileSync(path, payload, 'utf8');
 }
 
-/** Rewrite the log to exactly the given events (used for repair). */
-function rewriteLog(profile: string, events: ChatSessionEvent[], opts: SessionLogOptions = {}): void {
-  const path = chatLogPath(profile, opts);
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, events.map((e) => `${JSON.stringify(e)}\n`).join(''), 'utf8');
-}
 /**
  * Load + repair: read the log, and for any turn left open by a crash append a
  * synthetic turn/end { kind: 'interrupted' }. Returns the durable event list.
  */
-export function loadLog(profile: string, opts: SessionLogOptions = {}): ChatSessionEvent[] {
-  const logged = readLog(profile, opts);
-  const events = logged.map((l) => l.event);
+export function loadLog(
+  profile: string,
+  opts: SessionLogOptions = {},
+  repairInterrupted = true
+): ChatSessionEvent[] {
+  const events = readLog(profile, opts);
+
+  if (!repairInterrupted) return events;
 
   // Find open turns: a turn/start whose matching turn/end never arrived.
   const openTurns = new Set<number>();
@@ -109,7 +108,7 @@ export function loadLog(profile: string, opts: SessionLogOptions = {}): ChatSess
 
   if (openTurns.size === 0) return events;
 
-  // Close each open turn with a synthetic interrupted end, then rewrite.
+  // Close each open turn by appending synthetic interrupted ends.
   const repaired: ChatSessionEvent[] = [...events];
   let seq = repaired.length ? Math.max(...repaired.map((e) => e.seq)) : 0;
   for (const turn of [...openTurns].sort((a, b) => a - b)) {
@@ -123,8 +122,58 @@ export function loadLog(profile: string, opts: SessionLogOptions = {}): ChatSess
     };
     repaired.push(end);
   }
-  rewriteLog(profile, repaired, opts);
+  const path = chatLogPath(profile, opts);
+  if (!readFileSync(path, 'utf8').endsWith('\n')) appendFileSync(path, '\n', 'utf8');
+  appendEvents(profile, repaired.slice(events.length), opts);
   return repaired;
+}
+
+/** Derive the exact user and assistant messages used to resume a model. */
+export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTurn[] {
+  events = events.slice(completedCompactionStart(events));
+  const prompts = new Map<number, ChatUserMessage>();
+  for (const event of events) {
+    if (event.type === 'user/message' && (event.source === 'inject' || !prompts.has(event.turn))) {
+      prompts.set(event.turn, event);
+    }
+  }
+
+  const history: ChatTranscriptTurn[] = [];
+  for (const event of events) {
+    if (event.type === 'user/message' && event.source === 'prompt') {
+      const prompt = prompts.get(event.turn) ?? event;
+      history.push({ role: 'user', text: prompt.text, timestamp: prompt.timestamp });
+    } else if (event.type === 'assistant/message') {
+      history.push({
+        role: 'assistant',
+        text: event.text,
+        timestamp: event.timestamp,
+        backend: event.backend,
+        model: event.model,
+        usage: event.usage
+      });
+    } else if (event.type === 'compaction/summary') {
+      history.push({ role: 'system', text: event.summary, timestamp: event.timestamp });
+    }
+  }
+  return history;
+}
+
+function completedCompactionStart(events: ChatSessionEvent[]): number {
+  let end = -1;
+  for (let index = events.length - 1; index >= 0; index--) {
+    if (events[index].type === 'compaction/end') {
+      end = index;
+      break;
+    }
+  }
+  if (end < 0) return 0;
+  const turn = events[end].turn;
+  for (let index = end; index >= 0; index--) {
+    const event = events[index];
+    if (event.type === 'compaction/start' && event.turn === turn) return index;
+  }
+  return 0;
 }
 
 /**
@@ -132,16 +181,19 @@ export function loadLog(profile: string, opts: SessionLogOptions = {}): ChatSess
  * `cursor` is the highest seq; pass `sinceSeq` to resume streaming from a
  * position (the fold still computes the full transcript; the caller can slice).
  */
-export function foldSession(profile: string, opts: SessionLogOptions = {}): ChatSessionView {
-  const events = loadLog(profile, opts);
+export function foldSession(
+  profile: string,
+  opts: SessionLogOptions = {},
+  repairInterrupted = true
+): ChatSessionView {
+  const events = loadLog(profile, opts, repairInterrupted);
   const turns: ChatTranscriptTurn[] = [];
   let streaming: ChatSessionView['streaming'] = null;
-  let cursor = 0;
+  let cursor = events.reduce((highest, event) => Math.max(highest, event.seq), 0);
   let partialText = '';
   let openTurn: number | null = null;
 
-  for (const e of events) {
-    if (e.seq > cursor) cursor = e.seq;
+  for (const e of events.slice(completedCompactionStart(events))) {
     switch (e.type) {
       case 'turn/start':
         openTurn = e.turn;
@@ -157,7 +209,9 @@ export function foldSession(profile: string, opts: SessionLogOptions = {}): Chat
         }
         break;
       case 'user/message':
-        turns.push({ role: 'user', text: e.text, timestamp: e.timestamp });
+        if (e.source === 'prompt') {
+          turns.push({ role: 'user', text: e.text, timestamp: e.timestamp });
+        }
         break;
       case 'assistant/chunk':
         partialText += e.text;
@@ -178,6 +232,9 @@ export function foldSession(profile: string, opts: SessionLogOptions = {}): Chat
         break;
       case 'human/command':
         turns.push({ role: 'system', text: `/${e.command} ${e.result}`.trim(), timestamp: e.timestamp });
+        break;
+      case 'compaction/start':
+      case 'compaction/end':
         break;
       case 'compaction/summary':
         turns.push({ role: 'system', text: `Compacted: ${e.summary}`, timestamp: e.timestamp });

@@ -10,6 +10,7 @@
  */
 
 import { createAcpBackend, hermesSpawnSpec, codexSpawnSpec, claudeSpawnSpec, type ManagerCommandInfo, type ManagerModelInfo } from './acpAdapter.js';
+import type { ChatTranscriptTurn } from '@git-agent-harness/contracts';
 
 export type { ManagerCommandInfo, ManagerModelInfo };
 
@@ -20,7 +21,10 @@ export interface ManagerBackendInfo {
 }
 
 interface ManagerAdapter extends ManagerBackendInfo {
-  runTurn(gahProfile: string, message: string): Promise<{ reply: string; model: string | null }>;
+  runTurn(
+    gahProfile: string,
+    input: { prompt: string; history: ChatTranscriptTurn[]; onChunk: (text: string) => void }
+  ): Promise<{ reply: string; model: string | null }>;
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;
   listModels(gahProfile: string): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }>;
   setModel(gahProfile: string, modelId: string): Promise<void>;

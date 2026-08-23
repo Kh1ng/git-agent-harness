@@ -125,7 +125,12 @@ export function ManagerChatPage() {
     processedRequestIds.current.add(pendingRequestId);
 
     if (last.type === 'manager.chat.reply') {
-      setTurns((prev) => [...prev, { role: 'assistant', text: last.reply }]);
+      setTurns((prev) => [...prev, {
+        role: 'assistant',
+        text: last.reply,
+        backend: last.backend,
+        model: last.model
+      }]);
     } else if (last.type === 'error') {
       setTurns((prev) => [...prev, { role: 'error', text: last.error }]);
     }

@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { appendEvents, chatLogPath, foldSession, loadLog } from './sessionLog.js';
+import { appendEvents, chatLogPath, deriveModelHistory, foldSession, loadLog } from './sessionLog.js';
 import type { ChatSessionEvent } from '@git-agent-harness/contracts';
 
 function tempStateDir(): string {
@@ -61,6 +61,29 @@ test('append + fold produces the derived transcript with attribution', () => {
   }
 });
 
+test('model history uses the logged model prompt while the UI uses the human prompt', () => {
+  const events: ChatSessionEvent[] = [
+    turnStart(1, 1),
+    userMsg(1, 2, 'human prompt'),
+    { type: 'user/message', seq: 3, turn: 1, text: 'context plus human prompt', source: 'inject', timestamp: 2500 },
+    assistantMsg(1, 4, 'answer'),
+    turnEnd(1, 5)
+  ];
+
+  assert.equal(deriveModelHistory(events)[0]?.text, 'context plus human prompt');
+});
+
+test('a completed compaction makes its turn the new history boundary', () => {
+  const events: ChatSessionEvent[] = [
+    turnStart(1, 1), userMsg(1, 2, 'old'), assistantMsg(1, 3, 'old answer'), turnEnd(1, 4),
+    { type: 'compaction/start', seq: 5, turn: 2, timestamp: 5000 },
+    turnStart(2, 6), userMsg(2, 7, '/reset'), assistantMsg(2, 8, 'reset'), turnEnd(2, 9),
+    { type: 'compaction/end', seq: 10, turn: 2, timestamp: 6000 }
+  ];
+
+  assert.deepEqual(deriveModelHistory(events).map((turn) => turn.text), ['/reset', 'reset']);
+});
+
 test('an interrupted turn is repaired with a synthetic turn/end, not truncated', () => {
   const dir = tempStateDir();
   try {
@@ -88,6 +111,19 @@ test('an interrupted turn is repaired with a synthetic turn/end, not truncated',
   }
 });
 
+test('folding a live turn does not repair it as interrupted', () => {
+  const dir = tempStateDir();
+  try {
+    appendEvents('gah', [turnStart(1, 1), userMsg(1, 2, 'question')], { stateDir: dir });
+
+    const view = foldSession('gah', { stateDir: dir }, false);
+    assert.equal(view.cursor, 2);
+    assert.equal(loadLog('gah', { stateDir: dir }, false).length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a completed turn is not rewritten and no interrupted marker appears', () => {
   const dir = tempStateDir();
   try {
@@ -108,11 +144,17 @@ test('a completed turn is not rewritten and no interrupted marker appears', () =
   }
 });
 
-test('logs are profile-scoped', () => {
+test('logs are isolated by project profile and session', () => {
   const dir = tempStateDir();
   try {
     appendEvents('gah', [turnStart(1, 1), userMsg(1, 2, 'for gah'), turnEnd(1, 3)], { stateDir: dir });
-    assert.ok(chatLogPath('gah', { stateDir: dir }).endsWith('gah.jsonl'));
+    assert.ok(chatLogPath('gah', { stateDir: dir }).endsWith('project-gah/session-default/session.jsonl'));
+    assert.equal(chatLogPath('..', { stateDir: dir }), join(dir, 'project-..', 'session-default', 'session.jsonl'));
+    assert.notEqual(chatLogPath('owner/repo', { stateDir: dir }), chatLogPath('owner_repo', { stateDir: dir }));
+    assert.notEqual(
+      chatLogPath('gah', { stateDir: dir, sessionId: 'one' }),
+      chatLogPath('gah', { stateDir: dir, sessionId: 'two' })
+    );
     const sportsball = foldSession('sportsball', { stateDir: dir });
     assert.equal(sportsball.turns.length, 0);
   } finally {
@@ -124,8 +166,8 @@ test('malformed lines are skipped, not fatal', () => {
   const dir = tempStateDir();
   try {
     const path = chatLogPath('gah', { stateDir: dir });
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(path, '{not json}\n' + JSON.stringify(turnStart(1, 1)) + '\n', 'utf8');
+    mkdirSync(join(dir, 'project-gah', 'session-default'), { recursive: true });
+    writeFileSync(path, '{not json}\n' + JSON.stringify(turnStart(1, 1)), 'utf8');
 
     const view = foldSession('gah', { stateDir: dir });
     // The malformed line is skipped; the valid turn/start is repaired into a

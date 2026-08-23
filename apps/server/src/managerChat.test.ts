@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { isCompactionCommand } from './managerChat/ManagerChatManager.js';
 import { normalizeRemoteUrl } from './managerChat/memoryGatewayClient.js';
 import { modelOverrideForProfile, setModelOverrideForProfile } from './managerChat/settingsStore.js';
+import { historyDelta, resumePrompt } from './managerChat/acpAdapter.js';
 
 test('isCompactionCommand recognizes known compact/clear synonyms across backends', () => {
   assert.equal(isCompactionCommand('/compact'), true);
@@ -22,6 +23,21 @@ test('isCompactionCommand ignores unrelated slash commands and plain text', () =
   assert.equal(isCompactionCommand('please clear this up'), false);
   assert.equal(isCompactionCommand(''), false);
   assert.equal(isCompactionCommand('/'), false);
+});
+
+test('resumePrompt restores prior roles only for a fresh conversation', () => {
+  assert.equal(resumePrompt('next', []), 'next');
+  assert.match(resumePrompt('next', [
+    { role: 'user', text: 'before', timestamp: 1 },
+    { role: 'assistant', text: 'answer', timestamp: 2 }
+  ]), /user: before\nassistant: answer\n\nuser: next$/);
+});
+
+test('historyDelta catches up a backend without replaying turns it already knows', () => {
+  const first = { role: 'user' as const, text: 'first', timestamp: 1 };
+  const second = { role: 'assistant' as const, text: 'second', timestamp: 2 };
+  assert.deepEqual(historyDelta([first], [first, second]), [second]);
+  assert.equal(historyDelta([second], [first, second]), null);
 });
 
 test('normalizeRemoteUrl collapses https/ssh/scp variants of the same remote', () => {

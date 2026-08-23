@@ -269,7 +269,10 @@ async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessa
       type: 'manager.chat.reply',
       requestId,
       profile: message.profile,
-      reply
+      reply: reply.text,
+      backend: reply.backend!,
+      model: reply.model ?? null,
+      usage: reply.usage
     };
     ws.send(JSON.stringify(payload));
   } catch (error) {
