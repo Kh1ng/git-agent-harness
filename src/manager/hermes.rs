@@ -1117,8 +1117,14 @@ exec python3 -u "$tmp" "$@"
             .is_err());
         assert!(session.sessions.is_empty());
         assert!(session.prompt_requests.is_empty());
-        let requests = fs::read_to_string(f.record_dir.join("requests.jsonl")).unwrap();
-        assert!(requests.contains("session/cancel"));
+        for _ in 0..100 {
+            let requests = fs::read_to_string(f.record_dir.join("requests.jsonl")).unwrap();
+            if requests.contains("session/cancel") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("Hermes did not receive session/cancel");
     }
 
     #[test]
