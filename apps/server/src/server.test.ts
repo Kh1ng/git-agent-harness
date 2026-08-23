@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from './server.js';
 import { resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
-import type { ConfigProfileSummary, DoctorSnapshot } from '@git-agent-harness/contracts';
+import type { ConfigProfileSummary, DoctorSnapshot, ProfileSummary } from '@git-agent-harness/contracts';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtempSync } from 'node:fs';
@@ -54,7 +54,8 @@ async function withTestServer(
   runProfile: (profile: string) => Promise<ConfigProfileSummary>,
   testFn: (url: string) => Promise<void>,
   runDoctor?: (profile: string) => Promise<DoctorSnapshot>,
-  coordinatorPort?: number
+  coordinatorPort?: number,
+  runProfileList?: () => Promise<ProfileSummary[]>
 ) {
   resetCachedCoordinatorIdentity();
   const tmpIdentityDir = mkdtempSync(join(tmpdir(), 'gah-test-identity-'));
@@ -64,7 +65,8 @@ async function withTestServer(
   const app = createServer({
     runConfigShowProfile: runProfile,
     ...(runDoctor ? { runDoctor } : {}),
-    ...(coordinatorPort !== undefined ? { coordinatorPort } : {})
+    ...(coordinatorPort !== undefined ? { coordinatorPort } : {}),
+    ...(runProfileList ? { runProfileList } : {})
   });
   const server = http.createServer(app);
 
@@ -188,4 +190,55 @@ test('GET /api/info advertises the configured coordinator port', async () => {
     undefined,
     9123
   );
+});
+
+test('project routes expose only curated profiles', async () => {
+  const savedCatalogPath = process.env.GAH_PROJECT_CATALOG_PATH;
+  process.env.GAH_PROJECT_CATALOG_PATH = join(mkdtempSync(join(tmpdir(), 'gah-project-routes-')), 'projects.json');
+  const profiles: ProfileSummary[] = [{
+    name: 'repo',
+    display_name: 'Repo',
+    provider: 'github',
+    repo: 'owner/repo',
+    local_path: '/repos/repo',
+    web_url: 'https://github.com/owner/repo',
+    max_parallel_workers: null,
+    max_open_managed_mrs: 1,
+    manager_wake_autonomy: null,
+    validation_timeout_seconds: 300
+  }];
+
+  try {
+    await withTestServer(
+      async (profile) => profilePayload(profile),
+      async (baseUrl) => {
+        assert.deepEqual(await (await fetch(`${baseUrl}/api/projects`)).json(), []);
+
+        const addResponse = await fetch(`${baseUrl}/api/projects`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile: 'repo' })
+        });
+        assert.equal(addResponse.status, 201);
+        assert.equal(((await addResponse.json()) as ProfileSummary).name, 'repo');
+        assert.deepEqual(
+          ((await (await fetch(`${baseUrl}/api/projects`)).json()) as ProfileSummary[]).map((profile) => profile.name),
+          ['repo']
+        );
+
+        const invalidImport = await fetch(`${baseUrl}/api/projects/import`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gitUrl: 'file:///tmp/repo' })
+        });
+        assert.equal(invalidImport.status, 400);
+      },
+      undefined,
+      undefined,
+      async () => profiles
+    );
+  } finally {
+    if (savedCatalogPath === undefined) delete process.env.GAH_PROJECT_CATALOG_PATH;
+    else process.env.GAH_PROJECT_CATALOG_PATH = savedCatalogPath;
+  }
 });

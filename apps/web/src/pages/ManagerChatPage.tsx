@@ -3,6 +3,7 @@ import { Send, MessageSquare } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
+import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { generateRequestId } from '@git-agent-harness/shared';
 import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
@@ -222,20 +223,6 @@ export function ManagerChatPage() {
         description={`${currentProfileInfo?.repo ?? profile} · ${activeBackend ?? 'manager'}`}
         actions={
           <div className="flex items-center gap-2">
-            {availableProfiles.length > 1 && (
-              <select
-                value={profileOverride ?? wsProfile ?? ''}
-                onChange={(e) => setProfileOverride(e.target.value || null)}
-                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[180px]"
-                aria-label="Node / profile"
-              >
-                {availableProfiles.map((p) => (
-                  <option key={p.name} value={p.name}>
-                    {p.display_name || p.name}
-                  </option>
-                ))}
-              </select>
-            )}
             {models.length > 0 && (
               <select
                 value={currentModelId ?? ''}
@@ -255,7 +242,17 @@ export function ManagerChatPage() {
         }
       />
 
-      <div className="card-padded flex flex-col h-[65vh]">
+      <div className="grid min-w-0 gap-4 xl:grid-cols-[14rem_minmax(0,1fr)]">
+        <ProjectRail
+          currentProfile={profile}
+          profiles={availableProfiles}
+          onSelect={setProfileOverride}
+          onProjectAdded={(project) => {
+            setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.name), project]);
+          }}
+        />
+
+      <div className="card-padded flex min-w-0 flex-col h-[65vh]">
         <div className="flex-1 overflow-y-auto space-y-3 pr-1">
           {!historyLoaded && turns.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-center text-muted gap-2">
@@ -366,6 +363,7 @@ export function ManagerChatPage() {
             <Send size={14} aria-hidden="true" />
           </button>
         </div>
+      </div>
       </div>
     </div>
   );

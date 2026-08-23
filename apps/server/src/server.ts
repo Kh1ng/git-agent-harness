@@ -39,7 +39,10 @@ import type {
   ReportGroupBy,
   ReportSeriesData,
   ConfigProfileSummary,
-  DoctorSnapshot
+  DoctorSnapshot,
+  ProfileSummary,
+  ProjectImportData,
+  ProjectImportResult
 } from '@git-agent-harness/contracts';
 import { getFleetDispatch } from './wsServer.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
@@ -58,6 +61,7 @@ import {
   listModelsForProfile as listManagerChatModels,
   setModelForProfile as setManagerChatModel
 } from './managerChat/ManagerChatManager.js';
+import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
 
 const SERVER_VERSION = '0.1.0';
 
@@ -67,6 +71,8 @@ type ConfigEffectiveDeps = {
 };
 
 type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
+  runProfileList?: () => Promise<ProfileSummary[]>;
+  runProfileAdd?: (options: ProfileAddOptions) => Promise<void>;
   registryService?: RegistryService;
   claimsService?: ClaimsService;
   coordinatorPort?: number;
@@ -110,6 +116,8 @@ export function createServer(
     ...configDeps
   };
   const coordinatorPort = configDeps.coordinatorPort ?? 3773;
+  const listProfiles = configDeps.runProfileList ?? runProfileList;
+  const addProfile = configDeps.runProfileAdd ?? runProfileAdd;
 
   const registryService = configDeps.registryService || new RegistryService();
   const claimsService = configDeps.claimsService || new ClaimsService();
@@ -124,8 +132,8 @@ export function createServer(
   // Middleware
   app.use(cors());
   app.use(express.json());
-  // authMiddleware only guards the node registry -- it is new, narrowly scoped
-  // surface. The rest of the API (loop start/stop, config mutation, etc.) is
+  // authMiddleware guards new, narrowly scoped sensitive surfaces. The rest
+  // of the API (loop start/stop, legacy config mutation, etc.) is
   // unauthenticated pending #532; applying this globally would silently change
   // that pre-existing contract.
   app.use('/api/registry', authMiddleware);
@@ -135,6 +143,13 @@ export function createServer(
   // somewhere), so it gets the same narrow gate as registry/claims rather
   // than riding the unauthenticated default the rest of the API still has.
   app.use('/api/settings', authMiddleware);
+  app.use('/api/projects', authMiddleware);
+  app.use('/api/projects/import', rateLimit({
+    windowMs: 60_000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false
+  }));
   // Issue #882 (CodeQL: js/missing-rate-limiting) -- these routes are
   // authenticated but called frequently by design (a renewal every
   // lease/3, ~5 min, per in-flight dispatch), so the limit is generous for
@@ -203,6 +218,7 @@ export function createServer(
         events: '/api/events',
         controllerActivity: '/api/controller-activity',
         profiles: '/api/profiles',
+        projects: '/api/projects',
         config: '/api/config',
         configEffective: '/api/config/effective',
         loopStatus: '/api/loop/status',
@@ -658,11 +674,88 @@ export function createServer(
   // apps/web SettingsPage.
   app.get('/api/profiles', async (req, res) => {
     try {
-      const profiles = await runProfileList();
+      const profiles = await listProfiles();
       res.json(profiles);
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah profiles',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/projects', async (_req, res) => {
+    try {
+      res.json(listProjects(await listProfiles()));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load projects',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/projects', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile.trim() : '';
+    if (!profile) {
+      res.status(400).json({ error: 'Invalid project', message: 'profile is required' });
+      return;
+    }
+    try {
+      res.status(201).json(addProject(profile, await listProfiles()));
+    } catch (error) {
+      res.status(400).json({
+        error: 'Failed to add project',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/projects/import', async (req, res) => {
+    const gitUrl = typeof req.body?.gitUrl === 'string' ? req.body.gitUrl.trim() : '';
+    if (!gitUrl) {
+      res.status(400).json({ error: 'Invalid project import', message: 'gitUrl is required' });
+      return;
+    }
+    try {
+      parseGitUrl(gitUrl);
+    } catch (error) {
+      res.status(400).json({
+        error: 'Invalid project import',
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+    try {
+      const input: ProjectImportData = { gitUrl, reclone: req.body?.reclone === true };
+      const imported = await importGitProject(input, { listProfiles, addProfile });
+      const project = addProject(imported.profileName, await listProfiles());
+      const result: ProjectImportResult = {
+        project,
+        checkoutPath: imported.checkoutPath,
+        checkoutStatus: imported.checkoutStatus,
+        detectedLanguages: imported.detectedLanguages,
+        validationCommands: imported.validationCommands
+      };
+      res.status(201).json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const conflict = message.includes('uncommitted changes')
+        || message.includes('checkout origin')
+        || message.includes('managed checkouts');
+      res.status(conflict ? 409 : 502).json({
+        error: 'Failed to import project',
+        message
+      });
+    }
+  });
+
+  app.delete('/api/projects/:profile', (req, res) => {
+    try {
+      res.json({ removed: removeProject(req.params.profile) });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to remove project',
         message: error instanceof Error ? error.message : String(error)
       });
     }

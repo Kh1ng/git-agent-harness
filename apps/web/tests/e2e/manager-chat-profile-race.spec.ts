@@ -23,6 +23,13 @@ test('profile changes reject stale chat replies and control data', async ({ page
     if (url.pathname === '/api/profiles') {
       return route.fulfill({ json: [
         { name: 'alpha', display_name: 'Alpha', repo: 'org/alpha' },
+        { name: 'beta', display_name: 'Beta', repo: 'org/beta' },
+        { name: 'hidden', display_name: 'Hidden', repo: 'org/hidden' }
+      ] });
+    }
+    if (url.pathname === '/api/projects') {
+      return route.fulfill({ json: [
+        { name: 'alpha', display_name: 'Alpha', repo: 'org/alpha' },
         { name: 'beta', display_name: 'Beta', repo: 'org/beta' }
       ] });
     }
@@ -78,6 +85,9 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await expect(page.locator('[role="status"]:visible', { hasText: 'Live' })).toBeVisible();
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
+  const projects = page.getByRole('navigation', { name: 'Projects' });
+  await expect(projects.getByRole('button', { name: 'Alpha org/alpha' })).toBeVisible();
+  await expect(projects.getByRole('button', { name: /Hidden/ })).toHaveCount(0);
   await expect.poll(() => heldAlphaHistory).not.toBe('');
   await expect(page.getByText('Loading conversation…')).toBeVisible();
   await expect(page.getByText('Thinking…')).toHaveCount(0);
@@ -98,7 +108,7 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
   socket!.send(heldAlphaHistory);
 
-  await page.getByLabel('Node / profile').selectOption('beta');
+  await projects.getByRole('button', { name: 'Beta org/beta' }).click();
   await expect(page.getByRole('heading', { name: 'beta', exact: true })).toBeVisible();
   releaseAlpha();
   socket!.send(JSON.stringify({
@@ -128,6 +138,7 @@ test('reconnect restores and follows an in-flight reply', async ({ page }) => {
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/profiles') return route.fulfill({ json: [{ name: 'alpha', display_name: 'Alpha', repo: 'org/alpha' }] });
+    if (path === '/api/projects') return route.fulfill({ json: [{ name: 'alpha', display_name: 'Alpha', repo: 'org/alpha' }] });
     if (path === '/api/controller-activity') return route.fulfill({ json: [] });
     if (path === '/api/manager-chat/settings') return route.fulfill({ json: {
       defaultBackend: 'hermes', profileOverrides: {}, availableBackends: [{ id: 'hermes', displayName: 'Hermes' }]
