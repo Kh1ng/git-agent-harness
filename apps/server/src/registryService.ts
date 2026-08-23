@@ -45,14 +45,16 @@ function isCentralEndpoint(candidateUrl: string, advertisedCentralUrl: string, l
   if (getEndpoint(candidateUrl) === getEndpoint(advertisedCentralUrl)) return true;
   try {
     const candidate = new URL(candidateUrl);
-    return urlPort(candidate) === listenerPort && localListenerHosts().has(normalizeLoopbackHost(candidate.hostname));
+    const listenerHosts = localListenerHosts();
+    listenerHosts.add(normalizeLoopbackHost(new URL(advertisedCentralUrl).hostname));
+    return urlPort(candidate) === listenerPort && listenerHosts.has(normalizeLoopbackHost(candidate.hostname));
   } catch {
     return false;
   }
 }
 
 function localListenerHosts(): Set<string> {
-  const hosts = new Set([normalizeLoopbackHost(hostname()), '127.0.0.1']);
+  const hosts = new Set([normalizeLoopbackHost(hostname()), '127.0.0.1', '0.0.0.0', '::']);
   for (const addresses of Object.values(networkInterfaces())) {
     for (const address of addresses ?? []) hosts.add(normalizeLoopbackHost(address.address));
   }

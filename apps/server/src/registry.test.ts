@@ -407,6 +407,22 @@ test('RegistryService rejects its listener when the central advertises through a
         secret_ref: 'env:NODE_SECRET'
       });
     }, /central node's own endpoint/);
+
+    for (const [nodeId, advertisedUrl] of [
+      ['self-poll-public-host', 'http://central.example.com:3773'],
+      ['self-poll-ipv4-wildcard', 'http://0.0.0.0:3773'],
+      ['self-poll-ipv6-wildcard', 'http://[::]:3773']
+    ]) {
+      assert.throws(() => registry.registerNode({
+        node_id: nodeId,
+        display_name: 'Bad Node',
+        advertised_url: advertisedUrl,
+        version: '0.1.0',
+        schema_digest: COORDINATOR_SCHEMA_DIGEST,
+        transport_mode: 'trusted_lan',
+        secret_ref: 'env:NODE_SECRET'
+      }), /central node's own endpoint/);
+    }
   } finally {
     if (existsSync(tempPath)) unlinkSync(tempPath);
   }
