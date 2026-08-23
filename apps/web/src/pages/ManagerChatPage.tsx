@@ -176,11 +176,12 @@ export function ManagerChatPage() {
     }
   }, [messages, pendingRequest, profile]);
 
-  const isBusy = !historyLoaded || pendingRequest !== null || remoteTurnBusy;
+  const turnBusy = pendingRequest !== null || remoteTurnBusy;
+  const sendBlocked = !historyLoaded || turnBusy;
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [turns, isBusy]);
+  }, [turns, turnBusy]);
 
   // "/" palette: matches commands by prefix against whatever's typed after
   // the leading slash, only while the draft is exactly a slash-command in
@@ -205,7 +206,7 @@ export function ManagerChatPage() {
 
   const handleSend = () => {
     const text = draft.trim();
-    if (!text || isBusy) return;
+    if (!text || sendBlocked) return;
     const requestId = generateRequestId();
     setTurns((prev) => [...prev, { role: 'user', text }]);
     setDraft('');
@@ -292,7 +293,7 @@ export function ManagerChatPage() {
               )}
             </div>
           ))}
-          {isBusy && (
+          {turnBusy && (
             <div className="flex justify-start">
               <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-raised text-muted border border-subtle animate-pulse">
                 Thinking…
@@ -358,7 +359,7 @@ export function ManagerChatPage() {
           />
           <button
             onClick={handleSend}
-            disabled={!isConnected || !draft.trim() || isBusy}
+            disabled={!isConnected || !draft.trim() || sendBlocked}
             className="btn-primary h-fit"
             aria-label="Send"
           >

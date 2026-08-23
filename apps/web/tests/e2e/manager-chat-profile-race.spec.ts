@@ -79,6 +79,8 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await page.getByRole('button', { name: 'Manager Chat', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
   await expect.poll(() => heldAlphaHistory).not.toBe('');
+  await expect(page.getByText('Loading conversation…')).toBeVisible();
+  await expect(page.getByText('Thinking…')).toHaveCount(0);
   await page.getByPlaceholder(/Message the manager/).fill('alpha question');
   await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
   holdAlphaHistory = false;
