@@ -86,13 +86,14 @@ The updater never starts or restarts a recurring `gah loop`; with
   or start a detached `gah loop` by hand.
   The unit is enabled at `default.target`, so it starts at login/boot. A
   dashboard **Stop** writes a durable *manual-stop marker*
-  (`loopStateDir()/loop-<profile>.manual-stop.json`, next to the profile lock
+  (`loopStateDir()/loop-<profile>-<config-file>.manual-stop.json`, next to the profile lock
   under `.gah-locks`, or `$XDG_STATE_HOME/gah` when the server can't resolve a
   config path). `gah loop` honors that marker at startup and refuses to begin
   dispatching while it is present — so a deliberately-stopped loop does not
   come back to life after a reboot and start re-dispatching jobs. An explicit
   dashboard **Start** clears the marker before it starts the unit; a failed
-  start restores it so the stop intent survives.
+  start restores it so the stop intent survives. Starting the unit directly
+  does not clear the marker; use the dashboard Start action to resume it.
 - **`gah-watchdog`** (`.service` + `.timer`) — an **alert-only** health check
   for `gah-loop@<profile>.service` units (issue #726). Every profile
   configured in `gah`'s config gets checked (`--profile` scopes it to one).
@@ -664,7 +665,7 @@ descendant cleanup failed; refusing to retry` — records a durable
 `human_required` gate with reason code `terminal_harness_failure`. The
 controller stops re-dispatching that ticket (including after a reboot) until
 an operator inspects it and explicitly releases the gate with
-`gah ledger clear-attempts --profile <profile> <WORK_ID>`.
+`gah ledger clear-attempts --profile <profile> '<WORK_ID>'`.
 
 ### Validation check — `$XDG_STATE_HOME/gah/validation_check.json`
 

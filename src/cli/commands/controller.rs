@@ -158,19 +158,23 @@ pub fn run_route_approval(command: RouteApprovalCommands) -> Result<()> {
 }
 
 /// Mirrors the Node server's `loopManualStopFile` path convention
-/// (apps/server/src/gahCli.ts): `loopStateDir()/loop-<profile>.manual-stop.json`,
+/// (apps/server/src/gahCli.ts): config-adjacent markers include the config
+/// filename; fallback state directories use `loop-<profile>.manual-stop.json`.
 /// where `loopStateDir()` is either `<config-dir>/.gah-locks` (when the server
 /// resolved a config path) or `$XDG_STATE_HOME/gah` (fallback). We check both
 /// so a marker written by either server configuration is honored.
 fn manual_stop_marker_present(profile: &str, config_path: &std::path::Path) -> bool {
     let key = profile.replace('/', "_");
     let mut candidates = Vec::new();
-    if let Some(parent) = config_path.parent() {
-        candidates.push(
-            parent
-                .join(".gah-locks")
-                .join(format!("loop-{key}.manual-stop.json")),
-        );
+    let canonical_config =
+        std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.into());
+    if let (Some(parent), Some(config_name)) =
+        (canonical_config.parent(), canonical_config.file_name())
+    {
+        candidates.push(parent.join(".gah-locks").join(format!(
+            "loop-{key}-{}.manual-stop.json",
+            config_name.to_string_lossy()
+        )));
     }
     if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
         candidates.push(
@@ -196,7 +200,7 @@ pub fn run_loop(args: LoopArgs) -> Result<()> {
 
     // Issue: honor the manual-stop marker at daemon startup. When the
     // operator stops the loop through the control plane (dashboard Stop), the
-    // Node server writes `loopStateDir()/loop-<profile>.manual-stop.json` so
+    // Node server writes the config-scoped manual-stop marker so
     // the stop survives a reboot -- the gah-loop@<profile>.service unit is
     // enabled at default.target and would otherwise auto-start and begin
     // dispatching immediately after every reboot. The loop refuses to start
@@ -205,9 +209,9 @@ pub fn run_loop(args: LoopArgs) -> Result<()> {
     if !args.once && manual_stop_marker_present(&args.profile, &resolved_config_path) {
         eprintln!(
             "gah loop: profile '{}' was deliberately stopped through the control plane (manual-stop marker present). \
-             Not starting to avoid re-dispatching after reboot. Start it from the dashboard or with \
-             `systemctl --user start gah-loop@{}`.",
-            args.profile, args.profile
+             Not starting to avoid re-dispatching after reboot. Use the dashboard Start action to \
+             clear the marker before starting the systemd unit.",
+            args.profile
         );
         return Ok(());
     }
@@ -313,7 +317,7 @@ mod tests {
             let locks = dir.join(".gah-locks");
             std::fs::create_dir_all(&locks).unwrap();
             std::fs::write(
-                locks.join("loop-gah.manual-stop.json"),
+                locks.join("loop-gah-config.toml.manual-stop.json"),
                 r#"{"stoppedAt":"2026-08-22T00:00:00Z"}"#,
             )
             .unwrap();
@@ -379,12 +383,32 @@ mod tests {
             let locks = dir.join(".gah-locks");
             std::fs::create_dir_all(&locks).unwrap();
             std::fs::write(
-                locks.join("loop-sportsball.manual-stop.json"),
+                locks.join("loop-sportsball-config.toml.manual-stop.json"),
                 r#"{"stoppedAt":"2026-08-22T00:00:00Z"}"#,
             )
             .unwrap();
             let config_path = dir.join("config.toml");
             assert!(!manual_stop_marker_present("gah", &config_path));
+        });
+
+        restore_env("XDG_STATE_HOME", saved_xdg);
+        restore_env("HOME", saved_home);
+    }
+
+    #[test]
+    fn manual_stop_marker_ignores_same_profile_in_another_config() {
+        let _guard = env_guard();
+        let saved_xdg = std::env::var_os("XDG_STATE_HOME");
+        let saved_home = std::env::var_os("HOME");
+        std::env::remove_var("XDG_STATE_HOME");
+        std::env::remove_var("HOME");
+
+        with_temp_dir(|dir| {
+            let locks = dir.join(".gah-locks");
+            std::fs::create_dir_all(&locks).unwrap();
+            std::fs::write(locks.join("loop-gah-dev.toml.manual-stop.json"), "{}").unwrap();
+            assert!(manual_stop_marker_present("gah", &dir.join("dev.toml")));
+            assert!(!manual_stop_marker_present("gah", &dir.join("prod.toml")));
         });
 
         restore_env("XDG_STATE_HOME", saved_xdg);

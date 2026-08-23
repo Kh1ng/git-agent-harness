@@ -142,7 +142,7 @@ pub struct RemediationContext<'a> {
 
 fn work_label(work_id: Option<&str>) -> String {
     work_id
-        .map(str::to_string)
+        .map(|value| format!("'{}'", value.replace('\'', "'\"'\"'")))
         .unwrap_or_else(|| "<WORK_ID>".to_string())
 }
 
@@ -158,7 +158,7 @@ fn inspect_actions(
     if let Some(work_id) = work_id {
         actions.push(RemediationAction::inspect(
             "Inspect the blocked work item history",
-            format!("gah ledger work {work_id}"),
+            format!("gah ledger work {}", work_label(Some(work_id))),
         ));
     } else if reference.is_some() {
         actions.push(RemediationAction::inspect(
@@ -407,7 +407,7 @@ pub fn plan_remediation(context: RemediationContext<'_>) -> RemediationPlan {
             reason_code,
             RemediationAuthority::Operator,
             "The dispatch reached a terminal harness refusal and declined to retry (e.g. descendant cleanup failed); inspect the work item and the backend/harness state before explicitly releasing its gate",
-            inspect_actions(profile_name, work_id, reference),
+            retry_budget_actions(profile_name, work_id),
         ),
         HumanRequiredReason::Unknown => no_auto(
             profile_name,
@@ -556,6 +556,28 @@ mod tests {
                 .as_deref()
                 .is_none_or(|cmd| !cmd.contains("clear-attempts"))));
         }
+    }
+
+    #[test]
+    fn terminal_harness_failure_offers_an_explicit_quoted_release_command() {
+        let plan = plan_remediation(RemediationContext {
+            profile_name: "gah",
+            profile: &profile("github", MergePolicy::Auto, true),
+            work_id: Some("#243"),
+            reference: None,
+            reason_code: HumanRequiredReason::TerminalHarnessFailure,
+            blocker_kind: Some("human_required"),
+            backend: None,
+            model: None,
+        });
+        let RemediationPlan::NoAutomaticRemediation { safe_actions, .. } = plan else {
+            panic!("expected operator-gated remediation");
+        };
+        assert!(safe_actions.iter().any(|action| action.command.as_deref()
+            == Some("gah ledger clear-attempts --profile gah '#243'")));
+        assert!(safe_actions
+            .iter()
+            .any(|action| action.command.as_deref() == Some("gah ledger work '#243'")));
     }
 
     #[test]

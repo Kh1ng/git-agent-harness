@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 import {
@@ -202,6 +202,33 @@ test('manual-stop marker is profile-scoped', () => {
   } finally {
     if (originalState === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = originalState;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('manual-stop marker is config-scoped', () => {
+  const env = { XDG_STATE_HOME: '/state' };
+  assert.notEqual(
+    loopManualStopFile('gah', '/config/dev.toml', env),
+    loopManualStopFile('gah', '/config/prod.toml', env),
+  );
+});
+
+test('manual-stop marker resolves config symlinks like the Rust loop', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-manual-stop-'));
+  try {
+    const targetDir = join(dir, 'target');
+    mkdirSync(targetDir);
+    const config = join(targetDir, 'gah-config.toml');
+    const alias = join(dir, 'config-link.toml');
+    writeFileSync(config, '');
+    symlinkSync(config, alias);
+    assert.equal(loopManualStopFile('gah', alias, {}), loopManualStopFile('gah', config, {}));
+    assert.equal(
+      loopManualStopFile('gah', alias, {}),
+      join(realpathSync(targetDir), '.gah-locks', 'loop-gah-gah-config.toml.manual-stop.json'),
+    );
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

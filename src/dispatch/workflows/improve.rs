@@ -620,6 +620,14 @@ pub(crate) fn improve(
                 );
             }
             if cleanup_failed {
+                // Set the durable gate before cleanup operations that can fail;
+                // the outer dispatch boundary persists this ledger on every exit.
+                ledger.human_required = true;
+                ledger.human_required_reason_code = Some(
+                    HumanRequiredReason::TerminalHarnessFailure
+                        .as_str()
+                        .to_string(),
+                );
                 worktree::preserve_wip(
                     &wt,
                     &profile.default_target_branch,
@@ -630,13 +638,6 @@ pub(crate) fn improve(
                     ),
                 )?;
                 worktree::cleanup(&wt, repo);
-                // Terminal refusal: gate to stop re-dispatch after reboot.
-                ledger.human_required = true;
-                ledger.human_required_reason_code = Some(
-                    HumanRequiredReason::TerminalHarnessFailure
-                        .as_str()
-                        .to_string(),
-                );
                 anyhow::bail!("backend descendant cleanup failed; refusing to retry");
             }
             if stalled_before_changes {
