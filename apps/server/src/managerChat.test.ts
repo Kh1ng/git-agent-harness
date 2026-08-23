@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { compactionSummary, isCompactionCommand } from './managerChat/ManagerChatManager.js';
+import { compactionSummary, isCompactionCommand } from './managerChat/acpAdapter.js';
 import { normalizeRemoteUrl } from './managerChat/memoryGatewayClient.js';
 import { modelOverrideForProfile, setModelOverrideForProfile } from './managerChat/settingsStore.js';
 import { historyDelta, readModelConfig, resumePrompt, toChatUsage } from './managerChat/acpAdapter.js';

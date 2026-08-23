@@ -73,6 +73,27 @@ test('model history uses the logged model prompt while the UI uses the human pro
   assert.equal(deriveModelHistory(events)[0]?.text, 'context plus human prompt');
 });
 
+test('tool and slash-command results survive the event log', () => {
+  const dir = tempStateDir();
+  const events: ChatSessionEvent[] = [
+    turnStart(1, 1),
+    userMsg(1, 2, '/check'),
+    { type: 'tool/result', seq: 3, turn: 1, name: 'shell', text: 'ok', timestamp: 3 },
+    assistantMsg(1, 4, 'done'),
+    { type: 'human/command', seq: 5, turn: 1, command: 'check', result: 'done', timestamp: 5 },
+    turnEnd(1, 6)
+  ];
+
+  try {
+    appendEvents('gah', events, { stateDir: dir });
+    assert.deepEqual(foldSession('gah', { stateDir: dir }).turns.map((turn) => turn.text), [
+      '/check', '[shell] ok', 'done'
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a completed compaction makes its turn the new history boundary', () => {
   const events: ChatSessionEvent[] = [
     turnStart(1, 1), userMsg(1, 2, 'old'), assistantMsg(1, 3, 'old answer'), turnEnd(1, 4),
@@ -135,6 +156,7 @@ test('folding a live turn does not repair it as interrupted', () => {
 
     const view = foldSession('gah', { stateDir: dir }, false);
     assert.equal(view.cursor, 2);
+    assert.deepEqual(view.streaming, { turn: 1, partialText: '' });
     assert.equal(loadLog('gah', { stateDir: dir }, false).length, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });

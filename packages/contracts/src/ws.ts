@@ -4,7 +4,7 @@
  */
 
 import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, DependencyBlocker } from './gah.js';
-import type { ChatTranscriptTurn } from './chat-session.js';
+import type { ChatSessionView, ChatTranscriptTurn } from './chat-session.js';
 
 // Provider types
 export type ProviderKind = 
@@ -146,6 +146,8 @@ export type ServerMessage =
       turns: ManagerChatTurn[];
       /** Monotonic log position; the client can resume requesting after it. */
       cursor: number;
+      /** Partial assistant reply when the requested turn is still running. */
+      streaming: ChatSessionView['streaming'];
     };
 
 export type ManagerChatTurn = ChatTranscriptTurn;

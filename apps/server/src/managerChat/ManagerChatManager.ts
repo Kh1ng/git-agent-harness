@@ -18,11 +18,6 @@ import { backendForProfile, modelOverrideForProfile, setModelOverrideForProfile 
 import { appendEvents, createEventWriter, deriveModelHistory, foldSession, loadLog, type SessionLogOptions } from './sessionLog.js';
 import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 
-export { compactionSummary, isCompactionCommand } from './acpAdapter.js';
-
-/** The derived transcript turn -- the on-wire shape of a folded log. */
-export type ChatTurn = ChatTranscriptTurn;
-
 // Serializes turns per profile -- without this, two concurrent messages for
 // the same profile (e.g. two open browser tabs) would both prompt the same
 // backend session at once, corrupting turn ordering. One profile = one
@@ -35,11 +30,6 @@ const logOptions: SessionLogOptions = {};
 
 export function setSessionLogOptions(opts: SessionLogOptions): void {
   logOptions.stateDir = opts.stateDir;
-}
-
-/** Fold the event log into the derived transcript (survives restart). */
-export function getHistory(profile: string): ChatTurn[] {
-  return foldSession(profile, logOptions, !activeProfiles.has(profile)).turns;
 }
 
 /** The full folded view, including cursor + streaming state. */
@@ -84,12 +74,13 @@ async function runTurn(
   message: string,
   prompt: string,
   history: ChatTranscriptTurn[],
-  onChunk: (text: string) => void
+  onChunk: (text: string) => void,
+  onToolResult: (name: string, text: string) => void
 ): Promise<{ reply: string; backend: string; model: string | null; usage: ChatUsage | null }> {
   const backendId = backendForProfile(profile);
   const adapter = resolveAdapter(backendId);
   const isSlashCommand = message.trim().startsWith('/');
-  const result = await adapter.runTurn(profile, { prompt, history, onChunk });
+  const result = await adapter.runTurn(profile, { prompt, history, onChunk, onToolResult });
 
   await capture(profile, message, result.reply);
   // Force buffered L0 conversation into the gateway's L1/L2 pipeline right
@@ -135,15 +126,27 @@ export function sendManagerChatMessage(profile: string, message: string): Promis
         }], logOptions);
       }
       chunkWriter = createEventWriter(profile, logOptions);
-      const { reply, backend, model, usage } = await runTurn(profile, message, prompt, history, (text) => {
-        chunkWriter?.append({
+      const { reply, backend, model, usage } = await runTurn(
+        profile,
+        message,
+        prompt,
+        history,
+        (text) => chunkWriter?.append({
           type: 'assistant/chunk',
           seq: ++seq,
           turn: turnNo,
           text,
           timestamp: Date.now()
-        });
-      });
+        }),
+        (name, text) => chunkWriter?.append({
+          type: 'tool/result',
+          seq: ++seq,
+          turn: turnNo,
+          name,
+          text,
+          timestamp: Date.now()
+        })
+      );
       await chunkWriter.close();
       const assistant: ChatTranscriptTurn = {
         role: 'assistant',
@@ -164,6 +167,14 @@ export function sendManagerChatMessage(profile: string, message: string): Promis
           usage,
           timestamp: assistant.timestamp
         },
+        ...(isSlashCommand ? [{
+          type: 'human/command' as const,
+          seq: ++seq,
+          turn: turnNo,
+          command: message.trim().slice(1).split(/\s+/)[0] ?? '',
+          result: reply,
+          timestamp: Date.now()
+        }] : []),
         { type: 'turn/end', seq: ++seq, turn: turnNo, reason: { kind: 'complete' }, timestamp: Date.now() },
         ...(compaction ? [{
           type: 'compaction/summary' as const,

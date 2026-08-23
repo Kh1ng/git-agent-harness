@@ -262,7 +262,9 @@ export function foldSession(
         turns.push({ role: 'system', text: `[${e.name}] ${e.text}`, timestamp: e.timestamp });
         break;
       case 'human/command':
-        turns.push({ role: 'system', text: `/${e.command} ${e.result}`.trim(), timestamp: e.timestamp });
+        if (turns.at(-1)?.role !== 'assistant' || turns.at(-1)?.text !== e.result) {
+          turns.push({ role: 'system', text: `/${e.command} ${e.result}`.trim(), timestamp: e.timestamp });
+        }
         break;
       case 'compaction/start':
       case 'compaction/end':
@@ -273,7 +275,7 @@ export function foldSession(
     }
   }
 
-  if (openTurn !== null && partialText) {
+  if (openTurn !== null) {
     streaming = { turn: openTurn, partialText };
   }
 

@@ -40,13 +40,18 @@ export interface SpawnSpec {
 
 const COMPACTION_COMMAND_NAMES = new Set(['compact', 'compress', 'clear', 'reset']);
 
+function commandName(message: string): string | null {
+  if (!message.trim().startsWith('/')) return null;
+  return message.trim().slice(1).split(/\s+/)[0]?.toLowerCase() || null;
+}
+
 export function isCompactionCommand(message: string): boolean {
-  const name = message.trim().slice(1).split(/\s+/)[0]?.toLowerCase();
-  return name !== undefined && COMPACTION_COMMAND_NAMES.has(name);
+  const name = commandName(message);
+  return name !== null && COMPACTION_COMMAND_NAMES.has(name);
 }
 
 export function compactionSummary(message: string, reply: string): string {
-  const command = message.trim().slice(1).split(/\s+/)[0]?.toLowerCase();
+  const command = commandName(message);
   return command === 'clear' || command === 'reset'
     ? 'Conversation cleared.'
     : reply.trim() || 'Context compacted.';
@@ -56,6 +61,8 @@ class AcpClient implements acp.Client {
   availableCommands: ManagerCommandInfo[] = [];
   replyChunks: string[] = [];
   onReplyChunk?: (text: string) => void;
+  onToolResult?: (name: string, text: string) => void;
+  toolCalls = new Map<string, acp.ToolCallUpdate>();
   usageUpdate: acp.UsageUpdate | null = null;
   cumulativeUsage: acp.Usage | null = null;
   sessionCostUsd = 0;
@@ -92,9 +99,17 @@ class AcpClient implements acp.Client {
       if (update.cost?.currency === 'USD') this.sessionCostUsd = update.cost.amount;
     } else if (update.sessionUpdate === 'config_option_update') {
       this.configOptions = update.configOptions;
+    } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+      const previous = this.toolCalls.get(update.toolCallId);
+      const tool = { ...previous, ...update };
+      this.toolCalls.set(update.toolCallId, tool);
+      const finished = tool.status === 'completed' || tool.status === 'failed';
+      if (finished && previous?.status !== 'completed' && previous?.status !== 'failed') {
+        const value = tool.rawOutput ?? tool.content ?? tool.status;
+        this.onToolResult?.(tool.name ?? tool.title ?? tool.toolCallId, typeof value === 'string' ? value : JSON.stringify(value));
+      }
     }
-    // agent_thought_chunk / tool_call / tool_call_update / plan updates
-    // aren't surfaced in manager chat's reply text.
+    // agent_thought_chunk / plan updates aren't surfaced in manager chat.
   }
 }
 
@@ -198,10 +213,7 @@ function unwrapAcpError(error: unknown): Error {
 }
 
 export function hermesSpawnSpec(): SpawnSpec {
-  // Same hardcoded Hermes profile as the original CLI adapter -- one Hermes
-  // identity across all GAH profiles/projects (matches "one manager for all
-  // projects is fine" from the original scoping conversation).
-  return { command: 'hermes', args: ['-p', 'gah-manager', 'acp'] };
+  return { command: 'hermes', args: ['acp'] };
 }
 
 export function codexSpawnSpec(): SpawnSpec {
@@ -299,18 +311,24 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
 
   async function runTurn(
     gahProfile: string,
-    input: { prompt: string; history: ChatTranscriptTurn[]; onChunk: (text: string) => void }
+    input: {
+      prompt: string;
+      history: ChatTranscriptTurn[];
+      onChunk: (text: string) => void;
+      onToolResult: (name: string, text: string) => void;
+    }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }> {
     const state = await connect(gahProfile);
     state.client.replyChunks = [];
+    state.client.toolCalls.clear();
     let missingHistory = historyDelta(state.knownHistory, input.history);
     if (missingHistory === null) {
       await startSession(state, true);
       state.knownHistory = [];
       missingHistory = input.history;
     }
-    const slashCommand = input.prompt.trimStart().startsWith('/');
-    const command = input.prompt.trim().slice(1).split(/\s+/)[0]?.toLowerCase();
+    const slashCommand = commandName(input.prompt) !== null;
+    const command = commandName(input.prompt);
     // ponytail: ACP cannot inject roleful history ahead of a native command;
     // use loadSession when adapters persist their native session ids.
     if ((command === 'compact' || command === 'compress') && missingHistory.length > 0) {
@@ -318,6 +336,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     }
     const prompt = slashCommand ? input.prompt : resumePrompt(input.prompt, missingHistory);
     state.client.onReplyChunk = input.onChunk;
+    state.client.onToolResult = input.onToolResult;
     state.client.usageUpdate = null;
     const costBeforeUsd = state.client.sessionCostUsd;
     const startedAt = Date.now();
@@ -331,6 +350,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
       throw unwrapAcpError(error);
     } finally {
       state.client.onReplyChunk = undefined;
+      state.client.onToolResult = undefined;
     }
     if (result.stopReason !== 'end_turn') {
       console.warn(`[managerChat] ${label} turn ended with stopReason=${result.stopReason} for profile ${gahProfile}`);

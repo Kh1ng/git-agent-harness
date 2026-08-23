@@ -51,6 +51,7 @@ export function ManagerChatPage() {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const processedRequestIds = useRef(new Set<string>());
   const historyRequestId = useRef<string | null>(null);
+  const historyPollTimer = useRef<number | null>(null);
   const activeProfileRef = useRef(profile);
   activeProfileRef.current = profile;
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
@@ -64,6 +65,7 @@ export function ManagerChatPage() {
   // otherwise leaving the page (or a dropped connection) silently loses the
   // conversation even though the server keeps it.
   useEffect(() => {
+    if (historyPollTimer.current !== null) window.clearTimeout(historyPollTimer.current);
     setHistoryLoaded(false);
     setTurns([]);
     setPendingRequest(null);
@@ -71,6 +73,9 @@ export function ManagerChatPage() {
     const requestId = generateRequestId();
     historyRequestId.current = requestId;
     sendMessage({ type: 'manager.chat.historyRequest', requestId, profile });
+    return () => {
+      if (historyPollTimer.current !== null) window.clearTimeout(historyPollTimer.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, isConnected, reconnectSeq]);
 
@@ -137,8 +142,20 @@ export function ManagerChatPage() {
     if (!last) return;
 
     if (last.type === 'manager.chat.history' && last.profile === profile && last.requestId === historyRequestId.current) {
-      setTurns(last.turns.map(fromServerTurn));
+      const restored = last.turns.map(fromServerTurn);
+      if (last.streaming?.partialText) {
+        restored.push({ role: 'assistant', text: last.streaming.partialText });
+      }
+      setTurns(restored);
       setHistoryLoaded(true);
+      if (last.streaming) {
+        historyPollTimer.current = window.setTimeout(() => {
+          if (activeProfileRef.current !== last.profile) return;
+          const requestId = generateRequestId();
+          historyRequestId.current = requestId;
+          sendMessage({ type: 'manager.chat.historyRequest', requestId, profile: last.profile });
+        }, 250);
+      }
       return;
     }
 

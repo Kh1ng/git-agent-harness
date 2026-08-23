@@ -287,7 +287,8 @@ async function handleManagerChatHistoryRequest(ws: WebSocket, message: Extract<C
     requestId,
     profile: message.profile,
     turns: view.turns,
-    cursor: view.cursor
+    cursor: view.cursor,
+    streaming: view.streaming
   };
   ws.send(JSON.stringify(payload));
 }

@@ -61,7 +61,8 @@ test('profile changes reject stale chat replies and control data', async ({ page
           requestId: message.requestId,
           profile: message.profile,
           turns: [],
-          cursor: 0
+          cursor: 0,
+          streaming: null
         }));
       } else if (message.type === 'manager.chat.send') {
         alphaRequestId = message.requestId;
@@ -97,4 +98,52 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await page.getByPlaceholder(/Message the manager/).fill('/');
   await expect(page.getByText('/beta-command', { exact: true })).toBeVisible();
   await expect(page.getByText('org/beta · beta-backend')).toBeVisible();
+});
+
+test('reconnect restores and follows an in-flight reply', async ({ page }) => {
+  let historyRequests = 0;
+  let complete = false;
+
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/profiles') return route.fulfill({ json: [{ name: 'alpha', display_name: 'Alpha', repo: 'org/alpha' }] });
+    if (path === '/api/controller-activity') return route.fulfill({ json: [] });
+    if (path === '/api/manager-chat/settings') return route.fulfill({ json: {
+      defaultBackend: 'hermes', profileOverrides: {}, availableBackends: [{ id: 'hermes', displayName: 'Hermes' }]
+    } });
+    if (path === '/api/manager-chat/commands') return route.fulfill({ json: { commands: [] } });
+    if (path === '/api/manager-chat/models') return route.fulfill({ json: { models: [], currentModelId: null } });
+    return route.continue();
+  });
+
+  await page.routeWebSocket('**/ws**', (ws) => {
+    ws.send(JSON.stringify(WELCOME));
+    ws.onMessage((raw) => {
+      const message = JSON.parse(String(raw));
+      if (message.type !== 'manager.chat.historyRequest') return;
+      historyRequests += 1;
+      const response = JSON.stringify({
+        type: 'manager.chat.history',
+        requestId: message.requestId,
+        profile: message.profile,
+        turns: !complete
+          ? [{ role: 'user', text: 'question', timestamp: 1 }]
+          : [
+              { role: 'user', text: 'question', timestamp: 1 },
+              { role: 'assistant', text: 'complete reply', backend: 'hermes', model: null, usage: null, timestamp: 2 }
+            ],
+        cursor: complete ? 5 : 3,
+        streaming: complete ? null : { turn: 1, partialText: 'partial reply' }
+      });
+      ws.send(response);
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Manager Chat', exact: true }).click();
+  await expect(page.getByText('partial reply', { exact: true })).toBeVisible();
+  complete = true;
+  await expect(page.getByText('complete reply', { exact: true })).toBeVisible();
+  await expect(page.getByText('partial reply', { exact: true })).toHaveCount(0);
+  expect(historyRequests).toBeGreaterThanOrEqual(2);
 });

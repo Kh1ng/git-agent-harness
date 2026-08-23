@@ -23,7 +23,12 @@ export interface ManagerBackendInfo {
 interface ManagerAdapter extends ManagerBackendInfo {
   runTurn(
     gahProfile: string,
-    input: { prompt: string; history: ChatTranscriptTurn[]; onChunk: (text: string) => void }
+    input: {
+      prompt: string;
+      history: ChatTranscriptTurn[];
+      onChunk: (text: string) => void;
+      onToolResult: (name: string, text: string) => void;
+    }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }>;
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;
   listModels(gahProfile: string): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }>;

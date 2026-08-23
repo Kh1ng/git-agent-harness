@@ -163,17 +163,3 @@ export interface ChatSessionView {
     model?: string | null;
   } | null;
 }
-
-/** A compact chat event vocabulary for logging -- used by the store. */
-export const CHAT_SESSION_EVENT_TYPES = [
-  'turn/start',
-  'turn/end',
-  'user/message',
-  'assistant/chunk',
-  'assistant/message',
-  'tool/result',
-  'human/command',
-  'compaction/start',
-  'compaction/summary',
-  'compaction/end'
-] as const;
