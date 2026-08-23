@@ -412,6 +412,28 @@ test('RegistryService rejects its listener when the central advertises through a
   }
 });
 
+test('RegistryService rejects a local interface behind a reverse proxy', () => {
+  const address = Object.values(os.networkInterfaces()).flat().find((entry) => entry && !entry.internal)?.address;
+  assert.ok(address, 'test host must expose a non-loopback interface');
+  const host = address.includes(':') ? `[${address}]` : address;
+  const tempPath = createTempRegistryFile();
+  const registry = new RegistryService(tempPath, 'https://central.example.com', 3773);
+
+  try {
+    assert.throws(() => registry.registerNode({
+      node_id: 'self-poll-interface',
+      display_name: 'Bad Node',
+      advertised_url: `http://${host}:3773`,
+      version: '0.1.0',
+      schema_digest: COORDINATOR_SCHEMA_DIGEST,
+      transport_mode: 'trusted_lan',
+      secret_ref: 'env:NODE_SECRET'
+    }), /central node's own endpoint/);
+  } finally {
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+  }
+});
+
 test('RegistryService rejects an unrecognized transport_mode instead of silently skipping TLS enforcement', () => {
   const tempPath = createTempRegistryFile();
   const registry = new RegistryService(tempPath);

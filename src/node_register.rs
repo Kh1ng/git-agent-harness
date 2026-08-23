@@ -137,14 +137,14 @@ pub struct RegisterOptions {
 
 /// Transport abstraction so tests can substitute the curl subprocess with a
 /// canned (status, body) response instead of standing up a real HTTP server.
-pub trait RegisterTransport {
+trait RegisterTransport {
     /// Returns (http_status, response_body) on any completed HTTP exchange,
     /// `Err` only for transport-level failure (can't connect, timeout, DNS).
     /// A 4xx/5xx status is a normal `Ok` result the caller interprets.
     fn post(&self, url: &str, body: &str, token: Option<&str>) -> Result<(u16, Vec<u8>)>;
 }
 
-pub struct CurlRegisterTransport;
+struct CurlRegisterTransport;
 
 impl RegisterTransport for CurlRegisterTransport {
     fn post(&self, url: &str, body: &str, token: Option<&str>) -> Result<(u16, Vec<u8>)> {

@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { hostname, networkInterfaces } from 'node:os';
 import type {
   RegisteredNode,
   NodeSummary,
@@ -44,10 +45,18 @@ function isCentralEndpoint(candidateUrl: string, advertisedCentralUrl: string, l
   if (getEndpoint(candidateUrl) === getEndpoint(advertisedCentralUrl)) return true;
   try {
     const candidate = new URL(candidateUrl);
-    return isLoopback(candidateUrl) && urlPort(candidate) === listenerPort;
+    return urlPort(candidate) === listenerPort && localListenerHosts().has(normalizeLoopbackHost(candidate.hostname));
   } catch {
     return false;
   }
+}
+
+function localListenerHosts(): Set<string> {
+  const hosts = new Set([normalizeLoopbackHost(hostname()), '127.0.0.1']);
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const address of addresses ?? []) hosts.add(normalizeLoopbackHost(address.address));
+  }
+  return hosts;
 }
 
 /** Normalizes every loopback spelling to one canonical host so endpoint
