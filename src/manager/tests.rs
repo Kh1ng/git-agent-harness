@@ -67,4 +67,6 @@ fn session_ids_are_namespaced_and_unique_per_start() {
 
     assert_ne!(a, b);
     assert!(a.as_str().starts_with("gah:manager:p:"));
+    assert_eq!(a.as_str().parse::<GahSessionId>().unwrap(), a);
+    assert!("gah:manager:p:not-a-uuid".parse::<GahSessionId>().is_err());
 }

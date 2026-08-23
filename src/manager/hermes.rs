@@ -11,15 +11,88 @@ use super::{
     TerminalStatus, UnsupportedCapability,
 };
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fmt;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
 const DEFAULT_HERMES_PROFILE: &str = "gah-manager";
+
+#[derive(Serialize, Deserialize)]
+struct DurableSessionMapping {
+    gah_session_id: String,
+    provider_session_id: String,
+}
+
+fn resolve_session_dir(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -> Result<PathBuf> {
+    if let Some(dir) = xdg_state_home
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+    {
+        return Ok(dir.join("gah").join("manager-sessions").join("hermes"));
+    }
+    if let Some(home) = home.map(Path::new).filter(|path| path.is_absolute()) {
+        return Ok(home.join(".local/state/gah/manager-sessions/hermes"));
+    }
+    Err(anyhow!(
+        "Hermes session persistence requires an absolute XDG_STATE_HOME or HOME"
+    ))
+}
+
+fn default_session_dir() -> Result<PathBuf> {
+    resolve_session_dir(
+        std::env::var_os("XDG_STATE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+fn mapping_path(session_dir: &Path, session: &GahSessionId) -> PathBuf {
+    let digest = Sha256::digest(session.as_str().as_bytes());
+    session_dir.join(format!("{digest:x}.json"))
+}
+
+fn persist_mapping(
+    session_dir: &Path,
+    session: &GahSessionId,
+    provider_session_id: &str,
+) -> Result<()> {
+    fs::create_dir_all(session_dir)
+        .with_context(|| format!("creating Hermes session map {}", session_dir.display()))?;
+    let path = mapping_path(session_dir, session);
+    let temp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let mapping = DurableSessionMapping {
+        gah_session_id: session.as_str().to_string(),
+        provider_session_id: provider_session_id.to_string(),
+    };
+    let mut file = File::create(&temp)
+        .with_context(|| format!("creating Hermes session map {}", temp.display()))?;
+    serde_json::to_writer(&mut file, &mapping).context("serializing Hermes session map")?;
+    file.sync_all().ok();
+    fs::rename(&temp, &path)
+        .with_context(|| format!("committing Hermes session map {}", path.display()))?;
+    Ok(())
+}
+
+fn load_mapping(session_dir: &Path, session: &GahSessionId) -> Result<String> {
+    let path = mapping_path(session_dir, session);
+    let file = File::open(&path)
+        .with_context(|| format!("opening Hermes session map {}", path.display()))?;
+    let mapping: DurableSessionMapping = serde_json::from_reader(file)
+        .with_context(|| format!("parsing Hermes session map {}", path.display()))?;
+    if mapping.gah_session_id != session.as_str() {
+        return Err(anyhow!(
+            "Hermes session map identity mismatch for {session}"
+        ));
+    }
+    Ok(mapping.provider_session_id)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HermesAuthState {
@@ -133,17 +206,15 @@ impl HermesTransport {
             return Ok(());
         };
 
-        let chunks = extract_message_chunks(update);
-        if chunks.is_empty() {
+        let updates = extract_updates(update);
+        if updates.is_empty() {
             return Ok(());
         }
         if let Some(session) = sessions
             .values_mut()
             .find(|session| session.provider_session_id == session_id)
         {
-            session
-                .pending_updates
-                .extend(chunks.into_iter().map(SessionUpdate::MessageChunk));
+            session.pending_updates.extend(updates);
         }
         Ok(())
     }
@@ -236,26 +307,33 @@ fn decode_json_rpc_response(message: Value) -> Result<Value> {
     if let Some(error) = message.get("error") {
         let code = error.get("code").and_then(Value::as_i64).unwrap_or(-1);
         let message = error
-            .get("message")
+            .get("data")
+            .and_then(|data| data.get("message"))
             .and_then(Value::as_str)
+            .or_else(|| error.get("message").and_then(Value::as_str))
             .unwrap_or("Hermes ACP request failed");
         return Err(anyhow!("{message} (code {code})"));
     }
     Ok(message.get("result").cloned().unwrap_or(Value::Null))
 }
 
-fn extract_message_chunks(update: &Value) -> Vec<String> {
+fn extract_updates(update: &Value) -> Vec<SessionUpdate> {
     let Some(kind) = update.get("sessionUpdate").and_then(Value::as_str) else {
         return vec![];
     };
     match kind {
-        "agent_message_chunk" | "user_message_chunk" | "thought_chunk" => extract_texts(update),
-        "usage_update"
-        | "tool_call"
-        | "tool_call_update"
-        | "available_commands_update"
-        | "session_info_update" => vec![],
-        _ => extract_texts(update),
+        "agent_message_chunk" => extract_texts(update)
+            .into_iter()
+            .map(SessionUpdate::MessageChunk)
+            .collect(),
+        "usage_update" => match (
+            update.get("used").and_then(Value::as_u64),
+            update.get("size").and_then(Value::as_u64),
+        ) {
+            (Some(used), Some(size)) => vec![SessionUpdate::Usage { used, size }],
+            _ => vec![],
+        },
+        _ => vec![],
     }
 }
 
@@ -294,16 +372,7 @@ fn parse_version_from_output(output: &std::process::Output) -> Option<String> {
 
 fn classify_auth_state(output: &std::process::Output) -> HermesAuthState {
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        let message = if stderr.is_empty() {
-            stdout
-        } else if stdout.is_empty() {
-            stderr
-        } else {
-            format!("{stderr}: {stdout}")
-        };
-        return HermesAuthState::Error(sanitize_auth_message(&message));
+        return HermesAuthState::Error(format!("status command exited with {}", output.status));
     }
 
     let combined = format!(
@@ -312,7 +381,13 @@ fn classify_auth_state(output: &std::process::Output) -> HermesAuthState {
         String::from_utf8_lossy(&output.stderr)
     );
     let lower = combined.to_lowercase();
-    if lower.contains("logged in") || lower.contains("authenticated") {
+    let logged_in = lower.lines().any(|line| {
+        (line.contains("logged in") && !line.contains("not logged in"))
+            || (line.contains("authenticated")
+                && !line.contains("not authenticated")
+                && !line.contains("unauthenticated"))
+    });
+    if logged_in {
         HermesAuthState::LoggedIn
     } else if lower.contains("not logged in")
         || lower.contains("logged out")
@@ -322,24 +397,6 @@ fn classify_auth_state(output: &std::process::Output) -> HermesAuthState {
     } else {
         HermesAuthState::Unknown
     }
-}
-
-fn sanitize_auth_message(message: &str) -> String {
-    let mut words = Vec::new();
-    for word in message.split_whitespace() {
-        let lower = word.to_ascii_lowercase();
-        if lower.contains("token")
-            || lower.contains("secret")
-            || lower.contains("apikey")
-            || lower.contains("api-key")
-            || lower.contains("password")
-        {
-            words.push("[redacted]".to_string());
-        } else {
-            words.push(word.to_string());
-        }
-    }
-    words.join(" ")
 }
 
 pub fn discover(executable: impl AsRef<Path>) -> Result<HermesDiscovery> {
@@ -353,7 +410,7 @@ pub fn discover(executable: impl AsRef<Path>) -> Result<HermesDiscovery> {
 
     let auth_state = match Command::new(&executable).args(["status", "--all"]).output() {
         Ok(output) => classify_auth_state(&output),
-        Err(error) => HermesAuthState::Error(sanitize_auth_message(&error.to_string())),
+        Err(_) => HermesAuthState::Error("status command could not be started".to_string()),
     };
 
     Ok(HermesDiscovery {
@@ -368,6 +425,7 @@ pub struct HermesManagerSession {
     transport: HermesTransport,
     sessions: HashMap<GahSessionId, HermesSessionState>,
     capabilities: SessionCapabilities,
+    session_dir: PathBuf,
 }
 
 impl HermesManagerSession {
@@ -376,6 +434,13 @@ impl HermesManagerSession {
     }
 
     pub fn new(executable: impl AsRef<Path>) -> Result<Self> {
+        Self::new_with_session_dir(executable, default_session_dir()?)
+    }
+
+    fn new_with_session_dir(
+        executable: impl AsRef<Path>,
+        session_dir: impl Into<PathBuf>,
+    ) -> Result<Self> {
         let discovery = discover(executable.as_ref())?;
         let mut transport = HermesTransport::spawn(&discovery.executable)?;
         let mut temp_sessions = HashMap::new();
@@ -412,8 +477,7 @@ impl HermesManagerSession {
             .unwrap_or_else(|| Value::Object(Default::default()));
         transport.supports_resume = session_capabilities
             .get("resume")
-            .is_some_and(|value| value != &Value::Bool(false))
-            || transport.supports_load_session;
+            .is_some_and(|value| value != &Value::Bool(false));
         let capabilities = SessionCapabilities {
             resume: transport.supports_load_session || transport.supports_resume,
             interrupt: true,
@@ -424,6 +488,7 @@ impl HermesManagerSession {
             transport,
             sessions: HashMap::new(),
             capabilities,
+            session_dir: session_dir.into(),
         })
     }
 
@@ -437,15 +502,11 @@ impl HermesManagerSession {
             .ok_or_else(|| anyhow!("unknown Hermes session {session}"))
     }
 
-    fn session_id_from_gah(session: &GahSessionId) -> Result<String> {
-        let raw = session.as_str();
-        let suffix = raw
-            .strip_prefix("gah:manager:")
-            .ok_or_else(|| anyhow!("invalid Hermes GAH session id {raw}"))?;
-        let (_, provider_session_id) = suffix
-            .rsplit_once(':')
-            .ok_or_else(|| anyhow!("invalid Hermes GAH session id {raw}"))?;
-        Ok(provider_session_id.to_owned())
+    fn provider_session_id(&self, session: &GahSessionId) -> Result<String> {
+        if let Some(state) = self.sessions.get(session) {
+            return Ok(state.provider_session_id.clone());
+        }
+        load_mapping(&self.session_dir, session)
     }
 
     fn record_session(&mut self, session: GahSessionId, provider_session_id: String) {
@@ -482,8 +543,8 @@ impl ManagerSession for HermesManagerSession {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| anyhow!("Hermes ACP session/new response did not include sessionId"))?;
-        let gah_session_id =
-            GahSessionId::from_provider_session(&request.profile, &provider_session_id);
+        let gah_session_id = GahSessionId::new(&request.profile);
+        persist_mapping(&self.session_dir, &gah_session_id, &provider_session_id)?;
         self.record_session(gah_session_id.clone(), provider_session_id.clone());
         let _ = rpc_request(
             &mut self.transport,
@@ -511,8 +572,9 @@ impl ManagerSession for HermesManagerSession {
             .into());
         }
         let cwd = std::env::current_dir().context("resolving current directory for Hermes ACP")?;
-        let provider_session_id = Self::session_id_from_gah(session)?;
-        if !self.sessions.contains_key(session) {
+        let provider_session_id = self.provider_session_id(session)?;
+        let restored = !self.sessions.contains_key(session);
+        if restored {
             self.record_session(session.clone(), provider_session_id.clone());
         }
         let method = if self.transport.supports_resume {
@@ -525,7 +587,7 @@ impl ManagerSession for HermesManagerSession {
             }
             .into());
         };
-        let _ = rpc_request(
+        let result = rpc_request(
             &mut self.transport,
             &mut self.sessions,
             method,
@@ -535,7 +597,13 @@ impl ManagerSession for HermesManagerSession {
                 "mcpServers": [],
             }),
         )
-        .with_context(|| format!("resuming Hermes session {provider_session_id}"))?;
+        .with_context(|| format!("resuming Hermes session {provider_session_id}"));
+        if let Err(error) = result {
+            if restored {
+                self.sessions.remove(session);
+            }
+            return Err(error);
+        }
         if let Some(state) = self.sessions.get_mut(session) {
             state.status = SessionStatus::Idle;
         }
@@ -543,10 +611,11 @@ impl ManagerSession for HermesManagerSession {
     }
 
     fn send(&mut self, session: &GahSessionId, message: &str) -> Result<()> {
-        let provider_session_id = Self::session_id_from_gah(session)?;
-        if !self.sessions.contains_key(session) {
-            self.record_session(session.clone(), provider_session_id.clone());
-        }
+        let provider_session_id = self
+            .sessions
+            .get(session)
+            .map(|state| state.provider_session_id.clone())
+            .ok_or_else(|| anyhow!("Hermes session {session} must be resumed before sending"))?;
         let _ = rpc_request(
             &mut self.transport,
             &mut self.sessions,
@@ -580,7 +649,13 @@ impl ManagerSession for HermesManagerSession {
             }
             .into());
         }
-        let provider_session_id = Self::session_id_from_gah(session)?;
+        let provider_session_id = self
+            .sessions
+            .get(session)
+            .map(|state| state.provider_session_id.clone())
+            .ok_or_else(|| {
+                anyhow!("Hermes session {session} must be resumed before interrupting")
+            })?;
         self.transport.cancel(&provider_session_id)?;
         if let Some(state) = self.sessions.get_mut(session) {
             state.status = SessionStatus::Terminated(TerminalStatus::Interrupted);
@@ -606,7 +681,7 @@ impl ManagerSession for HermesManagerSession {
 
 impl Drop for HermesManagerSession {
     fn drop(&mut self) {
-        let _ = self.transport.child.kill();
+        let _ = crate::runner::process::kill_process_group(&mut self.transport.child);
         let _ = self.transport.child.wait();
     }
 }
@@ -614,7 +689,6 @@ impl Drop for HermesManagerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manager::fake::FakeManagerSession;
     use crate::runner::backends::test_util::{fixture, make_fake_bin};
 
     fn make_json_rpc_hermes(dir: &Path, record_dir: &Path) {
@@ -637,6 +711,7 @@ import os
 import sys
 
 record = os.environ["RECORD_PATH"]
+session_counter = 0
 with open(record, "a", encoding="utf-8") as fh:
     for raw in sys.stdin:
         line = raw.strip()
@@ -665,16 +740,20 @@ with open(record, "a", encoding="utf-8") as fh:
             }}
             print(json.dumps(resp), flush=True)
         elif method == "session/new":
+            session_counter += 1
             resp = {{
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {{
-                    "sessionId": "sess-new"
+                    "sessionId": "sess-" + str(session_counter)
                 }}
             }}
             print(json.dumps(resp), flush=True)
         elif method in ("session/resume", "session/load"):
-            print(json.dumps({{"jsonrpc": "2.0", "id": req_id, "result": {{}} }}), flush=True)
+            if msg["params"]["sessionId"] == "sess-fail":
+                print(json.dumps({{"jsonrpc": "2.0", "id": req_id, "error": {{"code": -32000, "message": "resume failed"}}}}), flush=True)
+            else:
+                print(json.dumps({{"jsonrpc": "2.0", "id": req_id, "result": {{}} }}), flush=True)
         elif method == "session/prompt":
             session_id = msg["params"]["sessionId"]
             update = {{
@@ -689,6 +768,14 @@ with open(record, "a", encoding="utf-8") as fh:
                 }}
             }}
             print(json.dumps(update), flush=True)
+            print(json.dumps({{
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {{
+                    "sessionId": session_id,
+                    "update": {{"sessionUpdate": "usage_update", "used": 12, "size": 4096}}
+                }}
+            }}), flush=True)
             resp = {{
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -730,12 +817,84 @@ exec python3 -u "$tmp" "$@"
     }
 
     #[test]
+    fn discovery_does_not_retain_failed_status_output() {
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "hermes",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\necho 'Authorization: Bearer sk-secret' >&2\nexit 1\n",
+        );
+
+        let discovery = discover(f.bin_dir.join("hermes")).unwrap();
+        let HermesAuthState::Error(message) = discovery.auth_state else {
+            panic!("expected failed status discovery");
+        };
+        assert!(!message.contains("sk-secret"));
+    }
+
+    #[test]
+    fn session_directory_requires_absolute_user_state() {
+        assert_eq!(
+            resolve_session_dir(Some(OsStr::new("/state")), Some(OsStr::new("/home/user")))
+                .unwrap(),
+            PathBuf::from("/state/gah/manager-sessions/hermes")
+        );
+        assert_eq!(
+            resolve_session_dir(Some(OsStr::new("")), Some(OsStr::new("/home/user"))).unwrap(),
+            PathBuf::from("/home/user/.local/state/gah/manager-sessions/hermes")
+        );
+        assert!(resolve_session_dir(Some(OsStr::new("relative")), None).is_err());
+    }
+
+    #[test]
+    fn structured_updates_exclude_user_echoes_and_thoughts() {
+        assert!(extract_updates(&json!({
+            "sessionUpdate": "user_message_chunk",
+            "content": {"text": "secret user prompt"}
+        }))
+        .is_empty());
+        assert!(extract_updates(&json!({
+            "sessionUpdate": "thought_chunk",
+            "content": {"text": "hidden reasoning"}
+        }))
+        .is_empty());
+        assert_eq!(
+            extract_updates(&json!({
+                "sessionUpdate": "usage_update",
+                "used": 12,
+                "size": 4096
+            })),
+            vec![SessionUpdate::Usage {
+                used: 12,
+                size: 4096
+            }]
+        );
+    }
+
+    #[test]
+    fn rpc_errors_prefer_structured_detail() {
+        let error = decode_json_rpc_response(json!({
+            "error": {
+                "code": -32000,
+                "message": "request failed",
+                "data": {"message": "session not found"}
+            }
+        }))
+        .unwrap_err();
+        assert_eq!(error.to_string(), "session not found (code -32000)");
+    }
+
+    #[test]
     fn adapter_runs_prompt_and_streams_message_chunks() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_json_rpc_hermes(&f.bin_dir, &f.record_dir);
 
-        let mut session = HermesManagerSession::new(f.bin_dir.join("hermes")).unwrap();
+        let mut session = HermesManagerSession::new_with_session_dir(
+            f.bin_dir.join("hermes"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
         let id = session
             .start(StartRequest {
                 profile: "profile-a".into(),
@@ -745,7 +904,13 @@ exec python3 -u "$tmp" "$@"
         let updates = session.stream(&id).unwrap();
         assert_eq!(
             updates,
-            vec![SessionUpdate::MessageChunk("reply: hello".into())]
+            vec![
+                SessionUpdate::MessageChunk("reply: hello".into()),
+                SessionUpdate::Usage {
+                    used: 12,
+                    size: 4096
+                }
+            ]
         );
         assert_eq!(session.terminal_status(&id).unwrap(), None);
     }
@@ -756,7 +921,11 @@ exec python3 -u "$tmp" "$@"
         let f = fixture();
         make_json_rpc_hermes(&f.bin_dir, &f.record_dir);
 
-        let mut session = HermesManagerSession::new(f.bin_dir.join("hermes")).unwrap();
+        let mut session = HermesManagerSession::new_with_session_dir(
+            f.bin_dir.join("hermes"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
         let id = session
             .start(StartRequest {
                 profile: "profile-a".into(),
@@ -772,8 +941,66 @@ exec python3 -u "$tmp" "$@"
     }
 
     #[test]
-    fn contract_suite_can_run_against_the_fake_with_resume_off() {
-        let mut session = FakeManagerSession::new(SessionCapabilities::default());
+    fn adapter_passes_shared_contract_suite() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_json_rpc_hermes(&f.bin_dir, &f.record_dir);
+        let mut session = HermesManagerSession::new_with_session_dir(
+            f.bin_dir.join("hermes"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
         crate::manager::contract::run_contract_suite(&mut session);
+    }
+
+    #[test]
+    fn restart_resumes_through_durable_gah_to_hermes_mapping() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_json_rpc_hermes(&f.bin_dir, &f.record_dir);
+        let session_dir = f.record_dir.join("sessions");
+        let id = {
+            let mut adapter =
+                HermesManagerSession::new_with_session_dir(f.bin_dir.join("hermes"), &session_dir)
+                    .unwrap();
+            adapter
+                .start(StartRequest {
+                    profile: "profile-a".into(),
+                    instruction: "hello".into(),
+                })
+                .unwrap()
+        };
+        assert!(!id.as_str().contains("sess-"));
+
+        let restored_id = id.as_str().parse::<GahSessionId>().unwrap();
+        let mut restarted =
+            HermesManagerSession::new_with_session_dir(f.bin_dir.join("hermes"), &session_dir)
+                .unwrap();
+        restarted.resume(&restored_id).unwrap();
+        restarted.send(&restored_id, "after restart").unwrap();
+        assert!(restarted
+            .stream(&restored_id)
+            .unwrap()
+            .contains(&SessionUpdate::MessageChunk("reply: after restart".into())));
+    }
+
+    #[test]
+    fn failed_restart_resume_does_not_unlock_send() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_json_rpc_hermes(&f.bin_dir, &f.record_dir);
+        let session_dir = f.record_dir.join("sessions");
+        let id = GahSessionId::new("profile-a");
+        persist_mapping(&session_dir, &id, "sess-fail").unwrap();
+        let mut restarted =
+            HermesManagerSession::new_with_session_dir(f.bin_dir.join("hermes"), &session_dir)
+                .unwrap();
+
+        assert!(restarted.resume(&id).is_err());
+        assert!(restarted
+            .send(&id, "must not bypass resume")
+            .unwrap_err()
+            .to_string()
+            .contains("must be resumed"));
     }
 }
