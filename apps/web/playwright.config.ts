@@ -1,5 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const port = process.env.GAH_WEB_TEST_PORT ?? '3000';
+const baseURL = `http://localhost:${port}`;
+
 /**
  * Hermetic Playwright setup (issue #636). Two webServers:
  *
@@ -10,7 +13,8 @@ import { defineConfig, devices } from '@playwright/test';
  *    fixture identity/registry files so it never writes into the repo.
  *    Port 3774 (not 3773) so a real control plane / t3 server on 3773 never
  *    leaks into the test.
- * 2. The vite dev server on :3000, whose /api + /ws proxies target :3774.
+ * 2. The Vite dev server on GAH_WEB_TEST_PORT (default 3000), whose /api +
+ *    /ws proxies target :3774.
  *
  * This is what makes `npm run e2e --workspace=apps/web` pass on a machine
  * with no gah binary and no gah config.
@@ -32,7 +36,7 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: 'list',
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL,
     screenshot: 'only-on-failure'
   },
   webServer: [
@@ -49,8 +53,8 @@ export default defineConfig({
       timeout: 60_000
     },
     {
-      command: 'VITE_PROXY_TARGET=http://localhost:3774 VITE_WS_PROXY_TARGET=ws://localhost:3774 npm run dev',
-      url: 'http://localhost:3000',
+      command: `VITE_PROXY_TARGET=http://localhost:3774 VITE_WS_PROXY_TARGET=ws://localhost:3774 npm run dev -- --port ${port}`,
+      url: baseURL,
       reuseExistingServer: false,
       timeout: 30_000
     }

@@ -22,7 +22,7 @@ export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
 
 const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'chat', label: 'Manager Chat', icon: MessageSquare },
+  { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'git', label: 'Git', icon: GitBranch },
   { id: 'work', label: 'Work', icon: ListChecks },
   { id: 'telemetry', label: 'Telemetry', icon: BarChart3 },

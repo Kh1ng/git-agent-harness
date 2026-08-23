@@ -17,8 +17,9 @@ import { spawn, type ChildProcessByStdio } from 'child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { Writable, Readable } from 'node:stream';
-import * as acp from '@zed-industries/agent-client-protocol';
+import * as acp from '@agentclientprotocol/sdk';
 import type { Writable as NodeWritable, Readable as NodeReadable } from 'node:stream';
+import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 
 export interface ManagerCommandInfo {
   name: string;
@@ -37,9 +38,35 @@ export interface SpawnSpec {
   args: string[];
 }
 
+const COMPACTION_COMMAND_NAMES = new Set(['compact', 'compress', 'clear', 'reset']);
+
+function commandName(message: string): string | null {
+  if (!message.trim().startsWith('/')) return null;
+  return message.trim().slice(1).split(/\s+/)[0]?.toLowerCase() || null;
+}
+
+export function isCompactionCommand(message: string): boolean {
+  const name = commandName(message);
+  return name !== null && COMPACTION_COMMAND_NAMES.has(name);
+}
+
+export function compactionSummary(message: string, reply: string): string {
+  const command = commandName(message);
+  return command === 'clear' || command === 'reset'
+    ? 'Conversation cleared.'
+    : reply.trim() || 'Context compacted.';
+}
+
 class AcpClient implements acp.Client {
   availableCommands: ManagerCommandInfo[] = [];
   replyChunks: string[] = [];
+  onReplyChunk?: (text: string) => void;
+  onToolResult?: (name: string, text: string) => void;
+  toolCalls = new Map<string, acp.ToolCallUpdate>();
+  usageUpdate: acp.UsageUpdate | null = null;
+  cumulativeUsage: acp.Usage | null = null;
+  sessionCostUsd = 0;
+  configOptions: acp.SessionConfigOption[] = [];
 
   constructor(private readonly label: string) {}
 
@@ -60,19 +87,69 @@ class AcpClient implements acp.Client {
     const update = params.update;
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
       this.replyChunks.push(update.content.text);
+      this.onReplyChunk?.(update.content.text);
     } else if (update.sessionUpdate === 'available_commands_update') {
       this.availableCommands = update.availableCommands.map((cmd) => ({
         name: cmd.name,
         description: cmd.description,
         argsHint: cmd.input && 'hint' in cmd.input ? cmd.input.hint : undefined
       }));
+    } else if (update.sessionUpdate === 'usage_update') {
+      this.usageUpdate = update;
+      if (update.cost?.currency === 'USD') this.sessionCostUsd = update.cost.amount;
+    } else if (update.sessionUpdate === 'config_option_update') {
+      this.configOptions = update.configOptions;
+    } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+      const previous = this.toolCalls.get(update.toolCallId);
+      const tool = { ...previous, ...update };
+      this.toolCalls.set(update.toolCallId, tool);
+      const finished = tool.status === 'completed' || tool.status === 'failed';
+      if (finished && previous?.status !== 'completed' && previous?.status !== 'failed') {
+        const value = tool.rawOutput ?? tool.content ?? tool.status;
+        this.onToolResult?.(tool.name ?? tool.title ?? tool.toolCallId, typeof value === 'string' ? value : JSON.stringify(value));
+      }
     }
-    // agent_thought_chunk / tool_call / tool_call_update / plan updates
-    // aren't surfaced in manager chat's reply text. usage_update and
-    // session_info_update are agent-side ACP extensions the 0.4.5 client
-    // schema doesn't recognize yet -- the library logs a harmless internal
-    // parse warning for them and moves on; they never reach this method.
+    // agent_thought_chunk / plan updates aren't surfaced in manager chat.
   }
+}
+
+export function toChatUsage(
+  usage: acp.Usage | null | undefined,
+  previousUsage: acp.Usage | null,
+  update: acp.UsageUpdate | null,
+  costBeforeUsd: number,
+  durationMs: number
+): ChatUsage | null {
+  if (!usage && !update) return null;
+  const cost = update?.cost?.currency === 'USD'
+    ? Math.max(0, update.cost.amount - costBeforeUsd)
+    : null;
+  return {
+    input_tokens: usage ? counterDelta(usage.inputTokens, previousUsage?.inputTokens) : null,
+    output_tokens: usage ? counterDelta(usage.outputTokens, previousUsage?.outputTokens) : null,
+    total_tokens: usage ? counterDelta(usage.totalTokens, previousUsage?.totalTokens) : null,
+    estimated_cost_usd: cost,
+    duration_seconds: durationMs / 1000
+  };
+}
+
+function counterDelta(current: number, previous: number | undefined): number {
+  return previous === undefined || current < previous ? current : current - previous;
+}
+
+export function readModelConfig(options: acp.SessionConfigOption[]): {
+  models: ManagerModelInfo[];
+  currentModelId: string | null;
+  configId: string | null;
+} {
+  const model = options.find((option) => option.type === 'select' && (option.category === 'model' || option.id === 'model'));
+  if (!model || model.type !== 'select') return { models: [], currentModelId: null, configId: null };
+  const choices = model.options.flatMap((option) => 'options' in option ? option.options : [option]);
+  return {
+    models: choices.map((option) => ({ id: option.value, name: option.name, description: option.description ?? undefined })),
+    currentModelId: model.currentValue,
+    configId: model.id
+  };
 }
 
 interface ProfileConnection {
@@ -82,16 +159,26 @@ interface ProfileConnection {
   sessionId: string;
   models: ManagerModelInfo[];
   currentModelId: string | null;
-  // ACP session *modes* (Default / Accept Edits / Don't Ask) are unrelated
-  // to model selection per spec -- but Hermes's ACP server has a bug where
-  // its session/set_model handler requires a `modeId` field that isn't
-  // part of the standard SetSessionModelRequest schema at all (confirmed:
-  // omitting it fails server-side with "Field required: modeId"; Codex's
-  // and Claude's bridges don't have this quirk). Track it so setModel() can
-  // work around it for whichever backend needs it, without affecting
-  // backends that don't have `modes` (the field is naturally omitted).
-  currentModeId: string | null;
+  modelConfigId: string | null;
+  knownHistory: ChatTranscriptTurn[];
   ready: Promise<void>;
+}
+
+/** Rehydrate a fresh ACP session from the durable transcript. */
+export function resumePrompt(prompt: string, history: ChatTranscriptTurn[]): string {
+  if (history.length === 0) return prompt;
+  const transcript = history.map((turn) => `${turn.role}: ${turn.text}`).join('\n');
+  return `Resume this conversation and answer only the final user message.\n\n${transcript}\n\nuser: ${prompt}`;
+}
+
+export function historyDelta(
+  known: ChatTranscriptTurn[],
+  current: ChatTranscriptTurn[]
+): ChatTranscriptTurn[] | null {
+  const matches = known.every(
+    (turn, index) => turn.role === current[index]?.role && turn.text === current[index]?.text
+  );
+  return matches ? current.slice(known.length) : null;
 }
 
 /** Resolves an npm package's `bin` script to an absolute path -- these
@@ -126,10 +213,7 @@ function unwrapAcpError(error: unknown): Error {
 }
 
 export function hermesSpawnSpec(): SpawnSpec {
-  // Same hardcoded Hermes profile as the original CLI adapter -- one Hermes
-  // identity across all GAH profiles/projects (matches "one manager for all
-  // projects is fine" from the original scoping conversation).
-  return { command: 'hermes', args: ['-p', 'gah-manager', 'acp'] };
+  return { command: 'hermes', args: ['acp'] };
 }
 
 export function codexSpawnSpec(): SpawnSpec {
@@ -145,6 +229,38 @@ export function claudeSpawnSpec(): SpawnSpec {
  * connections are never shared across backends. */
 export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
   const connections = new Map<string, ProfileConnection>();
+
+  function updateModels(state: ProfileConnection, options: acp.SessionConfigOption[]): void {
+    const model = readModelConfig(options);
+    state.models = model.models;
+    state.currentModelId = model.currentModelId;
+    state.modelConfigId = model.configId;
+  }
+
+  async function selectModel(state: ProfileConnection, modelId: string): Promise<void> {
+    if (!state.modelConfigId) throw new Error(`${label} does not advertise model selection.`);
+    const response = await state.connection.setSessionConfigOption({
+      sessionId: state.sessionId,
+      configId: state.modelConfigId,
+      value: modelId
+    });
+    state.client.configOptions = response.configOptions;
+    updateModels(state, response.configOptions);
+  }
+
+  async function startSession(state: ProfileConnection, preserveModel = false): Promise<void> {
+    const previousModel = preserveModel ? state.currentModelId : null;
+    state.client.sessionCostUsd = 0;
+    state.client.usageUpdate = null;
+    state.client.cumulativeUsage = null;
+    const session = await state.connection.newSession({ cwd: process.cwd(), mcpServers: [] });
+    state.sessionId = session.sessionId;
+    state.client.configOptions = session.configOptions ?? [];
+    updateModels(state, state.client.configOptions);
+    if (previousModel && previousModel !== state.currentModelId && state.models.some((model) => model.id === previousModel)) {
+      await selectModel(state, previousModel);
+    }
+  }
 
   async function connect(gahProfile: string): Promise<ProfileConnection> {
     const existing = connections.get(gahProfile);
@@ -170,7 +286,8 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
       sessionId: '',
       models: [],
       currentModelId: null,
-      currentModeId: null,
+      modelConfigId: null,
+      knownHistory: [],
       ready: Promise.resolve()
     };
     state.ready = (async () => {
@@ -178,18 +295,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } }
       });
-      const session = await connection.newSession({ cwd: process.cwd(), mcpServers: [] });
-      state.sessionId = session.sessionId;
-      // **UNSTABLE** per the ACP spec -- not every agent returns this (Claude's
-      // bridge doesn't today). Absence just means no model picker for that
-      // backend, not an error.
-      if (session.models) {
-        state.models = session.models.availableModels.map((m) => ({ id: m.modelId, name: m.name, description: m.description ?? undefined }));
-        state.currentModelId = session.models.currentModelId;
-      }
-      if (session.modes) {
-        state.currentModeId = session.modes.currentModeId;
-      }
+      await startSession(state);
     })();
 
     child.on('exit', () => {
@@ -203,22 +309,76 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     return state;
   }
 
-  async function runTurn(gahProfile: string, message: string): Promise<{ reply: string }> {
+  async function runTurn(
+    gahProfile: string,
+    input: {
+      prompt: string;
+      history: ChatTranscriptTurn[];
+      onChunk: (text: string) => void;
+      onToolResult: (name: string, text: string) => void;
+    }
+  ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }> {
     const state = await connect(gahProfile);
     state.client.replyChunks = [];
+    state.client.toolCalls.clear();
+    let missingHistory = historyDelta(state.knownHistory, input.history);
+    if (missingHistory === null) {
+      await startSession(state, true);
+      state.knownHistory = [];
+      missingHistory = input.history;
+    }
+    const slashCommand = commandName(input.prompt) !== null;
+    const command = commandName(input.prompt);
+    // ponytail: ACP cannot inject roleful history ahead of a native command;
+    // use loadSession when adapters persist their native session ids.
+    if ((command === 'compact' || command === 'compress') && missingHistory.length > 0) {
+      throw new Error('Send one normal message to restore this backend before compacting its context.');
+    }
+    const prompt = slashCommand ? input.prompt : resumePrompt(input.prompt, missingHistory);
+    state.client.onReplyChunk = input.onChunk;
+    state.client.onToolResult = input.onToolResult;
+    state.client.usageUpdate = null;
+    const costBeforeUsd = state.client.sessionCostUsd;
+    const startedAt = Date.now();
     let result;
     try {
       result = await state.connection.prompt({
         sessionId: state.sessionId,
-        prompt: [{ type: 'text', text: message }]
+        prompt: [{ type: 'text', text: prompt }]
       });
     } catch (error) {
       throw unwrapAcpError(error);
+    } finally {
+      state.client.onReplyChunk = undefined;
+      state.client.onToolResult = undefined;
     }
     if (result.stopReason !== 'end_turn') {
       console.warn(`[managerChat] ${label} turn ended with stopReason=${result.stopReason} for profile ${gahProfile}`);
     }
-    return { reply: state.client.replyChunks.join('') };
+    updateModels(state, state.client.configOptions);
+    const reply = state.client.replyChunks.join('');
+    if (isCompactionCommand(input.prompt)) {
+      state.knownHistory = [{ role: 'system', text: compactionSummary(input.prompt, reply), timestamp: Date.now() }];
+    } else if (!slashCommand) {
+      state.knownHistory = [
+        ...input.history,
+        { role: 'user', text: input.prompt, timestamp: Date.now() },
+        { role: 'assistant', text: reply, timestamp: Date.now() }
+      ];
+    }
+    const usage = toChatUsage(
+      result.usage,
+      state.client.cumulativeUsage,
+      state.client.usageUpdate,
+      costBeforeUsd,
+      Date.now() - startedAt
+    );
+    state.client.cumulativeUsage = result.usage ?? state.client.cumulativeUsage;
+    return {
+      reply,
+      model: state.currentModelId,
+      usage
+    };
   }
 
   /** Backs the "/" command palette. Lazily connects (the same session
@@ -238,17 +398,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     if (!state.models.some((m) => m.id === modelId)) {
       throw new Error(`Unknown model "${modelId}" for ${label}`);
     }
-    // modeId isn't part of the standard SetSessionModelRequest -- it's the
-    // Hermes-server-bug workaround (see the ProfileConnection.currentModeId
-    // comment above). Safe no-op for backends without modes: currentModeId
-    // is null there, and JSON.stringify drops undefined keys entirely.
-    await state.connection.setSessionModel({
-      sessionId: state.sessionId,
-      modelId,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see comment above, this is a deliberate off-spec field
-      ...(state.currentModeId ? { modeId: state.currentModeId } : {})
-    } as any);
-    state.currentModelId = modelId;
+    await selectModel(state, modelId);
   }
 
   return { runTurn, listCommands, listModels, setModel };
