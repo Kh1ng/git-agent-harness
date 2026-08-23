@@ -15,7 +15,7 @@ test('profile changes reject stale chat replies and control data', async ({ page
   let releaseAlpha!: () => void;
   const alphaGate = new Promise<void>((resolve) => { releaseAlpha = resolve; });
   let settingsCalls = 0;
-  let holdAlphaHistory = false;
+  let holdAlphaHistory = true;
   let heldAlphaHistory = '';
 
   await page.route('**/api/**', async (route) => {
@@ -78,7 +78,13 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await expect(page.locator('[role="status"]:visible', { hasText: 'Live' })).toBeVisible();
   await page.getByRole('button', { name: 'Manager Chat', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
+  await expect.poll(() => heldAlphaHistory).not.toBe('');
   await page.getByPlaceholder(/Message the manager/).fill('alpha question');
+  await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
+  holdAlphaHistory = false;
+  socket!.send(heldAlphaHistory);
+  heldAlphaHistory = '';
+  await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled();
   await page.getByRole('button', { name: 'Send' }).click();
   await expect.poll(() => alphaRequestId).not.toBe('');
   socket!.send(JSON.stringify({ type: 'manager.chat.updated', profile: 'alpha', requestId: 'another-tab' }));

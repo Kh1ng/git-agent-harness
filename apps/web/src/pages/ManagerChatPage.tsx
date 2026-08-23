@@ -176,7 +176,7 @@ export function ManagerChatPage() {
     }
   }, [messages, pendingRequest, profile]);
 
-  const isBusy = pendingRequest !== null || remoteTurnBusy;
+  const isBusy = !historyLoaded || pendingRequest !== null || remoteTurnBusy;
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth' });
