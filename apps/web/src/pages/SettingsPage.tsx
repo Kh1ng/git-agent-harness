@@ -718,7 +718,7 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
   if (!settings) {
     return (
       <section className="card-padded max-w-md">
-        <h3 className="text-sm font-semibold text-primary mb-1">Manager Chat</h3>
+        <h3 className="text-sm font-semibold text-primary mb-1">Chat</h3>
         {error ? <p className="text-xs text-critical">Failed to load: {error}</p> : <p className="text-xs text-muted">Loading…</p>}
       </section>
     );
@@ -730,9 +730,9 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
 
   return (
     <section className="card-padded max-w-md">
-      <h3 className="text-sm font-semibold text-primary mb-1">Manager Chat</h3>
+      <h3 className="text-sm font-semibold text-primary mb-1">Chat</h3>
       <p className="text-xs text-muted mb-3">
-        Which backend answers the interactive Manager Chat page. Separate from "Global manager" above --
+        Which backend answers the interactive Chat page. Separate from "Global manager" above --
         that one drives autonomous wake notifications, not chat.
       </p>
 

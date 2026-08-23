@@ -4,50 +4,37 @@
  * exchange back to memory. Slash commands (Hermes's real /reset, /compress,
  * etc.) are sent through like any other message -- the backend adapter's
  * own session dispatches them natively, GAH doesn't reinvent them.
+ *
+ * Issue #955: conversation history is an event-sourced session log (see
+ * sessionLog.ts) rather than an in-memory array -- it survives server
+ * restart, derives the transcript by folding, and carries per-message
+ * backend/model/usage attribution.
  */
 
 import { recall, capture, flushSession } from './memoryGatewayClient.js';
 import { resolveAdapter, type ManagerCommandInfo, type ManagerModelInfo } from './registry.js';
+import { compactionSummary, isCompactionCommand } from './acpAdapter.js';
 import { backendForProfile, modelOverrideForProfile, setModelOverrideForProfile } from './settingsStore.js';
+import { appendEvents, createEventWriter, deriveModelHistory, foldSession, loadLog, type SessionLogOptions } from './sessionLog.js';
+import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 
-// Backend-native command names that mean "compact/clear this session"
-// (Hermes: /reset, /compress; Codex/Claude ACP bridges: /compact, /clear).
-// GAH doesn't reinvent these commands (see runTurn below), so it can't rely
-// on a single canonical name -- it just recognizes the common synonyms well
-// enough to know when to also flush buffered memory (#849).
-const COMPACTION_COMMAND_NAMES = new Set(['compact', 'compress', 'clear', 'reset']);
-
-export function isCompactionCommand(message: string): boolean {
-  const name = message.trim().slice(1).split(/\s+/)[0]?.toLowerCase();
-  return name !== undefined && COMPACTION_COMMAND_NAMES.has(name);
-}
-
-export interface ChatTurn {
-  role: 'user' | 'assistant' | 'system';
-  text: string;
-  timestamp: number;
-}
-
-const MAX_HISTORY_PER_PROFILE = 200;
-
-const historyByProfile = new Map<string, ChatTurn[]>();
 // Serializes turns per profile -- without this, two concurrent messages for
 // the same profile (e.g. two open browser tabs) would both prompt the same
 // backend session at once, corrupting turn ordering. One profile = one
 // conversation, so turns must run one at a time.
 const turnQueueByProfile = new Map<string, Promise<unknown>>();
+const activeProfiles = new Set<string>();
 
-function appendHistory(profile: string, turn: ChatTurn): void {
-  const history = historyByProfile.get(profile) ?? [];
-  history.push(turn);
-  if (history.length > MAX_HISTORY_PER_PROFILE) {
-    history.splice(0, history.length - MAX_HISTORY_PER_PROFILE);
-  }
-  historyByProfile.set(profile, history);
+/** Session log storage options (tests may point at a temp state dir). */
+const logOptions: SessionLogOptions = {};
+
+export function setSessionLogOptions(opts: SessionLogOptions): void {
+  logOptions.stateDir = opts.stateDir;
 }
 
-export function getHistory(profile: string): ChatTurn[] {
-  return historyByProfile.get(profile) ?? [];
+/** The full folded view, including cursor + streaming state. */
+export function getSessionView(profile: string) {
+  return foldSession(profile, logOptions, !activeProfiles.has(profile));
 }
 
 export function listCommandsForProfile(profile: string): Promise<ManagerCommandInfo[]> {
@@ -82,49 +69,135 @@ export async function setModelForProfile(profile: string, modelId: string): Prom
   setModelOverrideForProfile(profile, backendId, modelId);
 }
 
-async function runTurn(profile: string, message: string): Promise<string> {
+async function runTurn(
+  profile: string,
+  message: string,
+  prompt: string,
+  history: ChatTranscriptTurn[],
+  onChunk: (text: string) => void,
+  onToolResult: (name: string, text: string) => void
+): Promise<{ reply: string; backend: string; model: string | null; usage: ChatUsage | null }> {
   const backendId = backendForProfile(profile);
   const adapter = resolveAdapter(backendId);
-
-  // Slash commands (Hermes's real /reset, /compress, etc.) must reach the
-  // backend verbatim -- its command parser only recognizes a message that
-  // *starts* with "/". Wrapping it in a "Relevant context..." prefix (as
-  // every other message gets) silently turns a real command into a plain
-  // question the model tries to answer instead of dispatching. Confirmed
-  // empirically: a wrapped "/reset" got interpreted as chat text ("What
-  // would you like me to reset?"); the bare message dispatched correctly
-  // ("Conversation history cleared.").
   const isSlashCommand = message.trim().startsWith('/');
-  const prompt = isSlashCommand ? message : await (async () => {
-    const { context } = await recall(profile, message);
-    return context ? `Relevant context from prior conversations:\n${context}\n\nUser: ${message}` : message;
-  })();
+  const result = await adapter.runTurn(profile, { prompt, history, onChunk, onToolResult });
 
-  const { reply } = await adapter.runTurn(profile, prompt);
-
-  await capture(profile, message, reply);
+  await capture(profile, message, result.reply);
   // Force buffered L0 conversation into the gateway's L1/L2 pipeline right
   // away on a compact/clear-like command, instead of waiting for the
   // pipeline's own idle timeout (#849).
   if (isSlashCommand && isCompactionCommand(message)) {
     await flushSession(profile);
   }
-  return reply;
+  return { reply: result.reply, backend: backendId, model: result.model, usage: result.usage };
 }
 
-export function sendManagerChatMessage(profile: string, message: string): Promise<string> {
-  appendHistory(profile, { role: 'user', text: message, timestamp: Date.now() });
-
+export function sendManagerChatMessage(profile: string, message: string): Promise<ChatTranscriptTurn> {
   const prior = turnQueueByProfile.get(profile) ?? Promise.resolve();
   const turn = prior.catch(() => undefined).then(async () => {
+    const existing = loadLog(profile, logOptions);
+    const history = deriveModelHistory(existing);
+    let seq = existing.reduce((highest, event) => Math.max(highest, event.seq), 0);
+    const turnNo = existing.reduce((highest, event) => Math.max(highest, event.turn), 0) + 1;
+    const now = Date.now();
+    const compaction = isCompactionCommand(message);
+    let chunkWriter: ReturnType<typeof createEventWriter> | undefined;
+    activeProfiles.add(profile);
+    appendEvents(profile, [
+      ...(compaction ? [{ type: 'compaction/start' as const, seq: ++seq, turn: turnNo, timestamp: now }] : []),
+      { type: 'turn/start', seq: ++seq, turn: turnNo, timestamp: now },
+      { type: 'user/message', seq: ++seq, turn: turnNo, text: message, source: 'prompt', timestamp: now }
+    ], logOptions);
+
     try {
-      const reply = await runTurn(profile, message);
-      appendHistory(profile, { role: 'assistant', text: reply, timestamp: Date.now() });
-      return reply;
+      // Keep slash commands bare so the backend dispatches them instead of
+      // sending them to the model as ordinary text.
+      const isSlashCommand = message.trim().startsWith('/');
+      const { context } = isSlashCommand ? { context: '' } : await recall(profile, message);
+      const prompt = context ? `Relevant context from prior conversations:\n${context}\n\nUser: ${message}` : message;
+      if (context) {
+        appendEvents(profile, [{
+          type: 'user/message',
+          seq: ++seq,
+          turn: turnNo,
+          text: prompt,
+          source: 'inject',
+          timestamp: Date.now()
+        }], logOptions);
+      }
+      chunkWriter = createEventWriter(profile, logOptions);
+      const { reply, backend, model, usage } = await runTurn(
+        profile,
+        message,
+        prompt,
+        history,
+        (text) => chunkWriter?.append({
+          type: 'assistant/chunk',
+          seq: ++seq,
+          turn: turnNo,
+          text,
+          timestamp: Date.now()
+        }),
+        (name, text) => chunkWriter?.append({
+          type: 'tool/result',
+          seq: ++seq,
+          turn: turnNo,
+          name,
+          text,
+          timestamp: Date.now()
+        })
+      );
+      await chunkWriter.close();
+      const assistant: ChatTranscriptTurn = {
+        role: 'assistant',
+        text: reply,
+        backend,
+        model,
+        usage,
+        timestamp: Date.now()
+      };
+      const done: ChatSessionEvent[] = [
+        {
+          type: 'assistant/message',
+          seq: ++seq,
+          turn: turnNo,
+          text: reply,
+          backend,
+          model,
+          usage,
+          timestamp: assistant.timestamp
+        },
+        ...(isSlashCommand ? [{
+          type: 'human/command' as const,
+          seq: ++seq,
+          turn: turnNo,
+          command: message.trim().slice(1).split(/\s+/)[0] ?? '',
+          result: reply,
+          timestamp: Date.now()
+        }] : []),
+        { type: 'turn/end', seq: ++seq, turn: turnNo, reason: { kind: 'complete' }, timestamp: Date.now() },
+        ...(compaction ? [{
+          type: 'compaction/summary' as const,
+          seq: ++seq,
+          turn: turnNo,
+          summary: compactionSummary(message, reply),
+          timestamp: Date.now()
+        }] : []),
+        ...(compaction ? [{ type: 'compaction/end' as const, seq: ++seq, turn: turnNo, timestamp: Date.now() }] : [])
+      ];
+      appendEvents(profile, done, logOptions);
+      return assistant;
     } catch (error) {
+      await chunkWriter?.close().catch(() => undefined);
       const text = error instanceof Error ? error.message : String(error);
-      appendHistory(profile, { role: 'system', text: `Error: ${text}`, timestamp: Date.now() });
+      const done: ChatSessionEvent[] = [
+        { type: 'harness/error', seq: ++seq, turn: turnNo, text, timestamp: Date.now() },
+        { type: 'turn/end', seq: ++seq, turn: turnNo, reason: { kind: 'error', message: text }, timestamp: Date.now() }
+      ];
+      appendEvents(profile, done, logOptions);
       throw error;
+    } finally {
+      activeProfiles.delete(profile);
     }
   });
   turnQueueByProfile.set(profile, turn.catch(() => undefined));

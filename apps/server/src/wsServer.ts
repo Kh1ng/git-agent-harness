@@ -12,7 +12,7 @@ import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
-import { sendManagerChatMessage, getHistory as getManagerChatHistory } from './managerChat/ManagerChatManager.js';
+import { sendManagerChatMessage, getSessionView as getManagerChatSessionView } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -269,20 +269,28 @@ async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessa
       type: 'manager.chat.reply',
       requestId,
       profile: message.profile,
-      reply
+      reply: reply.text,
+      backend: reply.backend!,
+      model: reply.model ?? null,
+      usage: reply.usage
     };
     ws.send(JSON.stringify(payload));
   } catch (error) {
     ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
+  } finally {
+    pushBus.publish({ type: 'manager.chat.updated', profile: message.profile, requestId });
   }
 }
 
 async function handleManagerChatHistoryRequest(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.historyRequest' }>, requestId: string) {
+  const view = getManagerChatSessionView(message.profile);
   const payload: ServerMessage = {
     type: 'manager.chat.history',
     requestId,
     profile: message.profile,
-    turns: getManagerChatHistory(message.profile)
+    turns: view.turns,
+    cursor: view.cursor,
+    streaming: view.streaming
   };
   ws.send(JSON.stringify(payload));
 }

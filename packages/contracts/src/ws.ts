@@ -4,6 +4,7 @@
  */
 
 import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, DependencyBlocker } from './gah.js';
+import type { ChatSessionView, ChatTranscriptTurn } from './chat-session.js';
 
 // Provider types
 export type ProviderKind = 
@@ -134,19 +135,28 @@ export type ServerMessage =
       requestId: string;
       profile: string;
       reply: string;
+      backend: string;
+      model: string | null;
+      usage: ChatTranscriptTurn['usage'];
     }
   | {
       type: "manager.chat.history";
       requestId: string;
       profile: string;
       turns: ManagerChatTurn[];
+      /** Monotonic log position; the client can resume requesting after it. */
+      cursor: number;
+      /** Partial assistant reply when the requested turn is still running. */
+      streaming: ChatSessionView['streaming'];
+    }
+  | {
+      /** Signals clients to reload one profile after its active turn ends. */
+      type: "manager.chat.updated";
+      profile: string;
+      requestId: string;
     };
 
-export type ManagerChatTurn = {
-  role: "user" | "assistant" | "system";
-  text: string;
-  timestamp: number;
-};
+export type ManagerChatTurn = ChatTranscriptTurn;
 
 export type ClientMessage = 
   | {
