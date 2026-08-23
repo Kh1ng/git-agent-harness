@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   buildConfigSetArgs,
@@ -6,6 +9,7 @@ import {
   buildProfileSetArgs,
   findGahBinary,
   loopSystemctlArgs,
+  stopLoop,
 } from './gahCli.js';
 
 test('config set args deduplicate clear values and use the CLI config flag', () => {
@@ -137,6 +141,33 @@ test('loop lifecycle uses systemd enablement as the durable boot policy', () => 
   assert.deepEqual(loopSystemctlArgs(false, 'sportsball'), [
     '--user', 'disable', '--now', 'gah-loop@sportsball.service', '--no-pager'
   ]);
+});
+
+test('stop disables an enabled unit even when it is already inactive', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-stop-loop-'));
+  const log = join(dir, 'systemctl.log');
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}:${originalPath ?? ''}`;
+  process.env.SYSTEMCTL_LOG = log;
+  writeFileSync(join(dir, 'systemctl'), `#!/bin/sh
+if [ "$2" = "show" ]; then
+  printf 'LoadState=loaded\nActiveState=failed\nMainPID=0\n'
+  exit 0
+fi
+printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+`);
+  writeFileSync(join(dir, 'pgrep'), '#!/bin/sh\nexit 1\n');
+  chmodSync(join(dir, 'systemctl'), 0o755);
+  chmodSync(join(dir, 'pgrep'), 0o755);
+  try {
+    assert.deepEqual(stopLoop('sportsball'), { stopped: true });
+    assert.match(readFileSync(log, 'utf8'), /disable --now gah-loop@sportsball\.service/);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    delete process.env.SYSTEMCTL_LOG;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('gah binary resolution probes candidates in order and falls back to PATH', () => {

@@ -1272,9 +1272,6 @@ export interface StopLoopResult {
 /** Graceful operator stop. Disabling the unit persists the stop across boot. */
 export function stopLoop(profile: string): StopLoopResult {
   const status = getLoopStatus(profile);
-  if (!status.running) {
-    return { stopped: false, error: `No running loop found for profile '${profile}'` };
-  }
   if (status.owner !== 'systemd') {
     return {
       stopped: false,
