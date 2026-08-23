@@ -3,8 +3,8 @@
 //! Hermes exposes the ACP server on stdio (`hermes acp`). That gives us a
 //! structured session lifecycle with real session IDs, prompt turns, prompt
 //! cancellation, and replay/resume support without scraping presentation
-//! prose. This adapter keeps the transport synchronous and object-safe so it
-//! can satisfy the shared `ManagerSession` trait directly.
+//! prose. A reader thread owns ACP stdout so prompt requests do not block
+//! `start` or `send`; the public adapter remains synchronous and object-safe.
 
 use super::{
     GahSessionId, ManagerSession, SessionCapabilities, SessionStatus, SessionUpdate, StartRequest,
@@ -21,6 +21,8 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
 const DEFAULT_HERMES_PROFILE: &str = "gah-manager";
@@ -131,7 +133,7 @@ struct HermesSessionState {
 struct HermesTransport {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    messages: Receiver<std::result::Result<Value, String>>,
     next_id: u64,
     supports_load_session: bool,
     supports_resume: bool,
@@ -158,10 +160,12 @@ impl HermesTransport {
             .stdout
             .take()
             .ok_or_else(|| anyhow!("Hermes ACP child did not provide stdout"))?;
+        let (sender, messages) = mpsc::channel();
+        thread::spawn(move || read_messages(stdout, sender));
         Ok(Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            messages,
             next_id: 1,
             supports_load_session: false,
             supports_resume: false,
@@ -192,109 +196,94 @@ impl HermesTransport {
         )
     }
 
-    fn handle_session_update(
-        sessions: &mut HashMap<GahSessionId, HermesSessionState>,
-        params: Option<&Value>,
-    ) -> Result<()> {
-        let Some(params) = params else {
-            return Ok(());
-        };
-        let Some(session_id) = params.get("sessionId").and_then(Value::as_str) else {
-            return Ok(());
-        };
-        let Some(update) = params.get("update") else {
-            return Ok(());
-        };
+    fn send_request(&mut self, method: &str, params: Value) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.write_json(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))?;
+        Ok(id)
+    }
 
-        let updates = extract_updates(update);
-        if updates.is_empty() {
-            return Ok(());
+    fn recv(&self) -> Result<Value> {
+        match self.messages.recv() {
+            Ok(Ok(message)) => Ok(message),
+            Ok(Err(error)) => Err(anyhow!(error)),
+            Err(_) => Err(anyhow!("Hermes ACP process closed its output")),
         }
-        if let Some(session) = sessions
-            .values_mut()
-            .find(|session| session.provider_session_id == session_id)
-        {
-            session.pending_updates.extend(updates);
+    }
+
+    fn try_recv(&self) -> Result<Option<Value>> {
+        match self.messages.try_recv() {
+            Ok(Ok(message)) => Ok(Some(message)),
+            Ok(Err(error)) => Err(anyhow!(error)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(anyhow!("Hermes ACP process closed its output")),
         }
-        Ok(())
+    }
+
+    fn respond_to_server_request(&mut self, message: &Value) -> Result<bool> {
+        let Some(method) = message.get("method").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let Some(id) = message.get("id").and_then(Value::as_u64) else {
+            return Ok(false);
+        };
+        if method == "session/request_permission" {
+            let selected = message
+                .get("params")
+                .and_then(|params| params.get("options"))
+                .and_then(Value::as_array)
+                .and_then(|options| {
+                    options.iter().find_map(|option| {
+                        let kind = option.get("kind").and_then(Value::as_str)?;
+                        let option_id = option.get("optionId").and_then(Value::as_str)?;
+                        ((kind == "reject_once") || (kind == "reject_always"))
+                            .then(|| option_id.to_owned())
+                    })
+                });
+            let result = selected
+                .map(|option_id| json!({"outcome": {"outcome": "selected", "optionId": option_id}}))
+                .unwrap_or_else(|| json!({"outcome": {"outcome": "cancelled"}}));
+            self.write_json(&json!({"jsonrpc": "2.0", "id": id, "result": result}))?;
+        } else {
+            self.write_json(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32601, "message": format!("unsupported client request {method}")}
+            }))?;
+        }
+        Ok(true)
     }
 }
 
-fn rpc_request(
-    transport: &mut HermesTransport,
-    sessions: &mut HashMap<GahSessionId, HermesSessionState>,
-    method: &str,
-    params: Value,
-) -> Result<Value> {
-    let id = transport.next_id;
-    transport.next_id += 1;
-    transport.write_json(&json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params,
-    }))?;
+fn read_messages(stdout: ChildStdout, sender: mpsc::Sender<std::result::Result<Value, String>>) {
+    for line in BufReader::new(stdout).lines() {
+        let message = match line {
+            Ok(line) if line.trim().is_empty() => continue,
+            Ok(line) => serde_json::from_str(line.trim())
+                .map_err(|error| format!("parsing Hermes ACP line: {error}")),
+            Err(error) => Err(format!("reading Hermes ACP output: {error}")),
+        };
+        if sender.send(message).is_err() {
+            return;
+        }
+    }
+}
+
+fn rpc_request(transport: &mut HermesTransport, method: &str, params: Value) -> Result<Value> {
+    let id = transport.send_request(method, params)?;
 
     loop {
-        let mut line = String::new();
-        let bytes = transport.stdout.read_line(&mut line)?;
-        if bytes == 0 {
-            return Err(anyhow!(
-                "Hermes ACP process exited while waiting for {method}"
-            ));
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let message: Value = serde_json::from_str(trimmed)
-            .with_context(|| format!("parsing Hermes ACP line: {trimmed}"))?;
+        let message = transport.recv()?;
 
         if is_response_for(&message, id) {
             return decode_json_rpc_response(message);
         }
-        if let Some(request_method) = message.get("method").and_then(Value::as_str) {
-            if let Some(request_id) = message.get("id").and_then(Value::as_u64) {
-                if request_method == "session/request_permission" {
-                    let selected = message
-                        .get("params")
-                        .and_then(|params| params.get("options"))
-                        .and_then(Value::as_array)
-                        .and_then(|options| {
-                            options.iter().find_map(|option| {
-                                let kind = option.get("kind").and_then(Value::as_str)?;
-                                let option_id = option.get("optionId").and_then(Value::as_str)?;
-                                ((kind == "reject_once") || (kind == "reject_always"))
-                                    .then(|| option_id.to_owned())
-                            })
-                        });
-                    let result = selected
-                        .map(|option_id| {
-                            json!({"outcome": {"outcome": "selected", "optionId": option_id}})
-                        })
-                        .unwrap_or_else(|| json!({"outcome": {"outcome": "cancelled"}}));
-                    transport.write_json(&json!({
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": result,
-                    }))?;
-                    continue;
-                }
-
-                transport.write_json(&json!({
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {
-                        "code": -32601,
-                        "message": format!("unsupported client request {request_method}"),
-                    }
-                }))?;
-                continue;
-            } else if request_method == "session/update" {
-                HermesTransport::handle_session_update(sessions, message.get("params"))?;
-                continue;
-            }
-        }
+        transport.respond_to_server_request(&message)?;
     }
 }
 
@@ -424,6 +413,7 @@ pub struct HermesManagerSession {
     discovery: HermesDiscovery,
     transport: HermesTransport,
     sessions: HashMap<GahSessionId, HermesSessionState>,
+    prompt_requests: HashMap<u64, GahSessionId>,
     capabilities: SessionCapabilities,
     session_dir: PathBuf,
 }
@@ -443,10 +433,8 @@ impl HermesManagerSession {
     ) -> Result<Self> {
         let discovery = discover(executable.as_ref())?;
         let mut transport = HermesTransport::spawn(&discovery.executable)?;
-        let mut temp_sessions = HashMap::new();
         let response = rpc_request(
             &mut transport,
-            &mut temp_sessions,
             "initialize",
             json!({
                 "protocolVersion": ACP_PROTOCOL_VERSION,
@@ -487,6 +475,7 @@ impl HermesManagerSession {
             discovery,
             transport,
             sessions: HashMap::new(),
+            prompt_requests: HashMap::new(),
             capabilities,
             session_dir: session_dir.into(),
         })
@@ -509,15 +498,107 @@ impl HermesManagerSession {
         load_mapping(&self.session_dir, session)
     }
 
-    fn record_session(&mut self, session: GahSessionId, provider_session_id: String) {
+    fn record_session(
+        &mut self,
+        session: GahSessionId,
+        provider_session_id: String,
+        status: SessionStatus,
+    ) {
         self.sessions.insert(
             session,
             HermesSessionState {
                 provider_session_id,
                 pending_updates: Vec::new(),
-                status: SessionStatus::Idle,
+                status,
             },
         );
+    }
+
+    fn handle_message(&mut self, message: Value) -> Result<()> {
+        if self.transport.respond_to_server_request(&message)? {
+            return Ok(());
+        }
+        if message.get("method").and_then(Value::as_str) == Some("session/update") {
+            let Some(params) = message.get("params") else {
+                return Ok(());
+            };
+            let Some(provider_id) = params.get("sessionId").and_then(Value::as_str) else {
+                return Ok(());
+            };
+            let updates = params
+                .get("update")
+                .map(extract_updates)
+                .unwrap_or_default();
+            if let Some(state) = self
+                .sessions
+                .values_mut()
+                .find(|state| state.provider_session_id == provider_id)
+            {
+                state.pending_updates.extend(updates);
+            }
+            return Ok(());
+        }
+        let Some(request_id) = message.get("id").and_then(Value::as_u64) else {
+            return Ok(());
+        };
+        let Some(session_id) = self.prompt_requests.remove(&request_id) else {
+            return Ok(());
+        };
+        let terminal = match decode_json_rpc_response(message) {
+            Ok(_) => TerminalStatus::Completed,
+            Err(error) => TerminalStatus::Failed(error.to_string()),
+        };
+        let still_working = self.prompt_requests.values().any(|id| id == &session_id);
+        if let Some(state) = self.sessions.get_mut(&session_id) {
+            match (&state.status, terminal, still_working) {
+                (SessionStatus::Terminated(TerminalStatus::Interrupted), _, _) => {}
+                (SessionStatus::Terminated(TerminalStatus::Failed(_)), _, _) => {}
+                (_, TerminalStatus::Failed(error), _) => {
+                    state.status = SessionStatus::Terminated(TerminalStatus::Failed(error));
+                }
+                (_, TerminalStatus::Completed, false) => {
+                    state.status = SessionStatus::Terminated(TerminalStatus::Completed);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn pump(&mut self) -> Result<()> {
+        while let Some(message) = self.transport.try_recv()? {
+            self.handle_message(message)?;
+        }
+        Ok(())
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let request_id = self.transport.send_request(method, params)?;
+        loop {
+            let message = self.transport.recv()?;
+            if is_response_for(&message, request_id) {
+                return decode_json_rpc_response(message);
+            }
+            self.handle_message(message)?;
+        }
+    }
+
+    fn prompt(&mut self, session: &GahSessionId, message: &str) -> Result<()> {
+        let provider_session_id = self
+            .sessions
+            .get(session)
+            .map(|state| state.provider_session_id.clone())
+            .ok_or_else(|| anyhow!("Hermes session {session} must be resumed before sending"))?;
+        let request_id = self.transport.send_request(
+            "session/prompt",
+            json!({
+                "sessionId": provider_session_id,
+                "prompt": [{"type": "text", "text": message}]
+            }),
+        )?;
+        self.prompt_requests.insert(request_id, session.clone());
+        self.state_mut(session)?.status = SessionStatus::Working;
+        Ok(())
     }
 }
 
@@ -528,10 +609,7 @@ impl ManagerSession for HermesManagerSession {
 
     fn start(&mut self, request: StartRequest) -> Result<GahSessionId> {
         let cwd = std::env::current_dir().context("resolving current directory for Hermes ACP")?;
-        let mut ignored = HashMap::new();
-        let response = rpc_request(
-            &mut self.transport,
-            &mut ignored,
+        let response = self.request(
             "session/new",
             json!({
                 "cwd": cwd,
@@ -544,23 +622,24 @@ impl ManagerSession for HermesManagerSession {
             .map(str::to_owned)
             .ok_or_else(|| anyhow!("Hermes ACP session/new response did not include sessionId"))?;
         let gah_session_id = GahSessionId::new(&request.profile);
-        persist_mapping(&self.session_dir, &gah_session_id, &provider_session_id)?;
-        self.record_session(gah_session_id.clone(), provider_session_id.clone());
-        let _ = rpc_request(
-            &mut self.transport,
-            &mut self.sessions,
-            "session/prompt",
-            json!({
-                "sessionId": provider_session_id,
-                "prompt": [
-                    {
-                        "type": "text",
-                        "text": request.instruction
-                    }
-                ]
-            }),
-        )
-        .with_context(|| format!("prompting Hermes session {provider_session_id}"))?;
+        self.record_session(
+            gah_session_id.clone(),
+            provider_session_id.clone(),
+            SessionStatus::Idle,
+        );
+        if let Err(error) = self.prompt(&gah_session_id, &request.instruction) {
+            self.sessions.remove(&gah_session_id);
+            return Err(error)
+                .with_context(|| format!("prompting Hermes session {provider_session_id}"));
+        }
+        if let Err(error) =
+            persist_mapping(&self.session_dir, &gah_session_id, &provider_session_id)
+        {
+            let _ = self.transport.cancel(&provider_session_id);
+            self.sessions.remove(&gah_session_id);
+            self.prompt_requests.retain(|_, id| id != &gah_session_id);
+            return Err(error);
+        }
         Ok(gah_session_id)
     }
 
@@ -575,7 +654,11 @@ impl ManagerSession for HermesManagerSession {
         let provider_session_id = self.provider_session_id(session)?;
         let restored = !self.sessions.contains_key(session);
         if restored {
-            self.record_session(session.clone(), provider_session_id.clone());
+            self.record_session(
+                session.clone(),
+                provider_session_id.clone(),
+                SessionStatus::Idle,
+            );
         }
         let method = if self.transport.supports_resume {
             "session/resume"
@@ -587,17 +670,16 @@ impl ManagerSession for HermesManagerSession {
             }
             .into());
         };
-        let result = rpc_request(
-            &mut self.transport,
-            &mut self.sessions,
-            method,
-            json!({
-                "sessionId": provider_session_id,
-                "cwd": cwd,
-                "mcpServers": [],
-            }),
-        )
-        .with_context(|| format!("resuming Hermes session {provider_session_id}"));
+        let result = self
+            .request(
+                method,
+                json!({
+                    "sessionId": provider_session_id,
+                    "cwd": cwd,
+                    "mcpServers": [],
+                }),
+            )
+            .with_context(|| format!("resuming Hermes session {provider_session_id}"));
         if let Err(error) = result {
             if restored {
                 self.sessions.remove(session);
@@ -611,33 +693,11 @@ impl ManagerSession for HermesManagerSession {
     }
 
     fn send(&mut self, session: &GahSessionId, message: &str) -> Result<()> {
-        let provider_session_id = self
-            .sessions
-            .get(session)
-            .map(|state| state.provider_session_id.clone())
-            .ok_or_else(|| anyhow!("Hermes session {session} must be resumed before sending"))?;
-        let _ = rpc_request(
-            &mut self.transport,
-            &mut self.sessions,
-            "session/prompt",
-            json!({
-                "sessionId": provider_session_id,
-                "prompt": [
-                    {
-                        "type": "text",
-                        "text": message
-                    }
-                ]
-            }),
-        )
-        .with_context(|| format!("prompting Hermes session {provider_session_id}"))?;
-        if let Some(state) = self.sessions.get_mut(session) {
-            state.status = SessionStatus::Idle;
-        }
-        Ok(())
+        self.prompt(session, message)
     }
 
     fn stream(&mut self, session: &GahSessionId) -> Result<Vec<SessionUpdate>> {
+        self.pump()?;
         let state = self.state_mut(session)?;
         Ok(std::mem::take(&mut state.pending_updates))
     }
@@ -657,6 +717,7 @@ impl ManagerSession for HermesManagerSession {
                 anyhow!("Hermes session {session} must be resumed before interrupting")
             })?;
         self.transport.cancel(&provider_session_id)?;
+        self.prompt_requests.retain(|_, id| id != session);
         if let Some(state) = self.sessions.get_mut(session) {
             state.status = SessionStatus::Terminated(TerminalStatus::Interrupted);
         }
@@ -671,6 +732,7 @@ impl ManagerSession for HermesManagerSession {
     }
 
     fn terminal_status(&mut self, session: &GahSessionId) -> Result<Option<TerminalStatus>> {
+        self.pump()?;
         let state = self.state_mut(session)?;
         Ok(match &state.status {
             SessionStatus::Terminated(status) => Some(status.clone()),
@@ -690,6 +752,31 @@ impl Drop for HermesManagerSession {
 mod tests {
     use super::*;
     use crate::runner::backends::test_util::{fixture, make_fake_bin};
+    use std::time::{Duration, Instant};
+
+    fn wait_for_updates(
+        session: &mut HermesManagerSession,
+        id: &GahSessionId,
+    ) -> Vec<SessionUpdate> {
+        for _ in 0..100 {
+            let updates = session.stream(id).unwrap();
+            if !updates.is_empty() {
+                return updates;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for Hermes updates");
+    }
+
+    fn wait_for_terminal(session: &mut HermesManagerSession, id: &GahSessionId) -> TerminalStatus {
+        for _ in 0..100 {
+            if let Some(status) = session.terminal_status(id).unwrap() {
+                return status;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for Hermes terminal status");
+    }
 
     fn make_json_rpc_hermes(dir: &Path, record_dir: &Path) {
         let body = format!(
@@ -709,6 +796,7 @@ cat > "$tmp" <<'PY'
 import json
 import os
 import sys
+import time
 
 record = os.environ["RECORD_PATH"]
 session_counter = 0
@@ -756,6 +844,10 @@ with open(record, "a", encoding="utf-8") as fh:
                 print(json.dumps({{"jsonrpc": "2.0", "id": req_id, "result": {{}} }}), flush=True)
         elif method == "session/prompt":
             session_id = msg["params"]["sessionId"]
+            prompt = msg["params"]["prompt"][0]["text"]
+            if prompt == "fail":
+                print(json.dumps({{"jsonrpc": "2.0", "id": req_id, "error": {{"code": -32001, "message": "prompt failed"}}}}), flush=True)
+                continue
             update = {{
                 "jsonrpc": "2.0",
                 "method": "session/update",
@@ -763,7 +855,7 @@ with open(record, "a", encoding="utf-8") as fh:
                     "sessionId": session_id,
                     "update": {{
                         "sessionUpdate": "agent_message_chunk",
-                        "content": {{"type": "text", "text": "reply: " + msg["params"]["prompt"][0]["text"]}}
+                        "content": {{"type": "text", "text": "reply: " + prompt}}
                     }}
                 }}
             }}
@@ -776,6 +868,8 @@ with open(record, "a", encoding="utf-8") as fh:
                     "update": {{"sessionUpdate": "usage_update", "used": 12, "size": 4096}}
                 }}
             }}), flush=True)
+            if prompt == "slow":
+                time.sleep(1)
             resp = {{
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -901,7 +995,7 @@ exec python3 -u "$tmp" "$@"
                 instruction: "hello".into(),
             })
             .unwrap();
-        let updates = session.stream(&id).unwrap();
+        let updates = wait_for_updates(&mut session, &id);
         assert_eq!(
             updates,
             vec![
@@ -912,7 +1006,80 @@ exec python3 -u "$tmp" "$@"
                 }
             ]
         );
-        assert_eq!(session.terminal_status(&id).unwrap(), None);
+        assert_eq!(
+            wait_for_terminal(&mut session, &id),
+            TerminalStatus::Completed
+        );
+    }
+
+    #[test]
+    fn prompt_returns_before_completion_and_can_be_interrupted() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_json_rpc_hermes(&f.bin_dir, &f.record_dir);
+        let mut session = HermesManagerSession::new_with_session_dir(
+            f.bin_dir.join("hermes"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let id = session
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "slow".into(),
+            })
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        session.interrupt(&id).unwrap();
+        assert_eq!(
+            session.terminal_status(&id).unwrap(),
+            Some(TerminalStatus::Interrupted)
+        );
+    }
+
+    #[test]
+    fn prompt_failure_becomes_terminal_failure() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_json_rpc_hermes(&f.bin_dir, &f.record_dir);
+        let mut session = HermesManagerSession::new_with_session_dir(
+            f.bin_dir.join("hermes"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        let id = session
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "fail".into(),
+            })
+            .unwrap();
+
+        let TerminalStatus::Failed(message) = wait_for_terminal(&mut session, &id) else {
+            panic!("expected failed prompt status");
+        };
+        assert!(message.contains("prompt failed"));
+    }
+
+    #[test]
+    fn failed_mapping_commit_removes_the_started_session() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_json_rpc_hermes(&f.bin_dir, &f.record_dir);
+        let session_dir = f.record_dir.join("not-a-directory");
+        fs::write(&session_dir, "occupied").unwrap();
+        let mut session =
+            HermesManagerSession::new_with_session_dir(f.bin_dir.join("hermes"), &session_dir)
+                .unwrap();
+
+        assert!(session
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "hello".into(),
+            })
+            .is_err());
+        assert!(session.sessions.is_empty());
+        assert!(session.prompt_requests.is_empty());
     }
 
     #[test]
@@ -978,9 +1145,7 @@ exec python3 -u "$tmp" "$@"
                 .unwrap();
         restarted.resume(&restored_id).unwrap();
         restarted.send(&restored_id, "after restart").unwrap();
-        assert!(restarted
-            .stream(&restored_id)
-            .unwrap()
+        assert!(wait_for_updates(&mut restarted, &restored_id)
             .contains(&SessionUpdate::MessageChunk("reply: after restart".into())));
     }
 

@@ -5,11 +5,26 @@
 //! fake-specific.
 
 use super::{unsupported_capability, ManagerSession, StartRequest};
+use std::time::Duration;
+
+fn wait_for_update(
+    session: &mut dyn ManagerSession,
+    id: &super::GahSessionId,
+) -> Vec<super::SessionUpdate> {
+    for _ in 0..100 {
+        let updates = session.stream(id).expect("stream must succeed");
+        if !updates.is_empty() {
+            return updates;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    vec![]
+}
 
 pub(crate) fn run_contract_suite(session: &mut dyn ManagerSession) {
     assert_start_produces_a_session_and_an_update(session);
     assert_send_produces_a_further_update(session);
-    assert_fresh_session_is_not_terminal(session);
+    assert_fresh_session_has_no_failure(session);
     assert_interrupt_terminates_when_supported(session);
     assert_unsupported_capabilities_return_a_typed_error(session);
 }
@@ -25,9 +40,7 @@ fn start(session: &mut dyn ManagerSession, instruction: &str) -> super::GahSessi
 
 fn assert_start_produces_a_session_and_an_update(session: &mut dyn ManagerSession) {
     let id = start(session, "hello");
-    let updates = session
-        .stream(&id)
-        .expect("stream must succeed for a session that was just started");
+    let updates = wait_for_update(session, &id);
     assert!(
         !updates.is_empty(),
         "start must produce at least one observable update, or a caller has no way to \
@@ -43,19 +56,19 @@ fn assert_send_produces_a_further_update(session: &mut dyn ManagerSession) {
     session
         .send(&id, "follow up")
         .expect("send must succeed against an active session");
-    let updates = session.stream(&id).expect("stream after send must succeed");
+    let updates = wait_for_update(session, &id);
     assert!(
         !updates.is_empty(),
         "send must produce at least one further observable update"
     );
 }
 
-fn assert_fresh_session_is_not_terminal(session: &mut dyn ManagerSession) {
+fn assert_fresh_session_has_no_failure(session: &mut dyn ManagerSession) {
     let id = start(session, "hello");
-    assert_eq!(
-        session.terminal_status(&id).unwrap(),
-        None,
-        "a freshly started session must not already report a terminal status"
+    let status = session.terminal_status(&id).unwrap();
+    assert!(
+        matches!(status, None | Some(super::TerminalStatus::Completed)),
+        "a fresh session may finish immediately, but must not fail or report interruption"
     );
 }
 
