@@ -25,7 +25,6 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
-const DEFAULT_HERMES_PROFILE: &str = "gah-manager";
 
 #[derive(Serialize, Deserialize)]
 struct DurableSessionMapping {
@@ -144,9 +143,10 @@ struct HermesTransport {
 impl HermesTransport {
     fn spawn(executable: &Path) -> Result<Self> {
         let mut cmd = Command::new(executable);
-        // Hermes's ACP server is launched as `hermes acp` in the upstream
-        // docs; we keep the same hard-coded profile used by the TS adapter.
-        cmd.arg("-p").arg(DEFAULT_HERMES_PROFILE).arg("acp");
+        if let Some(profile) = std::env::var_os("GAH_HERMES_PROFILE").filter(|p| !p.is_empty()) {
+            cmd.arg("-p").arg(profile);
+        }
+        cmd.arg("acp");
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -397,7 +397,7 @@ fn classify_auth_state(output: &std::process::Output) -> HermesAuthState {
     }
 }
 
-pub fn discover(executable: impl AsRef<Path>) -> Result<HermesDiscovery> {
+fn discover(executable: impl AsRef<Path>) -> Result<HermesDiscovery> {
     let executable = executable.as_ref().to_path_buf();
     let version = Command::new(&executable)
         .arg("--version")
@@ -1162,6 +1162,22 @@ exec python3 -u "$tmp" "$@"
             f.record_dir.join("sessions"),
         )
         .unwrap();
+        crate::manager::contract::run_contract_suite(&mut session);
+    }
+
+    #[test]
+    fn installed_hermes_passes_shared_contract_when_requested() {
+        let Some(executable) = std::env::var_os("GAH_TEST_REAL_HERMES") else {
+            return;
+        };
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let state = tempfile::TempDir::new().unwrap();
+        let mut session = HermesManagerSession::new_with_session_dir(
+            executable,
+            state.path().join("manager-sessions"),
+        )
+        .unwrap();
+
         crate::manager::contract::run_contract_suite(&mut session);
     }
 
