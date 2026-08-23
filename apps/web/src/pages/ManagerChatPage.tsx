@@ -41,6 +41,7 @@ export function ManagerChatPage() {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [draft, setDraft] = useState('');
   const [pendingRequest, setPendingRequest] = useState<PendingRequest | null>(null);
+  const [restoredStreaming, setRestoredStreaming] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [activeBackend, setActiveBackend] = useState<string | null>(null);
   const [commands, setCommands] = useState<ManagerCommandInfo[]>([]);
@@ -51,7 +52,6 @@ export function ManagerChatPage() {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const processedRequestIds = useRef(new Set<string>());
   const historyRequestId = useRef<string | null>(null);
-  const historyPollTimer = useRef<number | null>(null);
   const activeProfileRef = useRef(profile);
   activeProfileRef.current = profile;
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
@@ -65,17 +65,14 @@ export function ManagerChatPage() {
   // otherwise leaving the page (or a dropped connection) silently loses the
   // conversation even though the server keeps it.
   useEffect(() => {
-    if (historyPollTimer.current !== null) window.clearTimeout(historyPollTimer.current);
     setHistoryLoaded(false);
     setTurns([]);
     setPendingRequest(null);
+    setRestoredStreaming(false);
     if (!isConnected) return;
     const requestId = generateRequestId();
     historyRequestId.current = requestId;
     sendMessage({ type: 'manager.chat.historyRequest', requestId, profile });
-    return () => {
-      if (historyPollTimer.current !== null) window.clearTimeout(historyPollTimer.current);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, isConnected, reconnectSeq]);
 
@@ -148,14 +145,16 @@ export function ManagerChatPage() {
       }
       setTurns(restored);
       setHistoryLoaded(true);
-      if (last.streaming) {
-        historyPollTimer.current = window.setTimeout(() => {
-          if (activeProfileRef.current !== last.profile) return;
-          const requestId = generateRequestId();
-          historyRequestId.current = requestId;
-          sendMessage({ type: 'manager.chat.historyRequest', requestId, profile: last.profile });
-        }, 250);
-      }
+      setRestoredStreaming(Boolean(last.streaming));
+      return;
+    }
+
+    if (last.type === 'manager.chat.updated' && last.profile === profile) {
+      if (pendingRequest && last.requestId !== pendingRequest.id) return;
+      setPendingRequest(null);
+      const requestId = generateRequestId();
+      historyRequestId.current = requestId;
+      sendMessage({ type: 'manager.chat.historyRequest', requestId, profile });
       return;
     }
 
@@ -177,9 +176,11 @@ export function ManagerChatPage() {
     setPendingRequest(null);
   }, [messages, pendingRequest, profile]);
 
+  const isBusy = pendingRequest !== null || restoredStreaming;
+
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [turns, pendingRequest]);
+  }, [turns, isBusy]);
 
   // "/" palette: matches commands by prefix against whatever's typed after
   // the leading slash, only while the draft is exactly a slash-command in
@@ -204,7 +205,7 @@ export function ManagerChatPage() {
 
   const handleSend = () => {
     const text = draft.trim();
-    if (!text || pendingRequest) return;
+    if (!text || isBusy) return;
     const requestId = generateRequestId();
     setTurns((prev) => [...prev, { role: 'user', text }]);
     setDraft('');
@@ -291,7 +292,7 @@ export function ManagerChatPage() {
               )}
             </div>
           ))}
-          {pendingRequest && (
+          {isBusy && (
             <div className="flex justify-start">
               <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-raised text-muted border border-subtle animate-pulse">
                 Thinking…
@@ -357,7 +358,7 @@ export function ManagerChatPage() {
           />
           <button
             onClick={handleSend}
-            disabled={!isConnected || !draft.trim() || !!pendingRequest}
+            disabled={!isConnected || !draft.trim() || isBusy}
             className="btn-primary h-fit"
             aria-label="Send"
           >

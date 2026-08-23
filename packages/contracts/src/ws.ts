@@ -148,6 +148,12 @@ export type ServerMessage =
       cursor: number;
       /** Partial assistant reply when the requested turn is still running. */
       streaming: ChatSessionView['streaming'];
+    }
+  | {
+      /** Signals clients to reload one profile after its active turn ends. */
+      type: "manager.chat.updated";
+      profile: string;
+      requestId: string;
     };
 
 export type ManagerChatTurn = ChatTranscriptTurn;

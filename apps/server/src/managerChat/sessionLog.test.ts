@@ -89,6 +89,9 @@ test('tool and slash-command results survive the event log', () => {
     assert.deepEqual(foldSession('gah', { stateDir: dir }).turns.map((turn) => turn.text), [
       '/check', '[shell] ok', 'done'
     ]);
+    assert.deepEqual(deriveModelHistory(events).map((turn) => [turn.role, turn.text]), [
+      ['user', '/check'], ['system', '[shell] ok'], ['assistant', 'done']
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

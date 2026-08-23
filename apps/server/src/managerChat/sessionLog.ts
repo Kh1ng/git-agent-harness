@@ -178,6 +178,8 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
         model: event.model,
         usage: event.usage
       });
+    } else if (event.type === 'tool/result') {
+      history.push({ role: 'system', text: `[${event.name}] ${event.text}`, timestamp: event.timestamp });
     } else if (event.type === 'compaction/summary') {
       history.push({ role: 'system', text: event.summary, timestamp: event.timestamp });
     }

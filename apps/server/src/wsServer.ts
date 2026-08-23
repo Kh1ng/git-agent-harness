@@ -277,6 +277,8 @@ async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessa
     ws.send(JSON.stringify(payload));
   } catch (error) {
     ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
+  } finally {
+    pushBus.publish({ type: 'manager.chat.updated', profile: message.profile, requestId });
   }
 }
 

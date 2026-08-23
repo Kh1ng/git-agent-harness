@@ -77,6 +77,8 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await page.getByPlaceholder(/Message the manager/).fill('alpha question');
   await page.getByRole('button', { name: 'Send' }).click();
   await expect.poll(() => alphaRequestId).not.toBe('');
+  socket!.send(JSON.stringify({ type: 'manager.chat.updated', profile: 'alpha', requestId: 'another-tab' }));
+  await expect(page.getByText('Thinking…')).toBeVisible();
 
   await page.getByLabel('Node / profile').selectOption('beta');
   await expect(page.getByRole('heading', { name: 'beta', exact: true })).toBeVisible();
@@ -103,6 +105,7 @@ test('profile changes reject stale chat replies and control data', async ({ page
 test('reconnect restores and follows an in-flight reply', async ({ page }) => {
   let historyRequests = 0;
   let complete = false;
+  let socket: WebSocketRoute;
 
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -117,6 +120,7 @@ test('reconnect restores and follows an in-flight reply', async ({ page }) => {
   });
 
   await page.routeWebSocket('**/ws**', (ws) => {
+    socket = ws;
     ws.send(JSON.stringify(WELCOME));
     ws.onMessage((raw) => {
       const message = JSON.parse(String(raw));
@@ -142,8 +146,14 @@ test('reconnect restores and follows an in-flight reply', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Manager Chat', exact: true }).click();
   await expect(page.getByText('partial reply', { exact: true })).toBeVisible();
+  const requestsBeforeCompletion = historyRequests;
+  await page.getByPlaceholder(/Message the manager/).fill('second question');
+  await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
+  await page.waitForTimeout(500);
+  expect(historyRequests).toBe(requestsBeforeCompletion);
   complete = true;
+  socket!.send(JSON.stringify({ type: 'manager.chat.updated', profile: 'alpha', requestId: 'restored-turn' }));
   await expect(page.getByText('complete reply', { exact: true })).toBeVisible();
   await expect(page.getByText('partial reply', { exact: true })).toHaveCount(0);
-  expect(historyRequests).toBeGreaterThanOrEqual(2);
+  expect(historyRequests).toBeGreaterThan(requestsBeforeCompletion);
 });
