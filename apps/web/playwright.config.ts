@@ -38,6 +38,7 @@ export default defineConfig({
   webServer: [
     {
       command:
+        'PATH=./tests/fixtures/e2e/bin:$PATH ' +
         'GAH_BINARY=./tests/fixtures/gah/gah ' +
         'GAH_COORDINATOR_IDENTITY_PATH=./tests/fixtures/e2e/identity.json ' +
         'GAH_REGISTRY_CONFIG_PATH=./tests/fixtures/e2e/registry.json ' +

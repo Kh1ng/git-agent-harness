@@ -21,6 +21,7 @@ test('Overview renders fixture profile + status data from the hermetic server', 
   await expect(page.getByText('Profile: Fixture', { exact: false }).first()).toBeVisible();
   // fixture status.json carries 42 total ledger entries.
   await expect(page.getByText('42', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Loop running', { exact: true })).toBeVisible();
 });
 
 test('Quota page renders the fixture quota snapshot observations', async ({ page }) => {
@@ -29,6 +30,9 @@ test('Quota page renders the fixture quota snapshot observations', async ({ page
   // responses/quota.json carries codex/claude candidate cards with usage.
   await expect(page.getByText('codex', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('claude', { exact: false }).first()).toBeVisible();
+  await expect(page.getByText('Windows', { exact: true })).toBeVisible();
+  await expect(page.getByText('weekly', { exact: false })).toBeVisible();
+  await expect(page.getByText(/66% remaining/)).toBeVisible();
 });
 
 test('Telemetry page renders a backend row from the fixture report', async ({ page }) => {

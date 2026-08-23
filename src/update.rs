@@ -7,8 +7,9 @@
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use std::env;
+use std::ffi::OsString;
 use std::fs::{copy, create_dir_all, File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// Whether this host runs the control plane (`apps/server`, `gah-server.service`)
@@ -303,6 +304,13 @@ fn copy_systemd_unit(repo: &Path, config_home: &Path, unit_file_name: &str) -> R
 /// (default `gah-server.service`), so the copy target matches what the
 /// restart step below restarts.
 fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Option<PathBuf>> {
+    let mut components = Path::new(server_service).components();
+    if !server_service.ends_with(".service")
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+    {
+        bail!("invalid systemd service name '{server_service}'");
+    }
     if !systemd_available() {
         return Ok(None);
     }
@@ -311,19 +319,17 @@ fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Opt
         bail!("systemd unit template is missing: {}", source.display());
     }
     let target = PathBuf::from("/etc/systemd/system").join(server_service);
+    let source = source
+        .to_str()
+        .context("systemd unit template path is not UTF-8")?;
+    let target_arg = target
+        .to_str()
+        .context("systemd unit target path is not UTF-8")?;
     run_command(
         repo,
         "sudo",
         &[
-            "install",
-            "-o",
-            "root",
-            "-g",
-            "root",
-            "-m",
-            "0644",
-            source.to_str().unwrap_or_default(),
-            target.to_str().unwrap_or_default(),
+            "install", "-o", "root", "-g", "root", "-m", "0644", source, target_arg,
         ],
     )?;
     run_command(repo, "sudo", &["systemctl", "daemon-reload"])?;
@@ -342,17 +348,34 @@ fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Opt
 /// needs `sudo`. Deployment is a replace-in-place of the dist contents, not
 /// a delete of the whole root -- operator-provided files (favicon overrides,
 /// robots.txt, a Caddyfile) survive the update.
-fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
-    let root = env::var("GAH_WEB_DEPLOY_ROOT").unwrap_or_else(|_| "/var/www/gah".to_string());
-    if root.trim().is_empty() {
+fn resolve_web_deploy_root(configured: Option<OsString>) -> Result<Option<PathBuf>> {
+    let root = configured
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/www/gah"));
+    if root.as_os_str().is_empty() {
         return Ok(None);
     }
+    if !root.is_absolute()
+        || root == Path::new("/")
+        || root.components().any(|part| part == Component::ParentDir)
+    {
+        bail!("GAH_WEB_DEPLOY_ROOT must be an absolute path other than /");
+    }
+    Ok(Some(root))
+}
+
+fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
+    let Some(root_path) = resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? else {
+        return Ok(None);
+    };
     run_command(repo, "npm", &["run", "build:web"])?;
     let dist = repo.join("apps/web/dist");
     if !dist.join("index.html").is_file() {
         bail!("web build did not produce apps/web/dist/index.html");
     }
-    let root_path = PathBuf::from(&root);
+    let root = root_path
+        .to_str()
+        .context("GAH_WEB_DEPLOY_ROOT is not UTF-8")?;
     run_command(
         repo,
         "sudo",
@@ -360,19 +383,12 @@ fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
             "install", "-d", "-o", "root", "-g", "root", "-m", "0755", &root,
         ],
     )?;
-    // Copy the dist contents into the root. `dist/` itself is not copied as
-    // a nested directory; trailing separator semantics are fiddly across
-    // BSD/Linux cp, so use an explicit glob-style loop via cp -r of the
-    // directory contents.
-    run_command(
-        repo,
-        "sudo",
-        &[
-            "sh",
-            "-c",
-            &format!("cp -r '{}'/. '{}'", dist.display(), root),
-        ],
-    )?;
+    // Copy the dist contents into the root without crossing a shell boundary.
+    let dist_contents = dist.join(".");
+    let dist_contents = dist_contents
+        .to_str()
+        .context("web dist path is not UTF-8")?;
+    run_command(repo, "sudo", &["cp", "-r", "--", dist_contents, root])?;
     Ok(Some(root_path))
 }
 
@@ -470,8 +486,9 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        deploy_web_ui, ensure_clean, ensure_default_branch_checkout, install_server_unit_template,
-        install_watchdog_unit_template, installed_binary_path, run, HostRole, UpdateArgs,
+        ensure_clean, ensure_default_branch_checkout, install_server_unit_template,
+        install_watchdog_unit_template, installed_binary_path, resolve_web_deploy_root, run,
+        HostRole, UpdateArgs,
     };
     use crate::test_support::PathGuard;
     use std::ffi::OsString;
@@ -714,19 +731,31 @@ mod tests {
         assert!(record.contains("daemon-reload"), "{record}");
     }
 
+    #[test]
+    fn server_unit_name_cannot_escape_systemd_directory() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for name in [
+            "/tmp/pwn.service",
+            "../pwn.service",
+            "nested/pwn.service",
+            "not-a-unit",
+        ] {
+            assert!(install_server_unit_template(repo, name).is_err(), "{name}");
+        }
+    }
+
     /// Issue #896: an explicitly-empty GAH_WEB_DEPLOY_ROOT skips deployment
     /// (returns None) without touching npm or the filesystem -- the operator
     /// opted out of web deploy for this host.
     #[test]
     fn empty_web_deploy_root_skips_deployment() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let previous = std::env::var_os("GAH_WEB_DEPLOY_ROOT");
-        std::env::set_var("GAH_WEB_DEPLOY_ROOT", "");
-        let result = deploy_web_ui(repo).unwrap();
-        match previous {
-            Some(value) => std::env::set_var("GAH_WEB_DEPLOY_ROOT", value),
-            None => std::env::remove_var("GAH_WEB_DEPLOY_ROOT"),
-        }
-        assert!(result.is_none());
+        assert_eq!(
+            resolve_web_deploy_root(Some(OsString::new())).unwrap(),
+            None
+        );
+        assert!(resolve_web_deploy_root(Some(OsString::from("relative"))).is_err());
+        assert!(resolve_web_deploy_root(Some(OsString::from("/"))).is_err());
+        assert!(resolve_web_deploy_root(Some(OsString::from("/tmp/.."))).is_err());
+        assert!(resolve_web_deploy_root(Some(OsString::from("/var/www/gah/../../.."))).is_err());
     }
 }
