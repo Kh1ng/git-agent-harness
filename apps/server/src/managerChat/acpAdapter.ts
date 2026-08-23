@@ -203,7 +203,10 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     return state;
   }
 
-  async function runTurn(gahProfile: string, message: string): Promise<{ reply: string }> {
+  async function runTurn(
+    gahProfile: string,
+    message: string
+  ): Promise<{ reply: string; model: string | null }> {
     const state = await connect(gahProfile);
     state.client.replyChunks = [];
     let result;
@@ -218,7 +221,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     if (result.stopReason !== 'end_turn') {
       console.warn(`[managerChat] ${label} turn ended with stopReason=${result.stopReason} for profile ${gahProfile}`);
     }
-    return { reply: state.client.replyChunks.join('') };
+    return { reply: state.client.replyChunks.join(''), model: state.currentModelId };
   }
 
   /** Backs the "/" command palette. Lazily connects (the same session

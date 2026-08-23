@@ -4,11 +4,18 @@
  * exchange back to memory. Slash commands (Hermes's real /reset, /compress,
  * etc.) are sent through like any other message -- the backend adapter's
  * own session dispatches them natively, GAH doesn't reinvent them.
+ *
+ * Issue #955: conversation history is an event-sourced session log (see
+ * sessionLog.ts) rather than an in-memory array -- it survives server
+ * restart, derives the transcript by folding, and carries per-message
+ * backend/model/usage attribution.
  */
 
 import { recall, capture, flushSession } from './memoryGatewayClient.js';
 import { resolveAdapter, type ManagerCommandInfo, type ManagerModelInfo } from './registry.js';
 import { backendForProfile, modelOverrideForProfile, setModelOverrideForProfile } from './settingsStore.js';
+import { appendEvents, foldSession, type SessionLogOptions } from './sessionLog.js';
+import type { ChatSessionEvent, ChatTranscriptTurn } from '@git-agent-harness/contracts';
 
 // Backend-native command names that mean "compact/clear this session"
 // (Hermes: /reset, /compress; Codex/Claude ACP bridges: /compact, /clear).
@@ -22,32 +29,30 @@ export function isCompactionCommand(message: string): boolean {
   return name !== undefined && COMPACTION_COMMAND_NAMES.has(name);
 }
 
-export interface ChatTurn {
-  role: 'user' | 'assistant' | 'system';
-  text: string;
-  timestamp: number;
-}
+/** The derived transcript turn -- the on-wire shape of a folded log. */
+export type ChatTurn = ChatTranscriptTurn;
 
-const MAX_HISTORY_PER_PROFILE = 200;
-
-const historyByProfile = new Map<string, ChatTurn[]>();
 // Serializes turns per profile -- without this, two concurrent messages for
 // the same profile (e.g. two open browser tabs) would both prompt the same
 // backend session at once, corrupting turn ordering. One profile = one
 // conversation, so turns must run one at a time.
 const turnQueueByProfile = new Map<string, Promise<unknown>>();
 
-function appendHistory(profile: string, turn: ChatTurn): void {
-  const history = historyByProfile.get(profile) ?? [];
-  history.push(turn);
-  if (history.length > MAX_HISTORY_PER_PROFILE) {
-    history.splice(0, history.length - MAX_HISTORY_PER_PROFILE);
-  }
-  historyByProfile.set(profile, history);
+/** Session log storage options (tests may point at a temp state dir). */
+const logOptions: SessionLogOptions = {};
+
+export function setSessionLogOptions(opts: SessionLogOptions): void {
+  logOptions.stateDir = opts.stateDir;
 }
 
+/** Fold the event log into the derived transcript (survives restart). */
 export function getHistory(profile: string): ChatTurn[] {
-  return historyByProfile.get(profile) ?? [];
+  return foldSession(profile, logOptions).turns;
+}
+
+/** The full folded view, including cursor + streaming state. */
+export function getSessionView(profile: string) {
+  return foldSession(profile, logOptions);
 }
 
 export function listCommandsForProfile(profile: string): Promise<ManagerCommandInfo[]> {
@@ -82,7 +87,13 @@ export async function setModelForProfile(profile: string, modelId: string): Prom
   setModelOverrideForProfile(profile, backendId, modelId);
 }
 
-async function runTurn(profile: string, message: string): Promise<string> {
+let nextSeq = 1;
+/** Monotonic per-process seq. Persisted events keep their assigned seq. */
+function nextEventSeq(): number {
+  return nextSeq++;
+}
+
+async function runTurn(profile: string, message: string): Promise<{ reply: string; model: string | null }> {
   const backendId = backendForProfile(profile);
   const adapter = resolveAdapter(backendId);
 
@@ -100,30 +111,55 @@ async function runTurn(profile: string, message: string): Promise<string> {
     return context ? `Relevant context from prior conversations:\n${context}\n\nUser: ${message}` : message;
   })();
 
-  const { reply } = await adapter.runTurn(profile, prompt);
+  const result = await adapter.runTurn(profile, prompt);
 
-  await capture(profile, message, reply);
+  await capture(profile, message, result.reply);
   // Force buffered L0 conversation into the gateway's L1/L2 pipeline right
   // away on a compact/clear-like command, instead of waiting for the
   // pipeline's own idle timeout (#849).
   if (isSlashCommand && isCompactionCommand(message)) {
     await flushSession(profile);
   }
-  return reply;
+  return { reply: result.reply, model: result.model };
 }
 
 export function sendManagerChatMessage(profile: string, message: string): Promise<string> {
-  appendHistory(profile, { role: 'user', text: message, timestamp: Date.now() });
+  const now = Date.now();
+  const turnNo = foldSession(profile, logOptions).turns.length + 1;
+
+  const events: ChatSessionEvent[] = [
+    { type: 'turn/start', seq: nextEventSeq(), turn: turnNo, timestamp: now },
+    { type: 'user/message', seq: nextEventSeq(), turn: turnNo, text: message, source: 'prompt', timestamp: now }
+  ];
+  appendEvents(profile, events, logOptions);
 
   const prior = turnQueueByProfile.get(profile) ?? Promise.resolve();
   const turn = prior.catch(() => undefined).then(async () => {
     try {
-      const reply = await runTurn(profile, message);
-      appendHistory(profile, { role: 'assistant', text: reply, timestamp: Date.now() });
+      const { reply, model } = await runTurn(profile, message);
+      const backendId = backendForProfile(profile);
+      const done: ChatSessionEvent[] = [
+        {
+          type: 'assistant/message',
+          seq: nextEventSeq(),
+          turn: turnNo,
+          text: reply,
+          backend: backendId,
+          model,
+          usage: null,
+          timestamp: Date.now()
+        },
+        { type: 'turn/end', seq: nextEventSeq(), turn: turnNo, reason: { kind: 'complete' }, timestamp: Date.now() }
+      ];
+      appendEvents(profile, done, logOptions);
       return reply;
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      appendHistory(profile, { role: 'system', text: `Error: ${text}`, timestamp: Date.now() });
+      const done: ChatSessionEvent[] = [
+        { type: 'tool/result', seq: nextEventSeq(), turn: turnNo, name: 'error', text, timestamp: Date.now() },
+        { type: 'turn/end', seq: nextEventSeq(), turn: turnNo, reason: { kind: 'error', message: text }, timestamp: Date.now() }
+      ];
+      appendEvents(profile, done, logOptions);
       throw error;
     }
   });

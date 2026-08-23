@@ -10,10 +10,18 @@ import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSumm
 interface ChatTurn {
   role: 'user' | 'assistant' | 'system' | 'error';
   text: string;
+  /** Present on assistant turns: which backend + model produced this reply. */
+  backend?: string;
+  model?: string | null;
 }
 
 function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
-  return { role: turn.role, text: turn.text };
+  return {
+    role: turn.role === 'assistant' ? 'assistant' : turn.role,
+    text: turn.text,
+    backend: turn.backend,
+    model: turn.model
+  };
 }
 
 export function ManagerChatPage() {
@@ -216,7 +224,7 @@ export function ManagerChatPage() {
             </div>
           )}
           {turns.map((turn, i) => (
-            <div key={i} className={`flex ${turn.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div key={i} className={`flex flex-col ${turn.role === 'user' ? 'items-end' : 'items-start'}`}>
               <div
                 className={`max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words ${
                   turn.role === 'user'
@@ -230,6 +238,12 @@ export function ManagerChatPage() {
               >
                 {turn.text}
               </div>
+              {turn.role === 'assistant' && turn.backend && (
+                <span className="mt-0.5 px-1.5 py-0.5 rounded bg-raised border border-subtle text-[10px] text-muted font-mono">
+                  {turn.backend}
+                  {turn.model ? ` / ${turn.model}` : ''}
+                </span>
+              )}
             </div>
           ))}
           {pendingRequestId && (
