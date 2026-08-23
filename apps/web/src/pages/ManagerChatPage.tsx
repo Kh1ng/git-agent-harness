@@ -15,6 +15,11 @@ interface ChatTurn {
   model?: string | null;
 }
 
+interface PendingRequest {
+  id: string;
+  profile: string;
+}
+
 function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
   return {
     role: turn.role === 'assistant' ? 'assistant' : turn.role,
@@ -35,7 +40,7 @@ export function ManagerChatPage() {
 
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [draft, setDraft] = useState('');
-  const [pendingRequestId, setPendingRequestId] = useState<string | null>(null);
+  const [pendingRequest, setPendingRequest] = useState<PendingRequest | null>(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [activeBackend, setActiveBackend] = useState<string | null>(null);
   const [commands, setCommands] = useState<ManagerCommandInfo[]>([]);
@@ -46,6 +51,8 @@ export function ManagerChatPage() {
   const [paletteIndex, setPaletteIndex] = useState(0);
   const processedRequestIds = useRef(new Set<string>());
   const historyRequestId = useRef<string | null>(null);
+  const activeProfileRef = useRef(profile);
+  activeProfileRef.current = profile;
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -57,8 +64,10 @@ export function ManagerChatPage() {
   // otherwise leaving the page (or a dropped connection) silently loses the
   // conversation even though the server keeps it.
   useEffect(() => {
-    if (!isConnected) return;
     setHistoryLoaded(false);
+    setTurns([]);
+    setPendingRequest(null);
+    if (!isConnected) return;
     const requestId = generateRequestId();
     historyRequestId.current = requestId;
     sendMessage({ type: 'manager.chat.historyRequest', requestId, profile });
@@ -66,46 +75,60 @@ export function ManagerChatPage() {
   }, [profile, isConnected, reconnectSeq]);
 
   useEffect(() => {
+    let cancelled = false;
+    setActiveBackend(null);
+    setCommands([]);
+    setModels([]);
+    setCurrentModelId(null);
+    setModelChanging(false);
     gahApi
       .getManagerChatSettings()
       .then((settings) => {
         const backendId = settings.profileOverrides[profile] ?? settings.defaultBackend;
         const info = settings.availableBackends.find((b) => b.id === backendId);
-        setActiveBackend(info?.displayName ?? backendId);
+        if (!cancelled) setActiveBackend(info?.displayName ?? backendId);
       })
-      .catch(() => setActiveBackend(null));
+      .catch(() => { if (!cancelled) setActiveBackend(null); });
     // Real commands from the active backend's own registry (e.g. Hermes's
     // live ACP available-commands push) -- not a list GAH invents. Fetched
     // eagerly so the "/" palette has data the moment the user types it;
     // this also happens to be what warms up the backend's session.
     gahApi
       .getManagerChatCommands(profile)
-      .then(({ commands }) => setCommands(commands))
-      .catch(() => setCommands([]));
+      .then(({ commands }) => { if (!cancelled) setCommands(commands); })
+      .catch(() => { if (!cancelled) setCommands([]); });
     // Real selectable models from the backend's own ACP session state --
     // empty for backends that don't expose this (e.g. Claude's bridge
     // today), in which case no picker renders at all.
     gahApi
       .getManagerChatModels(profile)
       .then(({ models, currentModelId }) => {
-        setModels(models);
-        setCurrentModelId(currentModelId);
+        if (!cancelled) {
+          setModels(models);
+          setCurrentModelId(currentModelId);
+        }
       })
       .catch(() => {
-        setModels([]);
-        setCurrentModelId(null);
+        if (!cancelled) {
+          setModels([]);
+          setCurrentModelId(null);
+        }
       });
+    return () => { cancelled = true; };
   }, [profile]);
 
   const handleModelChange = async (modelId: string) => {
     setModelChanging(true);
+    const requestedProfile = profile;
     try {
-      await gahApi.setManagerChatModel(profile, modelId);
-      setCurrentModelId(modelId);
+      await gahApi.setManagerChatModel(requestedProfile, modelId);
+      if (activeProfileRef.current === requestedProfile) setCurrentModelId(modelId);
     } catch (err) {
-      setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch model: ${err instanceof Error ? err.message : String(err)}` }]);
+      if (activeProfileRef.current === requestedProfile) {
+        setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch model: ${err instanceof Error ? err.message : String(err)}` }]);
+      }
     } finally {
-      setModelChanging(false);
+      if (activeProfileRef.current === requestedProfile) setModelChanging(false);
     }
   };
 
@@ -113,16 +136,16 @@ export function ManagerChatPage() {
     const last = messages[messages.length - 1];
     if (!last) return;
 
-    if (last.type === 'manager.chat.history' && last.requestId === historyRequestId.current) {
+    if (last.type === 'manager.chat.history' && last.profile === profile && last.requestId === historyRequestId.current) {
       setTurns(last.turns.map(fromServerTurn));
       setHistoryLoaded(true);
       return;
     }
 
-    if (!pendingRequestId) return;
-    if (!('requestId' in last) || last.requestId !== pendingRequestId) return;
-    if (processedRequestIds.current.has(pendingRequestId)) return;
-    processedRequestIds.current.add(pendingRequestId);
+    if (!pendingRequest || pendingRequest.profile !== profile) return;
+    if (!('requestId' in last) || last.requestId !== pendingRequest.id) return;
+    if (processedRequestIds.current.has(pendingRequest.id)) return;
+    processedRequestIds.current.add(pendingRequest.id);
 
     if (last.type === 'manager.chat.reply') {
       setTurns((prev) => [...prev, {
@@ -134,12 +157,12 @@ export function ManagerChatPage() {
     } else if (last.type === 'error') {
       setTurns((prev) => [...prev, { role: 'error', text: last.error }]);
     }
-    setPendingRequestId(null);
-  }, [messages, pendingRequestId]);
+    setPendingRequest(null);
+  }, [messages, pendingRequest, profile]);
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [turns, pendingRequestId]);
+  }, [turns, pendingRequest]);
 
   // "/" palette: matches commands by prefix against whatever's typed after
   // the leading slash, only while the draft is exactly a slash-command in
@@ -164,12 +187,12 @@ export function ManagerChatPage() {
 
   const handleSend = () => {
     const text = draft.trim();
-    if (!text || pendingRequestId) return;
+    if (!text || pendingRequest) return;
     const requestId = generateRequestId();
     setTurns((prev) => [...prev, { role: 'user', text }]);
     setDraft('');
     setPaletteOpen(false);
-    setPendingRequestId(requestId);
+    setPendingRequest({ id: requestId, profile });
     sendMessage({ type: 'manager.chat.send', requestId, profile, message: text });
   };
 
@@ -251,7 +274,7 @@ export function ManagerChatPage() {
               )}
             </div>
           ))}
-          {pendingRequestId && (
+          {pendingRequest && (
             <div className="flex justify-start">
               <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-raised text-muted border border-subtle animate-pulse">
                 Thinking…
@@ -317,7 +340,7 @@ export function ManagerChatPage() {
           />
           <button
             onClick={handleSend}
-            disabled={!isConnected || !draft.trim() || !!pendingRequestId}
+            disabled={!isConnected || !draft.trim() || !!pendingRequest}
             className="btn-primary h-fit"
             aria-label="Send"
           >

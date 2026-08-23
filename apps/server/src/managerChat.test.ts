@@ -49,6 +49,7 @@ test('historyDelta catches up a backend without replaying turns it already knows
 test('ACP usage is attributed to the turn with a session-cost delta', () => {
   assert.deepEqual(toChatUsage(
     { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    null,
     { used: 12, size: 100, cost: { amount: 0.5, currency: 'USD' } },
     0.25,
     2500
@@ -59,6 +60,23 @@ test('ACP usage is attributed to the turn with a session-cost delta', () => {
     estimated_cost_usd: 0.25,
     duration_seconds: 2.5
   });
+});
+
+test('ACP cumulative counters are differenced without treating context occupancy as turn usage', () => {
+  assert.deepEqual(toChatUsage(
+    { inputTokens: 25, outputTokens: 12, totalTokens: 37 },
+    { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    { used: 90, size: 100, cost: { amount: 0.75, currency: 'USD' } },
+    0.5,
+    1000
+  ), {
+    input_tokens: 15,
+    output_tokens: 7,
+    total_tokens: 22,
+    estimated_cost_usd: 0.25,
+    duration_seconds: 1
+  });
+  assert.equal(toChatUsage(undefined, null, { used: 90, size: 100 }, 0, 1000)?.total_tokens, null);
 });
 
 test('ACP model config drives the existing model picker', () => {

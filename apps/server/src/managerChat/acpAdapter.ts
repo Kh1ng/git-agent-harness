@@ -57,6 +57,7 @@ class AcpClient implements acp.Client {
   replyChunks: string[] = [];
   onReplyChunk?: (text: string) => void;
   usageUpdate: acp.UsageUpdate | null = null;
+  cumulativeUsage: acp.Usage | null = null;
   sessionCostUsd = 0;
   configOptions: acp.SessionConfigOption[] = [];
 
@@ -99,6 +100,7 @@ class AcpClient implements acp.Client {
 
 export function toChatUsage(
   usage: acp.Usage | null | undefined,
+  previousUsage: acp.Usage | null,
   update: acp.UsageUpdate | null,
   costBeforeUsd: number,
   durationMs: number
@@ -108,12 +110,16 @@ export function toChatUsage(
     ? Math.max(0, update.cost.amount - costBeforeUsd)
     : null;
   return {
-    input_tokens: usage?.inputTokens ?? null,
-    output_tokens: usage?.outputTokens ?? null,
-    total_tokens: usage?.totalTokens ?? update?.used ?? null,
+    input_tokens: usage ? counterDelta(usage.inputTokens, previousUsage?.inputTokens) : null,
+    output_tokens: usage ? counterDelta(usage.outputTokens, previousUsage?.outputTokens) : null,
+    total_tokens: usage ? counterDelta(usage.totalTokens, previousUsage?.totalTokens) : null,
     estimated_cost_usd: cost,
     duration_seconds: durationMs / 1000
   };
+}
+
+function counterDelta(current: number, previous: number | undefined): number {
+  return previous === undefined || current < previous ? current : current - previous;
 }
 
 export function readModelConfig(options: acp.SessionConfigOption[]): {
@@ -234,6 +240,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     const previousModel = preserveModel ? state.currentModelId : null;
     state.client.sessionCostUsd = 0;
     state.client.usageUpdate = null;
+    state.client.cumulativeUsage = null;
     const session = await state.connection.newSession({ cwd: process.cwd(), mcpServers: [] });
     state.sessionId = session.sessionId;
     state.client.configOptions = session.configOptions ?? [];
@@ -339,10 +346,18 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
         { role: 'assistant', text: reply, timestamp: Date.now() }
       ];
     }
+    const usage = toChatUsage(
+      result.usage,
+      state.client.cumulativeUsage,
+      state.client.usageUpdate,
+      costBeforeUsd,
+      Date.now() - startedAt
+    );
+    state.client.cumulativeUsage = result.usage ?? state.client.cumulativeUsage;
     return {
       reply,
       model: state.currentModelId,
-      usage: toChatUsage(result.usage, state.client.usageUpdate, costBeforeUsd, Date.now() - startedAt)
+      usage
     };
   }
 

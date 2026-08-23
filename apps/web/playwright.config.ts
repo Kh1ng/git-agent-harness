@@ -1,5 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const port = process.env.GAH_WEB_TEST_PORT ?? '3000';
+const baseURL = `http://localhost:${port}`;
+
 /**
  * Minimal Playwright setup -- none existed before this pass. Assumes the
  * server (apps/server, port 3773) is already running and pointed at a real
@@ -12,13 +15,13 @@ export default defineConfig({
   fullyParallel: true,
   reporter: 'list',
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL,
     screenshot: 'only-on-failure'
   },
   webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:3000',
-    reuseExistingServer: true,
+    command: `npm run dev -- --port ${port}`,
+    url: baseURL,
+    reuseExistingServer: process.env.GAH_WEB_TEST_PORT === undefined,
     timeout: 30_000
   },
   projects: [
