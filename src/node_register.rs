@@ -57,7 +57,7 @@ struct NodeIdentity {
 }
 
 fn read_identity(path: &Path) -> Result<NodeIdentity> {
-    let text = std::fs::read_to_string(&path).with_context(|| {
+    let text = std::fs::read_to_string(path).with_context(|| {
         format!(
             "reading node identity from {} (set GAH_COORDINATOR_IDENTITY_PATH if it lives elsewhere)",
             path.display()
