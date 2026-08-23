@@ -30,20 +30,21 @@ export function isLoopback(urlStr: string): boolean {
 export function getEndpoint(urlStr: string): string {
   try {
     const url = new URL(urlStr);
-    const port = url.port || (url.protocol === 'https:' || url.protocol === 'wss:' ? '443' : '80');
-    return `${normalizeLoopbackHost(url.hostname)}:${port}`;
+    return `${normalizeLoopbackHost(url.hostname)}:${urlPort(url)}`;
   } catch {
     return urlStr;
   }
 }
 
-function isCentralEndpoint(candidateUrl: string, advertisedCentralUrl: string): boolean {
+function urlPort(url: URL): number {
+  return Number(url.port || (url.protocol === 'https:' || url.protocol === 'wss:' ? 443 : 80));
+}
+
+function isCentralEndpoint(candidateUrl: string, advertisedCentralUrl: string, listenerPort: number): boolean {
   if (getEndpoint(candidateUrl) === getEndpoint(advertisedCentralUrl)) return true;
   try {
     const candidate = new URL(candidateUrl);
-    const central = new URL(advertisedCentralUrl);
-    const port = (url: URL) => url.port || (url.protocol === 'https:' || url.protocol === 'wss:' ? '443' : '80');
-    return isLoopback(candidateUrl) && port(candidate) === port(central);
+    return isLoopback(candidateUrl) && urlPort(candidate) === listenerPort;
   } catch {
     return false;
   }
@@ -282,10 +283,12 @@ export class RegistryService {
    * own endpoint -- the liveness scheduler would poll the central's own
    * /api/status and recurse (observed live: every fleet/status call 502s). */
   private selfUrl: string | null;
+  private listenerPort: number | null;
 
-  constructor(configPath?: string, selfEndpoint?: string) {
+  constructor(configPath?: string, selfEndpoint?: string, listenerPort?: number) {
     this.configPath = configPath || process.env.GAH_REGISTRY_CONFIG_PATH || resolve(process.cwd(), 'config/registry-config.json');
     this.selfUrl = selfEndpoint ?? null;
+    this.listenerPort = listenerPort ?? (selfEndpoint ? urlPort(new URL(selfEndpoint)) : null);
     this.load();
   }
 
@@ -620,7 +623,7 @@ export class RegistryService {
     // itself and recurse until timeout (observed live: /api/status and
     // /api/registry/fleet both 502). Loopback spellings are normalized so
     // "localhost:3773" and "127.0.0.1:3773" both trip this.
-    if (this.selfUrl && isCentralEndpoint(node.advertised_url, this.selfUrl)) {
+    if (this.selfUrl && this.listenerPort !== null && isCentralEndpoint(node.advertised_url, this.selfUrl, this.listenerPort)) {
       throw new Error(
         `Refusing to register: advertised_url '${node.advertised_url}' is this central node's own endpoint (would make the central poll itself). A worker must advertise its own reachable URL.`
       );

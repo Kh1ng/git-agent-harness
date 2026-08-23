@@ -391,9 +391,9 @@ test('RegistryService rejects a node advertising the central node\'s own endpoin
   }
 });
 
-test('RegistryService rejects a loopback alias when the central advertises a tailnet address', () => {
+test('RegistryService rejects its listener when the central advertises through a reverse proxy', () => {
   const tempPath = createTempRegistryFile();
-  const registry = new RegistryService(tempPath, 'http://100.118.97.79:3773');
+  const registry = new RegistryService(tempPath, 'https://central.example.com', 3773);
 
   try {
     assert.throws(() => {

@@ -113,7 +113,7 @@ export function createServer(
 
   const registryService =
     configDeps.registryService ||
-    new RegistryService(undefined, getCoordinatorIdentity(undefined, coordinatorPort).advertised_url);
+    new RegistryService(undefined, getCoordinatorIdentity(undefined, coordinatorPort).advertised_url, coordinatorPort);
   const claimsService = configDeps.claimsService || new ClaimsService();
 
   const app = express();
