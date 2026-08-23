@@ -76,7 +76,7 @@ test('profile changes reject stale chat replies and control data', async ({ page
 
   await page.goto('/');
   await expect(page.locator('[role="status"]:visible', { hasText: 'Live' })).toBeVisible();
-  await page.getByRole('button', { name: 'Manager Chat', exact: true }).click();
+  await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
   await expect.poll(() => heldAlphaHistory).not.toBe('');
   await expect(page.getByText('Loading conversation…')).toBeVisible();
@@ -162,7 +162,7 @@ test('reconnect restores and follows an in-flight reply', async ({ page }) => {
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manager Chat', exact: true }).click();
+  await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await expect(page.getByText('partial reply', { exact: true })).toBeVisible();
   const requestsBeforeCompletion = historyRequests;
   await page.getByPlaceholder(/Message the manager/).fill('second question');

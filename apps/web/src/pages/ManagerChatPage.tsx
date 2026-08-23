@@ -218,7 +218,7 @@ export function ManagerChatPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={currentProfileInfo?.repo ? currentProfileInfo.repo.split('/').pop() ?? 'Manager Chat' : 'Manager Chat'}
+        title={currentProfileInfo?.repo ? currentProfileInfo.repo.split('/').pop() ?? 'Chat' : 'Chat'}
         description={`${currentProfileInfo?.repo ?? profile} · ${activeBackend ?? 'manager'}`}
         actions={
           <div className="flex items-center gap-2">
