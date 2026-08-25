@@ -6,7 +6,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { generateRequestId } from '@git-agent-harness/shared';
-import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
+import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary, ManagerBackendInfo } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
   role: 'user' | 'assistant' | 'system' | 'error';
@@ -60,7 +60,12 @@ export function ManagerChatPage() {
   const lastAppliedSeqRef = useRef(0);
   const processedMessagesRef = useRef(0);
   const [historyLoaded, setHistoryLoaded] = useState(false);
-  const [activeBackend, setActiveBackend] = useState<string | null>(null);
+  /** Which harness answers this profile's chat (#945): a stored per-profile
+   * override, not client state. The header picker writes it via
+   * POST /api/manager-chat/settings and the next turn uses it. */
+  const [activeBackendId, setActiveBackendId] = useState<string | null>(null);
+  const [availableBackends, setAvailableBackends] = useState<ManagerBackendInfo[]>([]);
+  const [backendChanging, setBackendChanging] = useState(false);
   const [commands, setCommands] = useState<ManagerCommandInfo[]>([]);
   const [models, setModels] = useState<ManagerModelInfo[]>([]);
   const [currentModelId, setCurrentModelId] = useState<string | null>(null);
@@ -98,7 +103,8 @@ export function ManagerChatPage() {
 
   useEffect(() => {
     let cancelled = false;
-    setActiveBackend(null);
+    setActiveBackendId(null);
+    setAvailableBackends([]);
     setCommands([]);
     setModels([]);
     setCurrentModelId(null);
@@ -107,10 +113,12 @@ export function ManagerChatPage() {
       .getManagerChatSettings()
       .then((settings) => {
         const backendId = settings.profileOverrides[profile] ?? settings.defaultBackend;
-        const info = settings.availableBackends.find((b) => b.id === backendId);
-        if (!cancelled) setActiveBackend(info?.displayName ?? backendId);
+        if (!cancelled) {
+          setAvailableBackends(settings.availableBackends);
+          setActiveBackendId(backendId);
+        }
       })
-      .catch(() => { if (!cancelled) setActiveBackend(null); });
+      .catch(() => { if (!cancelled) setActiveBackendId(null); });
     // Real commands from the active backend's own registry (e.g. Hermes's
     // live ACP available-commands push) -- not a list GAH invents. Fetched
     // eagerly so the "/" palette has data the moment the user types it;
@@ -218,6 +226,48 @@ export function ManagerChatPage() {
 
   const turnBusy = pendingRequest !== null || remoteTurnBusy || streaming !== null;
   const sendBlocked = !historyLoaded || turnBusy;
+  // #945: the header shows the actual configured harness, and flags a
+  // configured-but-unimplemented backend rather than silently falling back.
+  const activeBackendInfo = availableBackends.find((b) => b.id === activeBackendId);
+  const activeBackendLabel = activeBackendInfo?.displayName ?? activeBackendId ?? 'manager';
+  const activeBackendUnavailable = Boolean(activeBackendInfo && !activeBackendInfo.implemented);
+
+  const handleBackendChange = async (backendId: string) => {
+    // #945 AC5: never apply mid-turn -- it would misattribute the in-flight
+    // reply. The picker is disabled while a turn is in flight, and this guard
+    // is the belt-and-suspenders.
+    if (turnBusy) return;
+    setBackendChanging(true);
+    const requestedProfile = profile;
+    try {
+      // Preserve every other profile's override (#945 AC6) -- the server
+      // replaces profileOverrides wholesale, so merge over the current map.
+      const settings = await gahApi.getManagerChatSettings();
+      await gahApi.setManagerChatSettings({
+        profileOverrides: { ...settings.profileOverrides, [requestedProfile]: backendId }
+      });
+      if (activeProfileRef.current === requestedProfile) {
+        setActiveBackendId(backendId);
+        // Refresh the new backend's command palette + model list (the
+        // settings effect only re-runs on profile change, not backend change).
+        gahApi.getManagerChatCommands(requestedProfile)
+          .then(({ commands }) => setCommands(commands))
+          .catch(() => setCommands([]));
+        gahApi.getManagerChatModels(requestedProfile)
+          .then(({ models, currentModelId }) => {
+            setModels(models);
+            setCurrentModelId(currentModelId);
+          })
+          .catch(() => { setModels([]); setCurrentModelId(null); });
+      }
+    } catch (err) {
+      if (activeProfileRef.current === requestedProfile) {
+        setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch harness: ${err instanceof Error ? err.message : String(err)}` }]);
+      }
+    } finally {
+      if (activeProfileRef.current === requestedProfile) setBackendChanging(false);
+    }
+  };
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -265,9 +315,25 @@ export function ManagerChatPage() {
     <div className="space-y-6">
       <PageHeader
         title={currentProfileInfo?.repo ? currentProfileInfo.repo.split('/').pop() ?? 'Chat' : 'Chat'}
-        description={`${currentProfileInfo?.repo ?? profile} · ${activeBackend ?? 'manager'}`}
+        description={`${currentProfileInfo?.repo ?? profile} · ${activeBackendLabel}${activeBackendUnavailable ? ' (unavailable)' : ''}`}
         actions={
           <div className="flex items-center gap-2">
+            {availableBackends.length > 0 && (
+              <select
+                value={activeBackendId ?? ''}
+                onChange={(e) => handleBackendChange(e.target.value)}
+                disabled={backendChanging || turnBusy}
+                title={turnBusy ? 'Switching harness is disabled while a turn is in flight' : 'Harness / backend'}
+                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[170px]"
+                aria-label="Harness / backend"
+              >
+                {availableBackends.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.displayName}{b.implemented ? '' : ' (unavailable)'}
+                  </option>
+                ))}
+              </select>
+            )}
             {models.length > 0 && (
               <select
                 value={currentModelId ?? ''}
