@@ -105,7 +105,10 @@ test('profile changes reject stale chat replies and control data', async ({ page
   socket!.send(JSON.stringify({ type: 'manager.chat.updated', profile: 'alpha', requestId: alphaRequestId }));
   await expect.poll(() => heldAlphaHistory).not.toBe('');
   await page.getByPlaceholder(/Message the manager/).fill('second question');
-  await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
+  // #960 replaced the in-flight Send button with Stop: while a turn is
+  // running there is no Send control to disable, and the Stop affordance
+  // is the proof the turn is still in flight.
+  await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
   socket!.send(heldAlphaHistory);
 
   await projects.getByRole('button', { name: 'Beta org/beta' }).click();
@@ -177,7 +180,10 @@ test('reconnect restores and follows an in-flight reply', async ({ page }) => {
   await expect(page.getByText('partial reply', { exact: true })).toBeVisible();
   const requestsBeforeCompletion = historyRequests;
   await page.getByPlaceholder(/Message the manager/).fill('second question');
-  await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
+  // #960 replaced the in-flight Send button with Stop: while a turn is
+  // running there is no Send control to disable, and the Stop affordance
+  // is the proof the turn is still in flight.
+  await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
   await page.waitForTimeout(500);
   expect(historyRequests).toBe(requestsBeforeCompletion);
   complete = true;
