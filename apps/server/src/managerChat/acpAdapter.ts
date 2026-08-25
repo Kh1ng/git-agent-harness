@@ -401,5 +401,14 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     await selectModel(state, modelId);
   }
 
-  return { runTurn, listCommands, listModels, setModel };
+  /** Stops the in-flight prompt turn for a profile by sending session/cancel
+   * (#960). The ACP session itself survives -- only the current turn is
+   * aborted, and the same connection is reused for the next turn. */
+  async function cancelTurn(gahProfile: string): Promise<void> {
+    const state = connections.get(gahProfile);
+    if (!state || !state.sessionId) return;
+    await state.connection.cancel({ sessionId: state.sessionId });
+  }
+
+  return { runTurn, listCommands, listModels, setModel, cancelTurn };
 }

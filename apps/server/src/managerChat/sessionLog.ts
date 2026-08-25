@@ -165,10 +165,28 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
   }
 
   const history: ChatTranscriptTurn[] = [];
+  let partialText = '';
+  let openTurn: number | null = null;
   for (const [index, event] of events.entries()) {
-    if (event.type === 'user/message' && event.source === 'prompt') {
+    if (event.type === 'turn/start') {
+      openTurn = event.turn;
+      partialText = '';
+    } else if (event.type === 'turn/end') {
+      // A cancelled or crash-interrupted turn still produced partial output
+      // the model may have actually said -- carry it into the resumed
+      // history so a follow-up doesn't re-trigger the cancelled turn's
+      // context (it becomes the model's own prior words, not a prompt).
+      if (openTurn === event.turn &&
+        (event.reason.kind === 'cancelled' || event.reason.kind === 'interrupted') && partialText) {
+        history.push({ role: 'assistant', text: partialText, timestamp: event.timestamp });
+      }
+      openTurn = null;
+      partialText = '';
+    } else if (event.type === 'user/message' && event.source === 'prompt') {
       const prompt = prompts.get(event.turn) ?? event;
       history.push({ role: 'user', text: prompt.text, timestamp: prompt.timestamp });
+    } else if (event.type === 'assistant/chunk') {
+      partialText += event.text;
     } else if (event.type === 'assistant/message') {
       history.push({
         role: 'assistant',
@@ -242,8 +260,13 @@ export function foldSession(
         break;
       case 'turn/end':
         if (openTurn === e.turn) {
-          if (e.reason.kind === 'interrupted' && partialText) {
+          if ((e.reason.kind === 'interrupted' || e.reason.kind === 'cancelled') && partialText) {
             turns.push({ role: 'assistant', text: partialText, timestamp: e.timestamp });
+            // A deliberate cancel is distinguishable from a crash repair:
+            // mark it explicitly in the rendered transcript.
+            if (e.reason.kind === 'cancelled') {
+              turns.push({ role: 'system', text: '[cancelled]', timestamp: e.timestamp });
+            }
           }
           openTurn = null;
           partialText = '';
