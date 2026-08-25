@@ -6,9 +6,10 @@
 
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
-use std::fs::{copy, create_dir_all, File, OpenOptions};
+use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -108,10 +109,12 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             }
         }
 
-        // Issue #896: build the web dashboard and deploy it to wherever the
-        // host's web server (Caddy, by default) serves it from. The deploy
-        // root is configurable via GAH_WEB_DEPLOY_ROOT; unset (the default)
-        // deploys to /var/www/gah, an explicitly empty value skips deploy.
+        // Issue #896: build the web dashboard and deploy it to the host's
+        // web-server root (configurable via GAH_WEB_DEPLOY_ROOT; unset
+        // defaults to /var/www/gah). The deploy root is a convention, not
+        // something this repo ships -- an operator MUST point it at wherever
+        // the host actually serves the dashboard from, and the deploy prints
+        // the chosen root so a mismatch is visible.
         match deploy_web_ui(&repo)? {
             Some(root) => println!("Deployed web UI to {}", root.display()),
             None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
@@ -340,14 +343,14 @@ fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Opt
 /// web server serves the dashboard from. The deploy root is configurable via
 /// `GAH_WEB_DEPLOY_ROOT`:
 ///
-/// - unset -> `/var/www/gah` (the Caddy root the repo documents/ships)
+/// - unset -> `/var/www/gah` (a conventional static-site root; the operator
+///   MUST set this to the actual root of whatever web server serves the
+///   dashboard on this host, and the deploy prints the chosen root so a
+///   mismatch is visible)
 /// - set to a non-empty path -> that path
 /// - set to empty -> skip deployment entirely
 ///
-/// The web root is typically root-owned (Caddy's static site), so copying
-/// needs `sudo`. Deployment is a replace-in-place of the dist contents, not
-/// a delete of the whole root -- operator-provided files (favicon overrides,
-/// robots.txt, a Caddyfile) survive the update.
+/// The web root is typically root-owned, so copying needs `sudo`.
 fn resolve_web_deploy_root(configured: Option<OsString>) -> Result<Option<PathBuf>> {
     let root = configured
         .map(PathBuf::from)
@@ -364,6 +367,22 @@ fn resolve_web_deploy_root(configured: Option<OsString>) -> Result<Option<PathBu
     Ok(Some(root))
 }
 
+/// Deploys `apps/web/dist` into the configured web root. Ordering makes the
+/// swap atomic for a browser (issue #896 review): Vite content-hashes every
+/// asset filename, and `index.html` is the only file a browser loads first,
+/// so
+///
+/// 1. the hashed `assets/` files are copied before anything else,
+/// 2. `index.html` is replaced last -- a fetch mid-deploy either gets the
+///    old page (old index + old assets, both still present) or the new page
+///    (new index + new assets, already on disk), never a new index
+///    referencing chunks that don't exist yet,
+/// 3. stale hashed assets the new build no longer references are pruned, so
+///    the root doesn't accumulate every previous build's output forever.
+///
+/// Only the build output (`index.html` and `assets/`) is touched;
+/// operator-provided files in the root (favicon overrides, robots.txt, a
+/// web-server config file) survive the update.
 fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
     let Some(root_path) = resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? else {
         return Ok(None);
@@ -383,13 +402,112 @@ fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
             "install", "-d", "-o", "root", "-g", "root", "-m", "0755", root,
         ],
     )?;
-    // Copy the dist contents into the root without crossing a shell boundary.
-    let dist_contents = dist.join(".");
-    let dist_contents = dist_contents
+
+    // 1. Hashed assets land first, so a new index.html never references
+    //    chunks that aren't on disk yet.
+    let dist_assets = dist.join("assets");
+    if dist_assets.is_dir() {
+        run_command(
+            repo,
+            "sudo",
+            &[
+                "install",
+                "-d",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                "-m",
+                "0755",
+                &format!("{root}/assets"),
+            ],
+        )?;
+        let dist_assets = dist_assets
+            .to_str()
+            .context("web dist assets path is not UTF-8")?;
+        run_command(
+            repo,
+            "sudo",
+            &["cp", "-r", "--", dist_assets, &format!("{root}/")],
+        )?;
+    }
+
+    // 2. index.html last: the browser-facing swap is a single-file replace.
+    let dist_index = dist.join("index.html");
+    let dist_index = dist_index
         .to_str()
-        .context("web dist path is not UTF-8")?;
-    run_command(repo, "sudo", &["cp", "-r", "--", dist_contents, root])?;
+        .context("web dist index path is not UTF-8")?;
+    run_command(repo, "sudo", &["cp", "--", dist_index, root])?;
+
+    // 3. Prune stale hashed assets. Best-effort: a prune hiccup must not
+    //    fail the whole update after the new page is already live.
+    prune_stale_web_assets(repo, &root_path, &dist);
+
     Ok(Some(root_path))
+}
+
+/// Removes files under `<root>/assets/` that the new build no longer
+/// references. Vite content-hashes asset filenames, so any file present in
+/// the deployed assets dir but missing from the freshly built one is stale.
+/// Non-fatal: a listing/removal failure is logged but does not roll back the
+/// deploy, which has already replaced `index.html`.
+fn prune_stale_web_assets(repo: &Path, root: &Path, dist: &Path) {
+    let dist_assets = dist.join("assets");
+    if !dist_assets.is_dir() {
+        return;
+    }
+    let keep: HashSet<String> = match read_dir(&dist_assets) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect(),
+        Err(error) => {
+            eprintln!("[gah update] cannot read new web assets to prune against: {error}");
+            return;
+        }
+    };
+    let root_assets = root.join("assets");
+    let Some(root_assets_str) = root_assets.to_str() else {
+        eprintln!("[gah update] web deploy root is not UTF-8; skipping stale-asset prune");
+        return;
+    };
+    let listing = match captured(
+        repo,
+        "sudo",
+        &["find", root_assets_str, "-maxdepth", "1", "-type", "f"],
+    ) {
+        Ok(listing) => listing,
+        // assets/ doesn't exist yet or isn't listable -- nothing to prune.
+        Err(error) => {
+            eprintln!("[gah update] cannot list deployed web assets to prune: {error}");
+            return;
+        }
+    };
+    let stale = stale_asset_names(&listing, &keep);
+    if stale.is_empty() {
+        return;
+    }
+    let mut args = vec!["rm", "-f", "--"];
+    let mut names = Vec::new();
+    for name in stale {
+        names.push(format!("{root_assets_str}/{name}"));
+    }
+    args.extend(names.iter().map(String::as_str));
+    if let Err(error) = run_command(repo, "sudo", &args) {
+        eprintln!("[gah update] failed to prune stale web assets: {error}");
+    }
+}
+
+/// Pure filter: which files in a `find`-style listing (one path per line)
+/// are NOT part of the freshly built assets set. Content-hashed names mean
+/// anything missing from the new build is stale. Factored out so the
+/// deletion list is unit-testable without a sudo shim.
+fn stale_asset_names(listing: &str, keep: &HashSet<String>) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| Path::new(line).file_name()?.to_str().map(String::from))
+        .filter(|name| !keep.contains(name))
+        .collect()
 }
 
 fn reload_user_systemd(reason: &str) -> Result<()> {
@@ -488,9 +606,10 @@ mod tests {
     use super::{
         ensure_clean, ensure_default_branch_checkout, install_server_unit_template,
         install_watchdog_unit_template, installed_binary_path, resolve_web_deploy_root, run,
-        HostRole, UpdateArgs,
+        stale_asset_names, HostRole, UpdateArgs,
     };
     use crate::test_support::PathGuard;
+    use std::collections::HashSet;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -757,5 +876,26 @@ mod tests {
         assert!(resolve_web_deploy_root(Some(OsString::from("/"))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/tmp/.."))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/var/www/gah/../../.."))).is_err());
+    }
+
+    /// Issue #896 review: the deploy prunes stale hashed assets. Vite
+    /// content-hashes filenames, so any file in the deployed assets dir that
+    /// the new build doesn't reference is stale -- and a new asset that IS
+    /// referenced must never be pruned.
+    #[test]
+    fn prune_stale_web_assets_keeps_new_and_drops_old_hashed_files() {
+        let keep: HashSet<String> = ["index-new-def.js", "index-new-ghi.css"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let listing = "/var/www/gah/assets/index-old-abc.js\n\
+                        /var/www/gah/assets/index-new-def.js\n\
+                        /var/www/gah/assets/index-new-ghi.css\n";
+        assert_eq!(
+            stale_asset_names(listing, &keep),
+            vec!["index-old-abc.js".to_string()]
+        );
+        // An empty listing (no assets deployed yet) prunes nothing.
+        assert!(stale_asset_names("", &keep).is_empty());
     }
 }

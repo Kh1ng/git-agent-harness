@@ -41,10 +41,12 @@ tracked template (issue #894, so the installed unit can't drift from
 web root (issue #896), and optionally restarts `gah-server.service`. It does
 not build or deploy desktop, TUI, mobile, or other client packages.
 
-The web deploy root defaults to `/var/www/gah` (the Caddy static-site root
-this repo documents). Override with `GAH_WEB_DEPLOY_ROOT`; set it to an
-empty string to skip web deploy entirely on hosts that serve the dashboard
-from elsewhere.
+The web deploy root defaults to `/var/www/gah`, a conventional static-site
+root. It is **not** something this repo ships or documents as a server
+layout — set `GAH_WEB_DEPLOY_ROOT` to wherever the web server on this host
+actually serves the dashboard from (the deploy prints the chosen root so a
+mismatch is visible). Set it to an empty string to skip web deploy entirely
+on hosts that serve the dashboard from elsewhere.
 
 `--restart-server` refuses to run while any `gah loop --profile …` process is
 active. The loop has its own systemd user cgroup and must be stopped cleanly
