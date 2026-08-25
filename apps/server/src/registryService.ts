@@ -687,12 +687,12 @@ export class RegistryService {
         // a plain-HTTP URL (e.g. http://100.118.97.79). Mirror the Rust side's
         // GAH_COORDINATOR_INSECURE_TLS=1 opt-in: allow it only when the central
         // operator explicitly opts in, so the fail-closed default is unchanged.
-        if (process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN !== '1') {
+        if (process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {
           throw new Error(
-            'Non-loopback trusted_lan endpoints require GAH_REGISTRY_ALLOW_INSECURE_LAN=1 on the central node (fail-closed default; use authenticated_remote over TLS otherwise)'
+            'Non-loopback trusted_lan endpoints require GAH_ALLOW_INSECURE_HTTP=1 on the central node (fail-closed default; use authenticated_remote over TLS otherwise)'
           );
         }
-        warnings.push('Non-loopback trusted_lan endpoint accepted over plain HTTP (GAH_REGISTRY_ALLOW_INSECURE_LAN=1)');
+        warnings.push('Non-loopback trusted_lan endpoint accepted over plain HTTP (GAH_ALLOW_INSECURE_HTTP=1)');
       }
     } else {
       if (node.transport_mode === 'authenticated_remote') {
@@ -703,7 +703,14 @@ export class RegistryService {
       }
     }
 
-    this.nodes.set(node.node_id, { ...existing, ...node });
+    // The route layer gates updates to an existing node behind the
+    // coordinator token (#951 review), so by the time we're here a duplicate
+    // node_id is either a legitimate, authenticated reconciliation or a
+    // brand-new node. Store the incoming payload as-is: validation above
+    // requires every security-relevant field, and a full replace (rather than
+    // a merge) means a re-registration can never inherit stale profiles or
+    // secret_ref from an older partial payload.
+    this.nodes.set(node.node_id, node);
     this.save();
     return { warnings, created: !existing };
   }

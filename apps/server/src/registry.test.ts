@@ -314,8 +314,8 @@ test('RegistryService validates non-loopback endpoints and TLS modes', () => {
     assert.equal(resRemoteTls.warnings.length, 0);
 
     // Non-loopback URL + trusted_lan -> Fail closed by default (issue #944)
-    const prevAllow = process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
-    delete process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+    const prevAllow = process.env.GAH_ALLOW_INSECURE_HTTP;
+    delete process.env.GAH_ALLOW_INSECURE_HTTP;
     try {
       assert.throws(() => {
         registry.registerNode({
@@ -324,17 +324,17 @@ test('RegistryService validates non-loopback endpoints and TLS modes', () => {
           advertised_url: 'http://node.lan.com',
           transport_mode: 'trusted_lan'
         });
-      }, /GAH_REGISTRY_ALLOW_INSECURE_LAN=1/);
+      }, /GAH_ALLOW_INSECURE_HTTP=1/);
     } finally {
       if (prevAllow === undefined) {
-        delete process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+        delete process.env.GAH_ALLOW_INSECURE_HTTP;
       } else {
-        process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN = prevAllow;
+        process.env.GAH_ALLOW_INSECURE_HTTP = prevAllow;
       }
     }
 
     // Non-loopback URL + trusted_lan + explicit opt-in -> Success (with warning)
-    process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN = '1';
+    process.env.GAH_ALLOW_INSECURE_HTTP = '1';
     try {
       const resLan = registry.registerNode({
         ...baseNode,
@@ -344,7 +344,7 @@ test('RegistryService validates non-loopback endpoints and TLS modes', () => {
       });
       assert.equal(resLan.warnings.length, 1);
     } finally {
-      delete process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+      delete process.env.GAH_ALLOW_INSECURE_HTTP;
     }
 
   } finally {
@@ -851,6 +851,7 @@ test('Server endpoints handle Node CRUD, Secret Rotation and Revocation', async 
   const claimsPath = resolve(process.cwd(), `config-test-claims-${crypto.randomBytes(6).toString('hex')}.json`);
   const registry = new RegistryService(tempPath);
   
+  process.env.COORDINATOR_TOKEN = 'expected-coordinator-token';
   const app = createServer({ registryService: registry, claimsService: new ClaimsService(claimsPath) });
   const server = http.createServer(app);
 
@@ -872,14 +873,31 @@ test('Server endpoints handle Node CRUD, Secret Rotation and Revocation', async 
       secret_ref: 'env:TEST_SECRET'
     };
 
-    // 1. Register node (POST /api/registry/nodes)
+    // 1. Register node (POST /api/registry/nodes) -- creating a NEW node is
+    // how a worker self-registers, so it is accepted without a token even
+    // over loopback.
     const registerRes = await makeRequest(baseUrl, '/api/registry/nodes', 'POST', nodeObj);
     assert.equal(registerRes.status, 201);
     assert.equal(registerRes.body.success, true);
 
+    // Updating an EXISTING node repoints where the central polls, so it now
+    // requires the coordinator token even on a loopback-looking request
+    // (the Caddy reverse-proxy path, #951 review). A tokenless update is
+    // rejected without touching the stored node.
+    const unauthorizedUpdate = await makeRequest(baseUrl, '/api/registry/nodes', 'POST', {
+      ...nodeObj,
+      advertised_url: 'http://localhost:9999',
+      profiles: ['pwned']
+    });
+    assert.equal(unauthorizedUpdate.status, 403);
+    assert.equal(registry.getNode(nodeObj.node_id)?.advertised_url, 'http://localhost:9000');
+
+    // With the coordinator token, the legitimate reconciliation succeeds.
     const duplicateRes = await makeRequest(baseUrl, '/api/registry/nodes', 'POST', {
       ...nodeObj,
       profiles: ['gah']
+    }, {
+      'Authorization': 'Bearer expected-coordinator-token'
     });
     assert.equal(duplicateRes.status, 200);
     assert.deepEqual(registry.getNode(nodeObj.node_id)?.profiles, ['gah']);
@@ -921,6 +939,7 @@ test('Server endpoints handle Node CRUD, Secret Rotation and Revocation', async 
     assert.equal(listResEmpty.body.length, 0);
 
   } finally {
+    delete process.env.COORDINATOR_TOKEN;
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (existsSync(tempPath)) {
       unlinkSync(tempPath);
@@ -928,6 +947,49 @@ test('Server endpoints handle Node CRUD, Secret Rotation and Revocation', async 
     if (existsSync(claimsPath)) {
       unlinkSync(claimsPath);
     }
+  }
+});
+
+test('a registered node cannot be overwritten by an unauthenticated re-registration, even over loopback', async () => {
+  const tempPath = createTempRegistryFile();
+  const registry = new RegistryService(tempPath);
+  const app = createServer({ registryService: registry });
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const { port } = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const nodeObj: RegisteredNode = {
+    node_id: 'owned-node',
+    display_name: 'Legit Worker',
+    advertised_url: 'http://100.118.97.79:3773',
+    version: '0.1.0',
+    schema_digest: COORDINATOR_SCHEMA_DIGEST,
+    transport_mode: 'trusted_lan',
+    secret_ref: 'env:COORDINATOR_TOKEN'
+  };
+  try {
+    // trusted_lan non-loopback needs the opt-in even at the service layer, so
+    // enable it before seeding as if the node had self-registered earlier.
+    process.env.GAH_ALLOW_INSECURE_HTTP = '1';
+    registry.registerNode(nodeObj);
+    assert.equal(registry.getNode('owned-node')?.advertised_url, 'http://100.118.97.79:3773');
+
+    // The attacker knows the node_id but has no token; even with the LAN
+    // opt-in set (so transport validation would pass), the route's ownership
+    // gate must reject before any field changes.
+    const attack = await makeRequest(baseUrl, '/api/registry/nodes', 'POST', {
+      ...nodeObj,
+      advertised_url: 'http://attacker.example:3773',
+      secret_ref: 'env:ATTACKER_SECRET'
+    });
+    assert.equal(attack.status, 403);
+    const node = registry.getNode('owned-node');
+    assert.equal(node?.advertised_url, 'http://100.118.97.79:3773', 'advertised_url must not be repointed');
+    assert.equal(node?.secret_ref, 'env:COORDINATOR_TOKEN', 'secret_ref must not be swapped');
+  } finally {
+    delete process.env.GAH_ALLOW_INSECURE_HTTP;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (existsSync(tempPath)) unlinkSync(tempPath);
   }
 });
 
@@ -976,7 +1038,7 @@ test('authMiddleware rejects non-loopback requests with spoofed X-Forwarded-Prot
   assert.equal(jsonCalledWith?.error, 'Forbidden');
   assert.equal(
     jsonCalledWith?.message,
-    'Non-loopback endpoints require TLS unless GAH_REGISTRY_ALLOW_INSECURE_LAN=1'
+    'Non-loopback endpoints require TLS unless GAH_ALLOW_INSECURE_HTTP=1'
   );
   
   delete process.env.COORDINATOR_TOKEN;
@@ -1024,9 +1086,9 @@ test('authMiddleware accepts non-loopback requests when req.secure is true and t
 });
 
 test('authMiddleware accepts opted-in non-loopback HTTP with a valid token', () => {
-  const previousAllow = process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
+  const previousAllow = process.env.GAH_ALLOW_INSECURE_HTTP;
   const previousToken = process.env.COORDINATOR_TOKEN;
-  process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN = '1';
+  process.env.GAH_ALLOW_INSECURE_HTTP = '1';
   process.env.COORDINATOR_TOKEN = 'expected-token';
   const req = {
     socket: { remoteAddress: '100.64.0.2' },
@@ -1045,8 +1107,8 @@ test('authMiddleware accepts opted-in non-loopback HTTP with a valid token', () 
     assert.equal(called, true);
     assert.equal(status, undefined);
   } finally {
-    if (previousAllow === undefined) delete process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN;
-    else process.env.GAH_REGISTRY_ALLOW_INSECURE_LAN = previousAllow;
+    if (previousAllow === undefined) delete process.env.GAH_ALLOW_INSECURE_HTTP;
+    else process.env.GAH_ALLOW_INSECURE_HTTP = previousAllow;
     if (previousToken === undefined) delete process.env.COORDINATOR_TOKEN;
     else process.env.COORDINATOR_TOKEN = previousToken;
   }

@@ -44,7 +44,7 @@ import type {
 import { getFleetDispatch } from './wsServer.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
 import { deriveControllerActivity } from './controllerActivity.js';
-import { authMiddleware } from './authMiddleware.js';
+import { authMiddleware, coordinatorTokenMatches } from './authMiddleware.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
@@ -239,6 +239,24 @@ export function createServer(
 
   app.post('/api/registry/nodes', (req, res) => {
     try {
+      const nodeId = (req.body as { node_id?: unknown } | undefined)?.node_id;
+      // Ownership check (#951 review): creating a NEW node is how a worker
+      // self-registers, so it stays as open as authMiddleware already allows.
+      // UPDATING an existing node_id repoints where the central polls
+      // (advertised_url) and how it authenticates (secret_ref), so it must
+      // prove it knows the coordinator token -- authMiddleware alone can't
+      // gate this because a reverse-proxied LAN peer appears loopback to
+      // Express and skips auth entirely.
+      if (typeof nodeId === 'string' && registryService.getNode(nodeId)) {
+        const authHeader = req.headers.authorization ?? '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+        if (!coordinatorTokenMatches(token)) {
+          return res.status(403).json({
+            error: 'Forbidden',
+            message: 'Updating an existing node registration requires the coordinator token'
+          });
+        }
+      }
       const { warnings, created } = registryService.registerNode(req.body);
       res.status(created ? 201 : 200).json({
         success: true,

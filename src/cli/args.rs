@@ -421,7 +421,7 @@ pub enum NodeCommands {
         advertised_url: Option<String>,
         /// "loopback" | "authenticated_remote" | "trusted_lan". Defaults to
         /// "trusted_lan" (matches the self-hosted tailnet default; the central
-        /// must opt in with GAH_REGISTRY_ALLOW_INSECURE_LAN=1 to accept a
+        /// must opt in with GAH_ALLOW_INSECURE_HTTP=1 to accept a
         /// non-loopback trusted_lan endpoint over plain HTTP).
         #[arg(long, default_value = "trusted_lan")]
         transport_mode: String,

@@ -435,12 +435,25 @@ and `GAH_REGISTRY_SECRET_REF` env vars (defaults `trusted_lan` /
 to create its stable identity on the first loop start. For a non-loopback
 `trusted_lan` endpoint over **plain HTTP**
 (e.g. `http://100.118.97.79` on a tailnet), the central must opt in with
-`GAH_REGISTRY_ALLOW_INSECURE_LAN=1`; the worker needs the same opt-in for
-plain-HTTP status polling. Requests still require `COORDINATOR_TOKEN`.
+`GAH_ALLOW_INSECURE_HTTP=1`; the worker needs the same opt-in for
+plain-HTTP status polling. This flag is deliberately named for what it does —
+it lifts the TLS requirement for **every** `authMiddleware`-protected route
+(the registry, claims, and settings APIs), not just LAN registration — so
+treat it as "this host accepts plain HTTP for authenticated API traffic".
+Requests still require `COORDINATOR_TOKEN`.
 Without the opt-in, access is rejected. The central also rejects any node that
 advertises the central node's own endpoint, which would make its liveness
 poller poll itself and recurse. Re-running registration updates the existing
 node's validated endpoint, transport, secret reference, and profile declarations.
+
+> **Updating an existing registration requires the coordinator token.**
+> Creating a new node is how a worker self-registers, so it stays open to
+> loopback/authenticated requests. But a re-registration that matches an
+> existing `node_id` repoints where the central polls (`advertised_url`) and
+> how it authenticates (`secret_ref`), so the route requires a valid
+> `COORDINATOR_TOKEN` even for loopback-looking requests — otherwise any
+> tailnet peer reaching the central through its reverse proxy (which appears
+> loopback to the server) could hijack a node by its ID alone.
 
 ### Node liveness scheduler (issue #883)
 
