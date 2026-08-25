@@ -1186,6 +1186,20 @@ export function loopSystemctlArgs(enabled: boolean, profile: string): string[] {
   return ['--user', enabled ? 'enable' : 'disable', '--now', loopServiceName(profile), '--no-pager'];
 }
 
+/** Whether the loop unit is currently enabled (boot-persisted). startLoop
+ * reads this BEFORE it runs `enable --now` so a failed start can roll back
+ * only if it was the one that changed enablement -- never if the unit was
+ * already enabled (a crashed loop that is already boot-persisted must stay
+ * boot-persisted). */
+function loopIsEnabled(profile: string): boolean {
+  const result = spawnSync(
+    'systemctl',
+    ['--user', 'is-enabled', loopServiceName(profile), '--no-pager'],
+    { encoding: 'utf8', env: systemdUserEnv() }
+  );
+  return !result.error && result.status === 0 && (result.stdout ?? '').trim() === 'enabled';
+}
+
 function setLoopEnabled(enabled: boolean, profile: string): { ok: boolean; error?: string } {
   const args = loopSystemctlArgs(enabled, profile);
   const result = spawnSync('systemctl', args, {
@@ -1247,15 +1261,22 @@ export async function startLoop(profile: string): Promise<StartLoopResult> {
     };
   }
 
+  // #954 review: a rollback disable must not un-set a boot policy the unit
+  // already had. Unit enabled (boot-persisted) -> loop crashes -> operator
+  // clicks Start -> enable --now fails to activate -> rolling back with
+  // disable would kill the next-boot start too. Record enablement BEFORE we
+  // change it and only revert if this call is what changed it.
+  const wasEnabled = loopIsEnabled(profile);
+
   const result = setLoopEnabled(true, profile);
   if (!result.ok) {
-    setLoopEnabled(false, profile);
+    if (!wasEnabled) setLoopEnabled(false, profile);
     return { started: false, error: result.error };
   }
 
   const status = getLoopStatus(profile);
   if (!status.running || status.owner !== 'systemd') {
-    setLoopEnabled(false, profile);
+    if (!wasEnabled) setLoopEnabled(false, profile);
     return {
       started: false,
       error: `${loopServiceName(profile)} accepted the start request but is not active; inspect it with systemctl --user status ${loopServiceName(profile)}.`

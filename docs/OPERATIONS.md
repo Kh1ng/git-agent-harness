@@ -89,6 +89,9 @@ The updater never starts or restarts a recurring `gah loop`; with
   stays stopped after reboot. **Start** runs `enable --now`, so it starts now
   and at the next login. A direct `systemctl --user start` also starts a
   disabled unit for the current login without changing its next-boot policy.
+  `enable` only auto-starts a unit at boot when the user's systemd manager
+  lingers (`loginctl enable-linger <user>`); without linger the unit starts
+  at the next interactive login instead.
 - **`gah-watchdog`** (`.service` + `.timer`) — an **alert-only** health check
   for `gah-loop@<profile>.service` units (issue #726). Every profile
   configured in `gah`'s config gets checked (`--profile` scopes it to one).
