@@ -703,13 +703,23 @@ export class RegistryService {
       }
     }
 
-    // The route layer gates updates to an existing node behind the
-    // coordinator token (#951 review), so by the time we're here a duplicate
-    // node_id is either a legitimate, authenticated reconciliation or a
-    // brand-new node. Store the incoming payload as-is: validation above
-    // requires every security-relevant field, and a full replace (rather than
-    // a merge) means a re-registration can never inherit stale profiles or
-    // secret_ref from an older partial payload.
+    // SECURITY (issue #951 review): UPDATING an existing node_id repoints
+    // where the central polls (advertised_url) and how it authenticates
+    // (secret_ref). authMiddleware alone cannot gate that -- a reverse-proxied
+    // LAN peer appears loopback to Express and skips auth entirely -- so the
+    // ownership check for existing nodes lives in the POST /api/registry/nodes
+    // ROUTE (apps/server/src/server.ts), which requires the coordinator token
+    // before registerNode is called for an existing node_id. This method has
+    // exactly one caller today; if a second caller appears, it MUST preserve
+    // that gate, or any caller that can reach registerNode with a known
+    // node_id can hijack the node.
+    //
+    // By the time we're here a duplicate node_id is either a legitimate,
+    // authenticated reconciliation or a brand-new node. Store the incoming
+    // payload as-is: validation above requires every security-relevant field,
+    // and a full replace (rather than a merge) means a re-registration can
+    // never inherit stale profiles or secret_ref from an older partial
+    // payload.
     this.nodes.set(node.node_id, node);
     this.save();
     return { warnings, created: !existing };
