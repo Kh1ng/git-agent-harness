@@ -22,8 +22,9 @@
 //! and the typed `UnsupportedCapability` error exist here: a provider
 //! declares what it can't do instead of silently no-op-ing.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fmt;
+use std::str::FromStr;
 
 // `contract` is test-only code (see its own doc comment), but not gated
 // under `mod tests` itself: a future real adapter's own `#[cfg(test)] mod
@@ -34,6 +35,7 @@ use std::fmt;
 #[cfg(test)]
 mod contract;
 pub mod fake;
+pub mod hermes;
 #[cfg(test)]
 mod tests;
 
@@ -65,6 +67,24 @@ impl fmt::Display for GahSessionId {
     }
 }
 
+impl FromStr for GahSessionId {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let suffix = value
+            .strip_prefix("gah:manager:")
+            .ok_or_else(|| anyhow::anyhow!("invalid GAH manager session ID"))?;
+        let (profile, id) = suffix
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("invalid GAH manager session ID"))?;
+        if profile.is_empty() {
+            anyhow::bail!("invalid GAH manager session ID");
+        }
+        uuid::Uuid::parse_str(id).context("invalid GAH manager session UUID")?;
+        Ok(Self(value.to_string()))
+    }
+}
+
 /// What's needed to start a new manager session. Deliberately minimal --
 /// only what the fake adapter (and every real adapter) can act on without
 /// guessing; extend as a real adapter's `start` needs more.
@@ -74,14 +94,13 @@ pub struct StartRequest {
     pub instruction: String,
 }
 
-/// One unit of streamed output. Mirrors the one ACP `sessionUpdate` variant
-/// the existing TS adapter actually surfaces to a user
-/// (`agent_message_chunk`) -- intentionally not a full transcription of
-/// ACP's update taxonomy (tool calls, plans, thoughts, ...); add variants
-/// only when a real adapter has something concrete to put in them.
+/// One normalized unit of streamed output. Message chunks are user-visible
+/// assistant text; usage carries the provider's structured context pressure.
+/// Tool calls, plans, thoughts, and user-message echoes stay provider-local.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionUpdate {
     MessageChunk(String),
+    Usage { used: u64, size: u64 },
 }
 
 /// A session's current lifecycle state, as returned by `inspect`.
