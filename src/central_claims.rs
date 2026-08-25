@@ -31,15 +31,12 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::io::Write;
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
 const DEFAULT_LEASE_SECONDS: u64 = 15 * 60;
-const STATUS_MARKER: &str = "__GAH_CLAIMS_STATUS__:";
 
 /// Resolves this node's identity for claims calls from the same
 /// `coordinator-identity.json` `apps/server` reads/writes
@@ -51,9 +48,7 @@ const STATUS_MARKER: &str = "__GAH_CLAIMS_STATUS__:";
 /// fails loudly rather than guessing a node_id -- consistent with this
 /// module's fail-closed posture.
 pub fn resolve_node_id() -> Result<String> {
-    let path = std::env::var("GAH_COORDINATOR_IDENTITY_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("config/coordinator-identity.json"));
+    let path = crate::node_register::resolve_identity_path();
     let text = std::fs::read_to_string(&path).with_context(|| {
         format!(
             "reading coordinator identity from {} (set GAH_COORDINATOR_IDENTITY_PATH if apps/server uses a different path)",
@@ -93,73 +88,8 @@ impl ClaimsTransport for CurlClaimsTransport {
         token: Option<&str>,
         timeout_secs: u32,
     ) -> Result<(u16, Vec<u8>)> {
-        // Config-from-stdin (`-K -`) keeps the body and bearer token out of
-        // argv/ps, matching src/usage/vibe_admin.rs's existing pattern.
-        // `-w` appends a greppable status marker after the response body
-        // instead of `--fail`, which would discard the JSON error body
-        // (e.g. a 409's `held_by`) that callers need to read.
-        let mut cmd = Command::new("curl");
-        cmd.args([
-            "-sS",
-            "--max-time",
-            &timeout_secs.to_string(),
-            "-K",
-            "-",
-            "-w",
-            &format!("\n{STATUS_MARKER}%{{http_code}}\n"),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-        crate::runner::process::arm_child_pdeathsig(&mut cmd);
-        let mut child = cmd
-            .spawn()
-            .context("spawning curl for central claims call")?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let escaped_url = url.replace('\\', "\\\\").replace('"', "\\\"");
-            let escaped_body = body.replace('\\', "\\\\").replace('"', "\\\"");
-            let mut config = format!(
-                "silent\nurl = \"{escaped_url}\"\nheader = \"Content-Type: application/json\"\ndata = \"{escaped_body}\"\n"
-            );
-            if let Some(ca) = std::env::var("GAH_COORDINATOR_CA_CERT")
-                .ok()
-                .filter(|s| !s.is_empty())
-            {
-                let escaped_ca = ca.replace('\\', "\\\\").replace('"', "\\\"");
-                config.push_str(&format!("cacert = \"{escaped_ca}\"\n"));
-            } else if std::env::var("GAH_COORDINATOR_INSECURE_TLS")
-                .ok()
-                .as_deref()
-                == Some("1")
-            {
-                config.push_str("insecure\n");
-            }
-            if let Some(t) = token {
-                let escaped_token = t.replace('\\', "\\\\").replace('"', "\\\"");
-                config.push_str(&format!(
-                    "header = \"Authorization: Bearer {escaped_token}\"\n"
-                ));
-            }
-            stdin.write_all(config.as_bytes())?;
-        }
-        let output = child.wait_with_output().context("waiting for curl")?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "central claims request failed (curl exit {:?}): {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let marker_idx = stdout.rfind(STATUS_MARKER).ok_or_else(|| {
-            anyhow::anyhow!("curl output missing status marker (malformed response?)")
-        })?;
-        let status: u16 = stdout[marker_idx + STATUS_MARKER.len()..]
-            .trim()
-            .parse()
-            .context("parsing HTTP status from curl output")?;
-        let response_body = stdout[..marker_idx].trim_end().as_bytes().to_vec();
-        Ok((status, response_body))
+        let response = crate::curl_http::request("POST", url, Some(body), token, timeout_secs)?;
+        Ok((response.status, response.body))
     }
 }
 

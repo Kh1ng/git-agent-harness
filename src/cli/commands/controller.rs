@@ -168,6 +168,22 @@ pub fn run_loop(args: LoopArgs) -> Result<()> {
     // profile concurrently.
     if let Some(central_url) = &cfg.defaults.registry_central_url {
         let token = std::env::var("COORDINATOR_TOKEN").ok();
+        // Issue #944: make sure this node is registered (and thus
+        // claim-eligible) before starting work. Advisory only -- a failed
+        // registration warns loudly but never blocks startup. Transport mode
+        // and secret reference are env-driven like the rest of the fleet
+        // config (COORDINATOR_TOKEN, GAH_COORDINATOR_INSECURE_TLS).
+        let transport_mode = std::env::var("GAH_REGISTRY_TRANSPORT_MODE")
+            .unwrap_or_else(|_| "trusted_lan".to_string());
+        let secret_ref = std::env::var("GAH_REGISTRY_SECRET_REF")
+            .unwrap_or_else(|_| "env:COORDINATOR_TOKEN".to_string());
+        crate::node_register::register_advisory(
+            central_url,
+            &transport_mode,
+            &secret_ref,
+            token.as_deref(),
+            args.config_path.as_deref(),
+        );
         crate::fleet_preflight::check(
             &crate::fleet_preflight::CurlFleetQuerier,
             central_url,

@@ -330,6 +330,7 @@ pub fn generate_manifest() -> CapabilityManifest {
     add_telemetry_operations(&mut manifest);
     add_quota_operations(&mut manifest);
     add_claims_operations(&mut manifest);
+    add_node_operations(&mut manifest);
 
     manifest
 }

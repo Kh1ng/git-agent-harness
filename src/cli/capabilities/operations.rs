@@ -1008,3 +1008,30 @@ pub(super) fn add_claims_operations(manifest: &mut CapabilityManifest) {
         is_stable: true,
     });
 }
+
+pub(super) fn add_node_operations(manifest: &mut CapabilityManifest) {
+    // gah node register
+    manifest.add_operation(OperationDefinition {
+        operation_id: "node.register".to_string(),
+        display_name: "Register Worker Node".to_string(),
+        class: OperationClass::Mutation,
+        profile_scope: ProfileScope::ProfileOptional,
+        request_schema: None,
+        response_schema: None,
+        streaming: StreamingBehavior::None,
+        idempotency: Idempotency::Idempotent,
+        secret_fields: vec![SecretFieldSpec {
+            field_path: "secret_ref".to_string(),
+            is_secret: true,
+            may_contain_secrets: true,
+        }],
+        remote_disposition: RemoteDisposition::LocalOnly,
+        local_only_reason: Some(LocalOnlyReason::SecuritySensitive),
+        documentation: Some(
+            "Register this host as a worker node against the central registry (issue #944)"
+                .to_string(),
+        ),
+        cli_command_path: "gah node register".to_string(),
+        is_stable: true,
+    });
+}

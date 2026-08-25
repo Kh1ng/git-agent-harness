@@ -12,6 +12,18 @@ export function isLocalAddress(ip: string): boolean {
   );
 }
 
+/** Timing-safe check of a Bearer token against the configured coordinator
+ * token. Returns false when the token is unset too, so callers that need to
+ * distinguish "token not configured" can check `process.env.COORDINATOR_TOKEN`
+ * themselves. */
+export function coordinatorTokenMatches(token: string): boolean {
+  const expected = process.env.COORDINATOR_TOKEN;
+  if (!expected) return false;
+  const tokenHash = crypto.createHash('sha256').update(token).digest();
+  const expectedHash = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(tokenHash, expectedHash);
+}
+
 function isLoopbackRequest(req: Request): boolean {
   // Trust the TCP socket address only, not req.ip (which with trust proxy:loopback
   // reflects X-Forwarded-For, making Caddy-proxied LAN requests look non-local).
@@ -32,10 +44,10 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   // Rely on Express's req.secure, which only trusts proxy headers if 'trust proxy' is configured.
   const isTls = req.secure;
 
-  if (!isTls) {
+  if (!isTls && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {
     return res.status(403).json({
       error: 'Forbidden',
-      message: 'Non-loopback endpoints require TLS'
+      message: 'Non-loopback endpoints require TLS unless GAH_ALLOW_INSECURE_HTTP=1'
     });
   }
 
@@ -50,7 +62,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 
   const token = authHeader.substring(7);
   const expectedToken = process.env.COORDINATOR_TOKEN;
-  
+
   if (!expectedToken) {
     return res.status(500).json({
       error: 'Internal Server Error',
@@ -58,12 +70,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
     });
   }
 
-  // Use constant-time comparison to prevent timing attacks
-  const tokenHash = crypto.createHash('sha256').update(token).digest();
-  const expectedHash = crypto.createHash('sha256').update(expectedToken).digest();
-  const tokensMatch = crypto.timingSafeEqual(tokenHash, expectedHash);
-
-  if (!tokensMatch) {
+  if (!coordinatorTokenMatches(token)) {
     return res.status(401).json({
       error: 'Unauthorized',
       message: 'Invalid authentication token'

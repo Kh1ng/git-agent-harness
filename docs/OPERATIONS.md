@@ -431,6 +431,49 @@ blocks startup either, since failing closed on a flaky registry would be
 worse than the problem this exists to catch. See `crate::fleet_preflight`
 for the implementation.
 
+**Self-registration (issue #944)**: a node must be registered with the
+central before it can claim work -- `authorizeClaimRequest` refuses leases
+for unregistered nodes. `gah loop` now self-registers best-effort at
+startup (advisory: a failure warns loudly but never blocks the loop), and
+`gah node register` does it on demand. Both read the node's identity from
+`coordinator-identity.json` (the same file `apps/server` reads/writes) and
+POST it to the central's `/api/registry/nodes`:
+
+```bash
+gah node register \
+  --central-url https://central.example.com \
+  --transport-mode trusted_lan \
+  --secret-ref env:COORDINATOR_TOKEN \
+  --profiles gah,sportsball
+```
+
+`--transport-mode` defaults to `trusted_lan` (the self-hosted tailnet
+default); the loop-start self-registration reads `GAH_REGISTRY_TRANSPORT_MODE`
+and `GAH_REGISTRY_SECRET_REF` env vars (defaults `trusted_lan` /
+`env:COORDINATOR_TOKEN`). A fresh worker can set `GAH_NODE_ADVERTISED_URL`
+to create its stable identity on the first loop start. For a non-loopback
+`trusted_lan` endpoint over **plain HTTP**
+(e.g. `http://100.118.97.79` on a tailnet), the central must opt in with
+`GAH_ALLOW_INSECURE_HTTP=1`; the worker needs the same opt-in for
+plain-HTTP status polling. This flag is deliberately named for what it does —
+it lifts the TLS requirement for **every** `authMiddleware`-protected route
+(the registry, claims, and settings APIs), not just LAN registration — so
+treat it as "this host accepts plain HTTP for authenticated API traffic".
+Requests still require `COORDINATOR_TOKEN`.
+Without the opt-in, access is rejected. The central also rejects any node that
+advertises the central node's own endpoint, which would make its liveness
+poller poll itself and recurse. Re-running registration updates the existing
+node's validated endpoint, transport, secret reference, and profile declarations.
+
+> **Updating an existing registration requires the coordinator token.**
+> Creating a new node is how a worker self-registers, so it stays open to
+> loopback/authenticated requests. But a re-registration that matches an
+> existing `node_id` repoints where the central polls (`advertised_url`) and
+> how it authenticates (`secret_ref`), so the route requires a valid
+> `COORDINATOR_TOKEN` even for loopback-looking requests — otherwise any
+> tailnet peer reaching the central through its reverse proxy (which appears
+> loopback to the server) could hijack a node by its ID alone.
+
 ### Node liveness scheduler (issue #883)
 
 Before this, nothing polled registered nodes periodically -- `pollNodeObservation`

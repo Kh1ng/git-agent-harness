@@ -18,8 +18,6 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::process::{Command, Stdio};
 use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -72,48 +70,11 @@ pub struct CurlFleetQuerier;
 
 impl FleetQuerier for CurlFleetQuerier {
     fn query(&self, url: &str, token: Option<&str>, timeout_secs: u32) -> Result<Vec<u8>> {
-        // Config-from-stdin (`-K -`) keeps the Bearer token out of argv/ps,
-        // matching the existing curl-subprocess pattern in
-        // src/usage/vibe_admin.rs. pdeathsig is defense-in-depth so the
-        // kernel reaps this if the parent dies before curl returns.
-        let mut cmd = Command::new("curl");
-        cmd.args(["-sS", "--max-time", &timeout_secs.to_string(), "-K", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        crate::runner::process::arm_child_pdeathsig(&mut cmd);
-        let mut child = cmd.spawn().context("spawning curl for fleet preflight")?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let escaped_url = url.replace('\\', "\\\\").replace('"', "\\\"");
-            let mut config = format!("silent\nfail\nurl = \"{escaped_url}\"\n");
-            if let Some(ca) = std::env::var("GAH_COORDINATOR_CA_CERT")
-                .ok()
-                .filter(|s| !s.is_empty())
-            {
-                let escaped_ca = ca.replace('\\', "\\\\").replace('"', "\\\"");
-                config.push_str(&format!("cacert = \"{escaped_ca}\"\n"));
-            } else if std::env::var("GAH_COORDINATOR_INSECURE_TLS")
-                .ok()
-                .as_deref()
-                == Some("1")
-            {
-                config.push_str("insecure\n");
-            }
-            if let Some(t) = token {
-                let escaped = t.replace('\\', "\\\\").replace('"', "\\\"");
-                config.push_str(&format!("header = \"Authorization: Bearer {escaped}\"\n"));
-            }
-            stdin.write_all(config.as_bytes())?;
+        let response = crate::curl_http::request("GET", url, None, token, timeout_secs)?;
+        if !(200..300).contains(&response.status) {
+            anyhow::bail!("fleet preflight returned HTTP {}", response.status);
         }
-        let output = child.wait_with_output().context("waiting for curl")?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "fleet preflight request failed (curl exit {:?}): {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Ok(output.stdout)
+        Ok(response.body)
     }
 }
 

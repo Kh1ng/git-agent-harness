@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { hostname, networkInterfaces } from 'node:os';
 import type {
   RegisteredNode,
   NodeSummary,
@@ -30,11 +31,45 @@ export function isLoopback(urlStr: string): boolean {
 export function getEndpoint(urlStr: string): string {
   try {
     const url = new URL(urlStr);
-    const port = url.port || (url.protocol === 'https:' || url.protocol === 'wss:' ? '443' : '80');
-    return `${url.hostname}:${port}`;
+    return `${normalizeLoopbackHost(url.hostname)}:${urlPort(url)}`;
   } catch {
     return urlStr;
   }
+}
+
+function urlPort(url: URL): number {
+  return Number(url.port || (url.protocol === 'https:' || url.protocol === 'wss:' ? 443 : 80));
+}
+
+function isCentralEndpoint(candidateUrl: string, advertisedCentralUrl: string, listenerPort: number): boolean {
+  if (getEndpoint(candidateUrl) === getEndpoint(advertisedCentralUrl)) return true;
+  try {
+    const candidate = new URL(candidateUrl);
+    const listenerHosts = localListenerHosts();
+    listenerHosts.add(normalizeLoopbackHost(new URL(advertisedCentralUrl).hostname));
+    return urlPort(candidate) === listenerPort && listenerHosts.has(normalizeLoopbackHost(candidate.hostname));
+  } catch {
+    return false;
+  }
+}
+
+function localListenerHosts(): Set<string> {
+  const hosts = new Set([normalizeLoopbackHost(hostname()), '127.0.0.1', '0.0.0.0', '::']);
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const address of addresses ?? []) hosts.add(normalizeLoopbackHost(address.address));
+  }
+  return hosts;
+}
+
+/** Normalizes every loopback spelling to one canonical host so endpoint
+ * collision/self-poll comparisons don't treat `localhost:3773` and
+ * `127.0.0.1:3773` as different endpoints (they resolve to the same node). */
+function normalizeLoopbackHost(host: string): string {
+  const lower = host.toLowerCase().replace(/^\[|\]$/g, '');
+  if (lower === 'localhost' || lower === '::1' || lower.startsWith('127.')) {
+    return '127.0.0.1';
+  }
+  return lower;
 }
 
 export function containsSecretWords(text: string): boolean {
@@ -254,9 +289,17 @@ export class RegistryService {
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private consecutiveBadChecks: Map<string, number> = new Map();
   private alreadyAlerted: Set<string> = new Set();
+  /** Normalized endpoint of the central node itself (issue #944): a worker
+   * must never register a node whose advertised_url is the central node's
+   * own endpoint -- the liveness scheduler would poll the central's own
+   * /api/status and recurse (observed live: every fleet/status call 502s). */
+  private selfUrl: string | null;
+  private listenerPort: number | null;
 
-  constructor(configPath?: string) {
+  constructor(configPath?: string, selfEndpoint?: string, listenerPort?: number) {
     this.configPath = configPath || process.env.GAH_REGISTRY_CONFIG_PATH || resolve(process.cwd(), 'config/registry-config.json');
+    this.selfUrl = selfEndpoint ?? null;
+    this.listenerPort = listenerPort ?? (selfEndpoint ? urlPort(new URL(selfEndpoint)) : null);
     this.load();
   }
 
@@ -341,7 +384,10 @@ export class RegistryService {
       'User-Agent': 'GAH-Coordinator/0.1.0'
     };
 
-    if (node.transport_mode === 'authenticated_remote') {
+    if (
+      node.transport_mode === 'authenticated_remote' ||
+      (node.transport_mode === 'trusted_lan' && !isLoopback(node.advertised_url))
+    ) {
       let token = '';
       try {
         token = resolveSecret(node.secret_ref);
@@ -549,8 +595,9 @@ export class RegistryService {
     };
   }
 
-  registerNode(node: RegisteredNode): { warnings: string[] } {
+  registerNode(node: RegisteredNode): { warnings: string[]; created: boolean } {
     const warnings: string[] = [];
+    const existing = this.nodes.get(node.node_id);
 
     // 1. Basic validation
     if (!node.node_id || typeof node.node_id !== 'string') {
@@ -581,14 +628,22 @@ export class RegistryService {
       );
     }
 
-    // 2. Reject duplicate IDs
-    if (this.nodes.has(node.node_id)) {
-      throw new Error(`Duplicate node ID: ${node.node_id} is already registered`);
+    // 2. Reject the central node registering itself (issue #944). The
+    // liveness scheduler polls every registered node's advertised_url/api/status;
+    // a node advertising the central's own endpoint makes the central poll
+    // itself and recurse until timeout (observed live: /api/status and
+    // /api/registry/fleet both 502). Loopback spellings are normalized so
+    // "localhost:3773" and "127.0.0.1:3773" both trip this.
+    if (this.selfUrl && this.listenerPort !== null && isCentralEndpoint(node.advertised_url, this.selfUrl, this.listenerPort)) {
+      throw new Error(
+        `Refusing to register: advertised_url '${node.advertised_url}' is this central node's own endpoint (would make the central poll itself). A worker must advertise its own reachable URL.`
+      );
     }
 
     // 3. Reject endpoint collisions
     const newEndpoint = getEndpoint(node.advertised_url);
     for (const existingNode of this.nodes.values()) {
+      if (existingNode.node_id === node.node_id) continue;
       if (getEndpoint(existingNode.advertised_url) === newEndpoint) {
         throw new Error(`Endpoint collision: ${node.advertised_url} collides with registered node ${existingNode.node_id}`);
       }
@@ -628,7 +683,16 @@ export class RegistryService {
           throw new Error('Non-loopback authenticated remote endpoints must use TLS (https:// or wss://)');
         }
       } else if (node.transport_mode === 'trusted_lan') {
-        throw new Error('Non-loopback advertised URL cannot use trusted_lan transport mode; use authenticated_remote with TLS');
+        // Issue #944: self-hosted tailnet/LAN workers legitimately advertise
+        // a plain-HTTP URL (e.g. http://100.118.97.79). Mirror the Rust side's
+        // GAH_COORDINATOR_INSECURE_TLS=1 opt-in: allow it only when the central
+        // operator explicitly opts in, so the fail-closed default is unchanged.
+        if (process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {
+          throw new Error(
+            'Non-loopback trusted_lan endpoints require GAH_ALLOW_INSECURE_HTTP=1 on the central node (fail-closed default; use authenticated_remote over TLS otherwise)'
+          );
+        }
+        warnings.push('Non-loopback trusted_lan endpoint accepted over plain HTTP (GAH_ALLOW_INSECURE_HTTP=1)');
       }
     } else {
       if (node.transport_mode === 'authenticated_remote') {
@@ -639,9 +703,26 @@ export class RegistryService {
       }
     }
 
+    // SECURITY (issue #951 review): UPDATING an existing node_id repoints
+    // where the central polls (advertised_url) and how it authenticates
+    // (secret_ref). authMiddleware alone cannot gate that -- a reverse-proxied
+    // LAN peer appears loopback to Express and skips auth entirely -- so the
+    // ownership check for existing nodes lives in the POST /api/registry/nodes
+    // ROUTE (apps/server/src/server.ts), which requires the coordinator token
+    // before registerNode is called for an existing node_id. This method has
+    // exactly one caller today; if a second caller appears, it MUST preserve
+    // that gate, or any caller that can reach registerNode with a known
+    // node_id can hijack the node.
+    //
+    // By the time we're here a duplicate node_id is either a legitimate,
+    // authenticated reconciliation or a brand-new node. Store the incoming
+    // payload as-is: validation above requires every security-relevant field,
+    // and a full replace (rather than a merge) means a re-registration can
+    // never inherit stale profiles or secret_ref from an older partial
+    // payload.
     this.nodes.set(node.node_id, node);
     this.save();
-    return { warnings };
+    return { warnings, created: !existing };
   }
 
   revokeNode(nodeId: string): boolean {

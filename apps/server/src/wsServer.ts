@@ -67,7 +67,7 @@ class WebSocketSessionStore {
 const sessionStore = new WebSocketSessionStore();
 const pushBus = createServerPushBus();
 let fleetDispatch = createFleetDispatchCoordinator({
-  registryService: new RegistryService(),
+  registryService: new RegistryService(undefined, getCoordinatorIdentity().advertised_url),
   pushBus,
   coordinatorIdentity: getCoordinatorIdentity(),
   localSessionManager: getSessionManager()

@@ -609,6 +609,29 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "cli_command_path": "gah loop",
       "is_stable": true
     },
+
+    "node.register": {
+      "operation_id": "node.register",
+      "display_name": "Register Worker Node",
+      "class": "mutation",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [
+        {
+          "field_path": "secret_ref",
+          "is_secret": true,
+          "may_contain_secrets": true
+        }
+      ],
+      "remote_disposition": "local_only",
+      "local_only_reason": "security_sensitive",
+      "documentation": "Register this host as a worker node against the central registry (issue #944)",
+      "cli_command_path": "gah node register",
+      "is_stable": true
+    },
     "profile.show": {
       "operation_id": "profile.show",
       "display_name": "Show Profile",
@@ -947,6 +970,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "gah hold set": "hold.set",
     "gah policy-check": "policy.check",
     "gah loop": "loop.run",
+    "gah node register": "node.register",
     "gah prune": "prune.sessions",
     "gah availability": "availability.get",
     "gah sync": "sync.classify",
@@ -1009,6 +1033,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "update.cli": "local_backend_execution_required",
     "tui.run": "interactive_terminal_required",
     "loop.run": "local_backend_execution_required",
+    "node.register": "security_sensitive",
     "server.start": "local_backend_execution_required"
   }
 };
