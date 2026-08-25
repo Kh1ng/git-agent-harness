@@ -34,9 +34,19 @@ gah update --repo /path/to/git-agent-harness --restart-server
 It refuses a dirty or non-default-branch checkout, pulls with `--ff-only`,
 replaces the actual Cargo-installed CLI with `cargo install --path . --force`,
 installs the lockfile-pinned Node dependencies, builds `apps/server`, and
-installs/reloads the `gah-loop@.service` user-unit template, and optionally
-restarts `gah-server.service`. It does not
-build or deploy web, desktop, TUI, mobile, or other client packages.
+installs/reloads the `gah-loop@.service` user-unit template. On a central
+node it also reinstalls the system-level `gah-server.service` unit from the
+tracked template (issue #894, so the installed unit can't drift from
+`packaging/systemd/`), builds the web dashboard and deploys its `dist` to the
+web root (issue #896), and optionally restarts `gah-server.service`. It does
+not build or deploy desktop, TUI, mobile, or other client packages.
+
+The web deploy root defaults to `/var/www/gah`, a conventional static-site
+root. It is **not** something this repo ships or documents as a server
+layout — set `GAH_WEB_DEPLOY_ROOT` to wherever the web server on this host
+actually serves the dashboard from (the deploy prints the chosen root so a
+mismatch is visible). Set it to an empty string to skip web deploy entirely
+on hosts that serve the dashboard from elsewhere.
 
 `--restart-server` refuses to run while any `gah loop --profile …` process is
 active. The loop has its own systemd user cgroup and must be stopped cleanly
@@ -45,9 +55,10 @@ permission for `systemctl`; configure that deliberately for unattended hosts.
 
 Run `gah update` itself as the operator user, not via `sudo` — it installs the
 loop's systemd *user* unit under that user's own `$HOME`/`$XDG_CONFIG_HOME`.
-Only the two `--restart-server` sub-steps that touch the system-level
-`gah-server.service` need root, and `gah update` escalates those internally
-via its own `sudo systemctl …` calls. Running the whole command under `sudo`
+Only the root-owned sub-steps — the system-level `gah-server.service` unit
+install (issue #894), the web-root deploy (issue #896), and the
+`--restart-server` restart — need root, and `gah update` escalates those
+internally via its own `sudo …` calls. Running the whole command under `sudo`
 would resolve `HOME` to root's and silently install/reload the loop unit for
 root's systemd instance instead of yours.
 

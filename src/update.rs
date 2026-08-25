@@ -6,9 +6,11 @@
 
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
+use std::collections::HashSet;
 use std::env;
-use std::fs::{copy, create_dir_all, File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// Whether this host runs the control plane (`apps/server`, `gah-server.service`)
@@ -93,6 +95,30 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             "Built server:  {}",
             repo.join("apps/server/dist/bin.js").display()
         );
+
+        // Issue #894: keep the system-level control-plane unit in lockstep
+        // with the installed server, exactly like the user units below. The
+        // gah-server.service is a system unit (not user), so it needs sudo.
+        // Operator customization belongs in `systemctl edit gah-server.service`
+        // drop-ins; replacing the base template on every update is what
+        // prevents the stale-unit drift this fix exists for.
+        match install_server_unit_template(&repo, &args.server_service)? {
+            Some(target) => println!("Installed server unit: {}", target.display()),
+            None => {
+                println!("systemd not available on this host: skipping gah-server.service install.")
+            }
+        }
+
+        // Issue #896: build the web dashboard and deploy it to the host's
+        // web-server root (configurable via GAH_WEB_DEPLOY_ROOT; unset
+        // defaults to /var/www/gah). The deploy root is a convention, not
+        // something this repo ships -- an operator MUST point it at wherever
+        // the host actually serves the dashboard from, and the deploy prints
+        // the chosen root so a mismatch is visible.
+        match deploy_web_ui(&repo)? {
+            Some(root) => println!("Deployed web UI to {}", root.display()),
+            None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
+        }
     } else {
         println!("Role is 'worker': skipping control-plane server build.");
     }
@@ -272,6 +298,218 @@ fn copy_systemd_unit(repo: &Path, config_home: &Path, unit_file_name: &str) -> R
     Ok(target)
 }
 
+/// Issue #894: keep the system-level control-plane unit in lockstep with the
+/// installed server, same reasoning as `install_loop_unit_template`. Unlike
+/// the user units, gah-server.service is a system unit owned by root, so
+/// install needs `sudo`; operator customization belongs in `systemctl edit
+/// gah-server.service` drop-ins, so replacing the base template on every
+/// deterministic update is safe. `--server-service` names the installed unit
+/// (default `gah-server.service`), so the copy target matches what the
+/// restart step below restarts.
+fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Option<PathBuf>> {
+    let mut components = Path::new(server_service).components();
+    if !server_service.ends_with(".service")
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+    {
+        bail!("invalid systemd service name '{server_service}'");
+    }
+    if !systemd_available() {
+        return Ok(None);
+    }
+    let source = repo.join("packaging/systemd/gah-server.service");
+    if !source.is_file() {
+        bail!("systemd unit template is missing: {}", source.display());
+    }
+    let target = PathBuf::from("/etc/systemd/system").join(server_service);
+    let source = source
+        .to_str()
+        .context("systemd unit template path is not UTF-8")?;
+    let target_arg = target
+        .to_str()
+        .context("systemd unit target path is not UTF-8")?;
+    run_command(
+        repo,
+        "sudo",
+        &[
+            "install", "-o", "root", "-g", "root", "-m", "0644", source, target_arg,
+        ],
+    )?;
+    run_command(repo, "sudo", &["systemctl", "daemon-reload"])?;
+    Ok(Some(target))
+}
+
+/// Issue #896: build `apps/web` and deploy its `dist` to wherever the host's
+/// web server serves the dashboard from. The deploy root is configurable via
+/// `GAH_WEB_DEPLOY_ROOT`:
+///
+/// - unset -> `/var/www/gah` (a conventional static-site root; the operator
+///   MUST set this to the actual root of whatever web server serves the
+///   dashboard on this host, and the deploy prints the chosen root so a
+///   mismatch is visible)
+/// - set to a non-empty path -> that path
+/// - set to empty -> skip deployment entirely
+///
+/// The web root is typically root-owned, so copying needs `sudo`.
+fn resolve_web_deploy_root(configured: Option<OsString>) -> Result<Option<PathBuf>> {
+    let root = configured
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/www/gah"));
+    if root.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    if !root.is_absolute()
+        || root == Path::new("/")
+        || root.components().any(|part| part == Component::ParentDir)
+    {
+        bail!("GAH_WEB_DEPLOY_ROOT must be an absolute path other than /");
+    }
+    Ok(Some(root))
+}
+
+/// Deploys `apps/web/dist` into the configured web root. Ordering makes the
+/// swap atomic for a browser (issue #896 review): Vite content-hashes every
+/// asset filename, and `index.html` is the only file a browser loads first,
+/// so
+///
+/// 1. the hashed `assets/` files are copied before anything else,
+/// 2. `index.html` is replaced last -- a fetch mid-deploy either gets the
+///    old page (old index + old assets, both still present) or the new page
+///    (new index + new assets, already on disk), never a new index
+///    referencing chunks that don't exist yet,
+/// 3. stale hashed assets the new build no longer references are pruned, so
+///    the root doesn't accumulate every previous build's output forever.
+///
+/// Only the build output (`index.html` and `assets/`) is touched;
+/// operator-provided files in the root (favicon overrides, robots.txt, a
+/// web-server config file) survive the update.
+fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
+    let Some(root_path) = resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? else {
+        return Ok(None);
+    };
+    run_command(repo, "npm", &["run", "build:web"])?;
+    let dist = repo.join("apps/web/dist");
+    if !dist.join("index.html").is_file() {
+        bail!("web build did not produce apps/web/dist/index.html");
+    }
+    let root = root_path
+        .to_str()
+        .context("GAH_WEB_DEPLOY_ROOT is not UTF-8")?;
+    run_command(
+        repo,
+        "sudo",
+        &[
+            "install", "-d", "-o", "root", "-g", "root", "-m", "0755", root,
+        ],
+    )?;
+
+    // 1. Hashed assets land first, so a new index.html never references
+    //    chunks that aren't on disk yet.
+    let dist_assets = dist.join("assets");
+    if dist_assets.is_dir() {
+        run_command(
+            repo,
+            "sudo",
+            &[
+                "install",
+                "-d",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                "-m",
+                "0755",
+                &format!("{root}/assets"),
+            ],
+        )?;
+        let dist_assets = dist_assets
+            .to_str()
+            .context("web dist assets path is not UTF-8")?;
+        run_command(
+            repo,
+            "sudo",
+            &["cp", "-r", "--", dist_assets, &format!("{root}/")],
+        )?;
+    }
+
+    // 2. index.html last: the browser-facing swap is a single-file replace.
+    let dist_index = dist.join("index.html");
+    let dist_index = dist_index
+        .to_str()
+        .context("web dist index path is not UTF-8")?;
+    run_command(repo, "sudo", &["cp", "--", dist_index, root])?;
+
+    // 3. Prune stale hashed assets. Best-effort: a prune hiccup must not
+    //    fail the whole update after the new page is already live.
+    prune_stale_web_assets(repo, &root_path, &dist);
+
+    Ok(Some(root_path))
+}
+
+/// Removes files under `<root>/assets/` that the new build no longer
+/// references. Vite content-hashes asset filenames, so any file present in
+/// the deployed assets dir but missing from the freshly built one is stale.
+/// Non-fatal: a listing/removal failure is logged but does not roll back the
+/// deploy, which has already replaced `index.html`.
+fn prune_stale_web_assets(repo: &Path, root: &Path, dist: &Path) {
+    let dist_assets = dist.join("assets");
+    if !dist_assets.is_dir() {
+        return;
+    }
+    let keep: HashSet<String> = match read_dir(&dist_assets) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect(),
+        Err(error) => {
+            eprintln!("[gah update] cannot read new web assets to prune against: {error}");
+            return;
+        }
+    };
+    let root_assets = root.join("assets");
+    let Some(root_assets_str) = root_assets.to_str() else {
+        eprintln!("[gah update] web deploy root is not UTF-8; skipping stale-asset prune");
+        return;
+    };
+    let listing = match captured(
+        repo,
+        "sudo",
+        &["find", root_assets_str, "-maxdepth", "1", "-type", "f"],
+    ) {
+        Ok(listing) => listing,
+        // assets/ doesn't exist yet or isn't listable -- nothing to prune.
+        Err(error) => {
+            eprintln!("[gah update] cannot list deployed web assets to prune: {error}");
+            return;
+        }
+    };
+    let stale = stale_asset_names(&listing, &keep);
+    if stale.is_empty() {
+        return;
+    }
+    let mut args = vec!["rm", "-f", "--"];
+    let mut names = Vec::new();
+    for name in stale {
+        names.push(format!("{root_assets_str}/{name}"));
+    }
+    args.extend(names.iter().map(String::as_str));
+    if let Err(error) = run_command(repo, "sudo", &args) {
+        eprintln!("[gah update] failed to prune stale web assets: {error}");
+    }
+}
+
+/// Pure filter: which files in a `find`-style listing (one path per line)
+/// are NOT part of the freshly built assets set. Content-hashed names mean
+/// anything missing from the new build is stale. Factored out so the
+/// deletion list is unit-testable without a sudo shim.
+fn stale_asset_names(listing: &str, keep: &HashSet<String>) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| Path::new(line).file_name()?.to_str().map(String::from))
+        .filter(|name| !keep.contains(name))
+        .collect()
+}
+
 fn reload_user_systemd(reason: &str) -> Result<()> {
     let status = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
@@ -366,10 +604,12 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_clean, ensure_default_branch_checkout, install_watchdog_unit_template,
-        installed_binary_path, run, HostRole, UpdateArgs,
+        ensure_clean, ensure_default_branch_checkout, install_server_unit_template,
+        install_watchdog_unit_template, installed_binary_path, resolve_web_deploy_root, run,
+        stale_asset_names, HostRole, UpdateArgs,
     };
     use crate::test_support::PathGuard;
+    use std::collections::HashSet;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -555,5 +795,107 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("--role central"));
+    }
+
+    /// Issue #894: `gah update` (central role) reinstalls the system-level
+    /// `gah-server.service` unit from the tracked template on every run, so
+    /// the installed unit can never drift from `packaging/systemd/`. The fake
+    /// `sudo` shim records the invocation; the assertion checks the template
+    /// was copied to /etc/systemd/system and daemon-reload ran.
+    #[test]
+    fn server_unit_template_is_installed_on_every_update() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bin_tmp = TempDir::new().unwrap();
+        let record_path = bin_tmp.path().join("sudo-argv.log");
+        // Fake `sudo` that just logs its args and forwards to the real
+        // `install`/`systemctl` is too fragile; instead log and succeed so
+        // the test asserts the *plan* of the update, not the root-owned copy.
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"install\" ]; then exit 0; fi\nif [ \"$1\" = \"systemctl\" ] && [ \"$2\" = \"daemon-reload\" ]; then exit 0; fi\nexit 0\n",
+            record_path.display()
+        );
+        let script_path = bin_tmp.path().join("sudo");
+        std::fs::write(&script_path, script).unwrap();
+        // systemd_available() runs `systemctl --version`; without a fake
+        // systemctl on PATH the unit install is skipped entirely (returns
+        // None) and this test can't assert anything.
+        let systemctl_path = bin_tmp.path().join("systemctl");
+        std::fs::write(
+            &systemctl_path,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'systemd 255'; exit 0; fi\nif [ \"$1\" = \"daemon-reload\" ]; then exit 0; fi\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&script_path, &systemctl_path] {
+                let mut perms = std::fs::metadata(path).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(path, perms).unwrap();
+            }
+        }
+        let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
+
+        let target = install_server_unit_template(repo, "gah-server.service")
+            .unwrap()
+            .unwrap();
+        assert!(target.ends_with("/etc/systemd/system/gah-server.service"));
+        let record = std::fs::read_to_string(&record_path).unwrap();
+        assert!(
+            record.contains("install"),
+            "expected sudo install: {record}"
+        );
+        assert!(record.contains("gah-server.service"), "{record}");
+        assert!(record.contains("/etc/systemd/system"), "{record}");
+        assert!(record.contains("daemon-reload"), "{record}");
+    }
+
+    #[test]
+    fn server_unit_name_cannot_escape_systemd_directory() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for name in [
+            "/tmp/pwn.service",
+            "../pwn.service",
+            "nested/pwn.service",
+            "not-a-unit",
+        ] {
+            assert!(install_server_unit_template(repo, name).is_err(), "{name}");
+        }
+    }
+
+    /// Issue #896: an explicitly-empty GAH_WEB_DEPLOY_ROOT skips deployment
+    /// (returns None) without touching npm or the filesystem -- the operator
+    /// opted out of web deploy for this host.
+    #[test]
+    fn empty_web_deploy_root_skips_deployment() {
+        assert_eq!(
+            resolve_web_deploy_root(Some(OsString::new())).unwrap(),
+            None
+        );
+        assert!(resolve_web_deploy_root(Some(OsString::from("relative"))).is_err());
+        assert!(resolve_web_deploy_root(Some(OsString::from("/"))).is_err());
+        assert!(resolve_web_deploy_root(Some(OsString::from("/tmp/.."))).is_err());
+        assert!(resolve_web_deploy_root(Some(OsString::from("/var/www/gah/../../.."))).is_err());
+    }
+
+    /// Issue #896 review: the deploy prunes stale hashed assets. Vite
+    /// content-hashes filenames, so any file in the deployed assets dir that
+    /// the new build doesn't reference is stale -- and a new asset that IS
+    /// referenced must never be pruned.
+    #[test]
+    fn prune_stale_web_assets_keeps_new_and_drops_old_hashed_files() {
+        let keep: HashSet<String> = ["index-new-def.js", "index-new-ghi.css"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let listing = "/var/www/gah/assets/index-old-abc.js\n\
+                        /var/www/gah/assets/index-new-def.js\n\
+                        /var/www/gah/assets/index-new-ghi.css\n";
+        assert_eq!(
+            stale_asset_names(listing, &keep),
+            vec!["index-old-abc.js".to_string()]
+        );
+        // An empty listing (no assets deployed yet) prunes nothing.
+        assert!(stale_asset_names("", &keep).is_empty());
     }
 }

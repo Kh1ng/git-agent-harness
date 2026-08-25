@@ -156,7 +156,7 @@ test.describe('Dependency Blockers Component', () => {
     await expect(component.getByText('#1')).toBeVisible();
     await expect(component.getByText('Cyclic dependency issue')).toBeVisible();
     await expect(component.getByText('Dependency cycle detected')).toBeVisible();
-    await expect(component.getByText('#1, #2')).toBeVisible();
+    await expect(component.getByText('#1 [open], #2 [open]')).toBeVisible();
   });
 
   test('renders dependency blockers with missing state', async ({ mount }) => {
