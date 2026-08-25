@@ -133,3 +133,51 @@ test('a new project chat recalls a code word from shared project context', { tim
     process.env = savedEnv;
   }
 });
+
+test('a configured-but-unreachable gateway completes the turn and shows the degradation, not a hard failure', { timeout: 15_000 }, async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'gah-chat-degraded-'));
+  const savedEnv = { ...process.env };
+  process.env.PATH = `${join(fixtures, 'hermes')}:${process.env.PATH}`;
+  process.env.GAH_BINARY = join(fixtures, 'gah', 'gah');
+  process.env.GAH_CHAT_STATE_DIR = join(stateDir, 'chat');
+  process.env.GAH_GATEWAY_SETTINGS_PATH = join(stateDir, 'gateway.json');
+  process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = join(stateDir, 'manager-chat.json');
+  // Issue #878: point at a port with nothing listening -- the gateway is
+  // "configured" (env URL set) but down, so the turn must fail open and the
+  // degradation must be visible in the transcript.
+  process.env.TDAI_GATEWAY_URL = 'http://127.0.0.1:1';
+
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server });
+  createWebSocketHandler(wss);
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const wsUrl = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const profile = `degraded-e2e-${Date.now()}`;
+
+  try {
+    const ws = await connect(wsUrl, profile);
+
+    // The turn completes despite the gateway being down.
+    const reply = await sendChat(ws, profile, 'Remember code word DEGRADED-9182. Reply only OK.', 'degraded');
+    assert.equal(reply.reply, 'OK');
+
+    // The transcript surfaces the skipped recall, so the degradation is not
+    // silent.
+    const historyRequestId = 'degraded-history';
+    const historyPromise = nextMessage(ws, 'manager.chat.history', historyRequestId);
+    ws.send(JSON.stringify({
+      type: 'manager.chat.historyRequest', requestId: historyRequestId, profile
+    } satisfies ClientMessage));
+    const history = await historyPromise;
+    const transcript = history.turns.map((turn) => turn.text).join('\n');
+    assert.match(transcript, /memory gateway degraded \(recall context skipped\)/, 'recall degradation is visible in the transcript');
+
+    ws.close();
+    await once(ws, 'close');
+  } finally {
+    wss.close();
+    await new Promise<void>((done) => server.close(() => done()));
+    rmSync(stateDir, { recursive: true, force: true });
+    process.env = savedEnv;
+  }
+});

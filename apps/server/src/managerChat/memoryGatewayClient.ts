@@ -7,17 +7,26 @@
  * memory_tencentdb provider). One shared caller per profile is what makes
  * memory survive swapping which manager backend is actually running.
  *
- * The gateway is a required dependency, not a soft enhancement: recall,
- * capture, and flushSession all hard-block the turn on failure (throw)
- * rather than degrading silently. This is a deliberate policy choice (2026-08
- * design pass, issue #849) -- silent degradation was masking real gateway
- * outages instead of surfacing them.
+ * FAIL-OPEN POLICY (issue #878): the gateway is entirely optional at the GAH
+ * level. recall/capture/flushSession NEVER hard-block a turn on gateway
+ * failure -- they degrade gracefully (skip recall context, capture
+ * best-effort, flush reports false) -- because a down/misconfigured gateway
+ * must not take down every manager-chat turn. But that degradation is
+ * tracked and surfaced (a `degraded` flag on the result plus a health
+ * snapshot), so a configured-and-failing gateway producing silently worse
+ * chat quality is visible, not masked. A profile that has explicitly opted
+ * out (`gatewayEnabledForProfile` false via the gateway settings) skips the
+ * gateway entirely: no calls, no warnings, no failure modes.
  */
 
 import { spawnSync } from 'node:child_process';
 import { runProfileList } from '../gahCli.js';
 import { AsyncTtlCache } from '../asyncTtlCache.js';
-import { effectiveGatewayUrl, effectiveGatewayApiKey } from '../gatewaySettingsStore.js';
+import {
+  effectiveGatewayUrl,
+  effectiveGatewayApiKey,
+  gatewayEnabledForProfile
+} from '../gatewaySettingsStore.js';
 
 // Read fresh per call: lets tests substitute, and lets runtime config changes
 // (PUT /api/settings/gateway) take effect without a server restart.
@@ -31,10 +40,53 @@ export function gatewayApiKey(): string | undefined {
 export interface RecallResult {
   context: string;
   memoryCount: number;
+  /** #878: set when the gateway was reached-but-degraded or unreachable;
+   * `context` is then empty. Consumers surface this so a skipped recall is
+   * never silent. */
+  degraded?: boolean;
+  error?: string;
 }
 
 export interface CaptureResult {
   l0Recorded: number;
+  degraded?: boolean;
+  error?: string;
+}
+
+/** Snapshot of the gateway's last-known health, for a dashboard indicator
+ * (e.g. GET /api/settings/gateway) so a configured-but-failing gateway is
+ * noticeable outside the chat transcript too. */
+export interface GatewayHealth {
+  degraded: boolean;
+  lastError: string | null;
+  lastFailedAt: number | null;
+  lastOkAt: number | null;
+}
+
+const healthState: { lastError: string | null; lastFailedAt: number | null; lastOkAt: number | null } = {
+  lastError: null,
+  lastFailedAt: null,
+  lastOkAt: null
+};
+
+function recordGatewayOk(): void {
+  healthState.lastOkAt = Date.now();
+  healthState.lastError = null;
+  healthState.lastFailedAt = null;
+}
+
+function recordGatewayFailure(error: unknown): void {
+  healthState.lastError = error instanceof Error ? error.message : String(error);
+  healthState.lastFailedAt = Date.now();
+}
+
+export function gatewayHealth(): GatewayHealth {
+  return {
+    degraded: healthState.lastFailedAt !== null,
+    lastError: healthState.lastError,
+    lastFailedAt: healthState.lastFailedAt,
+    lastOkAt: healthState.lastOkAt
+  };
 }
 
 // GAH profile names get renamed in practice (this project's own history:
@@ -105,29 +157,45 @@ export async function sessionKeyForTicket(profile: string, ticketId: string): Pr
   return `gah:worker:${await resolveProjectKey(profile)}:${normalizeTicketId(ticketId)}`;
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+/** Best-effort POST that NEVER throws (#878 fail-open): records gateway
+ * degradation on any failure (transport, non-2xx, malformed JSON) and
+ * returns null; returns the parsed JSON and records success otherwise. */
+async function postJsonBestEffort<T>(path: string, body: unknown): Promise<T | null> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const apiKey = gatewayApiKey();
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  const res = await fetch(`${gatewayBaseUrl()}${path}`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`memory gateway ${path} returned ${res.status}: ${text}`);
+  try {
+    const res = await fetch(`${gatewayBaseUrl()}${path}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`memory gateway ${path} returned ${res.status}: ${text}`);
+    }
+    const data = (await res.json()) as T;
+    recordGatewayOk();
+    return data;
+  } catch (error) {
+    recordGatewayFailure(error);
+    return null;
   }
-  return res.json() as Promise<T>;
 }
 
 async function recallForKey(sessionKey: string, query: string): Promise<RecallResult> {
-  const result = await postJson<{ context: string; memory_count: number; code: number; message: string }>(
-    '/recall',
-    { query, session_key: sessionKey }
-  );
+  const result = await postJsonBestEffort<{
+    context: string;
+    memory_count: number;
+    code: number;
+    message: string;
+  }>('/recall', { query, session_key: sessionKey });
+  if (!result) {
+    return { context: '', memoryCount: 0, degraded: true, error: healthState.lastError ?? 'gateway unreachable' };
+  }
   if (result.code !== 0) {
-    throw new Error(`memory gateway recall degraded (code=${result.code}): ${result.message}`);
+    recordGatewayFailure(new Error(`memory gateway recall degraded (code=${result.code}): ${result.message}`));
+    return { context: '', memoryCount: 0, degraded: true, error: healthState.lastError ?? result.message };
   }
   return { context: result.context, memoryCount: result.memory_count };
 }
@@ -137,15 +205,23 @@ async function captureForKey(
   userContent: string,
   assistantContent: string
 ): Promise<CaptureResult> {
-  const result = await postJson<{ l0_recorded: number; scheduler_notified: boolean }>('/capture', {
+  const result = await postJsonBestEffort<{ l0_recorded: number; scheduler_notified: boolean }>('/capture', {
     user_content: userContent,
     assistant_content: assistantContent,
     session_key: sessionKey
   });
+  if (!result) {
+    return { l0Recorded: 0, degraded: true, error: healthState.lastError ?? 'gateway unreachable' };
+  }
   return { l0Recorded: result.l0_recorded };
 }
 
 export async function recall(profile: string, query: string): Promise<RecallResult> {
+  // #878: a profile that has explicitly opted out of the gateway skips it
+  // entirely -- no calls, no warnings, no failure modes.
+  if (!gatewayEnabledForProfile(profile)) {
+    return { context: '', memoryCount: 0 };
+  }
   return recallForKey(await sessionKeyForProfile(profile), query);
 }
 
@@ -154,6 +230,9 @@ export async function capture(
   userContent: string,
   assistantContent: string
 ): Promise<CaptureResult> {
+  if (!gatewayEnabledForProfile(profile)) {
+    return { l0Recorded: 0 };
+  }
   return captureForKey(await sessionKeyForProfile(profile), userContent, assistantContent);
 }
 
@@ -195,10 +274,16 @@ export async function captureForTicket(
  * only ENQUEUES a flush task and returns while the in-process
  * `PipelineWorker` still has to run it). GAH deliberately does NOT paper
  * over that with a delay or polling loop; the gateway must await the queued
- * flush task's completion before returning `{ flushed: true }`. */
+ * flush task's completion before returning `{ flushed: true }`.
+ *
+ * #878 fail-open: never throws. A failed flush reports `false` (and marks
+ * the gateway degraded) rather than aborting the turn. */
 export async function flushSession(profile: string): Promise<boolean> {
-  const result = await postJson<{ flushed: boolean }>('/session/end', {
+  if (!gatewayEnabledForProfile(profile)) {
+    return false;
+  }
+  const result = await postJsonBestEffort<{ flushed: boolean }>('/session/end', {
     session_key: await sessionKeyForProfile(profile)
   });
-  return result.flushed === true;
+  return result?.flushed === true;
 }

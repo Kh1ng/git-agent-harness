@@ -52,7 +52,7 @@ import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
 import { readSettings as readManagerChatSettings, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
-import { gatewayBaseUrl, gatewayApiKey, recall } from './managerChat/memoryGatewayClient.js';
+import { gatewayBaseUrl, gatewayApiKey, gatewayHealth, recall } from './managerChat/memoryGatewayClient.js';
 import { readGatewaySettings, writeGatewaySettings } from './gatewaySettingsStore.js';
 import { detectTailscaleIPv4 } from './tailscaleDetect.js';
 import { listManagerBackends } from './managerChat/registry.js';
@@ -949,6 +949,9 @@ export function createServer(
       disabledProfiles: stored.disabledProfiles,
       contextPolicy: stored.contextPolicy,
       contextPolicies: stored.contextPolicies,
+      // #878: last-known gateway health so a configured-but-failing gateway
+      // is noticeable from the dashboard, not just mid-chat.
+      degraded: gatewayHealth(),
       tailscaleIPv4
     });
   });
@@ -977,12 +980,15 @@ export function createServer(
     const { profile, query } = req.body as { profile?: string; query?: string };
     if (!query) return res.status(400).json({ error: 'query required' });
     const p = typeof profile === 'string' && profile ? profile : DEFAULT_PROFILE;
-    try {
-      const result = await recall(p, query);
-      res.json(result);
-    } catch (err) {
-      res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    // #878: recall is fail-open (never throws), so surface a degraded result
+    // here explicitly -- this is a diagnostic endpoint, an empty 200 would
+    // silently lie about why nothing came back.
+    const result = await recall(p, query);
+    if (result.degraded) {
+      res.status(502).json({ error: result.error ?? 'memory gateway unreachable', degraded: true });
+      return;
     }
+    res.json(result);
   });
 
   // Real slash commands for the active backend, sourced live from the
