@@ -60,6 +60,12 @@ pub enum HumanRequiredReason {
     /// observing a state transition. The durable gate prevents an infinite
     /// retry loop until an operator inspects and releases the item.
     StuckLoopGate,
+    /// A dispatch reached a terminal harness refusal -- the workflow itself
+    /// decided not to retry (e.g. "backend descendant cleanup failed;
+    /// refusing to retry"). Recorded as a durable gate so the loop stops
+    /// re-dispatching the same doomed ticket after a reboot instead of
+    /// spinning on it.
+    TerminalHarnessFailure,
     /// Unknown reason - for historical records without a code or genuinely
     /// unclassifiable cases. Missing data is never inferred as a different reason.
     #[default]
@@ -81,28 +87,8 @@ impl HumanRequiredReason {
             Self::FixRetryCapExceeded => "fix_retry_cap_exceeded",
             Self::MergeRetryCapExceeded => "merge_retry_cap_exceeded",
             Self::StuckLoopGate => "stuck_loop_gate",
+            Self::TerminalHarnessFailure => "terminal_harness_failure",
             Self::Unknown => "unknown",
-        }
-    }
-
-    /// Return a human-readable description of this reason code.
-    #[allow(dead_code)]
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::PolicyApproval => "Policy or approval requires human judgment",
-            Self::RetryBudgetExhausted => "Retry budget exhausted",
-            Self::ReviewEvidenceGate => "Review evidence gate requires human judgment",
-            Self::ReviewOutputInvalidExhausted => {
-                "All configured reviewers returned invalid repair evidence"
-            }
-            Self::ReviewCeilingExhausted => "Review hard-ceiling exhausted",
-            Self::MergePolicy => "Merge policy forbids auto-merge",
-            Self::PublishingRestriction => "Publishing policy forbids PR/MR creation",
-            Self::ConfigurationInfra => "Configuration or infrastructure failure",
-            Self::FixRetryCapExceeded => "Fix retry cap exceeded for MR",
-            Self::MergeRetryCapExceeded => "Merge retry cap exceeded for MR",
-            Self::StuckLoopGate => "Repeated lifecycle action made no observable progress",
-            Self::Unknown => "Unknown reason",
         }
     }
 
@@ -122,12 +108,13 @@ impl HumanRequiredReason {
             "fix_retry_cap_exceeded" => Self::FixRetryCapExceeded,
             "merge_retry_cap_exceeded" => Self::MergeRetryCapExceeded,
             "stuck_loop_gate" => Self::StuckLoopGate,
+            "terminal_harness_failure" => Self::TerminalHarnessFailure,
             _ => Self::Unknown,
         }
     }
 
     /// Returns all known reason codes for table-driven testing.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn all() -> &'static [Self] {
         &[
             Self::PolicyApproval,
@@ -141,6 +128,7 @@ impl HumanRequiredReason {
             Self::FixRetryCapExceeded,
             Self::MergeRetryCapExceeded,
             Self::StuckLoopGate,
+            Self::TerminalHarnessFailure,
             Self::Unknown,
         ]
     }
@@ -292,5 +280,35 @@ mod tests {
                 _ => panic!("Expected HumanRequired with reason_code for {code}"),
             }
         }
+    }
+
+    #[test]
+    fn terminal_harness_refusal_gate_is_durable_across_retry_entries() {
+        // A dispatch that reached a terminal "refusing to retry" harness
+        // failure records a human_required gate (improve.rs). A subsequent
+        // ordinary retry entry must NOT clear it, so the controller keeps the
+        // ticket out of the dispatch pool until an operator releases it.
+        let profile = crate::ledger::test_util::profile();
+        let mut refusal =
+            crate::ledger::LedgerEntry::new("test", &profile, "auto", "fix", "#800", None, None);
+        refusal.work_id = Some("#800".into());
+        refusal.human_required = true;
+        refusal.human_required_reason_code = Some("terminal_harness_failure".into());
+        refusal.error_summary = Some("backend descendant cleanup failed; refusing to retry".into());
+        let mut retry = refusal.clone();
+        retry.human_required = false;
+        retry.human_required_reason_code = None;
+
+        let gate = crate::ledger::effective_human_gate_from_entries(
+            &[refusal, retry],
+            "test",
+            &profile.repo_id,
+            "#800",
+        )
+        .expect("terminal refusal gate must survive a retry entry");
+        assert_eq!(
+            gate.reason_code.as_deref(),
+            Some("terminal_harness_failure")
+        );
     }
 }

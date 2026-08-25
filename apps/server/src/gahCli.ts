@@ -6,9 +6,9 @@
 
 import { spawn, spawnSync, SpawnOptions } from 'node:child_process';
 import { userInfo } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accessSync, constants, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants } from 'node:fs';
 import { AsyncTtlCache } from './asyncTtlCache.js';
 import type {
   StatusSnapshot,
@@ -1096,23 +1096,6 @@ export async function runConfigShowProfile(
 // previously allowed a server restart to leave an unobservable orphan loop.
 // ---------------------------------------------------------------------------
 
-/** Same state-dir fallback chain as `loop_lock_path` in src/controller.rs,
- * so the PID file lives next to gah's own lock file.
- * When config is unavailable, retain previous fallback behavior for parity
- * with older environments where discovery fails. */
-export function loopStateDir(
-  configPath: string | null = getConfigPath() ?? null,
-  env: NodeJS.ProcessEnv = process.env
-): string {
-  if (!configPath) {
-    const base =
-      env.XDG_STATE_HOME ||
-      (env.HOME ? resolve(env.HOME, '.local/state') : '/tmp');
-    return resolve(base, 'gah');
-  }
-  return resolve(dirname(configPath), '.gah-locks');
-}
-
 function appendClearArgs(
   args: string[],
   clearValues: string[] | undefined,
@@ -1125,21 +1108,6 @@ function appendClearArgs(
     if (excluded.has(key) || seen.has(key)) continue;
     args.push('--clear', key);
     seen.add(key);
-  }
-}
-
-/** A durable acknowledgement that the operator intentionally stopped this
- * profile through the control plane. The watchdog reads the same marker so it
- * does not turn a dashboard Stop into an immediate, invisible restart. */
-function loopManualStopFile(profile: string): string {
-  return resolve(loopStateDir(), `loop-${profile.replace(/\//g, '_')}.manual-stop.json`);
-}
-
-function clearManualStop(profile: string): void {
-  try {
-    unlinkSync(loopManualStopFile(profile));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }
 
@@ -1214,9 +1182,27 @@ function readSystemdLoopStatus(profile: string): SystemdUnitStatus | undefined {
   };
 }
 
-function runSystemctlUser(action: 'start' | 'stop', profile: string): { ok: boolean; error?: string } {
-  const service = loopServiceName(profile);
-  const result = spawnSync('systemctl', ['--user', action, service, '--no-pager'], {
+export function loopSystemctlArgs(enabled: boolean, profile: string): string[] {
+  return ['--user', enabled ? 'enable' : 'disable', '--now', loopServiceName(profile), '--no-pager'];
+}
+
+/** Whether the loop unit is currently enabled (boot-persisted). startLoop
+ * reads this BEFORE it runs `enable --now` so a failed start can roll back
+ * only if it was the one that changed enablement -- never if the unit was
+ * already enabled (a crashed loop that is already boot-persisted must stay
+ * boot-persisted). */
+function loopIsEnabled(profile: string): boolean {
+  const result = spawnSync(
+    'systemctl',
+    ['--user', 'is-enabled', loopServiceName(profile), '--no-pager'],
+    { encoding: 'utf8', env: systemdUserEnv() }
+  );
+  return !result.error && result.status === 0 && (result.stdout ?? '').trim() === 'enabled';
+}
+
+function setLoopEnabled(enabled: boolean, profile: string): { ok: boolean; error?: string } {
+  const args = loopSystemctlArgs(enabled, profile);
+  const result = spawnSync('systemctl', args, {
     encoding: 'utf8',
     env: systemdUserEnv()
   });
@@ -1227,7 +1213,7 @@ function runSystemctlUser(action: 'start' | 'stop', profile: string): { ok: bool
     error:
       detail ||
       result.error?.message ||
-      `systemctl --user ${action} ${service} exited with status ${result.status ?? 'unknown'}`
+      `systemctl ${args.join(' ')} exited with status ${result.status ?? 'unknown'}`
   };
 }
 
@@ -1260,6 +1246,10 @@ export interface StartLoopResult {
 export async function startLoop(profile: string): Promise<StartLoopResult> {
   const existing = getLoopStatus(profile);
   if (existing.running) {
+    if (existing.owner === 'systemd') {
+      const enabled = setLoopEnabled(true, profile);
+      if (!enabled.ok) return { started: false, pid: existing.pid, error: enabled.error };
+    }
     return {
       started: false,
       alreadyRunning: true,
@@ -1271,19 +1261,27 @@ export async function startLoop(profile: string): Promise<StartLoopResult> {
     };
   }
 
-  const result = runSystemctlUser('start', profile);
-  if (!result.ok) return { started: false, error: result.error };
+  // #954 review: a rollback disable must not un-set a boot policy the unit
+  // already had. Unit enabled (boot-persisted) -> loop crashes -> operator
+  // clicks Start -> enable --now fails to activate -> rolling back with
+  // disable would kill the next-boot start too. Record enablement BEFORE we
+  // change it and only revert if this call is what changed it.
+  const wasEnabled = loopIsEnabled(profile);
+
+  const result = setLoopEnabled(true, profile);
+  if (!result.ok) {
+    if (!wasEnabled) setLoopEnabled(false, profile);
+    return { started: false, error: result.error };
+  }
 
   const status = getLoopStatus(profile);
   if (!status.running || status.owner !== 'systemd') {
+    if (!wasEnabled) setLoopEnabled(false, profile);
     return {
       started: false,
       error: `${loopServiceName(profile)} accepted the start request but is not active; inspect it with systemctl --user status ${loopServiceName(profile)}.`
     };
   }
-  // Only a confirmed systemd start clears the marker. A failed request must
-  // leave an intentional stop intentional rather than inviting watchdog churn.
-  clearManualStop(profile);
   return { started: true, pid: status.pid };
 }
 
@@ -1292,15 +1290,9 @@ export interface StopLoopResult {
   error?: string;
 }
 
-/** Graceful operator stop. Persist a marker consumed by the watchdog before
- * signalling the loop, so the control-plane Stop action cannot be undone by
- * an automatic watchdog restart. The next successful control-plane Start
- * clears it. */
+/** Graceful operator stop. Disabling the unit persists the stop across boot. */
 export function stopLoop(profile: string): StopLoopResult {
   const status = getLoopStatus(profile);
-  if (!status.running) {
-    return { stopped: false, error: `No running loop found for profile '${profile}'` };
-  }
   if (status.owner !== 'systemd') {
     return {
       stopped: false,
@@ -1308,14 +1300,8 @@ export function stopLoop(profile: string): StopLoopResult {
     };
   }
   try {
-    const result = runSystemctlUser('stop', profile);
+    const result = setLoopEnabled(false, profile);
     if (!result.ok) return { stopped: false, error: result.error };
-    // Only a confirmed stop persists the marker. Writing it before the
-    // systemctl call succeeds would leave the watchdog believing a still-
-    // running loop (e.g. a bus-connection error, or linger not enabled) was
-    // intentionally stopped, suppressing any respawn/alerting for it.
-    mkdirSync(loopStateDir(), { recursive: true });
-    writeFileSync(loopManualStopFile(profile), JSON.stringify({ stoppedAt: new Date().toISOString() }));
     return { stopped: true };
   } catch (error) {
     return { stopped: false, error: error instanceof Error ? error.message : String(error) };

@@ -84,6 +84,14 @@ The updater never starts or restarts a recurring `gah loop`; with
   pool. `KillMode=control-group` ensures an operator stop or parent failure
   kills every concurrent backend child; do not wrap it in a shell supervisor
   or start a detached `gah loop` by hand.
+  The dashboard owns boot policy through systemd itself. **Stop** runs
+  `systemctl --user disable --now gah-loop@<profile>` so the loop stops and
+  stays stopped after reboot. **Start** runs `enable --now`, so it starts now
+  and at the next login. A direct `systemctl --user start` also starts a
+  disabled unit for the current login without changing its next-boot policy.
+  `enable` only auto-starts a unit at boot when the user's systemd manager
+  lingers (`loginctl enable-linger <user>`); without linger the unit starts
+  at the next interactive login instead.
 - **`gah-watchdog`** (`.service` + `.timer`) — an **alert-only** health check
   for `gah-loop@<profile>.service` units (issue #726). Every profile
   configured in `gah`'s config gets checked (`--profile` scopes it to one).
@@ -649,6 +657,13 @@ gah ledger reconcile --profile <profile>            # backfill later MR merged/c
 gah ledger clear-attempts --profile <profile> <WORK_ID>
 gah ledger clear-attempts --profile <profile> <WORK_ID> --dry-run
 ```
+
+A dispatch that reaches a **terminal harness refusal** — e.g. `backend
+descendant cleanup failed; refusing to retry` — records a durable
+`human_required` gate with reason code `terminal_harness_failure`. The
+controller stops re-dispatching that ticket (including after a reboot) until
+an operator inspects it and explicitly releases the gate with
+`gah ledger clear-attempts --profile <profile> '<WORK_ID>'`.
 
 ### Validation check — `$XDG_STATE_HOME/gah/validation_check.json`
 

@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
+import { test } from 'node:test';
 import {
   buildConfigSetArgs,
   buildProfileAddArgs,
   buildProfileSetArgs,
   findGahBinary,
-  loopStateDir,
+  loopSystemctlArgs,
+  startLoop,
+  stopLoop,
 } from './gahCli.js';
 
 test('config set args deduplicate clear values and use the CLI config flag', () => {
@@ -132,23 +135,102 @@ test('profile set emits validation timeout clear exactly once', () => {
   );
 });
 
-test('loop state follows the resolved config directory', () => {
-  assert.equal(
-    loopStateDir('/srv/gah/config.toml', {}),
-    join('/srv/gah', '.gah-locks'),
-  );
+test('loop lifecycle uses systemd enablement as the durable boot policy', () => {
+  assert.deepEqual(loopSystemctlArgs(true, 'sportsball'), [
+    '--user', 'enable', '--now', 'gah-loop@sportsball.service', '--no-pager'
+  ]);
+  assert.deepEqual(loopSystemctlArgs(false, 'sportsball'), [
+    '--user', 'disable', '--now', 'gah-loop@sportsball.service', '--no-pager'
+  ]);
 });
 
-test('loop state fallback order is XDG_STATE_HOME then HOME then tmp', () => {
-  assert.equal(
-    loopStateDir(null, { XDG_STATE_HOME: '/state', HOME: '/home/operator' }),
-    join('/state', 'gah'),
-  );
-  assert.equal(
-    loopStateDir(null, { HOME: '/home/operator' }),
-    join('/home/operator', '.local/state/gah'),
-  );
-  assert.equal(loopStateDir(null, {}), join('/tmp', 'gah'));
+test('stop disables an enabled unit even when it is already inactive', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-stop-loop-'));
+  const log = join(dir, 'systemctl.log');
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}:${originalPath ?? ''}`;
+  process.env.SYSTEMCTL_LOG = log;
+  writeFileSync(join(dir, 'systemctl'), `#!/bin/sh
+if [ "$2" = "show" ]; then
+  printf 'LoadState=loaded\nActiveState=failed\nMainPID=0\n'
+  exit 0
+fi
+printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+`);
+  writeFileSync(join(dir, 'pgrep'), '#!/bin/sh\nexit 1\n');
+  chmodSync(join(dir, 'systemctl'), 0o755);
+  chmodSync(join(dir, 'pgrep'), 0o755);
+  try {
+    assert.deepEqual(stopLoop('sportsball'), { stopped: true });
+    assert.match(readFileSync(log, 'utf8'), /disable --now gah-loop@sportsball\.service/);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    delete process.env.SYSTEMCTL_LOG;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A failed `enable --now` must not un-enable a unit that was already
+ * enabled (boot-persisted) -- that would break its next-boot start, the exact
+ * regression this branch exists to fix. The fake systemctl reports prior
+ * enablement via FAKE_IS_ENABLED and always fails the enable --now activation. */
+async function assertStartRollbackBehavior(wasEnabled: string, expectDisableInLog: boolean) {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-start-loop-'));
+  const log = join(dir, 'systemctl.log');
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}:${originalPath ?? ''}`;
+  process.env.SYSTEMCTL_LOG = log;
+  process.env.FAKE_IS_ENABLED = wasEnabled;
+  writeFileSync(join(dir, 'systemctl'), `#!/bin/sh
+case "$2" in
+  show)
+    printf 'LoadState=loaded\nActiveState=failed\nMainPID=0\n'
+    exit 0
+    ;;
+  is-enabled)
+    if [ "$FAKE_IS_ENABLED" = "enabled" ]; then echo enabled; exit 0; fi
+    echo disabled; exit 1
+    ;;
+  enable)
+    printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+    echo "Failed to activate" >&2
+    exit 1
+    ;;
+  *)
+    printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+    exit 0
+    ;;
+esac
+`);
+  writeFileSync(join(dir, 'pgrep'), '#!/bin/sh\nexit 1\n');
+  chmodSync(join(dir, 'systemctl'), 0o755);
+  chmodSync(join(dir, 'pgrep'), 0o755);
+  try {
+    const result = await startLoop('sportsball');
+    assert.equal(result.started, false);
+    assert.match(result.error ?? '', /Failed to activate/);
+    const logText = readFileSync(log, 'utf8');
+    if (expectDisableInLog) {
+      assert.match(logText, /disable --now gah-loop@sportsball\.service/, 'rollback should disable a unit startLoop itself enabled');
+    } else {
+      assert.doesNotMatch(logText, /disable --now/, 'a previously-enabled unit must NOT be disabled by a failed start');
+    }
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    delete process.env.SYSTEMCTL_LOG;
+    delete process.env.FAKE_IS_ENABLED;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('a failed start disables only a unit startLoop itself enabled', async () => {
+  await assertStartRollbackBehavior('disabled', true);
+});
+
+test('a failed start does not disable a previously-enabled unit (boot-persisted loop survives)', async () => {
+  await assertStartRollbackBehavior('enabled', false);
 });
 
 test('gah binary resolution probes candidates in order and falls back to PATH', () => {
