@@ -232,7 +232,11 @@ export async function importGitProject(
   const identity = parseGitUrl(input.gitUrl);
   const profiles = await dependencies.listProfiles();
   const existing = profiles.find((profile) => profile.provider === identity.provider && profile.repo === identity.repo);
-  if (existing && !input.reclone) {
+  // A configured profile whose checkout exists is verified in place. If the
+  // checkout is missing (profile in config.toml, repo never cloned on this
+  // node -- the common 'resurrect on a new node' case), fall through to the
+  // clone path below instead of hard-failing on an lstat ENOENT.
+  if (existing && !input.reclone && existsSync(existing.local_path)) {
     await verifyCheckout(existing.local_path, identity, git);
     const detected = detectedValidation(existing.local_path);
     return {
@@ -249,8 +253,16 @@ export async function importGitProject(
   const checkoutPath = resolve(existing?.local_path ?? resolve(root, name));
   const checkoutRelativePath = relative(root, checkoutPath);
   if (checkoutRelativePath === '' || checkoutRelativePath.startsWith('..')) {
-    throw new Error('Only managed checkouts can be re-cloned');
+    // Overwriting an EXISTING checkout outside the managed root is never
+    // allowed -- the path is not request-controlled (it comes from the
+    // operator's own config.toml), but a path that already exists could be a
+    // live checkout with history we must not clobber. A configured local_path
+    // that is MISSING is safe to clone into: there is nothing there to lose.
+    if (existsSync(checkoutPath) || !existing) {
+      throw new Error('Only managed checkouts can be re-cloned');
+    }
   }
+  mkdirSync(dirname(checkoutPath), { recursive: true });
   mkdirSync(root, { recursive: true });
 
   const existed = existsSync(checkoutPath);

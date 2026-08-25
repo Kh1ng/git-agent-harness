@@ -125,3 +125,56 @@ test('git import accepts hosted Git URLs only', () => {
   assert.throws(() => parseGitUrl('https://user:secret@github.com/owner/repo.git'), /credentials/);
   assert.throws(() => parseGitUrl('https://github.com/owner/repo.git?token=secret'), /query parameters/);
 });
+
+test('git import of an existing profile with a missing checkout clones into the configured path', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gah-project-import-'));
+  const source = join(root, 'source');
+  const projectsRoot = join(root, 'projects');
+  const missingCheckout = join(root, 'unmanaged', 'repo'); // outside the managed root, does not exist
+  execFileSync('git', ['init', '--initial-branch=main', source]);
+  writeFileSync(join(source, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
+  execFileSync('git', ['-C', source, 'add', 'package.json']);
+  execFileSync('git', ['-C', source, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial']);
+
+  process.env.GAH_PROJECTS_ROOT = projectsRoot;
+  process.env.XDG_DATA_HOME = join(root, 'data');
+  const remoteUrl = 'https://github.com/owner/repo.git';
+  const git = async (args: string[]): Promise<string> => {
+    const cloneUrlIndex = args.indexOf(remoteUrl);
+    const effectiveArgs = [...args];
+    if (cloneUrlIndex >= 0) effectiveArgs[cloneUrlIndex] = source;
+    const output = execFileSync('git', effectiveArgs, { encoding: 'utf8' }).trim();
+    if (cloneUrlIndex >= 0) {
+      execFileSync('git', ['-C', args.at(-1)!, 'remote', 'set-url', 'origin', remoteUrl]);
+    }
+    return output;
+  };
+
+  // The profile exists in config.toml but its checkout was never cloned on
+  // this node (or was deleted) -- the common 'resurrect on a new node' case.
+  let addCalls = 0;
+  const configured: ProfileSummary[] = [{
+    name: 'owner-repo',
+    display_name: 'repo',
+    provider: 'github',
+    repo: 'owner/repo',
+    local_path: missingCheckout,
+    web_url: remoteUrl.replace(/\.git$/, ''),
+    max_parallel_workers: null,
+    max_open_managed_mrs: 1,
+    manager_wake_autonomy: null,
+    validation_timeout_seconds: 300
+  }];
+  const dependencies = {
+    listProfiles: async () => configured,
+    addProfile: async () => { addCalls += 1; },
+    git
+  };
+
+  const imported = await importGitProject({ gitUrl: remoteUrl }, dependencies);
+  assert.equal(imported.checkoutStatus, 'cloned');
+  assert.equal(imported.checkoutPath, missingCheckout);
+  assert.equal(existsSync(join(missingCheckout, '.git')), true);
+  assert.equal(addCalls, 0, 'existing profile must not be re-added');
+});
+
