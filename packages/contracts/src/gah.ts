@@ -573,6 +573,20 @@ export interface ProfileSummary {
   validation_timeout_seconds: number;
 }
 
+export interface ProjectImportData {
+  gitUrl: string;
+  /** Replace an existing managed checkout after verifying it is clean. */
+  reclone?: boolean;
+}
+
+export interface ProjectImportResult {
+  project: ProfileSummary;
+  checkoutPath: string;
+  checkoutStatus: 'cloned' | 'verified' | 'recloned';
+  detectedLanguages: string[];
+  validationCommands: string[];
+}
+
 // ---------------------------------------------------------------------------
 // gah config show --json (src/main.rs) -- global defaults
 // ---------------------------------------------------------------------------

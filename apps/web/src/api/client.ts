@@ -36,7 +36,9 @@ import type {
   ManagerModelsSummary,
   ManagerChatSettingsUpdate,
   GatewaySettingsSummary,
-  GatewaySettingsUpdate
+  GatewaySettingsUpdate,
+  ProjectImportData,
+  ProjectImportResult
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -186,6 +188,10 @@ export interface GahDataSource {
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
   getControllerActivity(params?: { profile?: string; since?: string }): Promise<ControllerActivity[]>;
   getProfiles(): Promise<ProfileSummary[]>;
+  getProjects(): Promise<ProfileSummary[]>;
+  addProject(profile: string): Promise<ProfileSummary>;
+  removeProject(profile: string): Promise<{ removed: boolean }>;
+  importProject(data: ProjectImportData): Promise<ProjectImportResult>;
   addProfile(data: ProfileAddData): Promise<{ success: boolean; message: string }>;
   updateProfile(name: string, data: ProfileUpdateData): Promise<{ success: boolean; message: string }>;
   removeProfile(name: string, params?: ProfileRemoveParams): Promise<{ success: boolean; message: string }>;
@@ -333,6 +339,18 @@ export const gahApi: GahDataSource = {
   },
   getProfiles() {
     return getJson<ProfileSummary[]>('/api/profiles');
+  },
+  getProjects() {
+    return getJson<ProfileSummary[]>('/api/projects');
+  },
+  addProject(profile) {
+    return postJson<ProfileSummary, { profile: string }>('/api/projects', { profile });
+  },
+  removeProject(profile) {
+    return deleteJson<{ removed: boolean }>(`/api/projects/${encodeURIComponent(profile)}`);
+  },
+  importProject(data) {
+    return postJson<ProjectImportResult, ProjectImportData>('/api/projects/import', data);
   },
   addProfile(data) {
     return postJson<{ success: boolean; message: string }, ProfileAddData>('/api/profiles', data);
