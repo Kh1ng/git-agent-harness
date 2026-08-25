@@ -216,6 +216,18 @@ export function hermesSpawnSpec(): SpawnSpec {
   return { command: 'hermes', args: ['acp'] };
 }
 
+/** Classifies whether an adapter error is a usage/quota limit (#962). The
+ * unwrapped error already carries the nested `data.message` detail (e.g.
+ * "You've hit your usage limit..."), so matching on the message is the
+ * trigger signal. Anything else -- auth, backend crash, network -- is never
+ * a handoff trigger. */
+export function isUsageLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  // Quota/usage-limit triggers only. Deliberately not matching "token limit"
+  // (a max_tokens stop, not a quota) or generic "limit reached" phrasing.
+  return /usage limit|rate limit|quota|exhausted|insufficient (credits|quota)|hit (your|the) (daily |monthly )?limit|quota.*exceed/i.test(message);
+}
+
 export function codexSpawnSpec(): SpawnSpec {
   return { command: 'node', args: [resolveBinScript('@agentclientprotocol/codex-acp')] };
 }

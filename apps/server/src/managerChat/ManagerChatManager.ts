@@ -12,9 +12,10 @@
  */
 
 import { recall, capture, flushSession } from './memoryGatewayClient.js';
-import { resolveAdapter, type ManagerCommandInfo, type ManagerModelInfo } from './registry.js';
-import { compactionSummary, isCompactionCommand } from './acpAdapter.js';
+import { resolveAdapter, listManagerBackends, type ManagerCommandInfo, type ManagerModelInfo } from './registry.js';
+import { compactionSummary, isCompactionCommand, isUsageLimitError } from './acpAdapter.js';
 import { backendForProfile, modelOverrideForProfile, setModelOverrideForProfile } from './settingsStore.js';
+import { effectiveContextPolicy, applyContextBudget } from '../gatewaySettingsStore.js';
 import { appendEvents, createEventWriter, deriveModelHistory, foldSession, loadLog, type SessionLogOptions } from './sessionLog.js';
 import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 
@@ -111,6 +112,66 @@ export async function setModelForProfile(profile: string, modelId: string): Prom
   setModelOverrideForProfile(profile, backendId, modelId);
 }
 
+interface HandoffInfo {
+  from: string;
+  to: string;
+  reason: string;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Pure handoff orchestration (#962), factored out so unit tests can drive
+ * it with mock attempt functions instead of real backend processes. */
+export interface HandoffAttemptInput {
+  startBackend: string;
+  fallbackBackends: string[];
+  attempt: (backendId: string) => Promise<{ reply: string; model: string | null; usage: ChatUsage | null }>;
+}
+
+export async function handoffAttempt(
+  input: HandoffAttemptInput
+): Promise<{ reply: string; backend: string; model: string | null; usage: ChatUsage | null; handoff: HandoffInfo | null }> {
+  const { startBackend, fallbackBackends, attempt } = input;
+  let backend = startBackend;
+  let handoff: HandoffInfo | null = null;
+  try {
+    const result = await attempt(startBackend);
+    return { ...result, backend, handoff };
+  } catch (error) {
+    // Only a usage/quota limit triggers an automatic handoff. Any other
+    // failure (auth, backend crash, network) surfaces as today's error.
+    if (!isUsageLimitError(error)) throw error;
+
+    for (const fallback of fallbackBackends) {
+      try {
+        const result = await attempt(fallback);
+        backend = fallback;
+        handoff = { from: startBackend, to: fallback, reason: errorMessage(error) };
+        return { ...result, backend, handoff };
+      } catch (fallbackError) {
+        // At most one automatic handoff per turn: a second limit error fails
+        // the turn normally (AC4), surfacing the exhausted-model error.
+        if (isUsageLimitError(fallbackError)) throw error;
+        // Non-limit fallback failure (e.g. not installed) -> try the next.
+        continue;
+      }
+    }
+    // No eligible fallback: today's behavior -- fail with the limit error.
+    throw error;
+  }
+}
+
+/** The result type `runTurn` produces after any handoff. */
+export type TurnRunResult = {
+  reply: string;
+  backend: string;
+  model: string | null;
+  usage: ChatUsage | null;
+  handoff: HandoffInfo | null;
+};
+
 export async function runTurn(
   profile: string,
   message: string,
@@ -119,25 +180,43 @@ export async function runTurn(
   onChunk: (text: string) => void,
   onToolResult: (name: string, text: string) => void,
   active: ActiveTurn
-): Promise<{ reply: string; backend: string; model: string | null; usage: ChatUsage | null }> {
-  const backendId = backendForProfile(profile);
-  const adapter = resolveAdapter(backendId);
+): Promise<TurnRunResult> {
   const isSlashCommand = message.trim().startsWith('/');
-  const result = await adapter.runTurn(profile, { prompt, history, onChunk, onToolResult });
+  // #962: flush the session to the gateway before the handoff so the new
+  // backend's recall sees the pre-handoff exchange. Best-effort: a flush
+  // failure must not block the handoff itself.
+  const result = await handoffAttempt({
+    startBackend: backendForProfile(profile),
+    fallbackBackends: listManagerBackends().filter((b) => b.implemented && b.id !== backendForProfile(profile)).map((b) => b.id),
+    attempt: async (backendId) => {
+      const adapter = resolveAdapter(backendId);
+      const attempt = async () => {
+        const r = await adapter.runTurn(profile, { prompt, history, onChunk, onToolResult });
+        return r;
+      };
+      try {
+        return await attempt();
+      } catch (error) {
+        if (isUsageLimitError(error)) {
+          await flushSession(profile).catch(() => undefined);
+        }
+        throw error;
+      }
+    }
+  });
 
   // A cancelled turn is closed as cancelled, never captured as a completed
   // exchange (a partial reply must not enter the memory gateway).
-  if (active.cancelled) {
-    return { reply: result.reply, backend: backendId, model: result.model, usage: result.usage };
+  if (!active.cancelled) {
+    await capture(profile, message, result.reply);
+    // Force buffered L0 conversation into the gateway's L1/L2 pipeline right
+    // away on a compact/clear-like command, instead of waiting for the
+    // pipeline's own idle timeout (#849).
+    if (isSlashCommand && isCompactionCommand(message)) {
+      await flushSession(profile);
+    }
   }
-  await capture(profile, message, result.reply);
-  // Force buffered L0 conversation into the gateway's L1/L2 pipeline right
-  // away on a compact/clear-like command, instead of waiting for the
-  // pipeline's own idle timeout (#849).
-  if (isSlashCommand && isCompactionCommand(message)) {
-    await flushSession(profile);
-  }
-  return { reply: result.reply, backend: backendId, model: result.model, usage: result.usage };
+  return result;
 }
 
 export interface ManagerChatTurnResult {
@@ -193,7 +272,29 @@ export function sendManagerChatMessage(profile: string, message: string, request
       // Keep slash commands bare so the backend dispatches them instead of
       // sending them to the model as ordinary text.
       const isSlashCommand = message.trim().startsWith('/');
-      const { context } = isSlashCommand ? { context: '' } : await recall(profile, message);
+      let injectPolicy: { budgetChars?: number; tiers?: string[] } | undefined;
+      let truncated = false;
+      let context = '';
+      if (!isSlashCommand) {
+        const policy = effectiveContextPolicy(profile);
+        const recalled = await recall(profile, message);
+        // #961: budget injected recall deterministically (highest-relevance
+        // head first), and record the policy + truncation on the inject
+        // event so a replay explains itself.
+        const budgeted = applyContextBudget(recalled.context, policy);
+        context = budgeted.text;
+        truncated = budgeted.truncated;
+        injectPolicy = {
+          ...(policy.budgetChars ? { budgetChars: policy.budgetChars } : {}),
+          ...(policy.tiers && policy.tiers.length > 0 ? { tiers: policy.tiers } : {})
+        };
+        if (truncated) {
+          // Never silently: tell the agent the recall was cut and that more
+          // exists, so it knows to ask for the rest instead of trusting the
+          // slice as complete. (The on-demand path is /api/context/recall.)
+          context += '\n\n[Note: recall was truncated to the context budget; additional memory exists. Say "recall more context about <topic>" to fetch it.]';
+        }
+      }
       const prompt = context ? `Relevant context from prior conversations:\n${context}\n\nUser: ${message}` : message;
       if (context) {
         appendEvents(profile, [{
@@ -202,7 +303,9 @@ export function sendManagerChatMessage(profile: string, message: string, request
           turn: turnNo,
           text: prompt,
           source: 'inject',
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          policy: injectPolicy,
+          truncated
         }], logOptions);
       }
       active.chunkWriter = createEventWriter(profile, logOptions);
@@ -252,7 +355,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
         })
       );
       const result = await Promise.race([run, settleDeadline]);
-      const { reply, backend, model, usage } = result;
+      const { reply, backend, model, usage, handoff } = result;
       await active.chunkWriter.close();
       const assistant: ChatTranscriptTurn = {
         role: 'assistant',
@@ -275,6 +378,17 @@ export function sendManagerChatMessage(profile: string, message: string, request
               usage,
               timestamp: assistant.timestamp
             },
+            ...(handoff ? [{
+              type: 'handoff' as const,
+              seq: ++active.seq,
+              turn: turnNo,
+              from: handoff.from,
+              fromModel: model ?? null,
+              to: handoff.to,
+              toModel: null,
+              reason: handoff.reason,
+              timestamp: Date.now()
+            }] : []),
             ...(isSlashCommand ? [{
               type: 'human/command' as const,
               seq: ++active.seq,

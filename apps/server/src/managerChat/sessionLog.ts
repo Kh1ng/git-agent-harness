@@ -200,6 +200,12 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
       history.push({ role: 'system', text: `[${event.name}] ${event.text}`, timestamp: event.timestamp });
     } else if (event.type === 'compaction/summary') {
       history.push({ role: 'system', text: event.summary, timestamp: event.timestamp });
+    } else if (event.type === 'handoff') {
+      history.push({
+        role: 'system',
+        text: `[handoff: ${event.from} → ${event.to}] ${event.reason}`,
+        timestamp: event.timestamp
+      });
     }
   }
   return history;
@@ -301,6 +307,13 @@ export function foldSession(
         if (turns.at(-1)?.role !== 'assistant' || turns.at(-1)?.text !== e.result) {
           turns.push({ role: 'system', text: `/${e.command} ${e.result}`.trim(), timestamp: e.timestamp });
         }
+        break;
+      case 'handoff':
+        turns.push({
+          role: 'system',
+          text: `[handoff: ${e.from} → ${e.to}] ${e.reason}`,
+          timestamp: e.timestamp
+        });
         break;
       case 'compaction/start':
       case 'compaction/end':

@@ -11,6 +11,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import type { ClientMessage, ServerMessage } from '@git-agent-harness/contracts';
 import { createWebSocketHandler } from './wsServer.js';
 import { readLog } from './managerChat/sessionLog.js';
+import { writeGatewaySettings } from './gatewaySettingsStore.js';
 
 const fixtures = resolve(dirname(fileURLToPath(import.meta.url)), '../tests/fixtures');
 
@@ -286,5 +287,55 @@ test('cancelling a mid-turn reply closes the turn as cancelled and keeps the par
     );
 
     await closeSocket(ws);
+  });
+});
+
+test('a configured context budget truncates injected recall and records its provenance', { timeout: 30_000 }, async () => {
+  const bigContext = 'R'.repeat(10_000);
+  await withChatHarness(async ({ wsUrl, profile, stateDir }) => {
+    // The budget is a per-profile policy in the gateway settings store --
+    // read live per turn, no restart.
+    writeGatewaySettings({ contextPolicies: { [profile]: { budgetChars: 1000, tiers: ['L0', 'L1'] } } });
+
+    const ws = await connect(wsUrl, profile);
+    try {
+      const reply = nextMessage(ws, 'manager.chat.reply');
+      ws.send(JSON.stringify({
+        type: 'manager.chat.send',
+        requestId: 'budget-req',
+        profile,
+        message: 'Hello there'
+      } satisfies ClientMessage));
+      // The mock backend replies deterministically; the turn must complete.
+      assert.equal(typeof (await reply).reply, 'string');
+      assert.ok((await reply).reply.length > 0);
+
+      // The injected context event records the policy + truncation that
+      // produced it (AC7: replay explains itself). `text` is the assembled
+      // prompt; the recalled blob (the R's) must never exceed the budget.
+      const events = readLog(profile, { stateDir: join(stateDir, 'chat') });
+      const inject = events.find((e) => e.type === 'user/message' && e.source === 'inject') as
+        | (import('@git-agent-harness/contracts').ChatUserMessage & { source: 'inject' })
+        | undefined;
+      assert.ok(inject, 'an inject event was logged');
+      const recalledPortion = inject.text.match(/R{10,}/)?.[0] ?? '';
+      assert.equal(recalledPortion.length, 1000, 'context never exceeds the budget');
+      assert.equal(inject.truncated, true);
+      assert.deepEqual(inject.policy, { budgetChars: 1000, tiers: ['L0', 'L1'] });
+      // Truncation is never silent: the agent is told more exists.
+      assert.ok(inject.text.includes('truncated to the context budget'), 'truncation is surfaced, not silent');
+    } finally {
+      await closeSocket(ws);
+    }
+  }, (req, res) => {
+    if (req.url === '/recall') {
+      res.end(JSON.stringify({ context: bigContext, memory_count: 1, code: 0, message: 'ok' }));
+    } else if (req.url === '/capture') {
+      res.end(JSON.stringify({ l0_recorded: 1, scheduler_notified: false }));
+    } else if (req.url === '/session/end') {
+      res.end(JSON.stringify({ flushed: true }));
+    } else {
+      res.writeHead(404).end();
+    }
   });
 });
