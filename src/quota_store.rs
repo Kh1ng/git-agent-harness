@@ -371,20 +371,56 @@ pub fn refresh_codex_and_store_for_identity(
 /// rate limits. Best-effort: a refresh failure (backend not installed, no
 /// `MISTRAL_ADMIN_API_KEY`) must not fail the loop tick, so errors are
 /// swallowed here, not propagated.
-pub fn refresh_stale_quota_observations(profile: &crate::config::Profile, now: OffsetDateTime) {
-    let path = store_path();
+///
+/// Returns the spawned refresh threads (one per backend that was actually
+/// due and not already in flight) so a caller that must outlive them -- the
+/// dedicated `gah quota auto-refresh` oneshot CLI -- can join them; the
+/// fire-and-forget loop-tick caller simply drops the handles.
+pub fn refresh_stale_quota_observations(
+    profile: &crate::config::Profile,
+    now: OffsetDateTime,
+    store_path: &Path,
+) -> Vec<std::thread::JoinHandle<()>> {
     let codex_cmd = profile
         .codex_path
         .clone()
         .unwrap_or_else(|| "codex".to_string());
-    let codex_path = path.clone();
-    maybe_refresh_backend(&path, "codex", now, move || {
-        refresh_codex_and_store(&codex_cmd, None, &codex_path)
-    });
-    let vibe_path = path.clone();
-    maybe_refresh_backend(&path, "vibe", now, move || {
-        refresh_vibe_admin_and_store(None, &vibe_path)
-    });
+    let mut handles = Vec::new();
+    if let Some(handle) = maybe_refresh_backend(store_path, "codex", now, {
+        let codex_cmd = codex_cmd.clone();
+        let path = store_path.to_path_buf();
+        move || refresh_codex_and_store(&codex_cmd, None, &path)
+    }) {
+        handles.push(handle);
+    }
+    if let Some(handle) = maybe_refresh_backend(store_path, "vibe", now, {
+        let path = store_path.to_path_buf();
+        move || refresh_vibe_admin_and_store(None, &path)
+    }) {
+        handles.push(handle);
+    }
+    handles
+}
+
+/// Issue #761: blocking variant for the dedicated `gah quota auto-refresh`
+/// CLI command, which a systemd oneshot timer runs. Spawns the per-backend
+/// refresh threads (same throttle/supervision as
+/// `refresh_stale_quota_observations`) and JOINS them, so the oneshot
+/// process does not exit and kill the threads mid-refresh. Each backend
+/// refresh is independently bounded (codex status timeout / curl
+/// `--max-time`), so joining is bounded. Returns how many backends were
+/// actually refreshed (0 = nothing was due).
+pub fn refresh_quota_observations_and_wait(
+    profile: &crate::config::Profile,
+    now: OffsetDateTime,
+    store_path: &Path,
+) -> usize {
+    let handles = refresh_stale_quota_observations(profile, now, store_path);
+    let count = handles.len();
+    for handle in handles {
+        let _ = handle.join();
+    }
+    count
 }
 
 /// How long a stale reading is trusted before another live check is worth
@@ -422,7 +458,7 @@ fn maybe_refresh_backend(
     backend: &str,
     now: OffsetDateTime,
     refresh: impl FnOnce() -> Result<Option<QuotaObservationRecord>> + Send + 'static,
-) {
+) -> Option<std::thread::JoinHandle<()>> {
     let records = load(path).unwrap_or_default();
     let last_checked = records
         .iter()
@@ -435,7 +471,7 @@ fn maybe_refresh_backend(
         Some(last) => now - last > time::Duration::seconds(QUOTA_REFRESH_INTERVAL_SECONDS),
     };
     if !due {
-        return;
+        return None;
     }
     {
         let mut in_flight = IN_FLIGHT
@@ -445,12 +481,12 @@ fn maybe_refresh_backend(
         if !set.insert(backend.to_string()) {
             // A previous tick's refresh for this exact backend hasn't
             // returned yet -- don't pile on a second attempt on top of it.
-            return;
+            return None;
         }
     }
     let path = path.to_path_buf();
     let backend = backend.to_string();
-    std::thread::spawn(move || {
+    Some(std::thread::spawn(move || {
         // `refresh_*_and_store` already appends a real record when it
         // finds data (Ok(Some(_))); on Ok(None)/Err, append a data-free
         // marker purely so the next tick's `last_checked` sees a fresh
@@ -477,7 +513,7 @@ fn maybe_refresh_backend(
                 set.remove(&backend);
             }
         }
-    });
+    }))
 }
 
 #[cfg(test)]

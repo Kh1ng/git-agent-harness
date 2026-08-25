@@ -1,0 +1,24 @@
+# gah-quota-refresh.timer
+#
+# Issue #761: runs gah-quota-refresh.service every 15 minutes so account-level
+# quota observations are populated automatically, independent of whether any
+# dispatch happens to succeed. The auto-refresh command applies its own
+# per-backend 30-minute throttle internally, so this timer just guarantees a
+# due backend gets picked up within 15 minutes.
+#
+# Install:
+#   `gah update` installs and enables this timer. Manual install:
+#   mkdir -p ~/.config/systemd/user
+#   cp gah-quota-refresh.service gah-quota-refresh.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now gah-quota-refresh.timer
+[Unit]
+Description=Refresh GAH account-level quota every 15 minutes (issue #761)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

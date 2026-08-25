@@ -1,0 +1,40 @@
+# gah-quota-refresh.service
+#
+# Issue #761: account-level quota (codex status / Mistral Admin API) is
+# refreshed on a timer so the Quota/Telemetry pages show genuinely-recent
+# data instead of "stale N days ago" -- previously the only mechanism was a
+# human running `gah quota refresh` by hand, so quota_observations.jsonl
+# went stale for days even while dispatch itself was active.
+#
+# Runs `gah quota auto-refresh`, which iterates every configured profile's
+# quota-tracked backends, applies the per-backend 30-minute throttle, and
+# runs each due refresh to completion (bounded by the codex status timeout
+# and curl --max-time) before exiting -- safe for a systemd oneshot unit.
+#
+# `gah update` installs this service + the paired timer and enables the
+# timer. An operator who genuinely doesn't want periodic quota refresh can
+# opt out with:
+#   systemctl --user disable --now gah-quota-refresh.timer
+#
+# The PATH below matters the same way it does for gah-loop@.service: the
+# codex backend CLI may live in a rustup/nvm-managed bin dir that a systemd
+# unit's default PATH doesn't include. Adjust to match your toolchain.
+[Unit]
+Description=GAH account-level quota refresh (issue #761)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h
+Environment=HOME=%h
+Environment=GAH_CONFIG=%h/.config/gah/config.toml
+Environment=XDG_STATE_HOME=%h/.local/state
+Environment=PATH=%h/.nvm/versions/node/v22.23.1/bin:%h/.opencode/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/.cargo/bin/gah quota auto-refresh
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=timers.target
