@@ -176,6 +176,37 @@ test('an interrupted turn is repaired with a synthetic turn/end, not truncated',
   }
 });
 
+test('a cancelled turn folds distinctly and feeds its partial text into model history', () => {
+  const events: ChatSessionEvent[] = [
+    turnStart(1, 1),
+    userMsg(1, 2, 'question'),
+    { type: 'assistant/chunk', seq: 3, turn: 1, text: 'partial reply', timestamp: 3000 },
+    { type: 'turn/end', seq: 4, turn: 1, reason: { kind: 'cancelled' }, timestamp: 4000 }
+  ];
+
+  const dir = tempStateDir();
+  try {
+    appendEvents('gah', events, { stateDir: dir });
+
+    // No crash-repair: the turn is already closed, so reload adds nothing.
+    assert.equal(loadLog('gah', { stateDir: dir }).length, 4);
+
+    // Renders as cancelled, distinguishable from a completed/interrupted turn.
+    const view = foldSession('gah', { stateDir: dir });
+    assert.deepEqual(view.turns.map((t) => t.text), ['question', 'partial reply', '[cancelled]']);
+    assert.equal(view.streaming, null);
+
+    // The partial text becomes the model's own prior words on resume, so a
+    // follow-up message never re-triggers the cancelled turn's context.
+    assert.deepEqual(deriveModelHistory(events).map((t) => [t.role, t.text]), [
+      ['user', 'question'],
+      ['assistant', 'partial reply']
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('folding a live turn does not repair it as interrupted', () => {
   const dir = tempStateDir();
   try {

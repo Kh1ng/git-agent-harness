@@ -33,6 +33,7 @@ interface ManagerAdapter extends ManagerBackendInfo {
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;
   listModels(gahProfile: string): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }>;
   setModel(gahProfile: string, modelId: string): Promise<void>;
+  cancelTurn(gahProfile: string): Promise<void>;
 }
 
 class NotImplementedAdapter implements ManagerAdapter {
@@ -58,6 +59,10 @@ class NotImplementedAdapter implements ManagerAdapter {
   }
 
   async setModel(): Promise<void> {
+    throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
+  }
+
+  async cancelTurn(): Promise<void> {
     throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
   }
 }

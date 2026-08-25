@@ -1,0 +1,105 @@
+#!/usr/bin/env node
+import { Readable, Writable } from 'node:stream';
+import * as acp from '@agentclientprotocol/sdk';
+
+let nextSession = 0;
+let prompts = 0;
+const remembered = new Map();
+
+class MockHermes {
+  constructor(connection) {
+    this.connection = connection;
+    this.pendingPrompt = null;
+  }
+
+  async initialize() {
+    return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: false } };
+  }
+
+  async newSession() {
+    const sessionId = `mock-${++nextSession}`;
+    remembered.set(sessionId, null);
+    return { sessionId };
+  }
+
+  async authenticate() {
+    return {};
+  }
+
+  async prompt({ sessionId, prompt }) {
+    const text = prompt.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n');
+    const codeWord = text.match(/\b[A-Z]+-[A-Z]+-\d+\b/)?.[0] ?? null;
+    let reply;
+    if (/SLOW-REPLY/i.test(text)) {
+      // Emit one chunk, then park until cancel() resolves the pending prompt
+      // with a cancelled stop reason -- exercises the mid-turn cancel path
+      // with preserved partial output (#960).
+      await this.connection.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Partial answer ' }
+        }
+      });
+      return new Promise((resolve) => {
+        this.pendingPrompt = resolve;
+      });
+    } else if (text.trim() === '/reset') {
+      remembered.set(sessionId, null);
+      reply = 'Conversation history cleared.';
+    } else if (/remember code word/i.test(text) && !/previous chat/i.test(text)) {
+      remembered.set(sessionId, codeWord);
+      reply = 'OK';
+    } else {
+      reply = codeWord ?? remembered.get(sessionId) ?? 'UNKNOWN';
+    }
+
+    // Emit the reply in two progressive chunks (still assembles to the same
+    // text) so clients exercise live streaming, not just a single burst.
+    const mid = Math.ceil(reply.length / 2);
+    await this.connection.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: reply.slice(0, mid) }
+      }
+    });
+    await this.connection.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: reply.slice(mid) }
+      }
+    });
+    if (++prompts === 3) setTimeout(() => process.exit(0), 250);
+    return { stopReason: 'end_turn' };
+  }
+
+  async cancel() {
+    if (this.pendingPrompt) {
+      this.pendingPrompt({ stopReason: 'cancelled' });
+      this.pendingPrompt = null;
+    }
+  }
+}
+
+const stream = acp.ndJsonStream(
+  Writable.toWeb(process.stdout),
+  Readable.toWeb(process.stdin)
+);
+new acp.AgentSideConnection((connection) => new MockHermes(connection), stream);
+
+// A fixture must never keep the test runner's event loop alive. Exit after a
+// short idle period (reset on every prompt) so a lingering mock backend
+// cannot hang a test process that has already finished its assertions.
+let idleTimer = setTimeout(() => process.exit(0), 5_000);
+function bumpIdle() {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => process.exit(0), 5_000);
+}
+// Hook into the mock so every prompt resets the idle clock.
+const originalPrompt = MockHermes.prototype.prompt;
+MockHermes.prototype.prompt = function (...args) {
+  bumpIdle();
+  return originalPrompt.apply(this, args);
+};

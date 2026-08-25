@@ -25,6 +25,48 @@ import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage } from '@git-agent
 const turnQueueByProfile = new Map<string, Promise<unknown>>();
 const activeProfiles = new Set<string>();
 
+// Live tee of assistant/chunk log writes (#959): the session log is the
+// record, and the WebSocket layer pushes a copy of each chunk to every
+// subscribed client so a turn renders progressively. Registered by
+// wsServer.ts (setChunkPublisher). Kept a hook rather than importing the
+// push bus directly so ManagerChatManager stays transport-agnostic and
+// tests can observe chunks without a socket.
+type ChunkPublish = (chunk: {
+  type: 'manager.chat.chunk';
+  requestId: string;
+  profile: string;
+  turn: number;
+  seq: number;
+  text: string;
+}) => void;
+let chunkPublisher: ChunkPublish | undefined;
+
+export function setChunkPublisher(publish: ChunkPublish | undefined): void {
+  chunkPublisher = publish;
+}
+
+export function getChunkPublisher(): ChunkPublish | undefined {
+  return chunkPublisher;
+}
+
+/** Mutable state for the one in-flight turn per profile, so a cancel can
+ * close the writer, sequence its turn/end, and skip capture without racing
+ * the closure's own locals (#960). */
+interface ActiveTurn {
+  requestId: string;
+  turnNo: number;
+  seq: number;
+  chunkWriter: ReturnType<typeof createEventWriter> | undefined;
+  cancelled: boolean;
+  /** Resolves the moment cancelManagerChatTurn runs, so the in-flight turn
+   * can race the backend's acknowledgement against a settle deadline. */
+  cancelSettled: Promise<void>;
+  resolveCancel: () => void;
+}
+const activeTurns = new Map<string, ActiveTurn>();
+
+const CANCEL_SETTLE_TIMEOUT_MS = 8_000;
+
 /** Session log storage options (tests may point at a temp state dir). */
 const logOptions: SessionLogOptions = {};
 
@@ -69,19 +111,25 @@ export async function setModelForProfile(profile: string, modelId: string): Prom
   setModelOverrideForProfile(profile, backendId, modelId);
 }
 
-async function runTurn(
+export async function runTurn(
   profile: string,
   message: string,
   prompt: string,
   history: ChatTranscriptTurn[],
   onChunk: (text: string) => void,
-  onToolResult: (name: string, text: string) => void
+  onToolResult: (name: string, text: string) => void,
+  active: ActiveTurn
 ): Promise<{ reply: string; backend: string; model: string | null; usage: ChatUsage | null }> {
   const backendId = backendForProfile(profile);
   const adapter = resolveAdapter(backendId);
   const isSlashCommand = message.trim().startsWith('/');
   const result = await adapter.runTurn(profile, { prompt, history, onChunk, onToolResult });
 
+  // A cancelled turn is closed as cancelled, never captured as a completed
+  // exchange (a partial reply must not enter the memory gateway).
+  if (active.cancelled) {
+    return { reply: result.reply, backend: backendId, model: result.model, usage: result.usage };
+  }
   await capture(profile, message, result.reply);
   // Force buffered L0 conversation into the gateway's L1/L2 pipeline right
   // away on a compact/clear-like command, instead of waiting for the
@@ -92,21 +140,53 @@ async function runTurn(
   return { reply: result.reply, backend: backendId, model: result.model, usage: result.usage };
 }
 
-export function sendManagerChatMessage(profile: string, message: string): Promise<ChatTranscriptTurn> {
+export interface ManagerChatTurnResult {
+  turn: ChatTranscriptTurn;
+  cancelled: boolean;
+}
+
+/** Cancels the in-flight turn for a profile, if one is running. Safe to call
+ * when nothing is in flight (returns false) -- never appends a spurious
+ * turn/end in that case (#960). The ACP session itself survives; only the
+ * current prompt turn is stopped. */
+export async function cancelManagerChatTurn(profile: string): Promise<boolean> {
+  const active = activeTurns.get(profile);
+  if (!active) return false;
+  active.cancelled = true;
+  active.resolveCancel();
+  const backendId = backendForProfile(profile);
+  try {
+    await resolveAdapter(backendId).cancelTurn(profile);
+  } catch (error) {
+    console.error(`[managerChat] cancel failed for profile ${profile}:`, error);
+  }
+  return true;
+}
+
+export function sendManagerChatMessage(profile: string, message: string, requestId?: string): Promise<ManagerChatTurnResult> {
   const prior = turnQueueByProfile.get(profile) ?? Promise.resolve();
-  const turn = prior.catch(() => undefined).then(async () => {
+  const turn = prior.catch(() => undefined).then(async (): Promise<ManagerChatTurnResult> => {
     const existing = loadLog(profile, logOptions);
     const history = deriveModelHistory(existing);
-    let seq = existing.reduce((highest, event) => Math.max(highest, event.seq), 0);
     const turnNo = existing.reduce((highest, event) => Math.max(highest, event.turn), 0) + 1;
     const now = Date.now();
     const compaction = isCompactionCommand(message);
-    let chunkWriter: ReturnType<typeof createEventWriter> | undefined;
+    let resolveCancel!: () => void;
+    const active: ActiveTurn = {
+      requestId: requestId ?? '',
+      turnNo,
+      seq: existing.reduce((highest, event) => Math.max(highest, event.seq), 0),
+      chunkWriter: undefined,
+      cancelled: false,
+      cancelSettled: new Promise<void>((resolve) => { resolveCancel = resolve; }),
+      resolveCancel: () => resolveCancel()
+    };
+    activeTurns.set(profile, active);
     activeProfiles.add(profile);
     appendEvents(profile, [
-      ...(compaction ? [{ type: 'compaction/start' as const, seq: ++seq, turn: turnNo, timestamp: now }] : []),
-      { type: 'turn/start', seq: ++seq, turn: turnNo, timestamp: now },
-      { type: 'user/message', seq: ++seq, turn: turnNo, text: message, source: 'prompt', timestamp: now }
+      ...(compaction ? [{ type: 'compaction/start' as const, seq: ++active.seq, turn: turnNo, timestamp: now }] : []),
+      { type: 'turn/start', seq: ++active.seq, turn: turnNo, timestamp: now },
+      { type: 'user/message', seq: ++active.seq, turn: turnNo, text: message, source: 'prompt', timestamp: now }
     ], logOptions);
 
     try {
@@ -118,36 +198,62 @@ export function sendManagerChatMessage(profile: string, message: string): Promis
       if (context) {
         appendEvents(profile, [{
           type: 'user/message',
-          seq: ++seq,
+          seq: ++active.seq,
           turn: turnNo,
           text: prompt,
           source: 'inject',
           timestamp: Date.now()
         }], logOptions);
       }
-      chunkWriter = createEventWriter(profile, logOptions);
-      const { reply, backend, model, usage } = await runTurn(
+      active.chunkWriter = createEventWriter(profile, logOptions);
+      const run = runTurn(
         profile,
         message,
         prompt,
         history,
-        (text) => chunkWriter?.append({
-          type: 'assistant/chunk',
-          seq: ++seq,
-          turn: turnNo,
-          text,
-          timestamp: Date.now()
-        }),
-        (name, text) => chunkWriter?.append({
+        (text) => {
+          const chunk = {
+            type: 'assistant/chunk' as const,
+            seq: ++active.seq,
+            turn: turnNo,
+            text,
+            timestamp: Date.now()
+          };
+          active.chunkWriter?.append(chunk);
+          if (chunkPublisher) {
+            chunkPublisher({
+              type: 'manager.chat.chunk',
+              requestId: requestId ?? '',
+              profile,
+              turn: turnNo,
+              seq: chunk.seq,
+              text
+            });
+          }
+        },
+        (name, text) => active.chunkWriter?.append({
           type: 'tool/result',
-          seq: ++seq,
+          seq: ++active.seq,
           turn: turnNo,
           name,
           text,
           timestamp: Date.now()
+        }),
+        active
+      );
+      // A cancel is a barrier for the queue: once we've sent session/cancel
+      // to the backend, don't let an unresponsive agent wedge the profile's
+      // turn queue forever. Real agents reply with stopReason 'cancelled';
+      // this races a settle deadline only for the pathological case.
+      const settleDeadline = active.cancelSettled.then(
+        () => new Promise<never>((_resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('cancel timed out waiting for backend to stop')), CANCEL_SETTLE_TIMEOUT_MS);
+          timer.unref();
         })
       );
-      await chunkWriter.close();
+      const result = await Promise.race([run, settleDeadline]);
+      const { reply, backend, model, usage } = result;
+      await active.chunkWriter.close();
       const assistant: ChatTranscriptTurn = {
         role: 'assistant',
         text: reply,
@@ -156,48 +262,51 @@ export function sendManagerChatMessage(profile: string, message: string): Promis
         usage,
         timestamp: Date.now()
       };
-      const done: ChatSessionEvent[] = [
-        {
-          type: 'assistant/message',
-          seq: ++seq,
-          turn: turnNo,
-          text: reply,
-          backend,
-          model,
-          usage,
-          timestamp: assistant.timestamp
-        },
-        ...(isSlashCommand ? [{
-          type: 'human/command' as const,
-          seq: ++seq,
-          turn: turnNo,
-          command: message.trim().slice(1).split(/\s+/)[0] ?? '',
-          result: reply,
-          timestamp: Date.now()
-        }] : []),
-        { type: 'turn/end', seq: ++seq, turn: turnNo, reason: { kind: 'complete' }, timestamp: Date.now() },
-        ...(compaction ? [{
-          type: 'compaction/summary' as const,
-          seq: ++seq,
-          turn: turnNo,
-          summary: compactionSummary(message, reply),
-          timestamp: Date.now()
-        }] : []),
-        ...(compaction ? [{ type: 'compaction/end' as const, seq: ++seq, turn: turnNo, timestamp: Date.now() }] : [])
-      ];
+      const done: ChatSessionEvent[] = active.cancelled
+        ? [{ type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'cancelled' }, timestamp: Date.now() }]
+        : [
+            {
+              type: 'assistant/message',
+              seq: ++active.seq,
+              turn: turnNo,
+              text: reply,
+              backend,
+              model,
+              usage,
+              timestamp: assistant.timestamp
+            },
+            ...(isSlashCommand ? [{
+              type: 'human/command' as const,
+              seq: ++active.seq,
+              turn: turnNo,
+              command: message.trim().slice(1).split(/\s+/)[0] ?? '',
+              result: reply,
+              timestamp: Date.now()
+            }] : []),
+            { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'complete' }, timestamp: Date.now() },
+            ...(compaction ? [{
+              type: 'compaction/summary' as const,
+              seq: ++active.seq,
+              turn: turnNo,
+              summary: compactionSummary(message, reply),
+              timestamp: Date.now()
+            }] : []),
+            ...(compaction ? [{ type: 'compaction/end' as const, seq: ++active.seq, turn: turnNo, timestamp: Date.now() }] : [])
+          ];
       appendEvents(profile, done, logOptions);
-      return assistant;
+      return { turn: assistant, cancelled: active.cancelled };
     } catch (error) {
-      await chunkWriter?.close().catch(() => undefined);
+      await active.chunkWriter?.close().catch(() => undefined);
       const text = error instanceof Error ? error.message : String(error);
       const done: ChatSessionEvent[] = [
-        { type: 'harness/error', seq: ++seq, turn: turnNo, text, timestamp: Date.now() },
-        { type: 'turn/end', seq: ++seq, turn: turnNo, reason: { kind: 'error', message: text }, timestamp: Date.now() }
+        { type: 'harness/error', seq: ++active.seq, turn: turnNo, text, timestamp: Date.now() },
+        { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'error', message: text }, timestamp: Date.now() }
       ];
       appendEvents(profile, done, logOptions);
       throw error;
     } finally {
       activeProfiles.delete(profile);
+      activeTurns.delete(profile);
     }
   });
   turnQueueByProfile.set(profile, turn.catch(() => undefined));

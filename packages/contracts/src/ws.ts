@@ -140,6 +140,18 @@ export type ServerMessage =
       usage: ChatTranscriptTurn['usage'];
     }
   | {
+      /** Live tee of the session log's assistant/chunk events for one turn
+       * (#959). The session log is the record; this is a live push of the
+       * same writes so every client subscribed to the profile renders the
+       * turn progressively. `seq` matches the logged assistant/chunk event. */
+      type: "manager.chat.chunk";
+      requestId: string;
+      profile: string;
+      turn: number;
+      seq: number;
+      text: string;
+    }
+  | {
       type: "manager.chat.history";
       requestId: string;
       profile: string;
@@ -216,6 +228,13 @@ export type ClientMessage =
       requestId: string;
       profile: string;
       message: string;
+    }
+  | {
+      /** Stops the in-flight turn for a profile (#960). Safe to send when no
+       * turn is running; the server treats it as a no-op then. */
+      type: "manager.chat.cancel";
+      requestId: string;
+      profile: string;
     }
   | {
       type: "manager.chat.historyRequest";

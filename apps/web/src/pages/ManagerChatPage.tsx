@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Send, MessageSquare } from 'lucide-react';
+import { Send, Square, MessageSquare } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
@@ -18,6 +18,11 @@ interface ChatTurn {
 interface PendingRequest {
   id: string;
   profile: string;
+}
+
+interface StreamingTurn {
+  turn: number;
+  text: string;
 }
 
 function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
@@ -42,6 +47,17 @@ export function ManagerChatPage() {
   const [draft, setDraft] = useState('');
   const [pendingRequest, setPendingRequest] = useState<PendingRequest | null>(null);
   const [remoteTurnBusy, setRemoteTurnBusy] = useState(false);
+  /** Live assistant turn (#959): a tee of the session log's chunks. The log
+   * is the record; this state is just the live append. Replaced by the final
+   * turn when manager.chat.reply arrives, and re-derived from history on
+   * reload. */
+  const [streaming, setStreaming] = useState<StreamingTurn | null>(null);
+  /** Highest log seq this client has applied. Chunks at or below it are
+   * already reflected in the rendered transcript (e.g. fetched via history),
+   * so they're skipped -- gives exactly-once rendering for a client that
+   * connects mid-turn. */
+  const lastAppliedSeqRef = useRef(0);
+  const processedMessagesRef = useRef(0);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [activeBackend, setActiveBackend] = useState<string | null>(null);
   const [commands, setCommands] = useState<ManagerCommandInfo[]>([]);
@@ -69,6 +85,9 @@ export function ManagerChatPage() {
     setTurns([]);
     setPendingRequest(null);
     setRemoteTurnBusy(false);
+    setStreaming(null);
+    lastAppliedSeqRef.current = 0;
+    processedMessagesRef.current = 0;
     if (!isConnected) return;
     const requestId = generateRequestId();
     historyRequestId.current = requestId;
@@ -135,48 +154,68 @@ export function ManagerChatPage() {
   };
 
   useEffect(() => {
-    const last = messages[messages.length - 1];
-    if (!last) return;
+    // Process every not-yet-consumed message in order. React can batch
+    // several websocket frames into one render, so only looking at the last
+    // message would silently drop intermediate chunk fragments.
+    const batch = messages.slice(processedMessagesRef.current);
+    if (batch.length === 0) return;
+    processedMessagesRef.current = messages.length;
 
-    if (last.type === 'manager.chat.history' && last.profile === profile && last.requestId === historyRequestId.current) {
-      const restored = last.turns.map(fromServerTurn);
-      if (last.streaming?.partialText) {
-        restored.push({ role: 'assistant', text: last.streaming.partialText });
+    for (const last of batch) {
+      if (last.type === 'manager.chat.history' && last.profile === profile && last.requestId === historyRequestId.current) {
+        const restored = last.turns.map(fromServerTurn);
+        setTurns(restored);
+        setHistoryLoaded(true);
+        setPendingRequest(null);
+        lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, last.cursor);
+        setStreaming(last.streaming?.partialText ? { turn: last.streaming.turn, text: last.streaming.partialText } : null);
+        setRemoteTurnBusy(Boolean(last.streaming));
+        continue;
       }
-      setTurns(restored);
-      setHistoryLoaded(true);
-      setPendingRequest(null);
-      setRemoteTurnBusy(Boolean(last.streaming));
-      return;
-    }
 
-    if (last.type === 'manager.chat.updated' && last.profile === profile) {
-      if (pendingRequest && last.requestId !== pendingRequest.id) return;
-      setRemoteTurnBusy(true);
-      const requestId = generateRequestId();
-      historyRequestId.current = requestId;
-      sendMessage({ type: 'manager.chat.historyRequest', requestId, profile });
-      return;
-    }
+      if (last.type === 'manager.chat.updated' && last.profile === profile) {
+        if (pendingRequest && last.requestId !== pendingRequest.id) continue;
+        setRemoteTurnBusy(true);
+        const requestId = generateRequestId();
+        historyRequestId.current = requestId;
+        sendMessage({ type: 'manager.chat.historyRequest', requestId, profile });
+        continue;
+      }
 
-    if (!pendingRequest || pendingRequest.profile !== profile) return;
-    if (!('requestId' in last) || last.requestId !== pendingRequest.id) return;
-    if (processedRequestIds.current.has(pendingRequest.id)) return;
-    processedRequestIds.current.add(pendingRequest.id);
+      // Live chunk tee (#959). Dedupe by seq: chunks at or below what we've
+      // already applied are already part of the rendered transcript (history
+      // refetch mid-turn restores the partial text plus its cursor).
+      if (last.type === 'manager.chat.chunk' && last.profile === profile) {
+        if (last.seq <= lastAppliedSeqRef.current) continue;
+        lastAppliedSeqRef.current = last.seq;
+        setStreaming((prev) => (prev && prev.turn === last.turn
+          ? { turn: last.turn, text: prev.text + last.text }
+          : { turn: last.turn, text: last.text }));
+        setRemoteTurnBusy(true);
+        continue;
+      }
 
-    if (last.type === 'manager.chat.reply') {
-      setTurns((prev) => [...prev, {
-        role: 'assistant',
-        text: last.reply,
-        backend: last.backend,
-        model: last.model
-      }]);
-    } else if (last.type === 'error') {
-      setTurns((prev) => [...prev, { role: 'error', text: last.error }]);
+      if (!pendingRequest || pendingRequest.profile !== profile) continue;
+      if (!('requestId' in last) || last.requestId !== pendingRequest.id) continue;
+      if (processedRequestIds.current.has(pendingRequest.id)) continue;
+      processedRequestIds.current.add(pendingRequest.id);
+
+      if (last.type === 'manager.chat.reply') {
+        setStreaming(null);
+        setTurns((prev) => [...prev, {
+          role: 'assistant',
+          text: last.reply,
+          backend: last.backend,
+          model: last.model
+        }]);
+      } else if (last.type === 'error') {
+        setStreaming(null);
+        setTurns((prev) => [...prev, { role: 'error', text: last.error }]);
+      }
     }
   }, [messages, pendingRequest, profile]);
 
-  const turnBusy = pendingRequest !== null || remoteTurnBusy;
+  const turnBusy = pendingRequest !== null || remoteTurnBusy || streaming !== null;
   const sendBlocked = !historyLoaded || turnBusy;
 
   useEffect(() => {
@@ -213,6 +252,12 @@ export function ManagerChatPage() {
     setPaletteOpen(false);
     setPendingRequest({ id: requestId, profile });
     sendMessage({ type: 'manager.chat.send', requestId, profile, message: text });
+  };
+
+  const handleCancel = () => {
+    if (!turnBusy) return;
+    const requestId = generateRequestId();
+    sendMessage({ type: 'manager.chat.cancel', requestId, profile });
   };
 
   return (
@@ -293,7 +338,14 @@ export function ManagerChatPage() {
               )}
             </div>
           ))}
-          {turnBusy && (
+          {streaming && (
+            <div className="flex justify-start">
+              <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words bg-raised text-primary border border-subtle">
+                {streaming.text}
+              </div>
+            </div>
+          )}
+          {turnBusy && !streaming && (
             <div className="flex justify-start">
               <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-raised text-muted border border-subtle animate-pulse">
                 Thinking…
@@ -357,14 +409,25 @@ export function ManagerChatPage() {
             rows={2}
             className="flex-1 bg-raised border border-subtle rounded-md px-3 py-2 text-sm text-primary resize-none disabled:opacity-50"
           />
-          <button
-            onClick={handleSend}
-            disabled={!isConnected || !draft.trim() || sendBlocked}
-            className="btn-primary h-fit"
-            aria-label="Send"
-          >
-            <Send size={14} aria-hidden="true" />
-          </button>
+          {turnBusy ? (
+            <button
+              onClick={handleCancel}
+              className="btn-primary h-fit"
+              aria-label="Stop"
+              title="Stop this turn"
+            >
+              <Square size={14} aria-hidden="true" />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!isConnected || !draft.trim() || sendBlocked}
+              className="btn-primary h-fit"
+              aria-label="Send"
+            >
+              <Send size={14} aria-hidden="true" />
+            </button>
+          )}
         </div>
       </div>
     </div>

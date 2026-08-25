@@ -12,7 +12,7 @@ import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
-import { sendManagerChatMessage, getSessionView as getManagerChatSessionView } from './managerChat/ManagerChatManager.js';
+import { sendManagerChatMessage, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -50,10 +50,13 @@ class WebSocketSessionStore {
     return Array.from(this.sessions.entries());
   }
   
-  broadcast(message: ServerMessage, exclude?: WebSocket) {
+  broadcast(message: ServerMessage, exclude?: WebSocket, profile?: string) {
     const messageStr = JSON.stringify(message);
-    for (const [ws] of this.sessions) {
+    for (const [ws, info] of this.sessions) {
       if (ws !== exclude && ws.readyState === WebSocket.OPEN) {
+        // Profile-scoped chat pushes only reach clients subscribed to that
+        // profile; everything else still fans out to all connected clients.
+        if (profile && info.profile !== profile) continue;
         try {
           ws.send(messageStr);
         } catch (error) {
@@ -95,7 +98,6 @@ export function createWebSocketHandler(
     
     let clientInfo: { clientVersion: string; capabilities: ClientCapabilities } | null = null;
     let isAuthenticated = false;
-    
     // Extract profile from query parameters in the connection URL
     const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
     const profileFromQuery = url.searchParams.get('profile') || null;
@@ -141,10 +143,19 @@ export function createWebSocketHandler(
     }, 100);
   });
   
-  // Set up push bus to broadcast to all connected clients
+  // Set up push bus to broadcast to all connected clients. Chat messages are
+  // scoped to the profile they concern; everything else fans out everywhere.
   pushBus.subscribe((message: ServerMessage) => {
-    sessionStore.broadcast(message);
+    if (message.type === 'manager.chat.chunk' || message.type === 'manager.chat.updated') {
+      sessionStore.broadcast(message, undefined, message.profile);
+    } else {
+      sessionStore.broadcast(message);
+    }
   });
+
+  // Live-tee each logged assistant/chunk onto the push bus (#959) so every
+  // subscribed client renders a turn progressively, not just the sender.
+  setChunkPublisher((chunk) => pushBus.publish(chunk));
 }
 
 async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
@@ -185,6 +196,10 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
       
     case 'manager.chat.send':
       await handleManagerChatSend(ws, message, requestId);
+      break;
+
+    case 'manager.chat.cancel':
+      await handleManagerChatCancel(ws, message, requestId);
       break;
 
     case 'manager.chat.historyRequest':
@@ -263,22 +278,38 @@ async function handleSendCommand(ws: WebSocket, message: Extract<ClientMessage, 
 
 async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.send' }>, requestId: string) {
   try {
-    const reply = await sendManagerChatMessage(message.profile, message.message);
+    const { turn, cancelled } = await sendManagerChatMessage(message.profile, message.message, requestId);
 
-    const payload: ServerMessage = {
-      type: 'manager.chat.reply',
-      requestId,
-      profile: message.profile,
-      reply: reply.text,
-      backend: reply.backend!,
-      model: reply.model ?? null,
-      usage: reply.usage
-    };
-    ws.send(JSON.stringify(payload));
+    // A cancelled turn is never reported as a completed reply; clients
+    // reconcile via the manager.chat.updated push in the finally below
+    // (history refetch shows the cancelled turn with its partial text).
+    if (!cancelled) {
+      const payload: ServerMessage = {
+        type: 'manager.chat.reply',
+        requestId,
+        profile: message.profile,
+        reply: turn.text,
+        backend: turn.backend!,
+        model: turn.model ?? null,
+        usage: turn.usage
+      };
+      ws.send(JSON.stringify(payload));
+    }
   } catch (error) {
     ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
   } finally {
     pushBus.publish({ type: 'manager.chat.updated', profile: message.profile, requestId });
+  }
+}
+
+async function handleManagerChatCancel(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.cancel' }>, requestId: string) {
+  try {
+    const cancelled = await cancelManagerChatTurn(message.profile);
+    if (!cancelled) {
+      ws.send(JSON.stringify(createErrorResponse(requestId, new Error('No turn is in flight for this profile.'))));
+    }
+  } catch (error) {
+    ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
   }
 }
 
