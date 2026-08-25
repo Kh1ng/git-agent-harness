@@ -4,6 +4,7 @@ import rateLimit from 'express-rate-limit';
 import os from 'node:os';
 import { statfsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import { getServerReadiness } from './serverReadiness.js';
 import {
   runStatus,
@@ -62,6 +63,13 @@ import {
   setModelForProfile as setManagerChatModel
 } from './managerChat/ManagerChatManager.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
+import {
+  deleteSkill,
+  getSkill,
+  listSkillSummaries,
+  putSkill,
+  seedSkillFromDocs
+} from './skillBank.js';
 
 const SERVER_VERSION = '0.1.0';
 
@@ -146,6 +154,9 @@ export function createServer(
   // than riding the unauthenticated default the rest of the API still has.
   app.use('/api/settings', authMiddleware);
   app.use('/api/projects', authMiddleware);
+  // /api/skills (issue #963/#964): the central skill bank mutates the
+  // versioned store, so it gets the same narrow auth gate as projects.
+  app.use('/api/skills', authMiddleware);
   app.use('/api/projects/import', rateLimit({
     windowMs: 60_000,
     limit: 10,
@@ -776,6 +787,105 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to remove project',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // ── Skill bank (issue #963/#964) ───────────────────────────────────────
+
+  // Seed the bank from the repo's docs so the one skill that exists today is
+  // a first-class record on a fresh install (AC5). Best-effort: a missing
+  // docs file or a docs path that isn't resolvable skips seeding.
+  try {
+    const docsPath = process.env.GAH_SKILL_DOCS_PATH
+      || resolve(process.cwd(), 'docs', 'gah-manager-skill.md');
+    seedSkillFromDocs(
+      docsPath,
+      'docs/gah-manager-skill.md',
+      'gah-manager',
+      '1.0.0',
+      'GAH Project Manager & Orchestrator',
+      'The GAH manager agent skill: sits above worker agents to break down issues, enforce policies, and dispatch isolated tasks.',
+      ['hermes', 'codex', 'claude', 'opencode']
+    );
+  } catch (error) {
+    // Never fail startup on a seed problem; surface it in the log instead.
+    console.error('Failed to seed skill bank from docs:', error);
+  }
+
+  app.get('/api/skills', (_req, res) => {
+    try {
+      res.json({ skills: listSkillSummaries() });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load skills',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/skills/:id', (req, res) => {
+    try {
+      const skill = getSkill(req.params.id, typeof req.query.version === 'string' ? req.query.version : undefined);
+      if (!skill) {
+        res.status(404).json({ error: `Skill '${req.params.id}' not found` });
+        return;
+      }
+      res.json(skill);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load skill',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/skills', (req, res) => {
+    const body = req.body as {
+      id?: unknown;
+      version?: unknown;
+      displayName?: unknown;
+      description?: unknown;
+      content?: unknown;
+      backends?: unknown;
+      source?: unknown;
+    };
+    if (typeof body.id !== 'string' || typeof body.version !== 'string' || typeof body.content !== 'string') {
+      res.status(400).json({ error: 'Invalid skill', message: 'id, version, and content are required' });
+      return;
+    }
+    try {
+      const now = Date.now();
+      const existing = getSkill(body.id, body.version);
+      const skill = putSkill({
+        id: body.id,
+        version: body.version,
+        displayName: typeof body.displayName === 'string' ? body.displayName : body.id,
+        description: typeof body.description === 'string' ? body.description : '',
+        content: body.content,
+        backends: Array.isArray(body.backends) ? body.backends.filter((b): b is string => typeof b === 'string') : [],
+        source: typeof body.source === 'string' ? body.source : 'api',
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now
+      });
+      res.status(existing ? 200 : 201).json(skill);
+    } catch (error) {
+      res.status(400).json({
+        error: 'Failed to store skill',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.delete('/api/skills/:id', (req, res) => {
+    try {
+      const removed = deleteSkill(req.params.id);
+      res.json({ removed: removed.length });
+    } catch (error) {
+      // Deletion refused because the skill is bound (AC7).
+      res.status(409).json({
+        error: 'Failed to delete skill',
         message: error instanceof Error ? error.message : String(error)
       });
     }
