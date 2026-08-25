@@ -3,10 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { compactionSummary, isCompactionCommand } from './managerChat/acpAdapter.js';
+import { compactionSummary, isCompactionCommand, isUsageLimitError } from './managerChat/acpAdapter.js';
 import { normalizeRemoteUrl } from './managerChat/memoryGatewayClient.js';
 import { modelOverrideForProfile, setModelOverrideForProfile } from './managerChat/settingsStore.js';
 import { historyDelta, readModelConfig, resumePrompt, toChatUsage } from './managerChat/acpAdapter.js';
+import { handoffAttempt } from './managerChat/ManagerChatManager.js';
 
 test('isCompactionCommand recognizes known compact/clear synonyms across backends', () => {
   assert.equal(isCompactionCommand('/compact'), true);
@@ -130,4 +131,85 @@ test('model override persists per profile+backend and survives a fresh read', ()
     if (prevPath === undefined) delete process.env.GAH_MANAGER_CHAT_SETTINGS_PATH;
     else process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = prevPath;
   }
+});
+
+test('isUsageLimitError classifies quota-limit messages but not auth/crash/network errors', () => {
+  assert.equal(isUsageLimitError(new Error("You've hit your usage limit. Please wait or upgrade.")), true);
+  assert.equal(isUsageLimitError(new Error('Rate limit exceeded, retry in 30s.')), true);
+  assert.equal(isUsageLimitError(new Error('Quota exhausted: insufficient credits.')), true);
+  assert.equal(isUsageLimitError(new Error('Token limit reached.')), false); // not a quota-limit trigger by itself
+  assert.equal(isUsageLimitError(new Error('401 Unauthorized: invalid API key')), false);
+  assert.equal(isUsageLimitError(new Error('backend crashed: segfault')), false);
+  assert.equal(isUsageLimitError(new Error('network error: connection refused')), false);
+});
+
+test('handoffAttempt reruns a usage-limited turn on the next eligible backend, once', async () => {
+  const calls: string[] = [];
+  const result = await handoffAttempt({
+    startBackend: 'hermes',
+    fallbackBackends: ['codex', 'claude'],
+    attempt: async (backendId) => {
+      calls.push(backendId);
+      if (backendId === 'hermes') throw new Error("You've hit your usage limit.");
+      return { reply: `answered by ${backendId}`, model: null, usage: null };
+    }
+  });
+  assert.deepEqual(calls, ['hermes', 'codex']);
+  assert.equal(result.backend, 'codex');
+  assert.equal(result.reply, 'answered by codex');
+  assert.deepEqual(result.handoff, { from: 'hermes', to: 'codex', reason: "You've hit your usage limit." });
+});
+
+test('handoffAttempt skips a fallback that fails for a non-limit reason and tries the next', async () => {
+  const result = await handoffAttempt({
+    startBackend: 'hermes',
+    fallbackBackends: ['codex', 'claude'],
+    attempt: async (backendId) => {
+      if (backendId === 'hermes') throw new Error('usage limit hit');
+      if (backendId === 'codex') throw new Error('codex not installed');
+      return { reply: 'claude answer', model: 'opus', usage: null };
+    }
+  });
+  assert.equal(result.backend, 'claude');
+  assert.deepEqual(result.handoff, { from: 'hermes', to: 'claude', reason: 'usage limit hit' });
+});
+
+test('handoffAttempt does not hand off on non-limit errors', async () => {
+  const calls: string[] = [];
+  await assert.rejects(
+    handoffAttempt({
+      startBackend: 'hermes',
+      fallbackBackends: ['codex'],
+      attempt: async (backendId) => {
+        calls.push(backendId);
+        throw new Error('401 Unauthorized: invalid API key');
+      }
+    }),
+    /401 Unauthorized/
+  );
+  assert.deepEqual(calls, ['hermes'], 'no fallback was attempted');
+});
+
+test('handoffAttempt fails the turn when no fallback is configured', async () => {
+  await assert.rejects(
+    handoffAttempt({
+      startBackend: 'hermes',
+      fallbackBackends: [],
+      attempt: async () => { throw new Error('usage limit hit'); }
+    }),
+    /usage limit hit/
+  );
+});
+
+test('handoffAttempt allows at most one handoff: a second limit error fails the turn', async () => {
+  await assert.rejects(
+    handoffAttempt({
+      startBackend: 'hermes',
+      fallbackBackends: ['codex'],
+      attempt: async (backendId) => {
+        throw new Error(`${backendId} usage limit`);
+      }
+    }),
+    /hermes usage limit/
+  );
 });

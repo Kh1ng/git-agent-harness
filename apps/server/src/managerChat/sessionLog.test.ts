@@ -207,6 +207,35 @@ test('a cancelled turn folds distinctly and feeds its partial text into model hi
   }
 });
 
+test('a handoff event renders explicitly and survives into model history', () => {
+  const events: ChatSessionEvent[] = [
+    turnStart(1, 1),
+    userMsg(1, 2, 'question'),
+    assistantMsg(1, 3, 'answered by codex'),
+    { type: 'handoff', seq: 4, turn: 1, from: 'hermes', fromModel: null, to: 'codex', toModel: null, reason: "You've hit your usage limit.", timestamp: 4000 },
+    turnEnd(1, 5)
+  ];
+
+  const dir = tempStateDir();
+  try {
+    appendEvents('gah', events, { stateDir: dir });
+    const view = foldSession('gah', { stateDir: dir });
+    assert.deepEqual(view.turns.map((t) => t.text), [
+      'question',
+      'answered by codex',
+      "[handoff: hermes → codex] You've hit your usage limit."
+    ]);
+    const last = view.turns.at(-1);
+    assert.equal(last?.role, 'system');
+
+    // The switch is visible to the model on resume, so it knows why it is
+    // answering under a different backend.
+    assert.ok(deriveModelHistory(events).some((t) => t.role === 'system' && /handoff: hermes → codex/.test(t.text)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('folding a live turn does not repair it as interrupted', () => {
   const dir = tempStateDir();
   try {

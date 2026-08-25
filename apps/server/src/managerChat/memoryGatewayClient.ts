@@ -182,7 +182,20 @@ export async function captureForTicket(
  * isCompactionCommand): flushes buffered L0 conversation into the gateway's
  * L1/L2 extraction pipeline immediately (core.handleSessionEnd ->
  * scheduler.flushSession), instead of waiting for the pipeline's own idle
- * timeout. */
+ * timeout.
+ *
+ * CONTRACT (issue #958): a successful `/session/end` is a barrier for that
+ * session. It MUST NOT return while an L1 extraction for the session is
+ * queued or in flight -- an immediate `/recall` after this call must observe
+ * the committed memory, or the next chat can recall a superseded value
+ * (repro: store B after A, /reset, fresh chat recalls stale A).
+ *
+ * The root behavior lives in the gateway (`MemoryCore/src/gateway/server.ts`
+ * `handleSessionEnd` -> `stateful-pipeline-manager.ts` `flushSession`, which
+ * only ENQUEUES a flush task and returns while the in-process
+ * `PipelineWorker` still has to run it). GAH deliberately does NOT paper
+ * over that with a delay or polling loop; the gateway must await the queued
+ * flush task's completion before returning `{ flushed: true }`. */
 export async function flushSession(profile: string): Promise<boolean> {
   const result = await postJson<{ flushed: boolean }>('/session/end', {
     session_key: await sessionKeyForProfile(profile)

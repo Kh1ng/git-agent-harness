@@ -11,7 +11,7 @@ import { rmSync, existsSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 
 import { createServer } from './server.js';
-import { readGatewaySettings, writeGatewaySettings, effectiveGatewayUrl, gatewayEnabledForProfile } from './gatewaySettingsStore.js';
+import { readGatewaySettings, writeGatewaySettings, effectiveGatewayUrl, gatewayEnabledForProfile, effectiveContextPolicy, applyContextBudget } from './gatewaySettingsStore.js';
 
 async function withServer(testFn: (url: string) => Promise<void>) {
   const app = createServer({});
@@ -153,6 +153,66 @@ test('gatewaySettingsStore: per-profile opt-out respects disabledProfiles', () =
     delete process.env.GAH_GATEWAY_SETTINGS_PATH;
     if (existsSync(path)) rmSync(path);
   }
+});
+
+// ── #961 memory context policy ─────────────────────────────────────────────
+
+test('gatewaySettingsStore: context policy defaults are empty (unaffected profiles)', () => {
+  const path = join(tmpdir(), `gah-test-settings-${Date.now()}.json`);
+  process.env.GAH_GATEWAY_SETTINGS_PATH = path;
+  try {
+    const s = readGatewaySettings();
+    assert.deepEqual(s.contextPolicy, {});
+    assert.deepEqual(s.contextPolicies, {});
+    const policy = effectiveContextPolicy('prod');
+    assert.equal(policy.budgetChars, undefined);
+    assert.equal(policy.tiers, undefined);
+  } finally {
+    delete process.env.GAH_GATEWAY_SETTINGS_PATH;
+    if (existsSync(path)) rmSync(path);
+  }
+});
+
+test('gatewaySettingsStore: per-profile policy merges over the global default field-by-field', () => {
+  const path = join(tmpdir(), `gah-test-settings-${Date.now()}.json`);
+  process.env.GAH_GATEWAY_SETTINGS_PATH = path;
+  try {
+    writeGatewaySettings({
+      url: null, apiKey: null, enabled: true, disabledProfiles: [],
+      contextPolicy: { budgetChars: 2000, tiers: ['L0', 'L1'] },
+      contextPolicies: { 'qa': { budgetChars: 500 } }
+    });
+    assert.deepEqual(effectiveContextPolicy('prod'), { budgetChars: 2000, tiers: ['L0', 'L1'] });
+    assert.deepEqual(effectiveContextPolicy('qa'), { budgetChars: 500, tiers: ['L0', 'L1'] });
+  } finally {
+    delete process.env.GAH_GATEWAY_SETTINGS_PATH;
+    if (existsSync(path)) rmSync(path);
+  }
+});
+
+test('gatewaySettingsStore: a change to policy is visible on the next read (live reload)', () => {
+  const path = join(tmpdir(), `gah-test-settings-${Date.now()}.json`);
+  process.env.GAH_GATEWAY_SETTINGS_PATH = path;
+  try {
+    assert.equal(effectiveContextPolicy('gah').budgetChars, undefined);
+    writeGatewaySettings({ url: null, apiKey: null, enabled: true, disabledProfiles: [], contextPolicy: { budgetChars: 100 } });
+    assert.equal(effectiveContextPolicy('gah').budgetChars, 100);
+  } finally {
+    delete process.env.GAH_GATEWAY_SETTINGS_PATH;
+    if (existsSync(path)) rmSync(path);
+  }
+});
+
+test('applyContextBudget truncates deterministically to the highest-relevance head, never silently', () => {
+  const long = 'x'.repeat(10_000);
+  const result = applyContextBudget(long, { budgetChars: 1000 });
+  assert.equal(result.truncated, true);
+  assert.equal(result.text.length, 1000);
+  assert.ok(result.text.startsWith('xxx'), 'keeps the head (relevance-ordered)');
+  // Within budget: untouched.
+  assert.deepEqual(applyContextBudget('short', { budgetChars: 1000 }), { text: 'short', truncated: false });
+  // No budget: completely unaffected.
+  assert.deepEqual(applyContextBudget(long, {}), { text: long, truncated: false });
 });
 
 // ── PUT /api/settings/gateway ─────────────────────────────────────────────

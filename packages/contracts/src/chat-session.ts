@@ -23,6 +23,7 @@ export type ChatSessionEvent =
   | ChatToolResult
   | ChatHarnessError
   | ChatHumanCommand
+  | ChatHandoff
   | ChatCompactionStart
   | ChatCompactionSummary
   | ChatCompactionEnd;
@@ -60,6 +61,11 @@ export interface ChatUserMessage {
   text: string;
   source: ChatUserMessageSource;
   timestamp: number;
+  /** #961: provenance for injected context -- the policy and budget in force
+   * when this context was injected, plus whether the budget truncated it.
+   * Only present on source: 'inject' events. */
+  policy?: { budgetChars?: number; tiers?: string[] };
+  truncated?: boolean;
 }
 
 /** Raw assistant stream chunk -- token-level replay/typing fidelity. */
@@ -121,6 +127,21 @@ export interface ChatHumanCommand {
   turn: number;
   command: string;
   result: string;
+  timestamp: number;
+}
+
+/** An automatic mid-turn handoff to a fallback backend after a usage/quota
+ * limit (#962). Recorded so the transcript explains why the answering model
+ * changed -- the per-message backend/model badge then shows the switch. */
+export interface ChatHandoff {
+  type: 'handoff';
+  seq: number;
+  turn: number;
+  from: string;
+  fromModel: string | null;
+  to: string;
+  toModel: string | null;
+  reason: string;
   timestamp: number;
 }
 

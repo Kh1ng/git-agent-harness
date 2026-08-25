@@ -947,22 +947,28 @@ export function createServer(
       apiKey: apiKey ?? null,
       enabled: stored.enabled,
       disabledProfiles: stored.disabledProfiles,
+      contextPolicy: stored.contextPolicy,
+      contextPolicies: stored.contextPolicies,
       tailscaleIPv4
     });
   });
 
   app.put('/api/settings/gateway', (req, res) => {
-    const { url, apiKey, enabled, disabledProfiles } = req.body as {
+    const { url, apiKey, enabled, disabledProfiles, contextPolicy, contextPolicies } = req.body as {
       url?: string | null;
       apiKey?: string | null;
       enabled?: boolean;
       disabledProfiles?: string[];
+      contextPolicy?: import('./gatewaySettingsStore.js').MemoryContextPolicy;
+      contextPolicies?: Record<string, import('./gatewaySettingsStore.js').MemoryContextPolicy>;
     };
     const patch: Parameters<typeof writeGatewaySettings>[0] = {};
     if ('url' in req.body) patch.url = url ?? null;
     if ('apiKey' in req.body) patch.apiKey = apiKey ?? null;
     if (typeof enabled === 'boolean') patch.enabled = enabled;
     if (Array.isArray(disabledProfiles)) patch.disabledProfiles = disabledProfiles;
+    if (contextPolicy && typeof contextPolicy === 'object') patch.contextPolicy = contextPolicy;
+    if (contextPolicies && typeof contextPolicies === 'object') patch.contextPolicies = contextPolicies;
     writeGatewaySettings(patch);
     res.json(readGatewaySettings());
   });
