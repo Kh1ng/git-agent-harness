@@ -143,6 +143,21 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         }
         None => println!("systemd not available on this host: skipping watchdog unit install."),
     }
+    match install_quota_refresh_unit_template(&repo)? {
+        Some(quota_refresh_units) => {
+            for unit in &quota_refresh_units {
+                println!("Installed quota refresh unit: {}", unit.display());
+            }
+            println!(
+                "Quota refresh timer is installed and enabled: account-level quota \
+                 (codex/vibe) refreshes every 15 minutes (issue #761). Opt out with \
+                 `systemctl --user disable --now gah-quota-refresh.timer`."
+            );
+        }
+        None => {
+            println!("systemd not available on this host: skipping quota refresh unit install.")
+        }
+    }
 
     if args.restart_server {
         run_command(&repo, "sudo", &["systemctl", "daemon-reload"])?;
@@ -549,6 +564,34 @@ fn install_watchdog_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2]>> {
     Ok(Some([service, timer]))
 }
 
+/// Issue #761: keep the account-level quota refresh units in lockstep with
+/// the installed CLI, same reasoning as the other unit templates. Unlike the
+/// watchdog (which needs an alert command configured before it can do
+/// anything), quota refresh works with zero extra config -- it writes a
+/// data-free marker for backends that aren't configured and moves on -- so
+/// `gah update` both installs AND enables the timer: this is what makes
+/// `quota_observations.jsonl` populate automatically on deployed nodes
+/// instead of going stale for days (the bug #761 exists to fix). An operator
+/// who genuinely doesn't want periodic quota refresh opts out with
+/// `systemctl --user disable --now gah-quota-refresh.timer`.
+fn install_quota_refresh_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2]>> {
+    if !systemd_available() {
+        return Ok(None);
+    }
+    let config_home = systemd_user_config_home()?;
+    let service = copy_systemd_unit(repo, &config_home, "gah-quota-refresh.service")?;
+    let timer = copy_systemd_unit(repo, &config_home, "gah-quota-refresh.timer")?;
+    reload_user_systemd("installing gah-quota-refresh.service/.timer")?;
+    let status = Command::new("systemctl")
+        .args(["--user", "enable", "--now", "gah-quota-refresh.timer"])
+        .status()
+        .with_context(|| "enabling gah-quota-refresh.timer")?;
+    if !status.success() {
+        bail!("systemctl --user enable --now gah-quota-refresh.timer exited with {status}");
+    }
+    Ok(Some([service, timer]))
+}
+
 fn ensure_clean(repo: &Path) -> Result<()> {
     let status = captured(repo, "git", &["status", "--porcelain"])?;
     if !status.is_empty() {
@@ -604,9 +647,9 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_clean, ensure_default_branch_checkout, install_server_unit_template,
-        install_watchdog_unit_template, installed_binary_path, resolve_web_deploy_root, run,
-        stale_asset_names, HostRole, UpdateArgs,
+        ensure_clean, ensure_default_branch_checkout, install_quota_refresh_unit_template,
+        install_server_unit_template, install_watchdog_unit_template, installed_binary_path,
+        resolve_web_deploy_root, run, stale_asset_names, HostRole, UpdateArgs,
     };
     use crate::test_support::PathGuard;
     use std::collections::HashSet;
@@ -773,6 +816,56 @@ mod tests {
             );
         }
         assert!(record.contains("daemon-reload"), "{record}");
+    }
+
+    /// Issue #761: `gah update` installs BOTH quota-refresh units and
+    /// enables the timer (unlike the opt-in watchdog), so `quota_observations.jsonl`
+    /// gets populated automatically on deployed nodes. The fake systemctl
+    /// logs every invocation and succeeds; the assertion checks both files
+    /// landed and the timer was enabled.
+    #[test]
+    fn quota_refresh_units_are_installed_and_timer_enabled() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config_tmp = TempDir::new().unwrap();
+        let _xdg_guard = XdgConfigHomeGuard::set(config_tmp.path());
+
+        let bin_tmp = TempDir::new().unwrap();
+        let record_path = bin_tmp.path().join("argv.log");
+        let script = format!("#!/bin/sh\necho \"$@\" >> '{}'\n", record_path.display());
+        let script_path = bin_tmp.path().join("systemctl");
+        std::fs::write(&script_path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+        let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
+
+        let [service, timer] = install_quota_refresh_unit_template(repo).unwrap().unwrap();
+
+        assert!(service.ends_with("systemd/user/gah-quota-refresh.service"));
+        assert!(timer.ends_with("systemd/user/gah-quota-refresh.timer"));
+        assert!(
+            std::fs::read_to_string(&service)
+                .unwrap()
+                .contains("gah quota auto-refresh"),
+            "installed unit should invoke the packaged auto-refresh command"
+        );
+        assert!(
+            std::fs::read_to_string(&timer)
+                .unwrap()
+                .contains("gah-quota-refresh.service"),
+            "timer must point at the packaged service"
+        );
+
+        let record = std::fs::read_to_string(&record_path).unwrap();
+        assert!(record.contains("daemon-reload"), "{record}");
+        assert!(
+            record.contains("enable") && record.contains("gah-quota-refresh.timer"),
+            "timer must be enabled: {record}"
+        );
     }
 
     #[test]

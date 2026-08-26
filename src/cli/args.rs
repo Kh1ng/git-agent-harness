@@ -1030,6 +1030,20 @@ pub enum QuotaCommands {
         #[arg(long, name = "store")]
         store_path: Option<String>,
     },
+    /// Refresh account-level quota for every configured profile's
+    /// quota-tracked backends (codex, vibe), throttled to one live check per
+    /// backend per interval (30 min) and bounded so a hung backend can never
+    /// wedge the caller. Runs each due refresh to completion before exiting
+    /// (it JOINS the refresh threads, unlike the fire-and-forget loop-tick
+    /// probe), so a systemd oneshot timer can run it safely. Intended for
+    /// unattended invocation -- a systemd timer -- not the manual per-backend
+    /// `refresh` command.
+    AutoRefresh {
+        /// Override the durable store path (default: $XDG_STATE_HOME/gah/...).
+        /// Mainly for testing/automation.
+        #[arg(long, name = "store")]
+        store_path: Option<String>,
+    },
     /// List persisted account-level quota observations.
     List {
         #[arg(long, default_value_t = false)]

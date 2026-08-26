@@ -84,6 +84,45 @@ pub fn run(command: QuotaCommands) -> Result<()> {
                 }
             }
         }
+        QuotaCommands::AutoRefresh {
+            store_path: store_arg,
+        } => {
+            // Issue #761: periodic, unattended account-level quota refresh.
+            // Iterate every configured profile so per-profile codex_path
+            // overrides are honored, and let refresh_quota_observations_and_wait
+            // apply the per-backend 30-min throttle + bounded supervision.
+            // The store is shared across profiles, so one store path feeds all.
+            let path = store_arg
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(quota_store::store_path);
+            // A node with no config yet has no profiles to refresh -- report
+            // and exit cleanly rather than failing the systemd oneshot timer.
+            let cfg = match config::load(None) {
+                Ok(cfg) => cfg,
+                Err(error) => {
+                    println!("No gah config to refresh quota for (skipping): {error}");
+                    return Ok(());
+                }
+            };
+            let mut names: Vec<&String> = cfg.profiles.keys().collect();
+            names.sort();
+            let mut refreshed_any = false;
+            for name in names {
+                let profile = &cfg.profiles[name];
+                let refreshed = quota_store::refresh_quota_observations_and_wait(
+                    profile,
+                    time::OffsetDateTime::now_utc(),
+                    &path,
+                );
+                if refreshed > 0 {
+                    println!("Refreshed {refreshed} quota backend(s) for profile '{name}'");
+                    refreshed_any = true;
+                }
+            }
+            if !refreshed_any {
+                println!("No quota backends were due for refresh.");
+            }
+        }
         QuotaCommands::List {
             json,
             store_path: store_arg,
