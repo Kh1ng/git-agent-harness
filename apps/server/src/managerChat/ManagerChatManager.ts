@@ -208,7 +208,18 @@ export async function runTurn(
   // A cancelled turn is closed as cancelled, never captured as a completed
   // exchange (a partial reply must not enter the memory gateway).
   if (!active.cancelled) {
-    await capture(profile, message, result.reply);
+    const captured = await capture(profile, message, result.reply);
+    // #878: a failing gateway never hard-blocks the turn, but the skipped
+    // capture must be visible in the transcript, not silent.
+    if (captured.degraded) {
+      appendEvents(profile, [{
+        type: 'harness/error',
+        seq: ++active.seq,
+        turn: active.turnNo,
+        text: `memory gateway degraded (capture skipped, memory may be lost): ${captured.error ?? 'unknown error'}`,
+        timestamp: Date.now()
+      }], logOptions);
+    }
     // Force buffered L0 conversation into the gateway's L1/L2 pipeline right
     // away on a compact/clear-like command, instead of waiting for the
     // pipeline's own idle timeout (#849).
@@ -278,6 +289,17 @@ export function sendManagerChatMessage(profile: string, message: string, request
       if (!isSlashCommand) {
         const policy = effectiveContextPolicy(profile);
         const recalled = await recall(profile, message);
+        // #878: a failing gateway never hard-blocks the turn, but the skipped
+        // recall context must be visible in the transcript, not silent.
+        if (recalled.degraded) {
+          appendEvents(profile, [{
+            type: 'harness/error',
+            seq: ++active.seq,
+            turn: turnNo,
+            text: `memory gateway degraded (recall context skipped): ${recalled.error ?? 'unknown error'}`,
+            timestamp: Date.now()
+          }], logOptions);
+        }
         // #961: budget injected recall deterministically (highest-relevance
         // head first), and record the policy + truncation on the inject
         // event so a replay explains itself.
