@@ -42,7 +42,7 @@ test('profile changes reject stale chat replies and control data', async ({ page
       return route.fulfill({ json: {
         defaultBackend: backend,
         profileOverrides: {},
-        availableBackends: [{ id: backend, displayName: backend }]
+        availableBackends: [{ id: backend, displayName: backend, implemented: true }]
       } });
     }
     if (url.pathname === '/api/manager-chat/commands' || url.pathname === '/api/manager-chat/models') {
@@ -144,7 +144,7 @@ test('reconnect restores and follows an in-flight reply', async ({ page }) => {
     if (path === '/api/projects') return route.fulfill({ json: [{ name: 'alpha', display_name: 'Alpha', repo: 'org/alpha' }] });
     if (path === '/api/controller-activity') return route.fulfill({ json: [] });
     if (path === '/api/manager-chat/settings') return route.fulfill({ json: {
-      defaultBackend: 'hermes', profileOverrides: {}, availableBackends: [{ id: 'hermes', displayName: 'Hermes' }]
+      defaultBackend: 'hermes', profileOverrides: {}, availableBackends: [{ id: 'hermes', displayName: 'Hermes', implemented: true }]
     } });
     if (path === '/api/manager-chat/commands') return route.fulfill({ json: { commands: [] } });
     if (path === '/api/manager-chat/models') return route.fulfill({ json: { models: [], currentModelId: null } });
