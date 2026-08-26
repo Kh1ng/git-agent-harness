@@ -5,7 +5,7 @@ import { resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import type { ConfigProfileSummary, DoctorSnapshot, ProfileSummary } from '@git-agent-harness/contracts';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -240,5 +240,83 @@ test('project routes expose only curated profiles', async () => {
   } finally {
     if (savedCatalogPath === undefined) delete process.env.GAH_PROJECT_CATALOG_PATH;
     else process.env.GAH_PROJECT_CATALOG_PATH = savedCatalogPath;
+  }
+});
+
+
+test('skill bank API stores versions, resolves newest, and refuses deletion of a bound skill', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-skills-api-'));
+  const savedBank = process.env.GAH_SKILL_BANK_PATH;
+  process.env.GAH_SKILL_BANK_PATH = join(dir, 'skills.json');
+  try {
+    await withTestServer(async () => profilePayload('alpha'), async (baseUrl) => {
+      const empty = (await (await fetch(`${baseUrl}/api/skills`)).json()) as { skills: unknown[] };
+      assert.deepEqual(empty.skills, []);
+
+      const create = await fetch(`${baseUrl}/api/skills`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 'alpha', version: '1.0.0', displayName: 'Alpha', description: 'd', content: 'v1', backends: ['hermes'] })
+      });
+      assert.equal(create.status, 201);
+      await fetch(`${baseUrl}/api/skills`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 'alpha', version: '2.0.0', displayName: 'Alpha', description: 'd', content: 'v2', backends: ['hermes'] })
+      });
+
+      // Unversioned GET resolves to the newest; versioned to the named one.
+      const newest = (await (await fetch(`${baseUrl}/api/skills/alpha`)).json()) as { version: string };
+      assert.equal(newest.version, '2.0.0');
+      const v1 = (await (await fetch(`${baseUrl}/api/skills/alpha?version=1.0.0`)).json()) as { content: string };
+      assert.equal(v1.content, 'v1');
+      assert.equal((await fetch(`${baseUrl}/api/skills/nope`)).status, 404);
+
+      // AC7: deleting a skill that is bound is refused, naming the bindings.
+      const { addBinding } = await import('./skillBank.js');
+      addBinding('alpha', 'hermes:gah');
+      const refused = await fetch(`${baseUrl}/api/skills/alpha`, { method: 'DELETE' });
+      assert.equal(refused.status, 409);
+      const refusedBody = (await refused.json()) as { message: string };
+      assert.match(refusedBody.message, /still bound to hermes:gah/);
+    });
+  } finally {
+    if (savedBank === undefined) delete process.env.GAH_SKILL_BANK_PATH;
+    else process.env.GAH_SKILL_BANK_PATH = savedBank;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('skill bank mutation routes reject unauthenticated non-loopback requests like /api/projects', async () => {
+  const { isLocalAddress } = await import('./authMiddleware.js');
+  const dir = mkdtempSync(join(tmpdir(), 'gah-skills-api-'));
+  const savedBank = process.env.GAH_SKILL_BANK_PATH;
+  process.env.GAH_SKILL_BANK_PATH = join(dir, 'skills.json');
+  const os = await import('node:os');
+  const app = createServer({});
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '0.0.0.0', () => resolve()));
+  const { port } = server.address() as AddressInfo;
+  const nonLoopbackIp = Object.values(os.networkInterfaces())
+    .flatMap((list) => list ?? [])
+    .find((addr) => addr?.family === 'IPv4' && !isLocalAddress(addr.address))
+    ?.address;
+  try {
+    if (!nonLoopbackIp) return;
+    const baseUrl = `http://${nonLoopbackIp}:${port}`;
+    // No TLS, no token -> 403 Forbidden, exactly like /api/projects.
+    for (const path of ['/api/skills', '/api/projects']) {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 'x', version: '1.0.0', content: 'c' })
+      });
+      assert.equal(res.status, 403, `${path} must be gated by authMiddleware`);
+    }
+  } finally {
+    if (savedBank === undefined) delete process.env.GAH_SKILL_BANK_PATH;
+    else process.env.GAH_SKILL_BANK_PATH = savedBank;
+    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });

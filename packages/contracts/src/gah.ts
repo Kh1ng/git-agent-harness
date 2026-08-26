@@ -1076,3 +1076,51 @@ export interface ManagerModelsSummary {
   models: ManagerModelInfo[];
   currentModelId: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Skill bank (issue #963/#964): the central node's versioned skill store.
+// A skill is authored/installed once here and bound to any backend/instance
+// on any node without touching that provider's own configuration. #964 ships
+// the store + /api/skills; #965 resolves bindings per backend instance.
+// ---------------------------------------------------------------------------
+
+/** One versioned skill record in the central bank. Multiple versions of the
+ * same id coexist; unversioned reads resolve to the newest. */
+export interface Skill {
+  /** Stable id, e.g. 'gah-manager'. */
+  id: string;
+  /** Semver-ish version string, e.g. '1.0.0'. */
+  version: string;
+  displayName: string;
+  description: string;
+  /** The skill content (markdown text, a prompt file, etc.). */
+  content: string;
+  /** Declared backend compatibility (e.g. ['hermes', 'codex']). Empty = all
+   * backends. Used by #965 to decide which bindings are applicable. */
+  backends: string[];
+  /** Provenance: where the skill came from (e.g. 'docs/gah-manager-skill.md'). */
+  source: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** The durable bank file's shape: a flat list of versioned records plus the
+ * (still-resolving, #965) binding registry used to refuse deletion of a
+ * skill that is in use. */
+export interface SkillBankFile {
+  skills: Skill[];
+  /** skillId -> human-readable binding labels (e.g. 'hermes' or
+   * 'hermes:gah'). A skill with bindings cannot be deleted. */
+  bindings: Record<string, string[]>;
+}
+
+export interface SkillSummary {
+  id: string;
+  version: string;
+  displayName: string;
+  description: string;
+  backends: string[];
+  source: string;
+  /** True when this skill has live bindings (deletion would be refused). */
+  bound: boolean;
+}
