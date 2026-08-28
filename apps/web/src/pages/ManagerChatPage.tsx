@@ -55,6 +55,22 @@ function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
   };
 }
 
+function MarkdownMessage({ text }: { text: string }) {
+  return (
+    <div className="chat-markdown">
+      <ReactMarkdown
+        components={{
+          a: ({ node: _node, ...props }) => (
+            <a {...props} target="_blank" rel="noreferrer" />
+          )
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 /** WP3: the preview URL comes from the server (node address + allocated
  * port), but the client never trusts it blindly -- validate the exact
  * shape (plain http, host, numeric port) before it reaches an href or an
@@ -957,19 +973,17 @@ export function ManagerChatPage() {
                 <ToolCallCard tool={turn.tool} />
               ) : (
                 <div
-                  className={`max-w-[80%] rounded-lg px-3 py-2 text-sm break-words ${
+                  className={`min-w-0 max-w-[80%] rounded-lg px-3 py-2 text-sm break-words ${
                     turn.role === 'user'
-                      ? 'bg-accent text-white whitespace-pre-wrap'
+                      ? 'bg-accent text-white'
                       : turn.role === 'error'
-                        ? 'bg-red-500/10 text-red-400 border border-red-500/30 whitespace-pre-wrap'
+                        ? 'bg-red-500/10 text-red-400 border border-red-500/30'
                         : turn.role === 'system'
                           ? 'bg-transparent text-muted italic text-xs px-0'
-                          : 'bg-raised text-primary border border-subtle prose prose-invert prose-sm max-w-none'
+                          : 'bg-raised text-primary border border-subtle'
                   }`}
                 >
-                  {turn.role === 'assistant'
-                    ? <ReactMarkdown>{turn.text}</ReactMarkdown>
-                    : turn.text}
+                  <MarkdownMessage text={turn.text} />
                 </div>
               )}
               {turn.role === 'assistant' && turn.backend && (
@@ -1017,8 +1031,8 @@ export function ManagerChatPage() {
           )}
           {streaming && (
             <div className="flex justify-start">
-              <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm break-words bg-raised text-primary border border-subtle prose prose-invert prose-sm max-w-none">
-                <ReactMarkdown>{streaming.text}</ReactMarkdown>
+              <div className="min-w-0 max-w-[80%] rounded-lg px-3 py-2 text-sm break-words bg-raised text-primary border border-subtle">
+                <MarkdownMessage text={streaming.text} />
               </div>
             </div>
           )}
