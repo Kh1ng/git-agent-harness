@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GAH Worker</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0b0e14;
+        color: #e6e9ef;
+        font: 14px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      .card {
+        max-width: 32rem;
+        padding: 2rem;
+        border: 1px solid #232936;
+        border-radius: 0.75rem;
+        background: #11151f;
+      }
+      h1 { font-size: 1.1rem; margin: 0 0 0.75rem; }
+      code { color: #8ab4ff; background: #0b0e14; padding: 0.1rem 0.35rem; border-radius: 0.25rem; }
+      a { color: #8ab4ff; }
+      .muted { color: #9aa3b2; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>GAH Worker</h1>
+      <p>The dashboard loads from your central node over Tailscale.</p>
+      <p class="muted">
+        If this page stays visible, the central node is unreachable. Check:
+      </p>
+      <ul class="muted">
+        <li>Tailscale is connected on this machine</li>
+        <li>The central node is online (its address is read from <code>~/.config/gah/config.toml</code> — <code>registry_central_url</code>)</li>
+      </ul>
+      <p class="muted">The worker loop keeps running regardless — control it from the tray icon.</p>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

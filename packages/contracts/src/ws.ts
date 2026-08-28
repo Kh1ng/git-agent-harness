@@ -163,6 +163,18 @@ export type ServerMessage =
       locations: string[];
     }
   | {
+      /** WP3: a session's preview went live (manual set or auto-detected
+       * from dev-server output in tool events). Clients light up the
+       * Preview affordance. */
+      type: "manager.chat.preview";
+      requestId: string;
+      profile: string;
+      sessionId: string;
+      devPort: number;
+      listenPort: number;
+      url: string;
+    }
+  | {
       type: "manager.chat.reply";
       requestId: string;
       profile: string;

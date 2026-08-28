@@ -29,6 +29,7 @@ import {
   updateSession,
   type ChatSessionStoreOptions
 } from './chatSessions.js';
+import { previewProxy, detectDevPort } from './previewProxy.js';
 import { runProfileList } from '../gahCli.js';
 import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
@@ -95,6 +96,23 @@ export function setChatEventPublishers(publishers: {
   permissionPublisher = publishers.permission;
 }
 
+/** Live preview push (WP3): fired when a session's preview port is set or
+ * auto-detected, so clients can light up the Preview button mid-turn. */
+export type PreviewPublish = (event: {
+  type: 'manager.chat.preview';
+  requestId: string;
+  profile: string;
+  sessionId: string;
+  devPort: number;
+  listenPort: number;
+  url: string;
+}) => void;
+let previewPublisher: PreviewPublish | undefined;
+
+export function setPreviewPublisher(publish: PreviewPublish | undefined): void {
+  previewPublisher = publish;
+}
+
 export function setChunkPublisher(publish: ChunkPublish | undefined): void {
   chunkPublisher = publish;
 }
@@ -129,6 +147,9 @@ interface ActiveTurn {
     permissionId: string;
     request: { title: string; options: { optionId: string; name: string; kind: string }[]; locations: string[] };
   }) => Promise<void>;
+  /** In-flight previewProxy.set promises (WP3), awaited before the turn
+   * resolves so a clear() racing a pending set can't leak a listener. */
+  previewSets: Promise<unknown>[];
 }
 const activeTurns = new Map<string, ActiveTurn>();
 
@@ -206,7 +227,26 @@ export function updateChatSession(
 export async function archiveChatSession(profile: string, sessionId: string) {
   const profileInfo = await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
-  return archiveSession(profile, sessionId, profileInfo, chatSessionStoreOptions);
+  try {
+    return await archiveSession(profile, sessionId, profileInfo, chatSessionStoreOptions);
+  } finally {
+    // The worktree goes away; its preview can't be valid anymore.
+    await previewProxy.clear(profile, sessionId);
+  }
+}
+
+/** WP3 preview state for one session (null when none). */
+export function getChatPreview(profile: string, sessionId: string) {
+  return previewProxy.get(profile, sessionId);
+}
+
+/** WP3: point a session's preview at a dev port manually (null clears). */
+export async function setChatPreview(profile: string, sessionId: string, port: number | null) {
+  if (port === null) {
+    await previewProxy.clear(profile, sessionId);
+    return null;
+  }
+  return previewProxy.set(profile, sessionId, port);
 }
 
 export function listCommandsForProfile(profile: string): Promise<ManagerCommandInfo[]> {
@@ -530,7 +570,10 @@ export function sendManagerChatMessage(profile: string, message: string, request
       chunkWriter: undefined,
       cancelled: false,
       cancelSettled: new Promise<void>((resolve) => { resolveCancel = resolve; }),
-      resolveCancel: () => resolveCancel()
+      resolveCancel: () => resolveCancel(),
+      /** In-flight previewProxy.set promises (WP3): awaited before the turn
+       * resolves so a clear() racing a pending set can't leak a listener. */
+      previewSets: []
     };
     activeTurns.set(key, active);
     activeProfiles.add(key);
@@ -619,6 +662,29 @@ export function sendManagerChatMessage(profile: string, message: string, request
       // Slice 3: structured tool-call activity -- logged (durable, replayed
       // on resume) and pushed live. Status transitions append new events;
       // the fold keeps the latest per toolCallId.
+      // WP3: watch agent tool output for a dev-server port; when one shows
+      // up in a session turn, point the session's preview at it and push.
+      const detectPreview = (text: string): void => {
+        if (!sessionId || sessionId === 'default') return;
+        const devPort = detectDevPort(text);
+        if (devPort === null) return;
+        const setPromise = previewProxy
+          .set(profile, sessionId, devPort)
+          .then((info) => {
+            previewPublisher?.({
+              type: 'manager.chat.preview',
+              requestId: requestId ?? '',
+              profile,
+              sessionId,
+              devPort: info.devPort,
+              listenPort: info.listenPort,
+              url: info.url
+            });
+          })
+          .catch((error) => console.error('[managerChat] preview set failed:', error));
+        active.previewSets.push(setPromise);
+      };
+
       const onToolCall = (tool: {
         toolCallId: string;
         name: string | null;
@@ -643,6 +709,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
           turn: turnNo,
           ...tool
         });
+        if (tool.summary) detectPreview(tool.summary);
       };
       const run = runTurn(
         profile,
@@ -670,14 +737,17 @@ export function sendManagerChatMessage(profile: string, message: string, request
             });
           }
         },
-        (name, text) => active.chunkWriter?.append({
-          type: 'tool/result',
-          seq: ++active.seq,
-          turn: turnNo,
-          name,
-          text,
-          timestamp: Date.now()
-        }),
+        (name, text) => {
+          active.chunkWriter?.append({
+            type: 'tool/result',
+            seq: ++active.seq,
+            turn: turnNo,
+            name,
+            text,
+            timestamp: Date.now()
+          });
+          detectPreview(text);
+        },
         active,
         { key, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model },
         onToolCall
@@ -761,6 +831,10 @@ export function sendManagerChatMessage(profile: string, message: string, request
       // the backend errored while blocked) and detaches the sink.
       active.pendingPermission?.resolve('cancelled');
       active.permissionSink = undefined;
+      // Settle any in-flight preview detection BEFORE the turn resolves:
+      // otherwise a clear() right after the reply (archive, tests) races
+      // the pending set() and leaks the listener.
+      await Promise.allSettled(active.previewSets);
       if (sessionId && sessionId !== 'default') touchSession(profile, sessionId, chatSessionStoreOptions);
       activeProfiles.delete(key);
       activeTurns.delete(key);
