@@ -87,7 +87,10 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
   const projects = page.getByRole('navigation', { name: 'Projects' });
   await expect(projects.getByRole('button', { name: 'Alpha org/alpha' })).toBeVisible();
-  await expect(projects.getByRole('button', { name: /Hidden/ })).toHaveCount(0);
+  // The rail lists every CONFIGURED profile -- the curated catalog no longer
+  // gates chat (it stays for the Overview dashboard), so an un-curated
+  // profile like "hidden" is one click away (the project-switch fix).
+  await expect(projects.getByRole('button', { name: 'Hidden org/hidden' })).toBeVisible();
   await expect.poll(() => heldAlphaHistory).not.toBe('');
   await expect(page.getByText('Loading conversation…')).toBeVisible();
   await expect(page.getByText('Thinking…')).toHaveCount(0);
