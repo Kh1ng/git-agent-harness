@@ -18,6 +18,11 @@ test('the chat header switches the harness and persists a per-profile override',
   let socket: WebSocketRoute;
   let lastPost: { profileOverrides?: Record<string, string> } | null = null;
 
+  // The chat reply is gated until the AC5 block releases it, so the
+  // in-flight (Stop) state is observed deterministically.
+  let releaseReply!: () => void;
+  const replyGate = new Promise<void>((resolve) => { releaseReply = resolve; });
+
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/profiles') {
@@ -65,15 +70,20 @@ test('the chat header switches the harness and persists a per-profile override',
           streaming: null
         }));
       } else if (message.type === 'manager.chat.send') {
-        ws.send(JSON.stringify({
-          type: 'manager.chat.reply',
-          requestId: message.requestId,
-          profile: message.profile,
-          reply: 'ok',
-          backend: 'claude',
-          model: 'claude-model',
-          usage: null
-        }));
+        // The reply is gated: the AC5 block releases it after asserting the
+        // in-flight (Stop) state, so the busy-state transition is observed
+        // deterministically instead of racing the immediate reply.
+        void replyGate.then(() => {
+          ws.send(JSON.stringify({
+            type: 'manager.chat.reply',
+            requestId: message.requestId,
+            profile: message.profile,
+            reply: 'ok',
+            backend: 'claude',
+            model: 'claude-model',
+            usage: null
+          }));
+        });
       }
     });
   });
@@ -93,9 +103,15 @@ test('the chat header switches the harness and persists a per-profile override',
   await expect.poll(() => lastPost).not.toBeNull();
   expect(lastPost?.profileOverrides).toEqual({ alpha: 'claude' });
 
-  // AC5: the picker is disabled while a turn is in flight.
+  // AC5: the picker is disabled while a turn is in flight, and re-enables
+  // when the reply lands -- the busy state clears on the reply itself, not
+  // only on the post-turn history reload. The reply is held until Stop is
+  // observed so the in-flight state is deterministic.
   await page.getByPlaceholder(/Message the manager/).fill('question');
   await page.getByRole('button', { name: 'Send' }).click();
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
   await expect(harness).toBeDisabled();
+  releaseReply();
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
+  await expect(harness).toBeEnabled();
 });
