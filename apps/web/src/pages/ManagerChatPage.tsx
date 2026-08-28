@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
@@ -956,17 +957,19 @@ export function ManagerChatPage() {
                 <ToolCallCard tool={turn.tool} />
               ) : (
                 <div
-                  className={`max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words ${
+                  className={`max-w-[80%] rounded-lg px-3 py-2 text-sm break-words ${
                     turn.role === 'user'
-                      ? 'bg-accent text-white'
+                      ? 'bg-accent text-white whitespace-pre-wrap'
                       : turn.role === 'error'
-                        ? 'bg-red-500/10 text-red-400 border border-red-500/30'
+                        ? 'bg-red-500/10 text-red-400 border border-red-500/30 whitespace-pre-wrap'
                         : turn.role === 'system'
                           ? 'bg-transparent text-muted italic text-xs px-0'
-                          : 'bg-raised text-primary border border-subtle'
+                          : 'bg-raised text-primary border border-subtle prose prose-invert prose-sm max-w-none'
                   }`}
                 >
-                  {turn.text}
+                  {turn.role === 'assistant'
+                    ? <ReactMarkdown>{turn.text}</ReactMarkdown>
+                    : turn.text}
                 </div>
               )}
               {turn.role === 'assistant' && turn.backend && (
@@ -1014,8 +1017,8 @@ export function ManagerChatPage() {
           )}
           {streaming && (
             <div className="flex justify-start">
-              <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words bg-raised text-primary border border-subtle">
-                {streaming.text}
+              <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm break-words bg-raised text-primary border border-subtle prose prose-invert prose-sm max-w-none">
+                <ReactMarkdown>{streaming.text}</ReactMarkdown>
               </div>
             </div>
           )}

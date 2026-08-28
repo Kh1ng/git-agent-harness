@@ -58,7 +58,6 @@
     "targets": "all",
     "macOS": {
       "entitlements": null,
-      "exceptionDomain": "",
       "frameworks": [],
       "minimumSystemVersion": "10.13"
     }

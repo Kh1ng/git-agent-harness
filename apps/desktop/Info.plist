@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The dashboard webview loads the coordinator over plain HTTP, and the
+       operator-configured registry_central_url (config.toml) is routinely a
+       raw tailnet IP (e.g. http://100.118.97.79). ATS exception domains can
+       only match domain names -- never IP literals -- so the empty
+       NSExceptionDomains entry Tauri emits from `exceptionDomain` cannot
+       cover the real target and WKWebView blocks the load (white screen,
+       NSURLErrorAppTransportSecurity -1022). Arbitrary loads is the honest
+       setting for this app: the webview target is operator-configured. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsArbitraryLoads</key>
+    <true/>
+  </dict>
+</dict>
+</plist>
