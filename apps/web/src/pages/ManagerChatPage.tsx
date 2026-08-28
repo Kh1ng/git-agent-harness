@@ -143,6 +143,11 @@ export function ManagerChatPage() {
   const [preview, setPreview] = useState<ChatPreviewInfo | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewPortDraft, setPreviewPortDraft] = useState('');
+  /** WP3: mixed-content detection — an HTTPS dashboard embedding an HTTP
+   * preview gets blocked by the browser. A blocked frame keeps an
+   * accessible-but-empty contentDocument (about:blank); a loaded frame is
+   * cross-origin (different port) and access throws. */
+  const [previewBlocked, setPreviewBlocked] = useState(false);
   /** Highest log seq this client has applied. Chunks at or below it are
    * already reflected in the rendered transcript (e.g. fetched via history),
    * so they're skipped -- gives exactly-once rendering for a client that
@@ -598,6 +603,24 @@ export function ManagerChatPage() {
 
   const [newChatOpen, setNewChatOpen] = useState(false);
 
+  useEffect(() => {
+    if (!previewOpen || !preview) return;
+    setPreviewBlocked(false);
+    const timer = setTimeout(() => {
+      const frame = document.querySelector<HTMLIFrameElement>('iframe[title="Session preview"]');
+      if (!frame) return;
+      try {
+        // Accessible document with no content = the load never happened.
+        const doc = frame.contentDocument;
+        setPreviewBlocked(Boolean(doc && !doc.body?.childNodes.length && !doc.title));
+      } catch {
+        // Cross-origin access throws = the frame loaded a real page.
+        setPreviewBlocked(false);
+      }
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [previewOpen, preview?.url]);
+
   /** WP3 preview: manual port set/clear + panel toggle. */
   const applyPreviewPort = async (raw: string) => {
     if (!activeSession) return;
@@ -848,12 +871,31 @@ export function ManagerChatPage() {
               <p className="text-[11px] text-muted pb-2">
                 dev server <span className="font-mono">:{preview.devPort}</span> → <span className="font-mono">{safePreviewUrl(preview.url)}</span>
               </p>
-              <iframe
-                src={safePreviewUrl(preview.url) ?? undefined}
-                title="Session preview"
-                className="flex-1 min-h-0 w-full rounded-md border border-subtle bg-white"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-              />
+              <div className="relative flex-1 min-h-0">
+                <iframe
+                  src={safePreviewUrl(preview.url) ?? undefined}
+                  title="Session preview"
+                  className="h-full min-h-0 w-full rounded-md border border-subtle bg-white"
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                />
+                {previewBlocked && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-md bg-card/95 px-4 text-center">
+                    <p className="text-xs leading-relaxed text-secondary">
+                      The browser blocked the embedded preview (HTTPS page, HTTP preview).
+                      Opening it in a new tab works — the preview URL is served over the
+                      tailnet.
+                    </p>
+                    <a
+                      href={safePreviewUrl(preview.url) ?? '#'}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="btn-primary text-xs"
+                    >
+                      <ExternalLink size={13} aria-hidden="true" /> Open preview
+                    </a>
+                  </div>
+                )}
+              </div>
               <button
                 onClick={stopPreview}
                 className="btn-secondary text-xs mt-2 self-start"
