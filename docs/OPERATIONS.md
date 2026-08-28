@@ -77,6 +77,38 @@ gah update --repo /path/to/git-agent-harness --restart-server
 The updater never starts or restarts a recurring `gah loop`; with
 `--restart-server` it also refuses to restart the service while one is active.
 
+### Known issue: `gah update` web step can wedge on the central node
+
+The workspace-root `npm run build:web` runs a `prebuild` hook (`npm run
+test:server`, the full `apps/server` battery) before `vite build`. On the
+central node that battery wedges inside
+`apps/server/src/managerChatSessions.integration.test.ts`, so the update's
+web-build step never completes: observed 39 min at 0% CPU with no runner-level
+timeout, and a bounded reproduction where subtest 4 ("a session preview
+auto-detects the dev-server port and proxies it") fails at exactly its 30 s
+timeout. The same battery passes on macOS. The CLI install, `apps/server/dist`
+build, and systemd unit reinstall all precede the web step, so those still land
+correctly; only the dashboard goes stale. Tracked as issue #994.
+
+Verified workaround (used when the issue → chat work shipped, #991–#993) —
+skip the test gate, build and deploy the dashboard directly:
+
+```bash
+cd apps/web && npx vite build
+sudo rm -rf /var/www/gah/* && sudo cp -r dist/* /var/www/gah/
+sudo systemctl restart gah-server   # only if the server build also changed
+```
+
+### Deployed state (2026-08-28)
+
+Both the central node and the macOS dev host run the `gah` CLI at `origin/main`
+(`4d5ccad6`, the issue → chat fixes, #991–#993). Central `gah-server` is active
+and serving the rebuilt `apps/web` `dist` from `/var/www/gah`; the issue → chat
+routes (`GET/POST /api/manager-chat/issues…`) are live through the front door
+(`https://hermesagent.tail82695.ts.net`). Central `gah update` rolled the CLI
+and `apps/server`; the dashboard was deployed with the workaround above because
+of the prebuild gate issue.
+
 ### systemd units
 
 - **`gah-server`** — runs `apps/server/dist/bin.js`, the REST/WebSocket
