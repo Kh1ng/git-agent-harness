@@ -198,6 +198,12 @@ fn prune_worktrees(
     let prefixes = [
         format!("gah-{}-", profile.repo_id),
         format!("gah-exp-{}-", profile.repo_id),
+        // Chat-session worktrees (apps/server chatSessions.ts). Same base,
+        // same age+clean rules: an idle-but-clean chat worktree is safe to
+        // reclaim because the session's durable state (log + branch) survives
+        // and the worktree rematerializes on resume; a dirty one is retained
+        // for the session's own archive-with-patch step, never force-removed.
+        format!("gah-chat-{}-", profile.repo_id),
     ];
     // Full GitHub history is GraphQL-backed in the compatibility sync path.
     // It is acceptable for an explicit operator prune, but never for the
@@ -384,6 +390,62 @@ mod tests {
                 .checked_sub(Duration::from_secs(86_400))
                 .unwrap()
         ));
+    }
+
+    /// Chat-session worktrees share the worktree base and the gah-chat-<repo>-
+    /// naming prefix (apps/server chatSessions.ts); the same age+clean prune
+    /// that reclaims dispatch worktrees must reclaim idle chat ones too --
+    /// and must never touch a directory that doesn't carry the prefix.
+    #[test]
+    fn prune_worktrees_reclaims_idle_chat_worktrees_and_ignores_foreign_dirs() {
+        let worktree_base = tempfile::tempdir().unwrap();
+        let repo_id = "repo";
+        let chat = worktree_base
+            .path()
+            .join(format!("gah-chat-{repo_id}-abc123"));
+        let foreign = worktree_base.path().join("someone-elses-worktree");
+        for dir in [&chat, &foreign] {
+            fs::create_dir_all(dir).unwrap();
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            std::process::Command::new("touch")
+                .args(["-t", "202401010000", dir.to_str().unwrap()])
+                .output()
+                .unwrap();
+        }
+
+        let local_path = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(local_path.path())
+            .output()
+            .unwrap();
+
+        let cfg = GahConfig {
+            defaults: Defaults {
+                worktree_base: worktree_base.path().to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            profiles: HashMap::new(),
+            context: Default::default(),
+        };
+        let mut profile = test_profile_for_notifications();
+        profile.repo_id = repo_id.to_string();
+        profile.local_path = local_path.path().to_string_lossy().to_string();
+
+        let cutoff = SystemTime::now()
+            .checked_sub(Duration::from_secs(86_400))
+            .unwrap();
+        prune_worktrees(&cfg, &profile, cutoff, false, false).unwrap();
+
+        assert!(!chat.exists(), "idle chat worktree should be reclaimed");
+        assert!(
+            foreign.exists(),
+            "a directory without a gah prefix must never be touched"
+        );
     }
 
     #[test]

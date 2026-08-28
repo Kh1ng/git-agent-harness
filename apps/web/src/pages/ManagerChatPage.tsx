@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Send, Square, MessageSquare } from 'lucide-react';
+import { Send, Square, MessageSquare, GitBranch, Plus, Archive } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { generateRequestId } from '@git-agent-harness/shared';
-import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary, ManagerBackendInfo } from '@git-agent-harness/contracts';
+import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary, ManagerBackendInfo, ChatSessionSummary } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
   role: 'user' | 'assistant' | 'system' | 'error';
@@ -79,13 +79,38 @@ export function ManagerChatPage() {
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  /** WP2 sessions: null = the profile's default conversation; otherwise a
+   * session bound to its own worktree. */
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
+  const activeSession = useMemo(
+    () => sessions.find((s) => s.id === sessionId) ?? null,
+    [sessions, sessionId]
+  );
+
   useEffect(() => {
     gahApi.getProfiles().then(setAvailableProfiles).catch(() => {});
   }, []);
 
-  // Restore history on mount, on profile change, and after a reconnect --
-  // otherwise leaving the page (or a dropped connection) silently loses the
-  // conversation even though the server keeps it.
+  const refreshSessions = (forProfile: string) => {
+    gahApi
+      .getChatSessions(forProfile)
+      .then(({ sessions }) => {
+        if (activeProfileRef.current === forProfile) setSessions(sessions);
+      })
+      .catch(() => { if (activeProfileRef.current === forProfile) setSessions([]); });
+  };
+
+  useEffect(() => {
+    refreshSessions(profile);
+    return () => { setSessions([]); setSessionId(null); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile]);
+
+  // Restore history on mount, on profile change, on session change, and
+  // after a reconnect -- otherwise leaving the page (or a dropped
+  // connection) silently loses the conversation even though the server
+  // keeps it.
   useEffect(() => {
     setHistoryLoaded(false);
     setTurns([]);
@@ -97,9 +122,14 @@ export function ManagerChatPage() {
     if (!isConnected) return;
     const requestId = generateRequestId();
     historyRequestId.current = requestId;
-    sendMessage({ type: 'manager.chat.historyRequest', requestId, profile });
+    sendMessage({
+      type: 'manager.chat.historyRequest',
+      requestId,
+      profile,
+      ...(sessionId ? { sessionId } : {})
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, isConnected, reconnectSeq]);
+  }, [profile, sessionId, isConnected, reconnectSeq]);
 
   useEffect(() => {
     let cancelled = false;
@@ -171,7 +201,16 @@ export function ManagerChatPage() {
     processedMessagesRef.current = messages.length;
 
     for (const last of batch) {
-      if (last.type === 'manager.chat.history' && last.profile === profile && last.requestId === historyRequestId.current) {
+      // Session-scoped messages must match the conversation being rendered;
+      // messages without a sessionId belong to the default conversation.
+      const messageProfile = 'profile' in last ? last.profile : undefined;
+      const messageSession = 'sessionId' in last ? last.sessionId : undefined;
+      const sameConversation =
+        messageProfile === profile
+        && (messageSession ?? undefined) === (sessionId ?? undefined);
+      if (!sameConversation) continue;
+
+      if (last.type === 'manager.chat.history' && last.requestId === historyRequestId.current) {
         const restored = last.turns.map(fromServerTurn);
         setTurns(restored);
         setHistoryLoaded(true);
@@ -182,19 +221,24 @@ export function ManagerChatPage() {
         continue;
       }
 
-      if (last.type === 'manager.chat.updated' && last.profile === profile) {
+      if (last.type === 'manager.chat.updated') {
         if (pendingRequest && last.requestId !== pendingRequest.id) continue;
         setRemoteTurnBusy(true);
         const requestId = generateRequestId();
         historyRequestId.current = requestId;
-        sendMessage({ type: 'manager.chat.historyRequest', requestId, profile });
+        sendMessage({
+          type: 'manager.chat.historyRequest',
+          requestId,
+          profile,
+          ...(sessionId ? { sessionId } : {})
+        });
         continue;
       }
 
       // Live chunk tee (#959). Dedupe by seq: chunks at or below what we've
       // already applied are already part of the rendered transcript (history
       // refetch mid-turn restores the partial text plus its cursor).
-      if (last.type === 'manager.chat.chunk' && last.profile === profile) {
+      if (last.type === 'manager.chat.chunk') {
         if (last.seq <= lastAppliedSeqRef.current) continue;
         lastAppliedSeqRef.current = last.seq;
         setStreaming((prev) => (prev && prev.turn === last.turn
@@ -222,7 +266,7 @@ export function ManagerChatPage() {
         setTurns((prev) => [...prev, { role: 'error', text: last.error }]);
       }
     }
-  }, [messages, pendingRequest, profile]);
+  }, [messages, pendingRequest, profile, sessionId]);
 
   const turnBusy = pendingRequest !== null || remoteTurnBusy || streaming !== null;
   const sendBlocked = !historyLoaded || turnBusy;
@@ -302,13 +346,47 @@ export function ManagerChatPage() {
     setDraft('');
     setPaletteOpen(false);
     setPendingRequest({ id: requestId, profile });
-    sendMessage({ type: 'manager.chat.send', requestId, profile, message: text });
+    sendMessage({
+      type: 'manager.chat.send',
+      requestId,
+      profile,
+      message: text,
+      ...(sessionId ? { sessionId } : {})
+    });
   };
 
   const handleCancel = () => {
     if (!turnBusy) return;
     const requestId = generateRequestId();
-    sendMessage({ type: 'manager.chat.cancel', requestId, profile });
+    sendMessage({
+      type: 'manager.chat.cancel',
+      requestId,
+      profile,
+      ...(sessionId ? { sessionId } : {})
+    });
+  };
+
+  const handleNewSession = async () => {
+    try {
+      // No explicit backend: the session captures the profile's current
+      // default at create time (server-side resolution).
+      const session = await gahApi.createChatSession(profile);
+      refreshSessions(profile);
+      setSessionId(session.id);
+    } catch (err) {
+      setTurns((prev) => [...prev, { role: 'error', text: `Failed to create session: ${err instanceof Error ? err.message : String(err)}` }]);
+    }
+  };
+
+  const handleArchiveSession = async () => {
+    if (!activeSession) return;
+    try {
+      await gahApi.archiveChatSession(profile, activeSession.id);
+      refreshSessions(profile);
+      setSessionId(null);
+    } catch (err) {
+      setTurns((prev) => [...prev, { role: 'error', text: `Failed to archive session: ${err instanceof Error ? err.message : String(err)}` }]);
+    }
   };
 
   return (
@@ -352,6 +430,50 @@ export function ManagerChatPage() {
           </div>
         }
       />
+
+      {/* WP2 session bar: one conversation per worktree. Default = the
+          profile's shared conversation; sessions run in isolated worktrees
+          (branch survives archive; a reclaimed worktree rematerializes on
+          resume). */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <GitBranch size={14} className="text-muted shrink-0" aria-hidden="true" />
+        <select
+          value={sessionId ?? ''}
+          onChange={(e) => setSessionId(e.target.value || null)}
+          className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary min-w-[12rem]"
+          aria-label="Chat session"
+        >
+          <option value="">Default conversation</option>
+          {sessions.filter((s) => s.archivedAt === null).map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.title ?? s.branch}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={handleNewSession}
+          disabled={!isConnected || turnBusy}
+          className="btn-primary text-xs inline-flex items-center gap-1"
+          title="Start a session in a fresh worktree"
+        >
+          <Plus size={13} aria-hidden="true" /> Session
+        </button>
+        {sessionId && (
+          <>
+            <button
+              onClick={handleArchiveSession}
+              disabled={turnBusy}
+              className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-secondary hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-1"
+              title="Archive this session (dirty work is saved as a patch; the branch survives)"
+            >
+              <Archive size={13} aria-hidden="true" /> Archive
+            </button>
+            {sessions.some((s) => s.id === sessionId && s.archivedAt !== null) && (
+              <span className="text-[10px] text-muted">archived — read only</span>
+            )}
+          </>
+        )}
+      </div>
 
       <div className="grid min-w-0 gap-4 xl:grid-cols-[14rem_minmax(0,1fr)]">
         <ProjectRail

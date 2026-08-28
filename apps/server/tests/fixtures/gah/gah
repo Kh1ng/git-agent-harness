@@ -23,6 +23,14 @@ function respond(name) {
     process.stderr.write(message + '\n');
     process.exit(code);
   }
+  // Tests that need their own profile facts (e.g. the WP2 chat-session
+  // tests pointing repo_id/local_path/worktree_base at a temp git repo) can
+  // point GAH_FIXTURE_PROFILE_LIST at an arbitrary JSON file instead of
+  // editing the recorded response.
+  if (name === 'profile-list' && process.env.GAH_FIXTURE_PROFILE_LIST) {
+    process.stdout.write(fs.readFileSync(process.env.GAH_FIXTURE_PROFILE_LIST, 'utf8'));
+    process.exit(0);
+  }
   const file = path.join(responsesDir, `${name}.json`);
   process.stdout.write(fs.readFileSync(file, 'utf8'));
   process.exit(0);

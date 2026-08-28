@@ -157,6 +157,11 @@ interface ProfileConnection {
   connection: acp.ClientSideConnection;
   client: AcpClient;
   sessionId: string;
+  /** Working directory for new ACP sessions. The server's cwd for the
+   * default per-profile conversation; a session's worktree for session-bound
+   * turns (WP2) -- which is what makes a worktree interchangeable between
+   * backends: every backend spawns into the same directory. */
+  cwd: string;
   models: ManagerModelInfo[];
   currentModelId: string | null;
   modelConfigId: string | null;
@@ -265,7 +270,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     state.client.sessionCostUsd = 0;
     state.client.usageUpdate = null;
     state.client.cumulativeUsage = null;
-    const session = await state.connection.newSession({ cwd: process.cwd(), mcpServers: [] });
+    const session = await state.connection.newSession({ cwd: state.cwd, mcpServers: [] });
     state.sessionId = session.sessionId;
     state.client.configOptions = session.configOptions ?? [];
     updateModels(state, state.client.configOptions);
@@ -274,7 +279,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     }
   }
 
-  async function connect(gahProfile: string): Promise<ProfileConnection> {
+  async function connect(gahProfile: string, cwd?: string): Promise<ProfileConnection> {
     const existing = connections.get(gahProfile);
     if (existing) {
       await existing.ready;
@@ -296,6 +301,7 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
       connection,
       client,
       sessionId: '',
+      cwd: cwd ?? process.cwd(),
       models: [],
       currentModelId: null,
       modelConfigId: null,
@@ -328,9 +334,15 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
       history: ChatTranscriptTurn[];
       onChunk: (text: string) => void;
       onToolResult: (name: string, text: string) => void;
+      /** Working directory for this conversation's session (WP2): the
+       * profile default omits it and gets the server cwd; a session passes
+       * its worktree path. Only the FIRST connect per key wins -- a
+       * connection is reused across turns and its cwd is immutable, which
+       * is correct: one conversation = one directory. */
+      cwd?: string;
     }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }> {
-    const state = await connect(gahProfile);
+    const state = await connect(gahProfile, input.cwd);
     state.client.replyChunks = [];
     state.client.toolCalls.clear();
     let missingHistory = historyDelta(state.knownHistory, input.history);

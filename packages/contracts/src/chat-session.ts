@@ -194,3 +194,28 @@ export interface ChatSessionView {
     model?: string | null;
   } | null;
 }
+
+/**
+ * A durable chat session bound to one worktree (WP2 session service).
+ *
+ * The session is the portable object: its event log + branch survive backend
+ * swaps, server restarts, and worktree reclamation. The worktree itself is a
+ * disposable materialization of the branch -- pruned when idle (the
+ * `gah-chat-<repo_id>-` prefix makes `gah prune` see it), rematerialized on
+ * resume. A session's conversation runs with its worktree as cwd, which is
+ * what makes a worktree interchangeable between models.
+ */
+export interface ChatSessionSummary {
+  id: string;
+  profile: string;
+  /** Absolute worktree path; null once the worktree was reclaimed. */
+  worktreePath: string | null;
+  /** Branch backing the session (survives worktree reclamation). */
+  branch: string;
+  /** Backend serving this session (per-session override of the profile default). */
+  backend: string;
+  title: string | null;
+  createdAt: number;
+  lastActiveAt: number;
+  archivedAt: number | null;
+}

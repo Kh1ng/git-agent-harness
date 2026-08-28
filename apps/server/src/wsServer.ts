@@ -12,7 +12,7 @@ import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
-import { sendManagerChatMessage, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher } from './managerChat/ManagerChatManager.js';
+import { sendManagerChatMessage, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher, listChatSessions, createChatSession, archiveChatSession } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -206,6 +206,18 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
       await handleManagerChatHistoryRequest(ws, message, requestId);
       break;
 
+    case 'manager.chat.sessionList':
+      await handleManagerChatSessionList(ws, message, requestId);
+      break;
+
+    case 'manager.chat.sessionCreate':
+      await handleManagerChatSessionCreate(ws, message, requestId);
+      break;
+
+    case 'manager.chat.sessionArchive':
+      await handleManagerChatSessionArchive(ws, message, requestId);
+      break;
+
     case 'ping':
       // Respond to ping
       ws.send(JSON.stringify({
@@ -278,7 +290,7 @@ async function handleSendCommand(ws: WebSocket, message: Extract<ClientMessage, 
 
 async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.send' }>, requestId: string) {
   try {
-    const { turn, cancelled } = await sendManagerChatMessage(message.profile, message.message, requestId);
+    const { turn, cancelled } = await sendManagerChatMessage(message.profile, message.message, requestId, message.sessionId);
 
     // A cancelled turn is never reported as a completed reply; clients
     // reconcile via the manager.chat.updated push in the finally below
@@ -288,6 +300,7 @@ async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessa
         type: 'manager.chat.reply',
         requestId,
         profile: message.profile,
+        ...(message.sessionId ? { sessionId: message.sessionId } : {}),
         reply: turn.text,
         backend: turn.backend!,
         model: turn.model ?? null,
@@ -298,13 +311,18 @@ async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessa
   } catch (error) {
     ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
   } finally {
-    pushBus.publish({ type: 'manager.chat.updated', profile: message.profile, requestId });
+    pushBus.publish({
+      type: 'manager.chat.updated',
+      profile: message.profile,
+      ...(message.sessionId ? { sessionId: message.sessionId } : {}),
+      requestId
+    });
   }
 }
 
 async function handleManagerChatCancel(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.cancel' }>, requestId: string) {
   try {
-    const cancelled = await cancelManagerChatTurn(message.profile);
+    const cancelled = await cancelManagerChatTurn(message.profile, message.sessionId);
     if (!cancelled) {
       ws.send(JSON.stringify(createErrorResponse(requestId, new Error('No turn is in flight for this profile.'))));
     }
@@ -314,16 +332,57 @@ async function handleManagerChatCancel(ws: WebSocket, message: Extract<ClientMes
 }
 
 async function handleManagerChatHistoryRequest(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.historyRequest' }>, requestId: string) {
-  const view = getManagerChatSessionView(message.profile);
+  const view = getManagerChatSessionView(message.profile, message.sessionId);
   const payload: ServerMessage = {
     type: 'manager.chat.history',
     requestId,
     profile: message.profile,
+    ...(message.sessionId ? { sessionId: message.sessionId } : {}),
     turns: view.turns,
     cursor: view.cursor,
     streaming: view.streaming
   };
   ws.send(JSON.stringify(payload));
+}
+
+async function handleManagerChatSessionList(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.sessionList' }>, requestId: string) {
+  const payload: ServerMessage = {
+    type: 'manager.chat.sessionList',
+    requestId,
+    profile: message.profile,
+    sessions: listChatSessions(message.profile)
+  };
+  ws.send(JSON.stringify(payload));
+}
+
+async function handleManagerChatSessionCreate(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.sessionCreate' }>, requestId: string) {
+  try {
+    const session = await createChatSession(message.profile, message.backend, message.title);
+    const payload: ServerMessage = {
+      type: 'manager.chat.sessionCreated',
+      requestId,
+      profile: message.profile,
+      session
+    };
+    ws.send(JSON.stringify(payload));
+  } catch (error) {
+    ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
+  }
+}
+
+async function handleManagerChatSessionArchive(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.sessionArchive' }>, requestId: string) {
+  try {
+    const session = await archiveChatSession(message.profile, message.sessionId);
+    const payload: ServerMessage = {
+      type: 'manager.chat.sessionArchived',
+      requestId,
+      profile: message.profile,
+      session
+    };
+    ws.send(JSON.stringify(payload));
+  } catch (error) {
+    ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
+  }
 }
 
 async function handleProviderRefresh(ws: WebSocket, message: Extract<ClientMessage, { type: 'provider.refresh' }>, requestId: string) {
