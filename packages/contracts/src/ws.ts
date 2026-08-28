@@ -183,6 +183,10 @@ export type ServerMessage =
       backend: string;
       model: string | null;
       usage: ChatTranscriptTurn['usage'];
+      /** True when the turn was stopped (Stop button) rather than completed;
+       * the reply is the partial text captured before the stop. Clients
+       * clear their in-flight busy state either way. */
+      cancelled?: boolean;
     }
   | {
       /** Live tee of the session log's assistant/chunk events for one turn

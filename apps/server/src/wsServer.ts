@@ -308,22 +308,24 @@ async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessa
   try {
     const { turn, cancelled } = await sendManagerChatMessage(message.profile, message.message, requestId, message.sessionId);
 
-    // A cancelled turn is never reported as a completed reply; clients
-    // reconcile via the manager.chat.updated push in the finally below
-    // (history refetch shows the cancelled turn with its partial text).
-    if (!cancelled) {
-      const payload: ServerMessage = {
-        type: 'manager.chat.reply',
-        requestId,
-        profile: message.profile,
-        ...(message.sessionId ? { sessionId: message.sessionId } : {}),
-        reply: turn.text,
-        backend: turn.backend!,
-        model: turn.model ?? null,
-        usage: turn.usage
-      };
-      ws.send(JSON.stringify(payload));
-    }
+    // Send a reply for both outcomes: a cancelled turn reports its partial
+    // text plus `cancelled: true` so the client can resolve its in-flight
+    // busy state deterministically (the updated→history refetch below then
+    // shows the durable turn). #1001 — previously a cancelled turn sent no
+    // reply, so a client whose pending request had been resynced mid-turn
+    // dropped the updated push and froze with turnBusy stuck true.
+    const payload: ServerMessage = {
+      type: 'manager.chat.reply',
+      requestId,
+      profile: message.profile,
+      ...(message.sessionId ? { sessionId: message.sessionId } : {}),
+      reply: turn.text,
+      backend: turn.backend!,
+      model: turn.model ?? null,
+      usage: turn.usage,
+      cancelled: cancelled || undefined
+    };
+    ws.send(JSON.stringify(payload));
   } catch (error) {
     ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
   } finally {
