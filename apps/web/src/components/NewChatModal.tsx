@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { FolderGit2, Server, Cpu, X } from 'lucide-react';
-import type { ChatNodeInfo, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
+import { FolderGit2, Server, Cpu, X, CircleDot } from 'lucide-react';
+import type { ChatIssueSummary, ChatNodeInfo, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 import type { ManagerBackendInfo } from '@git-agent-harness/contracts';
 
@@ -10,6 +10,8 @@ interface NewChatModalProps {
   profiles: ProfileSummary[];
   backends: ManagerBackendInfo[];
   onClose: () => void;
+  /** Blank chat: (profile, sessionId). Issue chat: same shape — the
+   * session is opened the same way either way. */
   onCreated: (profile: string, sessionId: string) => void;
 }
 
@@ -18,6 +20,10 @@ interface NewChatModalProps {
  * provider/model. The created conversation is bound to a fresh worktree —
  * every backend in that session runs in the same directory, and the branch
  * survives archive/reclaim.
+ *
+ * "From issue" grabs a provider issue instead: the session branches for the
+ * issue (`gah/issue/<repo>-<n>`), the issue is marked in progress, and the
+ * conversation opens seeded with the issue body.
  */
 export function NewChatModal({ open, currentProfile, profiles, backends, onClose, onCreated }: NewChatModalProps) {
   const [project, setProject] = useState(currentProfile);
@@ -29,6 +35,11 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [mode, setMode] = useState<'blank' | 'issue'>('blank');
+  const [issues, setIssues] = useState<ChatIssueSummary[]>([]);
+  const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issue, setIssue] = useState<ChatIssueSummary | null>(null);
+
   const implementedBackends = backends.filter((b) => b.implemented);
 
   useEffect(() => {
@@ -37,12 +48,31 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     setError(null);
     setTitle('');
     setModel(null);
+    setMode('blank');
+    setIssue(null);
+    setIssues([]);
     gahApi
       .getChatNodes()
       .then(({ nodes }) => setNodes(nodes))
       .catch(() => setNodes([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Issue list follows the selected project in issue mode.
+  useEffect(() => {
+    if (!open || mode !== 'issue') return;
+    let cancelled = false;
+    setIssues([]);
+    setIssue(null);
+    setIssuesLoading(true);
+    gahApi
+      .getChatIssues(project)
+      .then(({ issues }) => { if (!cancelled) setIssues(issues); })
+      .catch(() => { if (!cancelled) setIssues([]); })
+      .finally(() => { if (!cancelled) setIssuesLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mode, project]);
 
   useEffect(() => {
     if (!open) return;
@@ -93,8 +123,14 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     setCreating(true);
     setError(null);
     try {
-      const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined);
-      onCreated(project, session.id);
+      if (mode === 'issue') {
+        if (!issue) return;
+        const { session } = await gahApi.startChatFromIssue(project, issue.number, backend, model);
+        onCreated(project, session.id);
+      } else {
+        const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined);
+        onCreated(project, session.id);
+      }
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -112,6 +148,61 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
             <X size={16} aria-hidden="true" />
           </button>
         </div>
+
+        {/* Mode: a blank session, or grab an issue into a chat (branch for
+            it, mark it in progress, seed the conversation with its body). */}
+        <div className="flex gap-1.5" role="tablist" aria-label="Chat source">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'blank'}
+            onClick={() => setMode('blank')}
+            className={`flex-1 rounded-md px-2 py-1.5 text-xs ${mode === 'blank' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
+          >
+            Blank chat
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'issue'}
+            onClick={() => setMode('issue')}
+            className={`flex-1 rounded-md px-2 py-1.5 text-xs inline-flex items-center justify-center gap-1.5 ${mode === 'issue' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
+          >
+            <CircleDot size={12} aria-hidden="true" /> From issue
+          </button>
+        </div>
+
+        {mode === 'issue' && (
+          <section className="space-y-2">
+            <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+              <CircleDot size={13} aria-hidden="true" /> Issue
+            </h3>
+            {issuesLoading && <p className="text-xs text-muted">Loading issues…</p>}
+            {!issuesLoading && issues.length === 0 && (
+              <p className="text-xs text-muted">No open issues for this project.</p>
+            )}
+            <div className="grid gap-1 max-h-40 overflow-y-auto">
+              {issues.map((candidate) => (
+                <button
+                  key={candidate.number}
+                  type="button"
+                  onClick={() => setIssue(candidate)}
+                  className={`rounded-md px-3 py-2 text-left ${issue?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
+                >
+                  <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
+                  {candidate.labels.length > 0 && (
+                    <span className="block text-[11px] text-muted truncate">{candidate.labels.join(', ')}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            {issue && (
+              <p className="text-[11px] text-muted">
+                Branches <span className="font-mono">gah/issue/…-{issue.number}</span>, marks #{issue.number} in progress, opens the chat seeded with the issue.
+              </p>
+            )}
+          </section>
+        )}
 
         <section className="space-y-2">
           <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
@@ -190,17 +281,19 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           )}
         </section>
 
-        <section className="space-y-2">
-          <label htmlFor="new-chat-title" className="block text-xs font-medium text-secondary">Title (optional)</label>
-          <input
-            id="new-chat-title"
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. Fix the retry loop"
-            className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-xs text-primary"
-          />
-        </section>
+        {mode === 'blank' && (
+          <section className="space-y-2">
+            <label htmlFor="new-chat-title" className="block text-xs font-medium text-secondary">Title (optional)</label>
+            <input
+              id="new-chat-title"
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Fix the retry loop"
+              className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-xs text-primary"
+            />
+          </section>
+        )}
 
         {error && <p className="text-xs text-red-400">{error}</p>}
 
@@ -209,7 +302,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           <button
             type="button"
             onClick={create}
-            disabled={creating || !backend || profiles.length === 0}
+            disabled={creating || !backend || profiles.length === 0 || (mode === 'issue' && !issue)}
             className="btn-primary text-xs"
           >
             {creating ? 'Creating…' : 'Start chat'}

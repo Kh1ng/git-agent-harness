@@ -1,0 +1,30 @@
+[
+  {
+    "number": 42,
+    "title": "Fix the retry loop",
+    "url": "https://github.com/owner/repo/issues/42",
+    "labels": [
+      {
+        "name": "bug"
+      }
+    ],
+    "updatedAt": "2026-08-28T10:00:00Z",
+    "state": "open"
+  },
+  {
+    "number": 41,
+    "title": "Add dark mode",
+    "url": "https://github.com/owner/repo/issues/41",
+    "labels": [],
+    "updatedAt": "2026-08-27T10:00:00Z",
+    "state": "open"
+  },
+  {
+    "number": 40,
+    "title": "Closed thing",
+    "url": "https://github.com/owner/repo/issues/40",
+    "labels": [],
+    "updatedAt": "2026-08-26T10:00:00Z",
+    "state": "closed"
+  }
+]

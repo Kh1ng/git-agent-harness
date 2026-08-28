@@ -316,3 +316,20 @@ export interface ChatPreviewInfo {
   /** Browser-facing URL (tailscale IP when available). */
   url: string;
 }
+
+/** An open provider issue offered by the issue → chat flow. */
+export interface ChatIssueSummary {
+  number: number;
+  title: string;
+  url: string | null;
+  labels: string[];
+  updatedAt: string | null;
+}
+
+/** Result of grabbing an issue into a chat session. */
+export interface ChatIssueStartResult {
+  session: ChatSessionSummary;
+  /** True when a live session for this issue already existed and was
+   * returned as-is (idempotent grab). */
+  existing: boolean;
+}

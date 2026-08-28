@@ -1,0 +1,1 @@
+{ "number": 42, "title": "Fix the retry loop", "body": "The retry loop spins forever when the backend returns 429.\n\nSteps: ...", "state": "open", "url": "https://github.com/owner/repo/issues/42", "labels": [{ "name": "bug" }] }
