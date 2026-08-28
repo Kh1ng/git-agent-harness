@@ -54,6 +54,22 @@ function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
   };
 }
 
+/** WP3: the preview URL comes from the server (node address + allocated
+ * port), but the client never trusts it blindly -- validate the exact
+ * shape (plain http, host, numeric port) before it reaches an href or an
+ * iframe src, so a tampered value can't redirect elsewhere. */
+function safePreviewUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:') return null;
+    if (!/^\d+$/.test(parsed.port) || parsed.port === '') return null;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
 /** Slice 3: one agent activity card -- what the agent is doing, which files
  * it touched, and a bounded output summary once it finishes. */
 function ToolCallCard({ tool }: { tool: NonNullable<ChatTurn['tool']> }) {
@@ -803,9 +819,9 @@ export function ManagerChatPage() {
               <MonitorPlay size={13} aria-hidden="true" /> Preview
             </h3>
             <div className="flex items-center gap-1">
-              {preview && (
+              {preview && safePreviewUrl(preview.url) !== null && (
                 <a
-                  href={preview.url}
+                  href={safePreviewUrl(preview.url) ?? undefined}
                   target="_blank"
                   rel="noreferrer"
                   className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
@@ -823,13 +839,17 @@ export function ManagerChatPage() {
               </button>
             </div>
           </div>
-          {preview ? (
+          {preview && safePreviewUrl(preview.url) === null ? (
+            <p className="text-xs text-red-400 px-4 py-6">
+              Preview URL failed validation and was blocked.
+            </p>
+          ) : preview ? (
             <>
               <p className="text-[11px] text-muted pb-2">
-                dev server <span className="font-mono">:{preview.devPort}</span> → <span className="font-mono">{preview.url}</span>
+                dev server <span className="font-mono">:{preview.devPort}</span> → <span className="font-mono">{safePreviewUrl(preview.url)}</span>
               </p>
               <iframe
-                src={preview.url}
+                src={safePreviewUrl(preview.url) ?? undefined}
                 title="Session preview"
                 className="flex-1 min-h-0 w-full rounded-md border border-subtle bg-white"
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
