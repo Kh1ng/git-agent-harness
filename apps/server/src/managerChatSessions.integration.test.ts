@@ -295,3 +295,130 @@ test('a session serves turns on its pinned model and switches model/backend in p
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test('tool calls stream as structured events and permissions round-trip through the client', { timeout: 30_000 }, async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'gah-chat-agent-surface-'));
+
+  const checkout = join(stateDir, 'checkout');
+  const worktreeBase = join(stateDir, 'worktrees');
+  execFileSync('mkdir', ['-p', checkout]);
+  execFileSync('git', ['init', '--quiet', '--initial-branch=main'], { cwd: checkout });
+  execFileSync('git', ['config', 'user.email', 'test@gah'], { cwd: checkout });
+  execFileSync('git', ['config', 'user.name', 'gah test'], { cwd: checkout });
+  writeFileSync(join(checkout, 'README.md'), '# repo\n');
+  execFileSync('git', ['add', '.'], { cwd: checkout });
+  execFileSync('git', ['commit', '--quiet', '-m', 'init'], { cwd: checkout });
+
+  const profile = 'agent-surface-e2e';
+  const profileListPath = join(stateDir, 'profile-list.json');
+  writeFileSync(profileListPath, JSON.stringify([{
+    name: profile,
+    display_name: 'Agent Surface E2E',
+    provider: 'github',
+    repo: 'owner/repo',
+    repo_id: 'repo',
+    local_path: checkout,
+    worktree_base: worktreeBase,
+    web_url: 'https://github.com/owner/repo',
+    max_parallel_workers: null,
+    max_open_managed_mrs: 1,
+    manager_wake_autonomy: null,
+    validation_timeout_seconds: 300
+  }]));
+
+  const gateway = http.createServer((req, res) => {
+    if (req.url === '/recall') {
+      res.end(JSON.stringify({ context: '', memory_count: 0, code: 0, message: 'ok' }));
+    } else if (req.url === '/capture') {
+      res.end(JSON.stringify({ l0_recorded: 1, scheduler_notified: false }));
+    } else if (req.url === '/session/end') {
+      res.end(JSON.stringify({ flushed: true }));
+    } else {
+      res.writeHead(404).end();
+    }
+  });
+  await new Promise<void>((done) => gateway.listen(0, '127.0.0.1', done));
+
+  const savedEnv = { ...process.env };
+  process.env.PATH = `${join(fixtures, 'hermes')}:${process.env.PATH}`;
+  process.env.GAH_BINARY = join(fixtures, 'gah', 'gah');
+  process.env.GAH_FIXTURE_PROFILE_LIST = profileListPath;
+  process.env.GAH_CHAT_STATE_DIR = join(stateDir, 'chat');
+  process.env.GAH_GATEWAY_SETTINGS_PATH = join(stateDir, 'gateway.json');
+  process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = join(stateDir, 'manager-chat.json');
+  process.env.TDAI_GATEWAY_URL = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`;
+
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server });
+  createWebSocketHandler(wss);
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const wsUrl = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  let ws: WebSocket | null = null;
+  try {
+    ws = await connect(wsUrl, profile);
+    const client = ws;
+    const created = await request(client, 'manager.chat.sessionCreated', 'create', {
+      type: 'manager.chat.sessionCreate', requestId: 'create', profile
+    } satisfies ClientMessage);
+    const sessionId = created.session.id;
+
+    const toolEvents: string[] = [];
+    ws.on('message', (raw) => {
+      const message = JSON.parse(raw.toString()) as ServerMessage;
+      if (message.type === 'manager.chat.toolCall') toolEvents.push(message.status);
+    });
+    const toolReply = await request(client, 'manager.chat.reply', 'turn-tool', {
+      type: 'manager.chat.send', requestId: 'turn-tool', profile, message: 'use a tool', sessionId
+    } satisfies ClientMessage);
+
+    const permissionPush = new Promise<Extract<ServerMessage, { type: 'manager.chat.permission' }>>((resolve) => {
+      client.on('message', (raw) => {
+        const message = JSON.parse(raw.toString()) as ServerMessage;
+        if (message.type === 'manager.chat.permission') resolve(message);
+      });
+    });
+    const dangerousReplyPromise = request(client, 'manager.chat.reply', 'turn-perm', {
+      type: 'manager.chat.send', requestId: 'turn-perm', profile, message: 'do a dangerous thing', sessionId
+    } satisfies ClientMessage);
+    const permission = await permissionPush;
+    ws.send(JSON.stringify({
+      type: 'manager.chat.permission.respond',
+      requestId: 'perm-answer',
+      profile,
+      sessionId,
+      permissionId: permission.permissionId,
+      optionId: 'allow-once'
+    } satisfies ClientMessage));
+    const dangerousReply = await dangerousReplyPromise;
+    assert.equal(dangerousReply.reply, 'permission allow-once');
+
+    const history = await request(client, 'manager.chat.history', 'history', {
+      type: 'manager.chat.historyRequest', requestId: 'history', profile, sessionId
+    } satisfies ClientMessage);
+    const toolTurn = history.turns.find((turn) => turn.role === 'tool');
+    assert.ok(toolTurn?.tool, 'tool card present in the folded transcript');
+    assert.equal(toolTurn.tool.title, 'Reading README.md');
+    assert.equal(toolTurn.tool.status, 'completed');
+    assert.deepEqual(toolTurn.tool.locations, ['/tmp/README.md']);
+    assert.match(toolTurn.tool.summary ?? '', /tool output line 1/);
+    const historyText = history.turns.map((t) => t.text).join('\n');
+    assert.match(historyText, /permission requested/);
+    assert.match(historyText, /allow-once/);
+
+    client.close();
+    await once(client, 'close');
+  } finally {
+    // Close the test client first: server.close() waits for open sockets,
+    // so an assertion failure above (ws never closed in the try) would
+    // otherwise wedge the finally forever and mask the real error.
+    try { ws?.close(); } catch { /* already closed */ }
+    await new Promise((r) => setTimeout(r, 300));
+    wss.close();
+    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((done) => gateway.close(() => done()));
+    execFileSync('git', ['worktree', 'prune'], { cwd: checkout });
+    process.env = savedEnv;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

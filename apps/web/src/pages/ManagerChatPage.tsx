@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Send, Square, MessageSquare, GitBranch, Plus, Archive } from 'lucide-react';
+import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
@@ -10,11 +10,21 @@ import { generateRequestId } from '@git-agent-harness/shared';
 import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary, ManagerBackendInfo, ChatSessionSummary } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
-  role: 'user' | 'assistant' | 'system' | 'error';
+  role: 'user' | 'assistant' | 'system' | 'error' | 'tool';
   text: string;
   /** Present on assistant turns: which backend + model produced this reply. */
   backend?: string;
   model?: string | null;
+  /** Present on tool turns (slice 3): structured info for the activity card. */
+  tool?: {
+    toolCallId: string;
+    name: string | null;
+    title: string;
+    kind: string | null;
+    status: 'pending' | 'completed' | 'failed';
+    locations: string[];
+    summary: string | null;
+  };
 }
 
 interface PendingRequest {
@@ -27,13 +37,65 @@ interface StreamingTurn {
   text: string;
 }
 
+interface LivePermission {
+  permissionId: string;
+  title: string;
+  options: { optionId: string; name: string; kind: string }[];
+  locations: string[];
+}
+
 function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
   return {
     role: turn.role === 'assistant' ? 'assistant' : turn.role,
     text: turn.text,
     backend: turn.backend,
-    model: turn.model
+    model: turn.model,
+    tool: turn.tool
   };
+}
+
+/** Slice 3: one agent activity card -- what the agent is doing, which files
+ * it touched, and a bounded output summary once it finishes. */
+function ToolCallCard({ tool }: { tool: NonNullable<ChatTurn['tool']> }) {
+  const [open, setOpen] = useState(false);
+  const statusColor = tool.status === 'failed'
+    ? 'text-red-400'
+    : tool.status === 'completed'
+      ? 'text-emerald-400'
+      : 'text-muted animate-pulse';
+  const statusLabel = tool.status === 'pending' || tool.status === 'completed' ? tool.status : tool.status;
+  return (
+    <div className="w-full max-w-[80%] rounded-md border border-subtle bg-raised/60 text-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-white/5"
+        aria-expanded={open}
+      >
+        <Wrench size={12} className="text-muted shrink-0" aria-hidden="true" />
+        <span className="min-w-0 truncate text-secondary flex-1">{tool.title}</span>
+        {tool.locations.length > 0 && (
+          <span className="text-[10px] text-muted truncate max-w-[30%]" title={tool.locations.join(', ')}>
+            {tool.locations.length === 1 ? tool.locations[0].split('/').pop() : `${tool.locations.length} files`}
+          </span>
+        )}
+        <span className={`shrink-0 text-[10px] uppercase tracking-wide ${statusColor}`}>{statusLabel}</span>
+      </button>
+      {open && (
+        <div className="px-2.5 pb-2 pt-1 border-t border-subtle space-y-1">
+          {tool.name && <p className="text-[10px] text-muted font-mono">{tool.name}{tool.kind ? ` · ${tool.kind}` : ''}</p>}
+          {tool.locations.length > 0 && (
+            <ul className="text-[10px] text-muted font-mono space-y-0.5">
+              {tool.locations.map((loc) => <li key={loc} className="truncate">{loc}</li>)}
+            </ul>
+          )}
+          {tool.summary && (
+            <pre className="text-[10px] text-secondary whitespace-pre-wrap break-words max-h-40 overflow-y-auto font-mono">{tool.summary}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function ManagerChatPage() {
@@ -54,6 +116,13 @@ export function ManagerChatPage() {
    * turn when manager.chat.reply arrives, and re-derived from history on
    * reload. */
   const [streaming, setStreaming] = useState<StreamingTurn | null>(null);
+  /** Slice 3: live tool-call activity for the in-flight turn (keyed by
+   * toolCallId; latest status wins). Rendered between the transcript and
+   * the streaming bubble. */
+  const [liveTools, setLiveTools] = useState<Record<string, NonNullable<ChatTurn['tool']>>>({});
+  /** Slice 3: the live permission request, when the backend is blocked on
+   * a human decision. */
+  const [permission, setPermission] = useState<LivePermission | null>(null);
   /** Highest log seq this client has applied. Chunks at or below it are
    * already reflected in the rendered transcript (e.g. fetched via history),
    * so they're skipped -- gives exactly-once rendering for a client that
@@ -118,6 +187,8 @@ export function ManagerChatPage() {
     setPendingRequest(null);
     setRemoteTurnBusy(false);
     setStreaming(null);
+    setLiveTools({});
+    setPermission(null);
     lastAppliedSeqRef.current = 0;
     processedMessagesRef.current = 0;
     if (!isConnected) return;
@@ -291,6 +362,36 @@ export function ManagerChatPage() {
         continue;
       }
 
+      // Slice 3: structured tool-call activity. Latest status per toolCallId
+      // wins; the cards live under the streaming bubble until the turn ends.
+      if (last.type === 'manager.chat.toolCall') {
+        setLiveTools((prev) => ({
+          ...prev,
+          [last.toolCallId]: {
+            toolCallId: last.toolCallId,
+            name: last.name,
+            title: last.title,
+            kind: last.kind,
+            status: last.status,
+            locations: last.locations,
+            summary: last.summary
+          }
+        }));
+        setRemoteTurnBusy(true);
+        continue;
+      }
+
+      // Slice 3: a permission request blocks the turn until answered.
+      if (last.type === 'manager.chat.permission') {
+        setPermission({
+          permissionId: last.permissionId,
+          title: last.title,
+          options: last.options,
+          locations: last.locations
+        });
+        continue;
+      }
+
       if (!pendingRequest || pendingRequest.profile !== profile) continue;
       if (!('requestId' in last) || last.requestId !== pendingRequest.id) continue;
       if (processedRequestIds.current.has(pendingRequest.id)) continue;
@@ -298,6 +399,8 @@ export function ManagerChatPage() {
 
       if (last.type === 'manager.chat.reply') {
         setStreaming(null);
+        setPermission(null);
+        setLiveTools({});
         setTurns((prev) => [...prev, {
           role: 'assistant',
           text: last.reply,
@@ -306,6 +409,8 @@ export function ManagerChatPage() {
         }]);
       } else if (last.type === 'error') {
         setStreaming(null);
+        setPermission(null);
+        setLiveTools({});
         setTurns((prev) => [...prev, { role: 'error', text: last.error }]);
       }
     }
@@ -407,6 +512,22 @@ export function ManagerChatPage() {
       profile,
       ...(sessionId ? { sessionId } : {})
     });
+  };
+
+  /** Slice 3: answer the live permission request; the blocked turn resumes
+   * (allow) or unwinds (reject) server-side. */
+  const handlePermissionRespond = (optionId: string) => {
+    if (!permission) return;
+    const requestId = generateRequestId();
+    sendMessage({
+      type: 'manager.chat.permission.respond',
+      requestId,
+      profile,
+      ...(sessionId ? { sessionId } : {}),
+      permissionId: permission.permissionId,
+      optionId
+    });
+    setPermission(null);
   };
 
   const handleArchiveSession = async () => {
@@ -589,19 +710,23 @@ export function ManagerChatPage() {
           )}
           {turns.map((turn, i) => (
             <div key={i} className={`flex flex-col ${turn.role === 'user' ? 'items-end' : 'items-start'}`}>
-              <div
-                className={`max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words ${
-                  turn.role === 'user'
-                    ? 'bg-accent text-white'
-                    : turn.role === 'error'
-                      ? 'bg-red-500/10 text-red-400 border border-red-500/30'
-                      : turn.role === 'system'
-                        ? 'bg-transparent text-muted italic text-xs px-0'
-                        : 'bg-raised text-primary border border-subtle'
-                }`}
-              >
-                {turn.text}
-              </div>
+              {turn.role === 'tool' && turn.tool ? (
+                <ToolCallCard tool={turn.tool} />
+              ) : (
+                <div
+                  className={`max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words ${
+                    turn.role === 'user'
+                      ? 'bg-accent text-white'
+                      : turn.role === 'error'
+                        ? 'bg-red-500/10 text-red-400 border border-red-500/30'
+                        : turn.role === 'system'
+                          ? 'bg-transparent text-muted italic text-xs px-0'
+                          : 'bg-raised text-primary border border-subtle'
+                  }`}
+                >
+                  {turn.text}
+                </div>
+              )}
               {turn.role === 'assistant' && turn.backend && (
                 <span className="mt-0.5 px-1.5 py-0.5 rounded bg-raised border border-subtle text-[10px] text-muted font-mono">
                   {turn.backend}
@@ -610,6 +735,41 @@ export function ManagerChatPage() {
               )}
             </div>
           ))}
+          {/* Slice 3: live tool activity for the in-flight turn. */}
+          {Object.entries(liveTools).map(([id, tool]) => (
+            <ToolCallCard key={id} tool={tool} />
+          ))}
+          {/* Slice 3: permission prompt -- the turn is blocked until one of
+              these is clicked (or it times out / is cancelled server-side). */}
+          {permission && (
+            <div className="w-full max-w-[80%] rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 space-y-2" role="alertdialog" aria-label="Permission request">
+              <div className="flex items-start gap-2">
+                <ShieldAlert size={15} className="text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+                <div className="min-w-0">
+                  <p className="text-sm text-primary font-medium break-words">{permission.title}</p>
+                  {permission.locations.length > 0 && (
+                    <p className="text-[11px] text-muted truncate">{permission.locations.join(', ')}</p>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5 justify-end">
+                {permission.options.map((opt) => (
+                  <button
+                    key={opt.optionId}
+                    type="button"
+                    onClick={() => handlePermissionRespond(opt.optionId)}
+                    className={
+                      opt.kind.startsWith('allow')
+                        ? 'btn-primary text-xs'
+                        : 'bg-raised border border-subtle rounded-md px-2.5 py-1 text-xs text-secondary hover:bg-white/5'
+                    }
+                  >
+                    {opt.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {streaming && (
             <div className="flex justify-start">
               <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words bg-raised text-primary border border-subtle">

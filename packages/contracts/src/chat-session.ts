@@ -20,6 +20,9 @@ export type ChatSessionEvent =
   | ChatUserMessage
   | ChatAssistantChunk
   | ChatAssistantMessage
+  | ChatToolCallEvent
+  | ChatPermissionRequest
+  | ChatPermissionDecision
   | ChatToolResult
   | ChatHarnessError
   | ChatHumanCommand
@@ -111,6 +114,63 @@ export interface ChatToolResult {
   timestamp: number;
 }
 
+/**
+ * A structured tool-call activity event (slice 3): the ACP tool_call stream
+ * surfaced as first-class session events instead of flattened text, so the
+ * UI renders what the agent is doing (with file locations) as it happens.
+ * `pending` events are live (in-flight tool calls); `completed`/`failed`
+ * carry a short output summary. Persisted in the session log, replayed on
+ * resume, and pushed live over the WS.
+ */
+export interface ChatToolCallEvent {
+  type: 'tool/call';
+  seq: number;
+  turn: number;
+  /** Stable id within the backend session (ACP toolCallId). */
+  toolCallId: string;
+  /** Programmatic tool name, when the backend provides one. */
+  name: string | null;
+  /** Human-readable title ("Reading src/main.rs"). */
+  title: string;
+  kind: string | null;
+  status: 'pending' | 'completed' | 'failed';
+  /** Absolute paths the tool touched, for follow-along UI. */
+  locations: string[];
+  /** Short output summary once finished (content/rawOutput digest). */
+  summary: string | null;
+  timestamp: number;
+}
+
+/** A permission request from the backend, awaiting a human decision
+ * (slice 3). One is live at a time per conversation; the turn blocks until
+ * the client answers (manager.chat.permission.respond), the turn is
+ * cancelled, or the timeout elapses (fail-closed: cancel). */
+export interface ChatPermissionRequest {
+  type: 'permission/request';
+  seq: number;
+  turn: number;
+  /** Opaque id the client echoes back in the response. */
+  permissionId: string;
+  /** What the backend wants to do ("Run `cargo test`"). */
+  title: string;
+  /** The selectable options, in the backend's own order. */
+  options: { optionId: string; name: string; kind: string }[];
+  /** File locations involved, when known. */
+  locations: string[];
+  timestamp: number;
+}
+
+/** The recorded decision for a permission request. */
+export interface ChatPermissionDecision {
+  type: 'permission/decision';
+  seq: number;
+  turn: number;
+  permissionId: string;
+  /** The chosen optionId, or 'cancelled' when nobody answered in time. */
+  optionId: string;
+  timestamp: number;
+}
+
 /** An infrastructure failure shown in chat but never replayed to a model. */
 export interface ChatHarnessError {
   type: 'harness/error';
@@ -171,13 +231,23 @@ export interface ChatCompactionEnd {
 
 /** The derived transcript: message turns with per-message attribution. */
 export interface ChatTranscriptTurn {
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant' | 'system' | 'tool';
   text: string;
   timestamp: number;
   /** Present on assistant turns: which backend + model produced this reply. */
   backend?: string;
   model?: string | null;
   usage?: ChatUsage | null;
+  /** Present on tool turns (slice 3): structured tool-call info for cards. */
+  tool?: {
+    toolCallId: string;
+    name: string | null;
+    title: string;
+    kind: string | null;
+    status: 'pending' | 'completed' | 'failed';
+    locations: string[];
+    summary: string | null;
+  };
 }
 
 /** The folded view the chat UI renders from the log. */
