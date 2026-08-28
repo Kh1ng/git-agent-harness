@@ -1,4 +1,5 @@
 import { expect, test, type WebSocketRoute } from '@playwright/test';
+import type { ServerMessage } from '@git-agent-harness/contracts';
 
 const WELCOME = {
   type: 'server.welcome',
@@ -194,4 +195,108 @@ test('reconnect restores and follows an in-flight reply', async ({ page }) => {
   await expect(page.getByText('complete reply', { exact: true })).toBeVisible();
   await expect(page.getByText('partial reply', { exact: true })).toHaveCount(0);
   expect(historyRequests).toBeGreaterThan(requestsBeforeCompletion);
+});
+
+test('a cancelled turn resolves via its terminal reply and the resync shows the [cancelled] fold (#1001)', async ({ page }) => {
+  let socket: WebSocketRoute;
+  let sentRequestId = '';
+  let folded = false;
+
+  await page.route('**/api/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/profiles') return route.fulfill({ json: [{ name: 'alpha', display_name: 'Alpha', repo: 'org/alpha' }] });
+    if (path === '/api/projects') return route.fulfill({ json: [{ name: 'alpha', display_name: 'Alpha', repo: 'org/alpha' }] });
+    if (path === '/api/controller-activity') return route.fulfill({ json: [] });
+    if (path === '/api/manager-chat/settings') return route.fulfill({ json: {
+      defaultBackend: 'hermes', profileOverrides: {}, availableBackends: [{ id: 'hermes', displayName: 'Hermes', implemented: true }]
+    } });
+    if (path === '/api/manager-chat/commands') return route.fulfill({ json: { commands: [] } });
+    if (path === '/api/manager-chat/models') return route.fulfill({ json: { models: [], currentModelId: null } });
+    return route.continue();
+  });
+
+  await page.routeWebSocket('**/ws**', (ws) => {
+    socket = ws;
+    ws.send(JSON.stringify(WELCOME));
+    ws.onMessage((raw) => {
+      const message = JSON.parse(String(raw));
+      if (message.type === 'manager.chat.send') {
+        sentRequestId = message.requestId;
+        return;
+      }
+      if (message.type !== 'manager.chat.historyRequest') return;
+      ws.send(JSON.stringify({
+        type: 'manager.chat.history',
+        requestId: message.requestId,
+        profile: message.profile,
+        turns: folded
+          ? [
+              { role: 'user', text: 'question', timestamp: 1 },
+              { role: 'assistant', text: 'partial answer', backend: 'hermes', model: null, usage: null, timestamp: 2 },
+              { role: 'system', text: '[cancelled]', timestamp: 3 }
+            ]
+          : [],
+        cursor: folded ? 6 : 0,
+        streaming: null
+      }));
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
+
+  await page.getByPlaceholder(/Message the manager/).fill('question');
+  await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect.poll(() => sentRequestId).not.toBe('');
+  await expect(page.getByText('Thinking…')).toBeVisible();
+
+  // A tool call streams while the turn runs (slice 3 live card).
+  socket!.send(JSON.stringify({
+    type: 'manager.chat.toolCall',
+    requestId: sentRequestId,
+    profile: 'alpha',
+    turn: 1,
+    toolCallId: 'tc-1',
+    name: 'shell',
+    title: 'Shell',
+    kind: 'shell',
+    status: 'completed',
+    locations: [],
+    summary: null
+  } satisfies ServerMessage));
+  await expect(page.getByText('Shell', { exact: true })).toBeVisible();
+
+  // The turn is cancelled mid-flight. #1001: the server still sends a
+  // terminal reply (flagged cancelled). The client must not drop it as a new
+  // assistant turn, and the busy state must resolve -- previously a cancelled
+  // turn sent nothing, the pending request had already been orphaned by a
+  // mid-turn resync, and the panel froze busy forever.
+  socket!.send(JSON.stringify({
+    type: 'manager.chat.reply',
+    requestId: sentRequestId,
+    profile: 'alpha',
+    reply: 'partial answer',
+    backend: 'hermes',
+    model: null,
+    usage: null,
+    cancelled: true
+  } satisfies ServerMessage));
+
+  // Busy resolved: no Thinking bubble, and the input accepts a new message
+  // (the send clears the draft, so retype before checking the Send enablement).
+  await expect(page.getByText('Thinking…')).toHaveCount(0);
+  await page.getByPlaceholder(/Message the manager/).fill('another question');
+  await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled();
+
+  // The follow-up updated forces the durable refetch, which folds the
+  // cancelled turn distinctly (partial text + [cancelled] marker) and owns
+  // the tool card from the live tee -- the live card must not be re-rendered
+  // as a duplicate once the transcript owns it.
+  folded = true;
+  socket!.send(JSON.stringify({ type: 'manager.chat.updated', profile: 'alpha', requestId: sentRequestId }));
+  await expect(page.getByText('[cancelled]')).toBeVisible();
+  await expect(page.getByText('partial answer', { exact: true })).toBeVisible();
+  await expect(page.getByText('Shell', { exact: true })).toHaveCount(1);
 });

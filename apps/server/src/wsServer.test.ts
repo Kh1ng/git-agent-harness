@@ -2,9 +2,17 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
 import type { ServerMessage } from '@git-agent-harness/contracts';
+
+// Hermetic: welcome is pushed only after gahCli.runStatus() spawns a real
+// `gah status` child. A cold call of the repo's release binary takes ~21s
+// here (statusCache then serves subsequent calls), which blows past the
+// per-message welcome deadline and makes the first connection a flaky
+// ~20s timeout. Point GAH_BINARY at the instant fixture instead.
+process.env.GAH_BINARY = fileURLToPath(new URL('../tests/fixtures/gah/gah', import.meta.url));
 
 /**
  * AC3 ("a restored WebSocket connection re-triggers a fresh REST pull",
