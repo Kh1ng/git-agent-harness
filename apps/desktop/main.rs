@@ -173,10 +173,16 @@ fn main() {
 
             let menu = build_tray_menu(&handle, false, &url)?;
 
+            // The tray is built ONLY here. Declaring `app.trayIcon` in
+            // tauri.conf.json as well creates a SECOND native menu-bar icon
+            // with the same id (Tauri's manager map keeps one entry, the
+            // other native icon leaks) — the "two GAH icons" bug.
             TrayIconBuilder::with_id("gah-tray")
                 .icon(app.default_window_icon().unwrap().clone())
+                .icon_as_template(true)
                 .title("GAH")
                 .tooltip("GAH Worker")
+                .show_menu_on_left_click(false)
                 .menu(&menu)
                 .on_menu_event({
                     let state = state.clone();

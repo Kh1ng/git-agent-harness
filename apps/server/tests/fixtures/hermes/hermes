@@ -113,6 +113,30 @@ class MockHermes {
         }
       });
       reply = 'tool done';
+    // WP3: prompts asking to "start a dev server" run a tool_call whose
+    // output prints the Vite-style URL, so tests can assert the preview
+    // auto-detection path end to end.
+    } else if (/start a dev server/i.test(text)) {
+      await this.connection.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'dev-server-1',
+          title: 'Starting dev server',
+          kind: 'execute',
+          status: 'in_progress'
+        }
+      });
+      await this.connection.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'dev-server-1',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'VITE v6.0.0  ready in 250 ms\n\n  ➜  Local:   http://localhost:4599/\n  ➜  Network: http://192.168.1.4:4599/' } }]
+        }
+      });
+      reply = 'dev server running';
     } else if (/SLOW-REPLY/i.test(text)) {
       // Emit one chunk, then park until cancel() resolves the pending prompt
       // with a cancelled stop reason -- exercises the mid-turn cancel path

@@ -66,7 +66,9 @@ import {
   listChatSessions,
   createChatSession,
   archiveChatSession,
-  updateChatSession
+  updateChatSession,
+  getChatPreview as getManagerChatPreview,
+  setChatPreview as setManagerChatPreview
 } from './managerChat/ManagerChatManager.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
 import {
@@ -1246,6 +1248,42 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to archive chat session',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // WP3 session preview: the dedicated port proxying the session worktree's
+  // dev server. GET the current state; POST sets (or clears with port:null)
+  // — auto-detection from agent tool output pushes manager.chat.preview.
+  app.get('/api/manager-chat/preview', (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
+    if (!sessionId) {
+      res.status(400).json({ error: 'Missing required query param: sessionId' });
+      return;
+    }
+    res.json({ preview: getManagerChatPreview(profile, sessionId) });
+  });
+
+  app.post('/api/manager-chat/preview/set', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : undefined;
+    const port = req.body?.port === null ? null : typeof req.body?.port === 'number' ? req.body.port : undefined;
+    if (!sessionId) {
+      res.status(400).json({ error: 'Missing required field: sessionId' });
+      return;
+    }
+    if (port === undefined) {
+      res.status(400).json({ error: 'Field "port" must be a number or null' });
+      return;
+    }
+    try {
+      const preview = await setManagerChatPreview(profile, sessionId, port);
+      res.json({ preview });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to set preview',
         message: error instanceof Error ? error.message : String(error)
       });
     }

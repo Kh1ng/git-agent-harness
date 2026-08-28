@@ -1,12 +1,14 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import tauri from 'vite-plugin-tauri';
 import path from 'path';
 
+// Builds the local fallback page served when the central node is
+// unreachable (the dashboard itself loads from the node over Tailscale —
+// see tauri.conf.json's window url). `tauri build` bundles whatever lands
+// in dist/ as frontendDist.
 export default defineConfig({
   plugins: [
     react(),
-    tauri(),
   ],
   resolve: {
     alias: {

@@ -303,3 +303,16 @@ export interface ChatNodeInfo {
   chatCapable: boolean;
   lastSeenAt: string | null;
 }
+
+/** WP3: a live session preview — the dedicated port proxying the dev
+ * server the agent started inside the session's worktree. */
+export interface ChatPreviewInfo {
+  profile: string;
+  sessionId: string;
+  /** Port the dev server listens on inside the node. */
+  devPort: number;
+  /** Dedicated port the proxy listens on. */
+  listenPort: number;
+  /** Browser-facing URL (tailscale IP when available). */
+  url: string;
+}

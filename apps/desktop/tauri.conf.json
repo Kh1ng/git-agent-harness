@@ -47,14 +47,7 @@
         "decorations": true,
         "visible": false
       }
-    ],
-    "trayIcon": {
-      "id": "gah-tray",
-      "iconPath": "icons/32x32.png",
-      "iconAsTemplate": true,
-      "menuOnLeftClick": false,
-      "title": "GAH"
-    }
+    ]
   },
   "build": {
     "frontendDist": "dist",

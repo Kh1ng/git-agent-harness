@@ -1,0 +1,102 @@
+# Desktop app installers (WP4): Windows NSIS installer and the macOS app.
+#
+# Manual dispatch (or a `desktop-*` tag). Windows can only be built on
+# windows-latest and macOS app bundles on macOS runners, so neither belongs
+# in the main CI path. The desktop app is a thin worker tray (Tauri) that
+# loads the central node's web UI, so the build only needs the workspace's
+# shared packages and a frontendDist stub.
+name: Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'desktop-*'
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows installer (NSIS)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust (stable MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npm run build:contracts && npm run build:shared
+
+      - name: Build frontendDist stub
+        working-directory: apps/desktop
+        run: npx vite build
+
+      - name: Build the Windows installer
+        working-directory: apps/desktop
+        run: npx tauri build --bundles nsis
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: gah-worker-windows-nsis
+          path: apps/desktop/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npm run build:contracts && npm run build:shared
+
+      - name: Build frontendDist stub
+        working-directory: apps/desktop
+        run: npx vite build
+
+      - name: Build the macOS app
+        working-directory: apps/desktop
+        run: npx tauri build --bundles app
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: gah-worker-macos-app
+          path: apps/desktop/target/release/bundle/macos/*.app
+          if-no-files-found: error

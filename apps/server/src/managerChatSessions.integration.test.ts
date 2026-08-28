@@ -422,3 +422,128 @@ test('tool calls stream as structured events and permissions round-trip through 
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+/** WP3: a dev server started by the agent in the session worktree is
+ * auto-detected from tool output, pushed live, and proxied through a
+ * dedicated port (Host rewritten to localhost). */
+test('a session preview auto-detects the dev-server port and proxies it', { timeout: 30_000 }, async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'gah-chat-preview-e2e-'));
+
+  const checkout = join(stateDir, 'checkout');
+  const worktreeBase = join(stateDir, 'worktrees');
+  execFileSync('mkdir', ['-p', checkout]);
+  execFileSync('git', ['init', '--quiet', '--initial-branch=main'], { cwd: checkout });
+  execFileSync('git', ['config', 'user.email', 'test@gah'], { cwd: checkout });
+  execFileSync('git', ['config', 'user.name', 'gah test'], { cwd: checkout });
+  writeFileSync(join(checkout, 'README.md'), '# repo\n');
+  execFileSync('git', ['add', '.'], { cwd: checkout });
+  execFileSync('git', ['commit', '--quiet', '-m', 'init'], { cwd: checkout });
+
+  const profile = 'preview-e2e';
+  const profileListPath = join(stateDir, 'profile-list.json');
+  writeFileSync(profileListPath, JSON.stringify([{
+    name: profile,
+    display_name: 'Preview E2E',
+    provider: 'github',
+    repo: 'owner/repo',
+    repo_id: 'repo',
+    local_path: checkout,
+    worktree_base: worktreeBase,
+    web_url: 'https://github.com/owner/repo',
+    max_parallel_workers: null,
+    max_open_managed_mrs: 1,
+    manager_wake_autonomy: null,
+    validation_timeout_seconds: 300
+  }]));
+
+  const gateway = http.createServer((req, res) => {
+    if (req.url === '/recall') {
+      res.end(JSON.stringify({ context: '', memory_count: 0, code: 0, message: 'ok' }));
+    } else if (req.url === '/capture') {
+      res.end(JSON.stringify({ l0_recorded: 1, scheduler_notified: false }));
+    } else if (req.url === '/session/end') {
+      res.end(JSON.stringify({ flushed: true }));
+    } else {
+      res.writeHead(404).end();
+    }
+  });
+  await new Promise<void>((done) => gateway.listen(0, '127.0.0.1', done));
+
+  const savedEnv = { ...process.env };
+  process.env.PATH = `${join(fixtures, 'hermes')}:${process.env.PATH}`;
+  process.env.GAH_BINARY = join(fixtures, 'gah', 'gah');
+  process.env.GAH_FIXTURE_PROFILE_LIST = profileListPath;
+  process.env.GAH_CHAT_STATE_DIR = join(stateDir, 'chat');
+  process.env.GAH_GATEWAY_SETTINGS_PATH = join(stateDir, 'gateway.json');
+  process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = join(stateDir, 'manager-chat.json');
+  process.env.TDAI_GATEWAY_URL = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`;
+
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server });
+  createWebSocketHandler(wss);
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const wsUrl = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  let createdSessionId: string | null = null;
+  // The "dev server" the agent allegedly started: records the Host header.
+  const seenHosts: string[] = [];
+  const devServer = http.createServer((req, res) => {
+    seenHosts.push(String(req.headers.host));
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<h1>dev server</h1>');
+  });
+  await new Promise<void>((done) => devServer.listen(4599, '127.0.0.1', done));
+
+  try {
+    const ws = await connect(wsUrl, profile);
+    const created = await request(ws, 'manager.chat.sessionCreated', 'create', {
+      type: 'manager.chat.sessionCreate', requestId: 'create', profile
+    } satisfies ClientMessage);
+    const sessionId = created.session.id;
+
+    const previewPush = new Promise<Extract<ServerMessage, { type: 'manager.chat.preview' }>>((resolve) => {
+      ws.on('message', (raw) => {
+        const message = JSON.parse(raw.toString()) as ServerMessage;
+        if (message.type === 'manager.chat.preview') resolve(message);
+      });
+    });
+    const reply = await request(ws, 'manager.chat.reply', 'turn', {
+      type: 'manager.chat.send', requestId: 'turn', profile, message: 'start a dev server', sessionId
+    } satisfies ClientMessage);
+    assert.equal(reply.reply, 'dev server running');
+    createdSessionId = sessionId;
+
+    const preview = await previewPush;
+    assert.equal(preview.devPort, 4599, 'port auto-detected from the tool output');
+    assert.ok(preview.url.includes(`:${preview.listenPort}`));
+
+    // The preview URL actually serves the dev server through the proxy,
+    // with the Host header rewritten to localhost (dev-server
+    // allowedHosts protection never sees the node's address).
+    const served = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      http.get(preview.url, { agent: false }, (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      }).on('error', reject);
+    });
+    assert.equal(served.status, 200);
+    assert.match(served.body, /dev server/);
+    assert.deepEqual(seenHosts, ['localhost:4599'], 'Host rewritten to localhost');
+
+    ws.close();
+    await once(ws, 'close');
+  } finally {
+    wss.close();
+    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((done) => gateway.close(() => done()));
+    await new Promise<void>((done) => devServer.close(() => done()));
+    const { previewProxy } = await import('./managerChat/previewProxy.js');
+    if (createdSessionId) await previewProxy.clear(profile, createdSessionId);
+    execFileSync('git', ['worktree', 'prune'], { cwd: checkout });
+    process.env = savedEnv;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+// Debug-only: if the process is still alive 5s after tests, dump handles.

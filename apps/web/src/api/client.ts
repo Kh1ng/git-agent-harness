@@ -40,7 +40,8 @@ import type {
   ProjectImportData,
   ProjectImportResult,
   ChatSessionSummary,
-  ChatNodeInfo
+  ChatNodeInfo,
+  ChatPreviewInfo
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -222,6 +223,8 @@ export interface GahDataSource {
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
   getChatNodes(): Promise<{ nodes: ChatNodeInfo[] }>;
   getManagerChatModelsForBackend(profile: string, backend: string): Promise<ManagerModelsSummary>;
+  getChatPreview(profile: string, sessionId: string): Promise<{ preview: ChatPreviewInfo | null }>;
+  setChatPreview(profile: string, sessionId: string, port: number | null): Promise<{ preview: ChatPreviewInfo | null }>;
 }
 
 async function postJson<T, U>(path: string, body: U): Promise<T> {
@@ -462,5 +465,11 @@ export const gahApi: GahDataSource = {
   },
   getManagerChatModelsForBackend(profile, backend) {
     return getJson<ManagerModelsSummary>('/api/manager-chat/models', { profile, backend });
+  },
+  getChatPreview(profile, sessionId) {
+    return getJson<{ preview: ChatPreviewInfo | null }>('/api/manager-chat/preview', { profile, sessionId });
+  },
+  setChatPreview(profile, sessionId, port) {
+    return postJson<{ preview: ChatPreviewInfo | null }, { profile: string; sessionId: string; port: number | null }>('/api/manager-chat/preview/set', { profile, sessionId, port });
   }
 };

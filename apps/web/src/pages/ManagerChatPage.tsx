@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert } from 'lucide-react';
+import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
@@ -7,7 +7,7 @@ import { NewChatModal } from '../components/NewChatModal.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { generateRequestId } from '@git-agent-harness/shared';
-import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary, ManagerBackendInfo, ChatSessionSummary } from '@git-agent-harness/contracts';
+import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary, ManagerBackendInfo, ChatSessionSummary, ChatPreviewInfo } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
   role: 'user' | 'assistant' | 'system' | 'error' | 'tool';
@@ -123,6 +123,10 @@ export function ManagerChatPage() {
   /** Slice 3: the live permission request, when the backend is blocked on
    * a human decision. */
   const [permission, setPermission] = useState<LivePermission | null>(null);
+  /** WP3: the session's live preview + panel visibility. */
+  const [preview, setPreview] = useState<ChatPreviewInfo | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewPortDraft, setPreviewPortDraft] = useState('');
   /** Highest log seq this client has applied. Chunks at or below it are
    * already reflected in the rendered transcript (e.g. fetched via history),
    * so they're skipped -- gives exactly-once rendering for a client that
@@ -139,6 +143,9 @@ export function ManagerChatPage() {
   const [commands, setCommands] = useState<ManagerCommandInfo[]>([]);
   const [models, setModels] = useState<ManagerModelInfo[]>([]);
   const [currentModelId, setCurrentModelId] = useState<string | null>(null);
+  /** True once the model list fetch completed (an empty list is "this
+   * backend exposes no picker", not "still loading"). */
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelChanging, setModelChanging] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
@@ -189,6 +196,15 @@ export function ManagerChatPage() {
     setStreaming(null);
     setLiveTools({});
     setPermission(null);
+    setPreview(null);
+    setPreviewOpen(false);
+    setPreviewPortDraft('');
+    if (sessionId && sessionId !== 'default') {
+      gahApi
+        .getChatPreview(profile, sessionId)
+        .then(({ preview }) => { if (activeProfileRef.current === profile) setPreview(preview); })
+        .catch(() => {});
+    }
     lastAppliedSeqRef.current = 0;
     processedMessagesRef.current = 0;
     if (!isConnected) return;
@@ -210,6 +226,7 @@ export function ManagerChatPage() {
     setCommands([]);
     setModels([]);
     setCurrentModelId(null);
+    setModelsLoaded(false);
     setModelChanging(false);
     gahApi
       .getManagerChatSettings()
@@ -238,12 +255,14 @@ export function ManagerChatPage() {
         if (!cancelled) {
           setModels(models);
           setCurrentModelId(currentModelId);
+          setModelsLoaded(true);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setModels([]);
           setCurrentModelId(null);
+          setModelsLoaded(true);
         }
       });
     return () => { cancelled = true; };
@@ -253,15 +272,17 @@ export function ManagerChatPage() {
   // that session's backend models, and changes go to the session record
   // (not the profile-wide default).
   const [sessionModels, setSessionModels] = useState<ManagerModelInfo[]>([]);
+  const [sessionModelsLoaded, setSessionModelsLoaded] = useState(false);
   const [sessionModelChanging, setSessionModelChanging] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setSessionModels([]);
+    setSessionModelsLoaded(false);
     if (!activeSession || !isConnected) return;
     gahApi
       .getManagerChatModelsForBackend(profile, activeSession.backend)
-      .then(({ models }) => { if (!cancelled) setSessionModels(models); })
-      .catch(() => { if (!cancelled) setSessionModels([]); });
+      .then(({ models }) => { if (!cancelled) { setSessionModels(models); setSessionModelsLoaded(true); } })
+      .catch(() => { if (!cancelled) { setSessionModels([]); setSessionModelsLoaded(true); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, sessionId, activeSession?.backend]);
@@ -388,6 +409,20 @@ export function ManagerChatPage() {
           title: last.title,
           options: last.options,
           locations: last.locations
+        });
+        continue;
+      }
+
+      // WP3: preview went live for this session (manual set or
+      // auto-detected dev-server port from tool output mid-turn). The
+      // conversation guard above already matched profile+sessionId.
+      if (last.type === 'manager.chat.preview') {
+        setPreview({
+          profile: last.profile,
+          sessionId: last.sessionId,
+          devPort: last.devPort,
+          listenPort: last.listenPort,
+          url: last.url
         });
         continue;
       }
@@ -547,6 +582,33 @@ export function ManagerChatPage() {
 
   const [newChatOpen, setNewChatOpen] = useState(false);
 
+  /** WP3 preview: manual port set/clear + panel toggle. */
+  const applyPreviewPort = async (raw: string) => {
+    if (!activeSession) return;
+    const port = Number.parseInt(raw, 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      setTurns((prev) => [...prev, { role: 'error', text: 'Preview port must be a number between 1 and 65535.' }]);
+      return;
+    }
+    try {
+      const { preview: updated } = await gahApi.setChatPreview(profile, activeSession.id, port);
+      setPreview(updated);
+      setPreviewPortDraft('');
+    } catch (err) {
+      setTurns((prev) => [...prev, { role: 'error', text: `Failed to set preview: ${err instanceof Error ? err.message : String(err)}` }]);
+    }
+  };
+
+  const stopPreview = async () => {
+    if (!activeSession) return;
+    try {
+      await gahApi.setChatPreview(profile, activeSession.id, null);
+      setPreview(null);
+    } catch (err) {
+      setTurns((prev) => [...prev, { role: 'error', text: `Failed to stop preview: ${err instanceof Error ? err.message : String(err)}` }]);
+    }
+  };
+
   /** New-chat completion: switch project if the modal picked another one,
    * then select the fresh session (its history effect clears the view). */
   const handleChatCreated = (createdProfile: string, createdSessionId: string) => {
@@ -598,6 +660,17 @@ export function ManagerChatPage() {
                   </option>
                 ))}
               </select>
+            )}
+            {/* This provider doesn't expose a model picker over its protocol
+                (e.g. Hermes over ACP): say so instead of silently hiding the
+                control. Codex / Claude / OpenCode expose live lists. */}
+            {!activeSession && modelsLoaded && models.length === 0 && activeBackendId && (
+              <span
+                className="rounded-md border border-subtle bg-raised px-2 py-1.5 text-[11px] text-muted"
+                title="This provider uses its configured default model and doesn't expose a picker. Switch provider (Codex, Claude, OpenCode expose live model lists) or use its own model command in chat."
+              >
+                Default model · {activeBackendLabel}
+              </span>
             )}
           </div>
         }
@@ -663,6 +736,29 @@ export function ManagerChatPage() {
                 ))}
               </select>
             )}
+            {sessionModelsLoaded && sessionModels.length === 0 && (
+              <span
+                className="rounded-md border border-subtle bg-raised px-2 py-1.5 text-[11px] text-muted"
+                title="This provider uses its configured default model and doesn't expose a picker. Switch the session provider to pick a model."
+              >
+                Default model
+              </span>
+            )}
+            <button
+              onClick={() => setPreviewOpen((v) => !v)}
+              disabled={turnBusy && !preview}
+              className={`inline-flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs disabled:opacity-50 ${
+                preview
+                  ? 'border-accent/40 bg-accent/15 text-primary'
+                  : 'border-subtle bg-raised text-secondary hover:bg-white/5'
+              }`}
+              title={preview
+                ? `Preview live: dev server on :${preview.devPort} → ${preview.url}`
+                : 'Open the preview panel — set the dev-server port, or let GAH auto-detect it from tool output'}
+            >
+              <MonitorPlay size={13} aria-hidden="true" />
+              Preview{preview ? ` :${preview.devPort}` : ''}
+            </button>
             <button
               onClick={handleArchiveSession}
               disabled={turnBusy}
@@ -687,7 +783,7 @@ export function ManagerChatPage() {
         onCreated={handleChatCreated}
       />
 
-      <div className="grid min-w-0 gap-4 xl:grid-cols-[14rem_minmax(0,1fr)]">
+      <div className={`grid min-w-0 gap-4 ${previewOpen && activeSession ? 'xl:grid-cols-[14rem_minmax(0,1fr)_minmax(0,26rem)]' : 'xl:grid-cols-[14rem_minmax(0,1fr)]'}`}>
         <ProjectRail
           currentProfile={profile}
           profiles={availableProfiles}
@@ -696,6 +792,86 @@ export function ManagerChatPage() {
             setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.name), project]);
           }}
         />
+
+      {/* WP3 preview panel: the session's dev server through the node's
+          dedicated preview port. Auto-detect lights it up mid-turn; the
+          port can also be set manually. */}
+      {previewOpen && activeSession && (
+        <div className="card-padded flex min-w-0 flex-col h-[65vh] order-3 xl:order-none">
+          <div className="flex items-center justify-between gap-2 pb-2">
+            <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+              <MonitorPlay size={13} aria-hidden="true" /> Preview
+            </h3>
+            <div className="flex items-center gap-1">
+              {preview && (
+                <a
+                  href={preview.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
+                  title="Open in a new tab"
+                >
+                  <ExternalLink size={13} aria-hidden="true" />
+                </a>
+              )}
+              <button
+                onClick={() => setPreviewOpen(false)}
+                className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
+                aria-label="Close preview"
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+          {preview ? (
+            <>
+              <p className="text-[11px] text-muted pb-2">
+                dev server <span className="font-mono">:{preview.devPort}</span> → <span className="font-mono">{preview.url}</span>
+              </p>
+              <iframe
+                src={preview.url}
+                title="Session preview"
+                className="flex-1 min-h-0 w-full rounded-md border border-subtle bg-white"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+              />
+              <button
+                onClick={stopPreview}
+                className="btn-secondary text-xs mt-2 self-start"
+                title="Stop proxying this port"
+              >
+                Stop preview
+              </button>
+            </>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-center text-muted gap-3 px-4">
+              <MonitorPlay size={24} className="opacity-50" aria-hidden="true" />
+              <p className="text-xs leading-relaxed">
+                No preview yet. Ask the agent to start a dev server in this session
+                (e.g. <span className="font-mono">npm run dev</span>) — GAH auto-detects
+                the port from the tool output. Or set it manually:
+              </p>
+              <form
+                className="flex gap-1.5 w-full max-w-[14rem]"
+                onSubmit={(e) => { e.preventDefault(); void applyPreviewPort(previewPortDraft); }}
+              >
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={previewPortDraft}
+                  onChange={(e) => setPreviewPortDraft(e.target.value)}
+                  placeholder="e.g. 5173"
+                  className="min-w-0 flex-1 rounded-md border border-subtle bg-raised px-2 py-1.5 text-xs text-primary"
+                  aria-label="Dev server port"
+                />
+                <button type="submit" className="btn-primary text-xs" disabled={!previewPortDraft}>
+                  Set
+                </button>
+              </form>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="card-padded flex min-w-0 flex-col h-[65vh]">
         <div className="flex-1 overflow-y-auto space-y-3 pr-1">
