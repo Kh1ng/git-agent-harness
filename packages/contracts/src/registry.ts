@@ -1,5 +1,5 @@
 import type { ActiveClaim, AvailabilityScope, BackendInstanceSummary, RecentLedgerSummary } from './gah.js';
-import coordinatorProtocol from './coordinator-protocol.json';
+import coordinatorProtocol from './coordinator-protocol.json' with { type: 'json' };
 
 export const COORDINATOR_VERSION = coordinatorProtocol.version;
 export const COORDINATOR_SCHEMA_SEED = coordinatorProtocol.schema_seed;
