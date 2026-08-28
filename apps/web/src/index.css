@@ -208,6 +208,60 @@
   .stat-tile-label {
     @apply text-xs font-medium text-muted uppercase tracking-wide;
   }
+
+  /* Chat markdown keeps each role's bubble color while giving generated
+     prose predictable spacing and bounded code/link rendering. */
+  .chat-markdown {
+    @apply min-w-0 whitespace-pre-wrap break-words;
+    overflow-wrap: anywhere;
+  }
+  .chat-markdown > :first-child {
+    margin-top: 0;
+  }
+  .chat-markdown > :last-child {
+    margin-bottom: 0;
+  }
+  .chat-markdown p,
+  .chat-markdown ul,
+  .chat-markdown ol,
+  .chat-markdown blockquote,
+  .chat-markdown pre,
+  .chat-markdown h1,
+  .chat-markdown h2,
+  .chat-markdown h3 {
+    margin: 0.5rem 0;
+  }
+  .chat-markdown h1,
+  .chat-markdown h2,
+  .chat-markdown h3,
+  .chat-markdown strong {
+    @apply font-semibold;
+  }
+  .chat-markdown ul {
+    @apply list-disc pl-5;
+  }
+  .chat-markdown ol {
+    @apply list-decimal pl-5;
+  }
+  .chat-markdown blockquote {
+    @apply border-l-2 border-current pl-3 opacity-80;
+  }
+  .chat-markdown a {
+    @apply underline underline-offset-2;
+    color: inherit;
+  }
+  .chat-markdown :not(pre) > code {
+    @apply rounded px-1 py-0.5 font-mono text-[0.9em];
+    background-color: rgb(0 0 0 / 0.2);
+  }
+  .chat-markdown pre {
+    @apply max-w-full overflow-x-auto rounded-md bg-page p-3 font-mono text-xs;
+    white-space: pre;
+  }
+  .chat-markdown pre code {
+    @apply bg-transparent p-0;
+    font-size: inherit;
+  }
 }
 
 /* Terminal styles (SessionDetailModal xterm host) */
