@@ -83,9 +83,16 @@ export async function listChatIssues(
     ? await execCli('glab', ['issue', 'list', '--output=json'], profileInfo.local_path)
     : await execCli('gh', ['issue', 'list', '--json', 'number,title,url,labels,updatedAt,state', `--limit=${limit}`], profileInfo.local_path);
   const parsed = JSON.parse(stdout) as ProviderIssue[];
+  const isOpen = (state: string): boolean => {
+    const normalized = state.toLowerCase();
+    // GitHub reports OPEN/CLOSED; GitLab opened/closed. Absent state (some
+    // list shapes) defaults to open: `issue list` without --state=all only
+    // returns open issues anyway.
+    return normalized === 'open' || normalized === 'opened' || state === '';
+  };
   return parsed
     .map((raw) => normalizeIssue(raw))
-    .filter((issue) => issue.state === 'opened' || issue.state === 'open')
+    .filter((issue) => isOpen(issue.state))
     .sort((a, b) => b.number - a.number);
 }
 
@@ -170,7 +177,8 @@ export async function startIssueChat(input: StartIssueChatInput): Promise<StartI
   if (live) return { session: live, existing: true };
 
   const issue = await fetchIssue(profileInfo, issueNumber);
-  if (issue.state !== 'open' && issue.state !== 'opened') {
+  const normalizedState = issue.state.toLowerCase();
+  if (normalizedState !== 'open' && normalizedState !== 'opened') {
     throw new Error(`Issue #${issueNumber} is ${issue.state}, not open`);
   }
   await markIssueInProgress(profileInfo, issueNumber, input.inProgressLabel ?? ISSUE_IN_PROGRESS_LABEL);
