@@ -115,7 +115,9 @@ async function labelExists(
     const isGitLab = profileInfo.provider === 'gitlab';
     const { stdout } = isGitLab
       ? await execCli('glab', ['label', 'list', '--output=json'], profileInfo.local_path)
-      : await execCli('gh', ['label', 'list', '--json', 'name'], profileInfo.local_path);
+      : // gh defaults to 30 labels per page -- repos routinely have more
+      // (this one has ~35), which made the in-progress check miss.
+      await execCli('gh', ['label', 'list', '--json', 'name', '--limit', '200'], profileInfo.local_path);
     const parsed = JSON.parse(stdout) as { name?: string }[];
     return parsed.some((entry) => entry.name === label);
   } catch {
