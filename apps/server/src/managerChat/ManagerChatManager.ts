@@ -249,6 +249,34 @@ export async function setChatPreview(profile: string, sessionId: string, port: n
   return previewProxy.set(profile, sessionId, port);
 }
 
+/** Issue → chat (issue-to-workflow): open issues for the profile's repo. */
+export async function listChatIssuesForProfile(profile: string) {
+  const profileInfo = await findProfileInfo(profile);
+  if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
+  const { listChatIssues } = await import('./issueChats.js');
+  return listChatIssues(profileInfo);
+}
+
+/** Issue → chat: grab the issue (idempotent), mark it in progress, branch
+ * for it, and open a session seeded with the issue body. */
+export async function startChatFromIssue(
+  profile: string,
+  issueNumber: number,
+  backend?: string,
+  model?: string | null
+) {
+  const profileInfo = await findProfileInfo(profile);
+  if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
+  const { startIssueChat } = await import('./issueChats.js');
+  return startIssueChat({
+    profile,
+    profileInfo,
+    issueNumber,
+    backend: backend ?? backendForProfile(profile),
+    model: model ?? null
+  });
+}
+
 export function listCommandsForProfile(profile: string): Promise<ManagerCommandInfo[]> {
   const backendId = backendForProfile(profile);
   return resolveAdapter(backendId).listCommands(profile);

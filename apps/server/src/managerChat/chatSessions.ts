@@ -127,6 +127,10 @@ export interface CreateSessionInput {
   /** Model override for the backend; null = backend default. */
   model?: string | null;
   title?: string;
+  /** Branch override (issue chats): e.g. `gah/issue/<repo>-42`. The
+   * worktree keeps the gah-chat-<repo_id>-<session> dir name so prune
+   * still sees it; only the branch differs. */
+  branch?: string;
 }
 
 /**
@@ -145,7 +149,7 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     id: sessionId,
     profile,
     worktreePath: null,
-    branch: sessionBranchName(profileInfo.repo_id, sessionId),
+    branch: input.branch ?? sessionBranchName(profileInfo.repo_id, sessionId),
     backend,
     model: input.model ?? null,
     title: input.title ?? null,

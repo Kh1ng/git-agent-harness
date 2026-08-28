@@ -68,7 +68,9 @@ import {
   archiveChatSession,
   updateChatSession,
   getChatPreview as getManagerChatPreview,
-  setChatPreview as setManagerChatPreview
+  setChatPreview as setManagerChatPreview,
+  listChatIssuesForProfile as listManagerChatIssues,
+  startChatFromIssue as startManagerChatFromIssue
 } from './managerChat/ManagerChatManager.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
 import {
@@ -1248,6 +1250,40 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to archive chat session',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Issue → chat (issue-to-workflow): open issues for the project's repo,
+  // and grab one into a chat -- branch for it, mark in progress, seed the
+  // session with the issue body.
+  app.get('/api/manager-chat/issues', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      res.json({ issues: await listManagerChatIssues(profile) });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to list issues',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/manager-chat/issues/start', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const issueNumber = typeof req.body?.issueNumber === 'number' ? req.body.issueNumber : undefined;
+    const backend = typeof req.body?.backend === 'string' ? req.body.backend : undefined;
+    const model = typeof req.body?.model === 'string' ? req.body.model : null;
+    if (issueNumber === undefined) {
+      res.status(400).json({ error: 'Missing required field: issueNumber' });
+      return;
+    }
+    try {
+      res.status(201).json(await startManagerChatFromIssue(profile, issueNumber, backend, model));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to start chat from issue',
         message: error instanceof Error ? error.message : String(error)
       });
     }

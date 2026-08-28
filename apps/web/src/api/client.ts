@@ -41,7 +41,9 @@ import type {
   ProjectImportResult,
   ChatSessionSummary,
   ChatNodeInfo,
-  ChatPreviewInfo
+  ChatPreviewInfo,
+  ChatIssueSummary,
+  ChatIssueStartResult
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -225,6 +227,8 @@ export interface GahDataSource {
   getManagerChatModelsForBackend(profile: string, backend: string): Promise<ManagerModelsSummary>;
   getChatPreview(profile: string, sessionId: string): Promise<{ preview: ChatPreviewInfo | null }>;
   setChatPreview(profile: string, sessionId: string, port: number | null): Promise<{ preview: ChatPreviewInfo | null }>;
+  getChatIssues(profile: string): Promise<{ issues: ChatIssueSummary[] }>;
+  startChatFromIssue(profile: string, issueNumber: number, backend?: string, model?: string | null): Promise<ChatIssueStartResult>;
 }
 
 async function postJson<T, U>(path: string, body: U): Promise<T> {
@@ -471,5 +475,11 @@ export const gahApi: GahDataSource = {
   },
   setChatPreview(profile, sessionId, port) {
     return postJson<{ preview: ChatPreviewInfo | null }, { profile: string; sessionId: string; port: number | null }>('/api/manager-chat/preview/set', { profile, sessionId, port });
+  },
+  getChatIssues(profile) {
+    return getJson<{ issues: ChatIssueSummary[] }>('/api/manager-chat/issues', { profile });
+  },
+  startChatFromIssue(profile, issueNumber, backend, model) {
+    return postJson<ChatIssueStartResult, { profile: string; issueNumber: number; backend?: string; model?: string | null }>('/api/manager-chat/issues/start', { profile, issueNumber, backend, model });
   }
 };

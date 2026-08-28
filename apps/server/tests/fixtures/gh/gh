@@ -1,0 +1,49 @@
+#!/usr/bin/env node
+// Fake `gh` for apps/server tests: a GitHub-shaped provider stub for the
+// issue → chat flow (issueChats.ts). Emits recorded JSON for the subcommands
+// the service shells out to, and RECORDS issue-edit invocations to a state
+// file so tests can assert the "mark in progress" step happened.
+//
+//   issue list --json number,title,url,labels,updatedAt --limit=N   → issues.json
+//   issue view <n> --json number,title,body,state,url,labels       → issue-<n>.json
+//   issue edit <n> --add-assignee @me [--add-label L]              → appends to $GAH_FAKE_GH_STATE
+//   label list --json name                                         → labels.json
+//
+// Point GAH_FAKE_GH_FIXTURE at the fixture data dir and GAH_FAKE_GH_STATE
+// at a writable scratch file. Unknown invocations fail loudly (exit 127)
+// so tests never silently exercise the real gh.
+import fs from 'node:fs';
+import path from 'node:path';
+
+const dataDir = process.env.GAH_FAKE_GH_FIXTURE;
+const stateFile = process.env.GAH_FAKE_GH_STATE;
+
+if (!dataDir || !stateFile) {
+  process.stderr.write('fake-gh fixture: GAH_FAKE_GH_FIXTURE and GAH_FAKE_GH_STATE must be set\n');
+  process.exit(127);
+}
+
+const args = process.argv.slice(2);
+const [command, sub] = args;
+
+function respond(name) {
+  const file = path.join(dataDir, `${name}.json`);
+  process.stdout.write(fs.readFileSync(file, 'utf8'));
+  process.exit(0);
+}
+
+if (command === 'issue' && sub === 'list') {
+  respond('issues');
+} else if (command === 'issue' && sub === 'view') {
+  const number = args[2];
+  respond(`issue-${number}`);
+} else if (command === 'issue' && sub === 'edit') {
+  const number = args[2];
+  fs.appendFileSync(stateFile, `${JSON.stringify({ number, args: args.slice(3) })}\n`);
+  process.exit(0);
+} else if (command === 'label' && sub === 'list') {
+  respond('labels');
+} else {
+  process.stderr.write(`fake-gh fixture: unrecognized invocation: ${args.join(' ')}\n`);
+  process.exit(127);
+}
