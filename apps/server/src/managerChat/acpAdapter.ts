@@ -340,9 +340,18 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
        * connection is reused across turns and its cwd is immutable, which
        * is correct: one conversation = one directory. */
       cwd?: string;
+      /** Model override for this conversation (WP2 sessions): applied after
+       * connect (never before -- setModel lazily connects, which would race
+       * the cwd first-connect rule), then only on change. Backends without
+       * a model picker (e.g. Claude's bridge) throw in selectModel; that's
+       * expected and degrades to the backend's default. */
+      model?: string | null;
     }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }> {
     const state = await connect(gahProfile, input.cwd);
+    if (input.model && input.model !== state.currentModelId && state.models.some((m) => m.id === input.model)) {
+      await selectModel(state, input.model);
+    }
     state.client.replyChunks = [];
     state.client.toolCalls.clear();
     let missingHistory = historyDelta(state.knownHistory, input.history);

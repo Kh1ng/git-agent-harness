@@ -214,8 +214,22 @@ export interface ChatSessionSummary {
   branch: string;
   /** Backend serving this session (per-session override of the profile default). */
   backend: string;
+  /** Model override for the session's backend; null = the backend's default.
+   * Applied on the session's connection before each turn. */
+  model: string | null;
   title: string | null;
   createdAt: number;
   lastActiveAt: number;
   archivedAt: number | null;
+}
+
+/** A node offered by the new-chat flow's node step. Chat runs on the
+ * central node today; workers are listed for visibility but not yet
+ * chat-capable (fleet chat is future work). */
+export interface ChatNodeInfo {
+  nodeId: string;
+  displayName: string;
+  role: 'central' | 'worker';
+  chatCapable: boolean;
+  lastSeenAt: string | null;
 }

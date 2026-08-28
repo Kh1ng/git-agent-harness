@@ -26,6 +26,7 @@ import {
   listSessions,
   resolveSessionCwd,
   touchSession,
+  updateSession,
   type ChatSessionStoreOptions
 } from './chatSessions.js';
 import { runProfileList } from '../gahCli.js';
@@ -99,12 +100,18 @@ const PROFILE_INFO_TTL_MS = 30_000;
 /** Resolves a profile's config facts (repo_id, local_path, worktree_base)
  * for session worktree management. Cached briefly: profiles are hot-path
  * enough (every session turn) but change rarely, and `gah profile list`
- * shells out to the Rust CLI. */
+ * shells out to the Rust CLI. A cache MISS forces one refresh before
+ * giving up, so a freshly created profile is chattable immediately
+ * (and tests that swap GAH_FIXTURE_PROFILE_LIST see the new list). */
 async function findProfileInfo(profile: string): Promise<ProfileSummary | null> {
   const now = Date.now();
   if (!profileInfoCache || now - profileInfoCache.at > PROFILE_INFO_TTL_MS) {
     profileInfoCache = { at: now, profiles: await runProfileList() };
   }
+  if (profileInfoCache.profiles.some((p) => p.name === profile)) {
+    return profileInfoCache.profiles.find((p) => p.name === profile) ?? null;
+  }
+  profileInfoCache = { at: now, profiles: await runProfileList() };
   return profileInfoCache.profiles.find((p) => p.name === profile) ?? null;
 }
 
@@ -121,13 +128,23 @@ export function listChatSessions(profile: string) {
 
 /** Creates a chat session bound to a fresh worktree (WP2). The backend
  * resolves at create time: explicit request, else the profile default. */
-export async function createChatSession(profile: string, backend?: string, title?: string) {
+export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string) {
   const profileInfo = await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   return createSession(
-    { profile, profileInfo, backend: backend ?? backendForProfile(profile), title },
+    { profile, profileInfo, backend: backend ?? backendForProfile(profile), model: model ?? null, title },
     chatSessionStoreOptions
   );
+}
+
+/** Changes a live session's backend/model/title; the worktree is untouched
+ * so the next turn runs in the same directory on the new backend/model. */
+export function updateChatSession(
+  profile: string,
+  sessionId: string,
+  patch: { backend?: string; model?: string | null; title?: string }
+) {
+  return updateSession(profile, sessionId, patch, chatSessionStoreOptions);
 }
 
 /** Archives a chat session: dirty worktree patched first, branch survives (WP2). */
@@ -167,6 +184,23 @@ export async function setModelForProfile(profile: string, modelId: string): Prom
   const backendId = backendForProfile(profile);
   await resolveAdapter(backendId).setModel(profile, modelId);
   setModelOverrideForProfile(profile, backendId, modelId);
+}
+
+/** Lists a specific backend's models for a profile (new-chat flow): the
+ * picker needs each backend's own list, not just the profile default's.
+ * The profile's persisted override for that backend is restored exactly as
+ * listModelsForProfile does for the default. */
+export async function listModelsForBackend(
+  profile: string,
+  backendId: string
+): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }> {
+  const adapter = resolveAdapter(backendId);
+  const { models, currentModelId } = await adapter.listModels(profile);
+  const override = modelOverrideForProfile(profile, backendId);
+  if (override && override !== currentModelId && models.some((m) => m.id === override)) {
+    return { models, currentModelId: override };
+  }
+  return { models, currentModelId };
 }
 
 interface HandoffInfo {
@@ -237,6 +271,8 @@ export interface RunTurnContext {
   backend: string;
   /** Session working directory (WP2); undefined = the server's cwd. */
   cwd?: string;
+  /** Per-conversation model override (WP2 sessions); undefined = none. */
+  model?: string | null;
 }
 
 export async function runTurn(
@@ -260,7 +296,11 @@ export async function runTurn(
     attempt: async (backendId) => {
       const adapter = resolveAdapter(backendId);
       const attempt = async () => {
-        const r = await adapter.runTurn(context.key, { prompt, history, onChunk, onToolResult, cwd: context.cwd });
+        // Model override applies to the session's own backend only -- a
+        // handoff fallback backend uses its own default (the override is
+        // for a different backend's model id space).
+        const model = backendId === context.backend ? context.model : undefined;
+        const r = await adapter.runTurn(context.key, { prompt, history, onChunk, onToolResult, cwd: context.cwd, model });
         return r;
       };
       try {
@@ -329,7 +369,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
   // materializing it from the branch if prune reclaimed the idle worktree)
   // and serve the turn from the session's own backend. Unknown or archived
   // sessions fail loudly rather than silently landing in the default log.
-  const prepareSession = async (): Promise<{ cwd?: string; backend: string }> => {
+  const prepareSession = async (): Promise<{ cwd?: string; backend: string; model?: string | null }> => {
     if (!sessionId || sessionId === 'default') {
       return { backend: backendForProfile(profile) };
     }
@@ -341,7 +381,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
     if (!resolved) {
       throw new Error(`No active chat session '${sessionId}' for profile '${profile}'`);
     }
-    return { cwd: resolved.cwd, backend: resolved.session.backend };
+    return { cwd: resolved.cwd, backend: resolved.session.backend, model: resolved.session.model };
   };
 
   const key = chatKey(profile, sessionId);
@@ -458,7 +498,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
           timestamp: Date.now()
         }),
         active,
-        { key, backend: sessionContext.backend, cwd: sessionContext.cwd }
+        { key, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model }
       );
       // A cancel is a barrier for the queue: once we've sent session/cancel
       // to the backend, don't let an unresponsive agent wedge the profile's

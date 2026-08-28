@@ -12,7 +12,7 @@ import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
-import { sendManagerChatMessage, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher, listChatSessions, createChatSession, archiveChatSession } from './managerChat/ManagerChatManager.js';
+import { sendManagerChatMessage, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher, listChatSessions, createChatSession, archiveChatSession, updateChatSession } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -214,6 +214,10 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
       await handleManagerChatSessionCreate(ws, message, requestId);
       break;
 
+    case 'manager.chat.sessionUpdate':
+      await handleManagerChatSessionUpdate(ws, message, requestId);
+      break;
+
     case 'manager.chat.sessionArchive':
       await handleManagerChatSessionArchive(ws, message, requestId);
       break;
@@ -357,9 +361,28 @@ async function handleManagerChatSessionList(ws: WebSocket, message: Extract<Clie
 
 async function handleManagerChatSessionCreate(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.sessionCreate' }>, requestId: string) {
   try {
-    const session = await createChatSession(message.profile, message.backend, message.title);
+    const session = await createChatSession(message.profile, message.backend, message.model ?? null, message.title);
     const payload: ServerMessage = {
       type: 'manager.chat.sessionCreated',
+      requestId,
+      profile: message.profile,
+      session
+    };
+    ws.send(JSON.stringify(payload));
+  } catch (error) {
+    ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
+  }
+}
+
+async function handleManagerChatSessionUpdate(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.sessionUpdate' }>, requestId: string) {
+  try {
+    const patch: { backend?: string; model?: string | null; title?: string } = {};
+    if (message.backend !== undefined) patch.backend = message.backend;
+    if (message.model !== undefined) patch.model = message.model;
+    if (message.title !== undefined) patch.title = message.title;
+    const session = updateChatSession(message.profile, message.sessionId, patch);
+    const payload: ServerMessage = {
+      type: 'manager.chat.sessionUpdated',
       requestId,
       profile: message.profile,
       session

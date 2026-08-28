@@ -124,6 +124,8 @@ export interface CreateSessionInput {
   /** The profile's config facts (repo_id, local_path, worktree_base). */
   profileInfo: Pick<ProfileSummary, 'repo_id' | 'local_path' | 'worktree_base'>;
   backend: string;
+  /** Model override for the backend; null = backend default. */
+  model?: string | null;
   title?: string;
 }
 
@@ -145,6 +147,7 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     worktreePath: null,
     branch: sessionBranchName(profileInfo.repo_id, sessionId),
     backend,
+    model: input.model ?? null,
     title: input.title ?? null,
     createdAt: now,
     lastActiveAt: now,
@@ -172,6 +175,26 @@ export function listSessions(profile: string, opts?: ChatSessionStoreOptions): C
 
 export function getSession(profile: string, sessionId: string, opts?: ChatSessionStoreOptions): ChatSessionSummary | null {
   return readIndex(profile, opts).find((s) => s.id === sessionId) ?? null;
+}
+
+/** Changes a live session's backend and/or model and/or title. The worktree
+ * is untouched: the next turn runs on the new backend/model in the same
+ * directory -- the manual form of backend interchange. */
+export function updateSession(
+  profile: string,
+  sessionId: string,
+  patch: { backend?: string; model?: string | null; title?: string },
+  opts?: ChatSessionStoreOptions
+): ChatSessionSummary {
+  const sessions = readIndex(profile, opts);
+  const session = sessions.find((s) => s.id === sessionId);
+  if (!session) throw new Error(`No chat session '${sessionId}' for profile '${profile}'`);
+  if (session.archivedAt !== null) throw new Error(`Chat session '${sessionId}' is archived`);
+  if (patch.backend !== undefined) session.backend = patch.backend;
+  if (patch.model !== undefined) session.model = patch.model;
+  if (patch.title !== undefined) session.title = patch.title;
+  writeIndex(profile, sessions, opts);
+  return session;
 }
 
 /** Effective turn cwd for a session: its worktree when it exists (re-

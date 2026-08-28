@@ -39,7 +39,8 @@ import type {
   GatewaySettingsUpdate,
   ProjectImportData,
   ProjectImportResult,
-  ChatSessionSummary
+  ChatSessionSummary,
+  ChatNodeInfo
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -216,8 +217,11 @@ export interface GahDataSource {
   getManagerChatModels(profile: string): Promise<ManagerModelsSummary>;
   setManagerChatModel(profile: string, modelId: string): Promise<{ success: boolean }>;
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
-  createChatSession(profile: string, backend?: string): Promise<ChatSessionSummary>;
+  createChatSession(profile: string, backend?: string, model?: string | null, title?: string): Promise<ChatSessionSummary>;
+  updateChatSession(profile: string, sessionId: string, patch: { backend?: string; model?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
+  getChatNodes(): Promise<{ nodes: ChatNodeInfo[] }>;
+  getManagerChatModelsForBackend(profile: string, backend: string): Promise<ManagerModelsSummary>;
 }
 
 async function postJson<T, U>(path: string, body: U): Promise<T> {
@@ -444,10 +448,19 @@ export const gahApi: GahDataSource = {
   getChatSessions(profile) {
     return getJson<{ sessions: ChatSessionSummary[] }>('/api/manager-chat/sessions', { profile });
   },
-  createChatSession(profile: string, backend?: string) {
-    return postJson<ChatSessionSummary, { profile: string; backend?: string }>('/api/manager-chat/sessions', { profile, backend });
+  createChatSession(profile, backend, model, title) {
+    return postJson<ChatSessionSummary, { profile: string; backend?: string; model?: string | null; title?: string }>('/api/manager-chat/sessions', { profile, backend, model, title });
   },
-  archiveChatSession(profile: string, sessionId: string) {
+  updateChatSession(profile, sessionId, patch) {
+    return postJson<ChatSessionSummary, { profile: string; sessionId: string } & { backend?: string; model?: string | null; title?: string }>('/api/manager-chat/sessions/update', { profile, sessionId, ...patch });
+  },
+  archiveChatSession(profile, sessionId) {
     return postJson<ChatSessionSummary, { profile: string; sessionId: string }>('/api/manager-chat/sessions/archive', { profile, sessionId });
+  },
+  getChatNodes() {
+    return getJson<{ nodes: ChatNodeInfo[] }>('/api/manager-chat/nodes');
+  },
+  getManagerChatModelsForBackend(profile, backend) {
+    return getJson<ManagerModelsSummary>('/api/manager-chat/models', { profile, backend });
   }
 };

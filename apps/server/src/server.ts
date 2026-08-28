@@ -43,7 +43,8 @@ import type {
   DoctorSnapshot,
   ProfileSummary,
   ProjectImportData,
-  ProjectImportResult
+  ProjectImportResult,
+  ChatNodeInfo
 } from '@git-agent-harness/contracts';
 import { getFleetDispatch } from './wsServer.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
@@ -60,10 +61,12 @@ import { listManagerBackends } from './managerChat/registry.js';
 import {
   listCommandsForProfile as listManagerChatCommands,
   listModelsForProfile as listManagerChatModels,
+  listModelsForBackend as listManagerChatModelsForBackend,
   setModelForProfile as setManagerChatModel,
   listChatSessions,
   createChatSession,
-  archiveChatSession
+  archiveChatSession,
+  updateChatSession
 } from './managerChat/ManagerChatManager.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
 import {
@@ -1122,11 +1125,15 @@ export function createServer(
 
   // Real selectable models for the active backend, sourced live from its
   // own ACP session state -- not a list GAH maintains. Empty for backends
-  // that don't expose this (Claude's ACP bridge doesn't today).
+  // that don't expose this (Claude's ACP bridge doesn't today). `backend`
+  // overrides the profile default (new-chat flow shows per-backend lists).
   app.get('/api/manager-chat/models', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const backend = typeof req.query.backend === 'string' ? req.query.backend : undefined;
     try {
-      const summary = await listManagerChatModels(profile);
+      const summary = backend
+        ? await listManagerChatModelsForBackend(profile, backend)
+        : await listManagerChatModels(profile);
       res.json(summary);
     } catch (error) {
       res.status(502).json({
@@ -1154,6 +1161,31 @@ export function createServer(
     }
   });
 
+  // The new-chat flow's node step. Chat runs on the central node today;
+  // registered workers are listed for fleet visibility but marked not yet
+  // chat-capable (worker-side chat dispatch is future work).
+  app.get('/api/manager-chat/nodes', (_req, res) => {
+    const identity = getCoordinatorIdentity(undefined, coordinatorPort);
+    const central: ChatNodeInfo = {
+      nodeId: identity.node_id,
+      displayName: identity.display_name,
+      role: 'central',
+      chatCapable: true,
+      lastSeenAt: null
+    };
+    const workers: ChatNodeInfo[] = registryService
+      .getNodesSummary()
+      .filter((node) => node.node_id !== identity.node_id)
+      .map((node) => ({
+        nodeId: node.node_id,
+        displayName: node.display_name,
+        role: 'worker' as const,
+        chatCapable: false,
+        lastSeenAt: node.last_seen_at ?? null
+      }));
+    res.json({ nodes: [central, ...workers] });
+  });
+
   // WP2 chat sessions: a session is one conversation bound to one worktree.
   // List/create/archive are plain REST (the UI's session rail); turns
   // themselves keep flowing over the WS manager.chat.* messages, which now
@@ -1166,13 +1198,36 @@ export function createServer(
   app.post('/api/manager-chat/sessions', async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     const backend = typeof req.body?.backend === 'string' ? req.body.backend : undefined;
+    const model = typeof req.body?.model === 'string' ? req.body.model : null;
     const title = typeof req.body?.title === 'string' ? req.body.title : undefined;
     try {
-      const session = await createChatSession(profile, backend, title);
+      const session = await createChatSession(profile, backend, model, title);
       res.status(201).json(session);
     } catch (error) {
       res.status(502).json({
         error: 'Failed to create chat session',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/manager-chat/sessions/update', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : undefined;
+    if (!sessionId) {
+      res.status(400).json({ error: 'Missing required field: sessionId' });
+      return;
+    }
+    const patch: { backend?: string; model?: string | null; title?: string } = {};
+    if (typeof req.body?.backend === 'string') patch.backend = req.body.backend;
+    if (typeof req.body?.model === 'string' || req.body?.model === null) patch.model = req.body.model;
+    if (typeof req.body?.title === 'string') patch.title = req.body.title;
+    try {
+      const session = await updateChatSession(profile, sessionId, patch);
+      res.json(session);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to update chat session',
         message: error instanceof Error ? error.message : String(error)
       });
     }
