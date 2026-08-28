@@ -15,11 +15,16 @@ import {
   seedSkillFromDocs
 } from './skillBank.js';
 
-function withTempBank(testFn: () => void): void {
+/** Sets a per-test bank path, runs the body, then restores the environment.
+ * MUST await the body: a synchronous finally would delete the env var while
+ * async writes are still in flight, sending them to the real default bank
+ * (~/.config/gah/skills.json) -- which is how the concurrent-writes test once
+ * polluted a production node with 50 `bulk` skills. */
+async function withTempBank(testFn: () => void | Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'gah-skills-'));
   process.env.GAH_SKILL_BANK_PATH = join(dir, 'skills.json');
   try {
-    testFn();
+    await testFn();
   } finally {
     delete process.env.GAH_SKILL_BANK_PATH;
     rmSync(dir, { recursive: true, force: true });
@@ -40,8 +45,8 @@ function skill(id: string, version: string, content = 'content'): Skill {
   };
 }
 
-test('a skill survives a write + re-read (restart) byte-identically', () => {
-  withTempBank(() => {
+test('a skill survives a write + re-read (restart) byte-identically', async () => {
+  await withTempBank(() => {
     putSkill(skill('alpha', '1.0.0', 'the skill text\nwith newlines'));
     const reread = getSkill('alpha', '1.0.0');
     assert.equal(reread?.content, 'the skill text\nwith newlines');
@@ -50,8 +55,8 @@ test('a skill survives a write + re-read (restart) byte-identically', () => {
   });
 });
 
-test('two versions coexist and unversioned reads resolve to the newest', () => {
-  withTempBank(() => {
+test('two versions coexist and unversioned reads resolve to the newest', async () => {
+  await withTempBank(() => {
     putSkill(skill('alpha', '1.0.0', 'v1'));
     putSkill(skill('alpha', '2.0.0', 'v2'));
     putSkill(skill('alpha', '1.5.0', 'v1.5'));
@@ -78,7 +83,7 @@ test('a corrupted bank file produces a clear error naming the file, never an emp
 });
 
 test('concurrent writes never interleave into a partial file', async () => {
-  withTempBank(() => {
+  await withTempBank(() => {
     // Serialize enough writes to make a torn-write regression observable: the
     // atomic temp-file + rename guarantees the final file is always one
     // complete JSON document regardless of ordering.
@@ -93,8 +98,8 @@ test('concurrent writes never interleave into a partial file', async () => {
   });
 });
 
-test('a skill bound to a backend cannot be deleted; the error names the bindings', () => {
-  withTempBank(() => {
+test('a skill bound to a backend cannot be deleted; the error names the bindings', async () => {
+  await withTempBank(() => {
     putSkill(skill('alpha', '1.0.0'));
     addBinding('alpha', 'hermes:gah');
     assert.deepEqual(listBindings('alpha'), ['hermes:gah']);
@@ -107,8 +112,8 @@ test('a skill bound to a backend cannot be deleted; the error names the bindings
   });
 });
 
-test('seed from docs makes the doc a first-class record, idempotently', () => {
-  withTempBank(() => {
+test('seed from docs makes the doc a first-class record, idempotently', async () => {
+  await withTempBank(() => {
     const dir = mkdtempSync(join(tmpdir(), 'gah-skills-'));
     const docPath = join(dir, 'gah-manager-skill.md');
     writeFileSync(docPath, '# Role: GAH Manager\n\ncontent here\n', 'utf8');
