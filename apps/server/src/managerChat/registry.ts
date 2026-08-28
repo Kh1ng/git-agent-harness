@@ -30,6 +30,8 @@ interface ManagerAdapter extends ManagerBackendInfo {
       onToolResult: (name: string, text: string) => void;
       /** Session working directory (WP2); omitted = the server's cwd. */
       cwd?: string;
+      /** Model override for this conversation (WP2 sessions). */
+      model?: string | null;
     }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }>;
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;

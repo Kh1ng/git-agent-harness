@@ -184,6 +184,12 @@ export type ServerMessage =
       session: ChatSessionSummary;
     }
   | {
+      type: "manager.chat.sessionUpdated";
+      requestId: string;
+      profile: string;
+      session: ChatSessionSummary;
+    }
+  | {
       type: "manager.chat.sessionArchived";
       requestId: string;
       profile: string;
@@ -281,6 +287,20 @@ export type ClientMessage =
       profile: string;
       /** Backend to serve the session; omitted = profile default. */
       backend?: string;
+      /** Model override for the session's backend; omitted = backend default. */
+      model?: string;
+      title?: string;
+    }
+  | {
+      /** WP2: change a live session's backend and/or model. The worktree
+       * stays; the next turn runs on the new backend/model in the same
+       * directory -- the manual form of backend interchange. */
+      type: "manager.chat.sessionUpdate";
+      requestId: string;
+      profile: string;
+      sessionId: string;
+      backend?: string;
+      model?: string | null;
       title?: string;
     }
   | {

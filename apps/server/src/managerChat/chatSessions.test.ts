@@ -13,7 +13,8 @@ import {
   listSessions,
   resolveSessionCwd,
   setChatSessionStoreOptions,
-  touchSession
+  touchSession,
+  updateSession
 } from './chatSessions.js';
 
 function initRepo(path: string): void {
@@ -139,3 +140,25 @@ test('chatKey keeps the bare profile for the default session', () => {
   assert.equal(chatKey('p', 'default'), 'p');
   assert.equal(chatKey('p', 'abc123'), 'p#abc123');
 });
+
+test('createSession stores the pinned model; updateSession switches backend/model in place', withEnv(async (env) => {
+  const session = await createSession({
+    profile: 'p',
+    profileInfo: env.profileInfo,
+    backend: 'hermes',
+    model: 'mock-strong'
+  });
+  assert.equal(session.model, 'mock-strong');
+
+  // Switching model/backend never touches the worktree or the branch.
+  const switched = updateSession('p', session.id, { backend: 'codex', model: null });
+  assert.equal(switched.backend, 'codex');
+  assert.equal(switched.model, null);
+  assert.equal(switched.worktreePath, session.worktreePath);
+  assert.equal(switched.branch, session.branch);
+
+  // Unknown or archived sessions refuse updates loudly.
+  assert.throws(() => updateSession('p', 'missing', { backend: 'codex' }), /No chat session/);
+  await archiveSession('p', session.id, env.profileInfo);
+  assert.throws(() => updateSession('p', session.id, { backend: 'hermes' }), /archived/);
+}));

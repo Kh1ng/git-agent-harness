@@ -9,6 +9,14 @@ const remembered = new Map();
 // Prompts containing "report cwd" get it echoed back, so tests can assert
 // which directory a conversation ran in without the agent touching the fs.
 const sessionCwds = new Map();
+// Per-session current model id (WP2: per-session model override). "report
+// model" prompts get it echoed back.
+const sessionModels = new Map();
+
+const MODEL_OPTIONS = [
+  { value: 'mock-default', name: 'Mock Default' },
+  { value: 'mock-strong', name: 'Mock Strong' }
+];
 
 class MockHermes {
   constructor(connection) {
@@ -24,7 +32,30 @@ class MockHermes {
     const sessionId = `mock-${++nextSession}`;
     remembered.set(sessionId, null);
     sessionCwds.set(sessionId, params?.cwd ?? null);
-    return { sessionId };
+    sessionModels.set(sessionId, 'mock-default');
+    return {
+      sessionId,
+      configOptions: [{
+        type: 'select',
+        id: 'model',
+        label: 'Model',
+        options: MODEL_OPTIONS,
+        currentValue: 'mock-default'
+      }]
+    };
+  }
+
+  async setSessionConfigOption({ sessionId, value }) {
+    sessionModels.set(sessionId, value);
+    return {
+      configOptions: [{
+        type: 'select',
+        id: 'model',
+        label: 'Model',
+        options: MODEL_OPTIONS,
+        currentValue: sessionModels.get(sessionId) ?? 'mock-default'
+      }]
+    };
   }
 
   async authenticate() {
@@ -57,6 +88,8 @@ class MockHermes {
       reply = 'OK';
     } else if (/report cwd/i.test(text)) {
       reply = sessionCwds.get(sessionId) ?? 'NO-CWD';
+    } else if (/report model/i.test(text)) {
+      reply = sessionModels.get(sessionId) ?? 'NO-MODEL';
     } else {
       reply = codeWord ?? remembered.get(sessionId) ?? 'UNKNOWN';
     }

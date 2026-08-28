@@ -3,6 +3,7 @@ import { Send, Square, MessageSquare, GitBranch, Plus, Archive } from 'lucide-re
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
+import { NewChatModal } from '../components/NewChatModal.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { generateRequestId } from '@git-agent-harness/shared';
@@ -150,7 +151,7 @@ export function ManagerChatPage() {
       })
       .catch(() => { if (!cancelled) setActiveBackendId(null); });
     // Real commands from the active backend's own registry (e.g. Hermes's
-    // live ACP available-commands push) -- not a list GAH invents. Fetched
+    // live ACP available-commands push) -- not something GAH invents. Fetched
     // eagerly so the "/" palette has data the moment the user types it;
     // this also happens to be what warms up the backend's session.
     gahApi
@@ -176,6 +177,48 @@ export function ManagerChatPage() {
       });
     return () => { cancelled = true; };
   }, [profile]);
+
+  // Session-scoped model list: when a session is active, the picker needs
+  // that session's backend models, and changes go to the session record
+  // (not the profile-wide default).
+  const [sessionModels, setSessionModels] = useState<ManagerModelInfo[]>([]);
+  const [sessionModelChanging, setSessionModelChanging] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setSessionModels([]);
+    if (!activeSession || !isConnected) return;
+    gahApi
+      .getManagerChatModelsForBackend(profile, activeSession.backend)
+      .then(({ models }) => { if (!cancelled) setSessionModels(models); })
+      .catch(() => { if (!cancelled) setSessionModels([]); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, sessionId, activeSession?.backend]);
+
+  const handleSessionModelChange = async (modelId: string) => {
+    if (!activeSession) return;
+    setSessionModelChanging(true);
+    try {
+      await gahApi.updateChatSession(profile, activeSession.id, { model: modelId });
+      refreshSessions(profile);
+    } catch (err) {
+      setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch session model: ${err instanceof Error ? err.message : String(err)}` }]);
+    } finally {
+      setSessionModelChanging(false);
+    }
+  };
+
+  const handleSessionBackendChange = async (backendId: string) => {
+    if (!activeSession || backendId === activeSession.backend) return;
+    // Backend switch: same worktree, new provider. The model reset matches
+    // the new backend's default (model ids are backend-specific).
+    try {
+      await gahApi.updateChatSession(profile, activeSession.id, { backend: backendId, model: null });
+      refreshSessions(profile);
+    } catch (err) {
+      setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch session backend: ${err instanceof Error ? err.message : String(err)}` }]);
+    }
+  };
 
   const handleModelChange = async (modelId: string) => {
     setModelChanging(true);
@@ -366,18 +409,6 @@ export function ManagerChatPage() {
     });
   };
 
-  const handleNewSession = async () => {
-    try {
-      // No explicit backend: the session captures the profile's current
-      // default at create time (server-side resolution).
-      const session = await gahApi.createChatSession(profile);
-      refreshSessions(profile);
-      setSessionId(session.id);
-    } catch (err) {
-      setTurns((prev) => [...prev, { role: 'error', text: `Failed to create session: ${err instanceof Error ? err.message : String(err)}` }]);
-    }
-  };
-
   const handleArchiveSession = async () => {
     if (!activeSession) return;
     try {
@@ -389,14 +420,30 @@ export function ManagerChatPage() {
     }
   };
 
+  const [newChatOpen, setNewChatOpen] = useState(false);
+
+  /** New-chat completion: switch project if the modal picked another one,
+   * then select the fresh session (its history effect clears the view). */
+  const handleChatCreated = (createdProfile: string, createdSessionId: string) => {
+    if (createdProfile !== profile) setProfileOverride(createdProfile);
+    refreshSessions(createdProfile);
+    setSessionId(createdSessionId);
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
         title={currentProfileInfo?.repo ? currentProfileInfo.repo.split('/').pop() ?? 'Chat' : 'Chat'}
-        description={`${currentProfileInfo?.repo ?? profile} · ${activeBackendLabel}${activeBackendUnavailable ? ' (unavailable)' : ''}`}
+        description={`${currentProfileInfo?.repo ?? profile} · ${
+          activeSession
+            ? `${activeSession.backend}${activeSession.model ? ` / ${activeSession.model}` : ''}`
+            : `${activeBackendLabel}${activeBackendUnavailable ? ' (unavailable)' : ''}`
+        }`}
         actions={
           <div className="flex items-center gap-2">
-            {availableBackends.length > 0 && (
+            {/* Profile-wide pickers for the default conversation; a session
+                carries its own backend/model in the session bar below. */}
+            {!activeSession && availableBackends.length > 0 && (
               <select
                 value={activeBackendId ?? ''}
                 onChange={(e) => handleBackendChange(e.target.value)}
@@ -412,7 +459,7 @@ export function ManagerChatPage() {
                 ))}
               </select>
             )}
-            {models.length > 0 && (
+            {!activeSession && models.length > 0 && (
               <select
                 value={currentModelId ?? ''}
                 onChange={(e) => handleModelChange(e.target.value)}
@@ -434,7 +481,7 @@ export function ManagerChatPage() {
       {/* WP2 session bar: one conversation per worktree. Default = the
           profile's shared conversation; sessions run in isolated worktrees
           (branch survives archive; a reclaimed worktree rematerializes on
-          resume). */}
+          resume). "New chat" is the T3 flow: project → node → provider. */}
       <div className="flex items-center gap-2 flex-wrap">
         <GitBranch size={14} className="text-muted shrink-0" aria-hidden="true" />
         <select
@@ -451,15 +498,46 @@ export function ManagerChatPage() {
           ))}
         </select>
         <button
-          onClick={handleNewSession}
-          disabled={!isConnected || turnBusy}
+          onClick={() => setNewChatOpen(true)}
+          disabled={!isConnected}
           className="btn-primary text-xs inline-flex items-center gap-1"
-          title="Start a session in a fresh worktree"
+          title="New chat: choose project, node, and provider/model — starts in a fresh worktree"
         >
-          <Plus size={13} aria-hidden="true" /> Session
+          <Plus size={13} aria-hidden="true" /> New chat
         </button>
-        {sessionId && (
+        {activeSession && activeSession.archivedAt === null && (
           <>
+            {/* Session backend/model quick-switch: the "interchangeable
+                worktree" control. Same worktree, next turn on the new
+                provider/model. */}
+            <select
+              value={activeSession.backend}
+              onChange={(e) => handleSessionBackendChange(e.target.value)}
+              disabled={turnBusy || sessionModelChanging}
+              className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary"
+              aria-label="Session provider"
+              title="Switch provider for this session — same worktree, same branch"
+            >
+              {availableBackends.map((b) => (
+                <option key={b.id} value={b.id} disabled={!b.implemented}>
+                  {b.displayName}{b.implemented ? '' : ' (unavailable)'}
+                </option>
+              ))}
+            </select>
+            {sessionModels.length > 0 && (
+              <select
+                value={activeSession.model ?? ''}
+                onChange={(e) => handleSessionModelChange(e.target.value)}
+                disabled={turnBusy || sessionModelChanging}
+                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[200px]"
+                aria-label="Session model"
+              >
+                {!activeSession.model && <option value="">Default model</option>}
+                {sessionModels.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </select>
+            )}
             <button
               onClick={handleArchiveSession}
               disabled={turnBusy}
@@ -468,12 +546,21 @@ export function ManagerChatPage() {
             >
               <Archive size={13} aria-hidden="true" /> Archive
             </button>
-            {sessions.some((s) => s.id === sessionId && s.archivedAt !== null) && (
-              <span className="text-[10px] text-muted">archived — read only</span>
-            )}
           </>
         )}
+        {activeSession?.archivedAt != null && (
+          <span className="text-[10px] text-muted">archived — read only</span>
+        )}
       </div>
+
+      <NewChatModal
+        open={newChatOpen}
+        currentProfile={profile}
+        profiles={availableProfiles}
+        backends={availableBackends}
+        onClose={() => setNewChatOpen(false)}
+        onCreated={handleChatCreated}
+      />
 
       <div className="grid min-w-0 gap-4 xl:grid-cols-[14rem_minmax(0,1fr)]">
         <ProjectRail
