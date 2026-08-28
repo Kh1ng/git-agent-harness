@@ -182,6 +182,7 @@ export function ManagerChatPage() {
    * session bound to its own worktree. */
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
+  const [sessionsError, setSessionsError] = useState(false);
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === sessionId) ?? null,
     [sessions, sessionId]
@@ -194,10 +195,17 @@ export function ManagerChatPage() {
   const refreshSessions = (forProfile: string) => {
     gahApi
       .getChatSessions(forProfile)
-      .then(({ sessions }) => {
-        if (activeProfileRef.current === forProfile) setSessions(sessions);
+      .then(({ sessions: fetched }) => {
+        if (activeProfileRef.current !== forProfile) return;
+        setSessions(fetched);
+        setSessionsError(false);
       })
-      .catch(() => { if (activeProfileRef.current === forProfile) setSessions([]); });
+      .catch(() => {
+        // #1002: a transient fetch failure must not wipe the rail — that made
+        // every session "disappear" on a blip. Keep the last known list and
+        // surface the failure instead of silently emptying.
+        if (activeProfileRef.current === forProfile) setSessionsError(true);
+      });
   };
 
   useEffect(() => {
@@ -371,7 +379,28 @@ export function ManagerChatPage() {
         const restored = last.turns.map(fromServerTurn);
         setTurns(restored);
         setHistoryLoaded(true);
-        setPendingRequest(null);
+        // #1002: reconcile live tool cards against what the log durably
+        // persisted. Cards whose toolCallId is back in the restored turns are
+        // dropped — the transcript now owns them; anything still live (e.g. a
+        // tool event from a turn that just ended before its fold landed) stays
+        // visible rather than vanishing at the turn boundary.
+        const covered = new Set<string>();
+        for (const t of restored) {
+          if (t.role === 'tool' && t.tool) covered.add(t.tool.toolCallId);
+        }
+        setLiveTools((prev) => {
+          const next: typeof prev = {};
+          for (const [id, tool] of Object.entries(prev)) {
+            if (!covered.has(id)) next[id] = tool;
+          }
+          return next;
+        });
+        // #1001: only drop the pending request once the server reports no
+        // turn in flight. A mid-turn history resync (reconnect, updated push,
+        // session switch) previously nulled pendingRequest while the turn was
+        // still running, so the turn's terminal reply could never match again
+        // and Stop left the panel busy forever.
+        if (!last.streaming) setPendingRequest(null);
         lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, last.cursor);
         setStreaming(last.streaming?.partialText ? { turn: last.streaming.turn, text: last.streaming.partialText } : null);
         setRemoteTurnBusy(Boolean(last.streaming));
@@ -379,6 +408,13 @@ export function ManagerChatPage() {
       }
 
       if (last.type === 'manager.chat.updated') {
+        // #960: with our own turn in flight (pendingRequest set), an updated
+        // for a *different* requestId belongs to another client — resyncing
+        // here would prematurely resolve our busy state. When no request is
+        // pending (reconnect mid-turn, foreign turn) resync unconditionally:
+        // history is authoritative and reports the live streaming turn, and
+        // #1001 keeps pendingRequest alive across that resync so the turn's
+        // terminal reply/update still resolves cleanly.
         if (pendingRequest && last.requestId !== pendingRequest.id) continue;
         setRemoteTurnBusy(true);
         const requestId = generateRequestId();
@@ -457,19 +493,23 @@ export function ManagerChatPage() {
       if (last.type === 'manager.chat.reply') {
         setStreaming(null);
         setPermission(null);
-        setLiveTools({});
+        // #1002: tool cards survive the turn boundary. Clearing them here
+        // made every tool call vanish at the moment its turn completed; the
+        // manager.chat.updated→history refetch below restores the persisted
+        // tool turns, and rendering dedupes live vs restored by toolCallId.
         setRemoteTurnBusy(false);
         setPendingRequest(null);
-        setTurns((prev) => [...prev, {
-          role: 'assistant',
-          text: last.reply,
-          backend: last.backend,
-          model: last.model
-        }]);
+        if (!last.cancelled) {
+          setTurns((prev) => [...prev, {
+            role: 'assistant',
+            text: last.reply,
+            backend: last.backend,
+            model: last.model
+          }]);
+        }
       } else if (last.type === 'error') {
         setStreaming(null);
         setPermission(null);
-        setLiveTools({});
         setRemoteTurnBusy(false);
         setPendingRequest(null);
         setTurns((prev) => [...prev, { role: 'error', text: last.error }]);
@@ -734,7 +774,30 @@ export function ManagerChatPage() {
               {s.title ?? s.branch}
             </option>
           ))}
+          {(() => {
+            const archived = sessions.filter((s) => s.archivedAt !== null);
+            if (archived.length === 0) return null;
+            return [
+              <optgroup key="archived" label={`Archived (${archived.length})`}>
+                {archived.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.title ?? s.branch}
+                  </option>
+                ))}
+              </optgroup>
+            ];
+          })()}
         </select>
+        {sessionsError && (
+          <button
+            type="button"
+            onClick={() => refreshSessions(profile)}
+            className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300 hover:bg-amber-500/20"
+            title="Session list failed to load — showing the last known sessions. Click to retry."
+          >
+            Sessions · retry
+          </button>
+        )}
         <button
           onClick={() => setNewChatOpen(true)}
           disabled={!isConnected}

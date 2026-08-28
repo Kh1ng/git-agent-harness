@@ -228,16 +228,23 @@ test('cancelling a mid-turn reply closes the turn as cancelled and keeps the par
     await firstChunk;
 
     // Cancel mid-turn.
+    // #1001: the cancelled turn still sends a terminal reply (flagged
+    // `cancelled`, partial text preserved) so a client can deterministically
+    // clear its in-flight busy state instead of waiting only on updated.
+    // Register both matchers up front: reply + updated are pushed back-to-back,
+    // so a matcher attached after the reply resolves can miss the update.
+    const cancelledReply = nextMessage(ws, 'manager.chat.reply', (m) => m.requestId === 'slow-req');
+    const updated = nextMessage(ws, 'manager.chat.updated', (m) => m.profile === profile);
     ws.send(JSON.stringify({
       type: 'manager.chat.cancel',
       requestId: 'cancel-req',
       profile
     } satisfies ClientMessage));
-
-    // The turn ends with the partial text preserved and a [cancelled] marker;
-    // a later history refetch reconciles (no manager.chat.reply for it).
-    const updated = nextMessage(ws, 'manager.chat.updated', (m) => m.profile === profile);
+    const stopped = await cancelledReply;
+    assert.equal(stopped.cancelled, true, 'cancelled reply is flagged');
+    assert.ok(stopped.reply.includes('Partial answer'), 'partial text rides the cancelled reply');
     await updated;
+
     const historyRequestId = `hist-${Date.now()}`;
     const history = nextMessage(ws, 'manager.chat.history', (m) => m.requestId === historyRequestId);
     ws.send(JSON.stringify({
@@ -263,7 +270,7 @@ test('cancelling a mid-turn reply closes the turn as cancelled and keeps the par
 
     // A new message dispatched right after the cancel starts a fresh turn
     // (queue released), and its exchange IS captured.
-    const reply = nextMessage(ws, 'manager.chat.reply');
+    const reply = nextMessage(ws, 'manager.chat.reply', (m) => m.requestId === 'after-req');
     ws.send(JSON.stringify({
       type: 'manager.chat.send',
       requestId: 'after-req',
