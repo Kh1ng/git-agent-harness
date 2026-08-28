@@ -56,6 +56,45 @@ type ChunkPublish = (chunk: {
 }) => void;
 let chunkPublisher: ChunkPublish | undefined;
 
+/** Live structured tool-call push (slice 3), same shape as the WS message. */
+export type ToolCallPublish = (event: {
+  type: 'manager.chat.toolCall';
+  requestId: string;
+  profile: string;
+  sessionId?: string;
+  turn: number;
+  toolCallId: string;
+  name: string | null;
+  title: string;
+  kind: string | null;
+  status: 'pending' | 'completed' | 'failed';
+  locations: string[];
+  summary: string | null;
+}) => void;
+let toolCallPublisher: ToolCallPublish | undefined;
+
+/** Live permission-request push (slice 3). */
+export type PermissionPublish = (event: {
+  type: 'manager.chat.permission';
+  requestId: string;
+  profile: string;
+  sessionId?: string;
+  turn: number;
+  permissionId: string;
+  title: string;
+  options: { optionId: string; name: string; kind: string }[];
+  locations: string[];
+}) => void;
+let permissionPublisher: PermissionPublish | undefined;
+
+export function setChatEventPublishers(publishers: {
+  toolCall?: ToolCallPublish;
+  permission?: PermissionPublish;
+}): void {
+  toolCallPublisher = publishers.toolCall;
+  permissionPublisher = publishers.permission;
+}
+
 export function setChunkPublisher(publish: ChunkPublish | undefined): void {
   chunkPublisher = publish;
 }
@@ -77,10 +116,26 @@ interface ActiveTurn {
    * can race the backend's acknowledgement against a settle deadline. */
   cancelSettled: Promise<void>;
   resolveCancel: () => void;
+  /** The live permission request for this turn (slice 3), when the backend
+   * is blocked waiting on a human decision. */
+  pendingPermission?: {
+    permissionId: string;
+    resolve: (optionId: string) => void;
+  };
+  /** Logs + pushes a permission request event (slice 3); set per-turn by
+   * sendManagerChatMessage so the request lands in the session log and on
+   * the WS before the promise resolves the adapter's block. */
+  permissionSink?: (payload: {
+    permissionId: string;
+    request: { title: string; options: { optionId: string; name: string; kind: string }[]; locations: string[] };
+  }) => Promise<void>;
 }
 const activeTurns = new Map<string, ActiveTurn>();
 
 const CANCEL_SETTLE_TIMEOUT_MS = 8_000;
+/** Nobody answers a permission prompt within this window -> cancel the
+ * request fail-closed (the backend gets 'cancelled', not a silent allow). */
+const PERMISSION_TIMEOUT_MS = 5 * 60_000;
 
 /** Session log storage options (tests may point at a temp state dir). */
 const logOptions: SessionLogOptions = {};
@@ -283,7 +338,17 @@ export async function runTurn(
   onChunk: (text: string) => void,
   onToolResult: (name: string, text: string) => void,
   active: ActiveTurn,
-  context: RunTurnContext
+  context: RunTurnContext,
+  /** Slice 3: structured tool-call sink (logs + pushes per event). */
+  onToolCall?: (tool: {
+    toolCallId: string;
+    name: string | null;
+    title: string;
+    kind: string | null;
+    status: 'pending' | 'completed' | 'failed';
+    locations: string[];
+    summary: string | null;
+  }) => void
 ): Promise<TurnRunResult> {
   const isSlashCommand = message.trim().startsWith('/');
   // #962: flush the session to the gateway before the handoff so the new
@@ -300,7 +365,44 @@ export async function runTurn(
         // handoff fallback backend uses its own default (the override is
         // for a different backend's model id space).
         const model = backendId === context.backend ? context.model : undefined;
-        const r = await adapter.runTurn(context.key, { prompt, history, onChunk, onToolResult, cwd: context.cwd, model });
+        const r = await adapter.runTurn(context.key, {
+          prompt,
+          history,
+          onChunk,
+          onToolResult,
+          cwd: context.cwd,
+          model,
+          onToolCall,
+          requestPermission: (request) => new Promise<string>((resolve) => {
+            // One live permission at a time per turn: the backend blocks
+            // until the human answers, the turn is cancelled, or the
+            // timeout cancels fail-closed.
+            const permissionId = `perm-${active.turnNo}-${Date.now().toString(36)}`;
+            active.pendingPermission = {
+              permissionId,
+              resolve: (optionId) => {
+                active.pendingPermission = undefined;
+                resolve(optionId);
+              }
+            };
+            const timeout = setTimeout(() => {
+              if (active.pendingPermission?.permissionId === permissionId) {
+                console.warn(`[managerChat] permission ${permissionId} timed out unanswered -- cancelling`);
+                active.pendingPermission.resolve('cancelled');
+              }
+            }, PERMISSION_TIMEOUT_MS);
+            timeout.unref?.();
+            active.cancelSettled.then(() => {
+              if (active.pendingPermission?.permissionId === permissionId) {
+                active.pendingPermission.resolve('cancelled');
+              }
+            });
+            // The decision event is logged by respondManagerChatPermission /
+            // the cancel path; the request event is logged by the caller's
+            // permission hook wrapper.
+            active.permissionSink?.({ permissionId, request }).finally(() => clearTimeout(timeout));
+          })
+        });
         return r;
       };
       try {
@@ -354,6 +456,9 @@ export async function cancelManagerChatTurn(profile: string, sessionId?: string)
   if (!active) return false;
   active.cancelled = true;
   active.resolveCancel();
+  // A cancel also answers any live permission request fail-closed -- the
+  // turn is going away, so the backend must not proceed on it.
+  active.pendingPermission?.resolve('cancelled');
   const backendId = (sessionId ? getSession(profile, sessionId, chatSessionStoreOptions)?.backend : undefined)
     ?? backendForProfile(profile);
   try {
@@ -361,6 +466,30 @@ export async function cancelManagerChatTurn(profile: string, sessionId?: string)
   } catch (error) {
     console.error(`[managerChat] cancel failed for ${key}:`, error);
   }
+  return true;
+}
+
+/** Answers the live permission request for a conversation (slice 3).
+ * Records the decision in the session log, resolves the backend's block,
+ * and returns false when there is nothing to answer. */
+export async function respondManagerChatPermission(
+  profile: string,
+  sessionId: string | undefined,
+  permissionId: string,
+  optionId: string
+): Promise<boolean> {
+  const active = activeTurns.get(chatKey(profile, sessionId));
+  if (!active || active.pendingPermission?.permissionId !== permissionId) return false;
+  const logOpts = sessionId && sessionId !== 'default' ? { ...logOptions, sessionId } : logOptions;
+  appendEvents(profile, [{
+    type: 'permission/decision',
+    seq: ++active.seq,
+    turn: active.turnNo,
+    permissionId,
+    optionId,
+    timestamp: Date.now()
+  }], logOpts);
+  active.pendingPermission.resolve(optionId);
   return true;
 }
 
@@ -463,6 +592,58 @@ export function sendManagerChatMessage(profile: string, message: string, request
         }], sessionOpts);
       }
       active.chunkWriter = createEventWriter(profile, sessionOpts);
+      // Slice 3: permission requests log + push before blocking the backend.
+      active.permissionSink = async ({ permissionId, request }) => {
+        active.chunkWriter?.append({
+          type: 'permission/request',
+          seq: ++active.seq,
+          turn: turnNo,
+          permissionId,
+          title: request.title,
+          options: request.options,
+          locations: request.locations,
+          timestamp: Date.now()
+        });
+        permissionPublisher?.({
+          type: 'manager.chat.permission',
+          requestId: requestId ?? '',
+          profile,
+          ...(sessionId ? { sessionId } : {}),
+          turn: turnNo,
+          permissionId,
+          title: request.title,
+          options: request.options,
+          locations: request.locations
+        });
+      };
+      // Slice 3: structured tool-call activity -- logged (durable, replayed
+      // on resume) and pushed live. Status transitions append new events;
+      // the fold keeps the latest per toolCallId.
+      const onToolCall = (tool: {
+        toolCallId: string;
+        name: string | null;
+        title: string;
+        kind: string | null;
+        status: 'pending' | 'completed' | 'failed';
+        locations: string[];
+        summary: string | null;
+      }) => {
+        active.chunkWriter?.append({
+          type: 'tool/call',
+          seq: ++active.seq,
+          turn: turnNo,
+          ...tool,
+          timestamp: Date.now()
+        });
+        toolCallPublisher?.({
+          type: 'manager.chat.toolCall',
+          requestId: requestId ?? '',
+          profile,
+          ...(sessionId ? { sessionId } : {}),
+          turn: turnNo,
+          ...tool
+        });
+      };
       const run = runTurn(
         profile,
         message,
@@ -498,7 +679,8 @@ export function sendManagerChatMessage(profile: string, message: string, request
           timestamp: Date.now()
         }),
         active,
-        { key, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model }
+        { key, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model },
+        onToolCall
       );
       // A cancel is a barrier for the queue: once we've sent session/cancel
       // to the backend, don't let an unresponsive agent wedge the profile's
@@ -575,6 +757,10 @@ export function sendManagerChatMessage(profile: string, message: string, request
       appendEvents(profile, done, sessionOpts);
       throw error;
     } finally {
+      // A turn ending answers any still-live permission fail-closed (e.g.
+      // the backend errored while blocked) and detaches the sink.
+      active.pendingPermission?.resolve('cancelled');
+      active.permissionSink = undefined;
       if (sessionId && sessionId !== 'default') touchSession(profile, sessionId, chatSessionStoreOptions);
       activeProfiles.delete(key);
       activeTurns.delete(key);

@@ -12,7 +12,7 @@ import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
-import { sendManagerChatMessage, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher, listChatSessions, createChatSession, archiveChatSession, updateChatSession } from './managerChat/ManagerChatManager.js';
+import { sendManagerChatMessage, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher, setChatEventPublishers, listChatSessions, createChatSession, archiveChatSession, updateChatSession, respondManagerChatPermission } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -156,6 +156,12 @@ export function createWebSocketHandler(
   // Live-tee each logged assistant/chunk onto the push bus (#959) so every
   // subscribed client renders a turn progressively, not just the sender.
   setChunkPublisher((chunk) => pushBus.publish(chunk));
+  // Slice 3: structured tool-call activity and permission requests ride the
+  // same profile-scoped broadcast as chunks.
+  setChatEventPublishers({
+    toolCall: (event) => pushBus.publish(event),
+    permission: (event) => pushBus.publish(event)
+  });
 }
 
 async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
@@ -204,6 +210,10 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
 
     case 'manager.chat.historyRequest':
       await handleManagerChatHistoryRequest(ws, message, requestId);
+      break;
+
+    case 'manager.chat.permission.respond':
+      await handleManagerChatPermissionRespond(ws, message, requestId);
       break;
 
     case 'manager.chat.sessionList':
@@ -347,6 +357,17 @@ async function handleManagerChatHistoryRequest(ws: WebSocket, message: Extract<C
     streaming: view.streaming
   };
   ws.send(JSON.stringify(payload));
+}
+
+async function handleManagerChatPermissionRespond(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.permission.respond' }>, requestId: string) {
+  try {
+    const answered = await respondManagerChatPermission(message.profile, message.sessionId, message.permissionId, message.optionId);
+    if (!answered) {
+      ws.send(JSON.stringify(createErrorResponse(requestId, new Error('No pending permission request for this conversation.'))));
+    }
+  } catch (error) {
+    ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
+  }
 }
 
 async function handleManagerChatSessionList(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.sessionList' }>, requestId: string) {

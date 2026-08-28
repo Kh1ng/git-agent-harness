@@ -196,6 +196,36 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
         model: event.model,
         usage: event.usage
       });
+    } else if (event.type === 'tool/call') {
+      // Slice 3: the latest event per toolCallId wins -- pending first,
+      // then the completed/failed update replaces it in place.
+      const existing = history.findIndex(
+        (turn) => turn.tool?.toolCallId === event.toolCallId
+      );
+      const turn: ChatTranscriptTurn = {
+        role: 'tool',
+        text: event.summary ?? event.title,
+        timestamp: event.timestamp,
+        tool: {
+          toolCallId: event.toolCallId,
+          name: event.name,
+          title: event.title,
+          kind: event.kind,
+          status: event.status,
+          locations: event.locations,
+          summary: event.summary
+        }
+      };
+      if (existing >= 0) history[existing] = turn;
+      else history.push(turn);
+    } else if (event.type === 'permission/request' || event.type === 'permission/decision') {
+      history.push({
+        role: 'system',
+        text: event.type === 'permission/request'
+          ? `[permission requested] ${event.title}`
+          : `[permission ${event.optionId === 'cancelled' ? 'cancelled' : `granted: ${event.optionId}`}]`,
+        timestamp: event.timestamp
+      });
     } else if (event.type === 'tool/result' && !isLegacyHarnessError(events, index)) {
       history.push({ role: 'system', text: `[${event.name}] ${event.text}`, timestamp: event.timestamp });
     } else if (event.type === 'compaction/summary') {
@@ -296,6 +326,38 @@ export function foldSession(
           usage: e.usage
         });
         partialText = '';
+        break;
+      case 'tool/call': {
+        // Slice 3: latest event per toolCallId wins -- the pending event is
+        // replaced in place by its completed/failed update.
+        const existing = turns.findIndex((t) => t.tool?.toolCallId === e.toolCallId);
+        const turn: ChatTranscriptTurn = {
+          role: 'tool',
+          text: e.summary ?? e.title,
+          timestamp: e.timestamp,
+          tool: {
+            toolCallId: e.toolCallId,
+            name: e.name,
+            title: e.title,
+            kind: e.kind,
+            status: e.status,
+            locations: e.locations,
+            summary: e.summary
+          }
+        };
+        if (existing >= 0) turns[existing] = turn;
+        else turns.push(turn);
+        break;
+      }
+      case 'permission/request':
+        turns.push({ role: 'system', text: `[permission requested] ${e.title}`, timestamp: e.timestamp });
+        break;
+      case 'permission/decision':
+        turns.push({
+          role: 'system',
+          text: `[permission ${e.optionId === 'cancelled' ? 'cancelled' : `granted: ${e.optionId}`}]`,
+          timestamp: e.timestamp
+        });
         break;
       case 'tool/result':
         turns.push({ role: 'system', text: `[${e.name}] ${e.text}`, timestamp: e.timestamp });

@@ -131,6 +131,38 @@ export type ServerMessage =
       requestId: string;
     }
   | {
+      /** Live structured tool-call activity (slice 3): the ACP tool_call
+       * stream as typed events, so clients render what the agent is doing
+       * while the turn is in flight. Mirrors the session log's tool/call
+       * events. */
+      type: "manager.chat.toolCall";
+      requestId: string;
+      profile: string;
+      sessionId?: string;
+      turn: number;
+      toolCallId: string;
+      name: string | null;
+      title: string;
+      kind: string | null;
+      status: "pending" | "completed" | "failed";
+      locations: string[];
+      summary: string | null;
+    }
+  | {
+      /** A backend permission request awaiting a human decision (slice 3).
+       * The turn is blocked until manager.chat.permission.respond arrives,
+       * the turn is cancelled, or the timeout cancels fail-closed. */
+      type: "manager.chat.permission";
+      requestId: string;
+      profile: string;
+      sessionId?: string;
+      turn: number;
+      permissionId: string;
+      title: string;
+      options: { optionId: string; name: string; kind: string }[];
+      locations: string[];
+    }
+  | {
       type: "manager.chat.reply";
       requestId: string;
       profile: string;
@@ -273,6 +305,15 @@ export type ClientMessage =
       requestId: string;
       profile: string;
       sessionId?: string;
+    }
+  | {
+      /** Answer a live permission request (slice 3). */
+      type: "manager.chat.permission.respond";
+      requestId: string;
+      profile: string;
+      sessionId?: string;
+      permissionId: string;
+      optionId: string;
     }
   | {
       /** WP2: list a profile's chat sessions. */

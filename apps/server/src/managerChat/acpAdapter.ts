@@ -62,6 +62,26 @@ class AcpClient implements acp.Client {
   replyChunks: string[] = [];
   onReplyChunk?: (text: string) => void;
   onToolResult?: (name: string, text: string) => void;
+  /** Structured tool-call stream (slice 3): called on every tool_call /
+   * tool_call_update with the merged snapshot. The manager logs it, pushes
+   * it over the WS, and renders it as activity cards. */
+  onToolCall?: (tool: {
+    toolCallId: string;
+    name: string | null;
+    title: string;
+    kind: string | null;
+    status: 'pending' | 'completed' | 'failed';
+    locations: string[];
+    summary: string | null;
+  }) => void;
+  /** Permission decision hook (slice 3): when set, requestPermission asks
+   * the human through the chat UI instead of auto-declining; resolves with
+   * the chosen optionId or 'cancelled'. */
+  permissionRequest?: (request: {
+    title: string;
+    options: { optionId: string; name: string; kind: string }[];
+    locations: string[];
+  }) => Promise<string>;
   toolCalls = new Map<string, acp.ToolCallUpdate>();
   usageUpdate: acp.UsageUpdate | null = null;
   cumulativeUsage: acp.Usage | null = null;
@@ -71,16 +91,27 @@ class AcpClient implements acp.Client {
   constructor(private readonly label: string) {}
 
   async requestPermission(params: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse> {
-    // Manager chat has no human in the loop for approval prompts (unlike an
-    // editor session where a person is watching in real time). Fail
-    // closed: pick a reject option if one exists, otherwise cancel --
-    // never silently choose "allow" on someone's behalf.
-    console.warn(`[managerChat] ${this.label} requested permission for "${params.toolCall?.title}" -- declining (no human in the loop for manager chat)`);
-    const reject = params.options.find((o) => o.kind === 'reject_once') ?? params.options.find((o) => o.kind === 'reject_always');
-    if (reject) {
-      return { outcome: { outcome: 'selected', optionId: reject.optionId } };
+    // Fail closed unless a human is watching through the chat UI (slice 3).
+    const title = params.toolCall?.title ?? params.toolCall?.name ?? 'Unknown action';
+    if (!this.permissionRequest) {
+      console.warn(`[managerChat] ${this.label} requested permission for "${title}" -- declining (no permission UI attached)`);
+      const reject = params.options.find((o) => o.kind === 'reject_once') ?? params.options.find((o) => o.kind === 'reject_always');
+      if (reject) {
+        return { outcome: { outcome: 'selected', optionId: reject.optionId } };
+      }
+      return { outcome: { outcome: 'cancelled' } };
     }
-    return { outcome: { outcome: 'cancelled' } };
+    const locations = (params.toolCall?.locations ?? []).map((l) => l.path);
+    const chosen = await this.permissionRequest({
+      title,
+      options: params.options.map((o) => ({ optionId: o.optionId, name: o.name, kind: o.kind })),
+      locations
+    });
+    console.log(`[managerChat] ${this.label} permission "${title}" -> ${chosen}`);
+    if (chosen === 'cancelled') {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    return { outcome: { outcome: 'selected', optionId: chosen } };
   }
 
   async sessionUpdate(params: acp.SessionNotification): Promise<void> {
@@ -103,6 +134,15 @@ class AcpClient implements acp.Client {
       const previous = this.toolCalls.get(update.toolCallId);
       const tool = { ...previous, ...update };
       this.toolCalls.set(update.toolCallId, tool);
+      this.onToolCall?.({
+        toolCallId: tool.toolCallId,
+        name: tool.name ?? null,
+        title: tool.title ?? tool.name ?? tool.toolCallId,
+        kind: tool.kind ?? null,
+        status: (tool.status ?? 'pending') as 'pending' | 'completed' | 'failed',
+        locations: (tool.locations ?? []).map((l) => l.path),
+        summary: summarizeToolOutput(tool)
+      });
       const finished = tool.status === 'completed' || tool.status === 'failed';
       if (finished && previous?.status !== 'completed' && previous?.status !== 'failed') {
         const value = tool.rawOutput ?? tool.content ?? tool.status;
@@ -221,6 +261,23 @@ export function hermesSpawnSpec(): SpawnSpec {
   return { command: 'hermes', args: ['acp'] };
 }
 
+/** A short, single-line digest of a finished tool call's output for the
+ * activity card: prefers a text content block, falls back to rawOutput.
+ * Bounded so a huge tool output can't flood the log/WS. */
+function summarizeToolOutput(tool: acp.ToolCallUpdate): string | null {
+  if (tool.status !== 'completed' && tool.status !== 'failed') return null;
+  const textBlock = tool.content?.find(
+    (c): c is Extract<typeof c, { type: 'content' }> =>
+      c.type === 'content' && c.content.type === 'text'
+  );
+  const text = textBlock?.content.type === 'text' ? textBlock.content.text : undefined;
+  const source = text ?? (tool.rawOutput != null
+    ? (typeof tool.rawOutput === 'string' ? tool.rawOutput : JSON.stringify(tool.rawOutput))
+    : null);
+  if (source == null) return tool.status;
+  return source.split('\n').slice(0, 5).join('\n').slice(0, 400);
+}
+
 /** Classifies whether an adapter error is a usage/quota limit (#962). The
  * unwrapped error already carries the nested `data.message` detail (e.g.
  * "You've hit your usage limit..."), so matching on the message is the
@@ -239,6 +296,12 @@ export function codexSpawnSpec(): SpawnSpec {
 
 export function claudeSpawnSpec(): SpawnSpec {
   return { command: 'node', args: [resolveBinScript('@agentclientprotocol/claude-agent-acp')] };
+}
+
+/** opencode ships a native ACP server (`opencode acp`) — Tier A like
+ * Hermes, no bridge needed. */
+export function opencodeSpawnSpec(): SpawnSpec {
+  return { command: 'opencode', args: ['acp'] };
 }
 
 /** Builds the runTurn/listCommands/listModels/setModel surface for one
@@ -346,6 +409,24 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
        * a model picker (e.g. Claude's bridge) throw in selectModel; that's
        * expected and degrades to the backend's default. */
       model?: string | null;
+      /** Structured tool-call stream (slice 3). */
+      onToolCall?: (tool: {
+        toolCallId: string;
+        name: string | null;
+        title: string;
+        kind: string | null;
+        status: 'pending' | 'completed' | 'failed';
+        locations: string[];
+        summary: string | null;
+      }) => void;
+      /** Permission round-trip (slice 3): resolve with the chosen optionId
+       * or 'cancelled'. Absent = fail-closed auto-decline (previous
+       * behavior, e.g. for adapter-driven turns without a UI attached). */
+      requestPermission?: (request: {
+        title: string;
+        options: { optionId: string; name: string; kind: string }[];
+        locations: string[];
+      }) => Promise<string>;
     }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }> {
     const state = await connect(gahProfile, input.cwd);
@@ -367,6 +448,11 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     if ((command === 'compact' || command === 'compress') && missingHistory.length > 0) {
       throw new Error('Send one normal message to restore this backend before compacting its context.');
     }
+    // Slice 3 hooks: attach per-turn (cleared in the finally below) so the
+    // connection's client streams structured tool calls and permission
+    // requests to whoever is watching this turn.
+    state.client.onToolCall = input.onToolCall;
+    state.client.permissionRequest = input.requestPermission;
     const prompt = slashCommand ? input.prompt : resumePrompt(input.prompt, missingHistory);
     state.client.onReplyChunk = input.onChunk;
     state.client.onToolResult = input.onToolResult;
@@ -384,6 +470,8 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     } finally {
       state.client.onReplyChunk = undefined;
       state.client.onToolResult = undefined;
+      state.client.onToolCall = undefined;
+      state.client.permissionRequest = undefined;
     }
     if (result.stopReason !== 'end_turn') {
       console.warn(`[managerChat] ${label} turn ended with stopReason=${result.stopReason} for profile ${gahProfile}`);

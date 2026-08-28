@@ -9,7 +9,8 @@
  * silently doing nothing or falling back to a different backend.
  */
 
-import { createAcpBackend, hermesSpawnSpec, codexSpawnSpec, claudeSpawnSpec, type ManagerCommandInfo, type ManagerModelInfo } from './acpAdapter.js';
+import { createAcpBackend, hermesSpawnSpec, codexSpawnSpec, claudeSpawnSpec, opencodeSpawnSpec, type ManagerCommandInfo, type ManagerModelInfo } from './acpAdapter.js';
+import { createHeadlessBackend, vibeBackendSpec, agyBackendSpec } from './headlessAdapter.js';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 
 export type { ManagerCommandInfo, ManagerModelInfo };
@@ -20,7 +21,7 @@ export interface ManagerBackendInfo {
   implemented: boolean;
 }
 
-interface ManagerAdapter extends ManagerBackendInfo {
+export interface ManagerAdapter extends ManagerBackendInfo {
   runTurn(
     gahProfile: string,
     input: {
@@ -32,6 +33,22 @@ interface ManagerAdapter extends ManagerBackendInfo {
       cwd?: string;
       /** Model override for this conversation (WP2 sessions). */
       model?: string | null;
+      /** Structured tool-call stream (slice 3). */
+      onToolCall?: (tool: {
+        toolCallId: string;
+        name: string | null;
+        title: string;
+        kind: string | null;
+        status: 'pending' | 'completed' | 'failed';
+        locations: string[];
+        summary: string | null;
+      }) => void;
+      /** Permission round-trip (slice 3). */
+      requestPermission?: (request: {
+        title: string;
+        options: { optionId: string; name: string; kind: string }[];
+        locations: string[];
+      }) => Promise<string>;
     }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }>;
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;
@@ -80,7 +97,9 @@ const REGISTRY: Record<string, ManagerAdapter> = {
   hermes: acpManagerAdapter('hermes', 'Hermes', hermesSpawnSpec),
   codex: acpManagerAdapter('codex', 'Codex', codexSpawnSpec),
   claude: acpManagerAdapter('claude', 'Claude', claudeSpawnSpec),
-  vibe: new NotImplementedAdapter('vibe', 'Vibe', 'no ACP or equivalent protocol available')
+  opencode: acpManagerAdapter('opencode', 'OpenCode', opencodeSpawnSpec),
+  vibe: { ...createHeadlessBackend(vibeBackendSpec()) } as ManagerAdapter,
+  agy: { ...createHeadlessBackend(agyBackendSpec()) } as ManagerAdapter
 };
 
 export const DEFAULT_BACKEND_ID = 'hermes';
